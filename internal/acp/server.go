@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"dshgo/internal/agent"
+	"dshgo/internal/session"
 )
 
 // Agent 是 ACP 服务端依赖的会话执行体（由 cmd 层用 agent.Loop 实现）。
@@ -31,6 +32,9 @@ type Agent interface {
 	SetMode(ctx context.Context, sessionID, modeID string) (string, error)
 	// Close 释放一个会话。
 	Close(sessionID string) error
+	// ListSessions 列出磁盘上的会话（不是"这个进程开过的"）。
+	// cwd 非空时只列这个项目。
+	ListSessions(ctx context.Context, cwd string) ([]session.Listing, error)
 	// Shutdown 在服务端退出时调用：把所有会话日志落盘并关闭。
 	Shutdown() error
 }
@@ -211,13 +215,20 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 		}, nil)
 
 	case MethodSessionList:
-		s.mu.Lock()
-		out := make([]map[string]any, 0, len(s.order))
-		for _, id := range s.order {
-			out = append(out, map[string]any{"sessionId": id, "cwd": s.sessions[id].cwd})
+		var p struct {
+			Cwd string `json:"cwd"`
 		}
-		s.mu.Unlock()
-		_ = s.reply(req.ID, map[string]any{"sessions": out}, nil)
+		_ = json.Unmarshal(req.Params, &p)
+		if s.Agent == nil {
+			_ = s.reply(req.ID, map[string]any{"sessions": []any{}}, nil)
+			return
+		}
+		list, err := s.Agent.ListSessions(ctx, p.Cwd)
+		if err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInternalError, Message: "列会话失败: " + err.Error()})
+			return
+		}
+		_ = s.reply(req.ID, map[string]any{"sessions": list}, nil)
 
 	case MethodSessionResume:
 		var p struct {

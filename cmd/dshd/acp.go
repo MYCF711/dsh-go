@@ -778,6 +778,29 @@ func (r *acpRunner) ensureSession(sessionID, cwd string) (*session.Log, error) {
 	return l, nil
 }
 
+// ListSessions 列磁盘上的会话（客户端会话面板用）。
+//
+// 先把自己刚建、可能还没落盘的会话补进去，避免"刚建的会话在面板里看不见"。
+func (r *acpRunner) ListSessions(ctx context.Context, cwd string) ([]session.Listing, error) {
+	list, err := session.ListSessions(r.home, cwd)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	known := make(map[string]bool, len(list))
+	for _, l := range list {
+		known[l.SessionID] = true
+	}
+	for id := range r.logs {
+		if known[id] {
+			continue
+		}
+		list = append([]session.Listing{{SessionID: id, Readable: true, Events: -1}}, list...)
+	}
+	r.mu.Unlock()
+	return list, nil
+}
+
 // Shutdown 把所有还开着的会话日志关闭（别把没落盘的帧丢了）。
 func (r *acpRunner) Shutdown() error {
 	r.mu.Lock()

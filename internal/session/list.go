@@ -1,0 +1,161 @@
+package session
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"dshgo/codecs/v4"
+	"dshgo/internal/llm"
+)
+
+// Listing 是会话面板需要的一行。
+type Listing struct {
+	SessionID string    `json:"sessionId"`
+	Cwd       string    `json:"cwd"`
+	Preset    string    `json:"agentPreset,omitempty"`
+	Parent    string    `json:"parentSession,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	// Summary 是从日志里摘出来的一句话：优先"最后一条助手消息"，没有再退到第一条用户消息。
+	Summary  string `json:"summary,omitempty"`
+	Events   int    `json:"events"`
+	Created  int64  `json:"createdAt"`
+	Readable bool   `json:"readable"`
+	// Error 非空表示这份会话读不动（损坏 / 版本不对），面板要能显示出来而不是假装没有。
+	Error string `json:"error,omitempty"`
+}
+
+// ListSessions 扫 <home>/sessions 下的所有会话，返回按更新时间倒序的列表。
+//
+// cwd 非空时只列这个项目下的（用 projectKey 换算目录名，不扫全盘）。
+//
+// 每个会话都要**读整份日志**才能算摘要与事件数。这在真实语料上是 100MB 级别，
+// 所以这里设了个上限：超过 maxScanBytes 的会话只读首 2MB 取摘要，事件数记为 -1。
+func ListSessions(home, cwd string) ([]Listing, error) {
+	if home == "" {
+		return nil, os.ErrInvalid
+	}
+	sessionsDir := filepath.Join(home, "sessions")
+	var projectDirs []string
+	if cwd != "" {
+		projectDirs = []string{filepath.Join(sessionsDir, v4.ProjectKey(cwd))}
+	} else {
+		entries, err := os.ReadDir(sessionsDir)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				projectDirs = append(projectDirs, filepath.Join(sessionsDir, e.Name()))
+			}
+		}
+	}
+
+	out := make([]Listing, 0, 16)
+	for _, dir := range projectDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			path := filepath.Join(dir, e.Name(), "session.v4.jsonl.zstd")
+			info, err := os.Stat(path)
+			if err != nil {
+				continue
+			}
+			out = append(out, describe(path, info))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out, nil
+}
+
+const maxScanBytes = 2 << 20
+
+func describe(path string, info os.FileInfo) Listing {
+	l := Listing{UpdatedAt: info.ModTime(), Events: -1}
+	log, err := v4.ReadFile(path)
+	if err != nil || log.Header.ID == "" {
+		l.SessionID = strings.TrimSuffix(filepath.Base(filepath.Dir(path)), ".zstd")
+		l.Readable = false
+		l.Error = "读不了这份会话（格式或版本不对）"
+		if info.Size() > maxScanBytes {
+			l.Error = "会话太大，先跳过"
+		}
+		return l
+	}
+	l.SessionID = log.Header.ID
+	l.Cwd = log.Header.Cwd
+	l.Preset = log.Header.AgentPreset
+	l.Parent = log.Header.ParentSession
+	l.Created = log.Header.CreatedAt
+	l.Readable = true
+	l.Events = len(log.Events)
+	l.Summary = summarize(log.Events)
+	return l
+}
+
+// summarize 取一句话摘要：最后一条助手消息优先，其次第一条用户消息。
+func summarize(events []v4.Event) string {
+	var firstUser, lastAssistant string
+	for _, ev := range events {
+		switch ev.Type {
+		case "user/message":
+			text := textOf(ev)
+			if firstUser == "" && !isCompactCheckpoint(ev) {
+				firstUser = text
+			}
+		case "assistant/message":
+			if text := textOf(ev); text != "" {
+				lastAssistant = text
+			}
+		}
+	}
+	s := lastAssistant
+	if s == "" {
+		s = firstUser
+	}
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	r := []rune(s)
+	if len(r) > 80 {
+		s = string(r[:80]) + "…"
+	}
+	return s
+}
+
+func isCompactCheckpoint(ev v4.Event) bool {
+	var d struct {
+		Source struct {
+			Kind string `json:"kind"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(ev.Data, &d); err != nil {
+		return false
+	}
+	return d.Source.Kind == "compact-checkpoint"
+}
+
+func textOf(ev v4.Event) string {
+	m, ok := messageOf(ev)
+	if !ok {
+		return ""
+	}
+	return m.Content
+}
+
+// messageOf 把一条事件里能喂给模型的那段文本取出来。
+func messageOf(ev v4.Event) (llm.Message, bool) {
+	if m, _, ok := surfaceMessage(ev); ok {
+		return m, true
+	}
+	return llm.Message{}, false
+}

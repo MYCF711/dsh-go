@@ -3,6 +3,7 @@ package acp
 import (
 	"bufio"
 	"context"
+	"dshgo/internal/session"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -58,6 +59,10 @@ func (a *fakeAgent) Load(ctx context.Context, sessionID, cwd string, emit func(a
 func (a *fakeAgent) Delete(ctx context.Context, sessionID, cwd string) error { return nil }
 
 func (a *fakeAgent) Shutdown() error { return nil }
+
+func (a *fakeAgent) ListSessions(ctx context.Context, cwd string) ([]session.Listing, error) {
+	return []session.Listing{{SessionID: "s1", Cwd: cwd, Summary: "摘要", Readable: true}}, nil
+}
 
 func (a *fakeAgent) SetMode(ctx context.Context, sessionID, modeID string) (string, error) {
 	if modeID != "default" {
@@ -530,5 +535,24 @@ func TestEOFDisconnectsAndCancels(t *testing.T) {
 		// Serve 返回了，正是期望
 	case <-time.After(3 * time.Second):
 		t.Fatal("客户端断连后服务端没有退出（在飞的 turn 把读循环卡住了？）")
+	}
+}
+
+func TestSessionListUsesAgent(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": MethodSessionList,
+		"params": map[string]any{"cwd": "/tmp/x"}})
+	res := h.recvResult(t, 1)
+	if res["error"] != nil {
+		t.Fatalf("列会话失败: %+v", res["error"])
+	}
+	ss := res["result"].(map[string]any)["sessions"].([]any)
+	if len(ss) != 1 {
+		t.Fatalf("应该返回 1 条，得到 %d", len(ss))
+	}
+	first := ss[0].(map[string]any)
+	if first["sessionId"] != "s1" || first["summary"] != "摘要" {
+		t.Fatalf("返回内容不对: %+v", first)
 	}
 }

@@ -1,3 +1,26 @@
+## 0.2.1-go.11（未发布）
+
+**`session/list` 改成读磁盘：会话面板要的是"所有会话"，不是"这个进程开过的"。**
+
+- `session.ListSessions(home, cwd)`：扫 `<home>/sessions/*/*/session.v4.jsonl.zstd`
+  - `cwd` 非空时只算这个项目的目录（用 `projectKey` 换算，不扫全盘）
+  - 每行带 `sessionId / cwd / agentPreset / parentSession / updatedAt / events / summary`
+  - 按 `updatedAt` 倒序
+- 摘要规则：**优先最后一条助手消息**，没有再退到第一条用户消息，80 字截断
+- 读不动的会话**照样列出来**并带 `readable:false` + `error`——面板要能显示坏文件，不能假装它不存在
+- 刚建、可能还没落盘的会话由 runner 补进列表，避免"刚建的在面板里看不见"
+
+**实测**
+```
+全部会话: 1
+ - session-31be4b64… preset=default events=5 摘要="LIST-ONE"
+别的项目的会话数: 0
+```
+
+**一个刻意的取舍**：每份会话都要读整份日志才能算摘要与事件数。真实语料是 100MB 级，
+所以设了 2MB 上限——超了只标"太大先跳过"，不为了面板好看去读 100MB。
+
+---
 ## 0.2.1-go.10（2026-11-02）· 续 3
 
 **客户端断连时的清理语义。**

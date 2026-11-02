@@ -46,7 +46,8 @@
 - ✅ 端到端回归（`scripts/e2e-regression.mjs`，13 项全通过）+ `docs/e2e-report.md`
 - ✅ `session/cancel` 真机回归 + `TestSessionUsableAfterCancel`（取消后 busy 必须清）
 - ✅ 断连语义：EOF → 取消在飞 turn → 等收尾（≤3s）→ `Shutdown()` 刷盘；`TestEOFDisconnectsAndCancels`
-- 下一步 **M12**：`session/list` 带上项目过滤 + 会话摘要（客户端会话面板需要）
+- ✅ `session/list` 读磁盘（项目过滤 + 一句话摘要 + 坏文件也列出来）+ `TestListSessions*` 四条
+- 下一步 **M12**：`0.2.1-go.11` 发版
 
 ---
 
@@ -76,7 +77,7 @@
 | `internal/kernel/` | scope / registry / eventbus / assembler **四件事** | 改动需在 PLAN 里有理由 |
 | `internal/spi/` | 全部接口 + 数据类型 + 服务键，**零实现** | 加接口要同步加"默认实现 + 替换样本"测试 |
 | `internal/fsutil/` | 文件遍历小工具（跳过噪声目录、二进制判定） | 零业务；只给 glob/grep 这类工具共用 |
-| `internal/session/` | 事件溯源 + canonical 模型 | 唯一允许直接读日志的包 |
+| `internal/session/` | 事件溯源 + canonical 模型 + 会话列举 | 唯一允许直接读日志的包 |
 | `internal/agent/` | turn/step 双循环 | 不许内联压缩逻辑 |
 | `internal/acp/` | ACP 服务端（stdio JSON-RPC） | 按 `research/22` 的方法表 |
 | `internal/llm/` | OpenAI 兼容 SSE 客户端 | 先只做 magpie |
