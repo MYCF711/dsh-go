@@ -383,6 +383,26 @@
     "caps": {}
   },
   {
+    "name": "web_fetch",
+    "description": "取一个 HTTP(S) 网页的正文并解码成文本。要看具体某个链接的内容时用。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "要取的 HTTP(S) URL"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "network": true
+    }
+  },
+  {
     "name": "working_directory",
     "description": "查看或切换当前工作目录（影响 read/write/glob/grep 与新开的 bash）",
     "parameters": {

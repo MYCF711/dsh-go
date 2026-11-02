@@ -33,6 +33,7 @@ import (
 	"dshgo/modules/tool/read"
 	todo "dshgo/modules/tool/todo"
 	wdtool "dshgo/modules/tool/wd"
+	"dshgo/modules/tool/webfetch"
 	"dshgo/modules/tool/write"
 	"dshgo/modules/tools"
 )
@@ -74,6 +75,7 @@ func builtinModules(wd, home string, maxChars int) []kernel.Module {
 		todo.Module(),
 		present.Module(),
 		ask.Module(),
+		webfetch.Module(),
 	}
 }
 

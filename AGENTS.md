@@ -116,7 +116,9 @@
 - ✅ P0 工具第 14 个 `ask_user_question`（`modules/tool/ask`）：契约是 **questions 数组**（id/question/header/options/multi_select）
 - ✅ `spi.Result` 新增 **`Stop`**：为 true 时 agent 循环在这一步后结束本轮（`TestStopEndsTurnImmediately`）——否则模型会自问自答
 - ⚠️ 对拍两次拦住：单 question 形状错、Description 超 120 字
-- 下一步 **M49**：P0 工具第 15 个 `read_image`（感知组）
+- ✅ P0 工具第 15 个 `web_fetch`（`modules/tool/webfetch`）：只收 http/https、512KB 上限、非 2xx 带状态码与解读、`Caps{Network:true}`
+- ⚠️ 顺序调整：`read_image` 不只是工具——图片进上下文要同时改 `spi.Block`、LLM 消息体、ACP 的 `image` 能力声明，先放后面单独做
+- 下一步 **M50**：P0 工具第 16 个 `web_search`（感知组）
 
 ---
 
@@ -262,7 +264,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | DSH 内存（私有工作集） | 870 MB | 本机 `tasklist` |
 | 其中 Chromium / Node 宿主 | ~500 / ~367 MB | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 14 个 / 11,788 字节 / **2,128 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 15 个 / 12,248 字节 / **2,201 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |

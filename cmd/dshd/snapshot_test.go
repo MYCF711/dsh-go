@@ -110,6 +110,8 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"present": {},
 		// 只把问题返回给模型并结束本轮，不碰文件系统。
 		"ask_user_question": {},
+		// 联网取网页正文。联网本身就是它的功能，不是副作用。
+		"web_fetch": {Network: true},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {
