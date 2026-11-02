@@ -156,18 +156,18 @@ func (t *Tool) Schema() json.RawMessage {
   "ignore_labels":{"type":"array","items":{"type":"string"},"description":"可选：带这些标签的一律跳过"},
   "only_assigned":{"type":"boolean","description":"可选：只看指派给我的"},
   "ack_label":{"type":"string","description":"可选：处理完要打的标签，默认「已处理」"}
-},"required":["repo"],"additionalProperties":false}`)
+},"additionalProperties":false}`)
 	case kindStatus:
 		return json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
 	case kindStop:
 		return json.RawMessage(`{"type":"object","properties":{
   "repo":{"type":"string","description":"要停掉的仓库，形如 owner/name"}
-},"required":["repo"],"additionalProperties":false}`)
+},"additionalProperties":false}`)
 	default:
 		return json.RawMessage(`{"type":"object","properties":{
   "repo":{"type":"string","description":"要记帐的仓库，形如 owner/name"},
   "numbers":{"type":"array","items":{"type":"integer"},"description":"已处理完的 issue/PR 编号"}
-},"required":["repo","numbers"],"additionalProperties":false}`)
+},"required":["numbers"],"additionalProperties":false}`)
 	}
 }
 
@@ -216,9 +216,9 @@ func (t *Tool) start(_ context.Context, raw json.RawMessage) (spi.Result, error)
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return spi.Result{Hint: `参数不合法：至少给 {"repo":"owner/name"}，其余字段都可省略`}, err
 	}
-	repo, err := normRepo(a.Repo)
+	repo, err := t.resolveRepo(a.Repo)
 	if err != nil {
-		return spi.Result{Hint: `repo 要写成 owner/name：一条斜杠、两边都不空，例如 "dshgo/dshd"`}, err
+		return spi.Result{Hint: `repo 要写成 owner/name；只盯了一个仓库时可以省略，多了就必须指定`}, err
 	}
 	if err := t.st.ready(); err != nil {
 		return spi.Result{Hint: "状态目录没配上：这是接线问题，报告监工，别改配置自己试"}, err
@@ -324,6 +324,32 @@ func (t *Tool) status(_ context.Context, _ json.RawMessage) (spi.Result, error) 
 
 // ---------------------------------------------------------------- watch_stop
 
+// resolveRepo 处理"只有一个仓库在盯时不填 repo"的情形。
+//
+// 让模型填一个它刚登记过的 owner/name，只是多一次被拒的机会；
+// 但**有多个**时必须让模型选，猜错就记到别人头上了。
+func (t *Tool) resolveRepo(repo string) (string, error) {
+	if strings.TrimSpace(repo) != "" {
+		return normRepo(repo)
+	}
+	list, err := t.st.load()
+	if err != nil {
+		return "", err
+	}
+	switch len(list) {
+	case 0:
+		return "", fmt.Errorf("还没有在盯任何仓库：先 watch_start 登记一个")
+	case 1:
+		return list[0].Repo, nil
+	default:
+		names := make([]string, 0, len(list))
+		for _, w := range list {
+			names = append(names, w.Repo)
+		}
+		return "", fmt.Errorf("盯了多个仓库（%s），repo 必须填一个", strings.Join(names, "、"))
+	}
+}
+
 func (t *Tool) stop(_ context.Context, raw json.RawMessage) (spi.Result, error) {
 	var a stopArgs
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -379,9 +405,9 @@ func (t *Tool) ack(_ context.Context, raw json.RawMessage) (spi.Result, error) {
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return spi.Result{Hint: `参数不合法：期望 {"repo":"owner/name","numbers":[12,13]}`}, err
 	}
-	repo, err := normRepo(a.Repo)
+	repo, err := t.resolveRepo(a.Repo)
 	if err != nil {
-		return spi.Result{Hint: `repo 要写成 owner/name：一条斜杠、两边都不空，例如 "dshgo/dshd"`}, err
+		return spi.Result{Hint: `repo 要写成 owner/name；只盯了一个仓库时可以省略，多了就必须指定`}, err
 	}
 
 	// 只收正数：issue/PR 编号从 1 开始，0 和负数只可能是抄错了。

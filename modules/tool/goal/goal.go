@@ -77,7 +77,7 @@ var (
       "description": "action=edit 时传，才改"},
     "blocked_reason": {"type": "string", "description": "action=blocked 时必填：具体卡在哪"}
   },
-  "required": ["goal_id", "revision", "action"],
+  "required": ["revision", "action"],
   "additionalProperties": false
 }`)
 )
@@ -361,10 +361,6 @@ func (t *Tool) update(ctx context.Context, raw json.RawMessage) (spi.Result, err
 		return spi.Result{Hint: "revision 要填 get_goal 返回的那个整数（从 1 起）；先 get_goal 抄一遍"},
 			fmt.Errorf("update_goal: revision 非法 %d", a.Revision)
 	}
-	if strings.TrimSpace(a.GoalID) == "" {
-		return spi.Result{Hint: "goal_id 要原样抄 get_goal 里的 id；先 get_goal 看一眼"},
-			fmt.Errorf("update_goal: goal_id 为空")
-	}
 
 	if err := t.st.ready(); err != nil {
 		return spi.Result{Hint: "目标目录没接线：这是部署配置问题，别重试；告诉维护者检查 Module(dir) 的入参"},
@@ -386,6 +382,11 @@ func (t *Tool) update(ctx context.Context, raw json.RawMessage) (spi.Result, err
 	if g == nil {
 		return spi.Result{Hint: "当前会话没有目标：先 create_goal 建一个，再改"},
 			fmt.Errorf("update_goal: 当前会话没有目标")
+	}
+	// goal_id 不填就用当前会话的目标：一个会话只有一个目标，
+	// 让模型抄一遍 id 只是多一次被拒的机会。填了就必须对上（防串目标）。
+	if strings.TrimSpace(a.GoalID) == "" {
+		a.GoalID = g.ID
 	}
 	if g.ID != a.GoalID {
 		return spi.Result{Hint: "goal_id 和当前会话的目标对不上（可能抄错了）：先 get_goal 拿准确 id"},

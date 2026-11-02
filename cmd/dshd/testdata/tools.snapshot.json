@@ -926,7 +926,6 @@
         }
       },
       "required": [
-        "goal_id",
         "revision",
         "action"
       ],
@@ -970,7 +969,6 @@
         }
       },
       "required": [
-        "repo",
         "numbers"
       ],
       "additionalProperties": false
@@ -1012,9 +1010,6 @@
           "description": "可选：处理完要打的标签，默认「已处理」"
         }
       },
-      "required": [
-        "repo"
-      ],
       "additionalProperties": false
     },
     "caps": {
@@ -1042,9 +1037,6 @@
           "description": "要停掉的仓库，形如 owner/name"
         }
       },
-      "required": [
-        "repo"
-      ],
       "additionalProperties": false
     },
     "caps": {
