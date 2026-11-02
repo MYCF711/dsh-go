@@ -1,6 +1,6 @@
 # AGENTS.md · DSH-GO
 
-> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.6`**。
+> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.7`**。
 > **先读** `PLAN.md` §1 的十项决策——那是用户逐条拍板的结论，**不要再讨论、不要"顺便优化"**。
 > 本文件是操作手册：冲突时以本文件为准；本文件没写的，以 `PLAN.md` 为准。
 
@@ -155,7 +155,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 
 ## 6. 版本、提交、文档
 
-- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.6`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
+- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.7`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
 - **提交**：`M<里程碑>: <一句话>`，例如 `M1: tools/read 与观测策略`。一个提交只做一件事。
 - **决策**：任何改变 §1 决策的实现，**先改 `PLAN.md` 并写理由**，再动代码。禁止"代码先行、文档追认"。
 - **文档**：`docs/cordis-alignment.md` 是 cordis 概念 → Go 概念的逐条对照，是设计约束，不是宣传材料。
@@ -177,8 +177,9 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 工具回显占上下文 | **85.5%** | 同上 |
 | 会话样本 | 94 MB，zstd 多帧，62 事件类型 | `research/21` |
 | Go 空进程冷启动 | median **18.1 ms** / p95 22.7 ms | `research/30` |
-| **dsh-go 冷启动（实测 2026-11-02）** | `dshd version` 装配 9 模块：median **35.2 ms** / min 30.9 ms | 本机 10 次 |
-| **dsh-go 二进制（实测 2026-11-02）** | `-ldflags "-s -w"` → **3.7 MB**（目标 ≤25 MB） | 本机 |
+| **dsh-go 冷启动（实测 2026-11-02）** | ACP 就绪（起到 initialize 应答）median **65.9 ms** | `scripts/measure-start.py` |
+| **dsh-go 二进制（实测 2026-11-02）** | `-ldflags "-s -w"` → **8.2 MB**（目标 ≤25 MB） | `scripts/build.sh` |
+| **dsh-go 内存（实测 2026-11-02）** | 整轮峰值 **15.4 MB**（DSH 本体 870 MB） | `scripts/measure-mem.py` |
 | go-plugin / wazero 二进制开销 | **+14.8 MB** / +3.5 MB | 同上 |
 | 进程插件工作集 | **14.4 MiB** | 同上 |
 
