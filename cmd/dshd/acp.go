@@ -503,7 +503,7 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 		return nil
 	}
 
-	span, n, ok := compact.Plan(surface, compact.Options{
+	items, span, ok := compact.Select(surface, compact.Options{
 		KeepRecent: r.keepRecent, MinToCompact: 2,
 	})
 	if !ok {
@@ -516,17 +516,11 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 		if keep >= len(surface) {
 			return nil
 		}
-		span, n, ok = compact.Plan(surface, compact.Options{KeepRecent: keep, MinToCompact: 2})
+		items, span, ok = compact.Select(surface, compact.Options{KeepRecent: keep, MinToCompact: 2})
 		if !ok {
 			return nil
 		}
 		fmt.Fprintf(os.Stderr, "超预算且无处可压：放宽到只保留最近 %d 条\n", keep)
-	}
-	items := make([]session.SurfaceMsg, 0, n)
-	for _, sm := range surface {
-		if sm.Seq >= span.Start && sm.Seq <= span.End {
-			items = append(items, sm)
-		}
 	}
 	text, err := compact.Summarize(ctx, llm.New(r.base, os.Getenv("DSHD_LLM_KEY")), r.model, items)
 	if err != nil {

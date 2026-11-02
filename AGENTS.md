@@ -33,6 +33,7 @@
 - ✅ `usage_update.used` 改为"本次调用的上下文大小"（原来是累计值，跑三步就翻三倍）；`--context-window` 可配
 - ✅ ACP 三方法：`session/load`（重放历史）/ `session/delete`（cwd 可省，靠 FindByID）/ `session/set_mode`
 - ✅ 压缩批量回归（15 个真实会话）：**发现并修掉"摘要被放到末尾"的顺序 bug**（现在插回遮蔽起点）
+- ✅ 压缩语义回归（`scripts/acp-compact-semantics.mjs`）：**又抓到一个 bug**——替身 seq 顺序与 surface 顺序不一致导致筛空；`compact.Select` 改为直接返回节点
 - 下一步 **M8**：`modes/` 真正落地（现在 `session/set_mode` 只有 default）
 
 ---
@@ -140,6 +141,8 @@ type Tool interface {
 - 每个新依赖要在 `go.mod` 注释里写「为什么标准库不够」。
 
 **发布件**：`bash scripts/build.sh` 出三平台二进制 + SHA256SUMS（不发 npm）。
+
+**压缩改动必跑**：`scripts/acp-compact-semantics.mjs`（压完之后模型还记不记得关键信息）。
 
 **交付前（缺一不可）**
 ```bash

@@ -33,31 +33,54 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// Plan 选出一个可压缩的前缀区间。
+// Plan 选出一个可压缩的前缀区间（保留给只关心 seq 的调用方）。
+func Plan(surface []session.SurfaceMsg, opts Options) (session.Span, int, bool) {
+	items, span, ok := Select(surface, opts)
+	return span, len(items), ok
+}
+
+// Select 选出要压缩的节点本身，并给出它们的 seq 区间。
+//
+// 为什么还要返回 items：**surface 的顺序不是 seq 顺序**——压缩替身会被插到
+// 它遮蔽的位置，但它的 seq 是最后追加的。按 seq 区间回头去筛节点会筛空
+// （踩过：日志里出现「没有可摘要的消息」）。
 //
 // 两条硬约束：
 //  1. 只动前缀——最近的 `KeepRecent` 条一定留；
-//  2. 开头若是 system/message（surface 节点 0），**不压它**：DSH 只允许被
-//     「恰好覆盖该节点的 system/message」替换，压掉它等于让模型忘记身份。
-func Plan(surface []session.SurfaceMsg, opts Options) (session.Span, int, bool) {
+//  2. 开头的 system/message 不压：DSH 只允许被「恰好覆盖该节点的 system/message」
+//     替换，压掉它等于让模型忘记身份。压缩替身同样不主动压（没有新信息可提炼）。
+func Select(surface []session.SurfaceMsg, opts Options) ([]session.SurfaceMsg, session.Span, bool) {
 	o := opts.withDefaults()
 	if o.MaxMessages > 0 && len(surface) <= o.MaxMessages {
-		return session.Span{}, 0, false
+		return nil, session.Span{}, false
 	}
 
 	start := 0
-	for start < len(surface) && surface[start].Type == "system/message" {
+	for start < len(surface) && (surface[start].Type == "system/message" || surface[start].Summary) {
 		start++
 	}
-	end := len(surface) - o.KeepRecent // 开区间右端（不含）
+	end := len(surface) - o.KeepRecent // 开区间右端
 	if end <= start {
-		return session.Span{}, 0, false
+		return nil, session.Span{}, false
 	}
 	cut := surface[start:end]
 	if len(cut) < o.MinToCompact {
-		return session.Span{}, 0, false
+		return nil, session.Span{}, false
 	}
-	return session.Span{Start: cut[0].Seq, End: cut[len(cut)-1].Seq}, len(cut), true
+
+	minSeq, maxSeq := cut[0].Seq, cut[0].Seq
+	for _, m := range cut {
+		if m.Seq < 0 {
+			continue
+		}
+		if minSeq < 0 || m.Seq < minSeq {
+			minSeq = m.Seq
+		}
+		if m.Seq > maxSeq {
+			maxSeq = m.Seq
+		}
+	}
+	return cut, session.Span{Start: minSeq, End: maxSeq}, true
 }
 
 // 输入预算：太大既贵又容易被截断，太小压不住长会话。

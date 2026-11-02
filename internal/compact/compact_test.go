@@ -155,3 +155,41 @@ func TestSummarizeMarksEarlierSummary(t *testing.T) {
 		t.Fatal("更早的摘要应该被标成 earlier-summary，否则模型会把它当用户原话")
 	}
 }
+
+// TestSelectHandlesCheckpointOrdering 锁死一个真 bug：
+// 压缩替身被插到 surface 最前面，但它的 seq 是最后追加的。
+// 如果按 seq 区间回头筛节点，就会筛空 → 日志里出现「没有可摘要的消息」。
+func TestSelectHandlesCheckpointOrdering(t *testing.T) {
+	s := []session.SurfaceMsg{
+		// 替身在最前，seq 却是最大的。
+		{Seq: 100, Type: "compaction/summary", Source: "compact-checkpoint", Summary: true,
+			Message: llm.Message{Role: "user", Content: "（更早的摘要）"}},
+		msg(1, "user/message", "user", "问一"),
+		msg(2, "assistant/message", "assistant", "答一"),
+		msg(3, "user/message", "user", "问二"),
+		msg(4, "assistant/message", "assistant", "答二"),
+		msg(5, "user/message", "user", "问三"),
+		msg(6, "assistant/message", "assistant", "答三"),
+	}
+	items, span, ok := Select(s, Options{KeepRecent: 2})
+	if !ok {
+		t.Fatal("应该能选出一段可压的（替身不该挡住整个计划）")
+	}
+	if len(items) == 0 {
+		t.Fatal("选出来 0 条——正是那个 bug")
+	}
+	if span.Start <= 0 || span.End <= 0 {
+		t.Fatalf("区间非法: %+v", span)
+	}
+	if span.Start > span.End {
+		t.Fatalf("start > end: %+v（说明用了错误的顺序）", span)
+	}
+	for _, it := range items {
+		if it.Summary {
+			t.Fatal("不该把替身再压一次")
+		}
+		if it.Seq < span.Start || it.Seq > span.End {
+			t.Fatalf("节点 seq %d 不在区间 %+v 内", it.Seq, span)
+		}
+	}
+}
