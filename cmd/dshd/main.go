@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 
+	"dshgo/codecs/v4"
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
 	"dshgo/modules/exec/bash"
@@ -55,6 +57,8 @@ func main() {
 		err = cmdExec(os.Args[2:])
 	case "tools":
 		err = cmdTools(os.Args[2:])
+	case "session":
+		err = cmdSession(os.Args[2:])
 	case "version":
 		fmt.Printf("dshd %s\n", version)
 	case "-h", "--help", "help":
@@ -78,6 +82,7 @@ func usage() {
   dshd modules list  [--manifest dsh.toml]   列出可装配模块
   dshd exec --tool <name> --args <json>      装配后执行一个工具
   dshd tools [--manifest dsh.toml]           打印模型看到的工具表（JSON）
+  dshd session rewrite --in <f> --out <f>     把 v4 会话读进来再用我们的编码器写出去（验证兼容用）
   dshd version                               版本
 `)
 }
@@ -180,6 +185,49 @@ func cmdTools(argv []string) error {
 	}
 	fmt.Println(string(out))
 	fmt.Fprintf(os.Stderr, "工具 %d 个，%d 字节\n", len(table), len(out))
+	return nil
+}
+
+// cmdSession 目前只有一个子命令 rewrite：读→写，用来验证我们的编码器，
+// 也用来给 Node 侧的 verify-node-reads.mjs 造样本。
+func cmdSession(argv []string) error {
+	if len(argv) == 0 || argv[0] != "rewrite" {
+		return fmt.Errorf("用法: dshd session rewrite --in <file> --out <file>")
+	}
+	fs := flag.NewFlagSet("session rewrite", flag.ContinueOnError)
+	in := fs.String("in", "", "源会话文件")
+	out := fs.String("out", "", "目标会话文件")
+	if err := fs.Parse(argv[1:]); err != nil {
+		return err
+	}
+	if *in == "" || *out == "" {
+		return fmt.Errorf("--in 与 --out 都必须给")
+	}
+	l, err := v4.ReadFile(*in)
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(*out); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	w, err := v4.Create(*out, l.Header)
+	if err != nil {
+		return err
+	}
+	defer w.Close()
+	for i := 0; i < len(l.Events); i += 20 {
+		end := i + 20
+		if end > len(l.Events) {
+			end = len(l.Events)
+		}
+		if err := w.Append(l.Events[i:end]...); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("重写完成：%d 事件 / %d 帧 → %s\n", len(l.Events), w.Frames(), *out)
+
 	return nil
 }
 
