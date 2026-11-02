@@ -10,7 +10,8 @@
 
 - ✅ **M0 完成**：内核四件事（Scope/Registry/Bus/Assemble）+ 工具 SPI + 装配器 + CLI；`scripts/check.sh` 全绿，CI（windows-latest，含 `-race`）绿
 - 🚧 **M1 收口**：工具层已齐（`read/write/edit/glob/grep/shell/job_*` 共 9 个），流水线 + 投影 + schema 快照 + token 实测（**906**）都已落地
-- 下一步：进 **M2** —— LLM(SSE) + agent loop + 会话 v4 codec（先写字节级 golden test 再写编码器）
+- 🚧 **M2 进行中**：`codecs/v4` **解码器**已通过全量真实语料（116 文件 / 66,877 帧 / 123,790 事件）；编码器、LLM(SSE)、agent loop 待做
+- 下一步：v4 **编码器**（读→写→再读 字节级比对）→ LLM(SSE) → agent turn/step 双循环
 
 ---
 

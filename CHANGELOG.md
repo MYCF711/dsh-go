@@ -10,6 +10,29 @@
 
 ---
 
+## 0.2.1-go.5 · M2-a — 2026-11-02
+
+**会话 v4 解码器：先拿真实语料验，再写代码。**
+
+- `codecs/v4/path.go`：`ProjectKey` / `EncodeSegment` 逐字实现 AGENTS §4 的转义规则
+- `codecs/v4/frame.go`：**只解帧结构不解压**地切帧（FHD/FCS/DictID/块头），因为「首帧只装 header」这条契约需要精确的帧边界
+- `codecs/v4/read.go`：`ReadFile` / `Read`
+  - header 键**白名单**，多一个键即报错
+  - 首帧必须恰好一行且以 `
+` 结尾，否则拒
+  - 版本必须是 4
+- 依赖 `github.com/klauspost/compress`（纯 Go zstd；cgo 绑定在 CI 上要 C 工具链）
+
+**实测**
+```
+TestReadRealCorpus: 116 个文件 / 66,877 帧 / 123,790 事件 —— 全部解析通过
+TestProjectKeyMatchesRealDirectories: 4 个真实目录名逐字复现
+```
+
+**注意**：语料数字两次运行略有变化（66,821 → 66,877 帧），因为 DSH 正在写当前会话——
+这反过来证明解码器能吃「正在被追加的文件」。
+
+---
 ## 0.2.1-go.5 · M1 收口 — 2026-11-02
 
 **工具表有了快照与预算：R4 落到测试里，token 有了实测数字。**

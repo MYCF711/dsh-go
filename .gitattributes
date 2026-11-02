@@ -12,3 +12,4 @@
 *.exe  binary
 *.wasm binary
 *.png  binary
+*.zstd binary
