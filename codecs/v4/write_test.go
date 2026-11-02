@@ -86,7 +86,7 @@ func TestFramesCarryChecksum(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frames, err := splitFrames(b)
+	frames, _, err := splitFrames(b)
 	if err != nil {
 		t.Fatal(err)
 	}

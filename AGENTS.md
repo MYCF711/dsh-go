@@ -80,7 +80,9 @@
 - ✅ ACP 的 `session/request_permission` 也带命令：`title` 是 `bash: <命令>`、`kind` 是 `execute`/`edit`、`content` 带"模型自述"标注
 - ✅ 边角盘点（`docs/edge-cases.md`）：崩溃恢复 / 并发 prompt / 1MB 单行 / Windows junction **四类本来就对，零改动**
 - ✅ 一个假警报：Git Bash 的 `ln -s` 会静默降级成复制，"遍历跟了符号链接"是夹具的问题，不是代码
-- 下一步 **M27**：还没打的五类——磁盘满/只读、会话文件被截断、极深目录、双宿主进程、模型输出非法 JSON
+- ✅ 双宿主并发写：两个 writer 各 20 帧，**一帧不丢**（`O_APPEND`）；编码器里没有截断式回滚，无"A 截掉 B"风险
+- ✅ **尾部半帧不再泼掉整份历史**：`splitFrames` 返回 `truncatedAt`，`Log.TailTruncatedAt` 带给调用方，`session info` 打警告；真损坏仍报错
+- 下一步 **M28**：剩三类——极深目录（MAX_PATH）、模型输出非法 tool_call JSON、只读 home
 
 ---
 

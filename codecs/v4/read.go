@@ -103,6 +103,10 @@ type Log struct {
 	Frames int
 	Header Header
 	Events []Event
+
+	// TailTruncatedAt 非零表示文件尾部有半帧（断电/磁盘满），
+	// 值是那半帧的起始偏移。前面的内容都还能用。
+	TailTruncatedAt int
 }
 
 // ReadFile 读并解析一个 v4 会话文件。
@@ -121,7 +125,7 @@ func ReadFile(path string) (*Log, error) {
 
 // Read 从字节解析。
 func Read(b []byte) (*Log, error) {
-	frames, err := splitFrames(b)
+	frames, tornAt, err := splitFrames(b)
 	if err != nil {
 		return nil, err
 	}
@@ -159,10 +163,22 @@ func Read(b []byte) (*Log, error) {
 		return nil, fmt.Errorf("版本 = %d，本解码器只认 4", l.Header.Version)
 	}
 	l.Frames = len(frames)
+	// 尾部有半帧（断电/磁盘满）：前面的照常返回，只把位置记下来。
+	l.TailTruncatedAt = tornAt
 
 	for i, f := range frames[1:] {
 		plain, err := decodeFrame(dec, b[f.offset:f.offset+f.length])
 		if err != nil {
+			// 断电/磁盘满会在尾部留下半帧。**为了半帧丢掉整份历史是最坏的结果**，
+			// 所以这里把"从第 N 帧开始读不动了"记下来，前面的照样返回。
+			//
+			// 判据只认一条：坏帧在尾巴上（它之后没有完整帧了）。
+			// 中间坏一帧说明文件真的坏了，那时才整体报错。
+			if i == len(frames)-2 {
+				l.TailTruncatedAt = f.offset
+				l.Frames = i + 1
+				return &l, nil
+			}
 			return nil, fmt.Errorf("第 %d 帧: %w", i+1, err)
 		}
 		for _, line := range strings.Split(string(plain), "\n") {

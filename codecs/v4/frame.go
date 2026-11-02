@@ -28,16 +28,16 @@ type frame struct {
 
 // splitFrames 只解析帧结构，不解压——帧边界必须精确，否则「首帧只装 header」这条
 // 契约就无从验证。
-func splitFrames(b []byte) ([]frame, error) {
+func splitFrames(b []byte) (frames []frame, truncatedAt int, err error) {
 	var out []frame
 	pos := 0
 	for pos < len(b) {
 		start := pos
 		if len(b)-pos < 5 {
-			return nil, fmt.Errorf("偏移 %d 处帧头被截断（剩 %d 字节）", pos, len(b)-pos)
+			return out, pos, nil
 		}
 		if binary.LittleEndian.Uint32(b[pos:]) != FrameMagic {
-			return nil, fmt.Errorf("偏移 %d 不是 zstd 帧魔数", pos)
+			return nil, 0, fmt.Errorf("偏移 %d 不是 zstd 帧魔数", pos)
 		}
 		pos += 4
 
@@ -74,12 +74,12 @@ func splitFrames(b []byte) ([]frame, error) {
 		}
 		pos += fcsSize
 		if pos > len(b) {
-			return nil, fmt.Errorf("偏移 %d 处帧头越界", start)
+			return out, start, nil
 		}
 
 		for {
 			if pos+3 > len(b) {
-				return nil, fmt.Errorf("偏移 %d 处块头被截断", pos)
+				return out, start, nil
 			}
 			bh := uint32(b[pos]) | uint32(b[pos+1])<<8 | uint32(b[pos+2])<<16
 			pos += 3
@@ -92,10 +92,10 @@ func splitFrames(b []byte) ([]frame, error) {
 			case 1: // RLE
 				pos += 1
 			default:
-				return nil, fmt.Errorf("偏移 %d 处出现保留块类型", pos-3)
+				return nil, 0, fmt.Errorf("偏移 %d 处出现保留块类型", pos-3)
 			}
 			if pos > len(b) {
-				return nil, fmt.Errorf("偏移 %d 处块体越界", pos)
+				return out, start, nil
 			}
 			if last {
 				break
@@ -105,11 +105,11 @@ func splitFrames(b []byte) ([]frame, error) {
 			pos += 4
 		}
 		if pos > len(b) {
-			return nil, fmt.Errorf("偏移 %d 处校验和被截断", pos)
+			return out, start, nil
 		}
 		out = append(out, frame{offset: start, length: pos - start})
 	}
-	return out, nil
+	return out, 0, nil
 }
 
 // decodeFrame 解一帧的明文。

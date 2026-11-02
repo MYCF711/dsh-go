@@ -4,7 +4,7 @@ import "github.com/klauspost/compress/zstd"
 
 // 仅供测试：暴露帧明文，用于核对真实文件的帧内格式。
 func framePlaintexts(b []byte) ([][]byte, error) {
-	frames, err := splitFrames(b)
+	frames, _, err := splitFrames(b)
 	if err != nil {
 		return nil, err
 	}

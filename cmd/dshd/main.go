@@ -654,6 +654,10 @@ func cmdSessionInfo(argv []string) error {
 	}
 	fmt.Printf("会话: %s（cwd=%s，mode=%s）\n", l.Header.ID, l.Header.Cwd, mode)
 	fmt.Printf("事件: %d（%d 帧）\n", len(l.Events), l.Frames)
+	if l.TailTruncatedAt > 0 {
+		// 不能装作没事：用户要知道这份日志的尾巴是坏的（断电/磁盘满留下的半帧）。
+		fmt.Printf("⚠ 尾部截断: 偏移 %d 之后读不动了（上面的内容照常可用）\n", l.TailTruncatedAt)
+	}
 	fmt.Printf("surface: %d 节点，其中摘要 %d\n", len(surface), summaries)
 	keys := make([]string, 0, len(byType))
 	for k := range byType {

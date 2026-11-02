@@ -61,8 +61,18 @@ func TestCorruptTailIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	broken := b[:len(b)-6] // 砍掉尾部
-	if _, err := Read(broken); err == nil {
-		t.Fatal("截断的文件必须报错，而不是静默少读几条")
+
+	// 契约（2026-11-03 改）：尾部半帧**不能泼掉前面的**，但也**不能静默**。
+	// 原来这里是"必须报错"——那样一次断电就整份历史读不出来。
+	log, err := Read(broken)
+	if err != nil {
+		t.Fatalf("尾部截断不该让整份日志读不出来: %v", err)
+	}
+	if log.TailTruncatedAt == 0 {
+		t.Fatal("截断必须报出来，不能静默少读几条")
+	}
+	if len(log.Events) == 0 {
+		t.Fatal("前面的完整帧应该留着")
 	}
 }
 
