@@ -376,7 +376,7 @@ func cmdACP(argv []string) error {
 		return err
 	}
 
-	mods, err := loadMods(*manifest)
+	mods, err := loadMods(*manifest, *home)
 	if err != nil {
 		return err
 	}

@@ -52,7 +52,9 @@
 - ✅ edit 失败归类：84% 是读后写策略；措辞逐字对齐 DSH（含 `cannot write`/`cannot edit` 动词区分）
 - ✅ **Martty 真客户端验收**（`docs/martty.md`）：`initialize ok → dsh-go-acp`，流式 reasoning 显示为「推理：…」，usage/模式/Caps 全对
 - ✅ `v4.NormalizeCwd`：去掉 `\?\` 前缀（Martty 传的 workspace 带它，会写出真实 DSH 永远不会产生的 projectKey）
-- 下一步 **M16**：工具回显的 token 效率（占上下文 85.5%，长会话的真正压力来源）
+- ✅ 工具回显账本（`docs/token-budget.md`）：实测占 57.4%，`bash` 占其中 64.5%，DSH 上限约 50k 字符
+- ✅ 修掉截断层空转（只换 Data 不换 Text）+ 指针不可读（artifact 移到 `<home>/artifacts` 并放行只读）
+- 下一步 **M16**：阈值调优——把 4,000 降到 2,000 能再省 18 个点，但要先量「多出来的重读次数」
 
 ---
 
@@ -82,6 +84,7 @@
 | `internal/kernel/` | scope / registry / eventbus / assembler **四件事** | 改动需在 PLAN 里有理由 |
 | `internal/spi/` | 全部接口 + 数据类型 + 服务键，**零实现** | 加接口要同步加"默认实现 + 替换样本"测试 |
 | `internal/fsutil/` | 文件遍历小工具（跳过噪声目录、二进制判定） | 零业务；只给 glob/grep 这类工具共用 |
+| `<home>/artifacts/` | 工具大输出的外置工件 | 宿主写、模型只读（`FS.WithExtraReadRoot` 放行） |
 | `internal/session/` | 事件溯源 + canonical 模型 + 会话列举 | 唯一允许直接读日志的包 |
 | `internal/agent/` | turn/step 双循环 | 不许内联压缩逻辑 |
 | `internal/acp/` | ACP 服务端（stdio JSON-RPC） | 按 `research/22` 的方法表 |

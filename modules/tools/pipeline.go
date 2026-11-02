@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"unicode/utf8"
 
@@ -126,18 +127,38 @@ func enforceSerialization(res *spi.Result) error {
 //
 // 尽力而为：存不下去就保留内联，绝不把一次成功的调用变成失败；
 // 替换体本身永远不超阈值，防止「取回 → 又被外置」的死循环。
+//
+// **Text 也必须一起截**。只换 Data 的话，ProjectResult 会优先用 Text，
+// 模型照样看到全文——那样 spill 等于没做（实测 9000 字符的输出，
+// 阈值 4000，模型仍然看到 9361 字符）。
 func (p *Pipeline) spill(res *spi.Result, toolName string) {
+	// 先把 Text 截掉：无论走不走 Data 外置，模型看到的那段文本都要有界。
+	textSpilled := false
+	if len(res.Text) > p.opts.MaxChars {
+		textSpilled = true
+	}
+
 	if res.Data == nil {
+		// 没有结构化 Data 也不能放过：Text 本身超了就直接截。
+		if textSpilled {
+			p.spillText(res, textSpilled, "")
+		}
 		return
 	}
 	raw, err := json.Marshal(res.Data)
 	if err != nil || len(raw) <= p.opts.MaxChars {
+		if textSpilled {
+			p.spillText(res, textSpilled, "")
+		}
 		return
 	}
 
 	path, err := p.writeSpill(raw)
 	if err != nil {
 		p.log.Warn("结果外置失败，保留内联", "error", err)
+		if textSpilled {
+			p.spillText(res, textSpilled, "")
+		}
 		return
 	}
 
@@ -150,9 +171,64 @@ func (p *Pipeline) spill(res *spi.Result, toolName string) {
 		"bytes":   len(raw),
 		"preview": preview,
 	}
+	if textSpilled {
+		p.spillText(res, textSpilled, path)
+	}
 	if res.Hint == "" {
 		res.Hint = "结果已外置到 " + path + "；用 read 工具（offset/limit 分段）读全文"
 	}
+}
+
+// spillText 把模型可见正文压到预算内：留头留尾，中间换一行指针。
+//
+// 留尾巴是因为很多输出（日志、报错、命令结果）的关键信息在最后。
+func (p *Pipeline) spillText(res *spi.Result, over bool, pointer string) {
+	budget := p.opts.MaxChars / 2 // 正文只占一半：还剩指针、提示、截断说明
+	head := budget * 3 / 4
+	tail := budget - head
+
+	orig := res.Text
+	total := len([]rune(orig))
+	r := []rune(orig)
+	keepHead := r[:minInt(head, len(r))]
+	keepTail := []rune{}
+	if len(r) > head+tail {
+		keepTail = r[len(r)-tail:]
+	}
+
+	var b strings.Builder
+	b.WriteString(string(keepHead))
+	b.WriteString("\n…（中间省略 " + itoa(total-head-tail) + " 字符")
+	if pointer != "" {
+		b.WriteString("，全文在 " + pointer)
+	}
+	b.WriteString("）…\n")
+	b.WriteString(string(keepTail))
+	res.Text = b.String()
+	if res.Truncated == nil {
+		res.Truncated = &spi.Truncation{Kept: head + tail, Total: total, Pointer: pointer}
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func itoa(n int) string {
+	if n <= 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }
 
 func (p *Pipeline) writeSpill(raw []byte) (string, error) {

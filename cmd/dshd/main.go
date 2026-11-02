@@ -45,16 +45,19 @@ var (
 // 历史检索服务是宿主提供的（它需要知道"当前是哪个会话"）。
 var hostHistory = &historyHolder{}
 
-func builtinModules() []kernel.Module {
-	wd, err := os.Getwd()
-	if err != nil {
-		wd = "."
-	}
+// builtinModules 按工作区与 home 装配默认实现。
+// artifacts 目录要放行给 FS 读：工具输出被外置成 artifact 之后，
+// Hint 会告诉模型「用 read 读全文」——不放行那句 Hint 就是假的。
+func builtinModules(wd, home string) []kernel.Module {
 	return []kernel.Module{
 		// 默认实现也是插件（A3）：它们与第三方插件走同一个 Register(scope)。
-		tools.Module(tools.Options{}),
+		tools.Module(tools.Options{
+			// artifact 落在 home 下（不是系统 temp）：FS 只放行了这个目录，
+			// 放 temp 里模型读不到自己刚被外置的结果。
+			SpillDir: filepath.Join(home, "artifacts"),
+		}),
 		bash.Module(wd, bash.Options{}),
-		local.Module(wd),
+		local.Module(wd, local.WithExtraReadRoot(filepath.Join(home, "artifacts"))),
 		read.Module(),
 		write.Module(),
 		edit.Module(),
@@ -119,8 +122,29 @@ func usage() {
 `)
 }
 
-func loadMods(manifestPath string) ([]kernel.Module, error) {
-	mods := builtinModules()
+// defaultHome 是子命令（modules/tools/exec）用的 home：
+// 它们没有 --home 旗标，但 artifact 目录要有一个确定位置。
+func defaultHome() string {
+	if v := os.Getenv("DSHD_HOME"); v != "" {
+		return v
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return ".dshd"
+	}
+	return filepath.Join(h, ".dshd")
+}
+
+func cwdOrDot() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
+}
+
+func loadMods(manifestPath, home string) ([]kernel.Module, error) {
+	mods := builtinModules(cwdOrDot(), home)
 	m, err := kernel.LoadManifest(manifestPath)
 	if err != nil {
 		return nil, err
@@ -137,7 +161,7 @@ func cmdModules(argv []string) error {
 	if err := fs.Parse(argv[1:]); err != nil {
 		return err
 	}
-	mods, err := loadMods(*manifest)
+	mods, err := loadMods(*manifest, defaultHome())
 	if err != nil {
 		return err
 	}
@@ -196,7 +220,7 @@ func cmdTools(argv []string) error {
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	mods, err := loadMods(*manifest)
+	mods, err := loadMods(*manifest, defaultHome())
 	if err != nil {
 		return err
 	}
@@ -245,7 +269,7 @@ func cmdRun(argv []string) error {
 		return fmt.Errorf("缺 --prompt")
 	}
 
-	mods, err := loadMods(*manifest)
+	mods, err := loadMods(*manifest, *home)
 	if err != nil {
 		return err
 	}
@@ -452,7 +476,7 @@ func cmdExec(argv []string) error {
 	if *toolName == "" {
 		return fmt.Errorf("缺 --tool")
 	}
-	mods, err := loadMods(*manifest)
+	mods, err := loadMods(*manifest, defaultHome())
 	if err != nil {
 		return err
 	}

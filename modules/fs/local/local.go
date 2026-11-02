@@ -23,21 +23,61 @@ type stamp struct {
 
 // FS 实现 spi.FS。
 type FS struct {
-	root string
-	mu   sync.Mutex
-	seen map[string]stamp
+	root  string
+	extra []string // 工作区之外仍然允许读的根（外置结果 artifact）
+	mu    sync.Mutex
+	seen  map[string]stamp
+}
+
+// Option 是 New 的可选项。
+type Option func(*FS)
+
+// WithExtraReadRoot 允许**读**工作区之外的某个根。
+//
+// 存在的理由：工具输出超阈值会被外置成 artifact（放在 home 下），
+// 然后 Hint 告诉模型「用 read 读全文」。如果 FS 不放行这个目录，
+// 那句 Hint 就是假的 —— 模型照着做会得到"越出工作区"。
+// 只放读，不放写：artifact 由宿主自己写。
+func WithExtraReadRoot(dir string) Option {
+	return func(f *FS) {
+		if strings.TrimSpace(dir) == "" {
+			return
+		}
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return
+		}
+		f.extra = append(f.extra, filepath.ToSlash(filepath.Clean(abs)))
+	}
 }
 
 // New 以 root 为工作区根。root 会被归一成绝对路径 + 正斜杠。
-func New(root string) (*FS, error) {
+func New(root string, opts ...Option) (*FS, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("解析工作区根失败: %w", err)
 	}
-	return &FS{root: filepath.ToSlash(filepath.Clean(abs)), seen: make(map[string]stamp)}, nil
+	f := &FS{root: filepath.ToSlash(filepath.Clean(abs)), seen: make(map[string]stamp)}
+	for _, o := range opts {
+		o(f)
+	}
+	return f, nil
 }
 
 func (f *FS) Root() string { return f.root }
+
+// within 判断 abs 是否在允许的根之内（工作区 + 只读额外根）。
+func (f *FS) within(abs string) bool {
+	if abs == f.root || strings.HasPrefix(abs, f.root+"/") {
+		return true
+	}
+	for _, e := range f.extra {
+		if abs == e || strings.HasPrefix(abs, e+"/") {
+			return true
+		}
+	}
+	return false
+}
 
 // Resolve 归一化并做越界检查。
 func (f *FS) Resolve(p string) (string, error) {
@@ -52,10 +92,10 @@ func (f *FS) Resolve(p string) (string, error) {
 		abs = filepath.Join(filepath.FromSlash(f.root), filepath.FromSlash(slashed))
 	}
 	slash := filepath.ToSlash(abs)
-	if slash != f.root && !strings.HasPrefix(slash, f.root+"/") {
-		return "", fmt.Errorf("路径 %q 越出工作区 %s；只允许操作工作区内的文件", p, f.root)
+	if f.within(slash) {
+		return slash, nil
 	}
-	return slash, nil
+	return "", fmt.Errorf("路径 %q 越出工作区 %s；只允许操作工作区内的文件", p, f.root)
 }
 
 // Read 先 stat 再读，并用 stat 的结果登记——若读的瞬间文件被改，登记的是旧值，
@@ -158,13 +198,13 @@ func (f *FS) mark(abs string, mod time.Time, size int64) {
 }
 
 // Module 返回装配用的模块描述。
-func Module(root string) kernel.Module {
+func Module(root string, opts ...Option) kernel.Module {
 	return kernel.Module{
 		ID:       "fs",
 		Backend:  kernel.BackendStatic,
 		Provides: []string{"fs"},
 		Register: func(s *kernel.Scope) error {
-			fs, err := New(root)
+			fs, err := New(root, opts...)
 			if err != nil {
 				return err
 			}

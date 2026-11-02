@@ -454,18 +454,27 @@ func (s *Server) handlePrompt(ctx context.Context, req Request) {
 	se.cancel = cancel
 	s.mu.Unlock()
 
-	defer func() {
-		cancel()
-		s.mu.Lock()
-		if cur, ok := s.sessions[p.SessionID]; ok && cur == se {
-			se.busy = false
-			se.cancel = nil
-		}
-		s.mu.Unlock()
-	}()
+	// release 释放 busy 标志。必须在**发出终态应答之前**调用：
+	// 客户端收到 cancelled 之后会立刻发下一条 prompt，
+	// 若此时 busy 还没清，那条请求会被"已有在飞的 prompt"挡掉——
+	// 用户看到的就是"取消完这一轮就不能再说话了"。
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			cancel()
+			s.mu.Lock()
+			if cur, ok := s.sessions[p.SessionID]; ok && cur == se {
+				se.busy = false
+				se.cancel = nil
+			}
+			s.mu.Unlock()
+		})
+	}
+	defer release()
 
 	text := promptText(p.Prompt)
 	if strings.TrimSpace(text) == "" {
+		release()
 		_ = s.reply(req.ID, SessionPromptResponse{StopReason: "end_turn"}, nil)
 		return
 	}
@@ -530,12 +539,14 @@ func (s *Server) handlePrompt(ctx context.Context, req Request) {
 	stop, usage, err := s.Agent.Prompt(runCtx, p.SessionID, se.cwd, text, emit)
 	if err != nil {
 		if runCtx.Err() != nil {
+			release()
 			_ = s.reply(req.ID, SessionPromptResponse{StopReason: "cancelled"}, nil)
 			return
 		}
 		_ = s.reply(req.ID, nil, &RPCError{Code: CodeInternalError, Message: err.Error()})
 		return
 	}
+	release()
 	_ = s.reply(req.ID, SessionPromptResponse{StopReason: stop, Usage: usage}, nil)
 }
 
