@@ -28,7 +28,8 @@
 - ✅ `session/fork`（`session.Fork` + CLI + ACP 方法）：继承 surface、记 parentSession、不继承授权；实测子会话能答出父会话的暗号
 - ✅ 工具契约对拍（`docs/tool-parity.md` + `TestToolParityWithDSH`）：发现并修掉 `shell→bash`、`id→job_id`、bash 缺 `description`
 - ✅ 返回结构对拍：`read`/`write` 采用 DSH 的 `<path>/<content>` 包裹（`spi.Result.Text` 优先投影）
-- 下一步 **M7**：`approval/policy` 落盘 + 审批范围（会话过期）
+- ✅ 审批跨进程保留（`--remember-approvals`，默认关；状态放 `<home>/state/approvals`，不污染 v4 日志）：实测两个进程只问 1 次
+- 下一步 **M7**：`usage_update` 接入 meter 估算 / 审批记忆的过期策略
 
 ---
 
@@ -64,7 +65,7 @@
 | `internal/llm/` | OpenAI 兼容 SSE 客户端 | 先只做 magpie |
 | `internal/prompt/` | 系统提示装配（确定性、可组合、有界） | 加段必须同时加"空段消失"与"确定性"测试 |
 | `internal/compact/` | 压缩策略（选区间 + 生成摘要） | 只做策略；写事件一律走 `session.Compact` |
-| `internal/approval/` | 审批记忆（会话×工具，进程内） | **不落盘**；resume 后必须重新批准 |
+| `internal/approval/` | 审批记忆（会话×工具） | 默认只在内存；落盘必须由 `--remember-approvals` 显式打开，且**不写进 v4 日志** |
 | `modules/*` | 静态默认实现，一模块一目录一个 `Register(scope)` | 新模块必须过 `PLAN.md` §2.4 的三条判据 |
 | `codecs/v4/` | DSH 会话 v4 编解码 | 字节级对齐，见 §4 |
 | `wasmhost/` `pluginhost/` | wazero / go-plugin 装载器 | 载入层只做装载，不含业务 |

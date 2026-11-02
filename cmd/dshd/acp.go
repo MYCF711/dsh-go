@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -43,6 +44,8 @@ type acpRunner struct {
 	keepRecent int
 	// approvals 记住"这个会话里这个工具已经批准过了"。
 	approvals *approval.Memory
+	// approvalsStore 非 nil 时，授权跨进程保留（需要 --remember-approvals）。
+	approvalsStore *approval.Store
 
 	mu    sync.Mutex
 	logs  map[string]*session.Log
@@ -251,6 +254,17 @@ func (r *acpRunner) Resume(ctx context.Context, sessionID, cwd string) error {
 	r.logs[sessionID] = logw
 	r.hist[sessionID] = hist
 	r.mu.Unlock()
+
+	// 把上次留下的授权读回来（只有显式开了 --remember-approvals 才会有记录）。
+	if r.approvalsStore != nil && r.approvals != nil {
+		tools, err := r.approvalsStore.Load(sessionID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "读授权记录失败（按未授权处理）：%v\n", err)
+		}
+		for _, t := range tools {
+			r.approvals.Remember(sessionID, t)
+		}
+	}
 	return nil
 }
 
@@ -317,6 +331,7 @@ func cmdACP(argv []string) error {
 	steps := fs.Int("max-steps", 8, "每轮最多几步")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	autoCompact := fs.Int("auto-compact", 40000, "surface 估算超过多少 token 就自动压缩（0=关闭）")
+	remember := fs.Bool("remember-approvals", false, "把\"以后都允许\"记到磁盘，resume 后仍然生效")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -344,6 +359,9 @@ func cmdACP(argv []string) error {
 	acpRunner := newACPRunner(reg, runner, *base, *model, *home, *steps)
 	acpRunner.system = assembled
 	acpRunner.autoCompact = *autoCompact
+	if *remember {
+		acpRunner.approvalsStore = &approval.Store{Dir: filepath.Join(*home, "state", "approvals")}
+	}
 	srv := &acp.Server{
 		In:      os.Stdin,
 		Out:     os.Stdout,
@@ -391,6 +409,11 @@ func cmdACP(argv []string) error {
 		case "allow-always":
 			if acpRunner.approvals != nil {
 				acpRunner.approvals.Remember(sessionID, tool)
+				if acpRunner.approvalsStore != nil {
+					if err := acpRunner.approvalsStore.Save(sessionID, acpRunner.approvals.Snapshot(sessionID)); err != nil {
+						fmt.Fprintf(os.Stderr, "记下授权时出错（本次仍生效）：%v\n", err)
+					}
+				}
 			}
 			return true, nil
 		default:

@@ -1,3 +1,30 @@
+## 0.2.1-go.7（未发布）· 续 7
+
+**审批跨进程保留：`--remember-approvals`（默认关）。**
+
+上一轮把审批记忆做成"进程内、不落盘"，理由是"resume 后重问一次更安全"。这一轮补上**选择权**：
+想要跨进程保留就显式打开，不打开就维持原样。
+
+- `internal/approval.Store`：写到 `<home>/state/approvals/<sessionID>.json`，原子替换
+- **不写进 v4 日志**：DSH 的 `approval/policy` 事件形状是 `{"policy":"never","source":...}`，
+  **没有工具维度**。往里加 `tool` 键属于自造字段——一旦 DSH 解析更严，整份日志会被判坏。
+  所以授权状态放旁边，会话日志保持 100% DSH 干净
+- `dshd acp --remember-approvals`：默认关闭；打开后 `allow-always` 落盘，resume 时读回
+
+**实测（两个独立进程）**
+```
+[A] session/new → 用 bash → 问 1 次（选 allow-always）
+[B] session/resume → 用 bash → 问 0 次
+PASS: 授权跨进程保留
+```
+
+状态文件内容：
+```json
+{ "allowed": ["bash"], "updatedAt": "2026-11-02T19:14:25+08:00" }
+```
+不开这个开关时，`state/` 目录根本不会出现（已验证）。
+
+---
 ## 0.2.1-go.7（未发布）· 续 6
 
 **返回结构对拍：`read` / `write` 改成 DSH 的 XML 包裹。**
