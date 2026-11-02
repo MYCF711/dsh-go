@@ -20,7 +20,8 @@
 - ✅ surface 投影：`shadowedSeqs` 遮蔽 + `compact-checkpoint` 替身 + `surfaceOp:replace`；`system/message` 已进历史
 - ✅ 提示词装配（`internal/prompt`）：确定性拼接、按 Caps 分工具、AGENTS.md 有界注入（默认 8 KB）
 - ✅ **P0 四条判据已验收**（见 `docs/p0-acceptance.md`）：内存 15.3 MB / ACP 就绪 59.5 ms / 工具表 906 token / 二进制 8.1 MB
-- 下一步 **M5 收尾**：打 tag + `gh release create` 附三平台二进制
+- ✅ 压缩协议（`session.Compact` + `dshd session compact|info`）：追加三条压缩事件、精确遮蔽、日志不删
+- 下一步 **M6**：LLM 生成摘要 + 阈值触发（现在摘要由人给、手动触发）
 
 ---
 

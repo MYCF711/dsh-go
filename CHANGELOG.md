@@ -1,3 +1,29 @@
+## 0.2.1-go.7（未发布）
+
+**压缩协议落地：能往真实会话里追加 `compaction/summary` 了。**
+
+- `session.Compact`：一次追加三条事件 `compaction/start` → `compaction/summary` → `compaction/end`
+  - `shadowedSeqs` 是**精确列表**（不是范围近似）
+  - 日志 append-only：17 条 → 20 条，被遮蔽的事件一条不少
+  - 返回 `compactionId` 与被遮蔽列表
+- `session.OpenSessionAt`：按路径续写（CLI 用，不要求文件在 `<home>/sessions` 布局里）
+- CLI：
+  - `dshd session compact --in <f> --from N --to M --summary "..."`（原地追加）
+  - `dshd session info --in <f>`：打印事件数 / surface 节点数 / 摘要数 / 各类型计数
+- 三条测试：遮蔽+追加、空区间报错、**级联压缩**（第二次把第一次的摘要也遮蔽掉，只剩最后一个可见）
+
+**实测（真实会话副本，原件只读）**
+```
+压缩前: 事件 17（6 帧）  surface 4 节点，摘要 0
+compact --from 0 --to 10 → 遮蔽 11 条
+压缩后: 事件 20（9 帧）  surface 2 节点，摘要 1
+Node 读: 9 帧 / 21 行 / 16527 字节  ✅
+```
+
+**下一步**：接 LLM 生成摘要 + 阈值触发（`agent/pre-step` 里按 surface token 数判断），
+现在是"协议通了、还需要人喊一声"。
+
+---
 ## 0.2.1-go.6 — 2026-11-02
 
 **修一个只有"下载发布件跑一次"才会发现的问题：没有 `dsh.toml` 时加载 0 个模块。**

@@ -357,7 +357,16 @@ func truncate(s string, n int) string {
 // cmdSession 目前只有一个子命令 rewrite：读→写，用来验证我们的编码器，
 // 也用来给 Node 侧的 verify-node-reads.mjs 造样本。
 func cmdSession(argv []string) error {
-	if len(argv) == 0 || argv[0] != "rewrite" {
+	if len(argv) == 0 {
+		return fmt.Errorf("用法: dshd session rewrite|compact ...")
+	}
+	if argv[0] == "compact" {
+		return cmdSessionCompact(argv[1:])
+	}
+	if argv[0] == "info" {
+		return cmdSessionInfo(argv[1:])
+	}
+	if argv[0] != "rewrite" {
 		return fmt.Errorf("用法: dshd session rewrite --in <file> --out <file>")
 	}
 	fs := flag.NewFlagSet("session rewrite", flag.ContinueOnError)
@@ -451,4 +460,80 @@ func join(ss []string) string {
 		out += s
 	}
 	return out
+}
+
+// cmdSessionCompact 往一个已有会话里**追加**压缩事件（日志 append-only，不删任何东西）。
+func cmdSessionCompact(argv []string) error {
+	fs := flag.NewFlagSet("session compact", flag.ContinueOnError)
+	path := fs.String("in", "", "会话文件（原地追加）")
+	from := fs.Int64("from", 0, "遮蔽区间起点 seq")
+	to := fs.Int64("to", -1, "遮蔽区间终点 seq")
+	summary := fs.String("summary", "", "摘要正文")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if *path == "" || *to < 0 || *summary == "" {
+		return fmt.Errorf("--in / --to / --summary 都必须给")
+	}
+	before, err := v4.ReadFile(*path)
+	if err != nil {
+		return err
+	}
+	l, err := session.OpenSessionAt(*path)
+	if err != nil {
+		return err
+	}
+	id, shadowed, err := session.Compact(l, before.Events, session.Span{Start: *from, End: *to},
+		[]spi.Block{{Type: "text", Text: *summary}},
+		session.CompactionMeta{Provider: "cli", Model: "manual"})
+	if err != nil {
+		l.Close()
+		return err
+	}
+	if err := l.Close(); err != nil {
+		return err
+	}
+	fmt.Printf("压缩完成：%s 遮蔽 %d 条事件（日志 %d → %d）\n",
+		id, len(shadowed), len(before.Events), l.Seq())
+	return nil
+}
+
+// cmdSessionInfo 打印一份会话的"账本面"：原始事件与 surface 各多少。
+func cmdSessionInfo(argv []string) error {
+	fs := flag.NewFlagSet("session info", flag.ContinueOnError)
+	path := fs.String("in", "", "会话文件")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if *path == "" {
+		return fmt.Errorf("--in 必填")
+	}
+	l, err := v4.ReadFile(*path)
+	if err != nil {
+		return err
+	}
+	byType := map[string]int{}
+	for _, ev := range l.Events {
+		byType[ev.Type]++
+	}
+	surface := session.Surface(l)
+	summaries := 0
+	for _, n := range surface {
+		if n.Summary {
+			summaries++
+		}
+	}
+	fmt.Printf("文件: %s\n", *path)
+	fmt.Printf("会话: %s（cwd=%s）\n", l.Header.ID, l.Header.Cwd)
+	fmt.Printf("事件: %d（%d 帧）\n", len(l.Events), l.Frames)
+	fmt.Printf("surface: %d 节点，其中摘要 %d\n", len(surface), summaries)
+	keys := make([]string, 0, len(byType))
+	for k := range byType {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Printf("  %-22s %d\n", k, byType[k])
+	}
+	return nil
 }

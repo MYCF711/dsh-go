@@ -130,3 +130,16 @@ func SessionPath(home, cwd, id string) (string, error) {
 	}
 	return filepath.Join(home, "sessions", v4.ProjectKey(cwd), seg, "session.v4.jsonl.zstd"), nil
 }
+
+// OpenSessionAt 直接按文件路径续写（CLI 用：文件可能不在 <home>/sessions 布局里）。
+func OpenSessionAt(path string) (*Log, error) {
+	back, err := v4.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	w, err := v4.OpenAppend(path)
+	if err != nil {
+		return nil, err
+	}
+	return &Log{w: w, Path: path, seq: int64(len(back.Events)), now: time.Now}, nil
+}
