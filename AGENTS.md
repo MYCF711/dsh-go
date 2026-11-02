@@ -9,8 +9,8 @@
 ## 0. 当前状态（2026-11-02）
 
 - ✅ **M0 完成**：内核四件事（Scope/Registry/Bus/Assemble）+ 工具 SPI + 装配器 + CLI；`scripts/check.sh` 全绿，CI（windows-latest，含 `-race`）绿
-- 🚧 **M1 进行中**：工具流水线三件套（序列化 / 截断外置 / Hint 兜底）+ `Result → content[]` 投影已完成
-- 下一步（顺序不可换）：`write` `edit` `glob` `grep` → `shell`（真实 bash 进程）→ 工具一致性套件 + `testdata/tools.snapshot.json`
+- 🚧 **M1 进行中**：流水线三件套 + `Result → content[]` 投影 + 文件组 `read/write/edit/glob/grep` 已完成（读后写策略在 `modules/fs/local`）
+- 下一步（顺序不可换）：`shell`（真实 bash 进程 + 持久会话 + 自动转后台）→ 工具一致性套件 + `testdata/tools.snapshot.json` + 工具表 token 实测
 
 ---
 
