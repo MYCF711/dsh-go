@@ -77,3 +77,11 @@ backend = "static"
 [[module]]
 id      = "tool-readimage"
 backend = "static"
+
+[[module]]
+id      = "subagent"
+backend = "static"
+
+[[module]]
+id      = "tool-subagent"
+backend = "static"

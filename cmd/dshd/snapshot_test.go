@@ -23,7 +23,7 @@ func assembleRegistry(t *testing.T) spi.ToolRegistry {
 	t.Helper()
 	k := kernel.New("snapshot")
 	t.Cleanup(k.Root().Dispose)
-	if _, err := kernel.Assemble(k.Root(), builtinModules(".", t.TempDir(), 0)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(".", t.TempDir(), 0, nil)); err != nil {
 		t.Fatalf("装配失败: %v", err)
 	}
 	reg, err := kernel.Inject(k.Root(), spi.ToolsKey)
@@ -116,6 +116,9 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"web_search": {Network: true},
 		// 只读图片文件并把图交给模型，不写不跑不联。
 		"read_image": {},
+		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
+		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
+		"subagent": {},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {

@@ -21,7 +21,7 @@ func TestSpilledArtifactIsReadable(t *testing.T) {
 
 	k := kernel.New("spilltest")
 	defer k.Root().Dispose()
-	if _, err := kernel.Assemble(k.Root(), builtinModules(wd, home, 0)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(wd, home, 0, nil)); err != nil {
 		t.Fatal(err)
 	}
 	runner, err := kernel.Inject(k.Root(), spi.ToolRunnerKey)
@@ -71,7 +71,7 @@ func TestSpillBoundsWhatModelSees(t *testing.T) {
 
 	k := kernel.New("spillbound")
 	defer k.Root().Dispose()
-	if _, err := kernel.Assemble(k.Root(), builtinModules(wd, home, 0)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(wd, home, 0, nil)); err != nil {
 		t.Fatal(err)
 	}
 	runner, err := kernel.Inject(k.Root(), spi.ToolRunnerKey)

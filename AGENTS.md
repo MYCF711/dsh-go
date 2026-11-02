@@ -123,7 +123,11 @@
 - ✅ P0 工具第 17 个 `read_image`（`modules/tool/readimage`）：按内容判类型、4MB 上限、图片不进日志（`json:"-"`）
 - ✅ 图片进模型整条链：`spi.Result.Images` → 循环紧跟一条 **user 消息**（tool 消息不能带图）→ `llm.Message` 有图时 content 变内容块数组
 - ✅ 决定性验证：把纯蓝图改名 `red.png`，模型答「蓝色」并指出文件名与内容不符——它看到的是像素
-- 下一步 **M52**：P0 工具第 18 个 `subagent`（最后一个）
+- ✅ P0 工具第 18 个 `subagent`（`modules/tool/subagent` + `cmd/dshd/subagent.go`）：**PLAN §7.4 的 18 个 P0 工具至此全部落地**
+- ✅ 与上游的差别如实标注：上游**异步**（返回 id 后回传），我们**同步**（等到收尾直接返回）——因为 ACP 侧没有"宿主主动通知客户端"的通道
+- ✅ 递归在结构上挡住：子代理的工具表里删掉 `subagent` 自己（`noSubagent`）
+- ⚠️ 真机踩到两个自己的 bug：`cwd` 参数是摆设（runner 没读）；子循环没设 `Project` 导致子代理看不到工具正文、撞满步数
+- 下一步 **M53**：`0.2.1-go.27` 发版（P0 工具集齐）
 
 ---
 
@@ -269,7 +273,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | DSH 内存（私有工作集） | 870 MB | 本机 `tasklist` |
 | 其中 Chromium / Node 宿主 | ~500 / ~367 MB | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 17 个 / 13,278 字节 / **2,377 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 18 个 / 14,075 字节 / **2,657 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |

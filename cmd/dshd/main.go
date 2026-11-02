@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/agent"
@@ -33,6 +34,7 @@ import (
 	"dshgo/modules/tool/present"
 	"dshgo/modules/tool/read"
 	"dshgo/modules/tool/readimage"
+	subagenttool "dshgo/modules/tool/subagent"
 	todo "dshgo/modules/tool/todo"
 	wdtool "dshgo/modules/tool/wd"
 	"dshgo/modules/tool/webfetch"
@@ -56,7 +58,10 @@ var hostHistory = &historyHolder{}
 // builtinModules 按工作区与 home 装配默认实现。
 // artifacts 目录要放行给 FS 读：工具输出被外置成 artifact 之后，
 // Hint 会告诉模型「用 read 读全文」——不放行那句 Hint 就是假的。
-func builtinModules(wd, home string, maxChars int) []kernel.Module {
+func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Module {
+	if sub == nil {
+		sub = &subProvider{} // 没绑定：工具会明确报「还没装配好」，不会假装能派
+	}
 	return []kernel.Module{
 		// 默认实现也是插件（A3）：它们与第三方插件走同一个 Register(scope)。
 		tools.Module(tools.Options{
@@ -82,6 +87,8 @@ func builtinModules(wd, home string, maxChars int) []kernel.Module {
 		webfetch.Module(),
 		websearch.Module(),
 		readimage.Module(),
+		subagentModule(sub),
+		subagenttool.Module(),
 	}
 }
 
@@ -163,8 +170,8 @@ func cwdOrDot() string {
 	return wd
 }
 
-func loadMods(manifestPath, home string, maxChars int) ([]kernel.Module, error) {
-	mods := builtinModules(cwdOrDot(), home, maxChars)
+func loadMods(manifestPath, home string, maxChars int, sub *subProvider) ([]kernel.Module, error) {
+	mods := builtinModules(cwdOrDot(), home, maxChars, sub)
 	m, err := kernel.LoadManifest(manifestPath)
 	if err != nil {
 		return nil, err
@@ -181,7 +188,7 @@ func cmdModules(argv []string) error {
 	if err := fs.Parse(argv[1:]); err != nil {
 		return err
 	}
-	mods, err := loadMods(*manifest, defaultHome(), 0)
+	mods, err := loadMods(*manifest, defaultHome(), 0, nil)
 	if err != nil {
 		return err
 	}
@@ -240,7 +247,7 @@ func cmdTools(argv []string) error {
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	mods, err := loadMods(*manifest, defaultHome(), 0)
+	mods, err := loadMods(*manifest, defaultHome(), 0, nil)
 	if err != nil {
 		return err
 	}
@@ -305,7 +312,8 @@ func cmdRun(argv []string) error {
 		}()
 	}
 
-	mods, err := loadMods(*manifest, *home, *maxChars)
+	subp := &subProvider{}
+	mods, err := loadMods(*manifest, *home, *maxChars, subp)
 	if err != nil {
 		return err
 	}
@@ -364,6 +372,12 @@ func cmdRun(argv []string) error {
 	}
 
 	chat := llm.New(*base, os.Getenv("DSHD_LLM_KEY"))
+	// 子代理复用同一套零件：同一个模型、同一张工具表、同一个执行器。
+	// 差别只有系统提示与步数上限（它只干一件小事）。
+	subp.Bind(&subRunner{
+		chat: chat, tools: reg, runner: guarded,
+		model: *model, maxSteps: 8, timeout: 5 * time.Minute,
+	})
 	loop := &agent.Loop{
 		Chat:     chat,
 		Compact:  runCompactor(chat, logw, *autoCompact, *model),
@@ -529,7 +543,7 @@ func cmdExec(argv []string) error {
 	if *toolName == "" {
 		return fmt.Errorf("缺 --tool")
 	}
-	mods, err := loadMods(*manifest, defaultHome(), 0)
+	mods, err := loadMods(*manifest, defaultHome(), 0, nil)
 	if err != nil {
 		return err
 	}

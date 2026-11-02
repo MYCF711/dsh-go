@@ -360,6 +360,33 @@
     "caps": {}
   },
   {
+    "name": "subagent",
+    "description": "把一件独立的事交给子代理跑（它有自己的上下文），只拿结果回来。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "type": "string",
+          "description": "子代理的初始工作目录；相对路径按当前目录算，省略表示继承"
+        },
+        "description": {
+          "type": "string",
+          "description": "3-5 个词的短描述，给人看"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "完整、自包含的任务；子代理看不到本会话的历史"
+        }
+      },
+      "required": [
+        "description",
+        "prompt"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "todo_write",
     "description": "记录或更新任务清单（整份替换）。多步骤工作时用它把计划摆出来、让人看得见进度。",
     "parameters": {

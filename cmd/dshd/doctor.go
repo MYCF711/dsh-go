@@ -244,7 +244,7 @@ func checkManifest(path string) checkResult {
 		c.Detail = "没有 " + path + "（用内置默认模块）"
 		return c
 	}
-	if _, err := loadMods(path, defaultHome(), 0); err != nil {
+	if _, err := loadMods(path, defaultHome(), 0, nil); err != nil {
 		c.Detail = path + ": " + err.Error()
 		c.Next = "manifest 语法或模块名写错了；`dshd modules list` 看能装配哪些"
 		return c

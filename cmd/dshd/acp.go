@@ -398,7 +398,7 @@ func cmdACP(argv []string) error {
 	if d := diagOrWarn(*home); d != nil {
 		defer d.Close()
 	}
-	mods, err := loadMods(*manifest, *home, *maxChars)
+	mods, err := loadMods(*manifest, *home, *maxChars, nil)
 	if err != nil {
 		return err
 	}

@@ -24,3 +24,8 @@ var HistoryKey = kernel.NewKey[HistorySearch]("history")
 //
 // 默认实现是"没配置"——它会明确报错并说清缺什么，而不是返回空结果。
 var SearchKey = kernel.NewKey[SearchProvider]("search")
+
+// SubagentKey 提供服务：派子代理。
+//
+// 没装这个服务时 `subagent` 工具必须明确报错——不能假装"派了"。
+var SubagentKey = kernel.NewKey[SubagentRunner]("subagent")
