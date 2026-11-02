@@ -33,6 +33,19 @@ else
     bad "go test -race"
   fi
 
+  # 变异清单自洽：每条的 old 片段必须**恰好出现一次**，
+  # 否则那条变异永远是 BAD，等于验收清单里混着一条废条目。
+  if [ -f scripts/mutate.py ] && [ -f scripts/mutations.json ]; then
+    if mut_out="$(python scripts/mutate.py --list 2>&1)"; then
+      pass "变异清单可解析（$(printf '%s' "$mut_out" | grep -c '::') 条）"
+    else
+      bad "scripts/mutations.json 解析失败: $(printf '%s' "$mut_out" | tail -2 | tr '
+' ' ')"
+    fi
+  else
+    skip "没有变异清单"
+  fi
+
   # 工具表：默认形态 + 体积预算
   #
   # compact 默认是 20 次 A/B 换来的（scripts/tool-table-ab.py），不是随手写的。
