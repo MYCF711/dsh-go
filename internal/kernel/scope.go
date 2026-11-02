@@ -124,7 +124,8 @@ func (s *Scope) Dispose() {
 }
 
 // safeCall 保证一个模块的清理 panic 不会打穿宿主（dsc 踩过同样的坑）。
-func safeCall(scope string, fn func()) {	defer func() {
+func safeCall(scope string, fn func()) {
+	defer func() {
 		if r := recover(); r != nil {
 			slog.Default().Error("scope disposer panicked", "scope", scope, "panic", r)
 		}

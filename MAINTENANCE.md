@@ -19,7 +19,7 @@
 
 ```
 分支        main
-里程碑      M0 完成（内核四件事 + 工具 SPI + 装配器 + CLI，门禁全绿）
+里程碑      M1 进行中（工具流水线三件套 + Result→content[] 投影已完成）
 版本        0.2.1-go.5（未打 tag）
 已有资产    方案 / 手册 / 调研 6 份 / 审计 3 份 / Go 骨架 13 个文件
 ```
@@ -33,9 +33,9 @@
 
 ## 三、下一步
 
-1. **M1**：工具中间件三件套（序列化 / 截断外置 / 提示）+ `Result → content[]` 投影的 golden test。
-2. 补齐文件组（`write` `edit` `glob` `grep`）与 `shell`——**shell 走真实 bash 进程**，不用 mvdan 执行（R6）。
-3. 之后按 `PLAN.md` §14 推进 M2→M5。
+1. **文件组**：`write` `edit` `glob` `grep`，共享 read-before-write 观测策略（由 FS 中间件统一实现）。
+2. **`shell`**：真实 bash 进程 + 持久会话 + 自动转后台；**不用 mvdan 执行**（R6）。
+3. **M1 收口**：工具一致性套件 + `testdata/tools.snapshot.json` 快照 + 工具表 token 实测。
 
 ### M0 的验收证据（已跑）
 

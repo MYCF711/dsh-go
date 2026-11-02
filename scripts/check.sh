@@ -18,6 +18,9 @@ else
   go build ./...      && pass "go build"      || bad "go build"
   go vet ./...        && pass "go vet"        || bad "go vet"
 
+  unformatted="$(gofmt -l cmd internal modules 2>/dev/null)"
+  [ -z "$unformatted" ] && pass "gofmt" || bad "gofmt 未格式化: $(echo "$unformatted" | tr '\n' ' ')"
+
   # -race 需要 cgo：不可用时降级为普通测试，并明说未验证什么。
   race_out="$(go test ./... -race 2>&1)"; race_rc=$?
   if [ $race_rc -eq 0 ]; then

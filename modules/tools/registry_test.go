@@ -12,8 +12,8 @@ import (
 
 type fakeTool struct{ name string }
 
-func (f *fakeTool) Name() string                        { return f.name }
-func (f *fakeTool) Schema() json.RawMessage             { return json.RawMessage(`{"type":"object"}`) }
+func (f *fakeTool) Name() string            { return f.name }
+func (f *fakeTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (f *fakeTool) Exec(context.Context, json.RawMessage) (spi.Result, error) {
 	return spi.Result{Summary: "ok"}, nil
 }
@@ -48,7 +48,7 @@ func TestRegistryKeepsRegistrationOrder(t *testing.T) {
 func TestModuleProvidesRegistry(t *testing.T) {
 	k := kernel.New("t")
 	defer k.Root().Dispose()
-	if err := Module().Register(k.Root()); err != nil {
+	if err := Module(Options{}).Register(k.Root()); err != nil {
 		t.Fatal(err)
 	}
 	reg, err := kernel.Inject(k.Root(), Key)

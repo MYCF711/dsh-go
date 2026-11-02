@@ -24,10 +24,10 @@ const (
 type Module struct {
 	ID       string
 	Backend  Backend
-	Provides []string         // 本模块提供的能力（服务键名）
-	Requires []string         // 本模块依赖的能力
-	Builtin  bool             // true = 内置模式，用户层不可覆盖
-	Config   map[string]any   // 来自 manifest 的配置
+	Provides []string       // 本模块提供的能力（服务键名）
+	Requires []string       // 本模块依赖的能力
+	Builtin  bool           // true = 内置模式，用户层不可覆盖
+	Config   map[string]any // 来自 manifest 的配置
 	Register func(*Scope) error
 }
 

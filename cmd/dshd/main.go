@@ -22,7 +22,7 @@ func builtinModules() []kernel.Module {
 		wd = "."
 	}
 	return []kernel.Module{
-		tools.Module(),
+		tools.Module(tools.Options{}),
 		read.Module(wd),
 	}
 }
@@ -128,15 +128,11 @@ func cmdExec(argv []string) error {
 	if _, err := kernel.Assemble(root, mods); err != nil {
 		return err
 	}
-	reg, err := kernel.Inject(root, tools.Key)
+	runner, err := kernel.Inject(root, tools.RunKey)
 	if err != nil {
 		return err
 	}
-	t, ok := reg.Get(*toolName)
-	if !ok {
-		return fmt.Errorf("工具 %q 不存在；已注册: %v", *toolName, reg.(*tools.Registry).Sorted())
-	}
-	res, err := t.Exec(root.Context(), json.RawMessage(*rawArgs))
+	res, err := runner.Run(root.Context(), *toolName, json.RawMessage(*rawArgs))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "执行失败: %v\n", err)
 		if res.Hint != "" {

@@ -10,6 +10,23 @@
 
 ---
 
+## 0.2.1-go.5 · M1-a — 2026-11-02
+
+**工具流水线（三条硬约束）与结果投影。**
+
+- `modules/tools/pipeline.go`：唯一执行入口 `Runner`
+  - 四槽：`tools/pre-execute`（waterfall，可 veto）→ `execute` → `tools/post-execute`（可改写）→ `tools/result`（广播）
+  - **序列化层**：`Data` 必须是合法 JSON，否则转成带 Hint 的错误
+  - **截断层**：超 4000 字符外置成 artifact + 指针；替换体 ≤ 阈值 1/4（防「取回又被外置」死循环）；落盘失败保留内联，绝不把成功变失败
+  - **提示层**：失败没给 Hint 就兜底并记账（`Violations()`），日志告警
+- `internal/kernel.OnTyped[T]`：载荷类型化订阅，类型不符返回明确错误而不是静默跳过
+- `internal/session/project.go`：`Result → content[]` 投影（摘要→数据→截断→提示，顺序固定、同输入同字节）+ `Flatten`
+- 模块 `tools` 同时提供 `tools` 与 `toolrunner` 两个服务：只给目录不给 Runner 等于允许绕过全部中间件
+- CLI `dshd exec` 改走 Runner，端到端覆盖中间件
+
+**实测**：43 个测试全绿；门禁 15 项 ALL GREEN；`dshd exec --tool read` 经流水线返回结构化结果。
+
+---
 ## 0.2.1-go.5 · M0 — 2026-11-02
 
 **内核四件事 + 工具 SPI + 装配器，门禁全绿。**

@@ -153,3 +153,18 @@ func (b *Bus) Parallel(name string, payload any) error {
 	wg.Wait()
 	return errors.Join(errs...)
 }
+
+// OnTyped 注册一个把载荷断言成 T 的监听器。
+//
+// 总线本身不认得任何业务类型（载荷是 any）；这个泛型包装让调用方少写断言，
+// 同时把「载荷类型不对」变成明确的错误，而不是静默跳过。
+func OnTyped[T any](b *Bus, s *Scope, event string, h func(T) error) {
+	b.On(s, event, func(e *Event) error {
+		v, ok := e.Payload.(T)
+		if !ok {
+			var zero T
+			return fmt.Errorf("事件 %q 的载荷类型是 %T，不是 %T", event, e.Payload, zero)
+		}
+		return h(v)
+	})
+}

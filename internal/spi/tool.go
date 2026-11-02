@@ -28,12 +28,12 @@ type Tool interface {
 // 注意与 DSH 的差异：DSH 只有 {isError, content[], meta?}，会话 v4 也只认这个形状。
 // 所以结构化是我们的内部契约，v4 是**边界上的编码**——由投影函数把 Data 压成 content。
 type Result struct {
-	Summary   string       // 一行，给人看（TUI/桌面端）
-	Data      any          // 结构化，给模型
-	Artifacts []Artifact   // 大结果外置后的引用
-	Truncated *Truncation  // 发生截断时的证据
-	Hint      string       // 失败或为空时的下一步建议
-	View      *ViewSpec    // 客户端渲染契约
+	Summary   string      // 一行，给人看（TUI/桌面端）
+	Data      any         // 结构化，给模型
+	Artifacts []Artifact  // 大结果外置后的引用
+	Truncated *Truncation // 发生截断时的证据
+	Hint      string      // 失败或为空时的下一步建议
+	View      *ViewSpec   // 客户端渲染契约
 }
 
 // Artifact 是一份被外置的大结果。
@@ -62,13 +62,13 @@ const (
 // ViewSpec 是给客户端（TUI / 桌面端）的结构化视图声明。
 // 未声明时客户端退化为键值卡片，再退化为原文。
 type ViewSpec struct {
-	Kind    ViewKind  `json:"kind"`
-	Title   string    `json:"title,omitempty"`
-	Badge   string    `json:"badge,omitempty"`
-	Fields  []Field   `json:"fields,omitempty"`
-	Columns []string  `json:"columns,omitempty"`
+	Kind    ViewKind   `json:"kind"`
+	Title   string     `json:"title,omitempty"`
+	Badge   string     `json:"badge,omitempty"`
+	Fields  []Field    `json:"fields,omitempty"`
+	Columns []string   `json:"columns,omitempty"`
 	Rows    [][]string `json:"rows,omitempty"`
-	Body    string    `json:"body,omitempty"`
+	Body    string     `json:"body,omitempty"`
 }
 
 // Field 是 card 版式的一行键值。
@@ -83,3 +83,25 @@ type ToolRegistry interface {
 	Tools() []Tool
 	Get(name string) (Tool, bool)
 }
+
+// Runner 是**唯一**允许执行工具的入口。绕过它直接调 Tool.Exec 是违规：
+// 审批、沙箱、超时、截断、提示、事件广播全在 Runner 里。
+type Runner interface {
+	Run(ctx context.Context, name string, args json.RawMessage) (Result, error)
+}
+
+// Call 是穿过工具流水线的可变载荷（waterfall 可就地改写）。
+type Call struct {
+	Name   string
+	Args   json.RawMessage
+	Result Result
+	Err    error
+}
+
+// 工具流水线的四个槽。顺序固定，监听器按注册顺序执行。
+const (
+	EventToolPreExecute  = "tools/pre-execute"
+	EventToolExecute     = "tools/execute"
+	EventToolPostExecute = "tools/post-execute"
+	EventToolResult      = "tools/result"
+)

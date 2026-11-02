@@ -84,13 +84,20 @@ func (r *Registry) Sorted() []string {
 }
 
 // Module 返回装配用的模块描述。
-func Module() kernel.Module {
+//
+// 它提供两个服务：工具目录（"tools"）与唯一执行入口（"toolrunner"）。
+// 两者必须同时存在——只给目录不给 Runner，等于允许调用方绕过全部中间件。
+func Module(opts Options) kernel.Module {
 	return kernel.Module{
 		ID:       "tools",
 		Backend:  kernel.BackendStatic,
-		Provides: []string{"tools"},
+		Provides: []string{"tools", "toolrunner"},
 		Register: func(s *kernel.Scope) error {
-			return kernel.Provide(s, Key, spi.ToolRegistry(New()))
+			reg := New()
+			if err := kernel.Provide(s, Key, spi.ToolRegistry(reg)); err != nil {
+				return err
+			}
+			return kernel.Provide(s, RunKey, spi.Runner(NewPipeline(reg, s.Bus(), opts)))
 		},
 	}
 }
