@@ -121,3 +121,7 @@ backend = "static"
 [[module]]
 id      = "tool-schedule"
 backend = "static"
+
+[[module]]
+id      = "tool-watch"
+backend = "static"

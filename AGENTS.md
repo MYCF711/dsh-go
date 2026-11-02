@@ -188,7 +188,13 @@
   现在先 `v4.ReadFile` + `session.History` 再追加新消息
 - ✅ **`dshd schedule run`**：到期的任务真的变成一轮对话（复用 cmdRun，审批/压缩/日志/落盘全一致），
   跑完推进 `next_at`。真机：模型在**原会话**里答出任务提示词，`next_at` 05:00 → 05:50
-- 下一步 **M66**：`watch_*`（32 次），或把 `schedule run` 挂成真正的常驻循环
+- ✅ **盯仓库落地**（dshd 自己写，572 行）：`watch_start/status/stop/ack`，
+  落 `<home>/state/watch/watchers.json`；`watch_ack` 把 watermark 推进到 max(numbers)（只增不减）
+- ✅ 真机：登记 → 状态 → ack 12,15 → watermark=15
+- ⚠️ 它写的 `created_at` 用 UTC（`...Z`），与其它模块的本地 `+08:00` 不一致——一致性债，先记
+- ⚠️ **工具表 5,451 token，已接近 P0 的 6k 上限**：再加工具前必须先算预算，
+  要么砍描述，要么把低频工具做成「一个工具多 action」
+- 下一步 **M67**：`dshd watch check`（真去 `gh` 查 issue）+ 把工具表压回 5k 以内
 
 ### 界面线现状（2026-11-03）
 
@@ -352,7 +358,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 其余 8 个渲染进程 | 378.6 / 182.0 / 43.0 / 42.8 / 42.7 / 42.3 / 38.4 / 2.9 MB | 同上（**每开一个窗口多一个**） |
 | 空转 CPU | **2.0%**（没在跑任务） | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 37 个 / 27,847 字节 / **5,033 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 41 个 / 30,539 字节 / **5,451 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |

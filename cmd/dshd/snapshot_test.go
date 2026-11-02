@@ -145,6 +145,11 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"schedule_list":   {},
 		"schedule_update": {Writes: true},
 		"schedule_delete": {Writes: true},
+		// 盯仓库：三个写、一个读。
+		"watch_start":  {Writes: true},
+		"watch_status": {},
+		"watch_stop":   {Writes: true},
+		"watch_ack":    {Writes: true},
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},

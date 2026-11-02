@@ -952,6 +952,106 @@
     "caps": {}
   },
   {
+    "name": "watch_ack",
+    "description": "打完标后调它，把已处理水位推进到这批编号的最大值。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "要记帐的仓库，形如 owner/name"
+        },
+        "numbers": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "已处理完的 issue/PR 编号"
+        }
+      },
+      "required": [
+        "repo",
+        "numbers"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
+    "name": "watch_start",
+    "description": "要开始盯一个新仓库时用它登记，之后由 dshd watch check 轮询。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "要盯的仓库，形如 owner/name"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "可选：只盯带这些标签的 issue/PR"
+        },
+        "ignore_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "可选：带这些标签的一律跳过"
+        },
+        "only_assigned": {
+          "type": "boolean",
+          "description": "可选：只看指派给我的"
+        },
+        "ack_label": {
+          "type": "string",
+          "description": "可选：处理完要打的标签，默认「已处理」"
+        }
+      },
+      "required": [
+        "repo"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
+    "name": "watch_status",
+    "description": "看当前在盯哪些仓库、各自已处理到第几个编号。",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
+    "name": "watch_stop",
+    "description": "不再盯某个仓库时把它从名单里摘掉。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "要停掉的仓库，形如 owner/name"
+        }
+      },
+      "required": [
+        "repo"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
     "name": "web_fetch",
     "description": "取一个 HTTP(S) 网页的正文并解码成文本。要看具体某个链接的内容时用。",
     "parameters": {
