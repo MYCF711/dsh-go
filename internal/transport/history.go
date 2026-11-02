@@ -29,6 +29,14 @@ type Page struct {
 //	          Truncated 恒为 false —— 补洞没有"更早的没给"这回事。
 //
 // limit <= 0 表示"不限"。all 假定已按 Seq 升序。
+//
+// 这个前提**不在这里校验**，两条理由都实测过：
+//  1. 183 个真实会话的 seq 全部严格递增（回退 0 处、重复 0 处）；
+//  2. 保证它的机制在别处——同一份会话只允许一个写入者（<会话文件>.lock）。
+//     没有写锁时两个进程各从 len(events) 编号，会写出重复 seq。
+//
+// 也就是说，去掉写锁之后这个前提才可能不成立。那时该报错还是该排序
+// 是个产品决定，不该由这个纯函数偷偷替调用方决定。
 func SelectPage(all []Message, mode PageMode, sinceSeq int, limit int) Page {
 	total := len(all)
 
