@@ -114,7 +114,7 @@ else
   else
     bad "run --policy 默认值可疑（必须是 auto/ask：默认 allow = 静默放行写操作）"
   fi
-  if printf '%s' "$help_out" | grep -A1 -E '^\s+-workspace-bytes' | grep -q 'default "0"'; then
+  if ! printf '%s' "$help_out" | grep -A1 -E '^[[:space:]]+-workspace-bytes' | grep -q '(default '; then
     bad "run --workspace-bytes 默认是 0（不传 AGENTS.md：模型会凭空猜约定）"
   else
     pass "run --workspace-bytes 默认会传手册"
@@ -128,8 +128,11 @@ else
 
   table_line="$(go run ./cmd/dshd tools 2>&1 >/dev/null | tail -1 || true)"
   table_bytes="$(printf '%s' "$table_line" | grep -oE '[0-9]+ 字节' | grep -oE '[0-9]+' || echo 0)"
-  if [ "${table_bytes:-0}" -le 32000 ]; then
-    pass "工具表体积 ${table_line:-未知}"
+  if [ -z "$table_bytes" ] || [ "$table_bytes" = "0" ]; then
+    # 读不到大小就别假装验过了——"未知"通过和"没检查"是一回事。
+    bad "工具表体积读不出来（tools 没输出 N 字节）: ${table_line:-空}"
+  elif [ "$table_bytes" -le 32000 ]; then
+    pass "工具表体积 ${table_line}"
   else
     printf '  WARN  工具表 ${table_line}（超过 32 KB：删描述或合并工具）
 '

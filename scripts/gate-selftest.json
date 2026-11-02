@@ -1,0 +1,32 @@
+{
+  "breakages": [
+    {
+      "name": "policy-default-allow",
+      "file": "cmd/dshd/main.go",
+      "old": "defaultRunPolicy      = \"auto\"",
+      "new": "defaultRunPolicy      = \"allow\"",
+      "expect": ""
+    },
+    {
+      "name": "workspace-bytes-zero",
+      "file": "cmd/dshd/main.go",
+      "old": "defaultWorkspaceBytes = 8000",
+      "new": "defaultWorkspaceBytes = 0",
+      "expect": ""
+    },
+    {
+      "name": "tool-schema-full",
+      "file": "cmd/dshd/main.go",
+      "old": "const defaultToolSchema = \"compact\"",
+      "new": "const defaultToolSchema = \"full\"",
+      "expect": ""
+    },
+    {
+      "name": "planted-credential",
+      "file": "docs/README-probe.md",
+      "old": "__PLANTED__",
+      "new": "token=ghp_{36xA}",
+      "expect": ""
+    }
+  ]
+}

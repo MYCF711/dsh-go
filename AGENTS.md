@@ -328,9 +328,22 @@
   "整个函数赋过就算"会被 pipeline 的六分支共用 result 骗过；
   更严的同层配对又对正确代码报警。最终版 = 字面量 / 同层前置 / 全函数兜底，
   **已知盲点写在注释里**：共用 result 变量时删掉其中一条分支的 Hint 扫不出来
-- ⚠️ 又一次被 CRLF 打败：manifest 被 python 按平台写成 CRLF，`read` 出来的行带 ``，
+- ⚠️ 又一次被 CRLF 打败：manifest 被 python 按平台写成 CRLF，`read` 出来的行带 `
+`，
   `grep -F` 全部落空（看起来像"清单里每一项都被删了"）。清单必须 LF，已在 check.sh 注明
-- 下一步 **M89**：`check.sh` 现在 23 项 PASS，逐项看一眼有没有"跑了但什么也没验"的
+- ✅ **`scripts/gate-selftest.py`**（`gate-selftest.json`）：把门禁要防的东西**真弄坏一次**，看它红不红。
+  4 条：policy 默认改 allow / workspace-bytes 改 0 / 工具表改 full / 埋一个假凭据——
+  全部 CAUGHT，且每条跑完源码都恢复干净
+- ✅ **它当场抓到一个废检查**：`run --workspace-bytes` 那条 grep 的是 `default "0"`（带引号），
+  而 Go 的 flag 对 int 打印 `(default 8000)` 不带引号；**更好的情况是零值根本不打印 default 行**。
+  也就是说这条检查从写下的那天起就永远为真——"跑了但什么也没验"
+- ✅ 改成"没有 `(default ` 行 = 默认是 0 = 红"，实演：把默认设 0 → `FAIL run --workspace-bytes 默认是 0`
+- ⚠️ 又一次 CRLF：脚本 `write_text` 在 Windows 上把 `
+` 写成 `
+`，每次"恢复"都在改坏行尾，
+  于是"恢复后门禁仍是红的"。改用 `newline=""` 后正常
+- ⚠️ 仓库里不能存一个像凭据的字符串（假令牌也会被凭据检查抓），改成 `{36xA}` 占位符，跑的时候展开
+- 下一步 **M90**：给剩下的检查也补自测条目（现在 4 条 / 23 项）
 
 ### 界面线现状（2026-11-03）
 
