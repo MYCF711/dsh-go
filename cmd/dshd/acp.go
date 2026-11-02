@@ -570,3 +570,80 @@ func contextUsed(prompt, completion, total, estimate int) int {
 	}
 	return used
 }
+
+// Load 载入会话并把历史**重放**给客户端（resume 不重放）。
+func (r *acpRunner) Load(ctx context.Context, sessionID, cwd string, emit func(agent.Event) error) error {
+	path, err := session.SessionPath(r.home, cwd, sessionID)
+	if err != nil {
+		return err
+	}
+	back, err := v4.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读会话失败: %w", err)
+	}
+	for _, node := range session.Surface(back) {
+		m := node.Message
+		if m.Content != "" {
+			kind := agent.EventText
+			if m.Role == "user" {
+				kind = agent.EventText
+			}
+			if err := emit(agent.Event{Kind: kind, Text: m.Content, Turn: 1, Step: 1}); err != nil {
+				return err
+			}
+		}
+		for _, tc := range m.ToolCalls {
+			if err := emit(agent.Event{
+				Kind: agent.EventToolCall, CallID: tc.ID, ToolName: tc.Function.Name,
+				Arguments: tc.Function.Arguments, Turn: 1, Step: 1,
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	return r.Resume(ctx, sessionID, cwd)
+}
+
+// Delete 删除一个会话的文件与内存状态。
+//
+// cwd 可能为空（SDK 的 deleteSession 只带 sessionId）：这时按会话 id 在
+// `<home>/sessions/*/<segment>/` 下找，找到唯一一个就删。
+func (r *acpRunner) Delete(ctx context.Context, sessionID, cwd string) error {
+	var path string
+	if cwd != "" {
+		p, err := session.SessionPath(r.home, cwd, sessionID)
+		if err != nil {
+			return err
+		}
+		path = p
+	} else {
+		p, err := session.FindByID(r.home, sessionID)
+		if err != nil {
+			return err
+		}
+		path = p
+	}
+	// 只拒绝"删到 DSH 本体历史"这一种情况；路径里有 sessions 不算理由——
+	// 我们自己的 home 本来就叫 sessions。
+	if session.UnderDSHHome(path, os.Getenv("DSH_HOME")) {
+		return fmt.Errorf("拒绝删除 DSH_HOME 下的会话：%s", path)
+	}
+	_ = r.Close(sessionID)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if r.approvalsStore != nil {
+		_ = r.approvalsStore.Delete(sessionID)
+	}
+	return nil
+}
+
+// SetMode 目前只有 default 一种模式；未知模式明确报错，不静默接受。
+func (r *acpRunner) SetMode(ctx context.Context, sessionID, modeID string) (string, error) {
+	switch modeID {
+	case "default", "":
+		return "default", nil
+	default:
+		return "", fmt.Errorf("未知模式 %q（可选：default）", modeID)
+	}
+}

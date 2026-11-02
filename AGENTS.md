@@ -31,7 +31,8 @@
 - ✅ 审批跨进程保留（`--remember-approvals`，默认关；状态放 `<home>/state/approvals`，不污染 v4 日志）：实测两个进程只问 1 次
 - ✅ `dshd run --policy ask|allow|deny|auto`：`run` 以前对写类工具完全放行，现在按 Caps 审批（auto=终端问、非终端拒）
 - ✅ `usage_update.used` 改为"本次调用的上下文大小"（原来是累计值，跑三步就翻三倍）；`--context-window` 可配
-- 下一步 **M7**：审批记忆的过期策略（会话删了记录还在）
+- ✅ ACP 三方法：`session/load`（重放历史）/ `session/delete`（cwd 可省，靠 FindByID）/ `session/set_mode`
+- 下一步 **M7**：批准记录随会话删除（Delete 已带上）+ 端到端回归一轮
 
 ---
 

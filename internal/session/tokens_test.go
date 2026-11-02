@@ -101,3 +101,16 @@ func TestHistoryGuardAllowsOrdinaryPath(t *testing.T) {
 		t.Fatalf("普通路径不该拦：%s", reason)
 	}
 }
+
+func TestUnderDSHHome(t *testing.T) {
+	home := t.TempDir()
+	if !UnderDSHHome(filepath.Join(home, "sessions", "x"), home) {
+		t.Fatal("home 下面应该判 true")
+	}
+	if UnderDSHHome(filepath.Join(t.TempDir(), "sessions", "x"), home) {
+		t.Fatal("不在 home 下面必须判 false——我们自己 home 里也有 sessions 目录")
+	}
+	if UnderDSHHome("/any/path", "") {
+		t.Fatal("没配 DSH_HOME 时一律 false")
+	}
+}

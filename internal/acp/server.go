@@ -21,6 +21,12 @@ type Agent interface {
 	Resume(ctx context.Context, sessionID, cwd string) error
 	// Fork 从已有会话派生一个新会话，返回新会话 id。
 	Fork(ctx context.Context, sessionID, cwd string) (string, error)
+	// Load 把一个已有会话载入并**重放**历史给客户端（resume 不重放）。
+	Load(ctx context.Context, sessionID, cwd string, emit func(agent.Event) error) error
+	// Delete 删除一个已持久化的会话。
+	Delete(ctx context.Context, sessionID, cwd string) error
+	// SetMode 切换会话模式，返回当前生效的模式 id。
+	SetMode(ctx context.Context, sessionID, modeID string) (string, error)
 	// Close 释放一个会话。
 	Close(sessionID string) error
 }
@@ -202,6 +208,88 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 				{ID: "reasoning_effort", Name: "Reasoning effort"},
 			},
 		}, nil)
+
+	case "session/load":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Cwd       string `json:"cwd"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()})
+			return
+		}
+		if p.SessionID == "" || p.Cwd == "" {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "sessionId 与 cwd 都必填"})
+			return
+		}
+		if s.Agent == nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInternalError, Message: "没有配置 Agent"})
+			return
+		}
+		emit := func(ev agent.Event) error {
+			if u, ok := updateFor(ev); ok {
+				return s.notify("session/update", map[string]any{"sessionId": p.SessionID, "update": u})
+			}
+			return nil
+		}
+		if err := s.Agent.Load(ctx, p.SessionID, p.Cwd, emit); err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "载入失败: " + err.Error()})
+			return
+		}
+		s.mu.Lock()
+		s.sessions[p.SessionID] = &sess{id: p.SessionID, cwd: p.Cwd}
+		s.mu.Unlock()
+		_ = s.reply(req.ID, SessionNewResponse{SessionID: p.SessionID}, nil)
+
+	case "session/delete":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Cwd       string `json:"cwd"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()})
+			return
+		}
+		if p.SessionID == "" {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "sessionId 必填"})
+			return
+		}
+		// 客户端（SDK 就是这样的）只带 sessionId 不带 cwd；cwd 缺失时由 Agent 自己去查。
+		if p.Cwd == "" {
+			s.mu.Lock()
+			if se, ok := s.sessions[p.SessionID]; ok {
+				p.Cwd = se.cwd
+			}
+			s.mu.Unlock()
+		}
+		if err := s.Agent.Delete(ctx, p.SessionID, p.Cwd); err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "删除失败: " + err.Error()})
+			return
+		}
+		s.mu.Lock()
+		delete(s.sessions, p.SessionID)
+		s.mu.Unlock()
+		_ = s.reply(req.ID, map[string]any{}, nil)
+
+	case "session/set_mode":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			ModeID    string `json:"modeId"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()})
+			return
+		}
+		if p.SessionID == "" || p.ModeID == "" {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "sessionId 与 modeId 都必填"})
+			return
+		}
+		mode, err := s.Agent.SetMode(ctx, p.SessionID, p.ModeID)
+		if err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()})
+			return
+		}
+		_ = s.reply(req.ID, map[string]any{"modeId": mode}, nil)
 
 	case "session/fork":
 		var p struct {
@@ -482,4 +570,51 @@ func rawJSON(s string) any {
 		return s
 	}
 	return v
+}
+
+// updateFor 把一条 agent 事件投影成 ACP update（**无状态**版本）。
+//
+// prompt 那条路径需要一个跨事件的 msgID 做增量拼接，所以自己维护；
+// 这里是给 session/load 重放历史用的：一条事件一个 update，不需要拼。
+func updateFor(ev agent.Event) (map[string]any, bool) {
+	switch ev.Kind {
+	case agent.EventReasoning:
+		return map[string]any{
+			"sessionUpdate": "agent_thought_chunk",
+			"content":       map[string]any{"type": "text", "text": ev.Text},
+		}, true
+	case agent.EventText:
+		return map[string]any{
+			"sessionUpdate": "agent_message_chunk",
+			"content":       map[string]any{"type": "text", "text": ev.Text},
+		}, true
+	case agent.EventToolCall:
+		return map[string]any{
+			"sessionUpdate": "tool_call",
+			"toolCallId":    ev.CallID,
+			"title":         ev.ToolName,
+			"kind":          "other",
+			"status":        "completed",
+			"rawInput":      rawJSON(ev.Arguments),
+		}, true
+	case agent.EventToolResult:
+		status := "completed"
+		if ev.IsError {
+			status = "failed"
+		}
+		text := ""
+		if ev.Result != nil {
+			text = ev.Result.Summary
+		}
+		return map[string]any{
+			"sessionUpdate": "tool_call_update",
+			"toolCallId":    ev.CallID,
+			"status":        status,
+			"content": []any{map[string]any{
+				"type":    "content",
+				"content": map[string]any{"type": "text", "text": text},
+			}},
+		}, true
+	}
+	return nil, false
 }

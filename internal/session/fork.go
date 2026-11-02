@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -133,4 +134,28 @@ func SortedKeys(m map[string]int) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// FindByID 在 <home>/sessions/*/<segment>/ 里按会话 id 找会话文件。
+//
+// 只用于"客户端只给了 id"的场景（比如 ACP 的 deleteSession）。
+// 找到多个就报错——同名会话不该被随便挑一个删掉。
+func FindByID(home, sessionID string) (string, error) {
+	seg, err := v4.EncodeSegment(sessionID)
+	if err != nil {
+		return "", err
+	}
+	pattern := filepath.Join(home, "sessions", "*", seg, "session.v4.jsonl.zstd")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return "", err
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("找不到会话 %s（在 %s 下）", sessionID, home)
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("会话 %s 在多个项目目录下都有（%d 个），请显式给 cwd", sessionID, len(matches))
+	}
 }

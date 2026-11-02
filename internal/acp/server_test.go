@@ -14,6 +14,8 @@ import (
 )
 
 // fakeAgent 按脚本发事件，用来在不碰模型的前提下测协议投影。
+var errNotExist = fmt.Errorf("会话不存在")
+
 type fakeAgent struct {
 	events     []agent.Event
 	stop       string
@@ -41,6 +43,22 @@ func (a *fakeAgent) Close(string) error { return nil }
 
 func (a *fakeAgent) Fork(ctx context.Context, sessionID, cwd string) (string, error) {
 	return "forked-" + sessionID, nil
+}
+
+func (a *fakeAgent) Load(ctx context.Context, sessionID, cwd string, emit func(agent.Event) error) error {
+	if sessionID == "missing" {
+		return errNotExist
+	}
+	return emit(agent.Event{Kind: agent.EventText, Text: "历史里的第一条"})
+}
+
+func (a *fakeAgent) Delete(ctx context.Context, sessionID, cwd string) error { return nil }
+
+func (a *fakeAgent) SetMode(ctx context.Context, sessionID, modeID string) (string, error) {
+	if modeID != "default" {
+		return "", fmt.Errorf("未知模式 %q", modeID)
+	}
+	return modeID, nil
 }
 
 func (a *fakeAgent) Resume(ctx context.Context, sessionID, cwd string) error {
@@ -355,5 +373,71 @@ func TestUnknownMethod(t *testing.T) {
 	e := res["error"].(map[string]any)
 	if int(e["code"].(float64)) != CodeMethodNotFound {
 		t.Fatalf("error = %+v", e)
+	}
+}
+
+func TestSessionLoadReplaysHistory(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "session/load",
+		"params": map[string]any{"sessionId": "s1", "cwd": t.TempDir()}})
+	res := h.recvResult(t, 1)
+	if res["error"] != nil {
+		t.Fatalf("load 失败: %+v", res["error"])
+	}
+	if got := res["result"].(map[string]any)["sessionId"]; got != "s1" {
+		t.Fatalf("sessionId = %v", got)
+	}
+	// 应该先收到重放的历史 update（recvResult 会把途中的通知缓存起来）。
+	us := h.updates(t)
+	if len(us) == 0 {
+		t.Fatal("load 应该重放历史 update，但一条都没收到")
+	}
+	first := us[0]["params"].(map[string]any)["update"].(map[string]any)
+	if first["sessionUpdate"] != "agent_message_chunk" {
+		t.Fatalf("重放的 update 类型 = %v", first["sessionUpdate"])
+	}
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "session/load",
+		"params": map[string]any{"sessionId": "missing", "cwd": t.TempDir()}})
+	if h.recvResult(t, 2)["error"] == nil {
+		t.Fatal("载入不存在的会话必须报错")
+	}
+}
+
+func TestSessionDelete(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": MethodSessionNew,
+		"params": map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}}})
+	sid := h.recvResult(t, 1)["result"].(map[string]any)["sessionId"].(string)
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "session/delete",
+		"params": map[string]any{"sessionId": sid, "cwd": t.TempDir()}})
+	if res := h.recvResult(t, 2); res["error"] != nil {
+		t.Fatalf("删除失败: %+v", res["error"])
+	}
+	// 删完之后这个会话不该还能 prompt。
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+		"params": map[string]any{"sessionId": sid, "prompt": []any{map[string]any{"type": "text", "text": "hi"}}}})
+	if h.recvResult(t, 3)["error"] == nil {
+		t.Fatal("删掉的会话不该还能用")
+	}
+}
+
+func TestSessionSetMode(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "session/set_mode",
+		"params": map[string]any{"sessionId": "s1", "modeId": "default"}})
+	if res := h.recvResult(t, 1); res["error"] != nil {
+		t.Fatalf("设置 default 失败: %+v", res["error"])
+	}
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "session/set_mode",
+		"params": map[string]any{"sessionId": "s1", "modeId": "turbo"}})
+	if h.recvResult(t, 2)["error"] == nil {
+		t.Fatal("未知模式必须报错，不能静默接受")
 	}
 }

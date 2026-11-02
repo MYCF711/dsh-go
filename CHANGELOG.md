@@ -1,3 +1,29 @@
+## 0.2.1-go.7（未发布）· 续 10
+
+**补齐三个 ACP 方法：`session/load`、`session/delete`、`session/set_mode`。**
+
+- `session/load`：载入并**重放**历史（`resume` 不重放，两者语义不同）。
+  重放走新增的无状态投影 `updateFor`——prompt 那条路径需要跨事件拼 msgID，这里一条事件一个 update
+- `session/delete`：删文件 + 内存 + 授权记录。**cwd 可省略**——SDK 的 `deleteSession` 只给 sessionId，
+  由 `session.FindByID` 在 `<home>/sessions/*/<segment>/` 下找；找到多个就报错，不随便挑一个删
+- `session/set_mode`：目前只有 `default`；未知模式**明确报错**，不静默接受
+
+**实测（官方 SDK 客户端）**
+```
+原会话: acp-27022ec8-...
+load 重放的消息块: 3 | 首块: "Runtime: dsh-go.
+Mod"
+set_mode → {"modeId":"default"}
+delete 完成
+会话文件已删除 ✅
+```
+
+**顺带修了一个"保护过度"的 bug**：`session/delete` 一开始被 `HistoryGuard` 拦了——
+因为路径里有 `sessions` 目录。但我们自己的 home 本来就叫 sessions。
+新增 `UnderDSHHome()` 只判"是不是在 `$DSH_HOME` 下面"，内部操作用它，
+CLI 的 `--force` 启发式保持不变。
+
+---
 ## 0.2.1-go.7（未发布）· 续 9
 
 **修 `usage_update` 的 `used`：它以前是"累计花了多少"，应该是"现在占了多少"。**

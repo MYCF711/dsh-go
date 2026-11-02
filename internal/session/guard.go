@@ -57,3 +57,24 @@ func EstimateRunes(s string) int {
 	}
 	return ascii/4 + other
 }
+
+// UnderDSHHome 只判断"这个路径是不是在 $DSH_HOME 下面"——不做启发式。
+//
+// 给内部操作用（比如 ACP 的 session/delete 删的是**我们自己的 home**，
+// 路径里当然有 sessions，不能因此就拦）。
+func UnderDSHHome(path, dshHome string) bool {
+	if dshHome == "" {
+		return false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	home, err := filepath.Abs(dshHome)
+	if err != nil {
+		return false
+	}
+	clean := strings.TrimSuffix(filepath.ToSlash(abs), "/")
+	hc := strings.TrimSuffix(filepath.ToSlash(home), "/")
+	return clean == hc || strings.HasPrefix(clean, hc+"/")
+}
