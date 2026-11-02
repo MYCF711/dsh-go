@@ -41,7 +41,11 @@ type acpRunner struct {
 	system string
 	// autoCompact 是自动压缩的 token 阈值（0 = 关闭）。
 	autoCompact int
-	// keepRecent 是自动压缩时保留的最近消息数。
+	// keepRecent 是自动压缩时**至少**保留的最近消息数（下限）。
+	//
+	// 它不再是"保留多少"：真正的保留量由 compact 的 token 预算决定。
+	// 踩过：按 8 条留，在一条工具输出就 2,300 token 的会话里顶到 8k 以上，
+	// 压了 10 次上下文还是线性涨。
 	keepRecent int
 	// approvals 记住"这个会话里这个工具已经批准过了"。
 	approvals *approval.Memory
@@ -569,7 +573,8 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 	}
 
 	items, span, ok := compact.Select(surface, compact.Options{
-		KeepRecent: r.keepRecent, MinToCompact: 2,
+		// 下限给 2：压缩的收益来自"按体积留"，条数下限只保证模型眼前不是空的。
+		KeepRecent: 2, KeepTokens: 2000, MinToCompact: 2,
 	})
 	if !ok {
 		// 已经超预算了，但"保留最近 N 条"把可压区间挤没了——这时必须让步：
@@ -581,7 +586,8 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 		if keep >= len(surface) {
 			return nil
 		}
-		items, span, ok = compact.Select(surface, compact.Options{KeepRecent: keep, MinToCompact: 2})
+		// 兜底：只按条数留，不再看 token 预算——已经超窗了，能压多少压多少。
+		items, span, ok = compact.Select(surface, compact.Options{KeepRecent: keep, KeepTokens: 1, MinToCompact: 2})
 		if !ok {
 			return nil
 		}

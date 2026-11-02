@@ -31,7 +31,7 @@ func surfaceOf(n int) []session.SurfaceMsg {
 
 func TestPlanKeepsRecent(t *testing.T) {
 	s := surfaceOf(10)
-	span, n, ok := Plan(s, Options{KeepRecent: 4})
+	span, n, ok := Plan(s, Options{KeepRecent: 4, KeepTokens: 1})
 	if !ok {
 		t.Fatal("应该能压")
 	}
@@ -50,7 +50,7 @@ func TestPlanNeverTouchesLeadingSystem(t *testing.T) {
 		m.Seq = int64(i + 1)
 		s = append(s, m)
 	}
-	span, n, ok := Plan(s, Options{KeepRecent: 3})
+	span, n, ok := Plan(s, Options{KeepRecent: 3, KeepTokens: 1})
 	if !ok {
 		t.Fatal("应该能压")
 	}
@@ -66,10 +66,10 @@ func TestPlanNeverTouchesLeadingSystem(t *testing.T) {
 }
 
 func TestPlanRespectsMinAndMax(t *testing.T) {
-	if _, _, ok := Plan(surfaceOf(5), Options{KeepRecent: 4}); ok {
+	if _, _, ok := Plan(surfaceOf(5), Options{KeepRecent: 4, KeepTokens: 1}); ok {
 		t.Fatal("只有 1 条可压时不该触发（MinToCompact=2）")
 	}
-	if _, _, ok := Plan(surfaceOf(8), Options{MaxMessages: 6, KeepRecent: 3}); !ok {
+	if _, _, ok := Plan(surfaceOf(8), Options{MaxMessages: 6, KeepRecent: 3, KeepTokens: 1}); !ok {
 		t.Fatal("表面 8 条已超过 MaxMessages=6，应该触发")
 	}
 	if _, _, ok := Plan(surfaceOf(4), Options{MaxMessages: 6}); ok {
@@ -79,7 +79,7 @@ func TestPlanRespectsMinAndMax(t *testing.T) {
 
 func TestPlanOnlyPrefix(t *testing.T) {
 	s := surfaceOf(20)
-	span, _, ok := Plan(s, Options{KeepRecent: 5})
+	span, _, ok := Plan(s, Options{KeepRecent: 5, KeepTokens: 1})
 	if !ok {
 		t.Fatal("应该能压")
 	}
@@ -171,7 +171,7 @@ func TestSelectHandlesCheckpointOrdering(t *testing.T) {
 		msg(5, "user/message", "user", "问三"),
 		msg(6, "assistant/message", "assistant", "答三"),
 	}
-	items, span, ok := Select(s, Options{KeepRecent: 2})
+	items, span, ok := Select(s, Options{KeepRecent: 2, KeepTokens: 1})
 	if !ok {
 		t.Fatal("应该能选出一段可压的（替身不该挡住整个计划）")
 	}
@@ -191,5 +191,46 @@ func TestSelectHandlesCheckpointOrdering(t *testing.T) {
 		if it.Seq < span.Start || it.Seq > span.End {
 			t.Fatalf("节点 seq %d 不在区间 %+v 内", it.Seq, span)
 		}
+	}
+}
+
+// 保留尾巴要按 **token 预算**，不是按条数。
+//
+// 踩过：KeepRecent=8 在"一条工具输出就 2,300 token"的会话里能顶到 8k 以上，
+// 压缩看着一直在跑，上下文纹丝不动。
+func TestKeepByTokenBudgetNotCount(t *testing.T) {
+	// 每条 2,000 token 的大消息 × 10 条
+	big := strings.Repeat("x", 8000)
+	s := make([]session.SurfaceMsg, 0, 10)
+	for i := 0; i < 10; i++ {
+		s = append(s, msg(int64(i), "tool/result", "tool", big))
+	}
+
+	items, _, ok := Select(s, Options{KeepRecent: 2, KeepTokens: 2500, MinToCompact: 2})
+	if !ok {
+		t.Fatal("应该能压")
+	}
+	// 预算 2500 → 尾巴最多留 1 条大的；至少留 2 条是下限，所以留 2、压 8
+	if len(items) != 8 {
+		t.Fatalf("压缩条数 = %d，期望 8（10 条里只留 2 条大的）", len(items))
+	}
+}
+
+// 小消息就该多留几条：预算按体积算，不是按条数算。
+func TestKeepManySmallMessages(t *testing.T) {
+	s := surfaceOf(10) // 每条 ≈ 1 token
+	_, _, ok := Select(s, Options{KeepRecent: 2, KeepTokens: 8, MinToCompact: 2})
+	if !ok {
+		t.Fatal("应该能压")
+	}
+	items, _, _ := Select(s, Options{KeepRecent: 2, KeepTokens: 8, MinToCompact: 2})
+	// 每条小消息按估算占几个 token；预算 8 能装下不止下限的 2 条。
+	per := session.EstimateRunes("内容")
+	want := 8 / per
+	if want < 2 {
+		want = 2
+	}
+	if keep := len(s) - len(items); keep < want {
+		t.Fatalf("只留了 %d 条，8 token 预算应该能留 %d 条（每条 %d）", keep, want, per)
 	}
 }

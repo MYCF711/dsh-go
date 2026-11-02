@@ -772,9 +772,16 @@ func runCompactor(chat agent.Chat, logw *session.Log, budget int, model string) 
 		if meter.Estimate(surface) <= budget {
 			return nil, nil // 没超预算，历史不动
 		}
+		// KeepRecent 是下限（至少留 6 条），真正的保留量由 KeepTokens 定。
+		// run 这条路径不暴露 token 预算：默认 2000 够用，超了也还有下面的兜底。
 		items, span, ok := compact.Select(surface, compact.Options{KeepRecent: 6, MinToCompact: 2})
 		if !ok {
-			return nil, nil // 没得压
+			// 已经超预算，但"预算内能留的"就是全部——这时必须让步：
+			// 只按最小条数留，剩下的都压掉。宁可摘要粗，也不能让这一步超窗。
+			items, span, ok = compact.Select(surface, compact.Options{KeepRecent: 2, KeepTokens: 1, MinToCompact: 2})
+		}
+		if !ok {
+			return nil, nil // 真没得压
 		}
 		text, err := compact.Summarize(ctx, chat, model, items)
 		if err != nil {
