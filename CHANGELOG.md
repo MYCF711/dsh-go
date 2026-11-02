@@ -10,6 +10,27 @@
 
 ---
 
+## 0.2.1-go.5 · M2-c — 2026-11-02
+
+**LLM 流式客户端（OpenAI 兼容），真机跑通 reasoning 增量。**
+
+- `internal/llm`
+  - `Client.Stream(ctx, req, onEvent)`：SSE 解析 → 增量事件（reasoning / content / tool_call / done）→ 完整响应
+  - `reasoning_content` 与 `reasoning` 两种字段名都认（DeepSeek 系与部分网关不同名）
+  - 工具调用按 `index` 拼碎片：id / name / arguments 三段都可能分片到达
+  - `stream_options.include_usage` 默认打开，`usage` 从最后一片读
+  - 坏分片直接报错，**不静默跳过**；回调返回错误即中止（下游可以随时叫停）
+- 8 条 httptest 单测（不碰网络）：内容拼装、reasoning 顺序、工具调用拼装、usage、401、坏分片、回调中止、ctx 取消
+- `TestLiveMagpie`（默认跳过，`DSHD_LIVE_LLM=1` 才跑）
+
+**真机实测（本机 magpie）**
+```
+模型=group/deepseek-v4.1-flash1017 时长=1.819s 分片=6
+reasoning=290 字节 content=109 字节 finish="stop"
+usage: prompt 41 / completion 125 / total 166
+```
+
+---
 ## 0.2.1-go.5 · M2-b — 2026-11-02
 
 **会话 v4 编码器：写出来的东西 Node 读得动。**

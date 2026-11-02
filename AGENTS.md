@@ -11,7 +11,7 @@
 - ✅ **M0 完成**：内核四件事（Scope/Registry/Bus/Assemble）+ 工具 SPI + 装配器 + CLI；`scripts/check.sh` 全绿，CI（windows-latest，含 `-race`）绿
 - 🚧 **M1 收口**：工具层已齐（`read/write/edit/glob/grep/shell/job_*` 共 9 个），流水线 + 投影 + schema 快照 + token 实测（**906**）都已落地
 - 🚧 **M2 进行中**：`codecs/v4` **双向可用** —— 解码吃了 116 个真实会话，编码产物 Node（`node:zlib` zstd）逐帧读通
-- 下一步：LLM(SSE) 客户端 → agent turn/step 双循环 → 把会话写入路径接到 codec
+- `internal/llm` 已真机跑通（分片 6 / reasoning 290B / usage 上报）；下一步 agent turn/step 双循环 → 会话写入接 codec
 
 ---
 
