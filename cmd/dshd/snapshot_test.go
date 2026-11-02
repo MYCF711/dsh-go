@@ -112,6 +112,8 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"ask_user_question": {},
 		// 联网取网页正文。联网本身就是它的功能，不是副作用。
 		"web_fetch": {Network: true},
+		// 联网搜索，同样按 Network 走审批。
+		"web_search": {Network: true},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {

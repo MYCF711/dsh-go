@@ -24,6 +24,7 @@ import (
 	"dshgo/internal/spi"
 	"dshgo/modules/exec/bash"
 	"dshgo/modules/fs/local"
+	"dshgo/modules/search"
 	"dshgo/modules/tool/ask"
 	"dshgo/modules/tool/edit"
 	"dshgo/modules/tool/glob"
@@ -34,6 +35,7 @@ import (
 	todo "dshgo/modules/tool/todo"
 	wdtool "dshgo/modules/tool/wd"
 	"dshgo/modules/tool/webfetch"
+	"dshgo/modules/tool/websearch"
 	"dshgo/modules/tool/write"
 	"dshgo/modules/tools"
 )
@@ -70,12 +72,14 @@ func builtinModules(wd, home string, maxChars int) []kernel.Module {
 		glob.Module(),
 		grep.Module(),
 		historyModule(hostHistory),
+		search.Module(),
 		history.Module(),
 		wdtool.Module(),
 		todo.Module(),
 		present.Module(),
 		ask.Module(),
 		webfetch.Module(),
+		websearch.Module(),
 	}
 }
 

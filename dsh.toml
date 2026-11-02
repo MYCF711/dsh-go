@@ -65,3 +65,11 @@ backend = "static"
 [[module]]
 id      = "tool-webfetch"
 backend = "static"
+
+[[module]]
+id      = "search"
+backend = "static"
+
+[[module]]
+id      = "tool-websearch"
+backend = "static"

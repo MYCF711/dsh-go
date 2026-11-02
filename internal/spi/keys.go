@@ -19,3 +19,8 @@ var (
 // 为什么需要它：压缩会把细节压进摘要，但日志是 append-only 的，
 // 原文永远在。模型需要一条"压得掉也找得回来"的路。
 var HistoryKey = kernel.NewKey[HistorySearch]("history")
+
+// SearchKey 提供服务：网页搜索。
+//
+// 默认实现是"没配置"——它会明确报错并说清缺什么，而不是返回空结果。
+var SearchKey = kernel.NewKey[SearchProvider]("search")
