@@ -86,5 +86,13 @@
     "new": "if m.Seq >= sinceSeq {",
     "pkg": "./internal/transport",
     "test": "TestSelectPage"
+  },
+  {
+    "name": "load-swallows-source-error",
+    "file": "internal/transport/source.go",
+    "old": "\tif err != nil {\n\t\treturn LoadResult{}, err\n\t}",
+    "new": "\tif err != nil {\n\t\treturn LoadResult{}, nil\n\t}",
+    "pkg": "./internal/transport",
+    "test": "TestSourceErrorsPropagate"
   }
 ]

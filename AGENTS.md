@@ -389,7 +389,15 @@
 - ✅ 决定：不加校验；在 `SelectPage` 注释里写清"入参已按 Seq 升序，这个前提由写锁保证"
 - ⚠️ 量法记一笔：这个数字看起来证明"不用管"，其实证明的是"写锁一直有效"。
   两件事在数据上长得一样，但**改掉写锁之后，这个数字会变，而它不会自己报警**
-- 下一步 **M95**：`v4.ReadFile` → `[]Message` 的转换 + 接进 transport，用真实会话做 golden test
+- ✅ **数据面接上了，但没让 transport 碰 v4**（dshd 写，9 次调用）：`Source` 接口
+  （`Messages(sessionID) ([]Message, error)`）+ `LoadSession` / `HistorySession` 两个入口。
+  **`grep -c codecs internal/transport/source.go` = 0**——R7 保住了：
+  transport 只认接口，读 v4 的事留在宿主那边
+- ✅ 五条测试：尾页截断 / 增量补洞 / 补洞到末尾得空页 / 空 id 报 `ErrNoSuchSession` / 源出错**原样透传**
+- ✅ 变异第 12 条 `load-swallows-source-error`（把错误换成 `nil`）→ **CAUGHT**
+- ✅ 它**自己顺手做了两次变异验证**（吞错误 / 删空 id 拦截各红一次，然后恢复、`git status` 干净）——
+  这是第一次不用我要求就自己验"测试是不是废的"
+- 下一步 **M96**：宿主侧实现 `Source`（`v4.ReadFile` → `[]Message`），用真实会话做 golden test
 
 ### 界面线现状（2026-11-03）
 
