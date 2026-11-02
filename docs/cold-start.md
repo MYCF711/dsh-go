@@ -57,3 +57,45 @@ for label,cmd in [("noop",['tmp/base/noop.exe']),("dshd",['tmp/dshd-strip.exe','
     xs.sort(); print(label, "p50", round(statistics.median(xs),1), "max", round(xs[-1],1))
 PY
 ```
+
+## 那么体积能不能减？先看它都装了什么
+
+`go tool nm -size` 按符号归桶（8.7 MB 发布件）：
+
+| 桶 | 大小 | 能减吗 |
+|---|---:|---|
+| `runtime`（pclntab 2.37 MB + 类型元数据） | 3.07 MB | **不能**，去了没法 panic/反射 |
+| 标准库散件（json / regexp / syscall / reflect…） | 3.01 MB | 大部分不能 |
+| `crypto/tls` + `crypto/x509` | **0.88 MB** | 只在"永远不说 https"时能去掉 |
+| `net/http` 栈（含 http2） | 0.32 MB | 同上 |
+| **我们自己的代码** | **0.29 MB** | — |
+| `x/net` + `x/text`（vendor） | 0.27 MB | 部分（idna/norm 是 tls 带进来的） |
+| `klauspost/compress`（zstd） | 0.25 MB | 不能，会话格式要它 |
+| `pelletier/go-toml` | 0.15 MB | 不能，配置要它 |
+
+**我们自己的代码只占 0.29 MB / 8.7 MB。**
+
+### 决定：不减
+
+能减的只有 TLS 那一串，合计 **~1.2 MB ≈ 3 ms**，代价是**不支持 https**——
+那意味着只能连本机 magpie，接不了任何远程 provider。
+
+**用 3 ms 换掉"能不能接远程模型"，不做。**
+
+顺带确认另一件事：ACP 启动时我们自己的活有多少——
+
+```
+[timing] main 开始          0.00 ms
+[timing] acp: 装配前         0.50 ms
+[timing] acp: 装配后         0.50 ms
+```
+
+**装配 11 个模块花 0.5 ms。** initialize 往返 33.1 ms 里，
+30 ms 是加载可执行文件，1 ms 是我们的活。
+
+### 这一条到此为止
+
+冷启动的账已经算到底了：
+**60 ms ≈ 30 ms（8.7 MB 加载，不可减）+ ~1 ms（我们的代码）+ 客户端与协议开销。**
+
+再往下只有在"二进制更小"这一条路上走，而那条路的收费站是放弃 HTTPS。
