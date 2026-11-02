@@ -153,15 +153,13 @@ func Read(b []byte) (*Log, error) {
 	}
 
 	var l Log
-	if err := json.Unmarshal(body, &l.Header); err != nil {
-		return nil, fmt.Errorf("解析 header: %w", err)
+	// 首帧校验与 ReadHeader 共用同一份（parseHeader），避免「列会话」与「打开会话」
+	// 对 header 的判断分叉。
+	h, err := parseHeader(head)
+	if err != nil {
+		return nil, err
 	}
-	if l.Header.Type != "session" {
-		return nil, fmt.Errorf("首行 type = %q，期望 session", l.Header.Type)
-	}
-	if l.Header.Version != 4 {
-		return nil, fmt.Errorf("版本 = %d，本解码器只认 4", l.Header.Version)
-	}
+	l.Header = h
 	l.Frames = len(frames)
 	// 尾部有半帧（断电/磁盘满）：前面的照常返回，只把位置记下来。
 	l.TailTruncatedAt = tornAt
