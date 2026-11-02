@@ -1,5 +1,30 @@
 ## 0.2.1-go.7（未发布）
 
+**自动压缩：区间自己算，摘要模型写。**
+
+- `internal/compact`
+  - `Plan`：只压前缀；**最近的 `KeepRecent` 条一定留**；开头的 `system/message` 不压
+    （压掉它模型就忘了自己是谁——DSH 的节点 0 保护）
+  - `Summarize`：有界提示词（单条 1,200 字、总量 24,000 字，超了写"省略 N 条"）
+  - 更早的摘要节点标成 `[earlier-summary]`，不伪装成用户原话
+- CLI：`dshd session compact --auto [--keep N] [--max N] [--dry-run]`
+
+**实测（真实会话副本，345 事件 / 111 surface 节点）**
+```
+--dry-run  → 计划：压缩 102 条（seq 9..313），保留最近 8 条
+--auto     → 摘要 730 字 → 遮蔽 305 条事件（日志 345 → 348）
+压缩后     → surface 111 → 10 节点（1 个摘要 + 9 个近期）
+Node 读    → 192 帧 / 349 行 / 320,684 字节 ✅
+```
+
+摘要质量抽样：目标、已确认的约束、关键文件路径（`internal/gateway/sniff.go` 的 `usageSniffer`）都保住了。
+
+**踩坑**：第一次 `MaxTokens: 600`，模型把预算全花在思维链上，`content` 空、`finish_reason=length`。
+现在的错误信息会直接说这件事（"推理型模型可能把预算花在了思维链上"），并把预算提到 2000。
+
+---
+
+
 **压缩协议落地：能往真实会话里追加 `compaction/summary` 了。**
 
 - `session.Compact`：一次追加三条事件 `compaction/start` → `compaction/summary` → `compaction/end`

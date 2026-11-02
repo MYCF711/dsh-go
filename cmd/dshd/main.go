@@ -13,6 +13,7 @@ import (
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/agent"
+	"dshgo/internal/compact"
 	"dshgo/internal/kernel"
 	"dshgo/internal/llm"
 	"dshgo/internal/session"
@@ -468,17 +469,56 @@ func cmdSessionCompact(argv []string) error {
 	path := fs.String("in", "", "会话文件（原地追加）")
 	from := fs.Int64("from", 0, "遮蔽区间起点 seq")
 	to := fs.Int64("to", -1, "遮蔽区间终点 seq")
-	summary := fs.String("summary", "", "摘要正文")
+	summary := fs.String("summary", "", "摘要正文（人工给）")
+	auto := fs.Bool("auto", false, "自动选区间并用模型生成摘要")
+	keep := fs.Int("keep", 6, "--auto 时保留最近多少条")
+	maxMessages := fs.Int("max", 0, "--auto 时表面超过多少条才触发（0=不设）")
+	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "摘要模型")
+	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
+	dryRun := fs.Bool("dry-run", false, "只打印计划，不写盘")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	if *path == "" || *to < 0 || *summary == "" {
-		return fmt.Errorf("--in / --to / --summary 都必须给")
+	if *path == "" {
+		return fmt.Errorf("--in 必填")
+	}
+	if !*auto && (*to < 0 || *summary == "") {
+		return fmt.Errorf("要么给 --from/--to/--summary，要么用 --auto")
 	}
 	before, err := v4.ReadFile(*path)
 	if err != nil {
 		return err
 	}
+	if *auto {
+		surface := session.Surface(before)
+		span, n, ok := compact.Plan(surface, compact.Options{
+			KeepRecent: *keep, MinToCompact: 2, MaxMessages: *maxMessages,
+		})
+		if !ok {
+			fmt.Printf("无需压缩：surface %d 节点，保留最近 %d 条后没有可压的前缀\n", len(surface), *keep)
+			return nil
+		}
+		fmt.Printf("计划：压缩 %d 条（seq %d..%d），保留最近 %d 条\n",
+			n, span.Start, span.End, *keep)
+		if *dryRun {
+			return nil
+		}
+		items := make([]session.SurfaceMsg, 0, n)
+		for _, m := range surface {
+			if m.Seq >= span.Start && m.Seq <= span.End {
+				items = append(items, m)
+			}
+		}
+		text, err := compact.Summarize(context.Background(), llm.New(*base, os.Getenv("DSHD_LLM_KEY")), *model, items)
+		if err != nil {
+			return err
+		}
+		*summary = text
+		*from = span.Start
+		*to = span.End
+		fmt.Printf("摘要 %d 字\n", len([]rune(text)))
+	}
+
 	l, err := session.OpenSessionAt(*path)
 	if err != nil {
 		return err

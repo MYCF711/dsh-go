@@ -21,7 +21,8 @@
 - ✅ 提示词装配（`internal/prompt`）：确定性拼接、按 Caps 分工具、AGENTS.md 有界注入（默认 8 KB）
 - ✅ **P0 四条判据已验收**（见 `docs/p0-acceptance.md`）：内存 15.3 MB / ACP 就绪 59.5 ms / 工具表 906 token / 二进制 8.1 MB
 - ✅ 压缩协议（`session.Compact` + `dshd session compact|info`）：追加三条压缩事件、精确遮蔽、日志不删
-- 下一步 **M6**：LLM 生成摘要 + 阈值触发（现在摘要由人给、手动触发）
+- ✅ 自动压缩（`internal/compact` + `session compact --auto`）：区间自算、提示词有界、真机跑通（surface 111→10）
+- 下一步 **M6**：接进 `agent/pre-step` 自动触发 + token meter（现在按消息条数、要人手敲）
 
 ---
 
@@ -56,6 +57,7 @@
 | `internal/acp/` | ACP 服务端（stdio JSON-RPC） | 按 `research/22` 的方法表 |
 | `internal/llm/` | OpenAI 兼容 SSE 客户端 | 先只做 magpie |
 | `internal/prompt/` | 系统提示装配（确定性、可组合、有界） | 加段必须同时加"空段消失"与"确定性"测试 |
+| `internal/compact/` | 压缩策略（选区间 + 生成摘要） | 只做策略；写事件一律走 `session.Compact` |
 | `modules/*` | 静态默认实现，一模块一目录一个 `Register(scope)` | 新模块必须过 `PLAN.md` §2.4 的三条判据 |
 | `codecs/v4/` | DSH 会话 v4 编解码 | 字节级对齐，见 §4 |
 | `wasmhost/` `pluginhost/` | wazero / go-plugin 装载器 | 载入层只做装载，不含业务 |
