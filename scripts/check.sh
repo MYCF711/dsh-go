@@ -18,12 +18,16 @@ else
   go build ./...      && pass "go build"      || bad "go build"
   go vet ./...        && pass "go vet"        || bad "go vet"
 
-  # -race 需要 cgo；本机没有 C 编译器时降级为普通测试，并明说未验证什么。
-  cc="$(go env CC)"
-  if [ "$(go env CGO_ENABLED)" = "1" ] && command -v "$cc" >/dev/null 2>&1; then
-    go test ./... -race && pass "go test -race" || bad "go test -race"
+  # -race 需要 cgo：不可用时降级为普通测试，并明说未验证什么。
+  race_out="$(go test ./... -race 2>&1)"; race_rc=$?
+  if [ $race_rc -eq 0 ]; then
+    pass "go test -race"
+  elif echo "$race_out" | grep -qiE 'requires cgo|C compiler|gcc.{0,12}not found|exec: "gcc"'; then
+    skip "-race 不可用（$(echo "$race_out" | head -1)）"
+    go test ./... && pass "go test（未覆盖竞态）" || bad "go test"
   else
-    go test ./... && pass "go test（-race 未验证：CGO_ENABLED=$(go env CGO_ENABLED)，CC=$cc 不可用）" || bad "go test"
+    printf '%s\n' "$race_out" | tail -25
+    bad "go test -race"
   fi
 
   # R1 内核零业务
