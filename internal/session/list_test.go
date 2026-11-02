@@ -1,6 +1,8 @@
 package session
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -93,5 +95,71 @@ func TestListSessionsSummaryFallsBackToUser(t *testing.T) {
 	}
 	if len(got) != 1 || !strings.Contains(got[0].Summary, "只有用户消息") {
 		t.Fatalf("没有助手消息时应回落到用户消息，得到 %+v", got)
+	}
+}
+
+// 同一个 session id 出现在多个项目目录下（换机器 / 换挂载点会让 projectKey 变）：
+// 列表里必须**合并成一条**，并标出有几份。
+//
+// 实测踩过：不给 cwd 列会话时，同一份会话出现两行同样的 id——
+// 面板上看不出区别，按 id 删除又会报「多处命中」。
+func TestListSessionsDedupesSameIDAcrossProjects(t *testing.T) {
+	home := t.TempDir()
+	cwdA := t.TempDir()
+
+	id := NewID()
+	lg, err := CreateSession(home, cwdA, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lg.Append("user/message", map[string]any{"a": 1}); err != nil {
+		t.Fatal(err)
+	}
+	path := lg.Path
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 复制到另一个项目目录下
+	src := filepath.Dir(path)
+	dst := filepath.Join(home, "sessions", "--other-project--", filepath.Base(src))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(dst, os.DirFS(src)); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := ListSessions(home, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("应该合并成 1 条，实际 %d 条: %+v", len(list), list)
+	}
+	if list[0].SessionID != id {
+		t.Fatalf("id 不对: %s", list[0].SessionID)
+	}
+	if list[0].Copies != 2 {
+		t.Fatalf("要标出有 2 份，实际 %d", list[0].Copies)
+	}
+}
+
+// 只有一份时不该冒出 copies 字段——那是噪声。
+func TestListSessionsSingleHasNoCopies(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	lg, err := CreateSession(home, cwd, NewID(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lg.Close()
+
+	list, err := ListSessions(home, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Copies != 0 {
+		t.Fatalf("单份不该有 Copies: %+v", list)
 	}
 }

@@ -85,3 +85,41 @@ dsh-go 的设计隐含"单机单用户"。下面三条是它最可能撑不住�
 
 三条里只有一条需要改代码，但**测试过程中挖出了另一个真问题**——
 这也是"先测再改"值回票价的地方。
+
+## ④ 会话列表里的重复条目（2026-11-03）
+
+**怎么测**：造一份会话，把整个目录复制到另一个项目目录下（模拟"换机器后 projectKey 变了"），
+再按不同的 cwd 调 `session/list`。
+
+```
+项目目录: ['--C-…-tmpear80qu7--', '--other-project--']
+
+按 A 的 cwd 列 → 1 条  ['session-3fc8a85c-…']
+按 B 的 cwd 列 → 0 条  []
+不给 cwd     → 2 条  ['session-3fc8a85c-…', 'session-3fc8a85c-…']   ← 同一个 id 两次
+```
+
+**判定：真问题，已修。**
+
+面板上会出现两行一模一样的条目，用户分不出哪行是哪份；更糟的是按 id 删除会撞上
+`FindByID` 的「多处命中，请显式给 cwd」——列表给了两条、删除却报歧义。
+
+修法：`ListSessions` 按 session id **合并**，保留最新的那份（列表本来就按更新倒序），
+份数写进 `copies` 字段：
+
+```json
+{"sessionId": "session-3fc8a85c-…", "copies": 2, …}
+```
+
+只有一份时不打这个字段（`copies` 为 0 会被 `omitempty` 省略）——不给面板添噪声。
+
+`TestListSessionsDedupesSameIDAcrossProjects` / `TestListSessionsSingleHasNoCopies` 钉住。
+
+## B 线四条疑点的总结
+
+| 疑点 | 结论 |
+|---|---|
+| ① 锁跨机器 | 本来就对（拒绝是对的；doctor 给路径） |
+| ② projectKey 换机器 | **真问题** → `ResolvePath` 回退按 id |
+| ③ 审批记忆 | 本来就对（跟着 home 走） |
+| ④ 列表重复条目 | **真问题** → 按 id 合并 + `copies` |

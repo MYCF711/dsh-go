@@ -26,6 +26,10 @@ type Listing struct {
 	Readable bool   `json:"readable"`
 	// Error 非空表示这份会话读不动（损坏 / 版本不对），面板要能显示出来而不是假装没有。
 	Error string `json:"error,omitempty"`
+	// Copies > 1 表示同一个 session id 在多个项目目录下都有。
+	// 换机器/换挂载点会让 projectKey 变，同一份会话就"住"到别的目录里去了；
+	// 不合并的话面板上会出现两行一模一样的条目，按 id 删又会撞上"多处命中"。
+	Copies int `json:"copies,omitempty"`
 }
 
 // ListSessions 扫 <home>/sessions 下的所有会话，返回按更新时间倒序的列表。
@@ -76,7 +80,36 @@ func ListSessions(home, cwd string) ([]Listing, error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
-	return out, nil
+	return dedupeByID(out), nil
+}
+
+// dedupeByID 把同一个 session id 的多份合并成一条。
+//
+// 保留**最新**的那份（按 UpdatedAt），并把份数写进 Copies。
+// 不合并的后果实测过：不给 cwd 列会话时，同一份会话出现两行同样的 id——
+// 面板上看不出区别，按 id 删除又会报「多处命中」。
+func dedupeByID(list []Listing) []Listing {
+	if len(list) < 2 {
+		return list
+	}
+	// list 已按 UpdatedAt 倒序，所以第一次见到的就是最新的。
+	seen := make(map[string]int, len(list))
+	out := make([]Listing, 0, len(list))
+	for _, it := range list {
+		if i, ok := seen[it.SessionID]; ok {
+			out[i].Copies++
+			continue
+		}
+		seen[it.SessionID] = len(out)
+		it.Copies = 1
+		out = append(out, it)
+	}
+	for i := range out {
+		if out[i].Copies == 1 {
+			out[i].Copies = 0 // 只有一份时不打这个字段
+		}
+	}
+	return out
 }
 
 const maxScanBytes = 2 << 20
