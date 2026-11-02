@@ -40,7 +40,8 @@
 - ✅ 模式决定审批倾向（`approvalDecision`）：deny 不问直接拒、allow 不问放行、deny 压过记忆；实测 no-exec 模式零打扰
 - ✅ 模式跟着会话走：写进 `header.agentPreset`、resume 采纳、fork 继承（三个 Go 测试钉住）
 - ✅ `history_search`（`spi.HistorySearch` + `modules/tool/history`）：在原始日志里回查含被压缩内容，带 `hidden` 标记
-- 下一步 **M9**：`dshd run` 也接上 history_search（现在只有 ACP 指了当前会话）
+- ✅ history 接线统一为 `attachHistory`（run / acp prompt / acp resume 三处）；`read-only` 模式允许 `history_search`
+- 下一步 **M10**：`dshd run` 的自动压缩（现在只有 ACP 有）
 
 ---
 

@@ -60,6 +60,10 @@ func TestLookupAndResolve(t *testing.T) {
 	if !m.Allows("read") {
 		t.Fatal("read-only 应该允许 read")
 	}
+	// history_search 只读日志，属于"看"的能力，read-only 下应该能用。
+	if !m.Allows("history_search") {
+		t.Fatal("read-only 应该允许 history_search")
+	}
 }
 
 func TestOverrideBuiltin(t *testing.T) {

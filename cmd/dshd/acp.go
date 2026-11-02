@@ -90,7 +90,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	r.mu.Unlock()
 
 	// 把"当前会话"指给 history_search：没有这行，模型回查的时候查的是空。
-	hostHistory.set(logw.Path)
+	attachHistory(logw)
 
 	// 每轮开始前自检：token 估算超过阈值就自动压缩（失败只记日志，不打断这一轮）。
 	if r.autoCompact > 0 {
@@ -286,6 +286,7 @@ func (r *acpRunner) Resume(ctx context.Context, sessionID, cwd string) error {
 	r.logs[sessionID] = logw
 	r.hist[sessionID] = hist
 	r.mu.Unlock()
+	attachHistory(logw) // resume 之后也要能回查
 
 	// 把上次留下的授权读回来（只有显式开了 --remember-approvals 才会有记录）。
 	if r.approvalsStore != nil && r.approvals != nil {

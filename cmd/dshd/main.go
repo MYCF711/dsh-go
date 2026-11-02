@@ -273,6 +273,10 @@ func cmdRun(argv []string) error {
 		return err
 	}
 	defer logw.Close()
+	// 把"当前会话"指给 history_search——`run` 以前没这一步，模型回查只会得到
+	// "没有活动会话"。ACP 那边早就指了，这里补上。
+	attachHistory(logw)
+
 	if err := logw.Append("system/message", session.SystemMessageData(1, 1, sys)); err != nil {
 		return err
 	}

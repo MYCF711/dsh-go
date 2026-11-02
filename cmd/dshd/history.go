@@ -8,6 +8,7 @@ import (
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/kernel"
+	"dshgo/internal/session"
 	"dshgo/internal/spi"
 )
 
@@ -18,6 +19,16 @@ import (
 type historyHolder struct {
 	mu  sync.RWMutex
 	dir string // 会话文件路径（空 = 还没有活动会话）
+}
+
+// attachHistory 把会话指给 history_search。
+//
+// 两条入口（run / acp）都调它：漏掉任何一条，模型回查就会撞上"没有活动会话"。
+func attachHistory(log *session.Log) {
+	if log == nil {
+		return
+	}
+	hostHistory.set(log.Path)
 }
 
 func (h *historyHolder) set(path string) {

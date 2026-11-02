@@ -48,9 +48,9 @@ func Builtins() []Mode {
 		{
 			ID:          "read-only",
 			Name:        "Read only",
-			Description: "只能读：read / glob / grep。用来审阅代码或做排查。",
+			Description: "只能读：read / glob / grep / history_search。用来审阅代码或做排查。",
 			Builtin:     true,
-			Tools:       []string{"read", "glob", "grep"},
+			Tools:       []string{"read", "glob", "grep", "history_search"},
 			Approval:    "deny",
 		},
 	}

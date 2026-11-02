@@ -106,3 +106,35 @@ func TestHistorySearchNotHiddenWhenSurfaced(t *testing.T) {
 }
 
 var _ = filepath.Join
+
+// attachHistory 是 run / acp 两条入口共用的一步。漏掉它，
+// 模型回查就会撞上"没有活动会话"——所以这里把它钉住。
+func TestAttachHistoryPointsService(t *testing.T) {
+	home := t.TempDir()
+	l, err := session.CreateSession(home, "/tmp/h2", "hist-2", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if err := l.Append("user/message", session.UserMessage([]spi.Block{
+		{Type: "text", Text: "编号 ATTACH-1 记一下"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	hostHistory.set("") // 先清空，证明是 attachHistory 起了作用
+	if _, err := hostHistory.Search("ATTACH-1", 5); err == nil {
+		t.Fatal("清空之后本该报没有活动会话")
+	}
+
+	attachHistory(l)
+	hits, err := hostHistory.Search("ATTACH-1", 5)
+	if err != nil {
+		t.Fatalf("attachHistory 之后应该能查: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("应该能查到刚写进去的消息")
+	}
+
+	attachHistory(nil) // nil 不能 panic
+}
