@@ -143,3 +143,57 @@ func TestEditWithoutReadSaysHowToFix(t *testing.T) {
 		t.Fatalf("措辞不一致（模型得靠这句话学会下一步）: %v", err)
 	}
 }
+
+// 恢复路径必须真的能走通：报错里给的两条建议，照着做要能成功。
+//
+// 只验"报错文案对不对"是不够的——文案说得再清楚，如果照着做仍然失败，
+// 模型就会在同一个地方卡住（真实语料里 edit 失败 75 次，1 次是这条）。
+func TestEditAmbiguousHintIsActionable(t *testing.T) {
+	const dup = "alpha" + string(rune(10)) + "TODO" + string(rune(10)) + "beta" + string(rune(10)) + "TODO" + string(rune(10)) + "gamma" + string(rune(10))
+
+	// 第一条建议：给它更多上下文让它唯一
+	t.Run("加上下文", func(t *testing.T) {
+		tl, fsx, root := newTool(t)
+		fixture(t, root, dup)
+		if _, err := fsx.Read("f.txt"); err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := call(t, tl, "f.txt", "TODO", "DONE", false)
+		if err == nil {
+			t.Fatal("两处匹配时必须拒绝")
+		}
+		if !strings.Contains(res.Hint, "上下文") || !strings.Contains(res.Hint, "replace_all") {
+			t.Fatalf("hint 必须同时给出两条出路，实际 %q", res.Hint)
+		}
+
+		// 照第一条做
+		oldS := "alpha" + string(rune(10)) + "TODO" + string(rune(10)) + "beta"
+		newS := "alpha" + string(rune(10)) + "DONE" + string(rune(10)) + "beta"
+		if _, err := call(t, tl, "f.txt", oldS, newS, false); err != nil {
+			t.Fatalf("加上下文后应该成功: %v", err)
+		}
+		got, _ := os.ReadFile(filepath.Join(root, "f.txt"))
+		want := "alpha" + string(rune(10)) + "DONE" + string(rune(10)) + "beta" + string(rune(10)) + "TODO" + string(rune(10)) + "gamma" + string(rune(10))
+		if string(got) != want {
+			t.Fatalf("只该改第一处，实际 %q", got)
+		}
+	})
+
+	// 第二条建议：显式 replace_all
+	t.Run("replace_all", func(t *testing.T) {
+		tl, fsx, root := newTool(t)
+		fixture(t, root, dup)
+		if _, err := fsx.Read("f.txt"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := call(t, tl, "f.txt", "TODO", "DONE", true); err != nil {
+			t.Fatalf("replace_all 应该成功: %v", err)
+		}
+		got, _ := os.ReadFile(filepath.Join(root, "f.txt"))
+		want := "alpha" + string(rune(10)) + "DONE" + string(rune(10)) + "beta" + string(rune(10)) + "DONE" + string(rune(10)) + "gamma" + string(rune(10))
+		if string(got) != want {
+			t.Fatalf("两处都该改，实际 %q", got)
+		}
+	})
+}

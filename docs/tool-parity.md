@@ -173,3 +173,43 @@ $ grep {"pattern":"zzz_no_such_symbol"}
 **不能因为加了新分支就让老路径的说法变味。**
 
 钉住的两条测试：`TestGlobZeroMatchMentionsIgnore`、`TestGrepZeroHitMentionsIgnore`。
+
+## 「不唯一」的两条出路必须真的能走通（2026-11-02）
+
+`edit` 遇到多处匹配时的报错：
+
+```
+执行失败: old_string 不唯一（2 处）
+提示: old_string 在文件里出现 2 次；给它更多上下文让它唯一，或显式传 replace_all=true
+```
+
+文案早就对齐了，但**"照着做能不能成"从来没验过**——文案说得再清楚，
+如果照着做仍然失败，模型会在同一个地方卡住（真实语料里 edit 失败 75 次，这条占 1 次）。
+
+`TestEditAmbiguousHintIsActionable` 把两条出路各走一遍：
+
+| 照做 | 结果 |
+|---|---|
+| 加更多上下文（`alpha
+TODO
+beta` → `alpha
+DONE
+beta`） | ✅ 只改第一处，第二处原样 |
+| 显式 `replace_all: true` | ✅ 两处都改 |
+
+### 真机观察：这条错误很少被触发
+
+给一个两行重复 `TODO` 的文件，让它"只改第一个"：
+
+```
+tool_calls=3 input=7038 output=368
+```
+
+模型第 1 步就 `read`，然后**自己用上下文拼出唯一片段**（`alpha
+TODO
+beta`）——一次成功，
+没走到歧义分支。它回答里还解释了这一步：
+
+> 由于两行文本完全一样，我把上下文 `alpha`、`beta` 一起用来匹配，以保证只改到第一个。
+
+所以这条错误路径的正确性靠测试保证，**触发率低是好事**——说明"先读再改"这条规则在起作用。
