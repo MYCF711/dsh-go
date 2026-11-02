@@ -85,7 +85,9 @@
 | `watch_ack` | `repo` | 可省 | 只盯了一个仓库时用它 |
 | `watch_stop` | `repo` | 可省 | 同上；**有多个时必须指定**——猜错会把水位记到别人头上 |
 | `schedule_update` | `id` | 可省 | 只有一条定时任务时用它 |
-| `schedule_delete` | `id` | 可省 | 同上；有多条时**列出候选 id** 再拒绝 |
+| `schedule_delete` | `id` | 可省 | 同上 |
+| `job_output` | `job_id` | 可省 | 只有一个后台任务时用它 |
+| `job_kill` | `job_id` | 可省 | 同上；有多个时**列出候选 id** 再拒绝 |
 
 三条测试钉住边界（单仓库可省 / 多仓库必须指定 / 一个都没有时说清先登记）。
 
@@ -97,6 +99,14 @@ Hint: schedule_update：这个会话有 2 条定时任务（sch-0001-2771、sch-
 ```
 
 **拒绝时把候选 id 列出来**，模型下一句就能直接重试对；只说"id 必填"等于让它再跑一次 list。
+
+真机（`job_output` / `job_kill` 都不带 id）：
+
+```
+→ bash {"command": "sleep 20; echo done-sleep", "idle_seconds": 3}
+→ job_output {}                     ← [ok]  自动落到唯一那个任务
+→ job_kill {"reason": "..."}        ← [ok]
+```
 
 **A/B 复测**（同两个任务，两种表）：
 

@@ -339,9 +339,6 @@
           "description": "可选：记录在日志里并转发给任务"
         }
       },
-      "required": [
-        "job_id"
-      ],
       "additionalProperties": false
     },
     "caps": {
@@ -379,9 +376,6 @@
           "description": "wait=true 时最多等多少毫秒，默认 30000"
         }
       },
-      "required": [
-        "job_id"
-      ],
       "additionalProperties": false
     },
     "caps": {}

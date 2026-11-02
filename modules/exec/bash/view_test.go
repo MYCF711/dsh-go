@@ -74,14 +74,16 @@ func TestJobToolsRejectEmptyID(t *testing.T) {
 		{"job_kill", &jobKillTool{svc: svc}},
 	}
 	for _, c := range cases {
-		_, err := c.tool.Exec(context.Background(), json.RawMessage(`{}`))
+		// 一条任务都没有时，空 id 的正确回答是"还没有任务、先起一个"，
+		// 而不是"id 为空"（那会让模型补一个它编不出来的值）。
+		res, err := c.tool.Exec(context.Background(), json.RawMessage(`{}`))
 		if err == nil {
-			t.Fatalf("%s: 空 id 必须报错", c.name)
+			t.Fatalf("%s: 空 id 且没有任务时必须报错", c.name)
 		}
-		if !strings.Contains(err.Error(), "为空") {
-			t.Fatalf("%s: 应该说参数为空，实际 %q", c.name, err.Error())
+		if !strings.Contains(res.Hint, "还没有后台任务") {
+			t.Fatalf("%s: Hint 应当说清还没有任务，实际 %q", c.name, res.Hint)
 		}
-		if strings.Contains(err.Error(), "没有任务") {
+		if strings.Contains(err.Error(), "没有任务") && !strings.Contains(err.Error(), "还没有后台任务") {
 			t.Fatalf("%s: 不该说成「任务不存在」: %q", c.name, err.Error())
 		}
 
@@ -90,5 +92,40 @@ func TestJobToolsRejectEmptyID(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "没有任务") {
 			t.Fatalf("%s: 未知 id 应该说没这个任务，实际 %v", c.name, err)
 		}
+	}
+}
+
+// 只有一个后台任务时，job_output / job_kill 可以省 job_id。
+// 多个时必须自己选——猜错就杀错了进程。
+func TestJobToolsDefaultToSingleJob(t *testing.T) {
+	svc := NewService(t.TempDir())
+	defer svc.Close()
+
+	if _, err := svc.Run("sleep 30", 150*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	out := &jobOutputTool{svc: svc}
+	res, err := out.Exec(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("只有一条任务时应当能省 job_id: %v / %q", err, res.Hint)
+	}
+}
+
+func TestJobToolsRequireIDWhenMultiple(t *testing.T) {
+	svc := NewService(t.TempDir())
+	defer svc.Close()
+
+	for i := 0; i < 2; i++ {
+		if _, err := svc.Run("sleep 30", 150*time.Millisecond); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kill := &jobKillTool{svc: svc}
+	res, err := kill.Exec(context.Background(), json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("多个任务时必须要求 job_id")
+	}
+	if !strings.Contains(res.Hint, "必须填一个") {
+		t.Fatalf("Hint 要说清要选一个: %q", res.Hint)
 	}
 }

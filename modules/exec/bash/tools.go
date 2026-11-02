@@ -175,7 +175,7 @@ var jobOutputSchema = json.RawMessage(`{
     "wait": {"type": "boolean", "description": "是否阻塞等待任务结束，默认 false"},
     "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 120000, "description": "wait=true 时最多等多少毫秒，默认 30000"}
   },
-  "required": ["job_id"],
+
   "additionalProperties": false
 }`)
 
@@ -199,9 +199,11 @@ func (t *jobOutputTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Resu
 	}
 	// 空 id 是**参数没给**，不是"任务不存在"。两者的下一步完全不同：
 	// 前者是补参数，后者是去 job_list 里找 id。别把前者报成后者。
-	if strings.TrimSpace(a.JobID) == "" {
-		return spi.Result{Hint: "job_id 不能为空；先用 job_list 看有哪些任务"}, fmt.Errorf("job_id 为空")
+	id, perr := t.svc.pickJobID(a.JobID, "job_output")
+	if perr != nil {
+		return spi.Result{Hint: perr.Error()}, perr
 	}
+	a.JobID = id
 	wait := time.Duration(0)
 	if a.Wait {
 		ms := a.TimeoutMS
@@ -240,9 +242,32 @@ var jobKillSchema = json.RawMessage(`{
     "job_id": {"type": "string", "description": "任务 id"},
     "reason": {"type": "string", "description": "可选：记录在日志里并转发给任务"}
   },
-  "required": ["job_id"],
+
   "additionalProperties": false
 }`)
+
+// pickJobID 处理"只有一个后台任务时不填 job_id"的情形。
+//
+// 与 schedule/watch 同一套规则：唯一时兜底，多个时必须选（猜错就杀错了任务）。
+// 拒绝时把候选 id 列出来——只说"必填"等于让模型再跑一次 job_list。
+func (t *Service) pickJobID(id, who string) (string, error) {
+	if strings.TrimSpace(id) != "" {
+		return id, nil
+	}
+	list := t.List()
+	switch len(list) {
+	case 0:
+		return "", fmt.Errorf("还没有后台任务：用 bash 起一个（返回里会带 job id）")
+	case 1:
+		return list[0].ID, nil
+	default:
+		ids := make([]string, 0, len(list))
+		for _, j := range list {
+			ids = append(ids, j.ID)
+		}
+		return "", fmt.Errorf("%s：现在有 %d 个后台任务（%s），job_id 必须填一个", who, len(list), strings.Join(ids, "、"))
+	}
+}
 
 type jobKillTool struct{ svc *Service }
 
@@ -259,9 +284,11 @@ func (t *jobKillTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return spi.Result{Hint: `参数不合法：期望 {"job_id": "job-1", "reason"?: "..."}`}, err
 	}
-	if strings.TrimSpace(a.JobID) == "" {
-		return spi.Result{Hint: "job_id 不能为空；先用 job_list 看有哪些任务"}, fmt.Errorf("job_id 为空")
+	id, perr := t.svc.pickJobID(a.JobID, "job_kill")
+	if perr != nil {
+		return spi.Result{Hint: perr.Error()}, perr
 	}
+	a.JobID = id
 	if err := t.svc.Kill(a.JobID); err != nil {
 		return spi.Result{Hint: "用 job_list 确认 id；已结束的任务不需要终止"}, err
 	}
