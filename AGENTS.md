@@ -68,7 +68,8 @@
 - ✅ 长会话实测（12 轮）：**发现压缩每轮都跑但当轮白压**（hist 在压缩前取快照）；修完 used 从线性 25,585 降到 **11k 见顶**
 - ✅ `scripts/acp-long-session.mjs`：12 轮 + 每轮真读 150 行，输出每轮 used/耗时曲线
 - ✅ 保留策略改按 **token 预算**（`KeepTokens` 默认 2000；`KeepRecent` 降为下限 2）：12 轮实测 11,285 → **6,995**，且这次只触发 0 次压缩
-- 下一步 **M21**：冷启动抖动的定位（55.8–61.4 ms 未解释）
+- ✅ 冷启动抖动定位（`docs/cold-start.md`）：**抖动来自 12MB 二进制加载**，空程序一样抖；成本 ≈2.5 ms/MB，`-s -w` 值 11 ms；我们的代码 vs 同体积空程序 = 41.8 vs 46.5 ms（更快）
+- 下一步 **M22**：减体积（每 MB ≈2.5 ms）—— 先量清哪几个依赖占大头
 
 ---
 
@@ -222,6 +223,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 工具回显占上下文 | **85.5%** | 同上 |
 | 会话样本 | 94 MB，zstd 多帧，62 事件类型 | `research/21` |
 | Go 空进程冷启动 | median **18.1 ms** / p95 22.7 ms | `research/30` |
+| **本机启动成本 vs 体积（实测 2026-11-02）** | 1.2MB→11.6ms / 8.8MB→31.7ms / 12.8MB→46.5ms（≈2.5 ms/MB） | `docs/cold-start.md` |
 | **dsh-go 冷启动（实测 2026-11-02）** | ACP 就绪（起到 initialize 应答）median **60.7 ms**（负载波动 55.6–85.9） | `scripts/measure-start.py` |
 | 进程 init 总和 | **2.0 ms**（换掉 BurntSushi/toml 之前是 26.0 ms） | `GODEBUG=inittrace=1` |
 | **dsh-go 二进制（实测 2026-11-02）** | `-ldflags "-s -w"` → **8.8 MB**（目标 ≤25 MB） | `scripts/build.sh` |
