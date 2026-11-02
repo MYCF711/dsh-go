@@ -32,11 +32,13 @@ type acpRunner struct {
 	fsRoot spi.RootFollower
 	// execCwd 可选：bash 支持换默认目录时，跟着一起换（否则 read 在 B、bash 在 A）。
 	execCwd spi.CwdFollower
-	runner  spi.Runner
-	base    string
-	model   string
-	home    string
-	steps   int
+	// workspace 是这个进程当前服务的工作区（第一个会话定下来，之后不许换）。
+	workspace string
+	runner    spi.Runner
+	base      string
+	model     string
+	home      string
+	steps     int
 
 	// ask 是审批闸门：返回 false 表示用户拒绝这次工具调用。
 	ask func(ctx context.Context, sessionID, tool string, args string) (bool, error)
@@ -812,16 +814,51 @@ func approvalDecision(modeApproval string, remembered bool) (allow bool, needAsk
 //
 // 抽出来是为了能直接测"模式有没有写进 header"——这条链路
 // 靠 node 脚本验证太脆，用 Go 测试钉住更可靠。
+// adoptWorkspace 把进程的工作区切到 want。
+//
+// 已经切到别处、而且那个会话还活着时不切——返回一个说得清的错误，
+// 让客户端知道"一个 dshd 只能服务一个工作区"，而不是两个会话互相串台。
+func (r *acpRunner) adoptWorkspace(want string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.workspace == "" {
+		r.workspace = want
+	} else if !samePath(r.workspace, want) {
+		return fmt.Errorf("这个 dshd 进程已经在工作区 %s；一个进程只服务一个工作区，"+
+			"请为 %s 另起一个 dshd", r.workspace, want)
+	}
+	if r.fsRoot != nil {
+		if err := r.fsRoot.SetRoot(want); err != nil {
+			return fmt.Errorf("工作区不可用: %w", err)
+		}
+	}
+	if r.execCwd != nil {
+		_ = r.execCwd.SetCwd(want)
+	}
+	return nil
+}
+
+func samePath(a, b string) bool {
+	ca, erra := filepath.Abs(a)
+	cb, errb := filepath.Abs(b)
+	if erra != nil || errb != nil {
+		return a == b
+	}
+	return strings.EqualFold(filepath.Clean(ca), filepath.Clean(cb))
+}
+
 func (r *acpRunner) ensureSession(sessionID, cwd string) (*session.Log, error) {
 	// 客户端带来的工作目录要真的生效：否则它说"我在 A 目录"，工具却在宿主
 	// 启动目录里干活（实测踩过：模型报"文件不存在"，然后在 203 个文件里翻，
-	// 全是宿主仓库的文件）。FS 支持换根就换，不支持就保持原样。
-	if r.fsRoot != nil && strings.TrimSpace(cwd) != "" {
-		_ = r.fsRoot.SetRoot(cwd)
-	}
-	// bash 的起始目录也要跟着换：同一个会话里两个世界是最难查的那种 bug。
-	if r.execCwd != nil && strings.TrimSpace(cwd) != "" {
-		_ = r.execCwd.SetCwd(cwd)
+	// 全是宿主仓库的文件）。
+	//
+	// 但工具的根是**进程级**的：一个 ACP 进程里同时开 A/B 两个会话时，
+	// 后开的会把先开的那个的根顶掉——那不是"小瑕疵"，是让 A 会话突然在 B 里干活。
+	// 所以这里宁可**明确拒绝**，也不静默串台。
+	if want := strings.TrimSpace(cwd); want != "" {
+		if err := r.adoptWorkspace(want); err != nil {
+			return nil, err
+		}
 	}
 	p, err := session.SessionPath(r.home, cwd, sessionID)
 	if err != nil {

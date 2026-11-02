@@ -45,7 +45,7 @@
 | **go-webview2（裸绑定）** | 2（Go + TS/JS） | 壳 **~2–4 MB**（估）+ 系统 WebView2 | 0.3–0.8 s（估） | WebView2（系统） | 无知名独立产品（多作为库） | B |
 | **Avalonia（C#）** | **3**（C# + Go + XAML） | 自包含 **60–120 MB**；裁剪/AOT **30–50 MB**（估） | 0.5–1.5 s（估） | .NET 运行时（自包含则无） | Avalonia 生态商业应用（未逐一取证） | C |
 | **WinUI 3 / MAUI** | 3+ | 30–100 MB（估） | 0.5–1.5 s（估） | Windows App SDK / .NET | Windows 原生应用 | C |
-| **Flutter desktop** | **3**（Dart + Go + C/FFI） | **20–50 MB 目录**（估；不是单 exe） | 0.3–1 s（估） | Dart AOT（随包） | 桌面端无旗舰案例 | B/C |
+| **Flutter desktop** | **3**（Dart + Go + C/FFI） | **20–50 MB 目录**（估；不是单 exe） | 0.3–1 s（估） | Dart AOT（随包） | 桌面端缺少同量级旗舰案例 | B/C |
 | **Electron** | 2（TS + Go 宿主，但壳内带 Node） | **80–200 MB**（DSH 实测安装 182 MB） | 1–3 s | Chromium + Node（随包） | VS Code、Slack、Discord、Notion、Obsidian、Figma、1Password | A |
 
 ### 1.1 Wails v3 / v2（Go + 系统 WebView）
@@ -97,7 +97,7 @@
 |---|---|---|
 | 当前版本 | **v0.10.3（2026-09）**；仍是 0.x | https://gioui.org/news |
 | IME | **Linux 的 IME 是 2026-09 才加的**（X11 ibus / Wayland text-input-v3）；Windows/macOS 更早，但生态验证少 | 同上 |
-| 真实产品 | **Tailscale**（官方 showcase 第一位）、godcr、gotraceui、Sointu、Protonet、Wormhole William | https://gioui.org/doc/showcase |
+| 真实产品 | **Tailscale**（官方 showcase 列出）、godcr、gotraceui、Sointu、Protonet、Wormhole William | https://gioui.org/doc/showcase |
 | 编程模型 | 立即模式，闭包式 widget tree；官方 FAQ 明确说这是为性能、避免堆分配 | https://gioui.org/doc/faq |
 | 组件 | 只有基础 widget（material 主题），**没有富文本编辑器、没有虚拟列表、没有表格** | https://gioui.org/doc/learn |
 | 无障碍 | 文档/API 中没有屏幕阅读器支持（截至 0.10.3） | https://gioui.org/doc/faq（无 a11y 条目） |
@@ -135,7 +135,7 @@
 | 体积 | release 目录约 **20–50 MB（估）**；无法做到「单文件 10 MB」 | 同上（产物结构） |
 | 与 Go 组合 | 要么 FFI 调 c-shared Go DLL（多一层 C ABI），要么 Go 当 sidecar 走 HTTP/gRPC；语言数 3 | — |
 | 业内评价 | Raycast 评估后**直接排除**（缺原生控制、成熟度不够） | https://www.raycast.com/blog/a-technical-deep-dive-into-the-new-raycast |
-| 真实产品 | 桌面端无旗舰案例（移动端才是主场） | — |
+| 真实产品 | 桌面端缺少同量级旗舰案例（移动端才是主场） | — |
 
 ### 1.8 保留 Electron 但换前端
 
@@ -157,25 +157,25 @@
 |---|---|---|---|---|
 | **VS Code** | Electron + TS/React | 跨平台 + Web 生态 + 扩展市场 | 成功；体积/内存长期被批评，但生态赢了 | 「够快 + 生态」可以压过「最快」 |
 | **Cursor** | VS Code 衍生（闭源） | 直接继承 VS Code 的编辑器和扩展生态 | 商业成功；受制于上游（Electron/VS Code） | 复用前端是合法策略 |
-| **Windsurf** | Electron 42 + VS Code 1.126 底座 | 同上 | 2026 年品牌并入 Devin Desktop，底座仍是 VS Code | 「换皮」也要背 Electron |
+| **Windsurf** | Electron 42 + VS Code 1.126 底座 | 同上 | 页面已以 **Devin Desktop (Windsurf)** 名义更新，底座仍是 VS Code | 「换皮」也要背 Electron |
 | **Zed** | Rust + 自研 GPUI（GPU） | Atom/Electron 到了平台天花板 | 2017 决定重写，2026-04 才 1.0；5 年、>100 万行 | 原生重写的真实价格 |
 | **Warp** | Rust（仓库含 Cargo.toml/.rustfmt.toml） | 终端要低延迟、GPU 渲染 | 成功；闭源转开源（2026） | 终端类产品必须原生 |
 | **Raycast** | Swift/AppKit → 2026 跨平台重写为 Swift/C# 壳 + TS/React + Node + Rust | 原生 macOS 到 Windows 要重写；Windows 原生 UI 不可靠 | 2026-05 v2 beta；内存 200–300 MB → **350–450 MB** | **最像本项目的先例**（见 §2.4） |
-| **1Password 8** | Rust core + Electron（Win/Linux/macOS）+ SwiftUI（iOS）+ 原生 Android | 4 套原生栈协作瘫痪；统一 core 提速度 | 功能成功；macOS 原生派不满；内存上升 | 「共享 core + Web UI」是成熟解 |
+| **1Password 8** | Rust core + Electron（Win/Linux/macOS）+ SwiftUI（iOS）+ 原生 Android | 4 套原生栈协作瘫痪；统一 core 提速度 | 功能成功；Electron 化在 macOS 原生派中口碑分化 | 「共享 core + Web UI」是成熟解 |
 | **Obsidian / Slack / Discord / Notion** | Electron | 富文本/实时/跨平台，一套代码 | 均在 Electron 名录；体积/内存是长期税 | Web 技术赢在「内容型 UI」 |
-| **Linear** | Web（React）+ Electron 桌面壳 | Web 优先、极致交互 | 成功；桌面壳只是容器 | 桌面壳可以极薄 |
+| **Linear** | Web 优先 + Electron 桌面壳 | Web 优先、极致交互 | 成功；桌面壳只是容器 | 桌面壳可以极薄 |
 | **GitHub Desktop** | Electron + TypeScript + React | 跨平台、复用 GitHub 前端 | 成功；但从不以性能为卖点 | 工具型客户端可以接受 Electron |
 | **Figma** | C++ → WebAssembly + WebGL；桌面为 Electron 壳 | 浏览器里跑原生级 2D 引擎 | 成功；加载时间 **3×** 提升（2017） | Web 也能承载重引擎（WASM） |
 | **JetBrains Fleet** | JVM + 自研 Skia 渲染 | 想要比 IntelliJ 轻的新 IDE 家族 | **2025-12-22 停止分发**，团队转做 Air | 自研渲染挡不住产品定位失败 |
 | **Claude Desktop** | Electron（无官方技术页，证据 C） | 复用 claude.ai Web 前端 | 成功；与 Web 版同源 | AI 客户端默认走 Web 壳 |
-| **Codex** | CLI（Rust 仓库）+ `codex app` 桌面端 | 终端优先，再补桌面 | 2026 仍在扩张 | 同一产品可以多前端 |
+| **Codex** | CLI（仓库含 `codex-rs`）+ `codex app` 桌面端 | 终端优先，再补桌面 | 2026 仍在扩张 | 同一产品可以多前端 |
 
 ### 2.1 VS Code / Cursor / Windsurf：为什么十几年没换
 
 - VS Code 官方 FAQ 至今把 Electron 当既定事实：排障条目直接写「VS Code 用的 Electron shell 在部分 GPU 上会白屏，用 `--disable-gpu`」。这说明到 2026 年它仍是 Electron 架构，没有换栈计划：https://code.visualstudio.com/docs/supporting/faq
 - VS Code 的成功不在「快」，在「扩展生态 + 跨平台 + 一套 UI」；它的启动/内存长期被批评，但用户为生态留下。
 - **Cursor** 是 VS Code 的衍生（闭源，官方文档不披露栈）：https://cursor.com/docs 。它证明「复用成熟前端底座」是合法商业策略——这与 `UIPLAN.md` Q2 的「先复用官方 MIT 前端包」同构。
-- **Windsurf** 的更新日志把栈写得很直白：`Fixed Electron 42.11.16 and Node.js 24.22.1 ...`、`Updated the base IDE to VS Code 1.126`（2026 年已并入 Devin Desktop 品牌）：https://windsurf.com/changelog
+- **Windsurf** 的更新日志把栈写得很直白：`Fixed Electron 42.11.16 and Node.js 24.22.1 ...`、`Updated the base IDE to VS Code 1.126`（页面现在以 **Devin Desktop (Windsurf)** 名义更新）：https://windsurf.com/changelog
 - **结论**：VS Code 系不是「不知道 Electron 重」，而是「重不是它的约束」。它的约束是扩展生态和跨平台一致性——这两条恰好是 DSH 不需要背的（我们只有 8–12 个槽，不做插件市场）。
 
 ### 2.2 Zed：从 Electron 重写到 Rust 原生，代价写得最诚实
@@ -220,7 +220,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 
 - Electron 官方应用名录同时列出 **Slack、Discord、Notion、Obsidian、Figma、1Password、Signal、WhatsApp**：https://www.electronjs.org/apps
 - 它们的共同点：UI 是「富文本 + 列表 + 实时消息」，不是「像素级自绘」；Web 的排版、输入法、无障碍、Markdown、emoji、粘贴图片全是现成的。
-- **Linear** 是 Web 优先（React），桌面端只是 Electron 容器：https://linear.app 。它证明「桌面壳可以极薄，产品价值在 Web 层」。
+- **Linear** 是 Web 优先，桌面端只是 Electron 容器（官方未单独披露，证据 B）：https://linear.app 。它证明「桌面壳可以极薄，产品价值在 Web 层」。
 - 代价也一致：安装体积、内存、启动都高于原生；但这些产品都不把「启动 200 ms」当卖点。
 
 ### 2.7 GitHub Desktop：Electron 的「够用」先例
@@ -254,7 +254,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 | **Continue** | VS Code / JetBrains 扩展 | https://www.continue.dev/ |
 | **Aider** | Python CLI + **实验性浏览器 UI** | https://aider.chat/docs/usage/browser.html |
 
-**规律**：AI coding agent 的「桌面端」几乎全部是 **Web 技术 + 系统 WebView/Electron**，没有一个是纯 Go/Qt 自绘。原因不是它们不懂原生，而是**界面里 80% 是聊天/代码/Markdown/工具卡**——这正是 Web 排版引擎的主场。唯一的例外是 Codex 的 CLI 用 Rust，因为那是终端而不是 GUI。
+**规律**：AI coding agent 的「桌面端」几乎全部是 **Web 技术 + 系统 WebView/Electron**，没有一个是纯 Go/Qt 自绘。原因不是它们不懂原生，而是**界面里 80% 是聊天/代码/Markdown/工具卡**——这正是 Web 排版引擎的主场。唯一的例外是 Codex 的 CLI（仓库含 `codex-rs`），因为那是终端而不是 GUI。
 
 ---
 
