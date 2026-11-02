@@ -11,11 +11,8 @@ import (
 	"dshgo/internal/spi"
 )
 
-// Block 是模型可见的内容块，对应 v4 里 content[] 的元素（目前只有 text）。
-type Block struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
+// Block 就是 spi.Block：内容块只有一份定义，避免会话层与 agent 层各自漂移。
+type Block = spi.Block
 
 // ProjectResult 把内部 Result 投影成会话边界上的 content[]。
 //

@@ -11,7 +11,8 @@
 - ✅ **M0 完成**：内核四件事（Scope/Registry/Bus/Assemble）+ 工具 SPI + 装配器 + CLI；`scripts/check.sh` 全绿，CI（windows-latest，含 `-race`）绿
 - 🚧 **M1 收口**：工具层已齐（`read/write/edit/glob/grep/shell/job_*` 共 9 个），流水线 + 投影 + schema 快照 + token 实测（**906**）都已落地
 - 🚧 **M2 进行中**：`codecs/v4` **双向可用** —— 解码吃了 116 个真实会话，编码产物 Node（`node:zlib` zstd）逐帧读通
-- `internal/llm` 已真机跑通（分片 6 / reasoning 290B / usage 上报）；下一步 agent turn/step 双循环 → 会话写入接 codec
+- **M2 基本完成**：`dshd run` 端到端可跑 —— 模型 → 工具 → 结果回灌 → 落 v4 会话；Go 读回与 Node 读通都验过
+- 下一步 **M3**：ACP 服务端（stdio JSON-RPC），验收 = Martty 连上并收到 reasoning
 
 ---
 

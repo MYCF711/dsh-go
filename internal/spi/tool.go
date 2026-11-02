@@ -108,3 +108,9 @@ const (
 	EventToolPostExecute = "tools/post-execute"
 	EventToolResult      = "tools/result"
 )
+
+// Block 是模型可见的内容块（agent 层投影的产物，会话层原样落盘）。
+type Block struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}

@@ -10,6 +10,32 @@
 
 ---
 
+## 0.2.1-go.5 · M2-d — 2026-11-02
+
+**会话写入路径接通：`dshd run` 真的落一个 v4 文件，Go 与 Node 都读得动。**
+
+- `internal/session/log.go`
+  - `CreateSession(home, cwd, id, preset)` → `<home>/sessions/<projectKey>/<segment>/session.v4.jsonl.zstd`
+  - `Append(type, data)` 分配 seq（文件内连续）并落一帧
+  - 事件构造器按**真实语料**抄形状：`user/message`（content/source/role/id + surfaceOp）、
+    `assistant/message`（turn/step/message/stream/usage + surfaceOp）、`tool/call`（arguments 是 JSON 字符串）、
+    `tool/result`（message.role=tool + toolCallId + isError + sourceEventSeqs）
+- agent 循环新增 `assistant/message` 事件（带完整响应与 usage），供会话层落盘
+- `dshd run` 现在边跑边写会话，结束时打印路径与事件数
+
+**实测**
+```
+dshd run --prompt "用 glob 数 .go 文件" → 12 事件，路径 .../--D-DeepSeek~0020Harness-default-workspace-DSH-GO--/session-.../session.v4.jsonl.zstd
+Go 读回：12 事件 / 2 帧
+Node  读：13 帧 / 13 行 / 4485 字节，header OK
+```
+
+**已知差异（待对齐）**
+- `assistant/message.stream` 只写 `{type:"finish",reason}`，缺 `replayState` 等回放细节；
+- `usage` 写的是**单步** token，DSH 的真实语料里 `totalTokens` 是**累计**值；
+- 一事件一帧（DSH 是 200ms 批窗口），本地写放大但语义等价。
+
+---
 ## 0.2.1-go.5 · M2-c — 2026-11-02
 
 **LLM 流式客户端（OpenAI 兼容），真机跑通 reasoning 增量。**

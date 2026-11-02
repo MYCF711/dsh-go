@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,7 +11,10 @@ import (
 	"sort"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/agent"
 	"dshgo/internal/kernel"
+	"dshgo/internal/llm"
+	"dshgo/internal/session"
 	"dshgo/internal/spi"
 	"dshgo/modules/exec/bash"
 	"dshgo/modules/fs/local"
@@ -59,6 +63,8 @@ func main() {
 		err = cmdTools(os.Args[2:])
 	case "session":
 		err = cmdSession(os.Args[2:])
+	case "run":
+		err = cmdRun(os.Args[2:])
 	case "version":
 		fmt.Printf("dshd %s\n", version)
 	case "-h", "--help", "help":
@@ -83,6 +89,7 @@ func usage() {
   dshd exec --tool <name> --args <json>      装配后执行一个工具
   dshd tools [--manifest dsh.toml]           打印模型看到的工具表（JSON）
   dshd session rewrite --in <f> --out <f>     把 v4 会话读进来再用我们的编码器写出去（验证兼容用）
+  dshd run --prompt "<话>" [--max-steps N]    跑一个真实 turn（模型 + 工具 + 结果回灌）
   dshd version                               版本
 `)
 }
@@ -186,6 +193,145 @@ func cmdTools(argv []string) error {
 	fmt.Println(string(out))
 	fmt.Fprintf(os.Stderr, "工具 %d 个，%d 字节\n", len(table), len(out))
 	return nil
+}
+
+// cmdRun 跑一个真实 turn：装配 → 模型 → 工具 → 回灌 → 收尾。
+//
+// 这是 M2 的验收动作：它同时踩到装配、工具流水线、LLM 流式、agent 双循环四条线。
+func cmdRun(argv []string) error {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	manifest := fs.String("manifest", "dsh.toml", "manifest 路径")
+	prompt := fs.String("prompt", "", "用户输入")
+	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "模型 id")
+	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
+	maxSteps := fs.Int("max-steps", 8, "最多几步")
+	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if *prompt == "" {
+		return fmt.Errorf("缺 --prompt")
+	}
+
+	mods, err := loadMods(*manifest)
+	if err != nil {
+		return err
+	}
+	k := kernel.New("dshd")
+	root := k.Root()
+	defer root.Dispose()
+	if _, err := kernel.Assemble(root, mods); err != nil {
+		return err
+	}
+	reg, err := kernel.Inject(root, spi.ToolsKey)
+	if err != nil {
+		return err
+	}
+	runner, err := kernel.Inject(root, spi.ToolRunnerKey)
+	if err != nil {
+		return err
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	sessID := "session-" + session.NewID()
+	logw, err := session.CreateSession(*home, cwd, sessID, "standard")
+	if err != nil {
+		return err
+	}
+	defer logw.Close()
+	if err := logw.Append("turn/start", session.TurnStartData(1)); err != nil {
+		return err
+	}
+	if err := logw.Append("user/message", session.UserMessage([]spi.Block{{Type: "text", Text: *prompt}})); err != nil {
+		return err
+	}
+	var lastCallSeq int64
+
+	loop := &agent.Loop{
+		Chat:     llm.New(*base, os.Getenv("DSHD_LLM_KEY")),
+		Tools:    reg,
+		Runner:   runner,
+		Project:  session.ProjectResult,
+		Model:    *model,
+		System:   "你在 dsh-go 宿主里工作。需要信息就调用工具，不要猜。",
+		MaxSteps: *maxSteps,
+		Emit: func(e agent.Event) error {
+			switch e.Kind {
+			case agent.EventAssistantMsg:
+				a := e.Assistant
+				blocks := make([]map[string]any, 0, 1+len(a.ToolCalls))
+				if a.Content != "" {
+					blocks = append(blocks, session.TextBlock(a.Content))
+				}
+				for _, tc := range a.ToolCalls {
+					blocks = append(blocks, session.ToolCallBlock(tc.ID, tc.Function.Name, tc.Function.Arguments))
+				}
+				var usage map[string]any
+				if a.Usage != nil {
+					usage = map[string]any{
+						"inputTokens":  a.Usage.PromptTokens,
+						"outputTokens": a.Usage.CompletionTokens,
+						"totalTokens":  a.Usage.TotalTokens,
+					}
+				}
+				return logw.Append("assistant/message",
+					session.AssistantMessageEvent(e.Turn, e.Step, blocks, a.Finish, usage))
+			case agent.EventToolCall:
+				lastCallSeq = logw.Seq()
+				if err := logw.Append("tool/call",
+					session.ToolCallEvent(e.Turn, e.Step, e.CallID, e.ToolName, e.Arguments)); err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "  → %s %s\n", e.ToolName, truncate(e.Arguments, 120))
+			case agent.EventToolResult:
+				code := "ok"
+				if e.IsError {
+					code = "ERR"
+				}
+				fmt.Fprintf(os.Stderr, "  ← %s [%s]\n", e.ToolName, code)
+				var blocks []spi.Block
+				if e.Result != nil {
+					blocks = session.ProjectResult(*e.Result)
+				} else {
+					blocks = []spi.Block{{Type: "text", Text: "（无结果）"}}
+				}
+				return logw.Append("tool/result",
+					session.ToolResultEvent(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}))
+			case agent.EventTurnEnd:
+				return logw.Append("turn/end", session.TurnEndData(e.Turn, "completed", ""))
+			}
+			return nil
+		},
+	}
+
+	hist, err := loop.Run(context.Background(), 1, []llm.Message{{Role: "user", Content: *prompt}})
+	if err != nil {
+		return err
+	}
+	if err := logw.Close(); err != nil {
+		return err
+	}
+	last := hist[len(hist)-1]
+	fmt.Println(last.Content)
+	fmt.Fprintf(os.Stderr, "会话：%s（%d 事件）\n", logw.Path, logw.Seq())
+	return nil
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // cmdSession 目前只有一个子命令 rewrite：读→写，用来验证我们的编码器，
