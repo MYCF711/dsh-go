@@ -17,10 +17,11 @@ import (
 //
 // 它只做两件事：分配 seq、把 payload 落成一行 JSON。帧怎么切、什么时候 fsync 由 codec 负责。
 type Log struct {
-	w    *v4.Writer
-	Path string
-	seq  int64
-	now  func() time.Time
+	w        *v4.Writer
+	Path     string
+	seq      int64
+	now      func() time.Time
+	lockPath string // 非空时 Close 要把它删掉
 }
 
 // CreateSession 在 <home>/sessions/<projectKey>/<sessionId>/ 下新建会话文件。
@@ -77,7 +78,14 @@ func (l *Log) Append(eventType string, data any) error {
 }
 
 // Close 关闭文件。
-func (l *Log) Close() error { return l.w.Close() }
+func (l *Log) Close() error {
+	err := l.w.Close()
+	if l.lockPath != "" {
+		os.Remove(l.lockPath)
+		l.lockPath = ""
+	}
+	return err
+}
 
 // Seq 返回已写事件数。
 func (l *Log) Seq() int64 { return l.seq }

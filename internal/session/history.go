@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -115,12 +116,42 @@ func OpenSession(home, cwd, id string) (*Log, error) {
 	if back.Header.ID != id {
 		return nil, fmt.Errorf("文件里的会话 id 是 %q，与请求的 %q 不符", back.Header.ID, id)
 	}
-	w, err := v4.OpenAppend(path)
-	if err != nil {
+	if err := claimWriter(path); err != nil {
 		return nil, err
 	}
-	return &Log{w: w, Path: path, seq: int64(len(back.Events)), now: time.Now}, nil
+	w, err := v4.OpenAppend(path)
+	if err != nil {
+		releaseWriter(path)
+		return nil, err
+	}
+	lg := &Log{w: w, Path: path, seq: int64(len(back.Events)), now: time.Now}
+	lg.lockPath = path + ".lock"
+	return lg, nil
 }
+
+// claimWriter 保证**同一时刻只有一个进程在写一份会话**。
+//
+// 为什么必须有：两个进程各自"读到 N 条 → 从 N 接着编号"，
+// 写出来的日志里会**出现重复 seq**（实测：9 条事件 3 个重复）。
+// seq 是 surface 与压缩遮蔽的排序依据，重复意味着顺序不确定——
+// 这比"拒绝打开"糟糕得多。所以宁可明确拒绝。
+func claimWriter(path string) error {
+	lock := path + ".lock"
+	f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("会话正被另一个进程写入（锁文件 %s）；"+
+				"确认没有别的 dshd 在用这份会话后删掉它再 resume", lock)
+		}
+		return fmt.Errorf("建写锁失败: %w", err)
+	}
+	fmt.Fprintf(f, "pid=%d"+string(rune(10))+"at=%s"+string(rune(10)),
+		os.Getpid(), time.Now().Format(time.RFC3339))
+	f.Close()
+	return nil
+}
+
+func releaseWriter(path string) { os.Remove(path + ".lock") }
 
 // SessionPath 按 v4 的目录规则算出会话文件路径。
 func SessionPath(home, cwd, id string) (string, error) {
