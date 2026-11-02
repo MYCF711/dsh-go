@@ -49,8 +49,11 @@ func (c Caps) NeedsApproval() bool {
 // 注意与 DSH 的差异：DSH 只有 {isError, content[], meta?}，会话 v4 也只认这个形状。
 // 所以结构化是我们的内部契约，v4 是**边界上的编码**——由投影函数把 Data 压成 content。
 type Result struct {
-	Summary   string      // 一行，给人看（TUI/桌面端）
-	Data      any         // 结构化，给模型
+	Summary string // 一行，给人看（TUI/桌面端）
+	Data    any    // 结构化，给模型
+	// Text 是**已经渲染好的**模型可见正文。非空时投影只用它，不再拼 Summary+JSON。
+	// 用它来对齐 DSH 的呈现约定（例如 read 的 <path>/<content> 包裹）。
+	Text      string
 	Artifacts []Artifact  // 大结果外置后的引用
 	Truncated *Truncation // 发生截断时的证据
 	Hint      string      // 失败或为空时的下一步建议

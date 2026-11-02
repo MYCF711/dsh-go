@@ -79,7 +79,16 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		verb = "新建"
 	}
 	summary := fmt.Sprintf("%s %s（%d 字节，原 %d 字节）", verb, p.Path, p.Bytes, size)
-	return spi.Result{Summary: summary, Data: p}, nil
+	action := "Updated file"
+	if p.Created {
+		action = "Created file"
+	}
+	text := "<path>" + p.Path + "</path>" + "\n" +
+		"<type>file</type>" + "\n" +
+		"<content>" + "\n" +
+		action + "\n" +
+		"</content>"
+	return spi.Result{Summary: summary, Data: p, Text: text}, nil
 }
 
 // Module 返回装配用的模块描述。

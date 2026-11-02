@@ -22,14 +22,20 @@ type Block = spi.Block
 func ProjectResult(r spi.Result) []Block {
 	out := make([]Block, 0, 4)
 
-	if s := r.Summary; s != "" {
-		out = append(out, Block{Type: "text", Text: s})
-	}
-	if r.Data != nil {
-		if b, err := json.Marshal(r.Data); err == nil && len(b) > 0 {
-			out = append(out, Block{Type: "text", Text: string(b)})
+	// 工具自己渲染好了就用它的（对齐 DSH 的呈现约定），否则退回 Summary+JSON。
+	if r.Text != "" {
+		out = append(out, Block{Type: "text", Text: r.Text})
+	} else {
+		if r.Summary != "" {
+			out = append(out, Block{Type: "text", Text: r.Summary})
+		}
+		if r.Data != nil {
+			if b, err := json.Marshal(r.Data); err == nil && len(b) > 0 {
+				out = append(out, Block{Type: "text", Text: string(b)})
+			}
 		}
 	}
+
 	if r.Truncated != nil {
 		out = append(out, Block{
 			Type: "text",

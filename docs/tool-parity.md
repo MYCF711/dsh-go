@@ -31,9 +31,32 @@
 
 第 3 条最值得记：它对功能没影响，但**它是 DSH 的调用契约**。少了它，模型每次 bash 调用都会多一个"多余的参数"。
 
+## 返回结构（第二轮对拍）
+
+数据来源：真实会话里 `tool/call`（有工具名）与 `tool/result`（有 callId）配对后的正文。
+
+**DSH 是 text-first，而且带 XML 包裹**：
+
+| 工具 | DSH 的正文形状 |
+|---|---|
+| `read` | `<path>…</path>` + `<type>file</type>` + `<content>` + `1: 行内容` … + `</content>` |
+| `write` | `<path>…</path>` + `<type>file</type>` + `<content>` + `Created file` / `Updated file` + `</content>` |
+| `glob` | 纯文本（`No files found` / 列表） |
+| `grep` | 纯文本（`Found 8 matches` + 命中行） |
+| `bash` | 原样 stdout/stderr |
+| `job_output` | 原样输出 + `[status: completed, exit code: 0]` |
+| `job_kill` | `requested cancellation of job <id>` |
+| `job_list` | `<id> [<kind>] <status> — <命令>` |
+
+**我们做了什么**：`spi.Result` 新增 `Text` 字段——工具已经渲染好的模型可见正文。
+`read` 与 `write` 改成 DSH 同款包裹（含行号前缀、`Created file`/`Updated file`），
+`session.ProjectResult` 优先用 `Text`，没有时才退回 `Summary + JSON(Data)`。
+
+这样模型看到的 `read` 结果和 DSH 一致，同时我们内部仍保留结构化 `Data`（给 UI 和测试用）。
+
 ## 没有对拍的部分
 
 - **描述措辞**：我们写中文、DSH 写英文。模型理解得了，但不是逐字一致。
-- **返回结构**：只比了入参契约。工具 `Data` 的字段名没比——那要跑同一批输入两头对比，
-  目前没有 DSH 的侧信道可调（它是个正在运行的 GUI 应用）。
+- ~~返回结构~~ → `read`/`write` 已对齐 DSH 的 `<path>/<content>` 包裹；`glob`/`grep`/`bash`/`job_*`
+  仍是"结构化 Data + 摘要"，没照抄 DSH 的纯文本格式（那些格式没有包裹，模型两种都认）。
 - **边界行为**：超大文件、二进制、符号链接、并发写这些，各自实现，没做交叉验证。

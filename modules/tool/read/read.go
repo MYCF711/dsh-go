@@ -113,6 +113,18 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		Truncated:  end < total,
 	}
 	summary := fmt.Sprintf("%s 第 %d-%d 行（共 %d 行）", p.Path, start, end, total)
+
+	// 模型可见正文对齐 DSH：<path>/<type>/<content> 包裹 + 行号前缀。
+	var rendered strings.Builder
+	rendered.WriteString("<path>" + p.Path + "</path>" + "\n")
+	rendered.WriteString("<type>file</type>" + "\n")
+	rendered.WriteString("<content>" + "\n")
+	if start <= total {
+		for i := start; i <= end; i++ {
+			fmt.Fprintf(&rendered, "%d: %s\n", i, lines[i-1])
+		}
+	}
+	rendered.WriteString("</content>")
 	hint := ""
 	if end < total {
 		hint = fmt.Sprintf("还有 %d 行没读；用 offset=%d 继续", total-end, end+1)
@@ -120,6 +132,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	return spi.Result{
 		Summary: summary,
 		Data:    p,
+		Text:    rendered.String(),
 		Hint:    hint,
 		View: &spi.ViewSpec{
 			Kind:  spi.ViewPlain,

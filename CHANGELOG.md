@@ -1,3 +1,23 @@
+## 0.2.1-go.7（未发布）· 续 6
+
+**返回结构对拍：`read` / `write` 改成 DSH 的 XML 包裹。**
+
+从真实会话里配对 `tool/call` 与 `tool/result` 后看到的 DSH 形状：
+
+```
+read : <path>a.md</path><type>file</type><content>1: ...</content>
+write: <path>...</path><type>file</type><content>Created file</content>
+```
+
+- `spi.Result` 新增 `Text`（工具渲染好的模型可见正文）；`session.ProjectResult` **Text 优先**，
+  没有时才退回 `Summary + JSON(Data)`
+- `read`：包裹 + **行号前缀**（`1: `），offset/limit 生效
+- `write`：包裹 + `Created file` / `Updated file`
+
+模型看到的样子和 DSH 一致，内部仍保留结构化 `Data`（UI/测试用）。
+其余工具（glob/grep/bash/job_*）保持"结构化 + 摘要"——DSH 那几种没有包裹，两种形状模型都认。
+
+---
 ## 0.2.1-go.7（未发布）· 续 5
 
 **工具契约对拍：拿 DSH 发给模型的那张表，逐项比。**
