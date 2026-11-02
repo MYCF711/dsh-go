@@ -3,6 +3,7 @@ package watch
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -44,5 +45,71 @@ func TestAckWithoutAnyWatcher(t *testing.T) {
 	}
 	if res.Hint == "" {
 		t.Fatal("Hint 不能为空")
+	}
+}
+
+// 水位跳过去 = 那些编号再也不会被当成新活。
+// 一次 ack [15] 会静默吞掉 4..14，所以必须把跳过的算出来写在 Summary 里。
+func TestAckReportsSkippedNumbers(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	if _, err := mk(dir, kindStart).Exec(ctx, json.RawMessage(`{"repo":"o/n"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[3]}`)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[15]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Summary, "跳过 11 个编号") {
+		t.Fatalf("Summary 要说清跳过了多少: %q", res.Summary)
+	}
+	if !strings.Contains(res.Summary, "4-14") {
+		t.Fatalf("连续编号要压成区间: %q", res.Summary)
+	}
+	if res.Hint == "" {
+		t.Fatal("跳过时必须给一句怎么做（现在改还来得及）")
+	}
+	m, _ := res.Data.(map[string]any)
+	if m["skipped_count"] != 11 {
+		t.Fatalf("skipped_count = %v，期望 11", m["skipped_count"])
+	}
+}
+
+// 连续 ack 不跳号时不该有噪音。
+func TestAckWithoutGapHasNoSkipNote(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	if _, err := mk(dir, kindStart).Exec(ctx, json.RawMessage(`{"repo":"o/n"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[1,2]}`)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[3,4]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Summary, "跳过") {
+		t.Fatalf("没跳号却报了跳过: %q", res.Summary)
+	}
+}
+
+func TestSpanText(t *testing.T) {
+	cases := []struct {
+		in   []int
+		want string
+	}{
+		{[]int{4, 5, 6, 9}, "4-6、9"},
+		{[]int{7}, "7"},
+		{[]int{1, 2, 3}, "1-3"},
+		{nil, ""},
+	}
+	for _, c := range cases {
+		if got := spanText(c.in); got != c.want {
+			t.Fatalf("spanText(%v) = %q，期望 %q", c.in, got, c.want)
+		}
 	}
 }

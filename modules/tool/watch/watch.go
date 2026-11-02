@@ -400,6 +400,32 @@ func (t *Tool) stop(_ context.Context, raw json.RawMessage) (spi.Result, error) 
 
 // ---------------------------------------------------------------- watch_ack
 
+// spanText 把一串连续编号压成人能读的短形式：4,5,6,9 → "4-6、9"。
+func spanText(nums []int) string {
+	if len(nums) == 0 {
+		return ""
+	}
+	var parts []string
+	start, prev := nums[0], nums[0]
+	flush := func() {
+		if start == prev {
+			parts = append(parts, fmt.Sprintf("%d", start))
+			return
+		}
+		parts = append(parts, fmt.Sprintf("%d-%d", start, prev))
+	}
+	for _, n := range nums[1:] {
+		if n == prev+1 {
+			prev = n
+			continue
+		}
+		flush()
+		start, prev = n, n
+	}
+	flush()
+	return strings.Join(parts, "、")
+}
+
 func (t *Tool) ack(_ context.Context, raw json.RawMessage) (spi.Result, error) {
 	var a ackArgs
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -461,8 +487,26 @@ func (t *Tool) ack(_ context.Context, raw json.RawMessage) (spi.Result, error) {
 		}
 	}
 
+	// 水位跳过去的编号**永远不会再被当成新活**。
+	// 一次 ack [15] 会静默吞掉 4..14 —— 这比多处理一批更难发现，
+	// 所以把"跳过了哪些"算出来，写在人看的那一行里。
+	acked := make(map[int]bool, len(nums))
+	for _, n := range nums {
+		acked[n] = true
+	}
+	var skipped []int
+	for n := prev + 1; n <= w.Watermark; n++ {
+		if !acked[n] {
+			skipped = append(skipped, n)
+		}
+	}
+
+	summary := fmt.Sprintf("%s 水位 %d → %d", w.Repo, prev, w.Watermark)
+	if len(skipped) > 0 {
+		summary += fmt.Sprintf("（跳过 %d 个编号：%s）", len(skipped), spanText(skipped))
+	}
 	res := spi.Result{
-		Summary: fmt.Sprintf("%s 水位 %d → %d", w.Repo, prev, w.Watermark),
+		Summary: summary,
 		Data: map[string]any{
 			"action":             "ack",
 			"repo":               w.Repo,
@@ -470,7 +514,13 @@ func (t *Tool) ack(_ context.Context, raw json.RawMessage) (spi.Result, error) {
 			"watermark":          w.Watermark,
 			"previous_watermark": prev,
 			"advanced":           advanced,
+			"skipped":            skipped,
+			"skipped_count":      len(skipped),
 		},
+	}
+	if len(skipped) > 0 {
+		res.Hint = fmt.Sprintf("水位跳过了 %s：这些编号以后不会再被当成新活。"+
+			"如果它们还没处理，现在就是最后的机会（把水位调回来要手改 %s）", spanText(skipped), t.st.display())
 	}
 	if !advanced {
 		res.Hint = fmt.Sprintf("这批编号都不超过现有水位 %d：可能已经记过账，不用重试；真要往前推，先确认编号没抄错", prev)
