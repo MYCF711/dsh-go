@@ -1,3 +1,22 @@
+## 0.2.1-go.16（未发布）· 续 3
+
+**截断说明从"中间省略 N 字符"改成可以直接执行的 offset/limit。**
+
+```
+…（第 102–1172 行已省略；取回：read offset=102 limit=1071；
+   或从 tmp/omit2/artifacts/spill-0001-….json 取全文）…
+```
+
+- 认得 `N: 内容` 这种渲染格式，从头部最后一行号 + 尾部第一行号推出省略区间
+- 没有行号的输出（`bash` 原始输出）不瞎编行号，退回字符数 + 指针
+- 真机验证：模型复述了 102–1172 并主动提议补读
+
+**为什么值**：一次工具调用的固定开销 5–6k token（`docs/token-budget.md` §6），
+把"猜区间再试探"变成"一次精确调用"，省的就是这一次。
+
+新增测试：`TestOmittedNoticeGivesExactOffsets`、`TestOmittedNoticeFallsBackWithoutLineNumbers`。
+
+---
 ## 0.2.1-go.16（未发布）· 续 2
 
 **工具结果不再被 JSON 转义：`bash` 直接给原始输出。**

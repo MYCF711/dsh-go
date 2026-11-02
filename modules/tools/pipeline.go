@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -204,16 +205,78 @@ func (p *Pipeline) spillText(res *spi.Result, over bool, pointer string) {
 
 	var b strings.Builder
 	b.WriteString(string(keepHead))
-	b.WriteString("\n…（中间省略 " + itoa(total-head-tail) + " 字符")
-	if pointer != "" {
-		b.WriteString("，全文在 " + pointer)
-	}
-	b.WriteString("）…\n")
+	b.WriteString("\n" + omittedNotice(string(keepHead), string(keepTail), total-head-tail, pointer) + "\n")
 	b.WriteString(string(keepTail))
 	res.Text = b.String()
 	if res.Truncated == nil {
 		res.Truncated = &spi.Truncation{Kept: head + tail, Total: total, Pointer: pointer}
 	}
+}
+
+// omittedNotice 写省略说明。
+//
+// 带行号的输出（read/grep 渲染成 "N: 内容"）要说清**省略了哪几行、怎么一次取回**。
+// 不然模型只知道"中间少了东西"，要么再试探一次，要么干脆放弃。
+// 一次精确调用 vs 两次试探，差 5–6k token（见 docs/token-budget.md §6）。
+func omittedNotice(head, tail string, omitted int, pointer string) string {
+	from, to, ok := omittedLineRange(head, tail)
+	if ok && to >= from && from > 0 {
+		return fmt.Sprintf("…（第 %d–%d 行已省略；取回：read offset=%d limit=%d%s）…",
+			from, to, from, to-from+1, pointerSuffix(pointer))
+	}
+	if pointer != "" {
+		return fmt.Sprintf("…（中间省略 %d 字符，全文在 %s）…", omitted, pointer)
+	}
+	return fmt.Sprintf("…（中间省略 %d 字符）…", omitted)
+}
+
+// omittedLineRange 从头部最后一行号与尾部第一行号，推出被省略的行区间。
+func omittedLineRange(head, tail string) (int, int, bool) {
+	lastHead := lastLineNumber(head)
+	firstTail := firstLineNumber(tail)
+	if lastHead == 0 || firstTail == 0 {
+		return 0, 0, false
+	}
+	return lastHead + 1, firstTail - 1, true
+}
+
+func lastLineNumber(s string) int {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if n, ok := lineNumber(lines[i]); ok {
+			return n
+		}
+	}
+	return 0
+}
+
+func firstLineNumber(s string) int {
+	for _, ln := range strings.Split(s, "\n") {
+		if n, ok := lineNumber(ln); ok {
+			return n
+		}
+	}
+	return 0
+}
+
+// lineNumber 认 "123: 内容" 这种渲染格式（行号最多 9 位）。
+func lineNumber(line string) (int, bool) {
+	i := strings.Index(line, ": ")
+	if i <= 0 || i > 9 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(line[:i])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func pointerSuffix(pointer string) string {
+	if pointer == "" {
+		return ""
+	}
+	return "；或从 " + pointer + " 取全文"
 }
 
 func minInt(a, b int) int {
