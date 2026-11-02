@@ -375,8 +375,15 @@
 - ⚠️ 它顺手指出我任务书里一句假话：Go 的 `os.WriteFile` 根本不翻译行尾，
   "这里要防 CRLF" 是我把 Python 的经验搬过来了。**注释里留一句假话，下一个人就会照着它做错事**
 - ⚠️ 快照只钉**形状**，不钉语义：`session.history` 与 `session.load` 的差别还没定
-- 下一步 **M93**：`session.history`（按 seq 增量补）与 `session.load`（首屏 + truncated）的语义差异定下来，
-  再进实现
+- ✅ **语义定下来了**（`internal/transport/history.go`，dshd 写，9 次调用）：`SelectPage` 一个纯函数两副面孔——
+  `PageTail`（`session.load` 用）返回**最后** limit 条 + `truncated`；
+  `PageSince`（`session.history` 用）只回 `Seq > sinceSeq` 的，**`truncated` 恒为 false**
+- ✅ 六条测试钉住：尾页截断 / 会话比 limit 短 / 增量边界 / sinceSeq 超出 / 空会话 / limit≤0 不限
+- ✅ 变异测试第 11 条 `page-since-off-by-one`（把 `>` 改成 `>=`）→ **CAUGHT**
+- ⚠️ dshd 主动提了个真问题：`SelectPage` **假定 `all` 已按 Seq 升序**，函数里没校验。
+  它是纯切片操作，校验会变成一遍扫描；而"真乱序时该报错还是该排序"是个产品决定。**这个决定留给我**
+- 下一步 **M94**：接上 `session.load` / `session.history` 的数据来源（`v4.ReadFile` → `Message`），
+  并在**调用点**处理"seq 可能不单调"这件事
 
 ### 界面线现状（2026-11-03）
 

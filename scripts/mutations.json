@@ -78,5 +78,13 @@
     "new": "\t\t\t_ = ok\n\t\t\treturn g.inner.Run(ctx, name, args)",
     "pkg": "./cmd/dshd",
     "test": "TestGuardedRunnerRefusalDoesNotExecute"
+  },
+  {
+    "name": "page-since-off-by-one",
+    "file": "internal/transport/history.go",
+    "old": "if m.Seq > sinceSeq {",
+    "new": "if m.Seq >= sinceSeq {",
+    "pkg": "./internal/transport",
+    "test": "TestSelectPage"
   }
 ]
