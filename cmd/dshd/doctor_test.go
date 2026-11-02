@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"dshgo/codecs/v4"
 )
@@ -228,6 +229,36 @@ func TestDiagOrWarnDoesNotCrash(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "logs"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if d := diagOrWarn(home); d != nil {
+		t.Fatal("拿不到日志应该返回 nil")
+	}
+}
+
+// 当天的日志文件本身只读（盘满/被改权限）：打开要失败、要能说清，
+// 但**不能因此影响干活**——记不了日志不是不干活的理由。
+func TestDiagFailsWhenLogFileReadOnly(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "dshd-"+time.Now().Format("2006-01-02")+".log")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Skip("这个平台改不了只读属性:", err)
+	}
+	defer os.Chmod(path, 0o644)
+
+	if d, err := openDiag(home); err == nil {
+		d.Close()
+		t.Skip("当前用户绕过只读属性，无法模拟")
+	} else if !strings.Contains(err.Error(), "日志") {
+		t.Fatalf("错误要说清是日志的问题: %v", err)
+	}
+
+	// 关键：拿不到日志只是警告，函数返回 nil 让调用方继续跑
 	if d := diagOrWarn(home); d != nil {
 		t.Fatal("拿不到日志应该返回 nil")
 	}
