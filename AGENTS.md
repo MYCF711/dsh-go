@@ -251,7 +251,15 @@
   `n <= w.Watermark` 的越界（挪到落盘前时它还是旧值），测试再次抓到
 - ✅ 真机：`← watch_ack [ok] 水位 0 → 3（跳过 2 个编号：1-2）` / `← watch_ack [ERR] 跳过了 11 个编号，需要 confirm_skip`
 - ⚠️ 靠阈值不靠事实；精确做法要 check 阶段把"见过的编号"落盘，还没做
-- 下一步 **M78**：`team_task_update` 的 delete 同理（删共享板上的条目，且没有历史）
+- ✅ **第 42 个工具 `spawn_teammate`**（dshd 自己写，202 行）：team 一族补齐——之前只有
+  send_message/wait_agent/list_agents/team_task_*，缺的正是"把队友建出来"。语料里 44 次，是最大缺口
+- ✅ 真机：`← spawn_teammate [ok] 已建队友 alice（fresh，第 1 个）`，重名返回 `[ERR] 队友 alice 已经存在（建于 …+08:00）`
+- ⚠️ **我自己接线写错**：把信箱目录当成了名单目录，队友名单落进 `state/mail/agents.json`。
+  靠 `find state -name agents.json` 才发现——**build 过 ≠ 落对地方**
+- ✅ 工具表 42 个：完整表 6,048 token（超 P0 的 6k），**默认压缩表 4,149**
+- ✅ **新增 `docs/dshd-shortboards.md`**：记它作为执行者的真实短板，比单测值钱
+- 下一步 **M80**：`team_task_update` 的 delete（删共享板条目且无历史），或把 shortboards 的教训
+  写成 dshd 任务书的固定模板
 
 ### 界面线现状（2026-11-03）
 
@@ -415,7 +423,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 其余 8 个渲染进程 | 378.6 / 182.0 / 43.0 / 42.8 / 42.7 / 42.3 / 38.4 / 2.9 MB | 同上（**每开一个窗口多一个**） |
 | 空转 CPU | **2.0%**（没在跑任务） | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 41 个 / 30,240 字节 / **5,426 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 42 个 / 31,630 字节 / 完整表 **6,048** token，**默认压缩表 4,149** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |

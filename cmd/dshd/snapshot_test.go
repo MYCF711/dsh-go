@@ -134,8 +134,10 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"team_task_update": {Writes: true},
 		// 会话间通信：发信写盘，读信与列会话只读。
 		"send_message": {Writes: true},
-		"wait_agent":   {},
-		"list_agents":  {},
+		// 写 <home>/state/team/agents.json：登记队友名单。
+		"spawn_teammate": {Writes: true},
+		"wait_agent":     {},
+		"list_agents":    {},
 		// 目标：读一个、写两个。
 		"get_goal":    {},
 		"create_goal": {Writes: true},

@@ -28,7 +28,7 @@
 | `team_task_create` | 58 | ❌ |
 | `grep` | 57 | ✅ |
 | `job_kill` | 50 | ✅ |
-| `spawn_teammate` | 44 | ❌ |
+| `spawn_teammate` | 44 | ✅（M79） |
 | `unlag_refresh` | 39 | ❌ |
 | `create_goal` | 37 | ❌ |
 | `team_task_list` | 32 | ❌ |

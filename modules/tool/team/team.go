@@ -446,7 +446,11 @@ func Module(dir string) kernel.Module {
 					return err
 				}
 			}
-			return nil
+			// spawn_teammate 写的是 <home>/state/team/agents.json，而 Module 的入参
+			// 是信箱目录 <home>/state/mail。**不能直接把 dir 传下去**——
+			// 踩过：队友名单落进了 state/mail/agents.json，和收件箱混在一起。
+			agentsDir := filepath.Join(filepath.Dir(dir), "team")
+			return reg.Register(&spawnTool{dir: agentsDir})
 		},
 	}
 }

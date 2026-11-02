@@ -683,6 +683,44 @@
     }
   },
   {
+    "name": "spawn_teammate",
+    "description": "在团队名单里登记一个具名队友，之后可以反复给它派任务而不用重述背景。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "队友名字：小写字母开头，只含小写字母/数字/连字符"
+        },
+        "description": {
+          "type": "string",
+          "description": "这个队友负责什么，最多 120 字"
+        },
+        "context": {
+          "type": "string",
+          "enum": [
+            "fresh",
+            "fork"
+          ],
+          "description": "可选，默认 fresh"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "给它的第一条任务"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "prompt"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
     "name": "subagent",
     "description": "把一件独立的事交给子代理跑（它有自己的上下文），只拿结果回来。",
     "parameters": {
