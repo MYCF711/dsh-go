@@ -32,6 +32,7 @@ import (
 	"dshgo/modules/tool/history"
 	"dshgo/modules/tool/present"
 	"dshgo/modules/tool/read"
+	"dshgo/modules/tool/readimage"
 	todo "dshgo/modules/tool/todo"
 	wdtool "dshgo/modules/tool/wd"
 	"dshgo/modules/tool/webfetch"
@@ -80,6 +81,7 @@ func builtinModules(wd, home string, maxChars int) []kernel.Module {
 		ask.Module(),
 		webfetch.Module(),
 		websearch.Module(),
+		readimage.Module(),
 	}
 }
 

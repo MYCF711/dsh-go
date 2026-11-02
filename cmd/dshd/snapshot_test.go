@@ -114,6 +114,8 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"web_fetch": {Network: true},
 		// 联网搜索，同样按 Network 走审批。
 		"web_search": {Network: true},
+		// 只读图片文件并把图交给模型，不写不跑不联。
+		"read_image": {},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {

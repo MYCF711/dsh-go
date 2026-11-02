@@ -342,6 +342,24 @@
     "caps": {}
   },
   {
+    "name": "read_image",
+    "description": "读取一张图片交给模型看（PNG/JPEG/WebP/GIF）。要看图时用，不要自己造缩略图。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "图片文件路径（相对当前工作目录）"
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "todo_write",
     "description": "记录或更新任务清单（整份替换）。多步骤工作时用它把计划摆出来、让人看得见进度。",
     "parameters": {

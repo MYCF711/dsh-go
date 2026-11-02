@@ -120,7 +120,10 @@
 - ⚠️ 顺序调整：`read_image` 不只是工具——图片进上下文要同时改 `spi.Block`、LLM 消息体、ACP 的 `image` 能力声明，先放后面单独做
 - ✅ P0 工具第 16 个 `web_search`（`modules/tool/websearch` + `modules/search`）：搜索做成 `spi.SearchProvider`，默认实现读 `DSHD_SEARCH_URL`
 - ✅ **没后端时明确报错**而不是返回"搜过了没结果"（后者会让模型以为网上真没有）；真机两条路都验过（ERR / ok）
-- 下一步 **M51**：`read_image` 要打通"图片进上下文"整条链路（`spi.Block` + LLM 消息体 + ACP `image` 能力）
+- ✅ P0 工具第 17 个 `read_image`（`modules/tool/readimage`）：按内容判类型、4MB 上限、图片不进日志（`json:"-"`）
+- ✅ 图片进模型整条链：`spi.Result.Images` → 循环紧跟一条 **user 消息**（tool 消息不能带图）→ `llm.Message` 有图时 content 变内容块数组
+- ✅ 决定性验证：把纯蓝图改名 `red.png`，模型答「蓝色」并指出文件名与内容不符——它看到的是像素
+- 下一步 **M52**：P0 工具第 18 个 `subagent`（最后一个）
 
 ---
 
@@ -266,7 +269,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | DSH 内存（私有工作集） | 870 MB | 本机 `tasklist` |
 | 其中 Chromium / Node 宿主 | ~500 / ~367 MB | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 16 个 / 12,797 字节 / **2,290 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 17 个 / 13,278 字节 / **2,377 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |

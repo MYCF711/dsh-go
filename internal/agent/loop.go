@@ -78,6 +78,9 @@ type Loop struct {
 	MaxSteps int
 	// Emit 观测量；返回错误即中断整个 turn。
 	Emit func(Event) error
+	// lastImages 暂存"上一步工具产出的图片"，由 runTool2 写、调用方读走即清。
+	// 放在结构体上是因为 Run 会并发处理多个 tool call，但它们是顺序执行的。
+	lastImages []llm.MessageImage
 	// Compact 可选：每步开始前调用，返回可能被瘦身过的历史。
 	//
 	// 为什么放在 Loop 里：压缩是**策略**（选区间 + 生成摘要），
@@ -175,6 +178,17 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 		for _, call := range resp.ToolCalls {
 			msg, stop := l.runTool2(ctx, turn, step, call)
 			msgs = append(msgs, msg)
+			// 带图的结果：图片不能塞进 tool 消息（OpenAI 兼容接口不支持），
+			// 所以紧跟一条 user 消息把图送过去。少了这一步，模型只会看到
+			// "读到了图片"这几个字，却看不见图——工具等于白跑。
+			if img := l.lastImages; len(img) > 0 {
+				l.lastImages = nil
+				msgs = append(msgs, llm.Message{
+					Role:    "user",
+					Content: "（这是工具刚返回的图片）",
+					Images:  img,
+				})
+			}
 			if stop {
 				stopAfter = true
 			}
@@ -241,6 +255,13 @@ func (l *Loop) runTool2(ctx context.Context, turn, step int, call llm.ToolCall) 
 		Kind: EventToolResult, Turn: turn, Step: step,
 		CallID: call.ID, ToolName: call.Function.Name, Result: &res,
 	})
+	if len(res.Images) > 0 {
+		imgs := make([]llm.MessageImage, 0, len(res.Images))
+		for _, im := range res.Images {
+			imgs = append(imgs, llm.MessageImage{MIME: im.MIME, DataBase64: im.DataBase64})
+		}
+		l.lastImages = imgs
+	}
 	return msg, res.Stop
 }
 

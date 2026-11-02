@@ -73,3 +73,7 @@ backend = "static"
 [[module]]
 id      = "tool-websearch"
 backend = "static"
+
+[[module]]
+id      = "tool-readimage"
+backend = "static"

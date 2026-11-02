@@ -58,9 +58,23 @@ type Result struct {
 	Truncated *Truncation // 发生截断时的证据
 	Hint      string      // 失败或为空时的下一步建议
 	View      *ViewSpec   // 客户端渲染契约
+	// Images 是这次结果附带的图片。宿主会把它们**挪进一条用户消息**再发给模型——
+	// 因为 OpenAI 兼容接口的 tool 消息不支持图片，只有 user 消息能带。
+	// 不写进会话日志：图片是二进制，塞进 append-only 的日志会把文件撑爆，
+	// 而且日志是给人回看的，不是给模型复读的。
+	Images []Image `json:"-"`
 	// Stop 为 true 时，agent 循环在这一步之后**结束本轮**，把控制权交回人。
 	// 给 ask_user_question 这类"必须等人回答"的工具用：模型不能自己编一个答案往下走。
 	Stop bool
+}
+
+// Image 是一张要送给模型看的图片。
+//
+// DataBase64 是**裸 base64**（不带 data: 前缀）——前缀由发送方按需拼，
+// 这样存进会话日志时不必重复存一份 URL 形式的元数据。
+type Image struct {
+	MIME       string
+	DataBase64 string
 }
 
 // Artifact 是一份被外置的大结果。
