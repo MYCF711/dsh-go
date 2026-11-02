@@ -266,7 +266,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | DSH 内存（私有工作集） | 870 MB | 本机 `tasklist` |
 | 其中 Chromium / Node 宿主 | ~500 / ~367 MB | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 16 个 / 12,797 字节 / **2,336 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 16 个 / 12,797 字节 / **2,290 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |
