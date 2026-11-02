@@ -305,3 +305,36 @@ resume 不存在  → -32602: 恢复失败: 找不到会话 nope
 
 钉住四条测试（`TestDescribeApproval*`）：命令排在描述之前、尾巴不被截掉、
 write 不显示正文、解析失败时原样显示参数。
+
+## ACP 侧的审批请求也是同一件事（2026-11-02）
+
+上一节改的是终端里的审批框。可**走 ACP 的客户端**（Martty 这类）走的是另一条路：
+`session/request_permission`。原来它发出去的东西是：
+
+```json
+{"toolCall": {"title": "bash", "kind": "other", "rawInput": {...}}}
+```
+
+`title` 只有工具名 `bash`。**如果客户端只显示 title，用户看到的就是"bash"两个字**——
+比终端那版更糟：终端至少还糊着 JSON。
+
+改完（真机抓到的原文）：
+
+```
+title: bash: echo approved
+kind : execute
+content: [{"type":"content","content":{"type":"text",
+          "text":"命令: echo approved
+模型自述（仅供参考，不是依据）: 输出 approved"}}]
+```
+
+三个字段各司其职：
+
+| 字段 | 作用 | 为什么必须这样 |
+|---|---|---|
+| `title` | 一行摘要，**命令在前**；多行命令压成一行 | 很多客户端只显示这一行 |
+| `kind` | `execute` / `edit` / `other` | 让客户端用对的图标与措辞，而不是一律"其它" |
+| `content` | 完整说明，含"模型自述"标注 | 想细看的客户端有得看 |
+| `rawInput` | 原样参数 | 机器可读，保持不变 |
+
+钉住三条测试：title 带命令且不混模型描述、多行压成单行且内容不丢、kind 映射正确。

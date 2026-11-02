@@ -77,6 +77,7 @@
 - ✅ ACP 边界：`load`/`resume` 对不存在的会话不再漏宿主路径（原来三层嵌套 + 绝对路径）；`set_mode` 未知模式会列可选值（本来就对）
 - ✅ 模型调用失败按种类说（连不上/401/404/429/5xx），不再把 Go 的 `dial tcp ... connectex` 与接口路径甩给客户端；网关正文截到 300 字符；API key 从未泄漏
 - ✅ 审批框改为"先命令、后模型自述（标注不可信）"，长命令截中间不截尾巴；`write`/`edit` 显示路径与字节数
+- ✅ ACP 的 `session/request_permission` 也带命令：`title` 是 `bash: <命令>`、`kind` 是 `execute`/`edit`、`content` 带"模型自述"标注
 - 下一步 **M27**：`0.2.1-go.20` 发版
 
 ---

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -447,12 +448,21 @@ func cmdACP(argv []string) error {
 	acpRunner.ask = func(ctx context.Context, sessionID, tool, args string) (bool, error) {
 		raw, err := srv.CallClient(ctx, acp.MethodRequestPermission, map[string]any{
 			"sessionId": sessionID,
+			// 客户端界面上显示什么，决定了用户点"允许"时知不知道自己在批什么。
+			// 三个字段各司其职：
+			//   title   —— 一行摘要，**命令在前**（很多客户端只显示这一行）
+			//   kind    —— 让客户端用对的图标/措辞（execute / edit）
+			//   content —— 完整说明，含"模型自述（仅供参考）"的标注
 			"toolCall": map[string]any{
 				"toolCallId": "perm-" + session.NewID(),
-				"title":      tool,
-				"kind":       "other",
+				"title":      approvalTitle(tool, args),
+				"kind":       approvalKind(tool),
 				"status":     "pending",
-				"rawInput":   json.RawMessage(args),
+				"content": []any{map[string]any{
+					"type":    "content",
+					"content": map[string]any{"type": "text", "text": describeApproval(tool, args)},
+				}},
+				"rawInput": json.RawMessage(args),
 			},
 			"options": []any{
 				map[string]any{"optionId": "allow-once", "name": "允许这一次", "kind": "allow_once"},
@@ -831,4 +841,55 @@ func (r *acpRunner) Shutdown() error {
 		}
 	}
 	return firstErr
+}
+
+// approvalTitle 是客户端界面上那一行字。
+//
+// 很多 ACP 客户端只显示 title，所以它必须**先给命令**——
+// 只写个 "bash" 等于什么都没说，用户是在盲签。
+func approvalTitle(tool, args string) string {
+	switch tool {
+	case "bash":
+		var a struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(args), &a); err == nil && a.Command != "" {
+			return "bash: " + oneLine(a.Command, 120)
+		}
+	case "write", "edit":
+		var a struct {
+			FilePath string `json:"file_path"`
+		}
+		if err := json.Unmarshal([]byte(args), &a); err == nil && a.FilePath != "" {
+			verb := "写入"
+			if tool == "edit" {
+				verb = "修改"
+			}
+			return verb + " " + a.FilePath
+		}
+	}
+	return tool
+}
+
+// approvalKind 让客户端用对的语义（执行 / 编辑 / 其它）。
+func approvalKind(tool string) string {
+	switch tool {
+	case "bash":
+		return "execute"
+	case "write", "edit":
+		return "edit"
+	}
+	return "other"
+}
+
+// oneLine 把多行命令压成一行：title 只有一行的高度。
+func oneLine(s string, n int) string {
+	cr, lf := string(rune(13)), string(rune(10))
+	s = strings.ReplaceAll(s, cr+lf, " ")
+	s = strings.ReplaceAll(s, lf, " ; ")
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }

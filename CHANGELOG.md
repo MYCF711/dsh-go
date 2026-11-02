@@ -1,3 +1,32 @@
+## 0.2.1-go.20（未发布）· 续
+
+**ACP 的审批请求也带上命令了。**
+
+终端里的审批框上一片已经改过，但走 ACP 的客户端是另一条路。原来它发的是：
+
+```json
+{"toolCall": {"title": "bash", "kind": "other", "rawInput": {...}}}
+```
+
+`title` 只有工具名——**客户端只显示 title 的话，用户看到的就是"bash"两个字**。
+
+改完（真机抓到的原文）：
+
+```
+title: bash: echo approved
+kind : execute
+content: [{"content":{"text":"命令: echo approved
+模型自述（仅供参考，不是依据）: 输出 approved"}}]
+```
+
+- `title` 一行摘要、命令在前；多行命令压成单行（`
+` → ` ; `）
+- `kind` 按工具映射成 `execute` / `edit` / `other`
+- `content` 带完整说明与"模型自述"标注；`rawInput` 原样保留
+
+新增 `TestApprovalTitleLeadsWithCommand` / `TestApprovalTitleSingleLine` / `TestApprovalKind`。
+
+---
 ## 0.2.1-go.20（未发布）
 
 **审批框：先给命令，再给"模型自述"，并且标明后者不可信。**
