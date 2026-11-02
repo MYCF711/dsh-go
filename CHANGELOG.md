@@ -1,3 +1,20 @@
+## 0.2.1-go.6 — 2026-11-02
+
+**修一个只有"下载发布件跑一次"才会发现的问题：没有 `dsh.toml` 时加载 0 个模块。**
+
+- 现象：把 `v0.2.1-go.5` 的 windows 二进制下载到空目录执行 `dshd tools`，报
+  `缺 "tools" 能力：没有模块 provides 它；在 dsh.toml 里启用提供该能力的模块`
+- 根因：`LoadManifest` 对不存在的文件返回**空 manifest**，而 `Apply` 把 manifest 当白名单，
+  空清单的结果就是"一个模块都不开"——二进制离开了仓库就废了
+- 修复：`Manifest.Present` 标记文件是否真的存在；**不存在 = 默认全开**，存在 = 白名单
+  （空文件依旧表示"什么都不开"）
+- 新增两条锁死语义的测试：`TestMissingManifestEnablesAll` / `TestEmptyManifestDisablesAll`
+- `CHECKLIST.md` B 表加一条：**把发布件下载到空目录跑一次**
+
+教训：`scripts/check.sh` 全绿、CI 全绿、150 个测试全绿，都拦不住这个——因为测试全在仓库根跑，
+永远有 `dsh.toml`。**发布件必须在"什么都没有的目录"里验一次。**
+
+---
 # CHANGELOG
 
 格式：`## <版本> — <日期>`，每条注明**上游映射**。语义化：修 bug → `go.N+1`；跟上游新版本 → `<新版本>-go.1`。

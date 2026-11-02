@@ -2,6 +2,8 @@ package kernel
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -242,5 +244,48 @@ func TestBusUnsubscribesOnDispose(t *testing.T) {
 	child.Dispose()
 	if got := b.Count("e"); got != 0 {
 		t.Fatalf("撤销后 Count = %d，期望 0", got)
+	}
+}
+
+// TestMissingManifestEnablesAll 锁死一条语义：没有 manifest 文件时二进制必须能用。
+// （v0.2.1-go.5 发布后下载到空目录跑 `dshd tools`，报了「缺 tools 能力」——就是这条没测。）
+func TestMissingManifestEnablesAll(t *testing.T) {
+	m, err := LoadManifest("no-such-dsh.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Present {
+		t.Fatal("文件不存在时 Present 必须是 false")
+	}
+	mods := []Module{{ID: "a", Provides: []string{"x"}}, {ID: "b", Provides: []string{"y"}}}
+	got, err := m.Apply(mods)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("没有 manifest 时应全开，得到 %d 个", len(got))
+	}
+}
+
+// TestEmptyManifestDisablesAll 反过来：文件存在但空，就是"一个都不开"。
+func TestEmptyManifestDisablesAll(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dsh.toml")
+	if err := os.WriteFile(path, []byte("[profile]\nname = \"x\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Present {
+		t.Fatal("文件存在时 Present 必须是 true")
+	}
+	got, err := m.Apply([]Module{{ID: "a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("空 manifest 应该什么都不开，得到 %d 个", len(got))
 	}
 }

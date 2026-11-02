@@ -33,6 +33,9 @@ type Module struct {
 
 // Manifest 是 dsh.toml。
 type Manifest struct {
+	// Present 表示磁盘上真的有这个文件（决定 Apply 是"全开"还是"白名单"）。
+	Present bool `toml:"-"`
+
 	Profile struct {
 		Name string `toml:"name"`
 	} `toml:"profile"`
@@ -57,8 +60,10 @@ func LoadManifest(path string) (*Manifest, error) {
 		return m, nil
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
+		// 没有 manifest 不是错误：二进制要能单独跑。
 		return m, nil
 	}
+	m.Present = true
 	if _, err := toml.DecodeFile(path, m); err != nil {
 		return nil, fmt.Errorf("读 manifest %s 失败: %w", path, err)
 	}
@@ -82,6 +87,11 @@ func (m *Manifest) Apply(mods []Module) ([]Module, error) {
 		}
 		byID[mod.ID] = i
 		known = append(known, mod.ID)
+	}
+
+	// 没有 manifest 文件 = 默认全开。manifest 在场时才当白名单用。
+	if !m.Present {
+		return mods, nil
 	}
 
 	seen := make(map[string]bool, len(m.Modules))
