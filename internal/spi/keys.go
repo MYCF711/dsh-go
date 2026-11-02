@@ -13,3 +13,9 @@ var (
 	ExecKey       = kernel.NewKey[Exec]("exec")
 	JobKey        = kernel.NewKey[Job]("jobs")
 )
+
+// HistoryKey 提供服务：在当前会话的**原始日志**里按关键词回查。
+//
+// 为什么需要它：压缩会把细节压进摘要，但日志是 append-only 的，
+// 原文永远在。模型需要一条"压得掉也找得回来"的路。
+var HistoryKey = kernel.NewKey[HistorySearch]("history")

@@ -84,6 +84,13 @@ func parseSchema(raw json.RawMessage) schema {
 	return s
 }
 
+// coreTools 是"必须和 DSH 同名"的那 9 个：它们是 P0 判据点名的工具。
+// 其它工具（比如 history_search）是我们的追加能力，DSH 里没有属正常。
+var coreTools = map[string]bool{
+	"read": true, "write": true, "edit": true, "glob": true, "grep": true,
+	"bash": true, "job_output": true, "job_kill": true, "job_list": true,
+}
+
 // TestToolParityWithDSH 是「工具语义对拍」的门。
 //
 // 判定标准刻意窄，只拦**会导致模型调用失败**的差异：
@@ -101,8 +108,12 @@ func TestToolParityWithDSH(t *testing.T) {
 	for _, o := range ours {
 		d, ok := dsh[o.Name]
 		if !ok {
-			problems = append(problems, o.Name+": DSH 里没有同名工具")
-			report = append(report, o.Name+"\t—\t缺失")
+			// DSH 没有这个工具：我们独有的扩展（如 history_search）。
+			// 加法不破坏 DSH 的调用契约，只报告；但核心 9 个必须同名，否则模型永远调不到。
+			if coreTools[o.Name] {
+				problems = append(problems, o.Name+": DSH 里没有同名工具（核心工具必须同名）")
+			}
+			report = append(report, o.Name+"\tDSH 无此工具")
 			continue
 		}
 		var oursSchema, dshSchema schema

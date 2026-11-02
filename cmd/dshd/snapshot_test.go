@@ -91,15 +91,16 @@ func buildToolTableMust(t *testing.T) []ToolEntry {
 // TestWriteToolsDeclareCaps 是 R3.6 的门：能力声明不许靠猜，新工具必须在这里被显式认领。
 func TestWriteToolsDeclareCaps(t *testing.T) {
 	want := map[string]spi.Caps{
-		"read":       {},
-		"glob":       {},
-		"grep":       {},
-		"job_list":   {},
-		"job_output": {},
-		"write":      {Writes: true},
-		"edit":       {Writes: true},
-		"bash":       {Writes: true, Executes: true},
-		"job_kill":   {Destructive: true},
+		"read":           {},
+		"glob":           {},
+		"grep":           {},
+		"job_list":       {},
+		"history_search": {}, // 只读：在原始日志里按关键词回查
+		"job_output":     {},
+		"write":          {Writes: true},
+		"edit":           {Writes: true},
+		"bash":           {Writes: true, Executes: true},
+		"job_kill":       {Destructive: true},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {

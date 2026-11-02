@@ -37,3 +37,11 @@ backend = "static"
 [[module]]
 id      = "tool-grep"
 backend = "static"
+
+[[module]]
+id      = "history"
+backend = "static"
+
+[[module]]
+id      = "tool-history"
+backend = "static"

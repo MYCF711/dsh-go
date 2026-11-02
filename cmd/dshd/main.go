@@ -26,6 +26,7 @@ import (
 	"dshgo/modules/tool/edit"
 	"dshgo/modules/tool/glob"
 	"dshgo/modules/tool/grep"
+	"dshgo/modules/tool/history"
 	"dshgo/modules/tool/read"
 	"dshgo/modules/tool/write"
 	"dshgo/modules/tools"
@@ -40,6 +41,9 @@ var (
 
 // builtinModules 是编译进二进制的默认实现列表。
 // 将来这里由 blank import + 注册表生成，形状不变。
+// 历史检索服务是宿主提供的（它需要知道"当前是哪个会话"）。
+var hostHistory = &historyHolder{}
+
 func builtinModules() []kernel.Module {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -55,6 +59,8 @@ func builtinModules() []kernel.Module {
 		edit.Module(),
 		glob.Module(),
 		grep.Module(),
+		historyModule(hostHistory),
+		history.Module(),
 	}
 }
 

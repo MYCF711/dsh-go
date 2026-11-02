@@ -89,6 +89,9 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	hist := r.hist[sessionID]
 	r.mu.Unlock()
 
+	// 把"当前会话"指给 history_search：没有这行，模型回查的时候查的是空。
+	hostHistory.set(logw.Path)
+
 	// 每轮开始前自检：token 估算超过阈值就自动压缩（失败只记日志，不打断这一轮）。
 	if r.autoCompact > 0 {
 		if err := r.autoCompactNow(ctx, sessionID); err != nil {
