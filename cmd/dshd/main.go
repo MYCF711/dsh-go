@@ -28,6 +28,7 @@ import (
 	"dshgo/modules/search"
 	"dshgo/modules/tool/ask"
 	"dshgo/modules/tool/edit"
+	"dshgo/modules/tool/github"
 	"dshgo/modules/tool/glob"
 	"dshgo/modules/tool/grep"
 	"dshgo/modules/tool/history"
@@ -89,6 +90,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		websearch.Module(),
 		readimage.Module(),
 		pwsh.Module(),
+		github.Module(),
 		subagentModule(sub),
 		subagenttool.Module(),
 	}

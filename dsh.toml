@@ -89,3 +89,7 @@ backend = "static"
 [[module]]
 id      = "tool-pwsh"
 backend = "static"
+
+[[module]]
+id      = "tool-github"
+backend = "static"

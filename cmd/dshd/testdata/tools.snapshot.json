@@ -131,6 +131,46 @@
     }
   },
   {
+    "name": "github",
+    "description": "调 GitHub REST API（path 如 repos/o/r/issues）。写方法要 confirm 与令牌。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "GitHub API 路径，不带前导斜杠，如 repos/o/r/issues"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "GET",
+            "POST",
+            "PATCH",
+            "PUT",
+            "DELETE"
+          ],
+          "description": "HTTP 方法，默认 GET；写方法必须带 confirm"
+        },
+        "body": {
+          "type": "string",
+          "description": "写操作的 JSON 请求体（字符串形式）"
+        },
+        "confirm": {
+          "type": "boolean",
+          "description": "写操作必须为 true，否则直接拒绝"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true,
+      "network": true
+    }
+  },
+  {
     "name": "glob",
     "description": "按 glob 模式找文件（支持 **），只返回路径；自动跳过 .git/refs/node_modules。",
     "parameters": {
