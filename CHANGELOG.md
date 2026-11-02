@@ -10,6 +10,26 @@
 
 ---
 
+## 0.2.1-go.5 · M3-b — 2026-11-02
+
+**官方 ACP SDK 当客户端连上来了——不是自测，是第三方库验收。**
+
+- `scripts/acp-sdk-client.mjs`：用 `@agentclientprotocol/sdk@1.4.0` 的 `ClientSideConnection` +
+  `ndJsonStream` 驱动 `dshd acp`（SDK 在 asar 里，需 Electron 的 Node 模式）
+
+**实测两次**
+
+| 场景 | 结果 |
+|---|---|
+| 纯问答 | `stopReason=end_turn`，reasoning 1 分片 / 64 字，text 2 分片 / 16 字，3.0s |
+| 带工具 | `stopReason=end_turn`，`tool_call` = glob，text 1 分片，回答"68 个 .go 文件"，2.5s |
+
+`initialize` 回 `dsh-go-acp 0.2.1-go.5 protocol=1`，`session/new` 回 2 个 configOptions，
+两个 `session/update` 变体（thought / message）与 `tool_call` 都被 SDK 正常解析。
+
+**P0 判据①达成**：第三方 ACP 客户端能连、能收到 reasoning、能拿到 stopReason。
+
+---
 ## 0.2.1-go.5 · M3-a — 2026-11-02
 
 **ACP 服务端上线：stdio JSON-RPC，reasoning 与 text 都以 ACP 变体流出去。**
