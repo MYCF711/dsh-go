@@ -36,6 +36,7 @@ import (
 	"dshgo/modules/tool/pwsh"
 	"dshgo/modules/tool/read"
 	"dshgo/modules/tool/readimage"
+	"dshgo/modules/tool/repohere"
 	subagenttool "dshgo/modules/tool/subagent"
 	todo "dshgo/modules/tool/todo"
 	wdtool "dshgo/modules/tool/wd"
@@ -91,6 +92,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		readimage.Module(),
 		pwsh.Module(),
 		github.Module(),
+		repohere.Module(),
 		subagentModule(sub),
 		subagenttool.Module(),
 	}

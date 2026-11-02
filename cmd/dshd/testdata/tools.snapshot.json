@@ -429,6 +429,16 @@
     "caps": {}
   },
   {
+    "name": "repo_here",
+    "description": "报告当前目录属于哪个 GitHub 仓库（owner/name 与分支）。",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "subagent",
     "description": "把一件独立的事交给子代理跑（它有自己的上下文），只拿结果回来。",
     "parameters": {

@@ -93,3 +93,7 @@ backend = "static"
 [[module]]
 id      = "tool-github"
 backend = "static"
+
+[[module]]
+id      = "tool-repohere"
+backend = "static"
