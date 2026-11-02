@@ -97,7 +97,9 @@ func TestMissingHintIsPatchedAndRecorded(t *testing.T) {
 func TestLargeDataIsSpilled(t *testing.T) {
 	big := strings.Repeat("x", 500)
 	tl := &stubTool{name: "big", res: spi.Result{Summary: "大结果", Data: map[string]any{"body": big}}}
-	p, k := newPipe(t, Options{MaxChars: 64}, tl)
+	// 阈值要够装下"指针体"（含 artifact 路径）。64 字节连路径都放不下，
+	// 那条"替换体不许超阈值"的规则在物理上就不可能满足。
+	p, k := newPipe(t, Options{MaxChars: 400}, tl)
 	defer k.Root().Dispose()
 
 	res, err := p.Run(context.Background(), "big", nil)

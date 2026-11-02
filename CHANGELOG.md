@@ -1,3 +1,30 @@
+## 0.2.1-go.16（未发布）· 续 2
+
+**工具结果不再被 JSON 转义：`bash` 直接给原始输出。**
+
+模型原来看到的是 `Summary` + `JSON(Data)`：
+
+```
+退出码 0，输出 10691 字节
+{"bytes":11068,"preview":"{\"output\":\"第 1 行…\"}"}   ← 双层转义
+（已截断：保留 999/11068 字节，全文在 …）
+提示：结果已外置到 …                                      ← 重复
+```
+
+改法三处：
+
+1. `bash` 给 `Result.Text` = `[exit N] [cwd X]` + 原始输出（不转义）
+2. 外置时 `Data` 只留 `{spilled, bytes, artifact}`，**去掉 preview**
+   （正文由 Text 承担，预览是同一段内容的第二份拷贝，而且多一层转义）
+3. 正文已带指针时不再补同义 Hint
+
+**新增测试**：`TestShellViewIsRawTextNotJSON`、`TestSpilledShellViewStaysRaw`。
+
+**顺带修的测试**：`TestLargeDataIsSpilled` 用了 `MaxChars: 64`，可一个指针体
+（含 artifact 路径）就 116 字节——那条"替换体不许超阈值"的规则在 64 字节下物理上不可能满足。
+改成 400，并写了注释。
+
+---
 ## 0.2.1-go.16（未发布）· 续
 
 **阈值 A/B：调低阈值没有实测收益；真正的变量是"模型调几次工具"。**

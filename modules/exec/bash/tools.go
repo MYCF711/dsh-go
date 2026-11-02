@@ -147,8 +147,14 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 	case res.ExitCode != 0:
 		hint = "命令失败：先读输出里的报错原文，再决定改命令还是改参数；不要原样重试"
 	}
+	// Text 是**模型看到的正文**：直接给原始输出。
+	//
+	// 不给的话，投影层会退回 Summary + JSON(Data)，于是命令输出会被
+	// JSON 转义一遍（换行和引号都要带反斜杠），外面还裹着 exit_code/cwd
+	// 这些模型用不上的字段。bash 占工具回显的 64.5%，这一层浪费被放大得最厉害。
 	return spi.Result{
 		Summary: summary,
+		Text:    shellView(res),
 		Data:    d,
 		Hint:    hint,
 		View: &spi.ViewSpec{
@@ -295,4 +301,18 @@ func (t *jobListTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result
 			Rows:    rows,
 		},
 	}, nil
+}
+
+// shellView 是命令结果给模型看的样子：一行元信息 + 原始输出（不做 JSON 转义）。
+func shellView(res spi.ExecResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[exit %d]", res.ExitCode)
+	if res.Cwd != "" {
+		fmt.Fprintf(&b, " [cwd %s]", res.Cwd)
+	}
+	if res.Output != "" {
+		b.WriteString("\n")
+		b.WriteString(res.Output)
+	}
+	return b.String()
 }

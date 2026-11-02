@@ -162,19 +162,25 @@ func (p *Pipeline) spill(res *spi.Result, toolName string) {
 		return
 	}
 
-	budget := p.opts.MaxChars / 4
-	preview := truncateUTF8(string(raw), budget)
+	// Data 里**不再放 preview**：模型看到的正文由 Text 承担（见 spillText），
+	// 再塞一份预览等于同一段内容出现两次，而且预览是 JSON 串（多一层转义）。
 	res.Artifacts = append(res.Artifacts, spi.Artifact{Name: toolName, Path: path, Bytes: int64(len(raw))})
-	res.Truncated = &spi.Truncation{Kept: len(preview), Total: len(raw), Pointer: path}
+	res.Truncated = &spi.Truncation{
+		Kept:    len([]rune(res.Text)),
+		Total:   len(raw),
+		Pointer: path,
+	}
 	res.Data = map[string]any{
-		"spilled": true,
-		"bytes":   len(raw),
-		"preview": preview,
+		"spilled":  true,
+		"bytes":    len(raw),
+		"artifact": path,
 	}
 	if textSpilled {
 		p.spillText(res, textSpilled, path)
 	}
-	if res.Hint == "" {
+	// 正文已经被截过（里面带着指针），就别再补一条同样意思的 Hint：
+	// 投影层还会再加一条"已截断"说明，三条消息说同一件事纯属浪费。
+	if res.Hint == "" && !textSpilled {
 		res.Hint = "结果已外置到 " + path + "；用 read 工具（offset/limit 分段）读全文"
 	}
 }
@@ -183,7 +189,7 @@ func (p *Pipeline) spill(res *spi.Result, toolName string) {
 //
 // 留尾巴是因为很多输出（日志、报错、命令结果）的关键信息在最后。
 func (p *Pipeline) spillText(res *spi.Result, over bool, pointer string) {
-	budget := p.opts.MaxChars / 2 // 正文只占一半：还剩指针、提示、截断说明
+	budget := p.opts.MaxChars * 3 / 4 // 留出指针/提示的位置，正文本身不超阈值
 	head := budget * 3 / 4
 	tail := budget - head
 
