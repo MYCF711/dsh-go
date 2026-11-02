@@ -194,3 +194,41 @@ func TestDoctorNoLogYet(t *testing.T) {
 		t.Fatalf("没有日志是正常的: %+v", c)
 	}
 }
+
+// logs 被一个文件占了：这**不是**"还没有日志"，是"永远写不了"。
+// 原来两种情况都说成"还没有日志（跑一次就会写）"，而后者恰恰是出事时最该知道的。
+func TestDoctorLogsBlockedByFile(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "logs"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := checkRecentLog(home)
+	if c.OK {
+		t.Fatal("logs 是文件是致命项，不能报 OK")
+	}
+	if !strings.Contains(c.Detail, "文件") {
+		t.Fatalf("要说清是被文件占了: %q", c.Detail)
+	}
+	if !strings.Contains(c.Next, "删掉") {
+		t.Fatalf("要给下一步: %q", c.Next)
+	}
+
+	// 打开日志也要给出同样的解释，而不是 mkdir 的原始错误
+	if _, err := openDiag(home); err == nil {
+		t.Fatal("logs 是文件时 openDiag 必须失败")
+	} else if !strings.Contains(err.Error(), "文件") {
+		t.Fatalf("openDiag 的错要说得清: %v", err)
+	}
+}
+
+// 拿不到日志时只警告、不中断——记不了日志不该让活干不下去。
+func TestDiagOrWarnDoesNotCrash(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "logs"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if d := diagOrWarn(home); d != nil {
+		t.Fatal("拿不到日志应该返回 nil")
+	}
+}

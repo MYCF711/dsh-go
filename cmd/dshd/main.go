@@ -279,7 +279,8 @@ func cmdRun(argv []string) error {
 
 	// 从这里开始，所有 slog 落到 <home>/logs/<日期>.log。
 	// 它不替代 stderr——只是让"事后能查"这件事成立。
-	if d, err := openDiag(*home); err == nil {
+	// 拿不到日志时**明说**：静默降级会让人以为有记录，出事才发现是空的。
+	if d := diagOrWarn(*home); d != nil {
 		defer d.Close()
 		defer func() {
 			if d.Path != "" {

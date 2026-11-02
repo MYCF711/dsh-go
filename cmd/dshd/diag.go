@@ -26,6 +26,11 @@ type diag struct {
 // stderr 的行为**不变**（原来怎么打还怎么打）：日志是附加的，不是替代。
 func openDiag(home string) (*diag, error) {
 	dir := filepath.Join(home, "logs")
+	// 先看是不是被一个**文件**占了。原样去 mkdir 只会得到
+	// "The system cannot find the path specified"，看不出是这个原因。
+	if st, err := os.Stat(dir); err == nil && !st.IsDir() {
+		return nil, fmt.Errorf("%s 是一个文件，不是目录；删掉它（或换成别的 --home）", dir)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("建日志目录失败（%s）: %w", dir, err)
 	}
@@ -57,4 +62,19 @@ func (d *diag) Close() {
 func logSessionStart(home, id, path, cwd, mode string) {
 	slog.Info("会话开始",
 		"session", id, "path", path, "cwd", cwd, "mode", mode, "home", home)
+}
+
+// diagOrWarn 拿日志；拿不到就**明说一句**再继续。
+//
+// 静默降级是最坏的选择：用户以为有记录，出事之后去翻，发现什么都没有。
+// 但也不能因为"记不了日志"就不干活——所以只警告、不中断。
+func diagOrWarn(home string) *diag {
+	d, err := openDiag(home)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "警告: 这次没有事后可查的记录——%v"+string(rune(10)), err)
+		fmt.Fprintf(os.Stderr, "      宿主照常工作；想看日志就修好 %s 再跑"+string(rune(10)),
+			filepath.Join(home, "logs"))
+		return nil
+	}
+	return d
 }

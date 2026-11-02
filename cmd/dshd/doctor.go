@@ -285,8 +285,25 @@ func countWarns(r doctorReport) int {
 func checkRecentLog(home string) checkResult {
 	c := checkResult{Name: "运行日志"}
 	dir := filepath.Join(home, "logs")
+	// 先分清"还没有"和"写不了"——原来两种情况都说成"还没有日志"，
+	// 而写不了恰恰是出事之后最需要知道的那件事。
+	if st, statErr := os.Stat(dir); statErr == nil && !st.IsDir() {
+		c.Detail = dir + " 是一个文件，不是目录"
+		c.Next = "删掉它；在此之前 run/acp 都写不了日志，出事后没有东西可查"
+		return c
+	}
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) == 0 {
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.OK = true
+			c.Detail = "还没有日志（跑一次 run/acp 就会写）"
+			return c
+		}
+		c.Detail = "日志目录读不了: " + err.Error()
+		c.Next = "检查 " + dir + " 的权限"
+		return c
+	}
+	if len(entries) == 0 {
 		c.OK = true
 		c.Detail = "还没有日志（跑一次 run/acp 就会写）"
 		return c

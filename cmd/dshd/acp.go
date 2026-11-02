@@ -392,7 +392,8 @@ func cmdACP(argv []string) error {
 		return err
 	}
 	// 同一套诊断日志：ACP 模式下 stdout 是协议，只能靠文件事后查。
-	if d, err := openDiag(*home); err == nil {
+	// 拿不到也明说——stderr 还没被协议占用，说得出话。
+	if d := diagOrWarn(*home); d != nil {
 		defer d.Close()
 	}
 	mods, err := loadMods(*manifest, *home, *maxChars)

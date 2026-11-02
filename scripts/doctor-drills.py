@@ -31,6 +31,7 @@ EXPECT = {
     "僵尸锁": ["锁文件"],
     "网关 500": ["500"],
     "只读 home": ["写不进去", "Access is denied", "denied"],
+    "日志写不了": ["是一个文件", "写不了"],
 }
 
 
@@ -162,6 +163,16 @@ def main():
     finally:
         shutil.rmtree(home3, ignore_errors=True)
 
+    # 5. 日志写不了（logs 被一个文件占了）
+    home5 = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(home5, "logs"), "w") as fh:
+            fh.write("x")
+        rc, out = run_doctor(binpath, home5)
+        drills.append(("日志写不了", rc, out, os.path.join(home5, "logs") + "（是个文件）"))
+    finally:
+        shutil.rmtree(home5, ignore_errors=True)
+
     # 4. 只读 home
     home4 = tempfile.mkdtemp()
     try:
@@ -191,7 +202,7 @@ def main():
         else:
             print(f"结论：✗ 没指出来（期望出现 {EXPECT[name]} 之一）")
     print()
-    print(f"四项里 doctor 指出了 {caught} 项。")
+    print(f"{len(drills)} 项里 doctor 指出了 {caught} 项。")
     return 0 if caught == len(drills) else 1
 
 
