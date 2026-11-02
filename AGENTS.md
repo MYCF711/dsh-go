@@ -44,7 +44,8 @@
 - ✅ `dshd run --auto-compact`：`agent.Loop.Compact` 每步钩子 + `runCompactor`，与 ACP 同一套零件
 - ✅ `session/new` 支持 `mode` 参数（建会话即定模式，没有"先建后切"的窗口）
 - ✅ 端到端回归（`scripts/e2e-regression.mjs`，13 项全通过）+ `docs/e2e-report.md`
-- 下一步 **M11**：ACP 的 `session/cancel`（现在有实现但没有回归覆盖）+ 断线重连语义
+- ✅ `session/cancel` 真机回归 + `TestSessionUsableAfterCancel`（取消后 busy 必须清）
+- 下一步 **M11**：客户端断开（stdio 关掉）时的清理语义
 
 ---
 
@@ -154,7 +155,7 @@ type Tool interface {
 
 **状态断言用 Go 测**：node ACP 脚本适合"真跑一轮对话"；断言 header/文件/状态一律写 Go 测试（踩过：node 侧连挂四次没暴露真因）。
 
-**回归**：`scripts/e2e-regression.mjs`（ACP 全方法，13 项）。写断言时贴着实际语义——踩过"恒真断言"和"delete 断言写反"。
+**回归**：`scripts/e2e-regression.mjs`（ACP 全方法，16 项）。写断言时贴着实际语义——踩过"恒真断言"和"delete 断言写反"。
 
 **压缩改动必跑**：`scripts/acp-compact-semantics.mjs`（压完之后模型还记不记得关键信息）。
 

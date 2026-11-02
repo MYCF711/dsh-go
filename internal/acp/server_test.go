@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ type fakeAgent struct {
 	events     []agent.Event
 	stop       string
 	blockOnCtx bool
+	mu         sync.Mutex
 }
 
 func (a *fakeAgent) Prompt(ctx context.Context, sessionID, cwd, text string, emit func(agent.Event) error) (string, map[string]any, error) {
@@ -465,5 +467,36 @@ func TestSessionNewWithMode(t *testing.T) {
 		"params": map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}, "mode": "turbo"}})
 	if h.recvResult(t, 2)["error"] == nil {
 		t.Fatal("未知模式必须报错")
+	}
+}
+
+// 取消之后会话必须能继续用。这条最容易被忽略：
+// 如果 busy 标志没清，下一次 prompt 会被"该会话已有在飞的 prompt"挡掉。
+func TestSessionUsableAfterCancel(t *testing.T) {
+	ag := &fakeAgent{blockOnCtx: true}
+	h := start(t, ag)
+	defer h.close()
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": MethodSessionNew,
+		"params": map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}}})
+	sid := h.recvResult(t, 1)["result"].(map[string]any)["sessionId"].(string)
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": MethodSessionPrompt,
+		"params": map[string]any{"sessionId": sid, "prompt": []any{map[string]any{"type": "text", "text": "跑"}}}})
+	time.Sleep(50 * time.Millisecond)
+	h.send(t, map[string]any{"jsonrpc": "2.0", "method": MethodSessionCancel,
+		"params": map[string]any{"sessionId": sid}})
+	if res := h.recvResult(t, 2); res["error"] != nil {
+		t.Fatalf("取消后 prompt 应返回结果而不是错误: %+v", res["error"])
+	}
+
+	// 让 fake agent 这次立刻返回
+	ag.blockOnCtx = false
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 3, "method": MethodSessionPrompt,
+		"params": map[string]any{"sessionId": sid, "prompt": []any{map[string]any{"type": "text", "text": "再来"}}}})
+	res := h.recvResult(t, 3)
+	if res["error"] != nil {
+		t.Fatalf("取消之后会话应该还能用，却报错: %+v", res["error"])
 	}
 }

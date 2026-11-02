@@ -5,7 +5,7 @@
 
 ---
 
-## 一、ACP 全方法（13 项，全通过）
+## 一、ACP 全方法（16 项，全通过）
 
 一个进程里跑 `new / prompt / set_mode / load / fork`，第二个进程验 `resume`，
 第三个进程验 `delete`。
@@ -25,6 +25,9 @@
 | 11 | `session/resume` 跨进程可用 | PASS（`["bash"]`） |
 | 12 | `session/delete` | PASS |
 | 13 | delete 只删掉目标会话 | PASS（2 → 1，fork 出来的还在） |
+| 14 | cancel 让 prompt 以 cancelled 结束 | PASS |
+| 15 | cancel 很快 | PASS（1 ms） |
+| 16 | 取消后会话仍可用 | PASS（`end_turn`） |
 
 ### 写这轮回归时踩的两个坑
 

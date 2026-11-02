@@ -119,6 +119,35 @@ try {
 }
 await A.done();
 
+// ── 取消链路：工具跑到一半取消 ──────────────────────────
+// 这是最容易断的一条：prompt 在飞、bash 在 sleep、cancel 进来。
+const K = await connect();
+try {
+  const { sessionId: kid } = await K.conn.newSession({ cwd: CWD, mcpServers: [], mode: 'default' });
+
+  // 不 await：prompt 必须异步跑起来，否则 cancel 永远进不来
+  const pending = K.conn.prompt({
+    sessionId: kid,
+    prompt: [{ type: 'text', text: '用 bash 执行 sleep 20，然后告诉我睡完了。' }],
+  });
+  await new Promise((r) => setTimeout(r, 1500));   // 等它真的开跑
+  const t0 = Date.now();
+  await K.conn.cancel({ sessionId: kid });
+  const stopped = await pending;
+  const elapsed = Date.now() - t0;
+
+  record('cancel 让 prompt 以 cancelled 结束', stopped.stopReason === 'cancelled', stopped.stopReason);
+  record('cancel 是快的（<5s）', elapsed < 5000, `${elapsed} ms`);
+
+  // 取消之后会话必须还能用
+  const n = K.seen.tools.length;
+  const again = await K.conn.prompt({ sessionId: kid, prompt: [{ type: 'text', text: '说一句 ok。' }] });
+  record('取消后会话仍可用', again.stopReason === 'end_turn', again.stopReason);
+} catch (e) {
+  record('取消链路', false, e.message);
+}
+await K.done();
+
 // ── 进程 B：resume 跨进程 ──────────────────────────────
 const B = await connect();
 try {

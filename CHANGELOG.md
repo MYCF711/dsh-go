@@ -1,3 +1,26 @@
+## 0.2.1-go.10（未发布）· 续 2
+
+**取消链路的回归：13 项 → 16 项。**
+
+`session/cancel` 一直有实现、服务端单测也有，但**从没在真机上验过**。
+取消是最容易出问题的一条：prompt 在飞、bash 正在 sleep、cancel 进来。
+
+**实测**
+```
+PASS  cancel 让 prompt 以 cancelled 结束  — cancelled
+PASS  cancel 是快的（<5s）             — 1 ms
+PASS  取消后会话仍可用                  — end_turn
+```
+
+第三条是新加的 Go 测试（`TestSessionUsableAfterCancel`）：
+**取消之后 busy 标志必须清掉**，否则下一次 prompt 会被
+"该会话已有在飞的 prompt" 挡死——而这正是最容易漏的地方。
+
+**一个语义要写清**：cancel 让 prompt **立刻**返回（1 ms），但 shell 里正在跑的
+`sleep 20` 不会被强杀。宿主选择"先响应取消、不等工具收尾"，
+因为让用户等 20 秒才收到 cancelled 更糟。
+
+---
 ## 0.2.1-go.10（未发布）· 续
 
 **端到端回归：ACP 全方法 + 会话格式 + P0 四条，一次跑完。**
