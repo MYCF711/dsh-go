@@ -77,6 +77,11 @@ type Loop struct {
 	MaxSteps int
 	// Emit 观测量；返回错误即中断整个 turn。
 	Emit func(Event) error
+	// Compact 可选：每步开始前调用，返回可能被瘦身过的历史。
+	//
+	// 为什么放在 Loop 里：压缩是**策略**（选区间 + 生成摘要），
+	// 但"什么时候压"必须由跑 turn 的人决定——它才知道预算和会话文件在哪。
+	Compact func(ctx context.Context, step int, history []llm.Message) ([]llm.Message, error)
 }
 
 func (l *Loop) emit(ev Event) error {
@@ -106,6 +111,15 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 	}
 
 	for step := 1; step <= l.maxSteps(); step++ {
+		if l.Compact != nil {
+			next, err := l.Compact(ctx, step, msgs)
+			if err != nil {
+				return msgs, err
+			}
+			if next != nil {
+				msgs = next
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return msgs, err
 		}

@@ -41,7 +41,8 @@
 - ✅ 模式跟着会话走：写进 `header.agentPreset`、resume 采纳、fork 继承（三个 Go 测试钉住）
 - ✅ `history_search`（`spi.HistorySearch` + `modules/tool/history`）：在原始日志里回查含被压缩内容，带 `hidden` 标记
 - ✅ history 接线统一为 `attachHistory`（run / acp prompt / acp resume 三处）；`read-only` 模式允许 `history_search`
-- 下一步 **M10**：`dshd run` 的自动压缩（现在只有 ACP 有）
+- ✅ `dshd run --auto-compact`：`agent.Loop.Compact` 每步钩子 + `runCompactor`，与 ACP 同一套零件
+- 下一步 **M10**：`0.2.1-go.9` 发版（模式 + history_search + run 自动压缩）
 
 ---
 

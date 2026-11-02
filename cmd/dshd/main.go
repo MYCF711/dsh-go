@@ -19,6 +19,7 @@ import (
 	"dshgo/internal/compact"
 	"dshgo/internal/kernel"
 	"dshgo/internal/llm"
+	"dshgo/internal/modes"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 	"dshgo/modules/exec/bash"
@@ -236,6 +237,7 @@ func cmdRun(argv []string) error {
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	policy := fs.String("policy", "auto", "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
+	autoCompact := fs.Int("auto-compact", 40000, "每步前估算超过多少 token 就自动压缩（0=关闭）")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -268,7 +270,7 @@ func cmdRun(argv []string) error {
 	}
 	sys := buildSystemPrompt(reg, *model, cwd, *workspaceBytes)
 	sessID := "session-" + session.NewID()
-	logw, err := session.CreateSession(*home, cwd, sessID, "standard")
+	logw, err := session.CreateSession(*home, cwd, sessID, modes.DefaultID)
 	if err != nil {
 		return err
 	}
@@ -298,8 +300,10 @@ func cmdRun(argv []string) error {
 		sessionID: sessID, approvals: approval.New(),
 	}
 
+	chat := llm.New(*base, os.Getenv("DSHD_LLM_KEY"))
 	loop := &agent.Loop{
-		Chat:     llm.New(*base, os.Getenv("DSHD_LLM_KEY")),
+		Chat:     chat,
+		Compact:  runCompactor(chat, logw, *autoCompact, *model),
 		Tools:    reg,
 		Runner:   guarded,
 		Project:  session.ProjectResult,
@@ -706,4 +710,47 @@ func isTerminal(f *os.File) bool {
 		return false
 	}
 	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// runCompactor 给 `dshd run` 提供每步前的自动压缩。
+//
+// 和 ACP 那条用的是同一套：读 log → Surface → compact.Select → Summarize →
+// session.Compact 写事件 → 从日志重建历史。区别只在于触发时机（每步 vs 每轮）。
+func runCompactor(chat agent.Chat, logw *session.Log, budget int, model string) func(context.Context, int, []llm.Message) ([]llm.Message, error) {
+	if budget <= 0 {
+		return nil
+	}
+	return func(ctx context.Context, step int, hist []llm.Message) ([]llm.Message, error) {
+		back, err := v4.ReadFile(logw.Path)
+		if err != nil {
+			return hist, nil // 读不了就别拦着干活
+		}
+		surface := session.Surface(back)
+		var meter session.Meter
+		if meter.Estimate(surface) <= budget {
+			return nil, nil // 没超预算，历史不动
+		}
+		items, span, ok := compact.Select(surface, compact.Options{KeepRecent: 6, MinToCompact: 2})
+		if !ok {
+			return nil, nil // 没得压
+		}
+		text, err := compact.Summarize(ctx, chat, model, items)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "自动压缩失败（不影响本轮）：%v\n", err)
+			return nil, nil
+		}
+		if _, _, err := session.Compact(logw, back.Events, span,
+			[]spi.Block{{Type: "text", Text: text}},
+			session.CompactionMeta{Provider: "dshd", Model: "run"}); err != nil {
+			fmt.Fprintf(os.Stderr, "写压缩事件失败（不影响本轮）：%v\n", err)
+			return nil, nil
+		}
+		after, err := v4.ReadFile(logw.Path)
+		if err != nil {
+			return nil, nil
+		}
+		fmt.Fprintf(os.Stderr, "自动压缩（第 %d 步）：surface %d → %d 节点\n",
+			step, len(surface), len(session.Surface(after)))
+		return session.History(after), nil
+	}
 }

@@ -1,3 +1,26 @@
+## 0.2.1-go.9（未发布）· 续 6
+
+**`dshd run` 也有自动压缩了——两套行为收敛成一套。**
+
+- `agent.Loop.Compact`：每步开始前的钩子，返回 nil 表示"这轮不用改"
+  - 放在 Loop 里是因为：压缩是策略，但"什么时候压"只有跑 turn 的人知道（预算、会话文件在哪）
+- `runCompactor`：读 log → Surface → 估算 → `compact.Select` → `Summarize` → `session.Compact` 落事件 → 从日志重建历史
+  - 和 ACP 那条是同一套零件，区别只在触发时机（每步 vs 每轮）
+- `dshd run --auto-compact <tokens>`（默认 40000）
+- 顺带把 `run` 的 `agentPreset` 从写死的 `"standard"` 改成 `modes.DefaultID`
+
+**实测**
+```
+自动压缩（第 5 步）：surface 10 → 8 节点
+自动压缩（第 6 步）：surface 10 → 9 节点
+（26 事件，压缩事件已落盘）
+```
+
+**踩到的一个坑**：`Summarize` 的第二个参数是**模型 id**，我一开始传了 `"run"`，
+magpie 直接回 `knows no model "run"`。压缩失败被降级成一行 stderr 就继续跑了——
+这个 fail-soft 是对的（压缩失败不该打断用户这一轮），但错误信息必须让人看见。
+
+---
 ## 0.2.1-go.9（未发布）· 续 5
 
 **`history_search` 的三处接线 + 一个模式归属的修正。**
