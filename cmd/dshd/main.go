@@ -372,6 +372,9 @@ func cmdRun(argv []string) error {
 	}
 
 	chat := llm.New(*base, os.Getenv("DSHD_LLM_KEY"))
+	// meter 跨步复用：每步都用服务端给的 totalTokens 校准一次估算。
+	// 以前每步新建一个空 meter，等于永远按启发式比例猜。
+	meter := &session.Meter{}
 	// 子代理复用同一套零件：同一个模型、同一张工具表、同一个执行器。
 	// 差别只有系统提示与步数上限（它只干一件小事）。
 	subp.Bind(&subRunner{
@@ -380,7 +383,7 @@ func cmdRun(argv []string) error {
 	})
 	loop := &agent.Loop{
 		Chat:     chat,
-		Compact:  runCompactor(chat, logw, *autoCompact, *model),
+		Compact:  runCompactor(chat, logw, *autoCompact, *model, meter),
 		Tools:    reg,
 		Runner:   guarded,
 		Project:  session.ProjectResult,
@@ -402,6 +405,10 @@ func cmdRun(argv []string) error {
 				if a.Usage != nil {
 					inTokens += a.Usage.PromptTokens
 					outTokens += a.Usage.CompletionTokens
+					// 用服务端实测值校准估算器：下一轮压缩判断才有锚点。
+					if back, err := v4.ReadFile(logw.Path); err == nil {
+						meter.Observe(a.Usage.TotalTokens, meter.Estimate(session.Surface(back)))
+					}
 					usage = map[string]any{
 						"inputTokens":  a.Usage.PromptTokens,
 						"outputTokens": a.Usage.CompletionTokens,
@@ -814,7 +821,7 @@ func isTerminal(f *os.File) bool {
 //
 // 和 ACP 那条用的是同一套：读 log → Surface → compact.Select → Summarize →
 // session.Compact 写事件 → 从日志重建历史。区别只在于触发时机（每步 vs 每轮）。
-func runCompactor(chat agent.Chat, logw *session.Log, budget int, model string) func(context.Context, int, []llm.Message) ([]llm.Message, error) {
+func runCompactor(chat agent.Chat, logw *session.Log, budget int, model string, meter *session.Meter) func(context.Context, int, []llm.Message) ([]llm.Message, error) {
 	if budget <= 0 {
 		return nil
 	}
@@ -824,7 +831,11 @@ func runCompactor(chat agent.Chat, logw *session.Log, budget int, model string) 
 			return hist, nil // 读不了就别拦着干活
 		}
 		surface := session.Surface(back)
-		var meter session.Meter
+		// 用**带实测锚点**的估算。run 这条路径以前每步新建一个空 meter，
+		// 等于永远用启发式比例猜——长会话里猜偏了就会要么该压不压、要么提前压。
+		if meter == nil {
+			meter = &session.Meter{}
+		}
 		if meter.Estimate(surface) <= budget {
 			return nil, nil // 没超预算，历史不动
 		}

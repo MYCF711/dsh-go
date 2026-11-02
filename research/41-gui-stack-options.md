@@ -2,7 +2,7 @@
 
 > **一句话结论：选「Go 宿主 + Go 自研 WebView2 壳 + TypeScript/React 界面」——语言数 2，单 exe 12–14 MB，冷启动 0.4–1.2 s，内存 120–200 MB。**
 > 它只被两件事推翻：**① 150 MB 是「整个产品」的硬指标**（WebView2 一个渲染进程就能吃掉 100–200 MB）；**② R6 判定 WebView 里的 JS 也算「引入 JS 运行时」**（`UIPLAN.md` Q3/Q4）。
-> 事实标 URL；估算标「估」；证据强度标 A（官方一手或实测）/ B（官方但间接、仓库）/ C（第三方或推断），见 §7。
+> 事实标 URL；估算标「估」；证据强度标 A（官方一手或实测）/ B（官方但间接、仓库）/ C（第三方或推断），见 §6。
 
 ---
 
@@ -29,6 +29,8 @@
 
 **界面占总代码量 80%+，壳不到 2%。** 因此真正的决策是「界面用什么写」，壳是最后 200–1000 行的事（`UIPLAN.md` §2.3、§4 U2）。任何把「换壳」当成「换语言」的方案，都是把 2% 的活当成 100% 的决策。
 
+**直接回答题目：选混合，但只在进程边界上混——Go 宿主 + Go 壳 + TypeScript 界面，语言数 2。**「全 Go」只在 UI 退化成「会话列表 + 纯文本 + 几个按钮」时成立；「Electron + 新前端」在任何情况下都不成立（25 MB 目标 vs 182 MB 起点）。理由与反例见 §2–§4。
+
 ---
 
 ## 1. A. 候选栈的硬事实
@@ -40,13 +42,27 @@
 | **Wails v3** | 2（Go + TS/JS） | **~15 MB**（官方口径） | **<0.5 s**（官方口径） | WebView2（系统） | Wails showcase：Tiny RDM、Restic Browser 等 | A |
 | **Wails v2** | 2 | 同量级（未单列） | 同量级 | WebView2（系统） | 同上，生态更老 | A |
 | **Tauri v2** | **3**（Rust + Go + TS） | 最小 **600 KB**（官方口径；Windows 不含 WebView2） | 0.3–0.8 s（估） | WebView2（系统）+ Rust 工具链（构建期） | 大量 Rust 系应用；Go 只能当 sidecar | A/B |
-| **Fyne** | **1**（Go） | **~20–30 MB**（估；cgo + OpenGL） | 0.3–0.8 s（估） | 无（OpenGL 驱动） | Croc GUI、FyneTerm、GoShell 等 237 个；**无旗舰商业产品** | A/B |
+| **Fyne** | **1**（Go） | **~20–30 MB**（估；cgo + OpenGL） | 0.3–0.8 s（估） | 无（OpenGL 驱动） | Croc GUI、FyneTerm、GoShell 等 237 个；**无同量级旗舰商业产品** | A/B |
 | **Gio** | **1**（Go） | **~8–15 MB**（估） | 0.1–0.4 s（估） | 无（GPU 驱动） | **Tailscale**、godcr、gotraceui、Sointu | A |
 | **go-webview2（裸绑定）** | 2（Go + TS/JS） | 壳 **~2–4 MB**（估）+ 系统 WebView2 | 0.3–0.8 s（估） | WebView2（系统） | 无知名独立产品（多作为库） | B |
 | **Avalonia（C#）** | **3**（C# + Go + XAML） | 自包含 **60–120 MB**；裁剪/AOT **30–50 MB**（估） | 0.5–1.5 s（估） | .NET 运行时（自包含则无） | Avalonia 生态商业应用（未逐一取证） | C |
 | **WinUI 3 / MAUI** | 3+ | 30–100 MB（估） | 0.5–1.5 s（估） | Windows App SDK / .NET | Windows 原生应用 | C |
 | **Flutter desktop** | **3**（Dart + Go + C/FFI） | **20–50 MB 目录**（估；不是单 exe） | 0.3–1 s（估） | Dart AOT（随包） | 桌面端缺少同量级旗舰案例 | B/C |
 | **Electron** | 2（TS + Go 宿主，但壳内带 Node） | **80–200 MB**（DSH 实测安装 182 MB） | 1–3 s | Chromium + Node（随包） | VS Code、Slack、Discord、Notion、Obsidian、Figma、1Password | A |
+
+### 1.0b 生态成熟度（本次取证口径，非评分）
+
+| 栈 | 成熟度 | 依据 |
+|---|---|---|
+| Electron | **极高** | 十余年生态；官方应用名录覆盖主流产品：https://www.electronjs.org/apps |
+| Tauri | **高** | 2.0 稳定版 2024-10-02；文档/插件/社区完整：https://v2.tauri.app/blog/ |
+| Wails | **中高** | v2 仍在维护（v2.17.1，2026-11-01）；v3 2026-10-26 才 GA，生态刚切换：https://wails.io/changelog/ |
+| Avalonia / .NET | **中高** | 跨平台 .NET UI 有商业案例，但本次未逐一取证：https://avaloniaui.net/ |
+| WinUI 3 / MAUI | **高（Windows 内）** | 微软官方栈；WinUI 3 被 Raycast 评为「年轻、未广泛验证」：https://www.raycast.com/blog/a-technical-deep-dive-into-the-new-raycast |
+| Flutter | **高（移动）/ 低中（桌面）** | 移动生态成熟；桌面端缺少同量级旗舰案例：https://docs.flutter.dev/platform-integration/windows/building |
+| Fyne | **中** | 237 个应用、无同量级旗舰：https://apps.fyne.io/all |
+| Gio | **低中** | 仍是 0.x；showcase 只有十余个应用：https://gioui.org/doc/showcase |
+| go-webview2 / webview | **低（作为库）** | 薄绑定，无知名独立产品；价值在「自己写壳」：https://github.com/jchv/go-webview2 |
 
 ### 1.1 Wails v3 / v2（Go + 系统 WebView）
 
@@ -58,7 +74,7 @@
 | Windows 的 WebView2 前提 | Windows 10/11 通常自带；缺了要装 Runtime 或跑 `wails3 doctor` | https://wails.io/quick-start/installation/ |
 | 体积 / 内存 / 启动（厂商口径） | **~15 MB 二进制**（对比 Electron 150 MB）、**~10 MB 基线内存**（对比 100 MB+）、**<0.5 s 启动**（对比 2–3 s） | https://wails.io/ |
 | IPC / 绑定方式 | 自动生成 **TypeScript/JavaScript SDK**，前端调 Go service；官方称内存 IPC、无网络端口 | https://wails.io/ |
-| 前端是否必须 JS | **是**。WebView 里是 HTML/CSS/JS；WML（Wails Markup）只是实验性服务端标记，仍渲染到 WebView | https://wails.io/guides/advanced/wml/ |
+| 前端是否必须 JS | **是**。WebView 里是 HTML/CSS/JS；WML（Wails Markup）是实验性标记层，最终仍生成 HTML 到 WebView | https://wails.io/guides/advanced/wml/ |
 | 真实产品 | 官方 showcase：Tiny RDM、Restic Browser、WailsTerm、Redis Viewer 等 | https://wails.io/community/showcase/ |
 
 **关键判断：Wails 的卖点是「绑定 + 资源服务 + 打包」，而这三样我们都已经有了（Transport 契约 + `//go:embed` + 自研壳）。** 用 Wails 会把「一份契约」变成「契约 + Wails 绑定」两套调用路径；而且 v3 GA 才 8 天，v2/v3 双线并存，API 仍在周更（v3.0.0 → v3.1.0 只隔 6 天）。
@@ -85,9 +101,10 @@
 | 富文本能力 | `RichText` 支持 Markdown **表格、任务列表、删除线、嵌套列表/引用**；代码块「看起来干净多了」；长文档滚动在 2.8 做了性能重构 | 同上 |
 | 代码高亮 | **没有内建语法高亮**；`RichText` 是样式化文本，代码块要靠自己按 token 上色或第三方 | 同上（无高亮 API） |
 | 无障碍 | **第一版，默认关闭**，要 `-tags accessibility` 才开 | 同上 |
-| 真实产品 | 官方应用库 **237 个**（大量工具/游戏/小应用）；能叫出名的商业产品：**没有** | https://apps.fyne.io/all |
+| 真实产品 | 官方应用库 **237 个**（大量工具/游戏/小应用）；**没有同量级旗舰商业产品** | https://apps.fyne.io/all |
 | 移动端 | 支持 iOS/Android（`fyne-cross` 打包） | https://docs.fyne.io/started/quick/ |
 | 文本渲染质量 | 自绘字体/布局；CJK 与复杂脚本靠系统字体回退；中文输入法候选框在 Canvas 上是经典难点 | —（`UIPLAN.md` §2.1 已列为缺口） |
+| 性能口碑 | 社区常见批评是复杂界面/长列表卡顿；官方 2.8 自述「长文档滚动比 2.7 更顺」，等于承认之前不够好 | https://fyne.io/blog/2026/07/13/fyne-v2.8-released/ |
 
 **Fyne 2.8 是它历史上最大的一次补课**（GPU 形状、Markdown 表格、RichText 性能），但补的是「文档阅读器」的课，不是「IDE 级文本编辑器」的课：没有可用的富文本输入框、没有增量 diff、没有虚拟滚动组件。
 
@@ -96,11 +113,12 @@
 | 问题 | 事实 | URL |
 |---|---|---|
 | 当前版本 | **v0.10.3（2026-09）**；仍是 0.x | https://gioui.org/news |
-| IME | **Linux 的 IME 是 2026-09 才加的**（X11 ibus / Wayland text-input-v3）；Windows/macOS 更早，但生态验证少 | 同上 |
+| IME | **Linux 的 IME 是 2026-09 才加的**（X11 ibus / Wayland text-input-v3）；其他平台的成熟度本次未逐一取证 | 同上 |
 | 真实产品 | **Tailscale**（官方 showcase 列出）、godcr、gotraceui、Sointu、Protonet、Wormhole William | https://gioui.org/doc/showcase |
 | 编程模型 | 立即模式，闭包式 widget tree；官方 FAQ 明确说这是为性能、避免堆分配 | https://gioui.org/doc/faq |
 | 组件 | 只有基础 widget（material 主题），**没有富文本编辑器、没有虚拟列表、没有表格** | https://gioui.org/doc/learn |
-| 无障碍 | 文档/API 中没有屏幕阅读器支持（截至 0.10.3） | https://gioui.org/doc/faq（无 a11y 条目） |
+| 上手成本 | **高**：立即模式 + 闭包式布局 + 自绘组件；官方 FAQ 用整节解释「为什么全是闭包」 | https://gioui.org/doc/faq |
+| 无障碍 | 文档/API 中没有屏幕阅读器支持（截至 0.10.3） | https://gioui.org/doc/faq （无 a11y 条目） |
 | 文本 | 矢量轮廓渲染、分辨率无关；适合自绘，不适合「拿来就用」的文档 UI | https://gioui.org/ |
 
 **Gio 能做出 Tailscale 那种「几个列表 + 几个开关 + 自绘图表」的 UI，但做不出聊天客户端的富文本输入 + 千条消息虚拟滚动 + diff 视图**——这三样都要自己写，且没有生态可抄。
@@ -141,7 +159,7 @@
 
 | 问题 | 事实 | URL |
 |---|---|---|
-| 谁在用 | VS Code、Slack、Discord、Notion、Obsidian、Figma、1Password、Signal、WhatsApp | https://www.electronjs.org/apps |
+| 谁在用 | Electron 名录列出 Slack、Discord、Notion、Obsidian、Figma、1Password、Signal、WhatsApp；VS Code 由官方 FAQ 佐证 | https://www.electronjs.org/apps 、https://code.visualstudio.com/docs/supporting/faq |
 | 成本 | 安装 80–200 MB（DSH 实测 182 MB）；Chromium + Node 常驻；本机 DSH 私有工作集 **870 MB** | `UIPLAN.md` §0；`AGENTS.md` §7 |
 | 何时反而是对的 | 需要 Chromium 级一致性（复杂 Canvas/WebGL、像素级跨平台一致）、已有庞大 Web 团队、或必须支持没有 WebView2 的老 Windows | — |
 
@@ -159,20 +177,20 @@
 | **Cursor** | VS Code 衍生（闭源） | 直接继承 VS Code 的编辑器和扩展生态 | 商业成功；受制于上游（Electron/VS Code） | 复用前端是合法策略 |
 | **Windsurf** | Electron 42 + VS Code 1.126 底座 | 同上 | 页面已以 **Devin Desktop (Windsurf)** 名义更新，底座仍是 VS Code | 「换皮」也要背 Electron |
 | **Zed** | Rust + 自研 GPUI（GPU） | Atom/Electron 到了平台天花板 | 2017 决定重写，2026-04 才 1.0；5 年、>100 万行 | 原生重写的真实价格 |
-| **Warp** | Rust（仓库含 Cargo.toml/.rustfmt.toml） | 终端要低延迟、GPU 渲染 | 成功；闭源转开源（2026） | 终端类产品必须原生 |
+| **Warp** | Rust（仓库含 Cargo.toml/.rustfmt.toml） | 终端要低延迟、GPU 渲染 | 成功；已开源（仓库可查） | 终端类产品必须原生 |
 | **Raycast** | Swift/AppKit → 2026 跨平台重写为 Swift/C# 壳 + TS/React + Node + Rust | 原生 macOS 到 Windows 要重写；Windows 原生 UI 不可靠 | 2026-05 v2 beta；内存 200–300 MB → **350–450 MB** | **最像本项目的先例**（见 §2.4） |
 | **1Password 8** | Rust core + Electron（Win/Linux/macOS）+ SwiftUI（iOS）+ 原生 Android | 4 套原生栈协作瘫痪；统一 core 提速度 | 功能成功；Electron 化在 macOS 原生派中口碑分化 | 「共享 core + Web UI」是成熟解 |
 | **Obsidian / Slack / Discord / Notion** | Electron | 富文本/实时/跨平台，一套代码 | 均在 Electron 名录；体积/内存是长期税 | Web 技术赢在「内容型 UI」 |
 | **Linear** | Web 优先 + Electron 桌面壳 | Web 优先、极致交互 | 成功；桌面壳只是容器 | 桌面壳可以极薄 |
-| **GitHub Desktop** | Electron + TypeScript + React | 跨平台、复用 GitHub 前端 | 成功；但从不以性能为卖点 | 工具型客户端可以接受 Electron |
+| **GitHub Desktop** | Electron + TypeScript + React | 跨平台、复用 Web 技术栈 | 成功；但从不以性能为卖点 | 工具型客户端可以接受 Electron |
 | **Figma** | C++ → WebAssembly + WebGL；桌面为 Electron 壳 | 浏览器里跑原生级 2D 引擎 | 成功；加载时间 **3×** 提升（2017） | Web 也能承载重引擎（WASM） |
 | **JetBrains Fleet** | JVM + 自研 Skia 渲染 | 想要比 IntelliJ 轻的新 IDE 家族 | **2025-12-22 停止分发**，团队转做 Air | 自研渲染挡不住产品定位失败 |
-| **Claude Desktop** | Electron（无官方技术页，证据 C） | 复用 claude.ai Web 前端 | 成功；与 Web 版同源 | AI 客户端默认走 Web 壳 |
+| **Claude Desktop** | Electron（业界普遍认定；官方无技术页，证据 C） | 复用 claude.ai Web 前端 | 成功；与 Web 版同源 | AI 客户端默认走 Web 壳 |
 | **Codex** | CLI（仓库含 `codex-rs`）+ `codex app` 桌面端 | 终端优先，再补桌面 | 2026 仍在扩张 | 同一产品可以多前端 |
 
 ### 2.1 VS Code / Cursor / Windsurf：为什么十几年没换
 
-- VS Code 官方 FAQ 至今把 Electron 当既定事实：排障条目直接写「VS Code 用的 Electron shell 在部分 GPU 上会白屏，用 `--disable-gpu`」。这说明到 2026 年它仍是 Electron 架构，没有换栈计划：https://code.visualstudio.com/docs/supporting/faq
+- VS Code 官方 FAQ 至今把 Electron 当既定事实：排障条目直接写「VS Code 用的 Electron shell 在部分 GPU 上会白屏，用 `--disable-gpu`」。这说明到 2026 年它仍是 Electron 架构，没有任何「已换栈」的迹象：https://code.visualstudio.com/docs/supporting/faq
 - VS Code 的成功不在「快」，在「扩展生态 + 跨平台 + 一套 UI」；它的启动/内存长期被批评，但用户为生态留下。
 - **Cursor** 是 VS Code 的衍生（闭源，官方文档不披露栈）：https://cursor.com/docs 。它证明「复用成熟前端底座」是合法商业策略——这与 `UIPLAN.md` Q2 的「先复用官方 MIT 前端包」同构。
 - **Windsurf** 的更新日志把栈写得很直白：`Fixed Electron 42.11.16 and Node.js 24.22.1 ...`、`Updated the base IDE to VS Code 1.126`（页面现在以 **Devin Desktop (Windsurf)** 名义更新）：https://windsurf.com/changelog
@@ -198,9 +216,9 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 
 | 决策点 | 官方说法 |
 |---|---|
-| 为什么不上 Windows 原生 | 「Windows 原生 UI 框架的状态，坦白说远谈不上好」；WPF/UWP/WinUI 3 代际更替，WinUI 3「still fairly young and not widely battle-tested」 |
+| 为什么不上 Windows 原生 | Windows 原生 UI 框架的状态「远谈不上好」；WPF/UWP/WinUI 3 代际更替，WinUI 3「still fairly young and not widely battle-tested」（后一句为原文引用） |
 | 为什么不选 Electron | 对**大多数公司** Electron 是正确选择（VS Code/Linear/Superhuman 证明），但 Raycast 深度依赖全局热键、剪贴板、辅助功能 API、浮窗，且不想在 macOS 上打包 Chromium |
-| 为什么不选 Tauri | 原生侧控制更少，当时「年轻到不想把公司押上去」 |
+| 为什么不选 Tauri | 原生侧控制更少，当时还太年轻，不愿把公司押上去（转述） |
 | 最终方案 | **自研原生壳 + 系统 WebView + React/TS 前端 + Node 后端 + Rust core**，四套运行时 |
 | 内存代价 | v1 **200–300 MB** → v2 **350–450 MB**；其中 WebView 120–200 MB、Node 150–200 MB、原生壳 40 MB、GPU 18 MB、网络 12 MB |
 | 空 WebView 基线 | **约 50 MB**（无内容）；裸 Node **约 12 MB** |
@@ -213,7 +231,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 
 - 官方长文（2021-08-12）自述：Mac/iOS/Windows/Android 四套独立栈，每次服务端改 API 要协调四个团队，「我们瘫痪了」；于是把非 UI 部分全部收进 **Rust core**，前端按平台选：Linux/Windows/macOS 用 **Electron**，iOS 用 SwiftUI，Android 用原生 View：https://1password.com/blog/1password-8-the-story-so-far
 - macOS 原本还做了 SwiftUI 版，最后**砍掉**，让 Electron 覆盖所有 macOS 版本——理由是「再维护一套前端工具链会拖垮排期」。
-- 口碑：功能与同步仍被认可；**Electron 化在 macOS 老用户中引发长期不满**（这是公开讨论，非官方数据；证据 C）。官方没有给出内存/启动的对比数字。
+- 口碑：功能与同步仍被认可；**Electron 化在 macOS 老用户中口碑分化**（公开讨论，非官方数据；证据 C）。官方没有给出内存/启动的对比数字。
 - **结论**：当「多平台一致性 + 交付速度」压过「原生观感」时，成熟团队会选 Web UI。1Password 的体量（安全/密码学/多平台）比 DSH 大得多，仍然这么做。
 
 ### 2.6 Obsidian / Slack / Discord / Notion / Linear：内容型 UI 的默认答案
@@ -248,13 +266,13 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 |---|---|---|
 | **Cursor** | VS Code 衍生（Electron + TS/React），闭源 | https://cursor.com/docs （官方未披露；证据 C） |
 | **Windsurf / Devin Desktop** | Electron 42 + VS Code 1.126 底座 | https://windsurf.com/changelog |
-| **Claude Desktop** | Electron（安装包为 WebView 壳；官方无技术页） | https://claude.com/download （证据 C） |
-| **Codex** | CLI（仓库为 Rust 工程）+ `codex app` 桌面端 | https://github.com/openai/codex |
+| **Claude Desktop** | Electron（业界普遍认定；官方无技术页） | https://claude.com/download （证据 C） |
+| **Codex** | CLI（仓库含 `codex-rs`）+ `codex app` 桌面端 | https://github.com/openai/codex |
 | **Cline** | VS Code 扩展 + CLI + 桌面 App（macOS/Windows） | https://github.com/cline/cline |
 | **Continue** | VS Code / JetBrains 扩展 | https://www.continue.dev/ |
 | **Aider** | Python CLI + **实验性浏览器 UI** | https://aider.chat/docs/usage/browser.html |
 
-**规律**：AI coding agent 的「桌面端」几乎全部是 **Web 技术 + 系统 WebView/Electron**，没有一个是纯 Go/Qt 自绘。原因不是它们不懂原生，而是**界面里 80% 是聊天/代码/Markdown/工具卡**——这正是 Web 排版引擎的主场。唯一的例外是 Codex 的 CLI（仓库含 `codex-rs`），因为那是终端而不是 GUI。
+**规律**：主流 AI coding agent 的「桌面端」几乎全部是 **Web 技术 + 系统 WebView/Electron**，本次取证中没有看到纯 Go/Qt 自绘的桌面端。原因不是它们不懂原生，而是**界面里 80% 是聊天/代码/Markdown/工具卡**——这正是 Web 排版引擎的主场。唯一的例外是 Codex 的 CLI（仓库含 `codex-rs`），因为那是终端而不是 GUI。
 
 ---
 
@@ -275,7 +293,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 ### 规律 3：「单语言」在跨进程架构里是伪需求
 
 - 真正要的是「**每个进程内部单语言**」，不是「整个产品单语言」。宿主 Go、界面 TS，中间一条 HTTP/WS；两边各自可测试、可替换（`UIPLAN.md` §2）。
-- **反例（支持单语言）**：Zed  monolingual（Rust 前后端），代价是 5 年 + 100 万行 + 自研 GPUI（https://zed.dev/blog/zed-1-0 ）。
+- **反例（支持单语言）**：Zed 是 monolingual（Rust 前后端），代价是 5 年 + 100 万行 + 自研 GPUI（https://zed.dev/blog/zed-1-0 ）。
 - **反例（反对单语言）**：1Password（Rust + Electron + SwiftUI + Kotlin）、Raycast（Swift/C# + TS + Node + Rust）都是多语言，照样交付（https://1password.com/blog/1password-8-the-story-so-far 、https://www.raycast.com/blog/a-technical-deep-dive-into-the-new-raycast ）。
 - **结论**：语言数不是道德问题，是「谁承担哪类工作」的问题。只有当 UI 退化成「几个列表 + 几个开关」时，单语言才真的划算。
 
@@ -295,7 +313,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 ### 规律 6：内存/体积预算决定壳，不决定语言
 
 - WebView2 的空载基线 ~50 MB，加载后 120–200 MB（Raycast 实测），是宿主 15.7 MB 的 **8–13 倍**；它一个人就能吃掉 150 MB 预算。
-- **反例**：Wails 宣称 10 MB 内存，但那是「Go 进程」，不含 WebView2 渲染进程；厂商对比表容易把「壳进程」和「整个产品」混为一谈（https://wails.io/ ）。
+- **反例**：Wails 宣称 10 MB 内存，但厂商没说明口径——很可能只是 Go 进程基线，不含 WebView2 渲染进程；对比表容易把「壳进程」和「整个产品」混为一谈（https://wails.io/ ）。
 - **对本项目**：如果 150 MB 是「整个产品」，WebView 方案当场出局；如果 150 MB 是「宿主进程」，WebView 方案成立。这是 `UIPLAN.md` Q4，也是全部选型里唯一能反转技术路线的一条。
 
 ---
@@ -352,6 +370,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 | 内存 | **45–80 MB**（估） | `UIPLAN.md` §2.4 估 ~45 MB |
 | 开发速度 | **最慢**：富文本输入 + IME、虚拟滚动、Markdown/高亮/diff、schema 表单四个缺口全自研；9–18 人月（估） | `UIPLAN.md` §2.1；Fyne 2.8 只补了 RichText 阅读 |
 | **什么时候它会赢** | ① UI 退化成「会话列表 + 纯文本输出 + 几个按钮」；② 150 MB 是整个产品的硬上限；③ 团队明确拒绝 JS/WebView；④ 需要单文件、无系统 WebView 依赖 | — |
+| **什么时候它会输** | ① 界面需要富文本输入/IME/虚拟滚动/diff（就是本项目现状）；② 需要 6–10 周内出可用 UI；③ 没人愿意长期维护自绘文本组件 | — |
 
 **它不是「更纯粹」，是「把 80% 的 Web 活重写成 20% 的 Go 活，而且质量上限更低」**：Fyne 的 RichText 到 2026 才支持 Markdown 表格，Gio 到 0.10.3 才补 Linux IME；两者都没有可用的富文本编辑器。
 
@@ -359,7 +378,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 
 | 组合 | 语言数 | 体积 | 冷启动 | 内存 | 为什么排除 |
 |---|---:|---|---|---|---|
-| **D. Tauri v2 + Go sidecar** | 3（Rust/Go/TS） | 13–16 MB | 0.4–1.0 s | 130–190 MB | Go 从「产品本体」降为「Rust 壳的子进程」；两次 IPC；生命周期在 Rust；三套工具链 |
+| **D. Tauri v2 + Go sidecar** | 3（Rust/Go/TS） | 13–16 MB（估） | 0.4–1.0 s（估） | 130–190 MB（估） | Go 从「产品本体」降为「Rust 壳的子进程」；两次 IPC；生命周期在 Rust；三套工具链 |
 | **E. Electron + 新前端** | 2（TS/Go，但壳内带 Node） | 150–200 MB | 1–3 s | 300–500 MB | 直接击穿 25 MB / 150 MB；R6 的起点动因；唯一合理场景是「必须 Chromium 级一致」 |
 
 ### 4.4 判定矩阵（1–5 分，5 最好；权重：内存 25%、开发速度 25%、体积 20%、冷启动 15%、生态 10%、语言数 5%）
@@ -370,7 +389,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 | **B. Wails v3 + TS** | 4 | 4 | 2 | 4 | 3 | 4 | **3.40** |
 | **C. 全 Go（Fyne/Gio）** | 3 | 4 | 5 | 1 | 2 | 5 | **3.15** |
 | **D. Tauri v2 + Go sidecar** | 4 | 3 | 2 | 3 | 4 | 2 | **3.00** |
-| **E. Electron + 新前端** | 1 | 2 | 1 | 5 | 5 | 3 | **2.65** |
+| **E. Electron + 新前端** | 1 | 2 | 1 | 5 | 5 | 4 | **2.70** |
 
 > 评分口径：体积 5=≤15 MB、3=25–35 MB、1=>80 MB；冷启动 5=≤0.3 s、3=0.8–1.5 s、1=>3 s；内存 5=≤60 MB、3=100–150 MB、1=>250 MB；开发速度按「UI 工时 + 缺口数量」；语言数 1 门=5、2 门=4、3 门=2、4 门=1。
 
@@ -388,7 +407,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 
 | 触发条件 | 推翻成什么 | 为什么 |
 |---|---|---|
-| **Q4 = 150 MB 是整个产品** | 组合 C（Fyne/Gio），或长期停在浏览器方案（浏览器内存不计入产品） | WebView2 一个进程 100–200 MB，无法压到 150 MB 以内 |
+| **Q4 = 150 MB 是整个产品** | 组合 C（Fyne/Gio），或长期停在浏览器方案（浏览器内存不计入产品） | WebView2 相关进程合计 100–200 MB，无法压到 150 MB 以内 |
 | **Q3 = R6 也管 WebView 里的 JS** | 组合 C | 不允许 WebView 就没有「Go 壳 + Web 前端」这条路 |
 | **壳的 WebView2 长尾（IME/无障碍/白屏/DPI）>2 周** | 组合 B（Wails v3） | 用成熟壳换时间；但只把 Transport 放在 Wails 之下，不用它的绑定 |
 | **UI 退化成托盘/启动器/纯文本** | 组合 C（Fyne） | Web 的排版优势消失，单语言/低内存胜出 |
@@ -401,7 +420,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 
 | Q | 本文的证据 | 建议 |
 |---|---|---|
-| **Q3**（R6 管不管 WebView JS） | WebView 的 JS 跑在系统渲染进程，dshd 进程不加 JS 引擎；官方壳本身就是 `sandbox:true` 的 WebView（`research/40`）；Raycast/Wails/Tauri 都把「JS 在 WebView」与「Node 在宿主」分开算 | **选 C（只对宿主进程有效）**；否则只能走全 Go，UI 工时 9–18 人月 |
+| **Q3**（R6 管不管 WebView JS） | WebView 的 JS 跑在系统渲染进程，dshd 进程不加 JS 引擎；官方壳本身就是 `sandbox:true` 的 WebView（`research/40`）；Wails/Tauri 的 Go/Rust 宿主同样不内嵌 V8，JS 都在系统 WebView 里 | **选 C（只对宿主进程有效）**；否则只能走全 Go，UI 工时 9–18 人月 |
 | **Q4**（150 MB 是宿主还是整个产品） | 空 WebView ~50 MB、加载 120–200 MB（Raycast 实测）；宿主 15.7 MB | **选 A（宿主）**；另立「整个产品 ≤250 MB」的软指标。若必须整个产品 ≤150 MB，则 WebView 方案当场出局 |
 | **Q8**（壳用谁） | Wails v3 GA 8 天、绑定与 Transport 重复；裸 go-webview2 足够 4 个能力；官方壳只有 45 个 IPC/4 个窗口 | **浏览器先上；壳用自研 WebView2；Wails 仅作长尾备选** |
 
@@ -418,7 +437,7 @@ Raycast v1 是 **Swift + AppKit 的原生 macOS 应用**，2026 年为了上 Win
 | Cursor 的栈 | 官方不披露；「VS Code 衍生」为业界共识（证据 C），未找到官方技术页 |
 | Claude Desktop 的栈 | 官方无技术页；「Electron」为安装包结构判断（证据 C） |
 | Warp 的 GPU 渲染细节 | 仓库可证 Rust（Cargo.toml）；「自研 GPU 渲染」未取到一手博文，标记 B |
-| 1Password 8 的口碑 | 官方博文只讲架构；「macOS 用户不满」为公开讨论，无官方统计（证据 C） |
+| 1Password 8 的口碑 | 官方博文只讲架构；「macOS 原生派口碑分化」为公开讨论，无官方统计（证据 C） |
 | Electron 最小体积 | 未单列；用 DSH 实测 182 MB 与 Electron 名录作锚 |
 | 各产品「冷启动」 | 除 Wails 厂商口径外均为量级估算，未在同一台机器上对比 |
 
