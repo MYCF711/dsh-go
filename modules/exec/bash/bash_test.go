@@ -1,6 +1,8 @@
 package bash
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -152,5 +154,30 @@ func TestOutputIsBoundedByPipeline(t *testing.T) {
 	}
 	if res.ExitCode != 0 {
 		t.Fatalf("退出码 = %d", res.ExitCode)
+	}
+}
+
+// ctx 取消时必须立刻返回，不能陪着 shell 等到 idle 超时。
+// 实测过：不修之前，取消一个 sleep 20 的调用要等 20 秒才返回。
+func TestExecReturnsOnContextCancel(t *testing.T) {
+	svc := NewService(t.TempDir())
+	defer svc.Close()
+	tool := &shellTool{svc: svc, budget: 30 * time.Second}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := tool.Exec(ctx, json.RawMessage(`{"command":"sleep 20"}`))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("取消之后应该返回错误")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("取消后 %v 才返回——ctx 没被尊重", elapsed)
 	}
 }

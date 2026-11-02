@@ -99,7 +99,31 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 		budget = 15 * time.Minute
 	}
 
-	res, err := t.svc.Run(a.Command, budget)
+	// 中断语义：ctx 取消（客户端 cancel / 断连）时必须**立刻**返回，
+	// 不能让调用方陪着 shell 等到 idle 超时（实测能等 20 秒）。
+	// 命令可能还在 shell 里跑——那是诚实的"结果未知"，
+	// 由上层把它报成 outcome is unknown，而不是假装失败。
+	type runOut struct {
+		res spi.ExecResult
+		err error
+	}
+	done := make(chan runOut, 1)
+	go func() {
+		r, e := t.svc.Run(a.Command, budget)
+		done <- runOut{r, e}
+	}()
+
+	var res spi.ExecResult
+	var err error
+	select {
+	case out := <-done:
+		res, err = out.res, out.err
+	case <-ctx.Done():
+		return spi.Result{
+			Hint: "命令可能仍在 shell 里跑；先 job_list 看有没有后台任务，或用一条只读命令确认现场的当前状态",
+		}, ctx.Err()
+	}
+
 	if err != nil {
 		if errors.Is(err, ErrSessionEnded) {
 			return spi.Result{Hint: "命令自己结束了 shell（例如 exit）；下一条命令会自动开新会话，但 cwd 会回到起点"}, err

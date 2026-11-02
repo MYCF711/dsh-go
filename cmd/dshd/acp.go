@@ -364,6 +364,7 @@ func cmdACP(argv []string) error {
 	manifest := fs.String("manifest", "dsh.toml", "manifest 路径")
 	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "模型 id")
 	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
+	maxChars := fs.Int("max-chars", 4000, "工具输出外置阈值（字符）")
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
 	steps := fs.Int("max-steps", 8, "每轮最多几步")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
@@ -376,7 +377,7 @@ func cmdACP(argv []string) error {
 		return err
 	}
 
-	mods, err := loadMods(*manifest, *home)
+	mods, err := loadMods(*manifest, *home, *maxChars)
 	if err != nil {
 		return err
 	}

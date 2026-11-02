@@ -48,13 +48,14 @@ var hostHistory = &historyHolder{}
 // builtinModules 按工作区与 home 装配默认实现。
 // artifacts 目录要放行给 FS 读：工具输出被外置成 artifact 之后，
 // Hint 会告诉模型「用 read 读全文」——不放行那句 Hint 就是假的。
-func builtinModules(wd, home string) []kernel.Module {
+func builtinModules(wd, home string, maxChars int) []kernel.Module {
 	return []kernel.Module{
 		// 默认实现也是插件（A3）：它们与第三方插件走同一个 Register(scope)。
 		tools.Module(tools.Options{
 			// artifact 落在 home 下（不是系统 temp）：FS 只放行了这个目录，
 			// 放 temp 里模型读不到自己刚被外置的结果。
 			SpillDir: filepath.Join(home, "artifacts"),
+			MaxChars: maxChars,
 		}),
 		bash.Module(wd, bash.Options{}),
 		local.Module(wd, local.WithExtraReadRoot(filepath.Join(home, "artifacts"))),
@@ -143,8 +144,8 @@ func cwdOrDot() string {
 	return wd
 }
 
-func loadMods(manifestPath, home string) ([]kernel.Module, error) {
-	mods := builtinModules(cwdOrDot(), home)
+func loadMods(manifestPath, home string, maxChars int) ([]kernel.Module, error) {
+	mods := builtinModules(cwdOrDot(), home, maxChars)
 	m, err := kernel.LoadManifest(manifestPath)
 	if err != nil {
 		return nil, err
@@ -161,7 +162,7 @@ func cmdModules(argv []string) error {
 	if err := fs.Parse(argv[1:]); err != nil {
 		return err
 	}
-	mods, err := loadMods(*manifest, defaultHome())
+	mods, err := loadMods(*manifest, defaultHome(), 0)
 	if err != nil {
 		return err
 	}
@@ -220,7 +221,7 @@ func cmdTools(argv []string) error {
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	mods, err := loadMods(*manifest, defaultHome())
+	mods, err := loadMods(*manifest, defaultHome(), 0)
 	if err != nil {
 		return err
 	}
@@ -259,6 +260,7 @@ func cmdRun(argv []string) error {
 	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
 	maxSteps := fs.Int("max-steps", 8, "最多几步")
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
+	maxChars := fs.Int("max-chars", 4000, "工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	policy := fs.String("policy", "auto", "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
 	autoCompact := fs.Int("auto-compact", 40000, "每步前估算超过多少 token 就自动压缩（0=关闭）")
@@ -269,7 +271,7 @@ func cmdRun(argv []string) error {
 		return fmt.Errorf("缺 --prompt")
 	}
 
-	mods, err := loadMods(*manifest, *home)
+	mods, err := loadMods(*manifest, *home, *maxChars)
 	if err != nil {
 		return err
 	}
@@ -476,7 +478,7 @@ func cmdExec(argv []string) error {
 	if *toolName == "" {
 		return fmt.Errorf("缺 --tool")
 	}
-	mods, err := loadMods(*manifest, defaultHome())
+	mods, err := loadMods(*manifest, defaultHome(), 0)
 	if err != nil {
 		return err
 	}
