@@ -145,6 +145,8 @@ type ToolEntry struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+	// Caps 是能力声明：审批与沙箱都靠它，所以要进快照（改了必须显式确认）。
+	Caps spi.Caps `json:"caps"`
 }
 
 // buildToolTable 按名字排序，保证同一装配产生同样的字节。
@@ -159,6 +161,7 @@ func buildToolTable(reg spi.ToolRegistry) ([]ToolEntry, error) {
 			Name:        t.Name(),
 			Description: t.Description(),
 			Parameters:  t.Schema(),
+			Caps:        t.Caps(),
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })

@@ -22,8 +22,26 @@ type Tool interface {
 	Description() string
 	// Schema 必须稳定：不得含时间戳、绝对路径、随机 id。
 	Schema() json.RawMessage
+	// Caps 声明这个工具会对外部世界造成什么影响。
+	//
+	// **必填**：审批与沙箱都靠它判定，不许让它们按工具名猜（dsc 的反例：sandbox.go:52）。
+	// 漏声明在编译期就会暴露，不会静默变成"只读"。
+	Caps() Caps
 	// Exec 执行。失败时必须通过 Result.Hint 给出下一步。
 	Exec(ctx context.Context, args json.RawMessage) (Result, error)
+}
+
+// Caps 是工具的能力声明。
+type Caps struct {
+	Writes      bool `json:"writes,omitempty"`      // 会改文件系统
+	Executes    bool `json:"executes,omitempty"`    // 会起子进程
+	Network     bool `json:"network,omitempty"`     // 会访问网络
+	Destructive bool `json:"destructive,omitempty"` // 可能造成不可恢复的后果
+}
+
+// NeedsApproval 是"要不要先问人"的判定：只读工具不问，其余都问。
+func (c Caps) NeedsApproval() bool {
+	return c.Writes || c.Executes || c.Network || c.Destructive
 }
 
 // Result 是宿主内部的工具结果契约。

@@ -35,7 +35,8 @@ type Tool struct {
 	fs spi.FS
 }
 
-func (t *Tool) Name() string { return "read" }
+func (t *Tool) Name() string   { return "read" }
+func (t *Tool) Caps() spi.Caps { return spi.Caps{} }
 func (t *Tool) Description() string {
 	return "读文件（按行窗口）。改文件前必须先读；大文件用 offset/limit 分段。"
 }

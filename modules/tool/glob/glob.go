@@ -39,7 +39,8 @@ type Tool struct {
 	fs spi.FS
 }
 
-func (t *Tool) Name() string { return "glob" }
+func (t *Tool) Name() string   { return "glob" }
+func (t *Tool) Caps() spi.Caps { return spi.Caps{} }
 func (t *Tool) Description() string {
 	return "按 glob 模式找文件（支持 **）。只返回路径，不读内容。"
 }

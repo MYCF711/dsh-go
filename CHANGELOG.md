@@ -10,6 +10,25 @@
 
 ---
 
+## 0.2.1-go.5 · M4-a — 2026-11-02
+
+**工具能力声明落地：审批不再按工具名猜（R3.6 的账还了）。**
+
+- `spi.Tool` 增加**必填**的 `Caps() Caps`：`{writes, executes, network, destructive}` + `NeedsApproval()`
+  - 必填是刻意的：漏声明编译期就炸，不会静默变成"只读工具"
+- 9 个工具逐个认领：`write`/`edit` = writes；`shell` = writes+executes；`job_kill` = destructive；其余只读
+- `guardedRunner` 改成查 `Caps().NeedsApproval()`，**删掉 `needPermission` 名字表**
+  （dsc 的反例：`sandbox.go:52` 按名字判断，改个名字就绕过审批）
+- 工具表快照现在含 `caps`；`TestWriteToolsDeclareCaps` 做成门：新工具必须在那张表里被显式认领
+
+**实测（官方 SDK 客户端）**
+
+| 工具 | caps | 审批请求 |
+|---|---|---:|
+| `glob` | `{}` | **0** |
+| `shell` | `{writes, executes}` | **1**（allow-once） |
+
+---
 ## 0.2.1-go.5 · M3-d — 2026-11-02
 
 **`session/resume`：会话状态跨进程活着——历史从 v4 文件读回来。**

@@ -19,8 +19,10 @@ type stubTool struct {
 	ran  *bool
 }
 
-func (s *stubTool) Name() string            { return s.name }
-func (s *stubTool) Description() string     { return "stub" }
+func (s *stubTool) Name() string        { return s.name }
+func (s *stubTool) Description() string { return "stub" }
+
+func (s *stubTool) Caps() spi.Caps          { return spi.Caps{} }
 func (s *stubTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (s *stubTool) Exec(context.Context, json.RawMessage) (spi.Result, error) {
 	if s.ran != nil {

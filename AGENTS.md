@@ -16,7 +16,8 @@
 - ✅ **官方 ACP SDK 客户端已连上**（`scripts/acp-sdk-client.mjs`）：reasoning/text/tool_call 都通，stopReason=end_turn
 - ✅ 审批链路：`write`/`edit`/`shell`/`job_kill` 走 `session/request_permission`；拒绝时模型能读懂并改招
 - ✅ **M3 完成**：ACP + SDK 客户端 + 审批 + usage_update + 跨进程 `session/resume`
-- 下一步 **M4**：surface 投影与提示词装配；顺带把 `needPermission` 名字表换成工具能力声明
+- ✅ 工具能力声明（`spi.Caps`，**必填**）：审批按 `NeedsApproval()` 判定，不再按名字猜
+- 下一步 **M4**：surface 投影 + 提示词装配（`system/message`）
 
 ---
 
@@ -77,7 +78,7 @@ type Tool interface {
 3. 每个 `error` 带 `Hint`，写清"下一步该怎么改"（模型下一句就靠这句话）。
 4. 失败返回 `(Result{}, err)`，不要返回半截结果 + nil error。
 5. 路径一律正斜杠、相对 workspace 根；绝不把 `os.Getwd()` 的原生反斜杠喂给模型。
-6. 写类工具必须声明"写能力"（供沙箱判定），**不许让沙箱按工具名猜**（dsc 的反例：`sandbox.go:52`）。
+6. 写类工具必须声明 `Caps()`（`writes`/`executes`/`network`/`destructive`），**必填**——审批与沙箱都按它判定，不许按工具名猜（dsc 的反例：`sandbox.go:52`）。
 7. 共享文件观测策略：**改前必须先读**（read-before-write），由 `FS` 中间件统一实现，工具自己别写。
 
 **中间件顺序（固定）**：`pre-execute`（审批/沙箱，可 veto）→ `execute`（超时 + 活跃续命）→ `post-execute`（spill/裁剪/重复提醒）→ `result`（广播）。

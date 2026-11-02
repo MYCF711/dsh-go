@@ -137,7 +137,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 
 	var runner spi.Runner = r.runner
 	if r.ask != nil {
-		runner = &guardedRunner{inner: r.runner, ask: r.ask, sessionID: sessionID}
+		runner = &guardedRunner{inner: r.runner, reg: r.reg, ask: r.ask, sessionID: sessionID}
 	}
 
 	loop := &agent.Loop{
@@ -165,20 +165,19 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	return "end_turn", usageOut, nil
 }
 
-// guardedRunner 在调用工具前先问用户。
+// guardedRunner 在调用工具前按**工具自己的能力声明**决定要不要问用户。
+//
+// 这里不按工具名判断：名字表是 dsc 踩过的坑（sandbox.go:52），
+// 一个改了名字的工具就会绕过审批。
 type guardedRunner struct {
 	inner     spi.Runner
+	reg       spi.ToolRegistry
 	ask       func(ctx context.Context, sessionID, tool string, args string) (bool, error)
 	sessionID string
 }
 
-// needPermission 是"会改世界"的工具集合。能力声明（R3.6）落地后这张表应该由工具自己报。
-var needPermission = map[string]bool{
-	"write": true, "edit": true, "shell": true, "job_kill": true,
-}
-
 func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
-	if needPermission[name] {
+	if t, ok := g.reg.Get(name); ok && t.Caps().NeedsApproval() {
 		ok, err := g.ask(ctx, g.sessionID, name, string(args))
 		if err != nil {
 			return spi.Result{Hint: "审批失败：客户端可能断开了；重试或改用只读工具"}, fmt.Errorf("审批失败: %w", err)

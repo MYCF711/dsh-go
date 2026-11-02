@@ -52,6 +52,7 @@ type fakeTool struct {
 }
 
 func (t *fakeTool) Name() string            { return t.name }
+func (t *fakeTool) Caps() spi.Caps          { return spi.Caps{} }
 func (t *fakeTool) Description() string     { return "假工具" }
 func (t *fakeTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (t *fakeTool) Exec(context.Context, json.RawMessage) (spi.Result, error) {

@@ -88,6 +88,37 @@ func buildToolTableMust(t *testing.T) []ToolEntry {
 	return table
 }
 
+// TestWriteToolsDeclareCaps 是 R3.6 的门：能力声明不许靠猜，新工具必须在这里被显式认领。
+func TestWriteToolsDeclareCaps(t *testing.T) {
+	want := map[string]spi.Caps{
+		"read":       {},
+		"glob":       {},
+		"grep":       {},
+		"job_list":   {},
+		"job_output": {},
+		"write":      {Writes: true},
+		"edit":       {Writes: true},
+		"shell":      {Writes: true, Executes: true},
+		"job_kill":   {Destructive: true},
+	}
+	seen := map[string]bool{}
+	for _, e := range buildToolTableMust(t) {
+		w, ok := want[e.Name]
+		if !ok {
+			t.Fatalf("新工具 %q 没有认领能力：请在上面这张表里显式写清它会不会写盘/起进程/联网", e.Name)
+		}
+		seen[e.Name] = true
+		if e.Caps != w {
+			t.Errorf("%q 的 caps = %+v，期望 %+v", e.Name, e.Caps, w)
+		}
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("能力表里的 %q 没有出现在工具表里（删了工具忘了删表？）", name)
+		}
+	}
+}
+
 // TestEveryToolHasDescription 是模型体验的底线：没有描述的工具模型只能猜什么时候用。
 func TestEveryToolHasDescription(t *testing.T) {
 	for _, e := range buildToolTableMust(t) {

@@ -31,7 +31,8 @@ type Tool struct {
 	fs spi.FS
 }
 
-func (t *Tool) Name() string { return "edit" }
+func (t *Tool) Name() string   { return "edit" }
+func (t *Tool) Caps() spi.Caps { return spi.Caps{Writes: true} }
 func (t *Tool) Description() string {
 	return "把文件中的 old_string 逐字替换为 new_string；要求唯一匹配，多处须显式 replace_all。"
 }

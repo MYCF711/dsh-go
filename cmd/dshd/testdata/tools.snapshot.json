@@ -28,6 +28,9 @@
         "new_string"
       ],
       "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
     }
   },
   {
@@ -54,7 +57,8 @@
         "pattern"
       ],
       "additionalProperties": false
-    }
+    },
+    "caps": {}
   },
   {
     "name": "grep",
@@ -88,7 +92,8 @@
         "pattern"
       ],
       "additionalProperties": false
-    }
+    },
+    "caps": {}
   },
   {
     "name": "job_kill",
@@ -105,6 +110,9 @@
         "id"
       ],
       "additionalProperties": false
+    },
+    "caps": {
+      "destructive": true
     }
   },
   {
@@ -114,7 +122,8 @@
       "type": "object",
       "properties": {},
       "additionalProperties": false
-    }
+    },
+    "caps": {}
   },
   {
     "name": "job_output",
@@ -137,7 +146,8 @@
         "id"
       ],
       "additionalProperties": false
-    }
+    },
+    "caps": {}
   },
   {
     "name": "read",
@@ -164,7 +174,8 @@
         "file_path"
       ],
       "additionalProperties": false
-    }
+    },
+    "caps": {}
   },
   {
     "name": "shell",
@@ -187,6 +198,10 @@
         "command"
       ],
       "additionalProperties": false
+    },
+    "caps": {
+      "writes": true,
+      "executes": true
     }
   },
   {
@@ -209,6 +224,9 @@
         "content"
       ],
       "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
     }
   }
 ]

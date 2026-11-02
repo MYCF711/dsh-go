@@ -49,7 +49,8 @@ type Tool struct {
 	fs spi.FS
 }
 
-func (t *Tool) Name() string { return "grep" }
+func (t *Tool) Name() string   { return "grep" }
+func (t *Tool) Caps() spi.Caps { return spi.Caps{} }
 func (t *Tool) Description() string {
 	return "按 Go 正则搜索文件内容，返回 文件:行:文本。找文件请用 glob。"
 }
