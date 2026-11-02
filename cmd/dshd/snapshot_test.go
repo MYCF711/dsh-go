@@ -104,6 +104,8 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		// 只改进程自己的 cwd：不写盘、不起进程、不联网。
 		// 它能让后续 write 落到别处，但 write 自己那道审批才是闸门。
 		"working_directory": {},
+		// 只记清单在内存里，不写盘、不起进程、不联网。
+		"todo_write": {},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {

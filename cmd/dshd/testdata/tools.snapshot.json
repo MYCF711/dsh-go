@@ -242,6 +242,47 @@
     "caps": {}
   },
   {
+    "name": "todo_write",
+    "description": "记录或更新任务清单（整份替换）。多步骤工作时用它把计划摆出来、让人看得见进度。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "todos": {
+          "type": "array",
+          "description": "完整的任务清单，替换掉之前的清单",
+          "items": {
+            "type": "object",
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "任务是什么——一句祈使句"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "completed"
+                ],
+                "description": "pending（没开始）| in_progress（正在做）| completed（做完了）"
+              }
+            },
+            "required": [
+              "content",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "todos"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "working_directory",
     "description": "查看或切换当前工作目录（影响 read/write/glob/grep 与新开的 bash）",
     "parameters": {
