@@ -1,3 +1,26 @@
+## 0.2.1-go.7（未发布）· 续 5
+
+**工具契约对拍：拿 DSH 发给模型的那张表，逐项比。**
+
+数据来源是真实会话的 `request/header.header.tools[]`——**模型真正看到的东西**，不是文档。
+
+| 结果 | 工具 |
+|---|---|
+| 完全一致（6） | `read` `write` `edit` `job_output` `job_kill` `job_list` |
+| 超集（3） | `glob`（多 limit）、`grep`（多 ignore_case/limit）、`bash`（多 idle_seconds） |
+
+**修掉的三处真差异：**
+
+1. `shell` → **`bash`**：DSH 的工具名是 bash，按 DSH 习惯写的调用会打空
+2. `job_output`/`job_kill` 的 `id` → **`job_id`**，`wait_seconds` → **`wait` + `timeout_ms`**
+3. `bash` 补上 **`description`（DSH 标为 required）**——功能上无关，但那是 DSH 的调用契约
+
+新门 `TestToolParityWithDSH`：只拦会让模型调用失败的差异（同名工具缺失、DSH 必需参数我们不认），
+措辞与可选参数只报告不判错。
+
+工具表 token：**906 → 1,294**（+43%，因为补了 description 与 job 参数），仍只占 6k 预算的 22%。
+
+---
 ## 0.2.1-go.7（未发布）· 续 4
 
 **`session/fork`：从已有会话派生新会话，继承 surface 不继承授权。**

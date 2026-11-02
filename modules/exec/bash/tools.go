@@ -49,9 +49,10 @@ var shellSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "command": {"type": "string", "description": "要执行的 bash 命令；cwd 跨命令保留"},
+    "description": {"type": "string", "description": "这段命令干什么，5-10 个字，给用户看的（例如「列出当前目录」）"},
     "idle_seconds": {"type": "integer", "minimum": 1, "maximum": 900, "description": "多久无输出转后台，默认 600"}
   },
-  "required": ["command"],
+  "required": ["command", "description"],
   "additionalProperties": false
 }`)
 
@@ -60,7 +61,7 @@ type shellTool struct {
 	budget time.Duration
 }
 
-func (t *shellTool) Name() string   { return "shell" }
+func (t *shellTool) Name() string   { return "bash" }
 func (t *shellTool) Caps() spi.Caps { return spi.Caps{Writes: true, Executes: true} }
 func (t *shellTool) Description() string {
 	return "在持久 bash 会话里执行命令，cwd 跨命令保留；无输出超时就转后台。"
@@ -69,6 +70,7 @@ func (t *shellTool) Schema() json.RawMessage { return shellSchema }
 
 type shellArgs struct {
 	Command     string `json:"command"`
+	Description string `json:"description"`
 	IdleSeconds int    `json:"idle_seconds"`
 }
 
@@ -127,7 +129,7 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 		Hint:    hint,
 		View: &spi.ViewSpec{
 			Kind:  spi.ViewPlain,
-			Title: "shell",
+			Title: "bash",
 			Badge: fmt.Sprintf("exit %d", res.ExitCode),
 			Body:  res.Output,
 		},
@@ -139,10 +141,11 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 var jobOutputSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "id": {"type": "string", "description": "任务 id，如 job-1"},
-    "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 120, "description": "最多等多久，默认 0（立即返回当前输出）"}
+    "job_id": {"type": "string", "description": "任务 id，如 job-1"},
+    "wait": {"type": "boolean", "description": "是否阻塞等待任务结束，默认 false"},
+    "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 120000, "description": "wait=true 时最多等多少毫秒，默认 30000"}
   },
-  "required": ["id"],
+  "required": ["job_id"],
   "additionalProperties": false
 }`)
 
@@ -157,14 +160,22 @@ func (t *jobOutputTool) Schema() json.RawMessage { return jobOutputSchema }
 
 func (t *jobOutputTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
 	var a struct {
-		ID          string `json:"id"`
-		WaitSeconds int    `json:"wait_seconds"`
+		JobID     string `json:"job_id"`
+		Wait      bool   `json:"wait"`
+		TimeoutMS int    `json:"timeout_ms"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return spi.Result{Hint: `参数不合法：期望 {"id": "job-1", "wait_seconds"?: 0}`}, err
+		return spi.Result{Hint: `参数不合法：期望 {"job_id": "job-1", "wait"?: false, "timeout_ms"?: 30000}`}, err
 	}
-	wait := time.Duration(a.WaitSeconds) * time.Second
-	out, err := t.svc.Output(a.ID, wait)
+	wait := time.Duration(0)
+	if a.Wait {
+		ms := a.TimeoutMS
+		if ms <= 0 {
+			ms = 30000
+		}
+		wait = time.Duration(ms) * time.Millisecond
+	}
+	out, err := t.svc.Output(a.JobID, wait)
 	if err != nil {
 		return spi.Result{Hint: "用 job_list 看有哪些任务 id"}, err
 	}
@@ -190,8 +201,11 @@ func doneText(done bool) string {
 
 var jobKillSchema = json.RawMessage(`{
   "type": "object",
-  "properties": {"id": {"type": "string", "description": "任务 id"}},
-  "required": ["id"],
+  "properties": {
+    "job_id": {"type": "string", "description": "任务 id"},
+    "reason": {"type": "string", "description": "可选：记录在日志里并转发给任务"}
+  },
+  "required": ["job_id"],
   "additionalProperties": false
 }`)
 
@@ -204,18 +218,19 @@ func (t *jobKillTool) Schema() json.RawMessage { return jobKillSchema }
 
 func (t *jobKillTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
 	var a struct {
-		ID string `json:"id"`
+		JobID  string `json:"job_id"`
+		Reason string `json:"reason"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return spi.Result{Hint: `参数不合法：期望 {"id": "job-1"}`}, err
+		return spi.Result{Hint: `参数不合法：期望 {"job_id": "job-1", "reason"?: "..."}`}, err
 	}
-	if err := t.svc.Kill(a.ID); err != nil {
+	if err := t.svc.Kill(a.JobID); err != nil {
 		return spi.Result{Hint: "用 job_list 确认 id；已结束的任务不需要终止"}, err
 	}
 	return spi.Result{
-		Summary: "已终止 " + a.ID,
-		Data:    map[string]any{"id": a.ID, "killed": true},
-		Hint:    "终止只杀掉 bash 进程；它的子进程可能仍在跑，必要时用 shell 手动清理",
+		Summary: "已终止 " + a.JobID,
+		Data:    map[string]any{"job_id": a.JobID, "killed": true},
+		Hint:    "终止只杀掉 bash 进程；它的子进程可能仍在跑，必要时用 bash 手动清理",
 	}, nil
 }
 

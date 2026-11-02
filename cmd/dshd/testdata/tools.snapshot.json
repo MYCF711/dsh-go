@@ -1,5 +1,37 @@
 [
   {
+    "name": "bash",
+    "description": "在持久 bash 会话里执行命令，cwd 跨命令保留；无输出超时就转后台。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "要执行的 bash 命令；cwd 跨命令保留"
+        },
+        "description": {
+          "type": "string",
+          "description": "这段命令干什么，5-10 个字，给用户看的（例如「列出当前目录」）"
+        },
+        "idle_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900,
+          "description": "多久无输出转后台，默认 600"
+        }
+      },
+      "required": [
+        "command",
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true,
+      "executes": true
+    }
+  },
+  {
     "name": "edit",
     "description": "把文件中的 old_string 逐字替换为 new_string；要求唯一匹配，多处须显式 replace_all。",
     "parameters": {
@@ -101,13 +133,17 @@
     "parameters": {
       "type": "object",
       "properties": {
-        "id": {
+        "job_id": {
           "type": "string",
           "description": "任务 id"
+        },
+        "reason": {
+          "type": "string",
+          "description": "可选：记录在日志里并转发给任务"
         }
       },
       "required": [
-        "id"
+        "job_id"
       ],
       "additionalProperties": false
     },
@@ -131,19 +167,23 @@
     "parameters": {
       "type": "object",
       "properties": {
-        "id": {
+        "job_id": {
           "type": "string",
           "description": "任务 id，如 job-1"
         },
-        "wait_seconds": {
+        "wait": {
+          "type": "boolean",
+          "description": "是否阻塞等待任务结束，默认 false"
+        },
+        "timeout_ms": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 120,
-          "description": "最多等多久，默认 0（立即返回当前输出）"
+          "maximum": 120000,
+          "description": "wait=true 时最多等多少毫秒，默认 30000"
         }
       },
       "required": [
-        "id"
+        "job_id"
       ],
       "additionalProperties": false
     },
@@ -176,33 +216,6 @@
       "additionalProperties": false
     },
     "caps": {}
-  },
-  {
-    "name": "shell",
-    "description": "在持久 bash 会话里执行命令，cwd 跨命令保留；无输出超时就转后台。",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "string",
-          "description": "要执行的 bash 命令；cwd 跨命令保留"
-        },
-        "idle_seconds": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 900,
-          "description": "多久无输出转后台，默认 600"
-        }
-      },
-      "required": [
-        "command"
-      ],
-      "additionalProperties": false
-    },
-    "caps": {
-      "writes": true,
-      "executes": true
-    }
   },
   {
     "name": "write",

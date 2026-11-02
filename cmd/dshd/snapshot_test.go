@@ -98,7 +98,7 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"job_output": {},
 		"write":      {Writes: true},
 		"edit":       {Writes: true},
-		"shell":      {Writes: true, Executes: true},
+		"bash":       {Writes: true, Executes: true},
 		"job_kill":   {Destructive: true},
 	}
 	seen := map[string]bool{}

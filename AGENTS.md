@@ -26,7 +26,8 @@
 - ✅ `session.HistoryGuard`：拒绝改写 `$DSH_HOME` 下的历史（要 `--force`）
 - ✅ 审批记忆（`internal/approval`，会话×工具，进程内不落盘）+ `allow-always` 选项：实测 3 次调用只问 1 次
 - ✅ `session/fork`（`session.Fork` + CLI + ACP 方法）：继承 surface、记 parentSession、不继承授权；实测子会话能答出父会话的暗号
-- 下一步 **M7**：工具语义对拍（同一批输入比对我们与 DSH 的输出结构）
+- ✅ 工具契约对拍（`docs/tool-parity.md` + `TestToolParityWithDSH`）：发现并修掉 `shell→bash`、`id→job_id`、bash 缺 `description`
+- 下一步 **M7**：返回结构对拍 / `approval/policy` 落盘
 
 ---
 
@@ -163,7 +164,8 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | DSH 内存（私有工作集） | 870 MB | 本机 `tasklist` |
 | 其中 Chromium / Node 宿主 | ~500 / ~367 MB | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（本人实测 2026-11-02）** | 9 个 / 3,760 字节 / **906 token** | `docs/tool-budget.md` |
+| **dsh-go 工具表（实测 2026-11-02）** | 9 个 / 3,600 字节 / **1,294 token**（对齐 DSH 参数后） | magpie 实测 |
+| 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |
 | 3,002 次调用的工具分布 | `bash` 83.7% / `job_output` 8.7% / 其余 7.6% | `HANDOFF.md` §1.5 |

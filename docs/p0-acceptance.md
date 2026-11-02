@@ -63,7 +63,7 @@ go test ./cmd/dshd -run TestWriteToolsDeclareCaps -v
 | 项 | 值 |
 |---|---|
 | 工具数 | 9（read/glob/grep/write/edit/shell/job_output/job_kill/job_list） |
-| 工具表 | 3,760 字节 / **906 token**（magpie 真实分词） |
+| 工具表 | 3,600 字节（紧凑 JSON）/ **1,294 token**（magpie 真实分词） |
 | 能力声明 | 全部必填；快照里可见 `caps` |
 | 只读 vs 需批准 | 5 : 4，由 `Caps().NeedsApproval()` 判定 |
 
@@ -95,7 +95,7 @@ python tmp/measure_start.py   # ACP 就绪延迟
 |---|---:|---:|---|
 | 常驻内存（整轮峰值） | < 150 MB | **15.3 MB** | 9.8× |
 | 冷启动（进程起到 initialize 应答） | < 100 ms | **59.5 ms**（median, min 58.7） | 1.7× |
-| 工具表 | ≤ 6,000 token | **906 token** | 6.6× |
+| 工具表 | ≤ 6,000 token | **1,294 token** | 4.6× |
 | 二进制（`-s -w`） | ≤ 25 MB | **8.1 MB** | 3× |
 
 对照 DSH 本体：870 MB 私有工作集 / 61 个工具 / 12,209 token。
