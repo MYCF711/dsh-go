@@ -5,9 +5,18 @@ export PATH="/c/Program Files/Go/bin:$PATH"
 cd "$(dirname "$0")/.."
 
 fail=0
-pass() { printf '  PASS  %s\n' "$1"; }
-skip() { printf '  SKIP  %s\n' "$1"; }
-bad()  { printf '  FAIL  %s\n' "$1"; fail=1; }
+# 记录每次判定，供最后的"守卫清单"核对：清单里写的必须在、且必须 PASS。
+gate_log="$(mktemp)"
+trap 'rm -f "$gate_log"' EXIT
+pass() { printf '  PASS  %s
+' "$1"; printf 'PASS %s
+' "$1" >> "$gate_log"; }
+skip() { printf '  SKIP  %s
+' "$1"; printf 'SKIP %s
+' "$1" >> "$gate_log"; }
+bad()  { printf '  FAIL  %s
+' "$1"; printf 'FAIL %s
+' "$1" >> "$gate_log"; fail=1; }
 
 echo "== dsh-go check =="
 
@@ -155,6 +164,24 @@ done
 hits=$(grep -rIl --exclude-dir=.git --exclude-dir=tmp --exclude-dir=refs --exclude-dir=probe \
   -E 'D:\\\\MyKey|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}' . 2>/dev/null || true)
 [ -z "$hits" ] && pass "无凭据泄露" || bad "疑似凭据出现在: $(echo "$hits" | tr '\n' ' ')"
+
+# 守卫清单：每道守卫自己也得有人守。
+# 把某个检查从本文件里删掉，门禁会在这里红——否则"守卫被删"和"守卫通过"长得一样。
+if [ -f scripts/gate-manifest.txt ]; then
+  missing=""
+  while IFS= read -r want; do
+    # 清单必须是 LF（仓里 .gitattributes 已统一）；CRLF 会让下面 grep 全部落空。
+    case "$want" in ''|'#'*) continue ;; esac
+    grep -qF -- "$want" "$gate_log" || missing="$missing $want"
+  done < scripts/gate-manifest.txt
+  if [ -z "$missing" ]; then
+    pass "守卫清单齐全（$(grep -vcE '^[[:space:]]*(#|$)' scripts/gate-manifest.txt) 项）"
+  else
+    bad "守卫清单缺了:$missing——有人把检查从 check.sh 里删了"
+  fi
+else
+  bad "scripts/gate-manifest.txt 不见了：门禁失去了自我核对的能力"
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL GREEN"; else echo "FAILED"; fi
