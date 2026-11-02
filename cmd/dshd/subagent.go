@@ -112,7 +112,13 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 	if strings.TrimSpace(text) == "" {
 		return spi.SubagentResult{Steps: len(hist)}, fmt.Errorf("子代理没有产出正文")
 	}
-	return spi.SubagentResult{Text: text, Steps: len(hist)}, nil
+	return spi.SubagentResult{
+		Text:  text,
+		Steps: len(hist),
+		// 说清楚这次用的是谁的授权：runner 是主会话那个 guarded，
+		// 审批记忆按会话记——主会话批准过的工具，子代理不会重问。
+		BorrowedApprovals: s.runner != nil,
+	}, nil
 }
 
 const subSystemPrompt = `你是一个子代理。你只负责交给你的那件事，做完就给结论。

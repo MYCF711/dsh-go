@@ -504,7 +504,18 @@ func cmdRun(argv []string) error {
 				if e.IsError {
 					code = "ERR"
 				}
-				fmt.Fprintf(os.Stderr, "  ← %s [%s]\n", e.ToolName, code)
+				// 把 Summary 也打出来：那是工具想告诉人的一句话
+				// （"已推进 3 条"、"子代理完成…；沿用主会话审批记忆"）。
+				// 只打 [ok] 等于人看不到任何结果，只有模型看得到。
+				summary := ""
+				if e.Result != nil {
+					summary = strings.TrimSpace(e.Result.Summary)
+				}
+				if summary != "" {
+					fmt.Fprintf(os.Stderr, "  ← %s [%s] %s\n", e.ToolName, code, truncate(summary, 100))
+				} else {
+					fmt.Fprintf(os.Stderr, "  ← %s [%s]\n", e.ToolName, code)
+				}
 				var blocks []spi.Block
 				if e.Result != nil {
 					blocks = session.ProjectResult(*e.Result)

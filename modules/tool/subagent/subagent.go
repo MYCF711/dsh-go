@@ -78,9 +78,12 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	}
 
 	return spi.Result{
-		Summary: fmt.Sprintf("子代理完成「%s」（%d 步，%d 字）", desc, res.Steps, len([]rune(res.Text))),
-		Text:    res.Text,
-		Data:    data{Description: desc, Steps: res.Steps, Bytes: len(res.Text)},
+		Summary: fmt.Sprintf("子代理完成「%s」（%d 步，%d 字%s）",
+			desc, res.Steps, len([]rune(res.Text)),
+			// 借用授权必须写进人看的这一行：它是一次权限面扩大。
+			map[bool]string{true: "；沿用主会话审批记忆", false: ""}[res.BorrowedApprovals]),
+		Text: res.Text,
+		Data: data{Description: desc, Steps: res.Steps, Bytes: len(res.Text)},
 	}, nil
 }
 

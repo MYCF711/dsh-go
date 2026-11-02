@@ -27,4 +27,11 @@ type SubagentResult struct {
 		In  int
 		Out int
 	}
+	// BorrowedApprovals 为真表示子代理**沿用了主会话的审批记忆**：
+	// 主会话里被"永远允许"过的工具，子代理不会再问一次。
+	//
+	// 这是有意的（同一个人、同一件事，问两遍纯属打扰），但它是一次
+	// **权限面的扩大**——模型自己派出去的子代理，用的是你刚才批准的授权。
+	// 所以必须回传给调用方，让它出现在 Summary 里，而不是埋在行为里。
+	BorrowedApprovals bool
 }
