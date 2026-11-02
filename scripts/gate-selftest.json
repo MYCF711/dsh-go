@@ -48,6 +48,26 @@
       "old": "// Plan 是装配结果：按依赖排好的模块序列。",
       "new": "var _ = fmt.Sprintf(\"%d\", \"x\")\n\n// Plan 是装配结果：按依赖排好的模块序列。",
       "expect": "go vet"
+    },
+    {
+      "name": "missing-doc-updating",
+      "file": "UPDATING.md",
+      "op": "delete",
+      "expect": "缺文档"
+    },
+    {
+      "name": "mutations-json-broken",
+      "file": "scripts/mutations.json",
+      "old": "  }\n]",
+      "new": "  },\n]",
+      "expect": "解析失败"
+    },
+    {
+      "name": "test-expectation-wrong",
+      "file": "internal/agent/loop_test.go",
+      "old": "want := \"step/start,assistant/text,assistant/message,turn/end\"",
+      "new": "want := \"step/start,assistant/text,assistant/message,turn/end,WRONG\"",
+      "expect": "go test"
     }
   ]
 }
