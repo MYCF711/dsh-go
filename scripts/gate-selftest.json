@@ -27,6 +27,27 @@
       "old": "__PLANTED__",
       "new": "token=ghp_{36xA}",
       "expect": ""
+    },
+    {
+      "name": "kernel-imports-business",
+      "file": "internal/kernel/assemble.go",
+      "old": "import (",
+      "new": "import (\n\t_ \"dshgo/internal/llm\"",
+      "expect": "R1 内核依赖了"
+    },
+    {
+      "name": "internal-imports-modules",
+      "file": "internal/fsutil/walk.go",
+      "old": "import (",
+      "new": "import (\n\t_ \"dshgo/modules/tool/read\"",
+      "expect": "A3 抽掉 modules 编不过"
+    },
+    {
+      "name": "vet-catches-wrong-format",
+      "file": "internal/kernel/assemble.go",
+      "old": "// Plan 是装配结果：按依赖排好的模块序列。",
+      "new": "var _ = fmt.Sprintf(\"%d\", \"x\")\n\n// Plan 是装配结果：按依赖排好的模块序列。",
+      "expect": "go vet"
     }
   ]
 }
