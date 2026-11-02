@@ -1,3 +1,31 @@
+## 0.2.1-go.7（未发布）· 续 2
+
+**压缩接进 agent 循环：每轮前自检，超预算自动压。**
+
+- `session.Meter`（PLAN §10 的 token 单一口径）
+  - 启发式：ASCII 4 字节 ≈ 1 token、非 ASCII 1 字 ≈ 1 token、每条消息 +4 结构开销
+  - **锚点校准**：喂过一次服务端 `usage.totalTokens` 之后，按「实测/估算」的刻度缩放
+  - 没锚点时纯启发式，够触发压缩、不够做账（这点写进代码注释）
+- `session.HistoryGuard`：`dshd session compact` 拒绝改动 `$DSH_HOME` 下的历史，
+  路径里带 `sessions` 段也要求 `--force`
+- `dshd acp --auto-compact <tokens>`（默认 40000，0=关）
+  - 每轮开始前：读日志 → 派生 surface → 估算 → 超阈值就摘要+落事件 → 重新派生历史
+  - **超预算但"保留最近 N 条"把可压区间挤没时，放宽到只保留一半**
+    （宁可摘要粗一点，也不能让这一轮超窗）
+  - 每步 assistant 的 `usage.totalTokens` 喂回 meter 做锚点
+
+**实测（3 轮真机对话，阈值故意设 1）**
+```
+prompt → end_turn
+prompt → end_turn
+[agent] 超预算且无处可压：放宽到只保留最近 2 条
+[agent] 自动压缩：遮蔽 2 条，摘要 248 字
+prompt → end_turn
+自动压缩触发次数: 1
+```
+落盘结果：16 事件 / surface 6 节点（1 摘要）/ Node 读 17 帧 ✅
+
+---
 ## 0.2.1-go.7（未发布）
 
 **自动压缩：区间自己算，摘要模型写。**

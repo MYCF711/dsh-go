@@ -22,7 +22,9 @@
 - ✅ **P0 四条判据已验收**（见 `docs/p0-acceptance.md`）：内存 15.3 MB / ACP 就绪 59.5 ms / 工具表 906 token / 二进制 8.1 MB
 - ✅ 压缩协议（`session.Compact` + `dshd session compact|info`）：追加三条压缩事件、精确遮蔽、日志不删
 - ✅ 自动压缩（`internal/compact` + `session compact --auto`）：区间自算、提示词有界、真机跑通（surface 111→10）
-- 下一步 **M6**：接进 `agent/pre-step` 自动触发 + token meter（现在按消息条数、要人手敲）
+- ✅ 自动压缩已接进 ACP：`--auto-compact <tokens>`（默认 40000），token meter 带锚点校准，超预算无处可压时放宽 keep
+- ✅ `session.HistoryGuard`：拒绝改写 `$DSH_HOME` 下的历史（要 `--force`）
+- 下一步 **M7**：审批记忆 + `session/fork`
 
 ---
 

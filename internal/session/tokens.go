@@ -1,0 +1,85 @@
+package session
+
+import "unicode/utf8"
+
+// Meter 是 token 计量的**单一口径**（PLAN §10）：
+// 服务端实测值只负责绝对值，启发式只负责"上次实测之后又涨了多少"。
+//
+// 没有锚点时纯靠启发式，误差大概 ±30%——够用来触发压缩，不够用来做账。
+type Meter struct {
+	anchorReal int // 上次服务端给的 totalTokens
+	anchorEst  int // 那一刻的启发式估算
+}
+
+// Observe 喂一个服务端实测值。
+//
+// realTotal 是 usage.totalTokens，estNow 是同一条表面的启发式估算。
+func (m *Meter) Observe(realTotal int, estNow int) {
+	if realTotal <= 0 {
+		return
+	}
+	m.anchorReal = realTotal
+	m.anchorEst = estNow
+}
+
+// Calibrated 表示已经拿到过服务端锚点。
+func (m *Meter) Calibrated() bool { return m.anchorReal > 0 && m.anchorEst > 0 }
+
+// Estimate 给出当前表面的 token 估算。
+func (m *Meter) Estimate(surface []SurfaceMsg) int {
+	raw := rawEstimate(surface)
+	if !m.Calibrated() {
+		return raw
+	}
+	// 用锚点校准：刻度 = 实测/估算。
+	scaled := raw * m.anchorReal / m.anchorEst
+	// 估出来的数不能比原始启发式还离谱。
+	if scaled <= 0 {
+		return raw
+	}
+	return scaled
+}
+
+// rawEstimate 是纯启发式：ASCII 4 字节 ≈ 1 token，其它（中日韩等）1 个字 ≈ 1 token。
+//
+// 这个比例是拿本机 magpie 的 usage 反推出来的经验值：9 个工具 3,760 字节 → 906 token，
+// 约 4.15 字节/token；而中文正文大约 1 字/token。
+func rawEstimate(surface []SurfaceMsg) int {
+	total := 0
+	for _, m := range surface {
+		total += estimateString(m.Message.Content)
+		for _, tc := range m.Message.ToolCalls {
+			total += estimateString(tc.Function.Name)
+			total += estimateString(tc.Function.Arguments)
+		}
+		// 每条消息的结构开销（role、分隔符等）。
+		total += 4
+	}
+	return total
+}
+
+func estimateString(s string) int {
+	ascii, other := 0, 0
+	for _, r := range s {
+		if r < utf8.RuneSelf {
+			ascii++
+		} else {
+			other++
+		}
+	}
+	return ascii/4 + other
+}
+
+// CharsOf 是给诊断用的：一条表面里有多少字符。
+func CharsOf(surface []SurfaceMsg) (ascii, other int) {
+	for _, m := range surface {
+		for _, r := range m.Message.Content {
+			if r < utf8.RuneSelf {
+				ascii++
+			} else {
+				other++
+			}
+		}
+	}
+	return ascii, other
+}

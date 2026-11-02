@@ -13,6 +13,7 @@ import (
 	"dshgo/codecs/v4"
 	"dshgo/internal/acp"
 	"dshgo/internal/agent"
+	"dshgo/internal/compact"
 	"dshgo/internal/kernel"
 	"dshgo/internal/llm"
 	"dshgo/internal/prompt"
@@ -35,19 +36,24 @@ type acpRunner struct {
 	ctxWindow int
 	// system 是装配好的系统提示（会作为事件落盘）。
 	system string
+	// autoCompact 是自动压缩的 token 阈值（0 = 关闭）。
+	autoCompact int
+	// keepRecent 是自动压缩时保留的最近消息数。
+	keepRecent int
 
 	mu    sync.Mutex
 	logs  map[string]*session.Log
 	turns map[string]int
 	hist  map[string][]llm.Message
 	used  map[string]int
+	meter map[string]*session.Meter
 }
 
 func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home string, steps int) *acpRunner {
 	return &acpRunner{
 		reg: reg, runner: runner, base: base, model: model, home: home, steps: steps,
 		logs: map[string]*session.Log{}, turns: map[string]int{}, hist: map[string][]llm.Message{},
-		used: map[string]int{}, ctxWindow: 128000,
+		used: map[string]int{}, ctxWindow: 128000, meter: map[string]*session.Meter{}, keepRecent: 8,
 	}
 }
 
@@ -73,6 +79,13 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	turn := r.turns[sessionID]
 	hist := r.hist[sessionID]
 	r.mu.Unlock()
+
+	// 每轮开始前自检：token 估算超过阈值就自动压缩（失败只记日志，不打断这一轮）。
+	if r.autoCompact > 0 {
+		if err := r.autoCompactNow(ctx, sessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "自动压缩失败（不影响本轮）：%v\n", err)
+		}
+	}
 
 	user := []spi.Block{{Type: "text", Text: text}}
 	if err := logw.Append("turn/start", session.TurnStartData(turn)); err != nil {
@@ -108,6 +121,9 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 			if err := logw.Append("assistant/message",
 				session.AssistantMessageEvent(e.Turn, e.Step, blocks, a.Finish, usage)); err != nil {
 				return err
+			}
+			if a.Usage != nil {
+				r.observeUsage(sessionID, logw.Path, a.Usage.TotalTokens)
 			}
 			if a.Usage != nil && r.ctxWindow > 0 {
 				r.mu.Lock()
@@ -249,6 +265,7 @@ func cmdACP(argv []string) error {
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
 	steps := fs.Int("max-steps", 8, "每轮最多几步")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
+	autoCompact := fs.Int("auto-compact", 40000, "surface 估算超过多少 token 就自动压缩（0=关闭）")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -275,6 +292,7 @@ func cmdACP(argv []string) error {
 	assembled := buildSystemPrompt(reg, *model, mustGetwd(), *workspaceBytes)
 	acpRunner := newACPRunner(reg, runner, *base, *model, *home, *steps)
 	acpRunner.system = assembled
+	acpRunner.autoCompact = *autoCompact
 	srv := &acp.Server{
 		In:      os.Stdin,
 		Out:     os.Stdout,
@@ -335,4 +353,105 @@ func mustGetwd() string {
 		return ""
 	}
 	return wd
+}
+
+// observeUsage 把服务端实测值喂给 meter（PLAN §10：实测只负责绝对值）。
+func (r *acpRunner) observeUsage(sessionID, path string, realTotal int) {
+	back, err := v4.ReadFile(path)
+	if err != nil {
+		return
+	}
+	est := session.Meter{}
+	if m := r.meterOf(sessionID); m != nil {
+		est = *m
+	}
+	r.mu.Lock()
+	m := r.meter[sessionID]
+	if m == nil {
+		m = &session.Meter{}
+		r.meter[sessionID] = m
+	}
+	r.mu.Unlock()
+	m.Observe(realTotal, est.Estimate(session.Surface(back)))
+}
+
+func (r *acpRunner) meterOf(sessionID string) *session.Meter {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.meter[sessionID]
+}
+
+// autoCompactNow 是"每轮前的自检"：估算超阈值就压缩并落事件。
+func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error {
+	path := ""
+	r.mu.Lock()
+	if l := r.logs[sessionID]; l != nil {
+		path = l.Path
+	}
+	r.mu.Unlock()
+	if path == "" {
+		return nil
+	}
+	back, err := v4.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	surface := session.Surface(back)
+	m := r.meterOf(sessionID)
+	if m == nil {
+		m = &session.Meter{}
+	}
+	if est := m.Estimate(surface); est <= r.autoCompact {
+		return nil
+	}
+
+	span, n, ok := compact.Plan(surface, compact.Options{
+		KeepRecent: r.keepRecent, MinToCompact: 2,
+	})
+	if !ok {
+		// 已经超预算了，但"保留最近 N 条"把可压区间挤没了——这时必须让步：
+		// 压掉较早的一半。宁可摘要粗一点，也不能让这一轮超窗。
+		keep := len(surface) / 2
+		if keep < 1 {
+			keep = 1
+		}
+		if keep >= len(surface) {
+			return nil
+		}
+		span, n, ok = compact.Plan(surface, compact.Options{KeepRecent: keep, MinToCompact: 2})
+		if !ok {
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "超预算且无处可压：放宽到只保留最近 %d 条\n", keep)
+	}
+	items := make([]session.SurfaceMsg, 0, n)
+	for _, sm := range surface {
+		if sm.Seq >= span.Start && sm.Seq <= span.End {
+			items = append(items, sm)
+		}
+	}
+	text, err := compact.Summarize(ctx, llm.New(r.base, os.Getenv("DSHD_LLM_KEY")), r.model, items)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	logw := r.logs[sessionID]
+	r.mu.Unlock()
+	if _, shadowed, err := session.Compact(logw, back.Events, span,
+		[]spi.Block{{Type: "text", Text: text}},
+		session.CompactionMeta{Provider: "dshd-acp", Model: r.model, LLMStreamCall: true}); err != nil {
+		return err
+	} else {
+		fmt.Fprintf(os.Stderr, "自动压缩：遮蔽 %d 条，摘要 %d 字\n", len(shadowed), len([]rune(text)))
+	}
+
+	// 重新派生历史，让本轮看到压缩后的表面。
+	after, err := v4.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.hist[sessionID] = session.History(after)
+	r.mu.Unlock()
+	return nil
 }

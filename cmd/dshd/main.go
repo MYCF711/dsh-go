@@ -476,11 +476,19 @@ func cmdSessionCompact(argv []string) error {
 	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "摘要模型")
 	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
 	dryRun := fs.Bool("dry-run", false, "只打印计划，不写盘")
+	force := fs.Bool("force", false, "确认要改动 sessions 目录下的文件")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
 	if *path == "" {
 		return fmt.Errorf("--in 必填")
+	}
+	if ok, reason := session.HistoryGuard(*path, os.Getenv("DSH_HOME"), *force); !ok {
+		hint := "（复制一份再操作，别动别人的历史）"
+		if !*force {
+			hint = "；确认无误加 --force"
+		}
+		return fmt.Errorf("%s%s", reason, hint)
 	}
 	if !*auto && (*to < 0 || *summary == "") {
 		return fmt.Errorf("要么给 --from/--to/--summary，要么用 --auto")
