@@ -368,7 +368,15 @@
 - ✅ 界面侧 U1 已有验收报告（7 项 smoke 全过），U0 交接文档也写完了
 - ✅ **本仓的下一块因此很明确**：`internal/transport` 兑现那 6 个会话 method + WS，
   文件和配置留到 U2。这正好是能整块派给 dshd 的活——接口被那张表定义死、验收可量化
-- 下一步 **M92**：写 transport 的任务书（三个坑各一条测试起步），派 dshd 做第一版
+- ✅ **界面线 U0 开张**（dshd 写，11 次调用）：`internal/transport/api.go` 只放类型与常量，
+  6 个会话 method + 四个结构体的 **JSON 键名快照**（`testdata/api.snapshot.json`）
+- ✅ 快照测试**用反射从 tag 取键名**，不是手抄一遍——手抄等于抄一份，抄错了测试也是绿的
+- ✅ `-update` 可重生成；`go build/vet/test` 全过，门禁 ALL GREEN
+- ⚠️ 它顺手指出我任务书里一句假话：Go 的 `os.WriteFile` 根本不翻译行尾，
+  "这里要防 CRLF" 是我把 Python 的经验搬过来了。**注释里留一句假话，下一个人就会照着它做错事**
+- ⚠️ 快照只钉**形状**，不钉语义：`session.history` 与 `session.load` 的差别还没定
+- 下一步 **M93**：`session.history`（按 seq 增量补）与 `session.load`（首屏 + truncated）的语义差异定下来，
+  再进实现
 
 ### 界面线现状（2026-11-03）
 

@@ -1,0 +1,35 @@
+{
+  "methods": [
+    "session.list",
+    "session.load",
+    "session.history",
+    "session.prompt",
+    "session.cancel",
+    "session.create"
+  ],
+  "types": {
+    "Message": [
+      "seq",
+      "role",
+      "text",
+      "tool",
+      "args",
+      "summary"
+    ],
+    "SessionSummary": [
+      "id",
+      "title",
+      "cwd",
+      "updatedAt"
+    ],
+    "LoadResult": [
+      "messages",
+      "total",
+      "truncated"
+    ],
+    "PromptResult": [
+      "accepted",
+      "turnId"
+    ]
+  }
+}
