@@ -75,6 +75,10 @@ type Loop struct {
 	// Model 与系统提示由调用方给；Loop 不猜。
 	Model  string
 	System string
+	// CompactTools 为真时，工具表压掉参数里的 description。
+	// 实测能省四成字节——但参数说明也帮模型填对参数，所以默认关，
+	// 用 --tool-schema=compact 显式打开，并靠 A/B 数据决定要不要改默认。
+	CompactTools bool
 	// SessionID 绑到每一步的 ctx 上，让工具能回答"我在为哪个会话干活"。
 	// 空字符串不算错——单会话场景（`dshd run`）本来就是匿名的。
 	SessionID string
@@ -317,14 +321,56 @@ func (l *Loop) toolDefs() []llm.ToolDef {
 	tools := l.Tools.Tools()
 	defs := make([]llm.ToolDef, 0, len(tools))
 	for _, t := range tools {
+		schema := t.Schema()
+		if l.CompactTools {
+			schema = CompactSchema(schema)
+		}
 		defs = append(defs, llm.ToolDef{
 			Type: "function",
 			Function: llm.ToolFuncDef{
 				Name:        t.Name(),
 				Description: t.Description(),
-				Parameters:  t.Schema(),
+				Parameters:  schema,
 			},
 		})
 	}
 	return defs
+}
+
+// CompactSchema 去掉 JSON schema 里所有 description 键，只留结构。
+//
+// 为什么值得做：工具表 17 KB 里有 6.6 KB 是参数的说明文字与它们的键名开销。
+// 保留结构（类型、enum、required）就够模型填对参数的情形很常见——
+// 但"常见"不等于"总是"，所以这只是个开关，默认仍是完整表。
+func CompactSchema(raw json.RawMessage) json.RawMessage {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return raw
+	}
+	var walk func(any) any
+	walk = func(x any) any {
+		switch t := x.(type) {
+		case map[string]any:
+			out := make(map[string]any, len(t))
+			for k, val := range t {
+				if k == "description" {
+					continue
+				}
+				out[k] = walk(val)
+			}
+			return out
+		case []any:
+			out := make([]any, len(t))
+			for i, val := range t {
+				out[i] = walk(val)
+			}
+			return out
+		}
+		return x
+	}
+	b, err := json.Marshal(walk(v))
+	if err != nil {
+		return raw
+	}
+	return b
 }

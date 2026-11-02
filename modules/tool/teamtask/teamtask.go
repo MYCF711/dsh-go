@@ -619,7 +619,13 @@ func (t *Tool) execUpdate(ctx context.Context, raw json.RawMessage) (spi.Result,
 
 	owner := strings.TrimSpace(a.Owner)
 	if action == "claim" && owner == "" {
-		return spi.Result{Hint: `claim 必须带 owner：例如 {"id": "<id>", "action": "claim", "owner": "alice"}`},
+		// 没给 owner 就认领成"当前会话"：身份本来就在 ctx 里，问一遍纯属多余。
+		// 实测代价：只靠参数说明提示"claim 必填 owner"时，压缩工具表后模型会漏填，
+		// 白白多跑两轮。让工具有个合理默认比把要求写进说明更可靠。
+		owner = spi.SessionFrom(ctx)
+	}
+	if action == "claim" && owner == "" {
+		return spi.Result{Hint: `claim 认领时需要知道是谁：参数里带 owner，或在会话里调用（用会话 id 署名）`},
 			fmt.Errorf("claim 缺少 owner")
 	}
 	if action == "set_dependencies" && a.BlockedBy == nil {
