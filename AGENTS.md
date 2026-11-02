@@ -32,7 +32,8 @@
 - ✅ `dshd run --policy ask|allow|deny|auto`：`run` 以前对写类工具完全放行，现在按 Caps 审批（auto=终端问、非终端拒）
 - ✅ `usage_update.used` 改为"本次调用的上下文大小"（原来是累计值，跑三步就翻三倍）；`--context-window` 可配
 - ✅ ACP 三方法：`session/load`（重放历史）/ `session/delete`（cwd 可省，靠 FindByID）/ `session/set_mode`
-- 下一步 **M7**：批准记录随会话删除（Delete 已带上）+ 端到端回归一轮
+- ✅ 压缩批量回归（15 个真实会话）：**发现并修掉"摘要被放到末尾"的顺序 bug**（现在插回遮蔽起点）
+- 下一步 **M8**：`modes/` 真正落地（现在 `session/set_mode` 只有 default）
 
 ---
 

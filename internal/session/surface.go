@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"sort"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/llm"
@@ -26,14 +27,14 @@ type SurfaceMsg struct {
 // 日志里仍有全部事件；这里只是派生。
 func Surface(log *v4.Log) []SurfaceMsg {
 	hidden := map[int64]bool{}
-	var checkpoints []struct {
-		seq   int64
-		order int
+	type checkpoint struct {
+		text  string
+		start int64 // 被它遮蔽的第一条 seq
+		seq   int64 // 压缩事件自己的 seq（排序兜底）
 	}
-	order := map[int64]int{}
+	var checkpoints []checkpoint
 
-	for i, ev := range log.Events {
-		order[ev.Seq] = i
+	for _, ev := range log.Events {
 		switch ev.Type {
 		case "compaction/summary", "compaction/prune":
 			var d struct {
@@ -47,20 +48,24 @@ func Surface(log *v4.Log) []SurfaceMsg {
 			if err := json.Unmarshal(ev.Data, &d); err != nil {
 				continue
 			}
+			minSeq := int64(-1)
 			for _, s := range d.ShadowedSeqs {
 				hidden[s] = true
+				if minSeq < 0 || s < minSeq {
+					minSeq = s
+				}
 			}
 			// shadowedRange 是 shadowedSeqs 的宽松上界；只在没有明细时兜底。
 			if len(d.ShadowedSeqs) == 0 && d.ShadowedRange != nil {
 				for s := d.ShadowedRange.Start; s <= d.ShadowedRange.End; s++ {
 					hidden[s] = true
 				}
+				minSeq = d.ShadowedRange.Start
 			}
-			if ev.Type == "compaction/summary" {
-				checkpoints = append(checkpoints, struct {
-					seq   int64
-					order int
-				}{ev.Seq, i})
+			if ev.Type == "compaction/summary" && minSeq >= 0 {
+				checkpoints = append(checkpoints, checkpoint{
+					text: joinText(d.Summary), start: minSeq, seq: ev.Seq,
+				})
 			}
 		}
 	}
@@ -76,38 +81,62 @@ func Surface(log *v4.Log) []SurfaceMsg {
 		}
 	}
 
-	summaryText := map[int64]string{}
-	for _, cp := range checkpoints {
-		ev := log.Events[cp.order]
-		var d struct {
-			Summary []block `json:"summary"`
-		}
-		if err := json.Unmarshal(ev.Data, &d); err == nil {
-			summaryText[cp.seq] = joinText(d.Summary)
-		}
-	}
-
+	// 先把可见节点按日志顺序铺好（压缩事件本身不出现在这里）。
 	out := make([]SurfaceMsg, 0, len(log.Events))
 	for _, ev := range log.Events {
 		if hidden[ev.Seq] {
 			continue
 		}
-		if text, ok := summaryText[ev.Seq]; ok {
-			out = append(out, SurfaceMsg{
-				Seq: ev.Seq, Type: ev.Type, Source: "compact-checkpoint",
-				Summary: true,
-				Message: llm.Message{Role: "user", Content: text},
-			})
+		if ev.Type == "compaction/summary" || ev.Type == "compaction/prune" {
 			continue
 		}
 		if m, src, ok := surfaceMessage(ev); ok {
-			// 替身有两种身份：compaction/summary 事件，或 fork 过来的
-			// source.kind = compact-checkpoint 的 user/message。两者都算摘要节点。
+			// 替身有两种身份：compaction/summary 事件（下面插入），
+			// 或 fork 过来的 source.kind = compact-checkpoint 的 user/message（就在这里）。
 			out = append(out, SurfaceMsg{
 				Seq: ev.Seq, Type: ev.Type, Source: src, Message: m,
 				Summary: src == "compact-checkpoint",
 			})
 		}
+	}
+
+	// 再把替身插回**它遮蔽的那段起点**，而不是追加到末尾。
+	// 追加到末尾会让模型以为"摘要"是最新发生的事——真实语料里压缩过的会话就是这样被读反的。
+	// 被后一次压缩遮蔽掉的摘要不该再出现（级联压缩）。
+	kept := checkpoints[:0]
+	for _, cp := range checkpoints {
+		if hidden[cp.seq] {
+			continue
+		}
+		kept = append(kept, cp)
+	}
+	checkpoints = kept
+
+	sort.Slice(checkpoints, func(i, j int) bool {
+		if checkpoints[i].start != checkpoints[j].start {
+			return checkpoints[i].start < checkpoints[j].start
+		}
+		return checkpoints[i].seq < checkpoints[j].seq
+	})
+	for _, cp := range checkpoints {
+		idx := len(out)
+		for i, n := range out {
+			if n.Summary {
+				continue // 别插到别的替身前面去
+			}
+			if n.Seq >= cp.start {
+				idx = i
+				break
+			}
+		}
+		node := SurfaceMsg{
+			Seq: cp.seq, Type: "compaction/summary", Source: "compact-checkpoint",
+			Summary: true,
+			Message: llm.Message{Role: "user", Content: cp.text},
+		}
+		out = append(out, SurfaceMsg{})
+		copy(out[idx+1:], out[idx:])
+		out[idx] = node
 	}
 	return out
 }

@@ -59,14 +59,16 @@ func TestSurfaceHidesCompactedRange(t *testing.T) {
 	if len(surface) != 3 {
 		t.Fatalf("surface 节点数 = %d，期望 3（第二问 + 摘要 + 第三问）：%+v", len(surface), surface)
 	}
-	if surface[0].Message.Content != "第二问" {
-		t.Fatalf("节点 0 = %+v", surface[0])
+	// 替身必须出现在**它遮蔽的那段起点**，也就是最前面——
+	// 追加到末尾会让模型以为摘要是最新发生的事。
+	if !surface[0].Summary || surface[0].Source != "compact-checkpoint" {
+		t.Fatalf("节点 0 应是压缩摘要: %+v", surface[0])
 	}
-	if !surface[1].Summary || surface[1].Source != "compact-checkpoint" {
-		t.Fatalf("节点 1 应是压缩摘要: %+v", surface[1])
+	if !strings.Contains(surface[0].Message.Content, "摘要") {
+		t.Fatalf("摘要内容不对: %q", surface[0].Message.Content)
 	}
-	if !strings.Contains(surface[1].Message.Content, "摘要") {
-		t.Fatalf("摘要内容不对: %q", surface[1].Message.Content)
+	if surface[1].Message.Content != "第二问" {
+		t.Fatalf("节点 1 = %+v", surface[1])
 	}
 	if surface[2].Message.Content != "第三问" {
 		t.Fatalf("节点 2 = %+v", surface[2])
