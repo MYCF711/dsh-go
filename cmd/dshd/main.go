@@ -89,6 +89,8 @@ func main() {
 		err = cmdRun(os.Args[2:])
 	case "acp":
 		err = cmdACP(os.Args[2:])
+	case "doctor":
+		err = cmdDoctor(os.Args[2:])
 	case "version":
 		timingf("enter version")
 		fmt.Printf("dshd %s\n", version)
@@ -119,6 +121,7 @@ func usage() {
   dshd session rewrite --in <f> --out <f>     把 v4 会话读进来再用我们的编码器写出去（验证兼容用）
   dshd run --prompt "<话>" [--max-steps N]    跑一个真实 turn（模型 + 工具 + 结果回灌）
   dshd acp                                    在 stdin/stdout 上跑 ACP 服务端（stdout 只放协议）
+  dshd doctor [--home X] [--base URL]        自检：home/会话/写锁/网关/模块，每项给下一步
   dshd version                               版本
 `)
 }
