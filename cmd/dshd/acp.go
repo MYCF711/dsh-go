@@ -27,7 +27,9 @@ import (
 
 // acpRunner 把 ACP 的 prompt 接到真实的 agent 循环与会话日志上。
 type acpRunner struct {
-	reg    spi.ToolRegistry
+	reg spi.ToolRegistry
+	// fsRoot 可选：FS 支持换根时，用它把工作区根切到客户端给的 cwd。
+	fsRoot spi.RootFollower
 	runner spi.Runner
 	base   string
 	model  string
@@ -442,6 +444,12 @@ func cmdACP(argv []string) error {
 	if err != nil {
 		return err
 	}
+	// FS 若支持换根，就把"客户端 cwd"接进来。
+	if fs, err := kernel.Inject(root, spi.FSKey); err == nil {
+		if rf, ok := fs.(spi.RootFollower); ok {
+			acpRunner.fsRoot = rf
+		}
+	}
 	acpRunner.modeReg = modeReg
 	acpRunner.modeID = m.ID
 	if *remember {
@@ -786,11 +794,24 @@ func approvalDecision(modeApproval string, remembered bool) (allow bool, needAsk
 	return false, true
 }
 
+// 关于工作目录：工具的根目录在**装配期**就定下来了（builtinModules(cwdOrDot(), …)），
+// 所以 ACP 的 session/new 里带的 cwd 只决定会话落在哪个 projectKey 下，
+// **不会**改工具解析相对路径的根。实测踩过：Martty 的 --workspace 指向某目录、
+// 而 dshd 是从别的目录启动的，模型就会在自己的仓库里翻文件、报"文件不存在"。
+//
+// 结论（写进 docs）：**启动 dshd 时 cwd 就是工作区**。客户端要换工作区，
+// 请从那个目录启动它（子进程继承 cwd），而不要指望 session/new 的 cwd 生效。
 // ensureSession 在磁盘上把会话建出来（幂等：已存在就打开）。
 //
 // 抽出来是为了能直接测"模式有没有写进 header"——这条链路
 // 靠 node 脚本验证太脆，用 Go 测试钉住更可靠。
 func (r *acpRunner) ensureSession(sessionID, cwd string) (*session.Log, error) {
+	// 客户端带来的工作目录要真的生效：否则它说"我在 A 目录"，工具却在宿主
+	// 启动目录里干活（实测踩过：模型报"文件不存在"，然后在 203 个文件里翻，
+	// 全是宿主仓库的文件）。FS 支持换根就换，不支持就保持原样。
+	if r.fsRoot != nil && strings.TrimSpace(cwd) != "" {
+		_ = r.fsRoot.SetRoot(cwd)
+	}
 	p, err := session.SessionPath(r.home, cwd, sessionID)
 	if err != nil {
 		return nil, err

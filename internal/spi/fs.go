@@ -7,6 +7,14 @@ package spi
 //     读过之后文件又被别人改过，必须重新读——不允许盲覆盖。
 //
 // 工具自己不要实现这两条（AGENTS §3.7）。
+// RootFollower 是 FS 的可选能力：把工作区根换成另一个目录。
+//
+// 客户端（ACP 的 session/new）可能带着自己的工作目录来，而 FS 的根是装配期定的。
+// 实现这个接口的 FS 才能"跟着会话走"。
+type RootFollower interface {
+	SetRoot(root string) error
+}
+
 type FS interface {
 	// Root 返回工作区根（正斜杠绝对路径）。
 	Root() string

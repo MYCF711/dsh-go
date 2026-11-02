@@ -66,6 +66,31 @@ func New(root string, opts ...Option) (*FS, error) {
 
 func (f *FS) Root() string { return f.root }
 
+// SetRoot 换工作区根。
+//
+// 为什么需要它：ACP 客户端在 session/new 里带 cwd，而工具的根是**装配期**定下的。
+// 不支持换根的话，客户端说"我在 A 目录"，工具却在宿主启动目录里干活——
+// 实测踩过：Marтty 以 --workspace 指向某目录，模型报"文件不存在"，
+// 然后在 203 个文件里翻，全是宿主仓库的文件。
+func (f *FS) SetRoot(root string) error {
+	if strings.TrimSpace(root) == "" {
+		return fmt.Errorf("工作区根不能为空")
+	}
+	st, err := os.Stat(root)
+	if err != nil || !st.IsDir() {
+		return fmt.Errorf("工作区根不是目录: %s", root)
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.root = filepath.ToSlash(filepath.Clean(abs))
+	f.seen = make(map[string]stamp) // 换根之后"读过哪些文件"的账要清空
+	f.mu.Unlock()
+	return nil
+}
+
 // within 判断 abs 是否在允许的根之内（工作区 + 只读额外根）。
 func (f *FS) within(abs string) bool {
 	if abs == f.root || strings.HasPrefix(abs, f.root+"/") {
