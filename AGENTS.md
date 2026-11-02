@@ -96,7 +96,9 @@
 - ✅ 日志写不了时**不静默**：`run` 打「警告: 这次没有事后可查的记录——<原因>」但照常干活；doctor 那一项报 ✗
 - ✅ 修 doctor 误导：日志目录读不了原来也说「还没有日志（跑一次就会写）」，而它永远不会写
 - ✅ 演练五项全中（新增「日志写不了」）
-- 下一步 **M35**（B 线）：协作一致性现状实测——锁文件跨机器、projectKey 换机器、审批记忆不跨机器
+- ✅ 协作一致性实测（`docs/collab.md` + `scripts/collab-probe.py`）：三条疑点里**一条真问题**（换 cwd 找不到会话，已修：`session.ResolvePath` 回退按 id）、两条本来就对
+- ✅ 实测顺带挖出后门：`OpenSessionAt`（ACP resume / CLI compact 的入口）**不抢写锁**，绕过了 M30 的防线；已修 + `TestOpenSessionAtAlsoClaimsLock`
+- 下一步 **M36**：`0.2.1-go.23` 发版（日志不静默 + resolve 回退 + 锁后门）
 
 ---
 

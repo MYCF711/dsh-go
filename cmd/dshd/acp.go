@@ -266,15 +266,17 @@ func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessa
 
 // Resume 从 v4 文件恢复历史，并以 append 模式续写同一个文件。
 func (r *acpRunner) Resume(ctx context.Context, sessionID, cwd string) error {
-	path, err := session.SessionPath(r.home, cwd, sessionID)
+	// 不能只按 (cwd, id) 算：projectKey 是按 cwd 字符串算的，
+	// 换个盘符/挂载点/另一台机器就算不出来了，而 session id 是全局唯一的。
+	path, err := session.ResolvePath(r.home, cwd, sessionID)
 	if err != nil {
 		return err
 	}
 	back, err := v4.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("读会话失败: %w", err)
+		return fmt.Errorf("读会话失败（%s）: %w", path, err)
 	}
-	logw, err := session.OpenSession(r.home, cwd, sessionID)
+	logw, err := session.OpenSessionAt(path)
 	if err != nil {
 		return err
 	}

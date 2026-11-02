@@ -76,3 +76,42 @@ func TestSecondWriterIsRefused(t *testing.T) {
 		t.Fatalf("应该是 3 + 1 条事件，实际 %d 条", len(raw.Events))
 	}
 }
+
+// OpenSessionAt 也必须抢锁——它是 ACP resume 与 CLI compact 的入口，
+// 漏了就等于给"同一份会话两个写入者"开后门（实测踩过）。
+func TestOpenSessionAtAlsoClaimsLock(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	id := NewID()
+
+	lg, err := CreateSession(home, cwd, id, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lg.Append("user/message", map[string]any{"a": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	path, err := ResolvePath(home, cwd, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := OpenSessionAt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenSessionAt(path); err == nil {
+		t.Fatal("第二个 OpenSessionAt 必须被锁挡住")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := OpenSessionAt(path)
+	if err != nil {
+		t.Fatalf("关掉之后应该能再开: %v", err)
+	}
+	again.Close()
+}

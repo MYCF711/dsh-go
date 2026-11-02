@@ -168,9 +168,17 @@ func OpenSessionAt(path string) (*Log, error) {
 	if err != nil {
 		return nil, err
 	}
-	w, err := v4.OpenAppend(path)
-	if err != nil {
+	// 同样要抢写锁：这条路径以前漏了，等于给"同一份会话两个写入者"开了后门
+	// （实测踩过：手工放一个僵尸锁，resume 照样成功）。
+	if err := claimWriter(path); err != nil {
 		return nil, err
 	}
-	return &Log{w: w, Path: path, seq: int64(len(back.Events)), now: time.Now}, nil
+	w, err := v4.OpenAppend(path)
+	if err != nil {
+		releaseWriter(path)
+		return nil, err
+	}
+	lg := &Log{w: w, Path: path, seq: int64(len(back.Events)), now: time.Now}
+	lg.lockPath = path + ".lock"
+	return lg, nil
 }

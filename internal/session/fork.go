@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -158,4 +159,26 @@ func FindByID(home, sessionID string) (string, error) {
 	default:
 		return "", fmt.Errorf("会话 %s 在多个项目目录下都有（%d 个），请显式给 cwd", sessionID, len(matches))
 	}
+}
+
+// ResolvePath 找一份会话的文件路径：先按 (cwd, id) 算，找不到再按 id 全库找。
+//
+// 为什么需要回退：projectKey 是按 **cwd 字符串**算出来的，同一个逻辑 workspace
+// 换个盘符/挂载点/另一台机器，目录名就变了。而 session id 是全局唯一的（uuid），
+// 实测踩过：拿正确的 id + 换过的 cwd 去 resume，报"找不到会话"。
+//
+// 与 FindByID 的取舍一致：多处命中就报错让人指定 cwd，不替人猜。
+func ResolvePath(home, cwd, sessionID string) (string, error) {
+	direct, err := SessionPath(home, cwd, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if _, statErr := os.Stat(direct); statErr == nil {
+		return direct, nil
+	}
+	found, ferr := FindByID(home, sessionID)
+	if ferr != nil {
+		return "", fmt.Errorf("按 cwd 算出的位置没有（%s），按 id 也没找到: %w", direct, ferr)
+	}
+	return found, nil
 }
