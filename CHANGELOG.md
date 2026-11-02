@@ -1,4 +1,62 @@
-## 0.2.1-go.20（未发布）· 续
+## 0.2.1-go.20（2026-11-02）
+
+**审批框与 ACP 审批请求：让用户知道自己在批什么。**
+
+这一版修的不是"模型看不懂"，是"**人不该被误导**"。
+
+### 终端里的审批框
+
+```
+需要审批：bash
+       命令: rm -rf /tmp/build
+       模型自述（仅供参考，不是依据）: 看看临时目录
+       → 允许？[y/N]
+```
+
+三条规矩：
+
+1. **命令原样、排第一**——眼睛先落到的必须是它；
+2. 模型的 `description` 单独一行，标成"仅供参考，不是依据"；
+3. **长命令截中间不截尾巴**——原来 `truncate(args,160)` 截的是尾巴，
+   一条 200 字符的命令正好把 `rm -rf /` 截没。
+
+`write` / `edit` 改成显示路径与字节数，不再把正文塞进终端。
+
+### ACP 的 `session/request_permission`
+
+原来 `title` 只有工具名：
+
+```json
+{"toolCall": {"title": "bash", "kind": "other", "rawInput": {...}}}
+```
+
+客户端只显示 title 的话，用户看到的就是"bash"两个字。现在：
+
+```
+title: bash: echo approved
+kind : execute
+content: [{"content":{"text":"命令: echo approved
+模型自述（仅供参考，不是依据）: 输出 approved"}}]
+```
+
+- `title` 一行摘要、命令在前；多行命令压成单行
+- `kind` 按工具映射 `execute` / `edit` / `other`
+- `content` 带完整说明；`rawInput` 原样保留
+
+新增 7 条测试（`TestDescribeApproval*` 4 条、`TestApprovalTitle*` 3 条）。
+
+### 实测量
+
+| 指标 | 目标 | 实测 |
+|---|---:|---:|
+| 常驻内存 | <150 MB | **15.9 MB** |
+| 冷启动（紧探针 p50） | <100 ms | **28.8 ms** |
+| 工具表 | ≤6k token | **1,418 token** |
+| 二进制 | ≤25 MB | **8.4 MB** |
+
+---
+
+### 续
 
 **ACP 的审批请求也带上命令了。**
 
