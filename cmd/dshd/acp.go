@@ -86,7 +86,6 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	}
 	r.turns[sessionID]++
 	turn := r.turns[sessionID]
-	hist := r.hist[sessionID]
 	r.mu.Unlock()
 
 	// 把"当前会话"指给 history_search：没有这行，模型回查的时候查的是空。
@@ -199,6 +198,13 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		MaxSteps: r.steps,
 		Emit:     sink,
 	}
+
+	// hist 必须在压缩**之后**取：autoCompactNow 会把 r.hist 换成压缩后的历史，
+	// 在压缩之前取好的快照会让这一轮仍然用未压缩的历史——
+	// 结果是压缩每轮都跑（每次都花一次模型调用），但当轮完全白压。
+	r.mu.Lock()
+	hist := r.hist[sessionID]
+	r.mu.Unlock()
 
 	next, err := loop.Run(ctx, turn, append(hist, llm.Message{Role: "user", Content: text}))
 	r.mu.Lock()
