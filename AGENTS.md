@@ -38,7 +38,8 @@
 |---|---|---|
 | `cmd/dshd/` | main：manifest → kernel → blank import 默认模块 | 只有装配代码，禁止业务分支 |
 | `internal/kernel/` | scope / registry / eventbus / assembler **四件事** | 改动需在 PLAN 里有理由 |
-| `internal/spi/` | 全部接口 + 数据类型，**零实现** | 加接口要同步加"默认实现 + 替换样本"测试 |
+| `internal/spi/` | 全部接口 + 数据类型 + 服务键，**零实现** | 加接口要同步加"默认实现 + 替换样本"测试 |
+| `internal/fsutil/` | 文件遍历小工具（跳过噪声目录、二进制判定） | 零业务；只给 glob/grep 这类工具共用 |
 | `internal/session/` | 事件溯源 + canonical 模型 | 唯一允许直接读日志的包 |
 | `internal/agent/` | turn/step 双循环 | 不许内联压缩逻辑 |
 | `internal/acp/` | ACP 服务端（stdio JSON-RPC） | 按 `research/22` 的方法表 |

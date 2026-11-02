@@ -10,6 +10,8 @@ import (
 	"dshgo/internal/kernel"
 	"dshgo/modules/fs/local"
 	"dshgo/modules/tool/edit"
+	"dshgo/modules/tool/glob"
+	"dshgo/modules/tool/grep"
 	"dshgo/modules/tool/read"
 	"dshgo/modules/tool/write"
 	"dshgo/modules/tools"
@@ -31,6 +33,8 @@ func builtinModules() []kernel.Module {
 		read.Module(),
 		write.Module(),
 		edit.Module(),
+		glob.Module(),
+		grep.Module(),
 	}
 }
 

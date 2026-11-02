@@ -25,3 +25,11 @@ backend = "static"
 [[module]]
 id      = "tool-edit"
 backend = "static"
+
+[[module]]
+id      = "tool-glob"
+backend = "static"
+
+[[module]]
+id      = "tool-grep"
+backend = "static"

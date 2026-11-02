@@ -10,6 +10,24 @@
 
 ---
 
+## 0.2.1-go.5 · M1-c — 2026-11-02
+
+**glob / grep：独立工具，不是 shell 的包装。**
+
+- `internal/fsutil`：共享遍历规则（跳过 `.git` `node_modules` `refs` `dist` `bin` `tmp`）+ 二进制判定
+- `tool-glob`：`**` 跨目录、`*`/`?`/字符类（单段 `path.Match`）；结果排序稳定、上限 200（可到 1000）、截断给 Hint
+  - **刻意不支持花括号展开**：少一种隐式语法，少一类"为什么没匹配上"
+- `tool-grep`：Go 正则、`include` 文件过滤、`ignore_case`、`limit` 100（可到 500）
+  - 只回命中行（带行号），不回上下文噪声；单文件 >2 MiB 与二进制跳过并计数
+  - 返回 `ViewSpec=table`（文件/行/内容），客户端直接渲染成表
+
+**实测（CLI）**
+```
+glob internal/**/*.go            → 10 个文件（命中上限，truncated=true）
+grep "func Assemble" include=**/*.go → internal/kernel/assemble.go:22（扫描 41 文件）
+```
+
+---
 ## 0.2.1-go.5 · M1-b — 2026-11-02
 
 **文件组（read / write / edit）与读后写观测策略。**
