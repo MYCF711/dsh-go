@@ -17,6 +17,9 @@ import (
 	"dshgo/internal/spi"
 )
 
+// systemPrompt 是 dsh-go 的系统提示（会作为事件落盘）。
+const systemPrompt = "你在 dsh-go 宿主里工作。需要信息就调用工具，不要猜。"
+
 // acpRunner 把 ACP 的 prompt 接到真实的 agent 循环与会话日志上。
 type acpRunner struct {
 	reg    spi.ToolRegistry
@@ -54,6 +57,12 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		if err != nil {
 			r.mu.Unlock()
 			return "", nil, fmt.Errorf("建会话失败: %w", err)
+		}
+		// 系统提示作为**耐久事件**落盘：DSH 退休 request/header.header.system 后的做法，
+		// 这样 resume 之后模型仍然知道自己是谁。
+		if err := l.Append("system/message", session.SystemMessageData(1, 1, systemPrompt)); err != nil {
+			r.mu.Unlock()
+			return "", nil, err
 		}
 		r.logs[sessionID] = l
 		logw = l
@@ -146,7 +155,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		Runner:   runner,
 		Project:  session.ProjectResult,
 		Model:    r.model,
-		System:   "你在 dsh-go 宿主里工作。需要信息就调用工具，不要猜。",
+		System:   systemPrompt,
 		MaxSteps: r.steps,
 		Emit:     sink,
 	}

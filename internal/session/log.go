@@ -179,6 +179,19 @@ func finishReasonKind(finish string) string {
 	}
 }
 
+// SystemMessageData 构造 system/message 的 data（角色=system，首条受保护）。
+func SystemMessageData(turn, step int, text string) map[string]any {
+	return map[string]any{
+		"turn": turn,
+		"step": step,
+		"message": map[string]any{
+			"role":    "system",
+			"content": []map[string]any{TextBlock(text)},
+		},
+		"surfaceOp": "append",
+	}
+}
+
 // TurnStart / TurnEnd 的 data。
 func TurnStartData(turn int) map[string]any { return map[string]any{"turn": turn} }
 

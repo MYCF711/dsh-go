@@ -18,22 +18,10 @@ import (
 //   - `tool/result` → role:"tool"，带 toolCallId；
 //   - `system/message` 目前不进历史（系统提示由装配期给），但要认得它。
 func History(log *v4.Log) []llm.Message {
-	out := make([]llm.Message, 0, len(log.Events))
-	for _, ev := range log.Events {
-		switch ev.Type {
-		case "user/message":
-			if m, ok := userMessage(ev.Data); ok {
-				out = append(out, m)
-			}
-		case "assistant/message":
-			if m, ok := assistantMessage(ev.Data); ok {
-				out = append(out, m)
-			}
-		case "tool/result":
-			if m, ok := toolMessage(ev.Data); ok {
-				out = append(out, m)
-			}
-		}
+	surface := Surface(log)
+	out := make([]llm.Message, 0, len(surface))
+	for _, node := range surface {
+		out = append(out, node.Message)
 	}
 	return out
 }

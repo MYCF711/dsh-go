@@ -64,6 +64,37 @@ type Event struct {
 	Time int64           `json:"time"`
 	Data json.RawMessage `json:"data"`
 	Raw  json.RawMessage `json:"-"`
+
+	// 信封上的可选字段。surfaceOp 有两种形状：字符串 "append"，
+	// 或 {op:"replace", startSeq, endSeq}（含端点）。
+	SurfaceOp       json.RawMessage `json:"surfaceOp,omitempty"`
+	SourceEventSeqs []int64         `json:"sourceEventSeqs,omitempty"`
+	Ignorable       bool            `json:"ignorable,omitempty"`
+}
+
+// SurfaceOpKind 返回 surfaceOp 的种类与替换区间。
+// append（或缺省）返回 ("append", 0, 0)；替换返回 ("replace", start, end)。
+func (e Event) SurfaceOpKind() (kind string, start, end int64) {
+	raw := bytes.TrimSpace(e.SurfaceOp)
+	if len(raw) == 0 {
+		return "append", 0, 0
+	}
+	if len(raw) > 0 && raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s, 0, 0
+		}
+		return "append", 0, 0
+	}
+	var op struct {
+		Op       string `json:"op"`
+		StartSeq int64  `json:"startSeq"`
+		EndSeq   int64  `json:"endSeq"`
+	}
+	if err := json.Unmarshal(raw, &op); err != nil || op.Op == "" {
+		return "append", 0, 0
+	}
+	return op.Op, op.StartSeq, op.EndSeq
 }
 
 // Log 是一个会话文件的解析结果。

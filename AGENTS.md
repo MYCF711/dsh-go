@@ -17,7 +17,8 @@
 - ✅ 审批链路：`write`/`edit`/`shell`/`job_kill` 走 `session/request_permission`；拒绝时模型能读懂并改招
 - ✅ **M3 完成**：ACP + SDK 客户端 + 审批 + usage_update + 跨进程 `session/resume`
 - ✅ 工具能力声明（`spi.Caps`，**必填**）：审批按 `NeedsApproval()` 判定，不再按名字猜
-- 下一步 **M4**：surface 投影 + 提示词装配（`system/message`）
+- ✅ surface 投影：`shadowedSeqs` 遮蔽 + `compact-checkpoint` 替身 + `surfaceOp:replace`；`system/message` 已进历史
+- 下一步 **M4**：提示词装配（可组合段落）；之后 **M5** 打包
 
 ---
 

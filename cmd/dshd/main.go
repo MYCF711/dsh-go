@@ -248,6 +248,9 @@ func cmdRun(argv []string) error {
 		return err
 	}
 	defer logw.Close()
+	if err := logw.Append("system/message", session.SystemMessageData(1, 1, systemPrompt)); err != nil {
+		return err
+	}
 	if err := logw.Append("turn/start", session.TurnStartData(1)); err != nil {
 		return err
 	}

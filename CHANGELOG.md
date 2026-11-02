@@ -10,6 +10,40 @@
 
 ---
 
+## 0.2.1-go.5 · M4-b — 2026-11-02
+
+**surface 投影：压缩遮蔽、替身节点、system 消息进历史。**
+
+- `codecs/v4`：`Event` 现在解析信封上的 `surfaceOp` / `sourceEventSeqs` / `ignorable`；
+  `SurfaceOpKind()` 区分 `"append"` 与 `{op:"replace", startSeq, endSeq}`
+- `session.Surface(log)`：
+  - 只有 5 类事件参与派生；其余只审计不派生
+  - `compaction/summary` 与 `compaction/prune` 的 `shadowedSeqs` **从 surface 消失**（日志本身一条不少）
+  - `compaction/summary.summary` 作为 `compact-checkpoint` 替身节点进入 surface
+  - `surfaceOp: replace` 把 `[startSeq,endSeq]` 摘掉
+- `session.History` 改为走 Surface；**`system/message` 不再被丢**——resume 之后模型仍知道自己是谁
+- `dshd run` / `dshd acp`：系统提示作为**耐久事件**落盘（DSH 退休 `request/header.header.system` 后的做法）
+
+**真实语料实测**
+
+| 会话 | 可派生 | surface | 压缩 |
+|---|---:|---:|---|
+| session-00b50089 | 7,216 | **1,378** | 22 次 |
+| session-8cc34e32 | 2,283 | **686** | 20 次 |
+| session-c0a5847a | 803 | **365** | 9 次（全部 summary） |
+
+**一个只有真数据才会暴露的现象**：9 次压缩却只看到 **1 个**摘要节点——因为后一次压缩会把上一次的摘要节点也遮蔽掉（**级联压缩**）。同理 `compaction/prune` 是纯裁剪，不产生替身，所以"压缩次数"和"可见摘要数"本来就不该相等。
+
+写出的新会话示例（9 事件 → 5 节点）：
+```
+[0] system/message    src=system     "你在 dsh-go 宿主里工作…"
+[1] user/message      src=user       "记住这个暗号：BLUE-FALCON-42…"
+[2] assistant/message src=assistant  "OK"
+[3] user/message      src=user       "刚才我让你记住的暗号是什么"
+[4] assistant/message src=assistant  "BLUE-FALCON-42"
+```
+
+---
 ## 0.2.1-go.5 · M4-a — 2026-11-02
 
 **工具能力声明落地：审批不再按工具名猜（R3.6 的账还了）。**
