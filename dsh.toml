@@ -45,3 +45,7 @@ backend = "static"
 [[module]]
 id      = "tool-history"
 backend = "static"
+
+[[module]]
+id      = "tool-wd"
+backend = "static"

@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 
@@ -96,6 +97,21 @@ func (m *Manifest) Apply(mods []Module) ([]Module, error) {
 	// 没有 manifest 文件 = 默认全开。manifest 在场时才当白名单用。
 	if !m.Present {
 		return mods, nil
+	}
+
+	// 白名单会**静默**丢掉没列出来的模块。踩过：新加一个内置模块、忘了写进
+	// dsh.toml，于是工具表里少一个，没有任何提示——查了半天以为是注册失败。
+	// 这里把"被白名单挡掉的"打一行日志，让人一眼看到。
+	if len(m.Modules) > 0 {
+		listed := make(map[string]bool, len(m.Modules))
+		for _, e := range m.Modules {
+			listed[e.ID] = true
+		}
+		for _, id := range known {
+			if !listed[id] {
+				slog.Warn("manifest 是白名单，这个模块没列出来，已跳过", "module", id)
+			}
+		}
 	}
 
 	seen := make(map[string]bool, len(m.Modules))

@@ -242,6 +242,21 @@
     "caps": {}
   },
   {
+    "name": "working_directory",
+    "description": "查看或切换当前工作目录（影响 read/write/glob/grep 与新开的 bash）",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "要切换到的目录（相对当前目录或绝对路径）；省略则只报告当前目录"
+        }
+      },
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "write",
     "description": "新建或整体覆盖文件。覆盖已有文件前必须先 read。",
     "parameters": {

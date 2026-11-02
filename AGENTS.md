@@ -108,7 +108,10 @@
 - ⛔ **不追**（用户拍板 2026-11-03）：真·磁盘满（与"文件只读"同一代码路径，实测收益≈0）；跨机器共用 home（很小众，且属"多机同步"另一个产品问题）。理由记在 `docs/doctor.md` 末尾，**别再当待办翻出来**
 - ✅ soak 长跑（`scripts/soak.py` + `docs/soak.md`）：120 轮 RSS 20.2 MB / 句柄 196 / 每轮 1s 不变；**曲线在 t30 后走平**（连续 45 轮句柄不动）→ 趋稳，不是泄漏
 - ✅ 踩到的坑：自己写 ACP 客户端时**必须应答 `session/request_permission`**，否则整轮永久挂起且**毫无报错**（看起来像模型不响应）
-- 下一步 **M45**：soak 的多进程版（`--agents N`）单独出曲线——N 个 ACP 共享一个 home 时，锁与写入行为在长跑下是否仍然干净
+- ✅ P0 工具第 11 个 `working_directory`（`modules/tool/wd`）：报告/切换**进程** cwd，并明确告知"已开着的 bash 会话有自己的 cwd"
+- ✅ 修掉白名单静默丢模块：`dsh.toml` 没列的模块原来一声不吭跳过，现在打 WARN
+- ⚠️ 记一笔：**新加模块必须同时写进 `dsh.toml`**，否则它不会激活
+- 下一步 **M46**：P0 工具第 12 个 `todo_write`（P0 组织组）
 
 ---
 
@@ -254,7 +257,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | DSH 内存（私有工作集） | 870 MB | 本机 `tasklist` |
 | 其中 Chromium / Node 宿主 | ~500 / ~367 MB | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-02）** | 10 个 / **1,418 token**（含 history_search） | magpie 实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 11 个 / 7,487 字节 / **1,500 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |

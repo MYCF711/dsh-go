@@ -1,3 +1,37 @@
+## 0.2.1-go.27（未发布）· 续
+
+**P0 工具集第 11 个：`working_directory`。**
+
+看/换当前工作目录。为什么需要它：模型经常要确认"我在哪"，以前只能靠 bash 的 `pwd`，
+但 bash 有**自己的持久会话**，`cd` 只影响那条会话——read/write/glob/grep 看不到。
+
+这里改的是**进程的** cwd，影响 read/write/glob/grep 与新开的 bash 会话。
+但它**改不了已经开着的那条 bash 会话**——这一点写在返回的 `bash_note` 与 Hint 里，
+否则模型会以为"我切了，bash 也切了"，然后在下一次调用里困惑。
+
+```
+→ working_directory {}
+← working_directory [ok]           当前目录: D:/…/wdcheck
+→ working_directory {"path": "sub"}
+← working_directory [ok]           已切到: D:/…/wdcheck/sub
+```
+
+### 顺带修掉一个会静默丢模块的坑
+
+`dsh.toml` 在场时是**白名单**：没列出来的模块被直接跳过，**一声不吭**。
+踩了——新加的 `tool-wd` 注册了但工具表里没有，查了半天以为是 Register 失败。
+
+现在被挡掉的模块会打一行 `WARN manifest 是白名单，这个模块没列出来，已跳过 module=tool-wd`。
+
+### 工具表
+
+11 个工具 / 7,487 字节 / **1,500 token**（上一版 1,418）。
+快照 `cmd/dshd/testdata/tools.snapshot.json` 已更新（R4 要求显式 diff）。
+
+新增 `TestReportsCurrentDir` / `TestSwitchToSubdir` / `TestBadTargets`；
+`TestWriteToolsDeclareCaps` 里显式认领：不写盘、不起进程、不联网。
+
+---
 ## 0.2.1-go.27（未发布）
 
 **长期运行（soak）：前 30 轮爬升，之后平——趋稳，不是泄漏。**
