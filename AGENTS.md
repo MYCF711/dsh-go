@@ -38,7 +38,8 @@
 - ✅ 模式落地（`internal/modes`）：`default` / `read-only`，工具可见性按模式裁剪，`set_mode` 真的换表
 - ✅ 用户自建模式（`$DSH_HOME/modes/*.toml`，支持 `copy_of` 继承）：四道 fail-loud 校验，实测 strict 模式下无 bash
 - ✅ 模式决定审批倾向（`approvalDecision`）：deny 不问直接拒、allow 不问放行、deny 压过记忆；实测 no-exec 模式零打扰
-- 下一步 **M9**：`history_search` 工具 / `session/fork` 的授权与模式继承规则
+- ✅ 模式跟着会话走：写进 `header.agentPreset`、resume 采纳、fork 继承（三个 Go 测试钉住）
+- 下一步 **M9**：`history_search` 工具
 
 ---
 
@@ -145,6 +146,8 @@ type Tool interface {
 - 每个新依赖要在 `go.mod` 注释里写「为什么标准库不够」。
 
 **发布件**：`bash scripts/build.sh` 出三平台二进制 + SHA256SUMS（不发 npm）。
+
+**状态断言用 Go 测**：node ACP 脚本适合"真跑一轮对话"；断言 header/文件/状态一律写 Go 测试（踩过：node 侧连挂四次没暴露真因）。
 
 **压缩改动必跑**：`scripts/acp-compact-semantics.mjs`（压完之后模型还记不记得关键信息）。
 

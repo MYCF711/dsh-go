@@ -1,3 +1,31 @@
+## 0.2.1-go.9（未发布）· 续 3
+
+**模式跟着会话走：写进 header、resume 采纳、fork 继承。**
+
+之前模式只在内存里。后果很实在：
+- 一个 `read-only` 会话 **resume 之后会悄悄变成 `default`**——权限反而变大；
+- 从 `read-only` fork 出来的子会话也是 `default`。
+
+修法：用 v4 header 的 `agentPreset`（白名单键，不是自造字段）记模式。
+
+- 建会话时写入当前模式
+- `Resume` 从 header 采纳模式（认不出就回落 default，但会保留原值不覆盖）
+- `Fork` 把**父会话当前生效的模式**写进子 header
+- `session info` 现在也打印 `mode=...`
+- 抽出 `ensureSession`（幂等建/开），让这条链路能被 Go 测试直接钉住
+
+**三个测试**
+```
+TestEnsureSessionRecordsMode     模式写进 header.agentPreset
+TestResumeAdoptsModeFromHeader   resume 后仍是 read-only
+TestForkInheritsAgentPreset      fork 出来的子会话继承 read-only
+```
+
+**一个方法论上的教训**：这套验证我先用 node ACP 脚本写，连续失败四次
+（`ACP connection closed`，真实原因一直没暴露出来）。最后换成 Go 测试，二十分钟搞定。
+**状态断言该用 Go 测**；node 脚本留给"真的跑一轮对话"这种端到端。
+
+---
 ## 0.2.1-go.9（未发布）· 续 2
 
 **模式决定审批倾向：工具可见 ≠ 工具能执行。**

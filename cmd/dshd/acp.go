@@ -73,19 +73,16 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	r.mu.Lock()
 	logw := r.logs[sessionID]
 	if logw == nil {
-		l, err := session.CreateSession(r.home, cwd, sessionID, "standard")
+		r.mu.Unlock()
+		l, err := r.ensureSession(sessionID, cwd)
 		if err != nil {
-			r.mu.Unlock()
-			return "", nil, fmt.Errorf("建会话失败: %w", err)
-		}
-		// 系统提示作为**耐久事件**落盘：DSH 退休 request/header.header.system 后的做法，
-		// 这样 resume 之后模型仍然知道自己是谁。
-		if err := l.Append("system/message", session.SystemMessageData(1, 1, r.system)); err != nil {
-			r.mu.Unlock()
 			return "", nil, err
 		}
-		r.logs[sessionID] = l
-		logw = l
+		r.mu.Lock()
+		if r.logs[sessionID] == nil {
+			r.logs[sessionID] = l
+		}
+		logw = r.logs[sessionID]
 	}
 	r.turns[sessionID]++
 	turn := r.turns[sessionID]
@@ -269,6 +266,16 @@ func (r *acpRunner) Resume(ctx context.Context, sessionID, cwd string) error {
 	}
 	hist := session.History(back)
 
+	// 会话里记着当初用的模式（header.agentPreset）。恢复它——
+	// 否则一个 read-only 会话 resume 之后会悄悄变成 default，权限反而更大。
+	if p := back.Header.AgentPreset; p != "" {
+		if m, err := r.registry().Resolve(p); err == nil {
+			r.mu.Lock()
+			r.sessionModes[sessionID] = m.ID
+			r.mu.Unlock()
+		}
+	}
+
 	r.mu.Lock()
 	if old := r.logs[sessionID]; old != nil {
 		_ = old.Close()
@@ -303,6 +310,9 @@ func (r *acpRunner) Fork(ctx context.Context, sessionID, cwd string) (string, er
 		return "", err
 	}
 	newID := "session-" + session.NewID()
+	// 子会话继承父会话**当前生效**的模式（不是 header 里的旧值）。
+	parentMode := r.modeOf(sessionID)
+	src.Header.AgentPreset = parentMode.ID
 	forked, err := session.Fork(src, r.home, cwd, newID)
 	if err != nil {
 		return "", err
@@ -323,6 +333,7 @@ func (r *acpRunner) Fork(ctx context.Context, sessionID, cwd string) (string, er
 	r.logs[newID] = writer
 	r.hist[newID] = session.History(back)
 	r.turns[newID] = 0
+	r.sessionModes[newID] = parentMode.ID
 	r.mu.Unlock()
 	return newID, nil
 }
@@ -731,4 +742,29 @@ func approvalDecision(modeApproval string, remembered bool) (allow bool, needAsk
 		return true, false
 	}
 	return false, true
+}
+
+// ensureSession 在磁盘上把会话建出来（幂等：已存在就打开）。
+//
+// 抽出来是为了能直接测"模式有没有写进 header"——这条链路
+// 靠 node 脚本验证太脆，用 Go 测试钉住更可靠。
+func (r *acpRunner) ensureSession(sessionID, cwd string) (*session.Log, error) {
+	p, err := session.SessionPath(r.home, cwd, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if _, statErr := os.Stat(p); statErr == nil {
+		return session.OpenSession(r.home, cwd, sessionID)
+	}
+	l, err := session.CreateSession(r.home, cwd, sessionID, r.modeOf(sessionID).ID)
+	if err != nil {
+		return nil, fmt.Errorf("建会话失败: %w", err)
+	}
+	// 系统提示作为**耐久事件**落盘：DSH 退休 request/header.header.system 后的做法，
+	// 这样 resume 之后模型仍然知道自己是谁。
+	if err := l.Append("system/message", session.SystemMessageData(1, 1, r.system)); err != nil {
+		l.Close()
+		return nil, err
+	}
+	return l, nil
 }

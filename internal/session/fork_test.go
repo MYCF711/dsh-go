@@ -170,3 +170,28 @@ func TestForkWritesToExpectedPath(t *testing.T) {
 		t.Fatalf("路径 = %s，期望 %s", got, want)
 	}
 }
+
+// TestForkInheritsAgentPreset 锁死一条安全规则：
+// 子会话必须继承父会话的模式，否则从 read-only fork 出来会变成 default（权限变大）。
+func TestForkInheritsAgentPreset(t *testing.T) {
+	home := t.TempDir()
+	src := buildForkSrc(t, home)
+	src.Header.AgentPreset = "read-only"
+
+	forked, err := Fork(src, home, "/tmp/f-mode", "fork-mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forked.Close()
+
+	back, err := v4.ReadFile(forked.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Header.AgentPreset != "read-only" {
+		t.Fatalf("子会话 agentPreset = %q，期望 read-only", back.Header.AgentPreset)
+	}
+	if back.Header.ParentSession != "src-1" {
+		t.Fatalf("parentSession = %q", back.Header.ParentSession)
+	}
+}

@@ -592,7 +592,11 @@ func cmdSessionInfo(argv []string) error {
 		}
 	}
 	fmt.Printf("文件: %s\n", *path)
-	fmt.Printf("会话: %s（cwd=%s）\n", l.Header.ID, l.Header.Cwd)
+	mode := l.Header.AgentPreset
+	if mode == "" {
+		mode = "（未记）"
+	}
+	fmt.Printf("会话: %s（cwd=%s，mode=%s）\n", l.Header.ID, l.Header.Cwd, mode)
 	fmt.Printf("事件: %d（%d 帧）\n", len(l.Events), l.Frames)
 	fmt.Printf("surface: %d 节点，其中摘要 %d\n", len(surface), summaries)
 	keys := make([]string, 0, len(byType))
