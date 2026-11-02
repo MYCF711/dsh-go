@@ -91,10 +91,17 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	}
 	total := len(lines)
 
-	start := a.Offset
-	if start > total {
-		start = total + 1
+	// offset 越过文件末尾：**必须报错**。
+	// 早先这里是静默返回空内容，模型会以为"文件这一段是空的"——
+	// 一个错误答案，比报错糟糕得多。DSH 也是这么做的。
+	if a.Offset > total && total > 0 {
+		return spi.Result{
+				Hint: fmt.Sprintf("这个文件只有 %d 行；要读末尾就用 offset=%d，要从头读就别传 offset", total, total),
+			},
+			fmt.Errorf("offset %d 超出范围：%q 只有 %d 行", a.Offset, a.FilePath, total)
 	}
+
+	start := a.Offset
 	end := start + a.Limit - 1
 	if end > total {
 		end = total

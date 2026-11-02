@@ -116,3 +116,33 @@ func TestSchemaIsStableJSON(t *testing.T) {
 		t.Fatal("Schema 里出现反斜杠转义，可能混入了机器路径")
 	}
 }
+
+// offset 越过文件末尾必须报错。
+// 早先是静默返回空内容 —— 模型会以为"这一段是空的"，那是错误答案，比报错糟得多。
+func TestReadOffsetOutOfRange(t *testing.T) {
+	tl, root := newTool(t)
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("1\n2\n3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := tl.Exec(context.Background(), json.RawMessage(`{"file_path":"a.txt","offset":99}`))
+	if err == nil {
+		t.Fatalf("越过末尾应该报错，却返回了 %+v", res)
+	}
+	if !strings.Contains(err.Error(), "超出范围") {
+		t.Fatalf("错误信息要说清原因: %v", err)
+	}
+	if res.Hint == "" {
+		t.Fatal("要给出 Hint：告诉模型该用多少 offset")
+	}
+}
+
+// 但空文件上的默认 offset 不该报错。
+func TestReadEmptyFileOK(t *testing.T) {
+	tl, root := newTool(t)
+	if err := os.WriteFile(filepath.Join(root, "empty.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tl.Exec(context.Background(), json.RawMessage(`{"file_path":"empty.txt"}`)); err != nil {
+		t.Fatalf("空文件不该报错: %v", err)
+	}
+}

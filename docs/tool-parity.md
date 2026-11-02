@@ -60,3 +60,17 @@
 - ~~返回结构~~ → `read`/`write` 已对齐 DSH 的 `<path>/<content>` 包裹；`glob`/`grep`/`bash`/`job_*`
   仍是"结构化 Data + 摘要"，没照抄 DSH 的纯文本格式（那些格式没有包裹，模型两种都认）。
 - **边界行为**：超大文件、二进制、符号链接、并发写这些，各自实现，没做交叉验证。
+
+## 行为对拍：失败长什么样（2026-11-02 补）
+
+语料实测：**23,407 个 tool/result，367 个 isError=true（1.6%）**。
+失败文本的约定：
+
+| 规则 | 例子 |
+|---|---|
+| 一律 `Error: ` 前缀 | `Error: cannot modify "…": file has not been read — read the file, then retry` |
+| 路径用双引号原样带上 | `Error: offset 1080 is out of range for "…/eval.mjs" (1052 lines)` |
+| 说清**下一步怎么做** | `provide a more specific old_string or set replace_all to true` |
+| 不要静默返回空结果 | 路径不对 → 报错，不是"0 处命中" |
+
+按这三条改掉的三处：`read` 的 offset 越界、`grep` 的坏路径、失败事件正文为空。

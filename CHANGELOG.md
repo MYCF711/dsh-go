@@ -1,3 +1,33 @@
+## 0.2.1-go.12（未发布）
+
+**行为对拍：从 2.3 万个真实工具结果里挖出「失败长什么样」，照着重修了三个地方。**
+
+真机语料：**23,407 个 tool/result，其中 367 个 isError=true**（1.6%）。失败文本一律
+`Error: <具体原因>`，而且**原因写得很实**：
+
+```
+Error: offset 1080 is out of range for "…/eval.mjs" (1052 lines)
+Error: cannot modify "…/PLAN.md": file has not been read — read the file, then retry
+Error: cannot write "…/go.mod": file changed since it was read — re-read the file, then retry
+Error: old_string matched 2 times in "…"; provide a more specific old_string or set replace_all to true
+Error: grep search failed (exit 2): rg: <stderr>
+```
+
+对照之下我们有三个问题：
+
+1. **`read` 的 offset 越过末尾时静默返回空内容** —— 模型会以为"这一段是空的"。
+   一个错误答案比报错糟糕得多。现在报 `offset 99999 超出范围："README.md" 只有 38 行`。
+2. **`grep` 搜不存在的路径返回"0 处命中"** —— 模型会以为"这个目录里没有这个符号"，
+   真实情况是路径就错了。现在报错并提示先 glob 确认。
+3. **工具失败时发给客户端的那条记录没有正文** —— 模型拿到的是 `工具失败：…`，
+   但 ACP 的 `tool_call_update` 发的是工具原始 Result（Summary 空），
+   界面上就是**一行红色、什么都不说**。现在两边是同一份文本，统一用 `Error: ` 前缀。
+
+**新增测试**：`TestReadOffsetOutOfRange`、`TestGrepMissingPathErrors`、`TestToolErrorCarriesReasonToClient`。
+
+**方法论**：这一轮没写一行"猜"的逻辑——全部结论来自真实语料里 367 个失败样本的形状。
+
+---
 ## 0.2.1-go.11（2026-11-02）
 
 **`session/list` 改成读磁盘：会话面板要的是"所有会话"，不是"这个进程开过的"。**

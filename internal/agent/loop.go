@@ -196,13 +196,17 @@ func (l *Loop) runTool(ctx context.Context, turn, step int, call llm.ToolCall) l
 	}
 	res, err := l.Runner.Run(ctx, call.Function.Name, json.RawMessage(args))
 	if err != nil {
-		msg.Content = renderBlocks(l.project(spi.Result{
-			Summary: "工具失败：" + err.Error(),
+		// 失败时**模型看到的**和**客户端看到的**必须是同一份文本。
+		// 早先发给客户端的是工具原始的 res（Summary 为空），
+		// 界面上就是一行红色但什么都不说的记录。
+		shown := spi.Result{
+			Summary: "Error: " + err.Error(),
 			Hint:    res.Hint,
-		}))
+		}
+		msg.Content = renderBlocks(l.project(shown))
 		_ = l.emit(Event{
 			Kind: EventToolResult, Turn: turn, Step: step,
-			CallID: call.ID, ToolName: call.Function.Name, IsError: true, Err: err, Result: &res,
+			CallID: call.ID, ToolName: call.Function.Name, IsError: true, Err: err, Result: &shown,
 		})
 		return msg
 	}

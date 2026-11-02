@@ -47,7 +47,8 @@
 - ✅ `session/cancel` 真机回归 + `TestSessionUsableAfterCancel`（取消后 busy 必须清）
 - ✅ 断连语义：EOF → 取消在飞 turn → 等收尾（≤3s）→ `Shutdown()` 刷盘；`TestEOFDisconnectsAndCancels`
 - ✅ `session/list` 读磁盘（项目过滤 + 一句话摘要 + 坏文件也列出来）+ `TestListSessions*` 四条
-- 下一步 **M13**：冷启动测量方法本身——现在分钟级波动太大，需要「同机取 min-of-N」的判读规则
+- ✅ 行为对拍：从 2.3 万个真实结果里挖失败形状，修掉 read offset 越界静默返空、grep 坏路径返 0 命中、失败事件正文为空
+- 下一步 **M13**：`0.2.1-go.12` 发版
 
 ---
 

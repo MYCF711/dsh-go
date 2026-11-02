@@ -117,6 +117,14 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	if err != nil {
 		return spi.Result{Hint: "path 必须在工作区内"}, err
 	}
+	// 目录/文件不存在**必须报错**：返回"0 处命中"会让模型以为
+	// "这个目录里没有这个符号"，而真实情况是路径就错了。
+	if _, statErr := os.Stat(absBase); statErr != nil {
+		return spi.Result{
+				Hint: "确认 path 拼写；先用 glob 列出目录，或把 path 去掉（默认搜当前工作区）",
+			},
+			fmt.Errorf("grep 搜索失败：%q 不存在", base)
+	}
 
 	var (
 		matches []Match

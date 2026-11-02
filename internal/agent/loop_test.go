@@ -281,3 +281,56 @@ func TestModelErrorSurfaces(t *testing.T) {
 		t.Fatalf("模型错误要冒出来，得到 %v", err)
 	}
 }
+
+// 工具失败时，客户端看到的那条记录必须带原因。
+// 早先发出的是工具原始的 Result（Summary 为空），界面上就是"一行红色、什么都不说"。
+func TestToolErrorCarriesReasonToClient(t *testing.T) {
+	losingErr := errors.New("文件不存在：a.txt")
+	chat := &scriptedChat{steps: []*llm.Response{
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Type: "function", Function: llm.Func{
+			Name: "read", Arguments: `{"file_path":"a.txt"}`,
+		}}}, FinishReason: "tool_calls"},
+		{Content: "好", FinishReason: "stop"},
+	}}
+	reg := &fakeRegistry{tools: map[string]spi.Tool{"read": &fakeTool{name: "read", err: losingErr}}}
+	var got *spi.Result
+	proj := func(r spi.Result) []spi.Block { return []spi.Block{{Type: "text", Text: r.Summary}} }
+	l := &Loop{
+		Chat:     chat,
+		Tools:    reg,
+		Runner:   &errRunner{err: losingErr, hint: "先 glob 找文件"},
+		Model:    "m",
+		MaxSteps: 2,
+		Project:  proj,
+		Emit: func(e Event) error {
+			if e.Kind == EventToolResult && e.IsError {
+				got = e.Result
+			}
+			return nil
+		},
+	}
+	if _, err := l.Run(context.Background(), 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("没有发出 tool/result 事件")
+	}
+	if got.Summary == "" {
+		t.Fatal("失败事件的文本是空的——客户端只会看到一行没有原因的红色记录")
+	}
+	if !strings.Contains(got.Summary, "a.txt") {
+		t.Fatalf("文本里没有原因: %q", got.Summary)
+	}
+	if got.Hint == "" {
+		t.Fatal("Hint 丢了")
+	}
+}
+
+type errRunner struct {
+	err  error
+	hint string
+}
+
+func (r *errRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
+	return spi.Result{Hint: r.hint}, r.err
+}

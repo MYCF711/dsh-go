@@ -154,3 +154,15 @@ func TestTableView(t *testing.T) {
 		t.Fatalf("表格行不对：%+v", res.View.Rows)
 	}
 }
+
+// 搜索一个不存在的路径必须报错，不能返回"0 处命中"。
+// 后者会让模型以为"这个目录里没有这个符号"，而真实情况是路径就错了。
+func TestGrepMissingPathErrors(t *testing.T) {
+	dir := t.TempDir()
+	tl, _ := newTool(t)
+	_ = dir
+	_, err := tl.Exec(context.Background(), json.RawMessage(`{"pattern":"x","path":"no-such-dir"}`))
+	if err == nil {
+		t.Fatal("路径不存在必须报错")
+	}
+}
