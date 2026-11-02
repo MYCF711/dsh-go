@@ -1,6 +1,6 @@
 # AGENTS.md · DSH-GO
 
-> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.21`**。
+> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.22`**。
 > **先读** `PLAN.md` §1 的十项决策——那是用户逐条拍板的结论，**不要再讨论、不要"顺便优化"**。
 > 本文件是操作手册：冲突时以本文件为准；本文件没写的，以 `PLAN.md` 为准。
 
@@ -93,7 +93,7 @@
 - ✅ 修 doctor 自身 bug：警告项原来渲染成 `✓` 而结尾说"上面 ! 那行"，对不上号；现在 Warn 优先画 `!`
 - ✅ 运行日志（`<home>/logs/<日期>.log`，一行一 JSON）：会话开始（id/path/cwd/mode）+ 每次工具调用（tool/ms/ok/错误原文）；`run` 与 `acp` 都写；`run` 结束打日志路径（出错也打）
 - ✅ doctor 新增「运行日志」项：数警告 + 带出最后一条错误原文 + 给文件路径
-- 下一步 **M33**：`0.2.1-go.22` 发版（doctor + 演练 + 运行日志）
+- 下一步 **M34**：日志本身写不进去时会怎样（磁盘满 / 目录只读）——诊断不能因为"记录失败"就崩
 
 ---
 
@@ -225,7 +225,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 
 ## 6. 版本、提交、文档
 
-- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.21`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
+- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.22`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
 - **提交**：`M<里程碑>: <一句话>`，例如 `M1: tools/read 与观测策略`。一个提交只做一件事。
 - **决策**：任何改变 §1 决策的实现，**先改 `PLAN.md` 并写理由**，再动代码。禁止"代码先行、文档追认"。
 - **文档**：`docs/cordis-alignment.md` 是 cordis 概念 → Go 概念的逐条对照，是设计约束，不是宣传材料。
@@ -248,7 +248,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 会话样本 | 94 MB，zstd 多帧，62 事件类型 | `research/21` |
 | Go 空进程冷启动 | median **18.1 ms** / p95 22.7 ms | `research/30` |
 | **本机启动成本 vs 体积（实测 2026-11-02）** | 1.2MB→11.6ms / 8.8MB→31.7ms / 12.8MB→46.5ms（≈2.5 ms/MB） | `docs/cold-start.md` |
-| **dsh-go 冷启动（实测 2026-11-03）** | `measure-start.py` 报 55–115（含探针开销）；**紧探针 p50 34.8 ms**（30–35 是本机底噪，见 `docs/cold-start.md`） | `docs/cold-start.md` |
+| **dsh-go 冷启动（实测 2026-11-03）** | `measure-start.py` 报 55–115（含探针开销）；**紧探针 p50 27.0–34.8 ms**（本机底噪，见 `docs/cold-start.md`） | `docs/cold-start.md` |
 | 进程 init 总和 | **2.0 ms**（换掉 BurntSushi/toml 之前是 26.0 ms） | `GODEBUG=inittrace=1` |
 | **dsh-go 二进制（实测 2026-11-02）** | `-ldflags "-s -w"` → **8.4 MB**（目标 ≤25 MB） | `scripts/build.sh` |
 | **dsh-go 内存（实测 2026-11-03）** | 整轮峰值 **15.5 MB**（DSH 本体 870 MB） | `scripts/measure-mem.py` |
