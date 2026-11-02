@@ -279,7 +279,15 @@
   全部 CAUGHT；`MUTATE=1 bash scripts/check.sh` 可一次性跑完并复查源码是否恢复干净
 - ✅ 顺带修了自己门禁里的一个错计数（`grep -c CAUGHT` 数到了明细行，改成打印 `CAUGHT=N` 汇总）
 - ⚠️ 又一课：`python ... | tail` 之后 `$?` 是 **tail 的**退出码。判退出码永远不要过管道
-- 下一步 **M83**：把这 6 条里"只测一个函数"的补上跨函数联动（比如 schedule run 那条 deny 分支现在没有测试）
+- ✅ **把 `schedule run` 的权限闸门抽成纯函数**（`cmd/dshd/schedule_policy.go`）：
+  它原来埋在 cmdSchedule 的循环里、**一行测试都没有**，而这正是最该有测试的地方——
+  无人值守 + 提示词由模型写 + 授权在登记时给。三条测试钉住：默认 deny（且 `--policy=allow` 压不过它）、
+  显式 opt-in 才透传、两种说明的字必须不同
+- ✅ 变异条目到 **8 条**（新增 `schedule-run-ignores-opt-in` / `schedule-run-ignores-allow-writes`），
+  全部 CAUGHT，`MUTATE=1 bash scripts/check.sh` 一次跑完
+- ✅ 真机：`跑 session-…1524  巡检 （只读：登记时没开 allow_writes）`
+- ⚠️ 第五次栽在"python 往 Go 里写带反斜杠的字符串"——改成**按行号替换**才稳。以后动这类代码一律按行号
+- 下一步 **M84**：把"权限相关分支必须有测试"变成门禁（扫 `policy`/`allow`/`deny` 关键字附近是否有测试覆盖）
 
 ### 界面线现状（2026-11-03）
 

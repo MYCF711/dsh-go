@@ -46,5 +46,21 @@
     "new": "if false {",
     "pkg": "./modules/tool/goal",
     "test": "TestUpdateRejectsStaleRevision"
+  },
+  {
+    "name": "schedule-run-ignores-opt-in",
+    "file": "cmd/dshd/schedule_policy.go",
+    "old": "return \"deny\", \"（只读：登记时没开 allow_writes）\"",
+    "new": "return \"allow\", \"（只读：登记时没开 allow_writes）\"",
+    "pkg": "./cmd/dshd",
+    "test": "TestSchedulePolicyDefaultsToReadOnly"
+  },
+  {
+    "name": "schedule-run-ignores-allow-writes",
+    "file": "cmd/dshd/schedule_policy.go",
+    "old": "if allowWrites {",
+    "new": "if false {",
+    "pkg": "./cmd/dshd",
+    "test": "TestSchedulePolicyHonorsExplicitOptIn"
   }
 ]

@@ -84,15 +84,7 @@ func cmdSchedule(args []string) error {
 			}
 			dues := schedule.DueAt(items, now)
 			for _, d := range dues {
-				// 每条任务自己的授权：没显式 opt-in 就只跑只读工具。
-				// 提示词是模型写的、执行时人不在场，不留这道门等于允许它
-				// 安排"两小时后无条件跑 bash"。
-				itemPolicy := "deny"
-				note := "（只读：登记时没开 allow_writes）"
-				if d.Item.AllowWrites {
-					itemPolicy = *policy
-					note = "（允许写：登记时开了 allow_writes）"
-				}
+				itemPolicy, note := schedulePolicy(d.Item.AllowWrites, *policy)
 				fmt.Printf("跑 %s  %s %s\n", shortID(sid), d.Item.Title, note)
 				args := []string{"--home", *home, "--session", sid, "--prompt", d.Item.Prompt,
 					"--policy", itemPolicy, "--max-steps", strconv.Itoa(*maxSteps), "--agents", "docs/WORKER.md"}
