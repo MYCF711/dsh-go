@@ -1,3 +1,22 @@
+## 0.2.1-go.21（未发布）· 续 3
+
+**`--home` 指到文件上时，先看清楚再动手。**
+
+```
+修前: dshd: 建会话目录失败: mkdir tmpfile: The system cannot find the path specified.
+修后: dshd: --home "tmp/afile" 是一个文件，不是目录；换一个目录路径（或先删掉它）
+```
+
+修前那句有三个毛病：报的是 Windows 的 `mkdir` 内部错误、**指到父目录而不是用户给的那个**、
+没说要干什么。现在 `checkHome` 在**建任何东西之前**先看一眼，`run` / `acp` 两条入口都过它。
+
+顺带确认一件**本来就对**的事：极深目录。60 层、路径长 1,193 字符（远超 260 的 MAX_PATH），
+`glob` 正常命中——Go 在 Windows 上用长路径前缀，不受 260 限制。
+
+`TestCheckHomeRejectsFile` / `TestCheckHomeAllowsMissingAndDir`：
+文件要拒、目录要放行、**不存在的路径不拦**（提前拦会把"第一次跑"误判成错误）。
+
+---
 ## 0.2.1-go.21（未发布）· 续 2
 
 **坏掉的 tool_call：参数不是 JSON 时，执行前就拦。**

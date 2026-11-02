@@ -35,7 +35,10 @@ func CreateSession(home, cwd, id, agentPreset string) (*Log, error) {
 	dir := filepath.Join(home, "sessions", v4.ProjectKey(cwd), seg)
 	path := filepath.Join(dir, "session.v4.jsonl.zstd")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("建会话目录失败: %w", err)
+		// 最常见的原因：--home 指到了一个**文件**上（或者父目录被文件占了）。
+		// 原始错误是 `mkdir tmpfile: The system cannot find the path specified.`
+		// ——看不出是"作业目录本身有问题"还是"权限不够"。
+		return nil, fmt.Errorf("建会话目录失败（%s）: %w；确认 --home 指向一个目录、且可写", dir, err)
 	}
 	h := v4.Header{
 		Type:            "session",

@@ -84,7 +84,10 @@
 - ✅ **尾部半帧不再泼掉整份历史**：`splitFrames` 返回 `truncatedAt`，`Log.TailTruncatedAt` 带给调用方，`session info` 打警告；真损坏仍报错
 - ✅ 坏 tool_call：参数不是 JSON 时在**流水线入口**拦下（原来直接透传给工具，不校验参数的会拿着垃圾照跑）；坏调用不会让 turn 崩
 - ✅ 修掉 `TestSurfaceRealCorpus` 的假阳性：用子串判 `compact-checkpoint` 会把"正文里讨论这个协议"误算成替身，改为解析 `source.kind`
-- 下一步 **M29**：剩两类——极深目录（MAX_PATH）、只读 home
+- ✅ `--home` 指到文件上：`checkHome` 在建任何东西之前拦下，说清「这是文件、要的是目录」（原来报 `mkdir <父目录>: cannot find the path`）
+- ✅ 极深目录本来就对：60 层 / 1,193 字符路径，glob 正常命中（Go 用长路径前缀）
+- ✅ `docs/edge-cases.md` 上列的七类边角**全部验完**
+- 下一步 **M30**：`0.2.1-go.21` 发版（尾部半帧 + 坏 tool_call + home 预检）
 
 ---
 

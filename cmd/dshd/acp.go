@@ -388,6 +388,9 @@ func cmdACP(argv []string) error {
 		return err
 	}
 
+	if err := checkHome(*home); err != nil {
+		return err
+	}
 	mods, err := loadMods(*manifest, *home, *maxChars)
 	if err != nil {
 		return err

@@ -76,7 +76,7 @@ type Writer struct {
 // Create 新建一个 v4 会话文件，并写入 header 帧。
 func Create(path string, h Header) (*Writer, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("建会话目录失败: %w", err)
+		return nil, fmt.Errorf("建会话目录失败（%s）: %w；确认 home 指向一个目录、且可写", filepath.Dir(path), err)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {

@@ -270,6 +270,9 @@ func cmdRun(argv []string) error {
 	if *prompt == "" {
 		return fmt.Errorf("缺 --prompt")
 	}
+	if err := checkHome(*home); err != nil {
+		return err
+	}
 
 	mods, err := loadMods(*manifest, *home, *maxChars)
 	if err != nil {
@@ -809,4 +812,22 @@ func runCompactor(chat agent.Chat, logw *session.Log, budget int, model string) 
 			step, len(surface), len(session.Surface(after)))
 		return session.History(after), nil
 	}
+}
+
+// checkHome 在建任何东西之前先把 --home 看一眼。
+//
+// 实测踩过：`--home tmp/afile/home`（afile 是个普通文件）报的是
+//
+//	mkdir tmpfile: The system cannot find the path specified.
+//
+// 用户看不出到底是"作业目录本身有问题"还是"权限不够"。
+func checkHome(home string) error {
+	st, err := os.Stat(home)
+	if err != nil {
+		return nil // 不存在没关系，建的时候会说
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("--home %q 是一个文件，不是目录；换一个目录路径（或先删掉它）", home)
+	}
+	return nil
 }
