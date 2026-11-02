@@ -1,3 +1,30 @@
+## 0.2.1-go.19（未发布）
+
+**`session/load` / `session/resume` 不再把宿主路径漏给客户端。**
+
+打 ACP 边角时看到的：
+
+```
+load 不存在 → 载入失败: 读会话失败: 读会话文件失败:
+              open D:\...\sessions\--D-...--
+ope\session.v4.jsonl.zstd: The system cannot find the file specified
+```
+
+三层嵌套 + 宿主绝对路径。路径是实现细节，客户端要的是一句"没有这个会话"：
+
+```
+load 不存在   → 载入失败: 找不到会话 nope
+resume 不存在 → 恢复失败: 找不到会话 nope
+```
+
+`sessionErrText` 只把 `fs.ErrNotExist` 认成"找不到会话"，其它错误原样透出——
+不能把"真出错了"也说成"没有这个会话"。
+
+顺带确认了三个本来就对的边界：
+`set_mode` 未知模式会列出可选值（`default, read-only`）、`delete` 不存在会说清在哪个 home 下、
+`set_mode` 合法返回生效后的 `modeId`。
+
+---
 ## 0.2.1-go.18（2026-11-02）
 
 **长会话的成本与语义：三个 bug、一个声明机制、三处措辞。**

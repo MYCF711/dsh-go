@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"strings"
 	"sync"
 	"testing"
@@ -554,5 +555,30 @@ func TestSessionListUsesAgent(t *testing.T) {
 	first := ss[0].(map[string]any)
 	if first["sessionId"] != "s1" || first["summary"] != "摘要" {
 		t.Fatalf("返回内容不对: %+v", first)
+	}
+}
+
+// 找不到会话时，协议层只该说"没有这个会话"。
+// 原来直接把 err 拼进去，客户端看到的是宿主路径 + 三层嵌套：
+//
+//	载入失败: 读会话失败: 读会话文件失败: open <home>/sessions/.../session.v4.jsonl.zstd
+//
+// 路径是宿主的实现细节，不该出现在协议里。
+func TestSessionErrTextHidesPaths(t *testing.T) {
+	inner := fmt.Errorf("读会话文件失败: %w", fs.ErrNotExist)
+	err := fmt.Errorf("读会话失败: %w", inner)
+
+	msg := sessionErrText("载入", "nope", err)
+	if strings.Contains(msg, "session.v4.jsonl") || strings.Contains(msg, "sessions") {
+		t.Fatalf("不该泄漏宿主路径: %q", msg)
+	}
+	if !strings.Contains(msg, "找不到会话 nope") {
+		t.Fatalf("应该说找不到这个会话: %q", msg)
+	}
+
+	// 其它错误原样透出——不能把"真出错了"也说成"没有这个会话"
+	other := sessionErrText("载入", "x", fmt.Errorf("权限不足"))
+	if !strings.Contains(other, "权限不足") || strings.Contains(other, "找不到会话") {
+		t.Fatalf("非 not-exist 错误应原样保留: %q", other)
 	}
 }

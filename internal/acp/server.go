@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,7 +254,9 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 			return
 		}
 		if err := s.Agent.Resume(ctx, p.SessionID, p.Cwd); err != nil {
-			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "恢复失败: " + err.Error()})
+			_ = s.reply(req.ID, nil, &RPCError{
+				Code: CodeInvalidParams, Message: sessionErrText("恢复", p.SessionID, err),
+			})
 			return
 		}
 		s.mu.Lock()
@@ -290,7 +294,9 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 			return nil
 		}
 		if err := s.Agent.Load(ctx, p.SessionID, p.Cwd, emit); err != nil {
-			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "载入失败: " + err.Error()})
+			_ = s.reply(req.ID, nil, &RPCError{
+				Code: CodeInvalidParams, Message: sessionErrText("载入", p.SessionID, err),
+			})
 			return
 		}
 		s.mu.Lock()
@@ -689,4 +695,20 @@ func updateFor(ev agent.Event) (map[string]any, bool) {
 		}, true
 	}
 	return nil, false
+}
+
+// sessionErrText 把"找不到会话"和"真出错了"分开说。
+//
+// 原来直接把 err.Error() 拼进去，客户端看到的是这样一串：
+//
+//	载入失败: 读会话失败: 读会话文件失败: open <home>/sessions/.../session.v4.jsonl.zstd:
+//	the system cannot find the file specified
+//
+// 里面是宿主路径和三层嵌套。客户端要的是一句话：**没有这个会话**。
+// 路径是我们自己的实现细节，不该出现在协议层。
+func sessionErrText(verb, sessionID string, err error) string {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, os.ErrNotExist) {
+		return verb + "失败: 找不到会话 " + sessionID
+	}
+	return verb + "失败: " + err.Error()
 }
