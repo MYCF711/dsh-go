@@ -2,7 +2,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"dshgo/internal/approval"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/agent"
@@ -223,6 +226,7 @@ func cmdRun(argv []string) error {
 	maxSteps := fs.Int("max-steps", 8, "最多几步")
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
+	policy := fs.String("policy", "auto", "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -271,10 +275,20 @@ func cmdRun(argv []string) error {
 	}
 	var lastCallSeq int64
 
+	// 审批守卫：`dshd run` 原来对写类工具是完全放行的，现在按 --policy 判定。
+	askFn, err := makeAskFunc(*policy)
+	if err != nil {
+		return err
+	}
+	guarded := &guardedRunner{
+		inner: runner, reg: reg, ask: askFn,
+		sessionID: sessID, approvals: approval.New(),
+	}
+
 	loop := &agent.Loop{
 		Chat:     llm.New(*base, os.Getenv("DSHD_LLM_KEY")),
 		Tools:    reg,
-		Runner:   runner,
+		Runner:   guarded,
 		Project:  session.ProjectResult,
 		Model:    *model,
 		System:   sys,
@@ -636,4 +650,43 @@ func cmdSessionFork(argv []string) error {
 	fmt.Printf("  源会话: %s（parentSession 已写入 header）\n", src.Header.ID)
 	fmt.Printf("  surface: %d 节点（摘要 %d）/ 事件 %d\n", len(surface), summaries, len(back.Events))
 	return nil
+}
+
+// makeAskFunc 把 --policy 变成 guardedRunner 用的判定函数。
+//
+// auto 的语义：终端里有人就问，非终端（管道 / CI / 脚本）一律拒绝——
+// 没人能回答的时候，"默认同意"是最坏的选择。
+func makeAskFunc(policy string) (func(ctx context.Context, sessionID, tool, args string) (bool, error), error) {
+	return makeAskFuncWith(policy, isTerminal(os.Stdin))
+}
+
+// makeAskFuncWith 把"是不是终端"显式传进来，方便测试两个分支。
+func makeAskFuncWith(policy string, interactive bool) (func(ctx context.Context, sessionID, tool, args string) (bool, error), error) {
+	switch policy {
+	case "allow":
+		return func(context.Context, string, string, string) (bool, error) { return true, nil }, nil
+	case "deny":
+		return func(context.Context, string, string, string) (bool, error) { return false, nil }, nil
+	case "ask", "auto":
+		if policy == "auto" && !interactive {
+			return func(context.Context, string, string, string) (bool, error) { return false, nil }, nil
+		}
+		return func(ctx context.Context, sessionID, tool, args string) (bool, error) {
+			fmt.Fprintf(os.Stderr, "需要审批：%s %s → 允许？[y/N] ", tool, truncate(args, 160))
+			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			line = strings.ToLower(strings.TrimSpace(line))
+			return line == "y" || line == "yes", nil
+		}, nil
+	default:
+		return nil, fmt.Errorf("未知 --policy %q（可选 ask/allow/deny/auto）", policy)
+	}
+}
+
+// isTerminal 判断是不是交互终端（Windows 上用 CharacterDevice 位）。
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }

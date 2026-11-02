@@ -1,3 +1,27 @@
+## 0.2.1-go.7（未发布）· 续 8
+
+**`dshd run` 补上审批守卫：以前它对写类工具是完全放行的。**
+
+- `dshd run --policy ask|allow|deny|auto`（默认 `auto`）
+  - `auto`：**终端里就问，非终端一律拒绝**——没人能回答的时候，"默认同意"是最坏的选择
+  - 复用 ACP 那条 `guardedRunner`：按工具自己声明的 `Caps()` 判定，不按名字猜
+- `makeAskFuncWith(policy, interactive)`：把"是不是终端"显式传进来，两个分支都能测
+
+**实测**
+
+```
+# deny：模型想跑 bash
+→ 被拒；模型回："如果你要我重试，请批准上面这条 echo HELLO…由于该命令未被执行，我无法给你真实的输出"
+  （没有编造输出，这是关键）
+
+# allow：正常执行
+call: bash {"command": "echo HELLO-42", "description": "输出 HELLO-42"} → 结果含 HELLO-42 ✅
+
+# 未知策略
+dshd: 未知 --policy "yolo"（可选 ask/allow/deny/auto）
+```
+
+---
 ## 0.2.1-go.7（未发布）· 续 7
 
 **审批跨进程保留：`--remember-approvals`（默认关）。**

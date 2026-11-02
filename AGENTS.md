@@ -29,7 +29,8 @@
 - ✅ 工具契约对拍（`docs/tool-parity.md` + `TestToolParityWithDSH`）：发现并修掉 `shell→bash`、`id→job_id`、bash 缺 `description`
 - ✅ 返回结构对拍：`read`/`write` 采用 DSH 的 `<path>/<content>` 包裹（`spi.Result.Text` 优先投影）
 - ✅ 审批跨进程保留（`--remember-approvals`，默认关；状态放 `<home>/state/approvals`，不污染 v4 日志）：实测两个进程只问 1 次
-- 下一步 **M7**：`usage_update` 接入 meter 估算 / 审批记忆的过期策略
+- ✅ `dshd run --policy ask|allow|deny|auto`：`run` 以前对写类工具完全放行，现在按 Caps 审批（auto=终端问、非终端拒）
+- 下一步 **M7**：`usage_update` 接入 meter 估算 / 审批记忆过期策略
 
 ---
 
