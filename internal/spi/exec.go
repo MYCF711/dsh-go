@@ -13,11 +13,11 @@ type Exec interface {
 
 // ExecResult 是一条命令的结果。
 type ExecResult struct {
-	Output   string `json:"output"` // stdout 与 stderr 合流（M1 的取舍，见 CHANGELOG）
-	ExitCode int    `json:"exit_code"`
-	Cwd      string `json:"cwd"`
-	JobID    string `json:"job_id,omitempty"`
-	MovedToBg bool  `json:"moved_to_bg,omitempty"`
+	Output    string `json:"output"` // stdout 与 stderr 合流（M1 的取舍，见 CHANGELOG）
+	ExitCode  int    `json:"exit_code"`
+	Cwd       string `json:"cwd"`
+	JobID     string `json:"job_id,omitempty"`
+	MovedToBg bool   `json:"moved_to_bg,omitempty"`
 }
 
 // Job 是后台任务表。
