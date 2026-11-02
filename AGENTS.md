@@ -10,8 +10,8 @@
 
 - ✅ **M0 完成**：内核四件事（Scope/Registry/Bus/Assemble）+ 工具 SPI + 装配器 + CLI；`scripts/check.sh` 全绿，CI（windows-latest，含 `-race`）绿
 - 🚧 **M1 收口**：工具层已齐（`read/write/edit/glob/grep/shell/job_*` 共 9 个），流水线 + 投影 + schema 快照 + token 实测（**906**）都已落地
-- 🚧 **M2 进行中**：`codecs/v4` **解码器**已通过全量真实语料（116 文件 / 66,877 帧 / 123,790 事件）；编码器、LLM(SSE)、agent loop 待做
-- 下一步：v4 **编码器**（读→写→再读 字节级比对）→ LLM(SSE) → agent turn/step 双循环
+- 🚧 **M2 进行中**：`codecs/v4` **双向可用** —— 解码吃了 116 个真实会话，编码产物 Node（`node:zlib` zstd）逐帧读通
+- 下一步：LLM(SSE) 客户端 → agent turn/step 双循环 → 把会话写入路径接到 codec
 
 ---
 
@@ -97,6 +97,8 @@ type Tool interface {
 | 12 | 压缩只追加 `compaction/summary`（`shadowedRange` + `shadowedSeqs`），**日志永不删**；遮蔽只发生在 surface 折叠 |
 
 > 先写 golden test（拿 `$DSH_HOME/sessions/` 里的真会话做输入），再写编码器。反过来的顺序一定会返工。
+>
+> 改了会话格式必须跑一次 Node 侧验证：`node scripts/verify-node-reads.mjs <file>`（本机需 `ELECTRON_RUN_AS_NODE=1 "D:/DeepSeek Harness/Desktop/DeepSeek Harness.exe"`）。
 
 ---
 

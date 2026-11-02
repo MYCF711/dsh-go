@@ -8,10 +8,10 @@ import (
 
 // ProjectKey 把 cwd 变成项目目录名。规则逐字对齐（research/21 §1）：
 //
-//	1. `/` `\` `:` 各变一个 `-`，连续 `-` 折叠；
-//	2. ASCII [A-Za-z0-9._-] 且非 `~` 原样，其余每个 **UTF-16 码元** → `~XXXX`（大写 4 位 hex）；
-//	3. 去前导 `-`；空 → `root`；截 251；
-//	4. 包成 `--<key>--`。
+//  1. `/` `\` `:` 各变一个 `-`，连续 `-` 折叠；
+//  2. ASCII [A-Za-z0-9._-] 且非 `~` 原样，其余每个 **UTF-16 码元** → `~XXXX`（大写 4 位 hex）；
+//  3. 去前导 `-`；空 → `root`；截 251；
+//  4. 包成 `--<key>--`。
 func ProjectKey(cwd string) string {
 	var b strings.Builder
 	for _, r := range cwd {
