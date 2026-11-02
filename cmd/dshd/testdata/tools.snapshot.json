@@ -547,6 +547,10 @@
           "type": "integer",
           "description": "kind=every 时必填，\u003e= 60"
         },
+        "allow_writes": {
+          "type": "boolean",
+          "description": "默认 false：到点只跑只读工具。设 true 才会在无人值守时执行写操作，用户要清楚后果"
+        },
         "daily_at": {
           "type": "string",
           "description": "kind=daily 时必填，本地时区 HH:MM，如 09:30"

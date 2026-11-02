@@ -441,6 +441,7 @@ func cmdRun(argv []string) error {
 	guarded := &guardedRunner{
 		inner: runner, reg: reg, ask: askFn,
 		sessionID: sessID, approvals: approval.New(),
+		policyDeniesUnattended: deniesSilently(*policy, isTerminal(os.Stdin)),
 	}
 
 	chat := llm.New(*base, os.Getenv("DSHD_LLM_KEY"))
@@ -870,6 +871,18 @@ func makeAskFunc(policy string) (func(ctx context.Context, sessionID, tool, args
 }
 
 // makeAskFuncWith 把"是不是终端"显式传进来，方便测试两个分支。
+// deniesSilently 判断这条策略是不是"不问、直接拒"。
+// 用于把"策略拒绝"和"人拒绝"分开说——两者对模型的下一步要求不同。
+func deniesSilently(policy string, interactive bool) bool {
+	switch policy {
+	case "deny":
+		return true
+	case "auto":
+		return !interactive
+	}
+	return false
+}
+
 func makeAskFuncWith(policy string, interactive bool) (func(ctx context.Context, sessionID, tool, args string) (bool, error), error) {
 	switch policy {
 	case "allow":

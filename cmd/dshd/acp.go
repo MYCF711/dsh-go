@@ -244,6 +244,9 @@ type guardedRunner struct {
 	approvals *approval.Memory
 	// modeApproval 是当前模式的审批倾向（""=沿用宿主 / ask / allow / deny）。
 	modeApproval string
+	// policyDeniesUnattended 表示"策略在无人值守时不问、直接拒"（--policy deny 或非终端 auto）。
+	// 它与"人看了之后说不"要分开说——对模型来说前者换问法没用，后者可以再来一次。
+	policyDeniesUnattended bool
 }
 
 func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
@@ -264,6 +267,12 @@ func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessa
 			return spi.Result{Hint: "审批失败：客户端可能断开了；重试或改用只读工具"}, fmt.Errorf("审批失败: %w", err)
 		}
 		if !ok {
+			// 拒绝可能是"人说不"，也可能是"策略不让人被问到"（--policy deny / 非终端 auto）。
+			// 两种情况对模型的要求不一样：前者要重新征求同意，后者换问法也没用。
+			if g.modeApproval == "deny" || g.policyDeniesUnattended {
+				return spi.Result{Hint: "当前策略不允许这类调用（不是有人拒绝了你）：改用只读工具，或让用户放宽审批策略"},
+					fmt.Errorf("策略拒绝了 %s", name)
+			}
 			return spi.Result{Hint: "用户拒绝了这次调用：换成只读方式确认，或先说明你要做什么再请求"},
 				fmt.Errorf("用户拒绝了 %s", name)
 		}

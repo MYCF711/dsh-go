@@ -61,3 +61,38 @@ func TestDeleteWithNoSchedules(t *testing.T) {
 		t.Fatalf("Hint 应当指向 create: %q", res.Hint)
 	}
 }
+
+// 默认只读：任务到点时不能动写类工具。
+// 提示词是模型写的、执行时人不在场、授权在登记时给——不留这道门等于放行一切。
+func TestAllowWritesDefaultsOff(t *testing.T) {
+	dir := t.TempDir()
+	ctx := ctxWith("acp-r")
+	res, err := mk(dir, kindCreate).Exec(ctx, json.RawMessage(`{"title":"巡检","prompt":"看看磁盘","kind":"every","every_seconds":300}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := res.Data.(map[string]any)
+	sch, ok := m["schedule"].(Schedule)
+	if !ok {
+		t.Fatalf("拿不到任务: %#v", res.Data)
+	}
+	if sch.AllowWrites {
+		t.Fatal("没显式 opt-in 时必须默认只读")
+	}
+}
+
+// 显式打开才允许写，且要落盘（重启后仍然生效）。
+func TestAllowWritesPersists(t *testing.T) {
+	dir := t.TempDir()
+	ctx := ctxWith("acp-w")
+	if _, err := mk(dir, kindCreate).Exec(ctx, json.RawMessage(`{"title":"清理","prompt":"删临时文件","kind":"every","every_seconds":300,"allow_writes":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := (&store{dir: dir}).load("acp-w")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("读回来: %v %v", items, err)
+	}
+	if !items[0].AllowWrites {
+		t.Fatal("allow_writes=true 应当落盘")
+	}
+}

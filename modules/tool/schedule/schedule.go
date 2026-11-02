@@ -65,6 +65,11 @@ type Schedule struct {
 	NextAt    string `json:"next_at"`    // RFC3339，算出来的
 	CreatedAt string `json:"created_at"` //
 	UpdatedAt string `json:"updated_at"` //
+
+	// AllowWrites 决定这条任务到点时**能不能动写类工具**。
+	// 默认 false = 只跑只读工具：提示词是模型写的、执行时人不在场，
+	// 授权又是在登记时给的——不留这道门，模型就能安排"两小时后无条件跑 bash"。
+	AllowWrites bool `json:"allow_writes,omitempty"`
 }
 
 // scheduleFile 是一个会话落盘的形状。
@@ -151,6 +156,8 @@ type createArgs struct {
 	DailyAt  string `json:"daily_at"`
 	WeeklyAt string `json:"weekly_at"`
 	Weekdays []int  `json:"weekdays"`
+	// AllowWrites 默认 false = 到点只跑只读工具。
+	AllowWrites bool `json:"allow_writes"`
 }
 
 // 指针字段用来区分"没传"和"传了空值"——update 是增量语义，不能把没提的字段清掉。
@@ -213,6 +220,8 @@ func (t *Tool) Schema() json.RawMessage {
     "kind": {"type": "string", "enum": ["every", "daily", "weekly"],
              "description": "调度方式：every=每 N 秒；daily=每天某时刻；weekly=每周若干天的某时刻"},
     "every_seconds": {"type": "integer", "description": "kind=every 时必填，>= 60"},
+    "allow_writes": {"type": "boolean",
+                     "description": "默认 false：到点只跑只读工具。设 true 才会在无人值守时执行写操作，用户要清楚后果"},
     "daily_at": {"type": "string", "description": "kind=daily 时必填，本地时区 HH:MM，如 09:30"},
     "weekly_at": {"type": "string", "description": "kind=weekly 时必填，本地时区 HH:MM，如 09:30"},
     "weekdays": {"type": "array", "items": {"type": "integer"}, "description": "kind=weekly 时必填，0=周日 .. 6=周六，可多选"}
@@ -301,12 +310,13 @@ func (t *Tool) create(ctx context.Context, raw json.RawMessage) (spi.Result, err
 	}
 
 	s := Schedule{
-		Title:    title,
-		Prompt:   prompt,
-		Kind:     strings.ToLower(strings.TrimSpace(a.Kind)),
-		DailyAt:  a.DailyAt,
-		WeeklyAt: a.WeeklyAt,
-		Weekdays: a.Weekdays,
+		Title:       title,
+		Prompt:      prompt,
+		Kind:        strings.ToLower(strings.TrimSpace(a.Kind)),
+		DailyAt:     a.DailyAt,
+		WeeklyAt:    a.WeeklyAt,
+		Weekdays:    a.Weekdays,
+		AllowWrites: a.AllowWrites,
 	}
 	if a.EverySec != nil {
 		s.EverySec = *a.EverySec

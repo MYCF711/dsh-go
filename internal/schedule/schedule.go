@@ -33,6 +33,14 @@ type Item struct {
 	Weekdays []int  `json:"weekdays,omitempty"`
 	WeeklyAt string `json:"weekly_at,omitempty"`
 	NextAt   string `json:"next_at"`
+
+	// AllowWrites 决定这条任务到点时**能不能动写类工具**。
+	//
+	// 默认 false = 只跑只读工具。理由：任务的提示词是模型写的、执行时人不在场，
+	// 而授权是在**登记时**给出的——不留一道显式的门，等于让模型安排
+	// "两小时后无条件跑 bash"。
+	// 老数据没有这个字段 → 零值 false → 按只读处理，这是安全的默认。
+	AllowWrites bool `json:"allow_writes,omitempty"`
 }
 
 // Due 是一个到期的任务，带上它的归属会话。
