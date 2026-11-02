@@ -122,7 +122,12 @@ func OpenSession(home, cwd, id string) (*Log, error) {
 	w, err := v4.OpenAppend(path)
 	if err != nil {
 		releaseWriter(path)
-		return nil, err
+		// 这时候**文件是能读的**（上面 ReadFile 已经成功了），只是打不开写入。
+		// 原始错误只有 `open <path>: Access is denied.`——看不出"读没问题、写不行"，
+		// 也不知道下一步该干什么。
+		return nil, fmt.Errorf("会话能读、但打不开写入（%s）：%w；"+
+			"文件只读/被占用/磁盘满都会这样。已有 %d 条事件不受影响，可以先用 `dshd session info --in` 查看",
+			path, err, len(back.Events))
 	}
 	lg := &Log{w: w, Path: path, seq: int64(len(back.Events)), now: time.Now}
 	lg.lockPath = path + ".lock"
@@ -176,7 +181,12 @@ func OpenSessionAt(path string) (*Log, error) {
 	w, err := v4.OpenAppend(path)
 	if err != nil {
 		releaseWriter(path)
-		return nil, err
+		// 这时候**文件是能读的**（上面 ReadFile 已经成功了），只是打不开写入。
+		// 原始错误只有 `open <path>: Access is denied.`——看不出"读没问题、写不行"，
+		// 也不知道下一步该干什么。
+		return nil, fmt.Errorf("会话能读、但打不开写入（%s）：%w；"+
+			"文件只读/被占用/磁盘满都会这样。已有 %d 条事件不受影响，可以先用 `dshd session info --in` 查看",
+			path, err, len(back.Events))
 	}
 	lg := &Log{w: w, Path: path, seq: int64(len(back.Events)), now: time.Now}
 	lg.lockPath = path + ".lock"
