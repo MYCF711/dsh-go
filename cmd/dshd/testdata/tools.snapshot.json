@@ -214,6 +214,41 @@
     "caps": {}
   },
   {
+    "name": "present",
+    "description": "把已存在的文件声明为交付物（不复制内容）。人需要单独打开某个文件时用。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "array",
+          "description": "通常 1-2 个最重要的交付物；一次最多 4 个",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "已存在文件的路径（相对当前工作目录）"
+              },
+              "description": {
+                "type": "string",
+                "description": "给人看的一句话说明"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "files"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "read",
     "description": "读文件（按行窗口）。改文件前必须先读；大文件用 offset/limit 分段。",
     "parameters": {

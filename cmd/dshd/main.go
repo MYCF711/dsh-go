@@ -28,6 +28,7 @@ import (
 	"dshgo/modules/tool/glob"
 	"dshgo/modules/tool/grep"
 	"dshgo/modules/tool/history"
+	"dshgo/modules/tool/present"
 	"dshgo/modules/tool/read"
 	todo "dshgo/modules/tool/todo"
 	wdtool "dshgo/modules/tool/wd"
@@ -70,6 +71,7 @@ func builtinModules(wd, home string, maxChars int) []kernel.Module {
 		history.Module(),
 		wdtool.Module(),
 		todo.Module(),
+		present.Module(),
 	}
 }
 

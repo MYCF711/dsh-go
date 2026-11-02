@@ -106,6 +106,8 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"working_directory": {},
 		// 只记清单在内存里，不写盘、不起进程、不联网。
 		"todo_write": {},
+		// 只 stat 文件、登记路径，不写不跑不联。
+		"present": {},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {

@@ -53,3 +53,7 @@ backend = "static"
 [[module]]
 id      = "tool-todo"
 backend = "static"
+
+[[module]]
+id      = "tool-present"
+backend = "static"
