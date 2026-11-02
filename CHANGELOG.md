@@ -1,4 +1,72 @@
-## 0.2.1-go.21（未发布）· 续 3
+## 0.2.1-go.21（2026-11-03）
+
+**三处会让"能长期托付"打折的地方：一次断电、一次模型发疯、一次手滑。**
+
+### 尾部半帧不再泼掉整份历史
+
+断电或磁盘满会在会话文件末尾留下半帧。原来读整份日志**直接失败**：
+
+```
+...session.v4.jsonl.zstd: 偏移 458 处块头被截断
+```
+
+为了最后半帧丢掉前面所有事件，是最坏的结果。现在**留住前面的，并且大声说出来**：
+
+```
+事件: 4（5 帧）
+⚠ 尾部截断: 偏移 6474 之后读不动了（上面的内容照常可用）
+```
+
+- `splitFrames` 对"字节不够"返回 `(frames, truncatedAt, nil)`；**真损坏**仍报错
+- `v4.Log.TailTruncatedAt` 带给调用方，`session info` 打警告
+- 契约变更：`TestCorruptTailIsReported` 从「必须报错」改成「必须返回前缀 + 必须报出截断」
+
+### 坏 tool_call 在流水线入口拦下
+
+三种形态里两种本来就对（`unknown tool "x"`、`file_path 为空`）。第三种
+**参数不是 JSON** 原来直接透传给工具——不校验参数的工具会拿着垃圾照跑：
+
+```
+执行失败: 参数不是 JSON 对象: json: cannot unmarshal string into Go value of type map[string]jsontext.Value
+提示: tool_call.arguments 必须是 JSON 对象（键值对）；常见原因是引号没转义或写成了字符串
+```
+
+坏调用**不会让 turn 崩**（`TestMalformedToolCallsKeepTheTurnAlive`）。
+
+### `--home` 指到文件上时说人话
+
+```
+修前: 建会话目录失败: mkdir tmpfile: The system cannot find the path specified.
+修后: --home "tmp/afile" 是一个文件，不是目录；换一个目录路径（或先删掉它）
+```
+
+修前那句报的是 Windows 的 `mkdir` 内部错误、**指到父目录而不是用户给的那个**、没说要干什么。
+
+### 顺带修掉一个测试假阳性
+
+`TestSurfaceRealCorpus` 报「有替身却没有可见摘要」——那条消息的正文在**讨论**
+`compact-checkpoint` 协议（第 10,340 字符处），`source.kind` 是 `plugin:hindsight`。
+测试用**子串**判断，把"我在说明这个协议"误算成"这是替身"。改为解析 `source.kind`。
+
+`git stash` 验证过不是本次改动引起——**真实语料每天在长，测试会随新数据变红**。
+
+### 边角九类盘点（`docs/edge-cases.md`）
+
+六类本来就对（崩溃恢复 / 并发 prompt / 1MB 单行 / Windows junction /
+双宿主并发写 / 极深目录），三类修了（尾部半帧 / 坏 tool_call / home 预检）。
+
+### 实测量
+
+| 指标 | 目标 | 实测 |
+|---|---:|---:|
+| 常驻内存 | <150 MB | **15.5 MB** |
+| 冷启动（紧探针 p50） | <100 ms | **34.8 ms** |
+| 工具表 | ≤6k token | **1,418 token** |
+| 二进制 | ≤25 MB | **8.4 MB** |
+
+---
+
+### 续 3
 
 **`--home` 指到文件上时，先看清楚再动手。**
 
@@ -17,7 +85,7 @@
 文件要拒、目录要放行、**不存在的路径不拦**（提前拦会把"第一次跑"误判成错误）。
 
 ---
-## 0.2.1-go.21（未发布）· 续 2
+### 续 2
 
 **坏掉的 tool_call：参数不是 JSON 时，执行前就拦。**
 
@@ -47,7 +115,7 @@
 `git stash` 验证过：这不是本次改动引起的——**真实语料每天在长，测试会随新数据变红**。
 
 ---
-## 0.2.1-go.21（未发布）· 续
+### 续
 
 **尾部半帧不再泼掉整份历史。**
 
