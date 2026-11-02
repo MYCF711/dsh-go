@@ -1,6 +1,6 @@
 # AGENTS.md · DSH-GO
 
-> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.18`**。
+> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.19`**。
 > **先读** `PLAN.md` §1 的十项决策——那是用户逐条拍板的结论，**不要再讨论、不要"顺便优化"**。
 > 本文件是操作手册：冲突时以本文件为准；本文件没写的，以 `PLAN.md` 为准。
 
@@ -76,7 +76,7 @@
 - ✅ `edit` 的「不唯一」两条出路实测可走通（加上下文 / replace_all 各验一遍）；真机上模型先读再拼上下文，很少触发这条错误
 - ✅ ACP 边界：`load`/`resume` 对不存在的会话不再漏宿主路径（原来三层嵌套 + 绝对路径）；`set_mode` 未知模式会列可选值（本来就对）
 - ✅ 模型调用失败按种类说（连不上/401/404/429/5xx），不再把 Go 的 `dial tcp ... connectex` 与接口路径甩给客户端；网关正文截到 300 字符；API key 从未泄漏
-- 下一步 **M25**：`0.2.1-go.19` 发版
+- 下一步 **M26**：`bash` 的 `description` 参数现在被忽略——查一下它到底该不该进审批提示
 
 ---
 
@@ -208,7 +208,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 
 ## 6. 版本、提交、文档
 
-- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.18`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
+- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.19`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
 - **提交**：`M<里程碑>: <一句话>`，例如 `M1: tools/read 与观测策略`。一个提交只做一件事。
 - **决策**：任何改变 §1 决策的实现，**先改 `PLAN.md` 并写理由**，再动代码。禁止"代码先行、文档追认"。
 - **文档**：`docs/cordis-alignment.md` 是 cordis 概念 → Go 概念的逐条对照，是设计约束，不是宣传材料。
@@ -234,7 +234,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | **dsh-go 冷启动（实测 2026-11-02）** | `measure-start.py` 报 55–115（含探针开销）；**紧探针 p50 32.5 ms** | `docs/cold-start.md` |
 | 进程 init 总和 | **2.0 ms**（换掉 BurntSushi/toml 之前是 26.0 ms） | `GODEBUG=inittrace=1` |
 | **dsh-go 二进制（实测 2026-11-02）** | `-ldflags "-s -w"` → **8.3 MB**（目标 ≤25 MB） | `scripts/build.sh` |
-| **dsh-go 内存（实测 2026-11-02）** | 整轮峰值 **15.5 MB**（DSH 本体 870 MB） | `scripts/measure-mem.py` |
+| **dsh-go 内存（实测 2026-11-02）** | 整轮峰值 **15.8 MB**（DSH 本体 870 MB） | `scripts/measure-mem.py` |
 | **`dshd version` 启动（实测 2026-11-02）** | median **42.8 ms**（不含装配，纯进程+init） | 本机 12 次 |
 | go-plugin / wazero 二进制开销 | **+14.8 MB** / +3.5 MB | 同上 |
 | 进程插件工作集 | **14.4 MiB** | 同上 |
