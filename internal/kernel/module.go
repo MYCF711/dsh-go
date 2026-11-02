@@ -5,7 +5,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/BurntSushi/toml"
+	toml "github.com/pelletier/go-toml/v2"
 )
 
 // Backend 是插件装载层（PLAN §3）。
@@ -64,8 +64,12 @@ func LoadManifest(path string) (*Manifest, error) {
 		return m, nil
 	}
 	m.Present = true
-	if _, err := toml.DecodeFile(path, m); err != nil {
+	raw, err := os.ReadFile(path)
+	if err != nil {
 		return nil, fmt.Errorf("读 manifest %s 失败: %w", path, err)
+	}
+	if err := toml.Unmarshal(raw, m); err != nil {
+		return nil, fmt.Errorf("解析 manifest %s 失败: %w", path, err)
 	}
 	return m, nil
 }

@@ -350,9 +350,11 @@ func cmdACP(argv []string) error {
 	k := kernel.New("dshd-acp")
 	root := k.Root()
 	defer root.Dispose()
+	timingf("acp: 装配前")
 	if _, err := kernel.Assemble(root, mods); err != nil {
 		return err
 	}
+	timingf("acp: 装配后")
 	reg, err := kernel.Inject(root, spi.ToolsKey)
 	if err != nil {
 		return err

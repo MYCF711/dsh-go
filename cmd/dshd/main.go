@@ -33,7 +33,7 @@ import (
 
 // 这三个由 -ldflags 覆盖（scripts/build.sh），默认值给 go run 用。
 var (
-	version   = "0.2.1-go.7"
+	version   = "0.2.1-go.8"
 	commit    = "dev"
 	buildTime = "unknown"
 )
@@ -59,6 +59,7 @@ func builtinModules() []kernel.Module {
 }
 
 func main() {
+	timingf("main 开始")
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -78,6 +79,7 @@ func main() {
 	case "acp":
 		err = cmdACP(os.Args[2:])
 	case "version":
+		timingf("enter version")
 		fmt.Printf("dshd %s\n", version)
 		fmt.Printf("commit: %s\n", commit)
 		fmt.Printf("built:  %s\n", buildTime)
@@ -191,6 +193,7 @@ func cmdTools(argv []string) error {
 	if err != nil {
 		return err
 	}
+	timingf("run: manifest 已读")
 	k := kernel.New("dshd")
 	root := k.Root()
 	defer root.Dispose()

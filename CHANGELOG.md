@@ -1,5 +1,34 @@
 ## 0.2.1-go.8（未发布）· 续
 
+**查冷启动变慢的原因：一个 TOML 库的 init 占了 23 ms。**
+
+上一版冷启动从 59.5 ms 涨到 65.9 ms（+11%）。趋势不对就查，别等撞线。
+
+**定位过程**（都是可复现的命令）
+
+```bash
+# 1. 和"什么都不做"的 Go 程序比：14.2 ms vs 60.6 ms → 我们有 46 ms 是自己的
+GODEBUG=inittrace=1 ./dshd.exe version
+# 2. 按包看 init 耗时
+#    总 init 26.0 ms，其中 BurntSushi/toml/internal 一个人 23.0 ms
+# 3. 决定性实验：把 toml 依赖摘掉再编一版，只测启动
+#    with toml 58.1 ms → without toml 39.3 ms
+```
+
+**修法**：`BurntSushi/toml` → `pelletier/go-toml/v2`（init 耗时 0 ms）。
+
+| 指标 | 换库前 | 换库后 |
+|---|---:|---:|
+| `dshd version`（median） | 58.1 ms | **40.0 ms** |
+| ACP 就绪（起到 initialize 应答） | 65.9 ms | **55.9 ms** |
+| 进程 init 总和 | 26.0 ms | **2.0 ms** |
+
+顺带加了 `DSHD_TIMING=1`：打印 `main 开始 / manifest 已读 / 装配前 / 装配后` 的耗时，
+下次再涨不用重新发明这套测量。
+
+---
+## 0.2.1-go.8（未发布）· 续
+
 **语义回归：压完之后，模型还记不记得暗号？**
 
 结构对不对（事件数、遮蔽列表、顺序）由 Go 测试保证；这一条只验语义：
