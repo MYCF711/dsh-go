@@ -101,6 +101,15 @@ def acp_resume(binpath, home, sid, cwd):
         return r
     finally:
         p.kill()
+        # ACP 被 kill 会把锁文件留在原地（正常退出才会清）。不清掉的话，
+        # 下一次测量会撞上自己上一轮留下的锁——这是**夹具的锅**，不是产品的问题。
+        for dp, _, files in os.walk(home):
+            for f in files:
+                if f.endswith(".lock"):
+                    try:
+                        os.remove(os.path.join(dp, f))
+                    except OSError:
+                        pass
 
 
 def probe_projectkey(binpath):
