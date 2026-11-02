@@ -14,9 +14,6 @@ import (
 	"dshgo/internal/spi"
 )
 
-// RunKey 是 Runner 的服务键。
-var RunKey = kernel.NewKey[spi.Runner]("toolrunner")
-
 // Options 是流水线的可调参数。默认值来自实测：dsc 的 spill 阈值 4000 字符。
 type Options struct {
 	SpillDir string // 外置目录；空 = <temp>/dshd-spill

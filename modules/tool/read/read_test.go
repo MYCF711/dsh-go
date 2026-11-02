@@ -9,15 +9,28 @@ import (
 	"testing"
 
 	"dshgo/internal/spi"
+	"dshgo/modules/fs/local"
 )
 
-func writeTemp(t *testing.T, content string) string {
+func newTool(t *testing.T) (*Tool, string) {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "sample.txt")
+	root := t.TempDir()
+	fs, err := local.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Tool{fs: fs}, root
+}
+
+func fixture(t *testing.T, root, name, content string) {
+	t.Helper()
+	p := filepath.Join(root, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return p
 }
 
 func call(t *testing.T, tool *Tool, args map[string]any) (spi.Result, error) {
@@ -30,8 +43,10 @@ func call(t *testing.T, tool *Tool, args map[string]any) (spi.Result, error) {
 }
 
 func TestExecReadsLines(t *testing.T) {
-	p := writeTemp(t, "a\nb\nc\n")
-	res, err := call(t, &Tool{}, map[string]any{"file_path": p})
+	tool, root := newTool(t)
+	fixture(t, root, "sample.txt", "a\nb\nc\n")
+
+	res, err := call(t, tool, map[string]any{"file_path": "sample.txt"})
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -51,8 +66,9 @@ func TestExecReadsLines(t *testing.T) {
 }
 
 func TestExecOffsetAndLimit(t *testing.T) {
-	p := writeTemp(t, "1\n2\n3\n4\n5\n")
-	res, err := call(t, &Tool{}, map[string]any{"file_path": p, "offset": 2, "limit": 2})
+	tool, root := newTool(t)
+	fixture(t, root, "n.txt", "1\n2\n3\n4\n5\n")
+	res, err := call(t, tool, map[string]any{"file_path": "n.txt", "offset": 2, "limit": 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,14 +85,19 @@ func TestExecOffsetAndLimit(t *testing.T) {
 }
 
 func TestExecMissingFileHasHint(t *testing.T) {
-	_, err := call(t, &Tool{}, map[string]any{"file_path": filepath.Join(t.TempDir(), "nope.txt")})
+	tool, _ := newTool(t)
+	res, err := call(t, tool, map[string]any{"file_path": "nope.txt"})
 	if err == nil {
 		t.Fatal("读不存在的文件必须报错")
+	}
+	if res.Hint == "" {
+		t.Fatal("失败必须带 Hint（R3）")
 	}
 }
 
 func TestExecBadArgsHasHint(t *testing.T) {
-	res, err := (&Tool{}).Exec(context.Background(), json.RawMessage(`{`))
+	tool, _ := newTool(t)
+	res, err := tool.Exec(context.Background(), json.RawMessage(`{`))
 	if err == nil {
 		t.Fatal("非法 JSON 必须报错")
 	}
@@ -85,17 +106,13 @@ func TestExecBadArgsHasHint(t *testing.T) {
 	}
 }
 
-func TestModuleRegistersIntoRegistry(t *testing.T) {
-	// 不依赖 GUI 层的装配测试：这里只验 “requires tools → 注册成功” 这条链。
-	p := writeTemp(t, "x\n")
-	tool := &Tool{Workdir: filepath.Dir(p)}
-	if tool.Name() != "read" {
-		t.Fatalf("Name = %q", tool.Name())
+func TestSchemaIsStableJSON(t *testing.T) {
+	tool, _ := newTool(t)
+	var v any
+	if err := json.Unmarshal(tool.Schema(), &v); err != nil {
+		t.Fatalf("Schema 必须是合法 JSON: %v", err)
 	}
-	if len(tool.Schema()) == 0 || !json.Valid(tool.Schema()) {
-		t.Fatal("Schema 必须是合法 JSON")
-	}
-	if _, err := call(t, tool, map[string]any{"file_path": p}); err != nil {
-		t.Fatal(err)
+	if strings.Contains(string(tool.Schema()), "\\\\") {
+		t.Fatal("Schema 里出现反斜杠转义，可能混入了机器路径")
 	}
 }

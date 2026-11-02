@@ -1,18 +1,16 @@
-// Package read 是第一个真实工具：读文件，返回结构化结果而不是 shell 回显。
+// Package read 是读文件工具：返回结构化结果而不是 shell 回显。
 //
-// 它也是三条硬约束的样板：Data 结构化、Summary 一行、失败带 Hint。
+// 它同时承担「观测」职责：读过的文件才允许被 write/edit 修改（读后写策略在 FS 里）。
 package read
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
-	"dshgo/modules/tools"
 )
 
 // schema 是稳定契约：不含时间戳、绝对路径、随机 id。
@@ -34,7 +32,7 @@ const (
 
 // Tool 实现 spi.Tool。
 type Tool struct {
-	Workdir string
+	fs spi.FS
 }
 
 func (t *Tool) Name() string { return "read" }
@@ -76,12 +74,10 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		a.Limit = maxLimit
 	}
 
-	data, err := os.ReadFile(a.FilePath)
+	data, err := t.fs.Read(a.FilePath)
 	if err != nil {
-		return spi.Result{
-				Hint: "确认路径存在且是文件；用 glob/grep 先定位，不要猜路径",
-			},
-			fmt.Errorf("读 %s 失败: %w", a.FilePath, err)
+		return spi.Result{Hint: "确认路径存在且是文件；用 glob/grep 先定位，不要猜路径"},
+			err
 	}
 
 	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
@@ -105,14 +101,14 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	}
 
 	p := payload{
-		Path:       a.FilePath,
+		Path:       strings.ReplaceAll(a.FilePath, "\\", "/"),
 		StartLine:  start,
 		EndLine:    end,
 		TotalLines: total,
 		Content:    body,
 		Truncated:  end < total,
 	}
-	summary := fmt.Sprintf("%s 第 %d-%d 行（共 %d 行）", a.FilePath, start, end, total)
+	summary := fmt.Sprintf("%s 第 %d-%d 行（共 %d 行）", p.Path, start, end, total)
 	hint := ""
 	if end < total {
 		hint = fmt.Sprintf("还有 %d 行没读；用 offset=%d 继续", total-end, end+1)
@@ -123,25 +119,29 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		Hint:    hint,
 		View: &spi.ViewSpec{
 			Kind:  spi.ViewPlain,
-			Title: a.FilePath,
+			Title: p.Path,
 			Badge: fmt.Sprintf("%d-%d/%d", start, end, total),
 			Body:  body,
 		},
 	}, nil
 }
 
-// Module 返回装配用的模块描述：它不提供能力，只消费 "tools"。
-func Module(workdir string) kernel.Module {
+// Module 返回装配用的模块描述：消费 "tools" 与 "fs"，不提供能力。
+func Module() kernel.Module {
 	return kernel.Module{
 		ID:       "tool-read",
 		Backend:  kernel.BackendStatic,
-		Requires: []string{"tools"},
+		Requires: []string{"tools", "fs"},
 		Register: func(s *kernel.Scope) error {
-			reg, err := kernel.Inject(s, tools.Key)
+			reg, err := kernel.Inject(s, spi.ToolsKey)
 			if err != nil {
 				return err
 			}
-			return reg.Register(&Tool{Workdir: workdir})
+			fsv, err := kernel.Inject(s, spi.FSKey)
+			if err != nil {
+				return err
+			}
+			return reg.Register(&Tool{fs: fsv})
 		},
 	}
 }

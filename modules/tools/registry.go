@@ -13,8 +13,11 @@ import (
 	"dshgo/internal/spi"
 )
 
-// Key 是本模块提供的服务键。
-var Key = kernel.NewKey[spi.ToolRegistry]("tools")
+// Key / RunKey 的唯一定义在 internal/spi/keys.go，这里只是本包内的别名。
+var (
+	Key    = spi.ToolsKey
+	RunKey = spi.ToolRunnerKey
+)
 
 // Registry 是 spi.ToolRegistry 的默认实现。
 type Registry struct {

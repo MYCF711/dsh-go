@@ -19,7 +19,7 @@
 
 ```
 分支        main
-里程碑      M1 进行中（工具流水线三件套 + Result→content[] 投影已完成）
+里程碑      M1 进行中（流水线 + 投影 + 文件组 read/write/edit 已完成）
 版本        0.2.1-go.5（未打 tag）
 已有资产    方案 / 手册 / 调研 6 份 / 审计 3 份 / Go 骨架 13 个文件
 ```
@@ -33,7 +33,7 @@
 
 ## 三、下一步
 
-1. **文件组**：`write` `edit` `glob` `grep`，共享 read-before-write 观测策略（由 FS 中间件统一实现）。
+1. **`glob` / `grep`**：独立工具（不合并进 shell），结果有界 + 截断提示。
 2. **`shell`**：真实 bash 进程 + 持久会话 + 自动转后台；**不用 mvdan 执行**（R6）。
 3. **M1 收口**：工具一致性套件 + `testdata/tools.snapshot.json` 快照 + 工具表 token 实测。
 

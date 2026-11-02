@@ -10,6 +10,27 @@
 
 ---
 
+## 0.2.1-go.5 · M1-b — 2026-11-02
+
+**文件组（read / write / edit）与读后写观测策略。**
+
+- `modules/fs/local`：`spi.FS` 默认实现
+  - 路径归一：统一正斜杠、相对工作区根；`..` 与工作区外绝对路径一律拒绝
+  - **读后写**：文件存在时必须先 `read`；读过之后文件被改过要重读（stat 先于读，宁可多读一次）
+  - 新建文件不需要先读；自己写的文件视为已观测
+- `spi/keys.go`：服务键集中定义（模块间只经 spi 相遇，不互相 import）
+- `tool-read` 迁到 `spi.FS`（读即登记观测）
+- `tool-write`：新建/覆盖；覆盖前过读后写策略
+- `tool-edit`：逐字替换；**默认要求唯一匹配**，多处必须显式 `replace_all`；空 old_string、无变化编辑一律拒绝
+- `dsh.toml` 增加 `fs` / `tool-write` / `tool-edit`
+
+**实测（CLI 跨进程）**
+```
+dshd exec write 新文件      → 新建 tmp/rbw.txt（4 字节）
+dshd exec write 覆盖未读     → 还没读过 tmp/rbw.txt；先 read 它再改（读后写策略：不做盲改）
+```
+
+---
 ## 0.2.1-go.5 · M1-a — 2026-11-02
 
 **工具流水线（三条硬约束）与结果投影。**
