@@ -19,7 +19,7 @@
 
 ```
 分支        main
-里程碑      M2 基本完成（编解码双向 + LLM 真机 + agent 双循环 + 会话写入；端到端可跑）
+里程碑      M3 进行中（ACP 服务端可用：initialize/session/prompt/cancel + 4 种 update 流式）
 版本        0.2.1-go.5（未打 tag）
 已有资产    方案 / 手册 / 调研 6 份 / 审计 3 份 / Go 骨架 13 个文件
 ```

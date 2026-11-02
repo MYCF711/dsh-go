@@ -1,0 +1,248 @@
+package acp
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"testing"
+	"time"
+
+	"dshgo/internal/agent"
+)
+
+// fakeAgent 按脚本发事件，用来在不碰模型的前提下测协议投影。
+type fakeAgent struct {
+	events     []agent.Event
+	stop       string
+	blockOnCtx bool
+}
+
+func (a *fakeAgent) Prompt(ctx context.Context, sessionID, cwd, text string, emit func(agent.Event) error) (string, map[string]any, error) {
+	if a.blockOnCtx {
+		<-ctx.Done()
+		return "", nil, ctx.Err()
+	}
+	for _, ev := range a.events {
+		if err := emit(ev); err != nil {
+			return "", nil, err
+		}
+	}
+	stop := a.stop
+	if stop == "" {
+		stop = "end_turn"
+	}
+	return stop, map[string]any{"inputTokens": 1}, nil
+}
+
+func (a *fakeAgent) Close(string) error { return nil }
+
+type harness struct {
+	srv     *Server
+	in      *io.PipeWriter
+	msgs    chan map[string]any
+	pending []map[string]any
+	cancel  context.CancelFunc
+	done    chan error
+}
+
+func start(t *testing.T, ag Agent) *harness {
+	t.Helper()
+	// client → server
+	srvIn, cliOut := io.Pipe()
+	// server → client
+	cliIn, srvOut := io.Pipe()
+
+	srv := &Server{In: srvIn, Out: srvOut, Agent: ag, Name: "dsh-go-acp", Version: "test"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx) }()
+
+	msgs := make(chan map[string]any, 64)
+	go func() {
+		sc := bufio.NewScanner(cliIn)
+		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for sc.Scan() {
+			var m map[string]any
+			if err := json.Unmarshal(sc.Bytes(), &m); err == nil {
+				msgs <- m
+			}
+		}
+		close(msgs)
+	}()
+
+	return &harness{srv: srv, in: cliOut, msgs: msgs, cancel: cancel, done: done}
+}
+
+func (h *harness) send(t *testing.T, v any) {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.in.Write(append(b, '\n')); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (h *harness) recv(t *testing.T) map[string]any {
+	t.Helper()
+	select {
+	case m, ok := <-h.msgs:
+		if !ok {
+			t.Fatal("连接已关闭")
+		}
+		return m
+	case <-time.After(5 * time.Second):
+		t.Fatal("等消息超时")
+	}
+	return nil
+}
+
+// recvResult 跳过通知，直到拿到与给定 id 对应的应答。
+func (h *harness) recvResult(t *testing.T, id float64) map[string]any {
+	t.Helper()
+	for {
+		m := h.recv(t)
+		if m["method"] == MethodSessionUpdate {
+			h.pending = append(h.pending, m)
+			continue
+		}
+		if got, ok := m["id"].(float64); ok && got == id {
+			return m
+		}
+		t.Fatalf("收到意外消息: %+v（已缓存通知 %d 条）", m, len(h.pending))
+	}
+}
+
+func (h *harness) updates(t *testing.T) []map[string]any {
+	t.Helper()
+	// 还在管道里的通知先收干净。
+	for {
+		select {
+		case m := <-h.msgs:
+			if m["method"] == MethodSessionUpdate {
+				h.pending = append(h.pending, m)
+			}
+			continue
+		case <-time.After(30 * time.Millisecond):
+			return h.pending
+		}
+	}
+}
+
+func (h *harness) close() {
+	h.cancel()
+	h.in.Close()
+}
+
+func TestInitialize(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize",
+		"params": map[string]any{"protocolVersion": 1}})
+	res := h.recvResult(t, 1)
+	r := res["result"].(map[string]any)
+	if r["protocolVersion"].(float64) != 1 {
+		t.Fatalf("protocolVersion = %v", r["protocolVersion"])
+	}
+	info := r["agentInfo"].(map[string]any)
+	if info["name"] != "dsh-go-acp" {
+		t.Fatalf("agentInfo = %+v", info)
+	}
+}
+
+func TestSessionNewRequiresAbsoluteCwd(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "session/new",
+		"params": map[string]any{"cwd": "relative/path", "mcpServers": []any{}}})
+	res := h.recvResult(t, 2)
+	if res["error"] == nil {
+		t.Fatal("相对路径 cwd 必须被拒")
+	}
+}
+
+func TestPromptStreamsUpdates(t *testing.T) {
+	ag := &fakeAgent{events: []agent.Event{
+		{Kind: agent.EventAssistantMsg, Step: 1},
+		{Kind: agent.EventReasoning, Text: "先看目录"},
+		{Kind: agent.EventText, Text: "好的"},
+		{Kind: agent.EventToolCall, CallID: "c1", ToolName: "glob", Arguments: `{"pattern":"*.go"}`},
+		{Kind: agent.EventToolResult, CallID: "c1", ToolName: "glob"},
+		{Kind: agent.EventTurnEnd, Finish: "completed"},
+	}}
+	h := start(t, ag)
+	defer h.close()
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "session/new",
+		"params": map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}}})
+	sid := h.recvResult(t, 1)["result"].(map[string]any)["sessionId"].(string)
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+		"params": map[string]any{"sessionId": sid, "prompt": []any{map[string]any{"type": "text", "text": "数一下"}}}})
+
+	res := h.recvResult(t, 2)
+	if res["error"] != nil {
+		t.Fatalf("prompt 失败: %+v", res["error"])
+	}
+	if got := res["result"].(map[string]any)["stopReason"]; got != "end_turn" {
+		t.Fatalf("stopReason = %v", got)
+	}
+
+	// 通知可能还在管道里：再收一会儿。
+	time.Sleep(50 * time.Millisecond)
+	notes := h.updates(t)
+	var kinds []string
+	for _, n := range notes {
+		p := n["params"].(map[string]any)
+		u := p["update"].(map[string]any)
+		kinds = append(kinds, u["sessionUpdate"].(string))
+		if u["sessionUpdate"] == "tool_call" {
+			if u["status"] != "in_progress" || u["toolCallId"] != "c1" {
+				t.Fatalf("tool_call 载荷 = %+v", u)
+			}
+			if _, ok := u["rawInput"].(map[string]any); !ok {
+				t.Fatalf("rawInput 应是解析后的对象: %T", u["rawInput"])
+			}
+		}
+	}
+	want := []string{"agent_thought_chunk", "agent_message_chunk", "tool_call", "tool_call_update"}
+	if fmt.Sprint(kinds) != fmt.Sprint(want) {
+		t.Fatalf("update 序列 = %v，期望 %v", kinds, want)
+	}
+}
+
+func TestCancelReturnsCancelled(t *testing.T) {
+	ag := &fakeAgent{blockOnCtx: true}
+	h := start(t, ag)
+	defer h.close()
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "session/new",
+		"params": map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}}})
+	sid := h.recvResult(t, 1)["result"].(map[string]any)["sessionId"].(string)
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
+		"params": map[string]any{"sessionId": sid, "prompt": []any{map[string]any{"type": "text", "text": "跑"}}}})
+	time.Sleep(50 * time.Millisecond)
+	h.send(t, map[string]any{"jsonrpc": "2.0", "method": "session/cancel",
+		"params": map[string]any{"sessionId": sid}})
+
+	res := h.recvResult(t, 2)
+	r := res["result"].(map[string]any)
+	if r["stopReason"] != "cancelled" {
+		t.Fatalf("stopReason = %v，期望 cancelled", r["stopReason"])
+	}
+}
+
+func TestUnknownMethod(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 9, "method": "providers/list", "params": map[string]any{}})
+	res := h.recvResult(t, 9)
+	e := res["error"].(map[string]any)
+	if int(e["code"].(float64)) != CodeMethodNotFound {
+		t.Fatalf("error = %+v", e)
+	}
+}

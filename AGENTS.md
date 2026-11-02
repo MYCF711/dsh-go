@@ -12,7 +12,8 @@
 - 🚧 **M1 收口**：工具层已齐（`read/write/edit/glob/grep/shell/job_*` 共 9 个），流水线 + 投影 + schema 快照 + token 实测（**906**）都已落地
 - 🚧 **M2 进行中**：`codecs/v4` **双向可用** —— 解码吃了 116 个真实会话，编码产物 Node（`node:zlib` zstd）逐帧读通
 - **M2 基本完成**：`dshd run` 端到端可跑 —— 模型 → 工具 → 结果回灌 → 落 v4 会话；Go 读回与 Node 读通都验过
-- 下一步 **M3**：ACP 服务端（stdio JSON-RPC），验收 = Martty 连上并收到 reasoning
+- 🚧 **M3 进行中**：`dshd acp` 可用 —— `initialize`/`session/new`/`session/prompt`/`session/cancel` 通，4 种 update 流式（含 reasoning）
+- 下一步：接真实第三方 ACP 客户端（Martty），再补 resume 与 request_permission
 
 ---
 

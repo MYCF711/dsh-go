@@ -65,6 +65,8 @@ func main() {
 		err = cmdSession(os.Args[2:])
 	case "run":
 		err = cmdRun(os.Args[2:])
+	case "acp":
+		err = cmdACP(os.Args[2:])
 	case "version":
 		fmt.Printf("dshd %s\n", version)
 	case "-h", "--help", "help":
@@ -90,6 +92,7 @@ func usage() {
   dshd tools [--manifest dsh.toml]           打印模型看到的工具表（JSON）
   dshd session rewrite --in <f> --out <f>     把 v4 会话读进来再用我们的编码器写出去（验证兼容用）
   dshd run --prompt "<话>" [--max-steps N]    跑一个真实 turn（模型 + 工具 + 结果回灌）
+  dshd acp                                    在 stdin/stdout 上跑 ACP 服务端（stdout 只放协议）
   dshd version                               版本
 `)
 }

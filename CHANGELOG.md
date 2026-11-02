@@ -10,6 +10,36 @@
 
 ---
 
+## 0.2.1-go.5 · M3-a — 2026-11-02
+
+**ACP 服务端上线：stdio JSON-RPC，reasoning 与 text 都以 ACP 变体流出去。**
+
+- `internal/acp`
+  - JSON-RPC 2.0 over stdio（**stdout 只放协议**，scanner 上限 8 MB）
+  - 已实现：`initialize` / `authenticate` / `session/new` / `session/list` / `session/close` /
+    `session/prompt` / `session/cancel` / `session/set_config_option`；未挂载的方法明确回 `-32601`
+  - **prompt 异步执行**：否则客户端在 prompt settle 前发的 `session/cancel` 进不来（读循环被堵死）
+  - 投影只发 ACP 定义过的 4 个变体：`agent_thought_chunk` / `agent_message_chunk` /
+    `tool_call`（`rawInput` 解析成对象）/ `tool_call_update`（completed/failed）
+  - `stopReason`：正常 `end_turn`，取消 `cancelled`；usage 回 `{inputTokens, outputTokens}`
+- `cmd/dshd/acp.go`：把 ACP prompt 接到真实 agent 循环 + v4 会话日志（先落盘，再上 wire）
+- `scripts/acp-smoke.py`：按真实客户端方式对话的冒烟脚本
+
+**实测（真机 magpie）**
+```
+initialize: dsh-go-acp 0.2.1-go.5 protocol=1
+session/new: acp-970e325c-...
+[think] The user asks a simple question: square root of 9...
+[text] 3（若指代数平方根 √9，结果为 3；数学上 9 的平方根是 ±3）
+prompt: stopReason=end_turn updates=4 用时=1.00s usage={inputTokens:1234, outputTokens:85}
+
+另一次带工具：glob → completed → “当前目录下有 68 个 .go 文件”（updates=3，19.78s）
+```
+
+**未做（M3 后续）**：`session/resume`、`session/request_permission`、`usage_update`、
+`config_option_update`、以及 agent→client 的 `fs/*` `terminal/*`（DSH 自己也不用这些）。
+
+---
 ## 0.2.1-go.5 · M2-d — 2026-11-02
 
 **会话写入路径接通：`dshd run` 真的落一个 v4 文件，Go 与 Node 都读得动。**
