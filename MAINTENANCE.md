@@ -56,10 +56,17 @@
 2. **SPI 之外无通路**（R2）：模块只拿 `*Scope`，不拿 `*App`、不写包级变量。
 3. **工具结构化 + 有界 + 错误带 Hint**（R3）。
 4. **会话日志 append-only**（R5）：视图永远是投影。
-5. **不引 JS 运行时、不 fork/vendor dsc、不用 mvdan 执行命令**（R6）。
-6. **没跑过的写成「未验证」，不写「通过」。**
-7. **不动真机**：不重启 DSH、不写 `D:/DeepSeek Harness/home/profiles/`、asar 只读。
+5. **不引 JS 运行时、不 fork/vendor dsc、不用 mvdan 执行命令**（R6）。**R6 对 WebView 里的 JS 是否适用还没拍板**（`UIPLAN.md` Q3）。
+6. **界面线不越界**（R7）：界面不直读日志、宿主不 import 界面，跨线只经 `Transport` + `ViewSpec`。
+7. **没跑过的写成「未验证」，不写「通过」。**
+8. **不动真机**：不重启 DSH、不写 `D:/DeepSeek Harness/home/profiles/`、asar 只读。
 
 ## 五、最短接手路径
 
-`README.md`（是什么）→ **本文件**（现状与约束）→ `AGENTS.md`（怎么写）→ `PLAN.md` §1（十项决策，别重新讨论）→ `CHECKLIST.md`（交付门）→ `UPDATING.md`（怎么发版）。
+**两条线，先认清在哪条**：
+
+- 通用：`README.md`（是什么）→ **本文件**（现状与约束）→ `AGENTS.md`（怎么写，含两条线的分工）→ `CHECKLIST.md`（交付门）→ `UPDATING.md`（怎么发版）
+- **宿主线**：`PLAN.md` §1（十项决策，别重新讨论）→ §14（里程碑）
+- **界面线**：`UIPLAN.md`（Q1–Q12，**未拍板不许开工**）→ `research/40-official-shell.md`（官方壳实测解剖）→ `research/42-frontend-inventory.md`（前端到底有多少行）
+
+> 界面线的代码**一行都还没有**。要开工，先让用户把 `UIPLAN.md` §7 的 Q 拍下来。

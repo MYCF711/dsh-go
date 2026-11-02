@@ -1,8 +1,25 @@
 # AGENTS.md · DSH-GO
 
-> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.27`**。
-> **先读** `PLAN.md` §1 的十项决策——那是用户逐条拍板的结论，**不要再讨论、不要"顺便优化"**。
-> 本文件是操作手册：冲突时以本文件为准；本文件没写的，以 `PLAN.md` 为准。
+> **本仓**：用 Go 重写 DeepSeek Harness（DSH）。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.27`**。
+> 本文件是操作手册：冲突时以本文件为准；本文件没写的，以对应那条线的 PLAN 为准。
+
+## 两条线（先认清在改哪条，否则一定改错地方）
+
+| | **宿主线** | **界面线** |
+|---|---|---|
+| PLAN | `PLAN.md`（十项决策，用户逐条拍板，**不要再讨论**） | `UIPLAN.md`（Q1–Q12，**未拍板项不许开工**） |
+| 目录 | `internal/` `modules/` `codecs/` `cmd/dshd/` | `internal/transport/` `ui/` `cmd/dshui/` |
+| 语言 | Go | Go（契约 + 壳）+ TypeScript（界面） |
+| 验收 | `scripts/check.sh`、`go test ./... -race`、P0 四条判据 | U0 的 12 个 method 快照 + U1「自己用它干一天活」 |
+| 现状 | M0–M3 完成，P0 工具 18/18 | **只有规划，一行代码都没有** |
+
+**两条线只在一个地方握手：`Transport` 契约**（HTTP `/api` + WS `remote.mux` + 一份 `ViewSpec`）。
+宿主不 import 界面，界面不 import 宿主。**跨线改动 = 先改契约快照，再两边各改各的。**
+
+> 官方壳的实测解剖在 `research/40-official-shell.md`，前端资产盘点在 `research/42-frontend-inventory.md`。
+> 两条最容易搞错的认知，先记死：
+> ① **官方的主界面不是 Electron**——它是纯 Web（`dsh-app://app/` → `dsh-web-frontend/dist`，`sandbox:true`），Electron 只是个 WebView 宿主；
+> ② **GUI 不用 ACP**——官方 Web 面吃的是 v4 的 62 种原始事件 + journal 4 种增量 + 助手 3 种 chunk，ACP 只是同一底层的另一种投影。
 
 ---
 
@@ -128,7 +145,15 @@
 - ✅ 递归在结构上挡住：子代理的工具表里删掉 `subagent` 自己（`noSubagent`）
 - ⚠️ 真机踩到两个自己的 bug：`cwd` 参数是摆设（runner 没读）；子循环没设 `Project` 导致子代理看不到工具正文、撞满步数
 - ✅ **P0 工具集 18/18 完成并发版 `0.2.1-go.27`**（工具表 2,657 token，P0 目标 ≤6k）
+- ✅ **ACP 的 cwd 现在真的生效**：`FS.SetRoot` + `spi.RootFollower`；实测进程在 A、客户端要求 B，B 里的文件读得到
 - 下一步 **M54**：真人长跑验收——真拿它干一天活，看哪里先崩（这是"能长期托付"最后一段距离）
+
+### 界面线现状（2026-11-03）
+
+- ✅ 调研落盘三份：`research/40-official-shell.md`（壳解剖）、`research/41-gui-stack-options.md`（选型与先例）、`research/42-frontend-inventory.md`（前端资产）
+- ✅ `UIPLAN.md` 已成稿，**Q1–Q12 待用户拍板**
+- 🚧 **代码零行**：`internal/transport/`、`ui/`、`cmd/dshui/` 都还不存在；`spi.ViewSpec` 有定义、无渲染器
+- ✅ 唯一已验证的原型是 `cmd/dshd-bridge/main.go`（595 行，把 dshd 伪装成 DSH `/api` + `events.mux`，dsh-TUI 能连）
 
 ---
 
@@ -142,11 +167,15 @@
 | **R4** | **工具 schema 稳定**：一次会话内不变；变更必须显式更新快照 | `testdata/tools.snapshot.json` 的 diff 必须出现在 PR 里 |
 | **R5** | **会话日志 append-only**：日志永不改、永不删；滑窗/压缩/截断都是派生期投影 | 读路径不得写盘；`open(write)` 才能发布新帧 |
 | **R6** | **不引 JS 运行时、不 fork/vendor dsc、不用 mvdan 执行命令** | `go.mod` 无 js 运行时；无 `dsc` module；`exec` 只走真实 shell 进程 |
+| **R7** | **界面线不越界**：界面不得直读会话日志；宿主不得 import 界面；跨线只经 `Transport` + `ViewSpec` | `grep -r 'codecs/v4' ui/` 为空；`go list -deps ./internal/transport \| grep -E 'ui/\|cmd/dshui'` 为空 |
 
 **R6 的依据**（别重新踩）：
 - 内嵌 Node 光底噪 113 MB，直接击穿 150 MB 目标。
 - dsc 的内核有 7 类硬编码业务、工具层是 text-first（`research/11`），fork 后要改的比自研多。
 - `mvdan.cc/sh` 在 Windows 上是静默桩：`cat <(echo x)` 输出字面量 `TODO: support process substitution on Windows`，`cd /tmp` 失败，外部命令 `exit status 127`。它只准用于**静态分析**（判定是否写盘 → 喂沙箱）。
+
+> **R6 的适用范围还没拍板。** 它的敌人是「把 V8 塞进 dshd 进程」（113 MB 底噪）。WebView 里的 JS 跑在**操作系统的渲染进程**里，dshd 自身不加一行 JS 引擎——这一类算不算违反 R6，见 `UIPLAN.md` §7 **Q3**。
+> **拍板前不许按"不受限"开工**；要动界面代码，先看到 Q3 的结论。
 
 ---
 
@@ -170,8 +199,13 @@
 | `codecs/v4/` | DSH 会话 v4 编解码 | 字节级对齐，见 §4 |
 | `wasmhost/` `pluginhost/` | wazero / go-plugin 装载器 | 载入层只做装载，不含业务 |
 | `internal/modes/` | 模式定义 + 工具可见性视图（只读） | 内置模式 `builtin=true` 只读；未知模式必须报错，不许回落 |
-| `docs/` | 设计文档 | 决策变更必须同时改 `PLAN.md` |
+| `docs/` | 设计文档 | 决策变更必须同时改**对应那条线**的 PLAN |
 | `research/` `evidence/` `refs/` | **只读**：调研与参考 | 只许追加新调研，不许改结论 |
+| `cmd/dshd-bridge/` | 把 dshd 伪装成 DSH `/api` + `events.mux` 的桥（595 行，第三方客户端能用） | 只做协议翻译，不含业务；**是 U0 的参考实现** |
+| `internal/transport/` | 界面线唯一的宿主侧入口：HTTP `/api` + WS `remote.mux` + `/connect` + `/plugins` | 只认 `spi`，不认 `ui/`；method 变更必须更新 `testdata/api.snapshot.json` |
+| `ui/` | 前端工程（TypeScript）；构建产物 `//go:embed` 进二进制 | 不得读日志文件；插件只能经 slot 授权树挂载 |
+| `cmd/dshui/` | 桌面壳（窗口 / 目录选择 / 拖入真实路径 / 外链白名单） | **≤1000 行**，不许出现业务分支 |
+| `UIPLAN.md` | 界面线的 PLAN（Q1–Q12 待拍板） | 决策变更必须同时改它；**未拍板的 Q 不许动手** |
 
 ---
 
@@ -319,9 +353,23 @@ export PATH="/c/Program Files/Go/bin:$PATH"     # go 1.27.3，未入 PATH
 
 ---
 
-## 9. 明确不做（有人提就复述 §1）
+## 9. 明确不做（有人提就复述对应的 PLAN）
 
-Electron / 147k 行 React 前端、JS 兼容桥、`!!js` 配置表达式、cordis 式热重载、team/workflow/schedule/goal/skill（P0）、多 provider、HTTP/WS 兼容层、把默认实现做成进程插件。
+**宿主线**：JS 兼容桥、`!!js` 配置表达式、cordis 式热重载、team/workflow/schedule/goal/skill（P0）、多 provider、HTTP/WS 兼容层、把默认实现做成进程插件。
+
+**界面线**（比宿主更容易被"顺手加一下"拖垮，逐条记死）：
+
+| 不做 | 为什么 |
+|---|---|
+| **Electron 壳** | 官方壳 174 MB asar / ~500 MB Chromium 主进程就是本项目的起点动因。壳只值 200 行——一个 WebView 窗口 + 三个原生能力 |
+| **复刻官方 55 个 `dsh-client-ui-*`** | 23.7 万行里 32% 是第三方库与共享模块，另有 9 个包可直接砍（`research/42`）。**机制抄，粒度不抄** |
+| plugin-market / schedule / goal / workflow / agent-team 面板 | 宿主侧 P0 就不做这些能力，界面自然没有对应物 |
+| 侧栏内嵌浏览器（`<webview>`） | 等于壳里再装一个浏览器，攻击面与复杂度极高，且与主流程无关 |
+| PDF / Excel 内联预览 | 官方为它付了 14.2 MB 前端字节；交给系统默认程序 |
+| 账号 / 充值 / 登录页 | 平台生意，不是 agent 客户端的能力 |
+| 自动更新 / 崩溃上报 / 埋点 / 托盘 | 与「不上报、单二进制、用户自己管更新」的定位冲突 |
+| monaco / 完整编辑器 | 我们是 agent 客户端，不是 IDE |
+| 移动端 | 生态里已有 `dsh-Go`（Dart）；Transport 做对了，移动端是别人的事 |
 
 ---
 
@@ -330,18 +378,56 @@ Electron / 147k 行 React 前端、JS 兼容桥、`!!js` 配置表达式、cordi
 本仓挂着一条主理鱼：它盯 issue/PR，有动静就唤醒会话，**唤醒后按本文件办事**。被唤醒时照这个顺序走：
 
 1. **先读 `MAINTENANCE.md` 的「当前状态」**——知道现在走到哪个里程碑，别从零猜。
-2. **按类型处置**：
+2. **先判断这条 issue 属于哪条线**（见开头「两条线」表）。判断不了就看它碰的路径。
+3. **按类型处置**：
 
 | 类型 | 怎么做 |
 |---|---|
 | bug（能复现） | 先写一个**在旧代码上会红**的测试 → 修 → `scripts/check.sh` → PR |
 | bug（复现不了） | 回一条「需要什么」（版本、复现步骤、报错原文），**不猜着改** |
 | 范围外功能请求 | 回「待定」并说明为什么不在当前里程碑，**不要顺手加功能** |
+| **界面线请求** | 先查 `UIPLAN.md` §7 那个 Q 拍板了没有。**没拍板一律回「待定，等 Qn 结论」**，不许为了"让用户高兴"先动手 |
 | 需要人拍板 | `ask_user_question` 问一次、问全 |
 
-3. **动代码前**复核 `PLAN.md` §1：这条改动动到十项决策了吗？动了就先改 PLAN 再改代码。
-4. **交付**：分支 + PR + `scripts/check.sh` 全绿 + `CHECKLIST.md` A 表逐条打勾。
-5. **收尾**：`watch_ack` 打标（`主理鱼:已处理`）；新踩的坑写进本文件 §7 或 `docs/`。
+4. **动代码前**复核对应的 PLAN：宿主线看 `PLAN.md` §1，界面线看 `UIPLAN.md` §7。动了决策就先改 PLAN 再改代码。
+5. **交付**：分支 + PR + `scripts/check.sh` 全绿 + `CHECKLIST.md` A 表逐条打勾。
+6. **收尾**：`watch_ack` 打标（`主理鱼:已处理`）；新踩的坑写进本文件 §7 或 `docs/`。
 
 **唤醒回合里的禁令**：不重启/不关闭 DSH、不写 `D:/DeepSeek Harness/home/profiles/`、不为了「让 CI 过」而放宽门禁。
+
+---
+
+## 11. 界面线的规程（只在改 `ui/` / `internal/transport/` / `cmd/dshui/` 时适用）
+
+**开工前**
+
+1. 读 `UIPLAN.md` §7，确认要碰的那个 Q **已经拍板**。没拍板 → 停，回去问。
+2. 读 `research/40-official-shell.md` §11 的「必须复刻 10 条 / 可以砍 10 条 / 可以换 9 条」——**不要重新发明壳**。
+3. 契约改动（`/api` 的 method、WS 帧形状、`ViewSpec` 字段）**先改快照，再改代码**：`testdata/api.snapshot.json` 的 diff 必须出现在 PR 里（对齐 R4）。
+
+**写代码时**
+
+| 规矩 | 内容 |
+|---|---|
+| 契约先行 | `internal/transport` 写完之后，UI 才可能写。**顺序反过来一定返工**（前端会逼出 `fs.read` 这类私有后门） |
+| 端口的铁律 | 宿主一律 `--port 0` 由 OS 分配；壳从 `ready{url}` 拿，**不许写死端口** |
+| 认证的铁律 | launch token → `/connect` 换 cookie；**cookie 永不进 WebView**（渲染进程能读 token = 一个 XSS 交掉整台机器） |
+| 事件用 v4 原始词汇 | 不许为 GUI 造第二套事件名。压缩/遮蔽语义只有一份真相 |
+| 断流必须能续 | WS 断开后靠 `revision`/`index` 连续性判定 + 尾页补洞；**不做"重连就整体刷新"**（长会话会闪） |
+| 前端产物 embed | `//go:embed ui/dist`；二进制里**不许**出现 `node_modules` |
+| 壳是薄的 | `cmd/dshui` ≤1000 行。要加第二个原生能力，先问"浏览器能不能做" |
+
+**交付前（界面线专属）**
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+go build ./... && go vet ./...
+go test ./... -race
+cd ui && npm run build && cd ..          # 产物必须能构建，且体积 ≤ 3 MB
+grep -r 'codecs/v4' ui/ | wc -l          # 必须 0（R7）
+go list -deps ./internal/transport | grep -E 'ui/|cmd/dshui'   # 必须无输出（R7）
+```
+
+- 前端产物体积、`dshd` 二进制体积（含 embed 后）两个数字都要贴。
+- **U1 的唯一验收是"自己用它干一天活"**——不是截图好看，不是测试全绿。
 
