@@ -8,6 +8,7 @@
 - [ ] 删掉 `modules/` 后 `go build ./internal/...` 仍通过（可替换性）
 - [ ] 新增 SPI 接口同时交：默认实现 + 替换样本 + 禁用后 fail-loud 测试
 - [ ] 每个 `Tool.Exec` 的 error 路径都设了 `Hint`
+- [ ] 每个工具都声明了 `Caps()`，且新的写类工具已在 `TestWriteToolsDeclareCaps` 里认领
 - [ ] 工具 schema 没有变化；若变了，`testdata/tools.snapshot.json` 的 diff 在本 PR 里
 - [ ] 工具表 token ≤ 6000（真实分词实测，不估算）
 - [ ] 没有把本地绝对路径、token、机器名写进代码或测试
@@ -20,7 +21,8 @@
 - [ ] 版本号符合 `<上游版本>-go.<上游序号>`
 - [ ] `git tag -a v<版本>` 并推送；`gh release create` 附二进制
 - [ ] Release notes 取自 CHANGELOG，**不发 npm**
-- [ ] 冷启动 / 内存 / 工具表 token 三项数字实测并写进 Release notes
+- [ ] 冷启动 / 内存 / 工具表 token 三项数字实测并写进 Release notes（脚本：`scripts/measure-start.py`、`scripts/measure-mem.py`）
+- [ ] `docs/p0-acceptance.md` 的四条判据逐条更新
 
 ## 发完之后
 

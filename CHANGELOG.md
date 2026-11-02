@@ -10,6 +10,30 @@
 
 ---
 
+## 0.2.1-go.5 · M5-a — 2026-11-02
+
+**打包与 P0 验收：三条资源线第一次全部有实测数字。**
+
+- `scripts/build.sh`：一次出三个目标（windows/amd64、linux/amd64、darwin/arm64），
+  `-trimpath` + `-s -w` + 注入 `commit`/`buildTime`，产出 `dist/` 与 `SHA256SUMS`
+- `dshd version` 现在打四行：版本、commit、构建时间、Go 版本
+- `scripts/measure-mem.py` / `scripts/measure-start.py`：内存与冷启动的可复现测量
+- `docs/p0-acceptance.md`：四条判据逐条记录命令与数字，**含"没达成的部分"**
+
+**实测（2026-11-02）**
+
+| 指标 | 目标 | 实测 | 余量 |
+|---|---:|---:|---|
+| 常驻内存（整轮峰值） | <150 MB | **15.3 MB** | 9.8× |
+| 冷启动（进程起到 initialize 应答） | <100 ms | **59.5 ms**（median，min 58.7） | 1.7× |
+| 工具表 | ≤6k token | **906 token** | 6.6× |
+| 二进制 | ≤25 MB | **8.1 MB**（windows/amd64） | 3× |
+
+三个平台的产物：windows 8.1 MB / linux 7.9 MB / darwin-arm64 7.4 MB。
+
+对照 DSH 本体 870 MB，差 **57 倍**。
+
+---
 ## 0.2.1-go.5 · M4-c — 2026-11-02
 
 **提示词装配：系统提示从一句硬编码变成可组合的段。**

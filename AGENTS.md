@@ -19,7 +19,8 @@
 - ✅ 工具能力声明（`spi.Caps`，**必填**）：审批按 `NeedsApproval()` 判定，不再按名字猜
 - ✅ surface 投影：`shadowedSeqs` 遮蔽 + `compact-checkpoint` 替身 + `surfaceOp:replace`；`system/message` 已进历史
 - ✅ 提示词装配（`internal/prompt`）：确定性拼接、按 Caps 分工具、AGENTS.md 有界注入（默认 8 KB）
-- 下一步 **M5**：打包 + 把 P0 四条判据逐条验收
+- ✅ **P0 四条判据已验收**（见 `docs/p0-acceptance.md`）：内存 15.3 MB / ACP 就绪 59.5 ms / 工具表 906 token / 二进制 8.1 MB
+- 下一步 **M5 收尾**：打 tag + `gh release create` 附三平台二进制
 
 ---
 
@@ -122,6 +123,8 @@ type Tool interface {
 - TDD 顺序：先写 golden/一致性测试 → 再写实现。会话、工具投影、提示词装配三处**必须**如此。
 - 每加一个 SPI 接口，同时交：默认实现 + 一个替换样本 + 禁用后的 fail-loud 测试。
 - 每个新依赖要在 `go.mod` 注释里写「为什么标准库不够」。
+
+**发布件**：`bash scripts/build.sh` 出三平台二进制 + SHA256SUMS（不发 npm）。
 
 **交付前（缺一不可）**
 ```bash

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 
 	"dshgo/codecs/v4"
@@ -26,7 +27,12 @@ import (
 	"dshgo/modules/tools"
 )
 
-const version = "0.2.1-go.5"
+// 这三个由 -ldflags 覆盖（scripts/build.sh），默认值给 go run 用。
+var (
+	version   = "0.2.1-go.5"
+	commit    = "dev"
+	buildTime = "unknown"
+)
 
 // builtinModules 是编译进二进制的默认实现列表。
 // 将来这里由 blank import + 注册表生成，形状不变。
@@ -69,6 +75,9 @@ func main() {
 		err = cmdACP(os.Args[2:])
 	case "version":
 		fmt.Printf("dshd %s\n", version)
+		fmt.Printf("commit: %s\n", commit)
+		fmt.Printf("built:  %s\n", buildTime)
+		fmt.Printf("go:     %s\n", runtime.Version())
 	case "-h", "--help", "help":
 		usage()
 	default:
