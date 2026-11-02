@@ -31,6 +31,7 @@ const (
 	EventToolResult   EventKind = "tool/result"
 	EventStepEnd      EventKind = "step/end"
 	EventTurnEnd      EventKind = "turn/end"
+	EventUsage        EventKind = "usage/update"
 )
 
 // Event 是循环里发生的一件事。
@@ -48,6 +49,10 @@ type Event struct {
 
 	// 以下只在 EventAssistantMsg 上出现：一步的完整产物（写会话用）。
 	Assistant *AssistantTurn
+
+	// 以下只在 EventUsage 上出现：累计用量与窗口大小。
+	UsageUsed int
+	UsageSize int
 }
 
 // AssistantTurn 是一步模型的完整输出。

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,6 +234,56 @@ func TestCancelReturnsCancelled(t *testing.T) {
 	r := res["result"].(map[string]any)
 	if r["stopReason"] != "cancelled" {
 		t.Fatalf("stopReason = %v，期望 cancelled", r["stopReason"])
+	}
+}
+
+func TestCallClientRoundTrip(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+
+	type answer struct {
+		raw []byte
+		err error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		raw, err := h.srv.CallClient(context.Background(), MethodRequestPermission, map[string]any{
+			"sessionId": "s", "options": []any{map[string]any{"optionId": "allow-once"}},
+		})
+		done <- answer{raw, err}
+	}()
+
+	req := h.recv(t)
+	if req["method"] != MethodRequestPermission {
+		t.Fatalf("服务端应发出 request_permission，收到 %+v", req)
+	}
+	id := req["id"]
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+		"outcome": map[string]any{"outcome": "selected", "optionId": "allow-once"},
+	}})
+
+	select {
+	case a := <-done:
+		if a.err != nil {
+			t.Fatal(a.err)
+		}
+		if !strings.Contains(string(a.raw), "allow-once") {
+			t.Fatalf("应答没传回来: %s", a.raw)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("CallClient 没有返回")
+	}
+}
+
+func TestCallClientHonorsContext(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := h.srv.CallClient(ctx, MethodRequestPermission, map[string]any{}); err == nil {
+		t.Fatal("客户端不应答时必须超时返回")
+	} else {
+		_ = h.recv(t) // 吃掉那条发出去的请求
 	}
 }
 

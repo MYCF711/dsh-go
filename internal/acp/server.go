@@ -42,6 +42,8 @@ type Server struct {
 	sessions map[string]*sess
 	order    []string
 	msgSeq   int
+	callSeq  int
+	pending  map[string]chan json.RawMessage
 }
 
 func (s *Server) write(v any) error {
@@ -83,6 +85,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.sessions == nil {
 		s.sessions = map[string]*sess{}
 	}
+	if s.pending == nil {
+		s.pending = map[string]chan json.RawMessage{}
+	}
 	s.mu.Unlock()
 
 	sc := bufio.NewScanner(s.In)
@@ -100,6 +105,11 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// 没有 method 的是「客户端对我们请求的应答」，交给等待方。
+		if req.Method == "" && len(req.ID) > 0 {
+			s.resolve([]byte(line))
+			continue
 		}
 		s.dispatch(ctx, req)
 	}
@@ -269,6 +279,12 @@ func (s *Server) handlePrompt(ctx context.Context, req Request) {
 				"status":        "in_progress",
 				"rawInput":      rawJSON(ev.Arguments),
 			})
+		case agent.EventUsage:
+			return s.sendUpdate(p.SessionID, map[string]any{
+				"sessionUpdate": "usage_update",
+				"used":          ev.UsageUsed,
+				"size":          ev.UsageSize,
+			})
 		case agent.EventToolResult:
 			status := "completed"
 			if ev.IsError {
@@ -301,6 +317,60 @@ func (s *Server) handlePrompt(ctx context.Context, req Request) {
 		return
 	}
 	_ = s.reply(req.ID, SessionPromptResponse{StopReason: stop, Usage: usage}, nil)
+}
+
+// CallClient 发一个 agent→client 的请求并等应答（目前只用于 session/request_permission）。
+func (s *Server) CallClient(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	s.mu.Lock()
+	if s.pending == nil {
+		s.pending = map[string]chan json.RawMessage{}
+	}
+	s.callSeq++
+	id := fmt.Sprintf("srv-%d", s.callSeq)
+	ch := make(chan json.RawMessage, 1)
+	s.pending[id] = ch
+	s.mu.Unlock()
+
+	defer func() {
+		s.mu.Lock()
+		delete(s.pending, id)
+		s.mu.Unlock()
+	}()
+
+	if err := s.write(map[string]any{
+		"jsonrpc": "2.0", "id": id, "method": method, "params": params,
+	}); err != nil {
+		return nil, err
+	}
+	select {
+	case raw := <-ch:
+		return raw, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// resolve 把客户端应答投递给等待方。
+func (s *Server) resolve(raw []byte) {
+	var env struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return
+	}
+	var key string
+	if err := json.Unmarshal(env.ID, &key); err != nil {
+		return
+	}
+	s.mu.Lock()
+	ch := s.pending[key]
+	s.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- append([]byte(nil), raw...):
+		default:
+		}
+	}
 }
 
 func (s *Server) sendUpdate(sessionID string, update map[string]any) error {

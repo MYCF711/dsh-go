@@ -14,7 +14,8 @@
 - **M2 基本完成**：`dshd run` 端到端可跑 —— 模型 → 工具 → 结果回灌 → 落 v4 会话；Go 读回与 Node 读通都验过
 - 🚧 **M3 进行中**：`dshd acp` 可用 —— `initialize`/`session/new`/`session/prompt`/`session/cancel` 通，4 种 update 流式（含 reasoning）
 - ✅ **官方 ACP SDK 客户端已连上**（`scripts/acp-sdk-client.mjs`）：reasoning/text/tool_call 都通，stopReason=end_turn
-- 下一步 **M3 收尾**：`session/resume`、`request_permission`、`usage_update`；之后 M4 投影与提示词装配
+- ✅ 审批链路：`write`/`edit`/`shell`/`job_kill` 走 `session/request_permission`；拒绝时模型能读懂并改招
+- 下一步 **M3 收尾**：`session/resume`；之后 M4 投影与提示词装配
 
 ---
 

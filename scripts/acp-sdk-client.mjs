@@ -22,6 +22,7 @@ const stream = ndJsonStream(
 );
 
 const chunks = [];
+const perms = [];
 const client = new ClientSideConnection(() => ({
   sessionUpdate: async (params) => {
     const u = params.update;
@@ -31,9 +32,18 @@ const client = new ClientSideConnection(() => ({
       chunks.push({ kind: 'tool_call', title: u.title, input: u.rawInput });
     } else if (u.sessionUpdate === 'tool_call_update') {
       chunks.push({ kind: 'tool_call_update', status: u.status });
+    } else if (u.sessionUpdate === 'usage_update') {
+      chunks.push({ kind: 'usage_update', used: u.used, size: u.size });
     }
   },
-  requestPermission: async () => ({ outcome: { outcome: 'selected', optionId: 'allow-once' } }),
+  requestPermission: async (params) => {
+    const title = params?.toolCall?.title ?? '?';
+    const deny = process.env.ACP_DENY === '1';
+    perms.push({ title, deny });
+    return deny
+      ? { outcome: { outcome: 'selected', optionId: 'reject-once' } }
+      : { outcome: { outcome: 'selected', optionId: 'allow-once' } };
+  },
 }), stream);
 
 const init = await client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
@@ -57,6 +67,9 @@ console.log(`prompt: stopReason=${res.stopReason} 用时=${ms}ms`);
 console.log(`  reasoning 分片=${think.length}（${think.reduce((n, c) => n + c.text.length, 0)} 字）`);
 console.log(`  text 分片=${text.length}（${text.reduce((n, c) => n + c.text.length, 0)} 字）`);
 console.log(`  工具调用=${tools.length} ${tools.map((t) => t.title).join(',')}`);
+console.log(`  审批请求=${perms.length} ${perms.map((p) => `${p.title}:${p.deny ? 'deny' : 'allow'}`).join(',')}`);
+const usage = chunks.filter((c) => c.kind === 'usage_update');
+if (usage.length) console.log(`  usage_update: used=${usage.at(-1).used} size=${usage.at(-1).size}`);
 if (think.length) console.log(`  reasoning 首片: ${JSON.stringify(think[0].text.slice(0, 80))}`);
 if (text.length) console.log(`  回答: ${text.map((c) => c.text).join('').slice(0, 200)}`);
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -24,16 +25,23 @@ type acpRunner struct {
 	home   string
 	steps  int
 
+	// ask 是审批闸门：返回 false 表示用户拒绝这次工具调用。
+	ask func(ctx context.Context, sessionID, tool string, args string) (bool, error)
+	// ctxWindow 用于 usage_update 的分母。
+	ctxWindow int
+
 	mu    sync.Mutex
 	logs  map[string]*session.Log
 	turns map[string]int
 	hist  map[string][]llm.Message
+	used  map[string]int
 }
 
 func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home string, steps int) *acpRunner {
 	return &acpRunner{
 		reg: reg, runner: runner, base: base, model: model, home: home, steps: steps,
 		logs: map[string]*session.Log{}, turns: map[string]int{}, hist: map[string][]llm.Message{},
+		used: map[string]int{}, ctxWindow: 128000,
 	}
 }
 
@@ -89,6 +97,18 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 				session.AssistantMessageEvent(e.Turn, e.Step, blocks, a.Finish, usage)); err != nil {
 				return err
 			}
+			if a.Usage != nil && r.ctxWindow > 0 {
+				r.mu.Lock()
+				r.used[sessionID] += a.Usage.TotalTokens
+				used := r.used[sessionID]
+				r.mu.Unlock()
+				if err := emit(agent.Event{
+					Kind: agent.EventUsage, Turn: e.Turn, Step: e.Step,
+					UsageUsed: used, UsageSize: r.ctxWindow,
+				}); err != nil {
+					return err
+				}
+			}
 		case agent.EventToolCall:
 			lastCallSeq = logw.Seq()
 			if err := logw.Append("tool/call",
@@ -114,10 +134,15 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		return emit(e)
 	}
 
+	var runner spi.Runner = r.runner
+	if r.ask != nil {
+		runner = &guardedRunner{inner: r.runner, ask: r.ask, sessionID: sessionID}
+	}
+
 	loop := &agent.Loop{
 		Chat:     llm.New(r.base, os.Getenv("DSHD_LLM_KEY")),
 		Tools:    r.reg,
-		Runner:   r.runner,
+		Runner:   runner,
 		Project:  session.ProjectResult,
 		Model:    r.model,
 		System:   "你在 dsh-go 宿主里工作。需要信息就调用工具，不要猜。",
@@ -137,6 +162,32 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		return "", usageOut, err
 	}
 	return "end_turn", usageOut, nil
+}
+
+// guardedRunner 在调用工具前先问用户。
+type guardedRunner struct {
+	inner     spi.Runner
+	ask       func(ctx context.Context, sessionID, tool string, args string) (bool, error)
+	sessionID string
+}
+
+// needPermission 是"会改世界"的工具集合。能力声明（R3.6）落地后这张表应该由工具自己报。
+var needPermission = map[string]bool{
+	"write": true, "edit": true, "shell": true, "job_kill": true,
+}
+
+func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
+	if needPermission[name] {
+		ok, err := g.ask(ctx, g.sessionID, name, string(args))
+		if err != nil {
+			return spi.Result{Hint: "审批失败：客户端可能断开了；重试或改用只读工具"}, fmt.Errorf("审批失败: %w", err)
+		}
+		if !ok {
+			return spi.Result{Hint: "用户拒绝了这次调用：换成只读方式确认，或先说明你要做什么再请求"},
+				fmt.Errorf("用户拒绝了 %s", name)
+		}
+	}
+	return g.inner.Run(ctx, name, args)
 }
 
 func (r *acpRunner) Close(sessionID string) error {
@@ -183,12 +234,45 @@ func cmdACP(argv []string) error {
 		return err
 	}
 
+	acpRunner := newACPRunner(reg, runner, *base, *model, *home, *steps)
 	srv := &acp.Server{
 		In:      os.Stdin,
 		Out:     os.Stdout,
-		Agent:   newACPRunner(reg, runner, *base, *model, *home, *steps),
+		Agent:   acpRunner,
 		Name:    "dsh-go-acp",
 		Version: version,
+	}
+	// 审批闸门：会改世界的工具先问客户端（ACP 的 session/request_permission）。
+	acpRunner.ask = func(ctx context.Context, sessionID, tool, args string) (bool, error) {
+		raw, err := srv.CallClient(ctx, acp.MethodRequestPermission, map[string]any{
+			"sessionId": sessionID,
+			"toolCall": map[string]any{
+				"toolCallId": "perm-" + session.NewID(),
+				"title":      tool,
+				"kind":       "other",
+				"status":     "pending",
+				"rawInput":   json.RawMessage(args),
+			},
+			"options": []any{
+				map[string]any{"optionId": "allow-once", "name": "允许这一次", "kind": "allow_once"},
+				map[string]any{"optionId": "reject-once", "name": "拒绝", "kind": "reject_once"},
+			},
+		})
+		if err != nil {
+			return false, err
+		}
+		var resp struct {
+			Result struct {
+				Outcome struct {
+					Outcome  string `json:"outcome"`
+					OptionID string `json:"optionId"`
+				} `json:"outcome"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return false, err
+		}
+		return resp.Result.Outcome.Outcome == "selected" && resp.Result.Outcome.OptionID == "allow-once", nil
 	}
 	return srv.Serve(context.Background())
 }

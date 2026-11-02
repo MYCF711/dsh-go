@@ -10,6 +10,32 @@
 
 ---
 
+## 0.2.1-go.5 · M3-c — 2026-11-02
+
+**审批链路打通 + 用量上报：客户端第一次真正有能力说"不"。**
+
+- `internal/acp`
+  - `Server.CallClient`：agent → client 的请求（带 id 等待方表），支持 ctx 超时
+  - Serve 现在区分「请求」与「应答」：无 `method` 的消息投递给等待方
+  - 新增 `usage_update` 分支（`{used,size}`）
+- `cmd/dshd/acp.go`
+  - `guardedRunner`：`write` / `edit` / `shell` / `job_kill` 执行前先发
+    `session/request_permission`（`allow-once` / `reject-once` 两个选项，与 DSH 一致）
+  - 用户拒绝时返回带 Hint 的结果：模型能读到"用户拒绝了这次调用"，并自己换只读方式
+  - 每会话累计 token，assistant 消息后发 `usage_update`
+- `agent.EventUsage`：用量事件（只给 ACP/UI 看，不落会话）
+
+**实测（官方 SDK 客户端）**
+
+| 场景 | 结果 |
+|---|---|
+| 允许 | `审批请求=1 shell:allow` → 执行 `echo hello-dsh-go` → 回答带原文输出 |
+| 拒绝 | `审批请求=1 shell:deny` → 模型："你拒绝了这次调用，所以没有执行…我可以用只读命令代替" |
+| 用量 | `usage_update: used=1266 size=128000` |
+
+**未做**：`session/resume`（恢复已持久化会话）。
+
+---
 ## 0.2.1-go.5 · M3-b — 2026-11-02
 
 **官方 ACP SDK 当客户端连上来了——不是自测，是第三方库验收。**
