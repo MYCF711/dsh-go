@@ -735,7 +735,10 @@ func makeAskFuncWith(policy string, interactive bool) (func(ctx context.Context,
 			return func(context.Context, string, string, string) (bool, error) { return false, nil }, nil
 		}
 		return func(ctx context.Context, sessionID, tool, args string) (bool, error) {
-			fmt.Fprintf(os.Stderr, "需要审批：%s %s → 允许？[y/N] ", tool, truncate(args, 160))
+			// 展示的是"要执行什么"，不是模型对它的描述（见 approval_view.go）。
+			q := string(rune(10))
+			body := strings.ReplaceAll(describeApproval(tool, args), q, q+"       ")
+			fmt.Fprintf(os.Stderr, "需要审批：%s%s       %s%s       → 允许？[y/N] ", tool, q, body, q)
 			line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 			line = strings.ToLower(strings.TrimSpace(line))
 			return line == "y" || line == "yes", nil

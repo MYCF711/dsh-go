@@ -1,3 +1,27 @@
+## 0.2.1-go.20（未发布）
+
+**审批框：先给命令，再给"模型自述"，并且标明后者不可信。**
+
+`bash` 的 `description` 参数原来被完全忽略。查下来真正的问题不是"要不要显示"，
+是**顺序与标注**——事故形态是模型把 `rm -rf /tmp/x` 描述成"看看临时目录"，
+用户点 y 就变成了批准一句话而不是一条命令。
+
+```
+需要审批：bash
+       命令: rm -rf /tmp/build
+       模型自述（仅供参考，不是依据）: 看看临时目录
+       → 允许？[y/N]
+```
+
+- 命令原样、排第一
+- 模型的 description 单独一行并标注"仅供参考，不是依据"
+- **长命令截中间不截尾巴**——危险的部分常在结尾（`rm -rf /`、`> /dev/sda`）
+- `write` / `edit` 显示路径与字节数，不再把正文塞进终端
+
+新增 `TestDescribeApprovalShowsCommandNotClaim` / `KeepsCommandTail` /
+`WriteShowsPathAndSize` / `FallsBackToRawArgs`。
+
+---
 ## 0.2.1-go.19（2026-11-02）
 
 **协议层不再把宿主的实现细节甩给客户端。**
