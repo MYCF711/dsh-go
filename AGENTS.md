@@ -1,6 +1,6 @@
 # AGENTS.md · DSH-GO
 
-> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.12`**。
+> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.13`**。
 > **先读** `PLAN.md` §1 的十项决策——那是用户逐条拍板的结论，**不要再讨论、不要"顺便优化"**。
 > 本文件是操作手册：冲突时以本文件为准；本文件没写的，以 `PLAN.md` 为准。
 
@@ -49,7 +49,7 @@
 - ✅ `session/list` 读磁盘（项目过滤 + 一句话摘要 + 坏文件也列出来）+ `TestListSessions*` 四条
 - ✅ 行为对拍：从 2.3 万个真实结果里挖失败形状，修掉 read offset 越界静默返空、grep 坏路径返 0 命中、失败事件正文为空
 - ✅ bash 失败样本归类：84/110 是 `unknown tool`（措辞已对齐）；取消改为 "outcome is unknown" 语义
-- 下一步 **M14**：`0.2.1-go.13` 发版
+- 下一步 **M15**：`edit` 的失败形态（853 次调用 / 75 次失败，是核心工具里失败率最高的）
 
 ---
 
@@ -180,7 +180,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 
 ## 6. 版本、提交、文档
 
-- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.12`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
+- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.13`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
 - **提交**：`M<里程碑>: <一句话>`，例如 `M1: tools/read 与观测策略`。一个提交只做一件事。
 - **决策**：任何改变 §1 决策的实现，**先改 `PLAN.md` 并写理由**，再动代码。禁止"代码先行、文档追认"。
 - **文档**：`docs/cordis-alignment.md` 是 cordis 概念 → Go 概念的逐条对照，是设计约束，不是宣传材料。
@@ -202,10 +202,10 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 工具回显占上下文 | **85.5%** | 同上 |
 | 会话样本 | 94 MB，zstd 多帧，62 事件类型 | `research/21` |
 | Go 空进程冷启动 | median **18.1 ms** / p95 22.7 ms | `research/30` |
-| **dsh-go 冷启动（实测 2026-11-02）** | ACP 就绪（起到 initialize 应答）median **57.0 ms**（负载波动 56.9–84.5） | `scripts/measure-start.py` |
+| **dsh-go 冷启动（实测 2026-11-02）** | ACP 就绪（起到 initialize 应答）median **57.9 ms**（负载波动 55.6–84.5） | `scripts/measure-start.py` |
 | 进程 init 总和 | **2.0 ms**（换掉 BurntSushi/toml 之前是 26.0 ms） | `GODEBUG=inittrace=1` |
 | **dsh-go 二进制（实测 2026-11-02）** | `-ldflags "-s -w"` → **8.8 MB**（目标 ≤25 MB） | `scripts/build.sh` |
-| **dsh-go 内存（实测 2026-11-02）** | 整轮峰值 **15.7 MB**（DSH 本体 870 MB） | `scripts/measure-mem.py` |
+| **dsh-go 内存（实测 2026-11-02）** | 整轮峰值 **15.4 MB**（DSH 本体 870 MB） | `scripts/measure-mem.py` |
 | **`dshd version` 启动（实测 2026-11-02）** | median **42.8 ms**（不含装配，纯进程+init） | 本机 12 次 |
 | go-plugin / wazero 二进制开销 | **+14.8 MB** / +3.5 MB | 同上 |
 | 进程插件工作集 | **14.4 MiB** | 同上 |
