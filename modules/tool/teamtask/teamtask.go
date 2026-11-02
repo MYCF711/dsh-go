@@ -325,16 +325,18 @@ func (t *Tool) Schema() json.RawMessage {
 		return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "id": {"type": "string", "description": "任务 id，形如 task-0001-3f9a"}
+    "task_id": {"type": "string", "description": "任务 id，形如 task-0001-3f9a"}
   },
-  "required": ["id"],
+  "required": ["task_id"],
   "additionalProperties": false
 }`)
 	case kindUpdate:
 		return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "id": {"type": "string", "description": "任务 id，形如 task-0001-3f9a"},
+    "task_id": {"type": "string", "description": "任务 id，形如 task-0001-3f9a"},
+    "expected_revision": {"type": "integer",
+                          "description": "可选：DSH 契约里的版本号参数；本实现暂不校验（改前先 team_task_get 看最新状态）"},
     "action": {"type": "string",
                "enum": ["claim", "release", "complete", "reopen", "edit", "set_dependencies", "delete"],
                "description": "claim=认领并置 in_progress；release=退回 pending 并清 owner；complete=完成；reopen=重开；edit=改 subject/description；set_dependencies=整份替换 blocked_by；delete=删除"},
@@ -344,7 +346,7 @@ func (t *Tool) Schema() json.RawMessage {
     "blocked_by": {"type": "array", "items": {"type": "string"},
                    "description": "action=set_dependencies 时必填：整份替换（空数组=清空依赖）"}
   },
-  "required": ["id", "action"],
+  "required": ["task_id", "action"],
   "additionalProperties": false
 }`)
 	}
@@ -526,13 +528,14 @@ func (t *Tool) execList(ctx context.Context, raw json.RawMessage) (spi.Result, e
 // ---------------------------------------------------------------- get
 
 type getArgs struct {
-	ID string `json:"id"`
+	// 参数名跟 DSH 对齐：叫 task_id 而不是 id（TestToolParityWithDSH 会查）
+	ID string `json:"task_id"`
 }
 
 func (t *Tool) execGet(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
 	var a getArgs
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return spi.Result{Hint: `参数不合法：期望 {"id": "task-0001-3f9a"}`},
+		return spi.Result{Hint: `参数不合法：期望 {"task_id": "task-0001-3f9a"}`},
 			fmt.Errorf("参数解析失败: %w", err)
 	}
 	if err := t.b.ready(); err != nil {
@@ -576,7 +579,10 @@ func (t *Tool) execGet(ctx context.Context, raw json.RawMessage) (spi.Result, er
 // ---------------------------------------------------------------- update
 
 type updateArgs struct {
-	ID          string    `json:"id"`
+	ID string `json:"task_id"`
+	// ExpectedRevision 留着占位：DSH 的契约里有这个参数，我们暂时不做 CAS
+	ExpectedRevision *int `json:"expected_revision"`
+
 	Action      string    `json:"action"`
 	Owner       string    `json:"owner"`
 	Subject     *string   `json:"subject"`
@@ -587,7 +593,7 @@ type updateArgs struct {
 func (t *Tool) execUpdate(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
 	var a updateArgs
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return spi.Result{Hint: `参数不合法：期望 {"id": "task-0001-3f9a", "action": "claim", "owner": "alice"}`},
+		return spi.Result{Hint: `参数不合法：期望 {"task_id": "task-0001-3f9a", "action": "claim", "owner": "alice"}`},
 			fmt.Errorf("参数解析失败: %w", err)
 	}
 	if err := t.b.ready(); err != nil {

@@ -527,6 +527,145 @@
     "caps": {}
   },
   {
+    "name": "schedule_create",
+    "description": "登记定时任务（every/daily/weekly），算出下次触发时间。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "一句话名字，最多 120 字"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "到点时要交给模型的话（祈使句）"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "every",
+            "daily",
+            "weekly"
+          ],
+          "description": "调度方式：every=每 N 秒；daily=每天某时刻；weekly=每周若干天的某时刻"
+        },
+        "every_seconds": {
+          "type": "integer",
+          "description": "kind=every 时必填，\u003e= 60"
+        },
+        "daily_at": {
+          "type": "string",
+          "description": "kind=daily 时必填，本地时区 HH:MM，如 09:30"
+        },
+        "weekly_at": {
+          "type": "string",
+          "description": "kind=weekly 时必填，本地时区 HH:MM，如 09:30"
+        },
+        "weekdays": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "kind=weekly 时必填，0=周日 .. 6=周六，可多选"
+        }
+      },
+      "required": [
+        "title",
+        "prompt",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
+    "name": "schedule_delete",
+    "description": "按 id 删掉一条定时任务。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "要删的定时任务 id"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
+    "name": "schedule_list",
+    "description": "列出本会话的定时任务，按下次触发时间升序。",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
+    "name": "schedule_update",
+    "description": "按 id 改定时任务；改时间字段会重算下次时间。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "要改的定时任务 id，形如 sch-0001-3f9a"
+        },
+        "title": {
+          "type": "string",
+          "description": "新名字，最多 120 字"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "新提示词"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "every",
+            "daily",
+            "weekly"
+          ]
+        },
+        "every_seconds": {
+          "type": "integer",
+          "description": "kind=every 时间隔秒数，\u003e= 60"
+        },
+        "daily_at": {
+          "type": "string",
+          "description": "kind=daily 时的 HH:MM，本地时区"
+        },
+        "weekly_at": {
+          "type": "string",
+          "description": "kind=weekly 时的 HH:MM，本地时区"
+        },
+        "weekdays": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "kind=weekly 时的星期集合，0=周日"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
     "name": "send_message",
     "description": "给另一个会话留一条消息，等它用 wait_agent 取走；要叫醒别人时用。",
     "parameters": {
@@ -616,13 +755,13 @@
     "parameters": {
       "type": "object",
       "properties": {
-        "id": {
+        "task_id": {
           "type": "string",
           "description": "任务 id，形如 task-0001-3f9a"
         }
       },
       "required": [
-        "id"
+        "task_id"
       ],
       "additionalProperties": false
     },
@@ -654,9 +793,13 @@
     "parameters": {
       "type": "object",
       "properties": {
-        "id": {
+        "task_id": {
           "type": "string",
           "description": "任务 id，形如 task-0001-3f9a"
+        },
+        "expected_revision": {
+          "type": "integer",
+          "description": "可选：DSH 契约里的版本号参数；本实现暂不校验（改前先 team_task_get 看最新状态）"
         },
         "action": {
           "type": "string",
@@ -692,7 +835,7 @@
         }
       },
       "required": [
-        "id",
+        "task_id",
         "action"
       ],
       "additionalProperties": false

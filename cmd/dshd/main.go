@@ -40,6 +40,7 @@ import (
 	"dshgo/modules/tool/read"
 	"dshgo/modules/tool/readimage"
 	"dshgo/modules/tool/repohere"
+	schedule "dshgo/modules/tool/schedule"
 	subagenttool "dshgo/modules/tool/subagent"
 	team "dshgo/modules/tool/team"
 	teamtask "dshgo/modules/tool/teamtask"
@@ -102,6 +103,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		teamtask.Module(filepath.Join(home, "state")),
 		team.Module(filepath.Join(home, "state", "mail")),
 		goalmod.Module(filepath.Join(home, "state", "goals")),
+		schedule.Module(filepath.Join(home, "state", "schedules")),
 		nowline.Module(),
 		subagentModule(sub),
 		subagenttool.Module(),

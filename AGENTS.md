@@ -174,7 +174,11 @@
   落 `<home>/state/goals/<会话>.json`；revision 做 CAS（拿旧值改会被拒）
 - ✅ 真机全链：create → get → update(complete)，revision 1→2，phase active→complete
 - 监工补四条测试：旧 revision 拒绝 / 重复 create 拒绝 / blocked 必带理由 / 无会话拒绝
-- 下一步 **M63**：`schedule_*`（42 次）或 `watch_*`（32 次）——都靠时间触发，得先有轮询/定时器
+- ✅ **定时任务落地**（dshd 自己写，874 行）：`schedule_create/list/update/delete`，
+  落 `<home>/state/schedules/<会话>.json`；**只登记与算 NextAt，不起定时器**（唤醒由宿主以后做）
+- ✅ 真机：三种 kind 的 NextAt 都算对（every +300s / daily 23:59 今晚 / weekly 周一三五 08:00）
+- ✅ 对拍又拦下一处：`team_task_get/update` 的 id 参数在 DSH 里叫 `task_id`，update 还带 `expected_revision`
+- 下一步 **M64**：`watch_*`（32 次）或把定时任务的**唤醒**接进 run/acp 主循环
 
 ### 界面线现状（2026-11-03）
 
@@ -338,7 +342,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 其余 8 个渲染进程 | 378.6 / 182.0 / 43.0 / 42.8 / 42.7 / 42.3 / 38.4 / 2.9 MB | 同上（**每开一个窗口多一个**） |
 | 空转 CPU | **2.0%**（没在跑任务） | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 33 个 / 24,274 字节 / **4,318 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 37 个 / 27,847 字节 / **5,033 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |

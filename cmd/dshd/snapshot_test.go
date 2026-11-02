@@ -140,6 +140,11 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"get_goal":    {},
 		"create_goal": {Writes: true},
 		"update_goal": {Writes: true},
+		// 定时任务：两个写、一个读、一个删（删也算写）。
+		"schedule_create": {Writes: true},
+		"schedule_list":   {},
+		"schedule_update": {Writes: true},
+		"schedule_delete": {Writes: true},
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},
