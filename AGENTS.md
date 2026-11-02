@@ -1,6 +1,6 @@
 # AGENTS.md · DSH-GO
 
-> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.22`**。
+> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.23`**。
 > **先读** `PLAN.md` §1 的十项决策——那是用户逐条拍板的结论，**不要再讨论、不要"顺便优化"**。
 > 本文件是操作手册：冲突时以本文件为准；本文件没写的，以 `PLAN.md` 为准。
 
@@ -98,7 +98,7 @@
 - ✅ 演练五项全中（新增「日志写不了」）
 - ✅ 协作一致性实测（`docs/collab.md` + `scripts/collab-probe.py`）：三条疑点里**一条真问题**（换 cwd 找不到会话，已修：`session.ResolvePath` 回退按 id）、两条本来就对
 - ✅ 实测顺带挖出后门：`OpenSessionAt`（ACP resume / CLI compact 的入口）**不抢写锁**，绕过了 M30 的防线；已修 + `TestOpenSessionAtAlsoClaimsLock`
-- 下一步 **M36**：`0.2.1-go.23` 发版（日志不静默 + resolve 回退 + 锁后门）
+- 下一步 **M37**（A 线）：只读 home 下 `run`/`acp` 的行为实测——会话建不出来时模型调用还发不发（不该发）
 
 ---
 
@@ -230,7 +230,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 
 ## 6. 版本、提交、文档
 
-- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.22`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
+- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.23`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
 - **提交**：`M<里程碑>: <一句话>`，例如 `M1: tools/read 与观测策略`。一个提交只做一件事。
 - **决策**：任何改变 §1 决策的实现，**先改 `PLAN.md` 并写理由**，再动代码。禁止"代码先行、文档追认"。
 - **文档**：`docs/cordis-alignment.md` 是 cordis 概念 → Go 概念的逐条对照，是设计约束，不是宣传材料。
