@@ -308,6 +308,17 @@ func cmdTools(argv []string) error {
 // 不再依赖说明文字提醒模型该填什么。
 const defaultToolSchema = "compact"
 
+// 两个安全默认值。它们和工具表不一样：改坏了不是多花 token，而是**多给权限**。
+//
+//   - defaultRunPolicy=auto：终端里问，非终端（管道/脚本/CI）直接拒。
+//     绝不能默认 allow——那等于把写文件和跑命令的授权静默发出去。
+//   - defaultWorkspaceBytes=8000：默认把 AGENTS.md 灌进系统提示。
+//     设 0 等于不传手册，模型会凭空猜约定（踩过：它连"描述 ≤120 字"都不知道）。
+const (
+	defaultRunPolicy      = "auto"
+	defaultWorkspaceBytes = 8000
+)
+
 // cmdRun 跑一个真实 turn：装配 → 模型 → 工具 → 回灌 → 收尾。
 //
 // 这是 M2 的验收动作：它同时踩到装配、工具流水线、LLM 流式、agent 双循环四条线。
@@ -320,14 +331,14 @@ func cmdRun(argv []string) error {
 	maxSteps := fs.Int("max-steps", 8, "最多几步")
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
 	maxChars := fs.Int("max-chars", 4000, "工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
-	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
+	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	resumeSession := fs.String("session", "", "续这个会话（空=新建）；cwd 可省，按 id 找")
 	// 工具表默认压掉参数说明：20 次 A/B（10 个任务 × 两种表）结果一致，输入省 22%。
 	// 要完整表就显式写 --tool-schema=full——比如排查"模型没填对参数"时。
 	toolSchema := fs.String("tool-schema", defaultToolSchema, "工具表形态：compact=压掉参数说明（省约两成输入）| full=完整")
 	// 规则文件：默认工作区的 AGENTS.md；给"执行者"喂精简手册时指到 docs/WORKER.md。
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
-	policy := fs.String("policy", "auto", "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
+	policy := fs.String("policy", defaultRunPolicy, "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
 	autoCompact := fs.Int("auto-compact", 40000, "每步前估算超过多少 token 就自动压缩（0=关闭）")
 	if err := fs.Parse(argv); err != nil {
 		return err

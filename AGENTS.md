@@ -222,7 +222,14 @@
   （去掉 description 后必须完全相等；**参数区 16,088 → 7,167 字节，省 55%**）；
   `scripts/check.sh` 断言 `run --help` 里必须是 `default "compact"`，工具表超 32 KB 打 WARN
 - ✅ 默认值写进 `const defaultToolSchema`，注释里写清"能成立的前提是工具兜住了可推导参数"
-- 下一步 **M73**：把这套"默认值 + 结构"的护栏用到别处（比如系统的审批策略默认值）
+- ✅ **安全默认值也上了闸**（`scripts/check.sh`）：`run --policy` 不许默认 `allow`、
+  `--workspace-bytes` 不许默认 0、`acp` 不许默认记住授权——这三条改坏**是多给权限**，不只是多花 token
+- ✅ 默认值收进 `const defaultRunPolicy / defaultWorkspaceBytes`，注释写明"改坏了是多给权限"
+- ✅ **有意放宽的地方给补偿**：`schedule run` 默认 `allow`（无人值守不给就永远跑不动），
+  所以每次真跑都打一行「这 N 轮用的是 --policy=allow，写操作没有逐次询问」
+- ⚠️ 第三次踩同一个坑：python 里写 `
+` 进 Go 字符串变成了真换行。以后一律 `chr(92)+'n'`
+- 下一步 **M74**：把「有意的放宽」都找出来（还有几处？），逐条给可见性补偿
 
 ### 界面线现状（2026-11-03）
 

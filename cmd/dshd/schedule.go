@@ -33,6 +33,8 @@ func cmdSchedule(args []string) error {
 	only := fs.String("session", "", "只看这个会话")
 	advance := fs.Bool("advance", false, "把到期的推进到下一次（不写就不动）")
 	// run 子命令用：跑一轮时的审批策略与步数上限，透传给 cmdRun。
+	// 定时任务是无人值守的：默认 allow，否则每个任务都会死在"没人点同意"上。
+	// 这是**有意放宽**，所以每次真跑都要把它打在屏幕上（见下面 run 分支）。
 	policy := fs.String("policy", "allow", "schedule run 的审批策略：ask/allow/deny/auto")
 	maxSteps := fs.Int("max-steps", 12, "schedule run 每轮最多几步")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -101,6 +103,10 @@ func cmdSchedule(args []string) error {
 		}
 		if ran == 0 {
 			fmt.Println("现在没有到期的任务")
+		} else {
+			// 把"刚才那些轮次没有经过审批"说出来。定时任务的授权是登记时给的，
+			// 跑的时候人不在场——不提示，用户就不知道写操作被自动放行了。
+			fmt.Printf("注意：这 %d 轮用的是 --policy=%s（无人值守，写操作没有逐次询问）；要改成别的就带 --policy\n", ran, *policy)
 		}
 		return nil
 

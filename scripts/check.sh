@@ -44,6 +44,25 @@ else
   else
     bad "工具表默认不是 compact（改了默认？先跑 scripts/tool-table-ab.py 拿数据）"
   fi
+  # 安全默认值：改坏了不是多花 token，而是多给权限。
+  # 三条都在断言"默认不许更宽松"，不是断言"必须是某个具体值"。
+  if printf '%s' "$help_out" | grep -A1 -E '^\s+-policy' | grep -q 'default "auth\|default "auto"'; then
+    pass "run --policy 默认不是 allow"
+  else
+    bad "run --policy 默认值可疑（必须是 auto/ask：默认 allow = 静默放行写操作）"
+  fi
+  if printf '%s' "$help_out" | grep -A1 -E '^\s+-workspace-bytes' | grep -q 'default "0"'; then
+    bad "run --workspace-bytes 默认是 0（不传 AGENTS.md：模型会凭空猜约定）"
+  else
+    pass "run --workspace-bytes 默认会传手册"
+  fi
+  acp_out="$(go run ./cmd/dshd acp --help 2>&1 || true)"
+  if printf '%s' "$acp_out" | grep -q 'remember-approvals.*default true'; then
+    bad "acp --remember-approvals 默认开着（授权会跨进程留下）"
+  else
+    pass "acp 不默认记住授权"
+  fi
+
   table_line="$(go run ./cmd/dshd tools 2>&1 >/dev/null | tail -1 || true)"
   table_bytes="$(printf '%s' "$table_line" | grep -oE '[0-9]+ 字节' | grep -oE '[0-9]+' || echo 0)"
   if [ "${table_bytes:-0}" -le 32000 ]; then
