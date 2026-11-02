@@ -114,3 +114,32 @@
 我们把这条措辞逐字对齐了（含破折号），并让动词跟着工具走：
 `write` 用 `cannot write`、`edit` 用 `cannot edit`。
 测试用同构比对（把路径换成占位符）钉住，防止以后"顺手改文案"改跑偏。
+
+## 参数缺失 vs 目标不存在（2026-11-02）
+
+拿 `dshd exec --tool <t> --args '{}'` 逐个打了一遍，发现两类错误被混成一句话：
+
+| 工具 | 空参数时的报错（修前） |
+|---|---|
+| `read` / `write` / `edit` | `file_path 为空` ✅ |
+| `glob` / `grep` | `pattern 为空` ✅ |
+| `bash` | `command 为空` ✅ |
+| **`job_output` / `job_kill`** | **`没有任务 ""`** ❌ |
+
+最后两条把「你没给参数」说成了「这个任务不存在」。模型看到后会觉得
+"id 可能写错了"，于是去 `job_list` 找一个根本不存在的 id——**方向错了**。
+
+修完：
+
+```
+$ dshd exec --tool job_output --args '{}'
+执行失败: job_id 为空
+提示: job_id 不能为空；先用 job_list 看有哪些任务
+
+$ dshd exec --tool job_output --args '{"job_id":"nope"}'
+执行失败: 没有任务 "nope"；用 job_list 看有哪些
+```
+
+**两类错误的下一步动作不同，就不能用同一句话。**
+`TestJobToolsRejectEmptyID` 把两条都钉住：空 id 不许出现「没有任务」，
+未知 id 必须出现「没有任务」。

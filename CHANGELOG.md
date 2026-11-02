@@ -1,3 +1,22 @@
+## 0.2.1-go.18（未发布）· 续 5
+
+**`job_output` / `job_kill` 把"你没给参数"报成了"任务不存在"。**
+
+```
+$ dshd exec --tool job_output --args '{}'
+执行失败: 没有任务 ""            ← 修前
+执行失败: job_id 为空            ← 修后
+```
+
+模型看到"任务不存在"会去 `job_list` 找一个根本不存在的 id——**方向是错的**。
+其他六个工具早就区分开了（`read`/`write`/`edit` 报 `file_path 为空`，
+`glob`/`grep` 报 `pattern 为空`，`bash` 报 `command 为空`），只有这两个漏了。
+
+**两类错误的下一步动作不同，就不能用同一句话。**
+
+新增 `TestJobToolsRejectEmptyID`：空 id 不许出现「没有任务」，未知 id 必须出现「没有任务」。
+
+---
 ## 0.2.1-go.18（未发布）· 续 4
 
 **体积账：我们自己的代码只占 0.29 MB / 8.7 MB。**

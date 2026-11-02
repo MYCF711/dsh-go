@@ -197,6 +197,11 @@ func (t *jobOutputTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Resu
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return spi.Result{Hint: `参数不合法：期望 {"job_id": "job-1", "wait"?: false, "timeout_ms"?: 30000}`}, err
 	}
+	// 空 id 是**参数没给**，不是"任务不存在"。两者的下一步完全不同：
+	// 前者是补参数，后者是去 job_list 里找 id。别把前者报成后者。
+	if strings.TrimSpace(a.JobID) == "" {
+		return spi.Result{Hint: "job_id 不能为空；先用 job_list 看有哪些任务"}, fmt.Errorf("job_id 为空")
+	}
 	wait := time.Duration(0)
 	if a.Wait {
 		ms := a.TimeoutMS
@@ -253,6 +258,9 @@ func (t *jobKillTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return spi.Result{Hint: `参数不合法：期望 {"job_id": "job-1", "reason"?: "..."}`}, err
+	}
+	if strings.TrimSpace(a.JobID) == "" {
+		return spi.Result{Hint: "job_id 不能为空；先用 job_list 看有哪些任务"}, fmt.Errorf("job_id 为空")
 	}
 	if err := t.svc.Kill(a.JobID); err != nil {
 		return spi.Result{Hint: "用 job_list 确认 id；已结束的任务不需要终止"}, err

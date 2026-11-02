@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"dshgo/internal/spi"
 	"time"
 )
 
@@ -55,5 +57,38 @@ func TestSpilledShellViewStaysRaw(t *testing.T) {
 	}
 	if strings.Contains(res.Text, `"output"`) {
 		t.Fatalf("正文里不该有 JSON 外壳: %q", res.Text)
+	}
+}
+
+// 空 job_id 是「参数没给」，不是「任务不存在」。
+// 报成后者会把模型送去 job_list 找一个根本不存在的 id。
+func TestJobToolsRejectEmptyID(t *testing.T) {
+	svc := NewService(t.TempDir())
+	defer svc.Close()
+
+	cases := []struct {
+		name string
+		tool spi.Tool
+	}{
+		{"job_output", &jobOutputTool{svc: svc}},
+		{"job_kill", &jobKillTool{svc: svc}},
+	}
+	for _, c := range cases {
+		_, err := c.tool.Exec(context.Background(), json.RawMessage(`{}`))
+		if err == nil {
+			t.Fatalf("%s: 空 id 必须报错", c.name)
+		}
+		if !strings.Contains(err.Error(), "为空") {
+			t.Fatalf("%s: 应该说参数为空，实际 %q", c.name, err.Error())
+		}
+		if strings.Contains(err.Error(), "没有任务") {
+			t.Fatalf("%s: 不该说成「任务不存在」: %q", c.name, err.Error())
+		}
+
+		// 给了不存在的 id 才该说"没有任务"
+		_, err = c.tool.Exec(context.Background(), json.RawMessage(`{"job_id":"nope"}`))
+		if err == nil || !strings.Contains(err.Error(), "没有任务") {
+			t.Fatalf("%s: 未知 id 应该说没这个任务，实际 %v", c.name, err)
+		}
 	}
 }
