@@ -147,6 +147,8 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 工具回显占上下文 | **85.5%** | 同上 |
 | 会话样本 | 94 MB，zstd 多帧，62 事件类型 | `research/21` |
 | Go 空进程冷启动 | median **18.1 ms** / p95 22.7 ms | `research/30` |
+| **dsh-go 冷启动（实测 2026-11-02）** | `dshd version` 装配 9 模块：median **35.2 ms** / min 30.9 ms | 本机 10 次 |
+| **dsh-go 二进制（实测 2026-11-02）** | `-ldflags "-s -w"` → **3.7 MB**（目标 ≤25 MB） | 本机 |
 | go-plugin / wazero 二进制开销 | **+14.8 MB** / +3.5 MB | 同上 |
 | 进程插件工作集 | **14.4 MiB** | 同上 |
 
