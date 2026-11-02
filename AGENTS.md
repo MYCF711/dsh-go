@@ -113,7 +113,10 @@
 - ⚠️ 记一笔：**新加模块必须同时写进 `dsh.toml`**，否则它不会激活
 - ✅ P0 工具第 12 个 `todo_write`（`modules/tool/todo`）：整份替换、漏字段报错、按状态计数、多项 in_progress 给提醒
 - ✅ P0 工具第 13 个 `present`（`modules/tool/present`）：只声明不复制；不存在/是目录/空文件三种都拦下并给下一步
-- 下一步 **M48**：P0 工具第 14 个 `ask_user_question`（P0 组织组最后一个）
+- ✅ P0 工具第 14 个 `ask_user_question`（`modules/tool/ask`）：契约是 **questions 数组**（id/question/header/options/multi_select）
+- ✅ `spi.Result` 新增 **`Stop`**：为 true 时 agent 循环在这一步后结束本轮（`TestStopEndsTurnImmediately`）——否则模型会自问自答
+- ⚠️ 对拍两次拦住：单 question 形状错、Description 超 120 字
+- 下一步 **M49**：P0 工具第 15 个 `read_image`（感知组）
 
 ---
 
@@ -259,7 +262,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | DSH 内存（私有工作集） | 870 MB | 本机 `tasklist` |
 | 其中 Chromium / Node 宿主 | ~500 / ~367 MB | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 13 个 / 9,675 字节 / **1,827 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 14 个 / 11,788 字节 / **2,128 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |

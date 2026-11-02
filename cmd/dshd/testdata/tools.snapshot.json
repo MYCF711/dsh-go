@@ -1,5 +1,70 @@
 [
   {
+    "name": "ask_user_question",
+    "description": "向人提问（可一次问多个）并等回答，本轮到此结束。需要人拍板时用，别自己猜。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "questions": {
+          "type": "array",
+          "description": "要先问人的问题；一次问全，别挤成多轮",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "这个问题的稳定 id；回答里会回显"
+              },
+              "question": {
+                "type": "string",
+                "description": "具体要问的那句话"
+              },
+              "header": {
+                "type": "string",
+                "description": "可选的短标题，例如「确认」「选模式」"
+              },
+              "options": {
+                "type": "array",
+                "description": "可选候选；推荐项放第一个并在标签后加「（推荐）」",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "label": {
+                      "type": "string",
+                      "description": "给人看的一句话选项"
+                    },
+                    "description": {
+                      "type": "string",
+                      "description": "这个选择的取舍，可选"
+                    }
+                  },
+                  "required": [
+                    "label"
+                  ],
+                  "additionalProperties": true
+                }
+              },
+              "multi_select": {
+                "type": "boolean",
+                "description": "能不能多选，默认不能"
+              }
+            },
+            "required": [
+              "id",
+              "question"
+            ],
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "bash",
     "description": "在持久 bash 会话里执行命令，cwd 跨命令保留；无输出超时就转后台。",
     "parameters": {

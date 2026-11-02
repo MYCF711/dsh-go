@@ -58,6 +58,9 @@ type Result struct {
 	Truncated *Truncation // 发生截断时的证据
 	Hint      string      // 失败或为空时的下一步建议
 	View      *ViewSpec   // 客户端渲染契约
+	// Stop 为 true 时，agent 循环在这一步之后**结束本轮**，把控制权交回人。
+	// 给 ask_user_question 这类"必须等人回答"的工具用：模型不能自己编一个答案往下走。
+	Stop bool
 }
 
 // Artifact 是一份被外置的大结果。

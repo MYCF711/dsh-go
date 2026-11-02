@@ -171,11 +171,23 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 			return msgs, nil
 		}
 
+		stopAfter := false
 		for _, call := range resp.ToolCalls {
-			msgs = append(msgs, l.runTool(ctx, turn, step, call))
+			msg, stop := l.runTool2(ctx, turn, step, call)
+			msgs = append(msgs, msg)
+			if stop {
+				stopAfter = true
+			}
 		}
 		if err := l.emit(Event{Kind: EventStepEnd, Turn: turn, Step: step}); err != nil {
 			return msgs, err
+		}
+		// 工具有话说"必须等人"：本轮到此为止，别再让模型自己往下编。
+		if stopAfter {
+			if err := l.emit(Event{Kind: EventTurnEnd, Turn: turn, Step: step, Finish: "awaiting_user"}); err != nil {
+				return msgs, err
+			}
+			return msgs, nil
 		}
 	}
 
@@ -184,6 +196,11 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 
 // runTool 执行一次工具调用并返回给模型的 tool 消息。
 func (l *Loop) runTool(ctx context.Context, turn, step int, call llm.ToolCall) llm.Message {
+	msg, _ := l.runTool2(ctx, turn, step, call)
+	return msg
+}
+
+func (l *Loop) runTool2(ctx context.Context, turn, step int, call llm.ToolCall) (llm.Message, bool) {
 	args := call.Function.Arguments
 	_ = l.emit(Event{
 		Kind: EventToolCall, Turn: turn, Step: step,
@@ -193,7 +210,7 @@ func (l *Loop) runTool(ctx context.Context, turn, step int, call llm.ToolCall) l
 	msg := llm.Message{Role: "tool", ToolCallID: call.ID, Name: call.Function.Name}
 	if l.Runner == nil {
 		msg.Content = "（宿主没有工具执行器）"
-		return msg
+		return msg, false
 	}
 	res, err := l.Runner.Run(ctx, call.Function.Name, json.RawMessage(args))
 	if err != nil {
@@ -217,14 +234,14 @@ func (l *Loop) runTool(ctx context.Context, turn, step int, call llm.ToolCall) l
 			Kind: EventToolResult, Turn: turn, Step: step,
 			CallID: call.ID, ToolName: call.Function.Name, IsError: true, Err: err, Result: &shown,
 		})
-		return msg
+		return msg, false
 	}
 	msg.Content = renderBlocks(l.project(res))
 	_ = l.emit(Event{
 		Kind: EventToolResult, Turn: turn, Step: step,
 		CallID: call.ID, ToolName: call.Function.Name, Result: &res,
 	})
-	return msg
+	return msg, res.Stop
 }
 
 func (l *Loop) project(r spi.Result) []spi.Block {

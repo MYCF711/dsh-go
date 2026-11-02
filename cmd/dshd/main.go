@@ -24,6 +24,7 @@ import (
 	"dshgo/internal/spi"
 	"dshgo/modules/exec/bash"
 	"dshgo/modules/fs/local"
+	"dshgo/modules/tool/ask"
 	"dshgo/modules/tool/edit"
 	"dshgo/modules/tool/glob"
 	"dshgo/modules/tool/grep"
@@ -72,6 +73,7 @@ func builtinModules(wd, home string, maxChars int) []kernel.Module {
 		wdtool.Module(),
 		todo.Module(),
 		present.Module(),
+		ask.Module(),
 	}
 }
 

@@ -416,3 +416,36 @@ func TestMalformedToolCallsKeepTheTurnAlive(t *testing.T) {
 		t.Fatalf("第 3 条是正常工具，应该拿到结果: %q", toolMsgs[2])
 	}
 }
+
+// 工具有话说"必须等人"（Result.Stop）：本轮就在这一步收尾，
+// 模型**不会再被叫一次**去自己编答案。
+func TestStopEndsTurnImmediately(t *testing.T) {
+	chat := &scriptedChat{steps: []*llm.Response{
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Function: llm.Func{
+			Name: "ask", Arguments: `{}`}}}},
+		// 第二步故意留着：如果循环没停，它会用掉这一步。
+		{Content: "我猜答案是 A"},
+	}}
+	loop, events := newLoop(t, chat,
+		&fakeTool{name: "ask", res: spi.Result{Summary: "等你回答", Stop: true}})
+	hist := []llm.Message{{Role: "user", Content: "x"}}
+	if _, err := loop.Run(context.Background(), 1, hist); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(chat.reqs) != 1 {
+		t.Fatalf("设了 Stop 就不该再问模型，实际发了 %d 次请求", len(chat.reqs))
+	}
+	var end *Event
+	for i := range *events {
+		if (*events)[i].Kind == EventTurnEnd {
+			end = &(*events)[i]
+		}
+	}
+	if end == nil {
+		t.Fatal("应该发出 TurnEnd")
+	}
+	if end.Finish != "awaiting_user" {
+		t.Fatalf("收尾原因要说清在等人，实际 %q", end.Finish)
+	}
+}

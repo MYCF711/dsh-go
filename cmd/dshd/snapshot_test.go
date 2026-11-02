@@ -108,6 +108,8 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"todo_write": {},
 		// 只 stat 文件、登记路径，不写不跑不联。
 		"present": {},
+		// 只把问题返回给模型并结束本轮，不碰文件系统。
+		"ask_user_question": {},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {

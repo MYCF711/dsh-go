@@ -1,3 +1,39 @@
+## 0.2.1-go.27（未发布）· 续 4
+
+**P0 工具第 14 个：`ask_user_question`——它必须"真的停下来等人"。**
+
+前 13 个工具都立即返回结果，这个不一样：**它返回的是等回答的问题**。
+所以除了工具本身，还得让 agent 循环认一件事——
+
+`spi.Result` 加了 `Stop bool`：为 true 时循环在这一步之后**结束本轮**，
+不再叫模型。不这么做的话，模型会自己编一个答案继续往下跑，整条链路变成自问自答。
+
+```
+→ ask_user_question {"questions": [{"id": "lang", "header": "选语言", "question": "项目骨架用哪种语言？", …}]}
+← ask_user_question [ok]
+stats: tool_calls=1        ← 提问后立刻收尾，没有再问模型
+```
+
+`TestStopEndsTurnImmediately` 钉住：脚本里备了第二步回答，**一次都没被取用**——
+说明循环真的停了，而不是"模型碰巧没继续"。
+
+### 契约被对拍挡住了两次
+
+第一版我按"单个 question"写，`TestToolParityWithDSH` 直接报：
+
+```
+ask_user_question	缺参	额外: options,question
+```
+
+翻上游 schema 才发现是 **`questions` 数组**，每项带 `id`（回答里回显）、`question`，
+可选 `header` / `options` / `multi_select`。照抄之后对拍通过。
+
+另一处：`Description` 写长了（124 字），`TestEveryToolHasDescription` 报
+「会挤占工具表预算」——收到 120 字以内。
+
+工具表：14 个 / 11,788 字节 / **2,128 token**（上一版 1,827）。
+
+---
 ## 0.2.1-go.27（未发布）· 续 3
 
 **P0 工具第 13 个：`present`。**
