@@ -1,6 +1,6 @@
 # AGENTS.md · DSH-GO
 
-> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.17`**。
+> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.18`**。
 > **先读** `PLAN.md` §1 的十项决策——那是用户逐条拍板的结论，**不要再讨论、不要"顺便优化"**。
 > 本文件是操作手册：冲突时以本文件为准；本文件没写的，以 `PLAN.md` 为准。
 
@@ -74,7 +74,7 @@
 - ✅ 参数缺失 vs 目标不存在：`job_output`/`job_kill` 原把空 id 报成「没有任务」，已分开（其余六个工具本来就对）
 - ✅ `glob`/`grep` 的「0 命中」分清"真的没有"与"被 .dshdignore 挡住"（摘要带「扫过 N」和「挡掉 N 个目录」）
 - ✅ `edit` 的「不唯一」两条出路实测可走通（加上下文 / replace_all 各验一遍）；真机上模型先读再拼上下文，很少触发这条错误
-- 下一步 **M24**：`0.2.1-go.18` 发版（.dshdignore + 压缩两修 + 措辞三分）
+- 下一步 **M24**：`session/list` 之外的 ACP 方法边界（`session/load` 对不存在 ID、`set_mode` 对未知模式）
 
 ---
 
@@ -206,7 +206,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 
 ## 6. 版本、提交、文档
 
-- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.17`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
+- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.18`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
 - **提交**：`M<里程碑>: <一句话>`，例如 `M1: tools/read 与观测策略`。一个提交只做一件事。
 - **决策**：任何改变 §1 决策的实现，**先改 `PLAN.md` 并写理由**，再动代码。禁止"代码先行、文档追认"。
 - **文档**：`docs/cordis-alignment.md` 是 cordis 概念 → Go 概念的逐条对照，是设计约束，不是宣传材料。
@@ -229,9 +229,9 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 会话样本 | 94 MB，zstd 多帧，62 事件类型 | `research/21` |
 | Go 空进程冷启动 | median **18.1 ms** / p95 22.7 ms | `research/30` |
 | **本机启动成本 vs 体积（实测 2026-11-02）** | 1.2MB→11.6ms / 8.8MB→31.7ms / 12.8MB→46.5ms（≈2.5 ms/MB） | `docs/cold-start.md` |
-| **dsh-go 冷启动（实测 2026-11-02）** | ACP 就绪（起到 initialize 应答）median **60.7 ms**（负载波动 55.6–85.9） | `scripts/measure-start.py` |
+| **dsh-go 冷启动（实测 2026-11-02）** | `measure-start.py` 报 55–115（含探针开销）；**紧探针 p50 32.5 ms** | `docs/cold-start.md` |
 | 进程 init 总和 | **2.0 ms**（换掉 BurntSushi/toml 之前是 26.0 ms） | `GODEBUG=inittrace=1` |
-| **dsh-go 二进制（实测 2026-11-02）** | `-ldflags "-s -w"` → **8.8 MB**（目标 ≤25 MB） | `scripts/build.sh` |
+| **dsh-go 二进制（实测 2026-11-02）** | `-ldflags "-s -w"` → **8.3 MB**（目标 ≤25 MB） | `scripts/build.sh` |
 | **dsh-go 内存（实测 2026-11-02）** | 整轮峰值 **15.5 MB**（DSH 本体 870 MB） | `scripts/measure-mem.py` |
 | **`dshd version` 启动（实测 2026-11-02）** | median **42.8 ms**（不含装配，纯进程+init） | 本机 12 次 |
 | go-plugin / wazero 二进制开销 | **+14.8 MB** / +3.5 MB | 同上 |
