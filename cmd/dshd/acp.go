@@ -483,7 +483,12 @@ func cmdACP(argv []string) error {
 			return false, nil
 		}
 	}
-	return srv.Serve(context.Background())
+	serveErr := srv.Serve(context.Background())
+	// 客户端断连之后仍要把日志落盘：批窗口里可能还压着没写出去的帧。
+	if cerr := acpRunner.Shutdown(); cerr != nil && serveErr == nil {
+		serveErr = cerr
+	}
+	return serveErr
 }
 
 // buildSystemPrompt 用现有工具表装配系统提示（确定性：同输入同输出）。
@@ -771,4 +776,23 @@ func (r *acpRunner) ensureSession(sessionID, cwd string) (*session.Log, error) {
 		return nil, err
 	}
 	return l, nil
+}
+
+// Shutdown 把所有还开着的会话日志关闭（别把没落盘的帧丢了）。
+func (r *acpRunner) Shutdown() error {
+	r.mu.Lock()
+	logs := make([]*session.Log, 0, len(r.logs))
+	for _, l := range r.logs {
+		logs = append(logs, l)
+	}
+	r.logs = map[string]*session.Log{}
+	r.mu.Unlock()
+
+	var firstErr error
+	for _, l := range logs {
+		if err := l.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

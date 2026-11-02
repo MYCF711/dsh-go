@@ -45,7 +45,8 @@
 - ✅ `session/new` 支持 `mode` 参数（建会话即定模式，没有"先建后切"的窗口）
 - ✅ 端到端回归（`scripts/e2e-regression.mjs`，13 项全通过）+ `docs/e2e-report.md`
 - ✅ `session/cancel` 真机回归 + `TestSessionUsableAfterCancel`（取消后 busy 必须清）
-- 下一步 **M11**：客户端断开（stdio 关掉）时的清理语义
+- ✅ 断连语义：EOF → 取消在飞 turn → 等收尾（≤3s）→ `Shutdown()` 刷盘；`TestEOFDisconnectsAndCancels`
+- 下一步 **M11**：`0.2.1-go.10` 发版（cancel/断连/回归）
 
 ---
 

@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"dshgo/internal/agent"
 )
@@ -29,6 +31,8 @@ type Agent interface {
 	SetMode(ctx context.Context, sessionID, modeID string) (string, error)
 	// Close 释放一个会话。
 	Close(sessionID string) error
+	// Shutdown 在服务端退出时调用：把所有会话日志落盘并关闭。
+	Shutdown() error
 }
 
 type sess struct {
@@ -47,6 +51,9 @@ type Server struct {
 	Name    string
 	Version string
 
+	// Err 是杂项日志输出（默认 stderr）；wg 用来等在飞的 turn 收尾。
+	Err      io.Writer
+	wg       sync.WaitGroup
 	wmu      sync.Mutex
 	mu       sync.Mutex
 	sessions map[string]*sess
@@ -91,6 +98,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	if s.Version == "" {
 		s.Version = "0.2.1-go.5"
 	}
+	if s.Err == nil {
+		s.Err = os.Stderr
+	}
 	s.mu.Lock()
 	if s.sessions == nil {
 		s.sessions = map[string]*sess{}
@@ -123,6 +133,30 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		s.dispatch(ctx, req)
 	}
+
+	// stdin EOF = 客户端走了。先把在飞的 turn 取消掉——不然它们会继续跑，
+	// 往一个没人读的管道里写，还占着会话文件。
+	s.mu.Lock()
+	for _, se := range s.sessions {
+		if se.cancel != nil {
+			se.cancel()
+		}
+	}
+	s.mu.Unlock()
+
+	// 等一下在飞的 turn 收尾：它们还要把取消的尾巴事件写进日志。
+	// 不等就 Close，那些事件会丢（写已关闭的文件）。最多等 3 秒。
+	finished := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		fmt.Fprintf(s.Err, "断连后仍有 turn 没在 3 秒内收尾，强制退出\n")
+	}
+
 	return sc.Err()
 }
 
@@ -357,7 +391,11 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 	case MethodSessionPrompt:
 		// prompt 必须异步：客户端会在它 settle 之前发 session/cancel，
 		// 同步处理会把读循环堵死，取消永远进不来。
-		go s.handlePrompt(ctx, req)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.handlePrompt(ctx, req)
+		}()
 
 	case MethodSessionSetConfig:
 		var p struct {

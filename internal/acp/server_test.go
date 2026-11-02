@@ -57,6 +57,8 @@ func (a *fakeAgent) Load(ctx context.Context, sessionID, cwd string, emit func(a
 
 func (a *fakeAgent) Delete(ctx context.Context, sessionID, cwd string) error { return nil }
 
+func (a *fakeAgent) Shutdown() error { return nil }
+
 func (a *fakeAgent) SetMode(ctx context.Context, sessionID, modeID string) (string, error) {
 	if modeID != "default" {
 		return "", fmt.Errorf("未知模式 %q", modeID)
@@ -164,6 +166,11 @@ func (h *harness) updates(t *testing.T) []map[string]any {
 			return h.pending
 		}
 	}
+}
+
+// closeInput 关掉客户端→服务端这条管道，模拟"客户端直接消失"。
+func (h *harness) closeInput() {
+	_ = h.in.Close()
 }
 
 func (h *harness) close() {
@@ -498,5 +505,30 @@ func TestSessionUsableAfterCancel(t *testing.T) {
 	res := h.recvResult(t, 3)
 	if res["error"] != nil {
 		t.Fatalf("取消之后会话应该还能用，却报错: %+v", res["error"])
+	}
+}
+
+// 客户端断连（stdin EOF）时：在飞的 turn 要被取消，Serve 要干净返回。
+func TestEOFDisconnectsAndCancels(t *testing.T) {
+	ag := &fakeAgent{blockOnCtx: true}
+	h := start(t, ag)
+	defer h.close()
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": MethodSessionNew,
+		"params": map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}}})
+	sid := h.recvResult(t, 1)["result"].(map[string]any)["sessionId"].(string)
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": MethodSessionPrompt,
+		"params": map[string]any{"sessionId": sid, "prompt": []any{map[string]any{"type": "text", "text": "跑"}}}})
+	time.Sleep(50 * time.Millisecond)
+
+	// 直接关掉客户端这一侧的写端 = 断连
+	h.closeInput()
+
+	select {
+	case <-h.done:
+		// Serve 返回了，正是期望
+	case <-time.After(3 * time.Second):
+		t.Fatal("客户端断连后服务端没有退出（在飞的 turn 把读循环卡住了？）")
 	}
 }
