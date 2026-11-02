@@ -8,9 +8,9 @@
 
 ## 0. 当前状态（2026-11-02）
 
-- ✅ 调研完成：`research/`（6 份，全部带 `文件:行号`）、`refs/dsc/`（只读参考）、`probe/`（Go 依赖实测工程）
-- ❌ **产品代码零行**。下一个里程碑是 **M0**（`PLAN.md` §14）。不要跳步，不要先写 agent loop。
-- 开工第一件事：`go mod init dshgo` + 建 `internal/{kernel,spi}`，然后写 **`spi/tool.go`**。
+- ✅ **M0 完成**：内核四件事（Scope/Registry/Bus/Assemble）+ 工具 SPI + 装配器 + CLI；`scripts/check.sh` 全绿，CI（windows-latest，含 `-race`）绿
+- 🚧 **M1 进行中**：工具流水线三件套（序列化 / 截断外置 / Hint 兜底）+ `Result → content[]` 投影已完成
+- 下一步（顺序不可换）：`write` `edit` `glob` `grep` → `shell`（真实 bash 进程）→ 工具一致性套件 + `testdata/tools.snapshot.json`
 
 ---
 
