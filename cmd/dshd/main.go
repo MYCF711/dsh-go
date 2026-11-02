@@ -390,6 +390,17 @@ func cmdRun(argv []string) error {
 		},
 	}
 
+	// 一轮的账：工具调用次数与 token。
+	// 实测每多一次工具调用约多 5–6k token（docs/token-budget.md §6），
+	// 所以 tool_calls 比"输出多长"更值得盯。
+	//
+	// 用 defer：**失败的那一轮才最需要看账**（步数用满、一直调工具）。
+	// 放在成功分支里的话，恰好把最贵的那些跑法排除在统计外。
+	defer func() {
+		fmt.Fprintf(os.Stderr, "stats: tool_calls=%d input=%d output=%d\n",
+			toolCalls, inTokens, outTokens)
+	}()
+
 	hist, err := loop.Run(context.Background(), 1, []llm.Message{{Role: "user", Content: *prompt}})
 	if err != nil {
 		return err
@@ -399,11 +410,6 @@ func cmdRun(argv []string) error {
 	}
 	last := hist[len(hist)-1]
 	fmt.Println(last.Content)
-	// 一轮的账：工具调用次数与 token。
-	// 实测每多一次工具调用约多 5–6k token（docs/token-budget.md §6），
-	// 所以 tool_calls 比"输出多长"更值得盯。
-	fmt.Fprintf(os.Stderr, "stats: tool_calls=%d input=%d output=%d\n",
-		toolCalls, inTokens, outTokens)
 	fmt.Fprintf(os.Stderr, "会话：%s（%d 事件）\n", logw.Path, logw.Seq())
 	return nil
 }

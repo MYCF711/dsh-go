@@ -67,7 +67,7 @@
   },
   {
     "name": "glob",
-    "description": "按 glob 模式找文件（支持 **）。只返回路径，不读内容。",
+    "description": "按 glob 模式找文件（支持 **），只返回路径；自动跳过 .git/refs/node_modules。",
     "parameters": {
       "type": "object",
       "properties": {
@@ -94,7 +94,7 @@
   },
   {
     "name": "grep",
-    "description": "按 Go 正则搜索文件内容，返回 文件:行:文本。找文件请用 glob。",
+    "description": "按 Go 正则搜内容，返回 文件:行:文本；自动跳过 .git/refs/node_modules，比 bash grep -r 准。",
     "parameters": {
       "type": "object",
       "properties": {

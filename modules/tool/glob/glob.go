@@ -42,7 +42,7 @@ type Tool struct {
 func (t *Tool) Name() string   { return "glob" }
 func (t *Tool) Caps() spi.Caps { return spi.Caps{} }
 func (t *Tool) Description() string {
-	return "按 glob 模式找文件（支持 **）。只返回路径，不读内容。"
+	return "按 glob 模式找文件（支持 **），只返回路径；自动跳过 .git/refs/node_modules。"
 }
 func (t *Tool) Schema() json.RawMessage { return schema }
 

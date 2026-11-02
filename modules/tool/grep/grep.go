@@ -52,7 +52,11 @@ type Tool struct {
 func (t *Tool) Name() string   { return "grep" }
 func (t *Tool) Caps() spi.Caps { return spi.Caps{} }
 func (t *Tool) Description() string {
-	return "按 Go 正则搜索文件内容，返回 文件:行:文本。找文件请用 glob。"
+	// 说明里必须点出「跳过 .git/refs/node_modules 等目录」：
+	// 模型默认爱用 bash 的 grep -r，那会把 vendored 代码一起扫进来。
+	// 实测一次这样的事故：refs/ 里 3,569 个文件让答案从 252 变成 9,852，
+	// 模型为了消除这个歧义多花了 6 次调用、多烧 22k token。
+	return "按 Go 正则搜内容，返回 文件:行:文本；自动跳过 .git/refs/node_modules，比 bash grep -r 准。"
 }
 func (t *Tool) Schema() json.RawMessage { return schema }
 
