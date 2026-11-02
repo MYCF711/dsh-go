@@ -1,0 +1,29 @@
+{
+  "relaxations": {
+    "schedule-run-read-only": {
+      "file": "cmd/dshd/schedule_policy.go",
+      "must_contain": "（只读：登记时没开 allow_writes）",
+      "doc_anchor": "## 1. `dshd schedule run`"
+    },
+    "subagent-borrowed-approvals": {
+      "file": "modules/tool/subagent/subagent.go",
+      "must_contain": "沿用主会话审批记忆",
+      "doc_anchor": "## 2. 子代理沿用主会话的审批记忆"
+    },
+    "compact-force": {
+      "file": "cmd/dshd/main.go",
+      "must_contain": "session.HistoryGuard(*path, os.Getenv(\"DSH_HOME\"), *force)",
+      "doc_anchor": "## 3. `dshd session compact --force`"
+    },
+    "mode-allow-overrides-memory": {
+      "file": "cmd/dshd/acp.go",
+      "must_contain": "这个会话里以后都允许",
+      "doc_anchor": "## 4. 模式的 `allow` 压过记忆里的拒绝"
+    },
+    "watch-ack-skip": {
+      "file": "modules/tool/watch/watch.go",
+      "must_contain": "（跳过 %d 个编号：%s）",
+      "doc_anchor": "## 5. `watch_ack` 的水位可以一次跳过一批编号"
+    }
+  }
+}

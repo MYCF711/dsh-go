@@ -46,6 +46,19 @@ else
     skip "没有权限分支守卫"
   fi
 
+  # 放宽守卫：每处"有意放宽"都必须还带着它的可见性。
+  # 文档靠人记得去看，这条把它变成可执行的。
+  if [ -f scripts/relax-guard.py ]; then
+    if rl_out="$(python scripts/relax-guard.py 2>&1)"; then
+      pass "$(printf '%s' "$rl_out" | tail -1)"
+    else
+      bad "放宽守卫: $(printf '%s' "$rl_out" | tail -2 | tr '
+' ' ')"
+    fi
+  else
+    skip "没有放宽守卫"
+  fi
+
   # 变异清单自洽：每条的 old 片段必须**恰好出现一次**，
   # 否则那条变异永远是 BAD，等于验收清单里混着一条废条目。
   if [ -f scripts/mutate.py ] && [ -f scripts/mutations.json ]; then
