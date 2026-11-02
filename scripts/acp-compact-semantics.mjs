@@ -16,13 +16,13 @@ import { rmSync } from 'node:fs';
 const SDK = 'file:///D:/DeepSeek%20Harness/Desktop/resources/app.asar/dsh/node_modules/@agentclientprotocol/sdk/dist/acp.js';
 const { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION } = await import(SDK);
 
-const HOME = 'tmp/compact-semantics-home';
+const HOME = process.env.COMPACT_HOME || 'tmp/compact-semantics-home';
 const SECRET = 'COMPACT-KEY-7';
 const BIN = process.env.DSHD_BIN || 'tmp/dshd.exe';
 
 rmSync(HOME, { recursive: true, force: true });
 
-const proc = spawn(BIN, ['acp', '--home', HOME, '--workspace-bytes', '0', '--auto-compact', '1'], {
+const proc = spawn(BIN, ['acp', '--home', HOME, '--workspace-bytes', '0', '--auto-compact', process.env.AUTO_COMPACT || '1'], {
   stdio: ['pipe', 'pipe', 'pipe'],
 });
 let compressed = 0;

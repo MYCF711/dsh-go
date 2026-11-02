@@ -315,6 +315,8 @@ func cmdRun(argv []string) error {
 		return err
 	}
 	var lastCallSeq int64
+	// 一轮的累计账（给 stats 行用）
+	var toolCalls, inTokens, outTokens int
 
 	// 审批守卫：`dshd run` 原来对写类工具是完全放行的，现在按 --policy 判定。
 	askFn, err := makeAskFunc(*policy)
@@ -349,6 +351,8 @@ func cmdRun(argv []string) error {
 				}
 				var usage map[string]any
 				if a.Usage != nil {
+					inTokens += a.Usage.PromptTokens
+					outTokens += a.Usage.CompletionTokens
 					usage = map[string]any{
 						"inputTokens":  a.Usage.PromptTokens,
 						"outputTokens": a.Usage.CompletionTokens,
@@ -359,6 +363,7 @@ func cmdRun(argv []string) error {
 					session.AssistantMessageEvent(e.Turn, e.Step, blocks, a.Finish, usage))
 			case agent.EventToolCall:
 				lastCallSeq = logw.Seq()
+				toolCalls++
 				if err := logw.Append("tool/call",
 					session.ToolCallEvent(e.Turn, e.Step, e.CallID, e.ToolName, e.Arguments)); err != nil {
 					return err
@@ -394,6 +399,11 @@ func cmdRun(argv []string) error {
 	}
 	last := hist[len(hist)-1]
 	fmt.Println(last.Content)
+	// 一轮的账：工具调用次数与 token。
+	// 实测每多一次工具调用约多 5–6k token（docs/token-budget.md §6），
+	// 所以 tool_calls 比"输出多长"更值得盯。
+	fmt.Fprintf(os.Stderr, "stats: tool_calls=%d input=%d output=%d\n",
+		toolCalls, inTokens, outTokens)
 	fmt.Fprintf(os.Stderr, "会话：%s（%d 事件）\n", logw.Path, logw.Seq())
 	return nil
 }
