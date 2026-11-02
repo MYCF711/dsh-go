@@ -1,6 +1,10 @@
 package session
 
-import "unicode/utf8"
+import (
+	"unicode/utf8"
+
+	"dshgo/internal/llm"
+)
 
 // Meter 是 token 计量的**单一口径**（PLAN §10）：
 // 服务端实测值只负责绝对值，启发式只负责"上次实测之后又涨了多少"。
@@ -82,4 +86,16 @@ func CharsOf(surface []SurfaceMsg) (ascii, other int) {
 		}
 	}
 	return ascii, other
+}
+
+// HistoryToSurface 把 canonical 历史转成 surface 消息，供 meter 估算。
+//
+// 历史里没有 seq/来源信息，这里给 -1 作为"不是从日志派生"的标记——
+// meter 只用 Content 与 ToolCalls，不依赖 seq。
+func HistoryToSurface(hist []llm.Message) []SurfaceMsg {
+	out := make([]SurfaceMsg, 0, len(hist))
+	for _, m := range hist {
+		out = append(out, SurfaceMsg{Seq: -1, Message: m})
+	}
+	return out
 }

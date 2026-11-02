@@ -133,9 +133,15 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 				r.observeUsage(sessionID, logw.Path, a.Usage.TotalTokens)
 			}
 			if a.Usage != nil && r.ctxWindow > 0 {
+				// `used` 是**这一次调用的上下文大小**，不是"这个会话累计花了多少 token"。
+				// 原来是累加的：跑 10 步就变成真实值的 10 倍，客户端会以为快撑爆了。
+				var est int
+				if m := r.meterOf(sessionID); m != nil {
+					est = m.Estimate(session.HistoryToSurface(r.hist[sessionID]))
+				}
+				used := contextUsed(a.Usage.PromptTokens, a.Usage.CompletionTokens, a.Usage.TotalTokens, est)
 				r.mu.Lock()
-				r.used[sessionID] += a.Usage.TotalTokens
-				used := r.used[sessionID]
+				r.used[sessionID] = used
 				r.mu.Unlock()
 				if err := emit(agent.Event{
 					Kind: agent.EventUsage, Turn: e.Turn, Step: e.Step,
@@ -331,6 +337,7 @@ func cmdACP(argv []string) error {
 	steps := fs.Int("max-steps", 8, "每轮最多几步")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	autoCompact := fs.Int("auto-compact", 40000, "surface 估算超过多少 token 就自动压缩（0=关闭）")
+	ctxWindow := fs.Int("context-window", 128000, "上下文窗口大小（usage_update 的分母）")
 	remember := fs.Bool("remember-approvals", false, "把\"以后都允许\"记到磁盘，resume 后仍然生效")
 	if err := fs.Parse(argv); err != nil {
 		return err
@@ -359,6 +366,9 @@ func cmdACP(argv []string) error {
 	acpRunner := newACPRunner(reg, runner, *base, *model, *home, *steps)
 	acpRunner.system = assembled
 	acpRunner.autoCompact = *autoCompact
+	if *ctxWindow > 0 {
+		acpRunner.ctxWindow = *ctxWindow
+	}
 	if *remember {
 		acpRunner.approvalsStore = &approval.Store{Dir: filepath.Join(*home, "state", "approvals")}
 	}
@@ -542,4 +552,21 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 	r.hist[sessionID] = session.History(after)
 	r.mu.Unlock()
 	return nil
+}
+
+// contextUsed 决定 usage_update 里的 used：**这次调用的上下文大小**，不是累计值。
+//
+// 三条规则：
+//  1. 有 prompt/completion 就用它们的和（服务端实测，最可信）；
+//  2. 只有 total 就用 total；
+//  3. 启发式估算更大时取估算——宁可早报警，也不要等到真撑爆。
+func contextUsed(prompt, completion, total, estimate int) int {
+	used := prompt + completion
+	if used == 0 {
+		used = total
+	}
+	if estimate > used {
+		used = estimate
+	}
+	return used
 }

@@ -1,3 +1,24 @@
+## 0.2.1-go.7（未发布）· 续 9
+
+**修 `usage_update` 的 `used`：它以前是"累计花了多少"，应该是"现在占了多少"。**
+
+老代码：`r.used[sessionID] += a.Usage.TotalTokens` —— 跑三步就是真实值的三倍，
+客户端会以为上下文快撑爆了，进而触发不必要的压缩或报错。
+
+- `contextUsed(prompt, completion, total, estimate)`：一次调用的上下文大小
+  1. 有 prompt/completion 就用它们的和（服务端实测最可信）
+  2. 只有 total 就退回 total
+  3. 启发式估算更大时**取估算**——宁可早报警，别等真撑爆
+- `--context-window`（默认 128000）：usage_update 的分母，现在可以改
+- `session.HistoryToSurface`：把 canonical 历史转成 surface 消息给 meter 用（seq 记 -1）
+
+**实测（三轮对话，官方 SDK 客户端）**
+```
+used: 4126 → 4167 → 4324   ✅ 缓慢增长（上下文变大）
+（修复前会是 4126 → 8293 → 12417，线性累加）
+```
+
+---
 ## 0.2.1-go.7（未发布）· 续 8
 
 **`dshd run` 补上审批守卫：以前它对写类工具是完全放行的。**
