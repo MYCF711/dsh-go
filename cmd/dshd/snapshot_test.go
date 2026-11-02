@@ -136,6 +136,10 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"send_message": {Writes: true},
 		"wait_agent":   {},
 		"list_agents":  {},
+		// 目标：读一个、写两个。
+		"get_goal":    {},
+		"create_goal": {Writes: true},
+		"update_goal": {Writes: true},
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},

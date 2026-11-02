@@ -170,7 +170,11 @@
 - ✅ 对拍拦住一次真错：DSH 的 `send_message` 参数是 `agent_id`/`message`，我们写成了 `to`/`text`
 - ⚠️ 我的 python 字符串替换**静默失效**过一次（签名写错 → 什么都没替换 → 以为改好了），
   以后替换必须断言命中
-- 下一步 **M62**：`get_goal/create_goal/update_goal`（162 次）——目标要跨会话持久，正好复用信箱那套文件存储
+- ✅ **目标一族落地**（dshd 自己写，514 行）：`get_goal` / `create_goal` / `update_goal`，
+  落 `<home>/state/goals/<会话>.json`；revision 做 CAS（拿旧值改会被拒）
+- ✅ 真机全链：create → get → update(complete)，revision 1→2，phase active→complete
+- 监工补四条测试：旧 revision 拒绝 / 重复 create 拒绝 / blocked 必带理由 / 无会话拒绝
+- 下一步 **M63**：`schedule_*`（42 次）或 `watch_*`（32 次）——都靠时间触发，得先有轮询/定时器
 
 ### 界面线现状（2026-11-03）
 
@@ -334,7 +338,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 其余 8 个渲染进程 | 378.6 / 182.0 / 43.0 / 42.8 / 42.7 / 42.3 / 38.4 / 2.9 MB | 同上（**每开一个窗口多一个**） |
 | 空转 CPU | **2.0%**（没在跑任务） | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 30 个 / 21,948 字节 / **3,911 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 33 个 / 24,274 字节 / **4,318 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |

@@ -31,6 +31,7 @@ import (
 	"dshgo/modules/tool/execlit"
 	"dshgo/modules/tool/github"
 	"dshgo/modules/tool/glob"
+	goalmod "dshgo/modules/tool/goal"
 	"dshgo/modules/tool/grep"
 	"dshgo/modules/tool/history"
 	"dshgo/modules/tool/nowline"
@@ -100,6 +101,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		execlit.Module(),
 		teamtask.Module(filepath.Join(home, "state")),
 		team.Module(filepath.Join(home, "state", "mail")),
+		goalmod.Module(filepath.Join(home, "state", "goals")),
 		nowline.Module(),
 		subagentModule(sub),
 		subagenttool.Module(),

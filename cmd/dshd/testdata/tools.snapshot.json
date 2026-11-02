@@ -97,6 +97,32 @@
     }
   },
   {
+    "name": "create_goal",
+    "description": "为需要多轮才能完成的事建一个跨会话存活的目标。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "objective": {
+          "type": "string",
+          "description": "这个长程目标要达成什么，一句话说清"
+        },
+        "max_goal_rounds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "description": "允许的总轮次上限，可省略，默认 256"
+        }
+      },
+      "required": [
+        "objective"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
     "name": "edit",
     "description": "把文件中的 old_string 逐字替换为 new_string；要求唯一匹配，多处须显式 replace_all。",
     "parameters": {
@@ -161,6 +187,16 @@
       "writes": true,
       "executes": true
     }
+  },
+  {
+    "name": "get_goal",
+    "description": "查当前会话的目标和 revision；改目标前先调它。",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "caps": {}
   },
   {
     "name": "github",
@@ -705,6 +741,57 @@
       "additionalProperties": false
     },
     "caps": {}
+  },
+  {
+    "name": "update_goal",
+    "description": "改目标：edit/pause/resume/complete/blocked，要带最新 revision。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "goal_id": {
+          "type": "string",
+          "description": "从 get_goal 原样抄来的目标 id"
+        },
+        "revision": {
+          "type": "integer",
+          "description": "从 get_goal 原样抄来的当前 revision"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "edit",
+            "pause",
+            "resume",
+            "complete",
+            "blocked"
+          ],
+          "description": "edit 改 objective/max_goal_rounds；pause/resume 暂停或恢复；complete 完成；blocked 需给 blocked_reason"
+        },
+        "objective": {
+          "type": "string",
+          "description": "action=edit 时传，才改"
+        },
+        "max_goal_rounds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "description": "action=edit 时传，才改"
+        },
+        "blocked_reason": {
+          "type": "string",
+          "description": "action=blocked 时必填：具体卡在哪"
+        }
+      },
+      "required": [
+        "goal_id",
+        "revision",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
   },
   {
     "name": "wait_agent",
