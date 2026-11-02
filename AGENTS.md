@@ -57,7 +57,8 @@
 
 ```go
 type Tool interface {
-    Name() string
+    Name() string                                   // 全局唯一、稳定
+    Description() string                            // 「什么时候用它」，≤120 字
     Schema() json.RawMessage                        // 稳定：无时间戳/绝对路径/随机 id
     Exec(ctx context.Context, args json.RawMessage) (Result, error)
 }
