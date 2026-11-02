@@ -164,6 +164,8 @@ export PATH="/c/Program Files/Go/bin:$PATH"     # go 1.27.3，未入 PATH
 | 模型网关 | `http://127.0.0.1:3425/v1`（magpie，OpenAI 兼容） | LLM 客户端联调 |
 | dsc 参考 | `refs/dsc/` | **只读**；借鉴处必须注明 `refs/dsc/<file>:<line>` |
 
+**行尾**：仓库统一 LF（`.gitattributes` 的 `eol=lf`）。CRLF 会让 `gofmt -l` 把所有文件判成"未格式化"，CI 直接红——编辑器别开自动转 CRLF。
+
 **真机禁忌**（与 `$DSH_HOME/AGENTS.md` 一致，这里只强调三条）：
 1. 不重启、不关闭 DSH；不改 `D:/DeepSeek Harness/home/profiles/*/cordis.patch.yml`。
 2. asar 与 profiles 一律只读。
