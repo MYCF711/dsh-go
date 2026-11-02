@@ -212,6 +212,7 @@ func cmdRun(argv []string) error {
 	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
 	maxSteps := fs.Int("max-steps", 8, "最多几步")
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
+	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -242,13 +243,14 @@ func cmdRun(argv []string) error {
 	if err != nil {
 		return err
 	}
+	sys := buildSystemPrompt(reg, *model, cwd, *workspaceBytes)
 	sessID := "session-" + session.NewID()
 	logw, err := session.CreateSession(*home, cwd, sessID, "standard")
 	if err != nil {
 		return err
 	}
 	defer logw.Close()
-	if err := logw.Append("system/message", session.SystemMessageData(1, 1, systemPrompt)); err != nil {
+	if err := logw.Append("system/message", session.SystemMessageData(1, 1, sys)); err != nil {
 		return err
 	}
 	if err := logw.Append("turn/start", session.TurnStartData(1)); err != nil {
@@ -265,7 +267,7 @@ func cmdRun(argv []string) error {
 		Runner:   runner,
 		Project:  session.ProjectResult,
 		Model:    *model,
-		System:   "你在 dsh-go 宿主里工作。需要信息就调用工具，不要猜。",
+		System:   sys,
 		MaxSteps: *maxSteps,
 		Emit: func(e agent.Event) error {
 			switch e.Kind {

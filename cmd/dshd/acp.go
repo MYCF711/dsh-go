@@ -6,19 +6,19 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"sync"
+	"time"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/acp"
 	"dshgo/internal/agent"
 	"dshgo/internal/kernel"
 	"dshgo/internal/llm"
+	"dshgo/internal/prompt"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 )
-
-// systemPrompt 是 dsh-go 的系统提示（会作为事件落盘）。
-const systemPrompt = "你在 dsh-go 宿主里工作。需要信息就调用工具，不要猜。"
 
 // acpRunner 把 ACP 的 prompt 接到真实的 agent 循环与会话日志上。
 type acpRunner struct {
@@ -33,6 +33,8 @@ type acpRunner struct {
 	ask func(ctx context.Context, sessionID, tool string, args string) (bool, error)
 	// ctxWindow 用于 usage_update 的分母。
 	ctxWindow int
+	// system 是装配好的系统提示（会作为事件落盘）。
+	system string
 
 	mu    sync.Mutex
 	logs  map[string]*session.Log
@@ -60,7 +62,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		}
 		// 系统提示作为**耐久事件**落盘：DSH 退休 request/header.header.system 后的做法，
 		// 这样 resume 之后模型仍然知道自己是谁。
-		if err := l.Append("system/message", session.SystemMessageData(1, 1, systemPrompt)); err != nil {
+		if err := l.Append("system/message", session.SystemMessageData(1, 1, r.system)); err != nil {
 			r.mu.Unlock()
 			return "", nil, err
 		}
@@ -155,7 +157,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		Runner:   runner,
 		Project:  session.ProjectResult,
 		Model:    r.model,
-		System:   systemPrompt,
+		System:   r.system,
 		MaxSteps: r.steps,
 		Emit:     sink,
 	}
@@ -246,6 +248,7 @@ func cmdACP(argv []string) error {
 	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
 	steps := fs.Int("max-steps", 8, "每轮最多几步")
+	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -269,7 +272,9 @@ func cmdACP(argv []string) error {
 		return err
 	}
 
+	assembled := buildSystemPrompt(reg, *model, mustGetwd(), *workspaceBytes)
 	acpRunner := newACPRunner(reg, runner, *base, *model, *home, *steps)
+	acpRunner.system = assembled
 	srv := &acp.Server{
 		In:      os.Stdin,
 		Out:     os.Stdout,
@@ -310,4 +315,24 @@ func cmdACP(argv []string) error {
 		return resp.Result.Outcome.Outcome == "selected" && resp.Result.Outcome.OptionID == "allow-once", nil
 	}
 	return srv.Serve(context.Background())
+}
+
+// buildSystemPrompt 用现有工具表装配系统提示（确定性：同输入同输出）。
+func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes int) string {
+	return prompt.Default(prompt.Context{
+		Model:             model,
+		Cwd:               cwd,
+		Platform:          runtime.GOOS + "/" + runtime.GOARCH,
+		Date:              time.Now().Format("2006-01-02"),
+		Tools:             reg.Tools(),
+		MaxWorkspaceBytes: workspaceBytes,
+	})
+}
+
+func mustGetwd() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
 }

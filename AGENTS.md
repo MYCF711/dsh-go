@@ -18,7 +18,8 @@
 - ✅ **M3 完成**：ACP + SDK 客户端 + 审批 + usage_update + 跨进程 `session/resume`
 - ✅ 工具能力声明（`spi.Caps`，**必填**）：审批按 `NeedsApproval()` 判定，不再按名字猜
 - ✅ surface 投影：`shadowedSeqs` 遮蔽 + `compact-checkpoint` 替身 + `surfaceOp:replace`；`system/message` 已进历史
-- 下一步 **M4**：提示词装配（可组合段落）；之后 **M5** 打包
+- ✅ 提示词装配（`internal/prompt`）：确定性拼接、按 Caps 分工具、AGENTS.md 有界注入（默认 8 KB）
+- 下一步 **M5**：打包 + 把 P0 四条判据逐条验收
 
 ---
 
@@ -52,6 +53,7 @@
 | `internal/agent/` | turn/step 双循环 | 不许内联压缩逻辑 |
 | `internal/acp/` | ACP 服务端（stdio JSON-RPC） | 按 `research/22` 的方法表 |
 | `internal/llm/` | OpenAI 兼容 SSE 客户端 | 先只做 magpie |
+| `internal/prompt/` | 系统提示装配（确定性、可组合、有界） | 加段必须同时加"空段消失"与"确定性"测试 |
 | `modules/*` | 静态默认实现，一模块一目录一个 `Register(scope)` | 新模块必须过 `PLAN.md` §2.4 的三条判据 |
 | `codecs/v4/` | DSH 会话 v4 编解码 | 字节级对齐，见 §4 |
 | `wasmhost/` `pluginhost/` | wazero / go-plugin 装载器 | 载入层只做装载，不含业务 |
@@ -151,6 +153,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 其中 Chromium / Node 宿主 | ~500 / ~367 MB | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
 | **dsh-go 工具表（本人实测 2026-11-02）** | 9 个 / 3,760 字节 / **906 token** | `docs/tool-budget.md` |
+| **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |
 | 3,002 次调用的工具分布 | `bash` 83.7% / `job_output` 8.7% / 其余 7.6% | `HANDOFF.md` §1.5 |
 | 工具回显占上下文 | **85.5%** | 同上 |
