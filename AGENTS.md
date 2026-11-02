@@ -275,7 +275,11 @@
   **验收工具自己有假阳性，等于没有验收**
 - ✅ 三组验证：正常变异→CAUGHT/退出 0；不影响断言的变异→MISSED/退出 1；编译不过→BAD/退出 1
 - ✅ 门禁加了「变异清单可解析」一条（`check.sh`）
-- 下一步 **M82**：给别的模块补变异条目（现在只有 teamtask 两条）
+- ✅ **变异条目扩到 6 条**（team-task delete 2 / watch 跳号 2 / schedule 只读默认 1 / goal revision 1），
+  全部 CAUGHT；`MUTATE=1 bash scripts/check.sh` 可一次性跑完并复查源码是否恢复干净
+- ✅ 顺带修了自己门禁里的一个错计数（`grep -c CAUGHT` 数到了明细行，改成打印 `CAUGHT=N` 汇总）
+- ⚠️ 又一课：`python ... | tail` 之后 `$?` 是 **tail 的**退出码。判退出码永远不要过管道
+- 下一步 **M83**：把这 6 条里"只测一个函数"的补上跨函数联动（比如 schedule run 那条 deny 分支现在没有测试）
 
 ### 界面线现状（2026-11-03）
 

@@ -14,5 +14,37 @@
     "new": "false",
     "pkg": "./modules/tool/teamtask",
     "test": "TestDeleteRefusesOtherOwnersTask"
+  },
+  {
+    "name": "watch-allows-silent-jump",
+    "file": "modules/tool/watch/watch.go",
+    "old": "if len(skipped) > maxSilentSkip && !a.ConfirmSkip {",
+    "new": "if false {",
+    "pkg": "./modules/tool/watch",
+    "test": "TestAckBlocksLargeSkipWithoutConfirm"
+  },
+  {
+    "name": "watch-skip-calculation-off-by-one",
+    "file": "modules/tool/watch/watch.go",
+    "old": "for n := prev + 1; n <= top; n++ {",
+    "new": "for n := prev + 1; n <= prev; n++ {",
+    "pkg": "./modules/tool/watch",
+    "test": "TestAckReportsSkippedNumbers"
+  },
+  {
+    "name": "schedule-defaults-to-writable",
+    "file": "modules/tool/schedule/schedule.go",
+    "old": "AllowWrites: a.AllowWrites,",
+    "new": "AllowWrites: true,",
+    "pkg": "./modules/tool/schedule",
+    "test": "TestAllowWritesDefaultsOff"
+  },
+  {
+    "name": "goal-ignores-stale-revision",
+    "file": "modules/tool/goal/goal.go",
+    "old": "if g.Revision != a.Revision {",
+    "new": "if false {",
+    "pkg": "./modules/tool/goal",
+    "test": "TestUpdateRejectsStaleRevision"
   }
 ]

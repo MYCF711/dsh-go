@@ -45,6 +45,18 @@ else
   else
     skip "没有变异清单"
   fi
+  # 真跑变异要临时改源码，不能和其它检查并行，所以默认不跑；MUTATE=1 才跑。
+  if [ "${MUTATE:-0}" = "1" ] && [ -f scripts/mutate.py ]; then
+    if python scripts/mutate.py >/tmp/mutate.log 2>&1; then
+      pass "变异测试全被抓（$(grep -oE 'CAUGHT=[0-9]+' /tmp/mutate.log | tail -1)）"
+    else
+      bad "变异测试有没抓住的（看 /tmp/mutate.log）"
+    fi
+    # 跑完源码必须原样：临时改坏却恢复失败是最坏的结果。
+    if [ -n "$(git status --porcelain modules internal 2>/dev/null)" ]; then
+      bad "变异测试跑完源码没恢复干净"
+    fi
+  fi
 
   # 工具表：默认形态 + 体积预算
   #
