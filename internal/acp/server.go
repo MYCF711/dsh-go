@@ -17,6 +17,8 @@ import (
 type Agent interface {
 	// Prompt 跑一个 turn；emit 里的每条事件都会被投影成 ACP update。
 	Prompt(ctx context.Context, sessionID, cwd, text string, emit func(agent.Event) error) (stopReason string, usage map[string]any, err error)
+	// Resume 把一个已持久化的会话接回内存；不重放旧 update。
+	Resume(ctx context.Context, sessionID, cwd string) error
 	// Close 释放一个会话。
 	Close(sessionID string) error
 }
@@ -166,6 +168,38 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 		}
 		s.mu.Unlock()
 		_ = s.reply(req.ID, map[string]any{"sessions": out}, nil)
+
+	case MethodSessionResume:
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Cwd       string `json:"cwd"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()})
+			return
+		}
+		if p.SessionID == "" || p.Cwd == "" {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "sessionId 与 cwd 都必填"})
+			return
+		}
+		if s.Agent == nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInternalError, Message: "没有配置 Agent"})
+			return
+		}
+		if err := s.Agent.Resume(ctx, p.SessionID, p.Cwd); err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "恢复失败: " + err.Error()})
+			return
+		}
+		s.mu.Lock()
+		s.sessions[p.SessionID] = &sess{id: p.SessionID, cwd: p.Cwd}
+		s.mu.Unlock()
+		_ = s.reply(req.ID, SessionNewResponse{
+			SessionID: p.SessionID,
+			ConfigOptions: []ConfigOption{
+				{ID: "model", Name: "Model"},
+				{ID: "reasoning_effort", Name: "Reasoning effort"},
+			},
+		}, nil)
 
 	case MethodSessionClose:
 		var p struct {

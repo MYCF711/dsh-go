@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 
+	"dshgo/codecs/v4"
 	"dshgo/internal/acp"
 	"dshgo/internal/agent"
 	"dshgo/internal/kernel"
@@ -188,6 +189,32 @@ func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessa
 		}
 	}
 	return g.inner.Run(ctx, name, args)
+}
+
+// Resume 从 v4 文件恢复历史，并以 append 模式续写同一个文件。
+func (r *acpRunner) Resume(ctx context.Context, sessionID, cwd string) error {
+	path, err := session.SessionPath(r.home, cwd, sessionID)
+	if err != nil {
+		return err
+	}
+	back, err := v4.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读会话失败: %w", err)
+	}
+	logw, err := session.OpenSession(r.home, cwd, sessionID)
+	if err != nil {
+		return err
+	}
+	hist := session.History(back)
+
+	r.mu.Lock()
+	if old := r.logs[sessionID]; old != nil {
+		_ = old.Close()
+	}
+	r.logs[sessionID] = logw
+	r.hist[sessionID] = hist
+	r.mu.Unlock()
+	return nil
 }
 
 func (r *acpRunner) Close(sessionID string) error {

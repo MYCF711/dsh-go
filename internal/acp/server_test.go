@@ -39,6 +39,13 @@ func (a *fakeAgent) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 
 func (a *fakeAgent) Close(string) error { return nil }
 
+func (a *fakeAgent) Resume(ctx context.Context, sessionID, cwd string) error {
+	if sessionID == "unknown" {
+		return fmt.Errorf("没有这个会话")
+	}
+	return nil
+}
+
 type harness struct {
 	srv     *Server
 	in      *io.PipeWriter
@@ -284,6 +291,28 @@ func TestCallClientHonorsContext(t *testing.T) {
 		t.Fatal("客户端不应答时必须超时返回")
 	} else {
 		_ = h.recv(t) // 吃掉那条发出去的请求
+	}
+}
+
+func TestSessionResume(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": MethodSessionResume,
+		"params": map[string]any{"sessionId": "unknown", "cwd": t.TempDir()}})
+	if res := h.recvResult(t, 1); res["error"] == nil {
+		t.Fatal("恢复不存在的会话必须报错")
+	}
+
+	cwd := t.TempDir()
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": MethodSessionResume,
+		"params": map[string]any{"sessionId": "s1", "cwd": cwd}})
+	res := h.recvResult(t, 2)
+	if res["error"] != nil {
+		t.Fatalf("恢复失败: %+v", res["error"])
+	}
+	if got := res["result"].(map[string]any)["sessionId"]; got != "s1" {
+		t.Fatalf("sessionId = %v", got)
 	}
 }
 

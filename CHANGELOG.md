@@ -10,6 +10,33 @@
 
 ---
 
+## 0.2.1-go.5 · M3-d — 2026-11-02
+
+**`session/resume`：会话状态跨进程活着——历史从 v4 文件读回来。**
+
+- `internal/session/history.go`
+  - `History(log)`：从 5 类耐久事件派生模型可见历史（user / assistant 含 tool-call / tool）
+  - `OpenSession`：校验 header 后以 **append** 模式续写同一个文件（seq 从已有条数继续）
+  - `SessionPath`：按 projectKey + segment 定位文件
+- `internal/acp`：`session/resume` 方法 + `Agent.Resume` 接口
+- `cmd/dshd/acp.go`：resume 时读文件 → 派生历史 → 接回内存
+
+**实测（跨进程，官方 SDK 客户端）**
+```
+[A] session/new: acp-fd9146af-...
+[A] prompt "记住暗号 BLUE-FALCON-42" → OK
+[A] close + 退出进程
+
+[B] session/resume 同一 id → 200 OK
+[B] prompt "刚才的暗号是什么" → "BLUE-FALCON-42"
+PASS
+```
+
+**真实语料派生**：3 个历史会话分别派生出 210 / 94 / 187 条消息（user 7/6/8，assistant 79/40/70，tool 124/48/109）。
+
+**踩坑**：`OpenSession` 忘了设 `now` 时钟，第一次 `Append` 就 nil 调用 panic；panic 又让文件句柄没关，Windows 上表现为 `TempDir` 清理失败——两个现象一个根因。
+
+---
 ## 0.2.1-go.5 · M3-c — 2026-11-02
 
 **审批链路打通 + 用量上报：客户端第一次真正有能力说"不"。**
