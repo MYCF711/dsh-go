@@ -97,3 +97,7 @@ backend = "static"
 [[module]]
 id      = "tool-repohere"
 backend = "static"
+
+[[module]]
+id      = "tool-execlit"
+backend = "static"

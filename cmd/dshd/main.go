@@ -28,6 +28,7 @@ import (
 	"dshgo/modules/search"
 	"dshgo/modules/tool/ask"
 	"dshgo/modules/tool/edit"
+	"dshgo/modules/tool/execlit"
 	"dshgo/modules/tool/github"
 	"dshgo/modules/tool/glob"
 	"dshgo/modules/tool/grep"
@@ -93,6 +94,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		pwsh.Module(),
 		github.Module(),
 		repohere.Module(),
+		execlit.Module(),
 		subagentModule(sub),
 		subagenttool.Module(),
 	}

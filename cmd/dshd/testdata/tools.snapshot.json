@@ -131,6 +131,38 @@
     }
   },
   {
+    "name": "exec_literal",
+    "description": "直接运行 .exe，参数逐个原样传入、不被 Git-Bash 转换。适合 ipconfig /all。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "program": {
+          "type": "string",
+          "description": ".exe 的绝对路径，例如 C:/Windows/System32/ipconfig.exe"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "可选：逐个原样传给程序的参数，不拆分、不转义"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "description": "可选：超时秒数，默认 60，上限 600"
+        }
+      },
+      "required": [
+        "program"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true,
+      "executes": true
+    }
+  },
+  {
     "name": "github",
     "description": "调 GitHub REST API（path 如 repos/o/r/issues）。写方法要 confirm 与令牌。",
     "parameters": {

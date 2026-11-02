@@ -122,6 +122,9 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"github": {Network: true, Writes: true},
 		// 只读 git 配置（remote/branch），不起副作用。
 		"repo_here": {},
+		// 起 .exe（参数不做转换）。它自己多声明了 Writes——任意程序都可能写盘，
+		// 这个保守判断是对的，比我在任务书里写的更安全。
+		"exec_literal": {Writes: true, Executes: true},
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},

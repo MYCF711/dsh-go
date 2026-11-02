@@ -95,3 +95,39 @@ api.github.com 在那一刻**持续回 502 且正文为空**。工具原来的 H
 
 **教训**：任务书里必须写死「Description ≤120 字」，或者干脆由监工收尾时改。
 
+## 派活 6：exec_literal —— 第一次带上仓库手册
+
+**这是最有信息量的一次，因为它证明了我之前一直在坑它。**
+
+前面五次派活我都写了 `--workspace-bytes 0`——这个参数的意思是
+**AGENTS.md 不进系统提示**（默认 8000 字节，写 0 = 不传）。
+也就是说：我让它在**没有仓库手册**的情况下改仓库，然后怪它
+`Description` 超限、不知道 `dsh.toml` 要登记、不知道快照要更新。
+
+**那些约束全写在 AGENTS.md 里。**
+
+A/B 对照（同一类任务）：
+
+| | 带 AGENTS.md | 不带 |
+|---|---|---|
+| pwsh | — | Description 127 字，测试红 |
+| github | — | Description 147 字，测试红 |
+| repo_here | — | Description 158 字，测试红 |
+| **exec_literal** | **51 字，一次过** | — |
+
+3/3 失败 vs 1/1 通过。差别不在模型，在**有没有给它手册**。
+
+**它这次还纠正了我**：任务书里我写 `Caps{Executes: true}`，
+它实现成 `{Writes: true, Executes: true}`——理由是"任意程序都可能写盘"。
+这个保守判断比我的对，快照期望得跟着改。
+
+**派活命令从此固定**：
+
+```bash
+./tmp/dshd.exe run --home <tmp> --policy allow   --workspace-bytes 41000 \        # 完整 AGENTS.md，别再写 0
+  --max-steps 12 --prompt "$(cat <brief 文件>)"
+```
+
+任务书正文放文件里用 `$(cat)` 传——直接内联 41KB 手册 + 长任务会撞
+`Argument list too long`（这个也踩过一次）。
+
