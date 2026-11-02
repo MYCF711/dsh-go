@@ -130,6 +130,8 @@ func main() {
 		err = cmdRun(os.Args[2:])
 	case "acp":
 		err = cmdACP(os.Args[2:])
+	case "schedule":
+		err = cmdSchedule(os.Args[2:])
 	case "doctor":
 		err = cmdDoctor(os.Args[2:])
 	case "version":

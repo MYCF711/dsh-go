@@ -178,7 +178,12 @@
   落 `<home>/state/schedules/<会话>.json`；**只登记与算 NextAt，不起定时器**（唤醒由宿主以后做）
 - ✅ 真机：三种 kind 的 NextAt 都算对（every +300s / daily 23:59 今晚 / weekly 周一三五 08:00）
 - ✅ 对拍又拦下一处：`team_task_get/update` 的 id 参数在 DSH 里叫 `task_id`，update 还带 `expected_revision`
-- 下一步 **M64**：`watch_*`（32 次）或把定时任务的**唤醒**接进 run/acp 主循环
+- ✅ **定时任务真的会到期了**（`internal/schedule` + `dshd schedule list|due`）：
+  `DueAt` 判到期、`nextAfter` 算下一次（every 要一格一格追上、daily/weekly 按本地时区）、
+  `Advance` 原子推进 `next_at`。**不做常驻 ticker**——`run` 一次性、`acp` 没有宿主主动发起对话的通道，
+  硬起 goroutine 只会得到一个自己调模型却没人能插话的东西
+- ✅ 七条测试钉住时间算术（every 追上 / daily 过点 / weekly 跳天 / 坏输入兜底不 panic）
+- 下一步 **M65**：`watch_*`（32 次），或给 `due` 加一个「把到期任务变成一轮对话」的执行器
 
 ### 界面线现状（2026-11-03）
 
