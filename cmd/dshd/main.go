@@ -367,6 +367,9 @@ func cmdSession(argv []string) error {
 	if argv[0] == "info" {
 		return cmdSessionInfo(argv[1:])
 	}
+	if argv[0] == "fork" {
+		return cmdSessionFork(argv[1:])
+	}
 	if argv[0] != "rewrite" {
 		return fmt.Errorf("用法: dshd session rewrite --in <file> --out <file>")
 	}
@@ -583,5 +586,54 @@ func cmdSessionInfo(argv []string) error {
 	for _, k := range keys {
 		fmt.Printf("  %-22s %d\n", k, byType[k])
 	}
+	return nil
+}
+
+// cmdSessionFork 从一个会话派生新会话（继承 surface，不继承审批记忆）。
+func cmdSessionFork(argv []string) error {
+	fs := flag.NewFlagSet("session fork", flag.ContinueOnError)
+	in := fs.String("in", "", "源会话文件")
+	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "新会话写到哪里")
+	cwd := fs.String("cwd", "", "新会话的工作目录（默认沿用源会话）")
+	id := fs.String("id", "", "新会话 id（默认自动生成）")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if *in == "" {
+		return fmt.Errorf("--in 必填")
+	}
+	src, err := v4.ReadFile(*in)
+	if err != nil {
+		return err
+	}
+	targetCwd := *cwd
+	if targetCwd == "" {
+		targetCwd = src.Header.Cwd
+	}
+	newID := *id
+	if newID == "" {
+		newID = "session-" + session.NewID()
+	}
+	forked, err := session.Fork(src, *home, targetCwd, newID)
+	if err != nil {
+		return err
+	}
+	if err := forked.Close(); err != nil {
+		return err
+	}
+	back, err := v4.ReadFile(forked.Path)
+	if err != nil {
+		return err
+	}
+	surface := session.Surface(back)
+	summaries := 0
+	for _, n := range surface {
+		if n.Summary {
+			summaries++
+		}
+	}
+	fmt.Printf("派生完成：%s\n", forked.Path)
+	fmt.Printf("  源会话: %s（parentSession 已写入 header）\n", src.Header.ID)
+	fmt.Printf("  surface: %d 节点（摘要 %d）/ 事件 %d\n", len(surface), summaries, len(back.Events))
 	return nil
 }

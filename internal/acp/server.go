@@ -19,6 +19,8 @@ type Agent interface {
 	Prompt(ctx context.Context, sessionID, cwd, text string, emit func(agent.Event) error) (stopReason string, usage map[string]any, err error)
 	// Resume 把一个已持久化的会话接回内存；不重放旧 update。
 	Resume(ctx context.Context, sessionID, cwd string) error
+	// Fork 从已有会话派生一个新会话，返回新会话 id。
+	Fork(ctx context.Context, sessionID, cwd string) (string, error)
 	// Close 释放一个会话。
 	Close(sessionID string) error
 }
@@ -200,6 +202,41 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 				{ID: "reasoning_effort", Name: "Reasoning effort"},
 			},
 		}, nil)
+
+	case "session/fork":
+		var p struct {
+			SessionID string `json:"sessionId"`
+			Cwd       string `json:"cwd"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()})
+			return
+		}
+		if p.SessionID == "" {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "sessionId 必填"})
+			return
+		}
+		s.mu.Lock()
+		src, ok := s.sessions[p.SessionID]
+		s.mu.Unlock()
+		if !ok {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "未知会话: " + p.SessionID})
+			return
+		}
+		cwd := p.Cwd
+		if cwd == "" {
+			cwd = src.cwd
+		}
+		newID, err := s.Agent.Fork(ctx, p.SessionID, cwd)
+		if err != nil {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInternalError, Message: "fork 失败: " + err.Error()})
+			return
+		}
+		s.mu.Lock()
+		s.sessions[newID] = &sess{id: newID, cwd: cwd}
+		s.order = append(s.order, newID)
+		s.mu.Unlock()
+		_ = s.reply(req.ID, SessionNewResponse{SessionID: newID}, nil)
 
 	case MethodSessionClose:
 		var p struct {

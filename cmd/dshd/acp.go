@@ -254,6 +254,43 @@ func (r *acpRunner) Resume(ctx context.Context, sessionID, cwd string) error {
 	return nil
 }
 
+// Fork 从当前会话派生一个新会话：继承 surface，不继承审批记忆。
+func (r *acpRunner) Fork(ctx context.Context, sessionID, cwd string) (string, error) {
+	r.mu.Lock()
+	srcLog := r.logs[sessionID]
+	r.mu.Unlock()
+	if srcLog == nil {
+		return "", fmt.Errorf("没有活跃会话 %s（要先 resume 或 prompt 过）", sessionID)
+	}
+	src, err := v4.ReadFile(srcLog.Path)
+	if err != nil {
+		return "", err
+	}
+	newID := "session-" + session.NewID()
+	forked, err := session.Fork(src, r.home, cwd, newID)
+	if err != nil {
+		return "", err
+	}
+	if err := forked.Close(); err != nil {
+		return "", err
+	}
+
+	back, err := v4.ReadFile(forked.Path)
+	if err != nil {
+		return "", err
+	}
+	writer, err := session.OpenSession(r.home, cwd, newID)
+	if err != nil {
+		return "", err
+	}
+	r.mu.Lock()
+	r.logs[newID] = writer
+	r.hist[newID] = session.History(back)
+	r.turns[newID] = 0
+	r.mu.Unlock()
+	return newID, nil
+}
+
 func (r *acpRunner) Close(sessionID string) error {
 	if r.approvals != nil {
 		r.approvals.Forget(sessionID)

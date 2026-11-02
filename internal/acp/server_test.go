@@ -39,6 +39,10 @@ func (a *fakeAgent) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 
 func (a *fakeAgent) Close(string) error { return nil }
 
+func (a *fakeAgent) Fork(ctx context.Context, sessionID, cwd string) (string, error) {
+	return "forked-" + sessionID, nil
+}
+
 func (a *fakeAgent) Resume(ctx context.Context, sessionID, cwd string) error {
 	if sessionID == "unknown" {
 		return fmt.Errorf("没有这个会话")
@@ -313,6 +317,33 @@ func TestSessionResume(t *testing.T) {
 	}
 	if got := res["result"].(map[string]any)["sessionId"]; got != "s1" {
 		t.Fatalf("sessionId = %v", got)
+	}
+}
+
+func TestSessionFork(t *testing.T) {
+	h := start(t, &fakeAgent{})
+	defer h.close()
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": MethodSessionNew,
+		"params": map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}}})
+	sid := h.recvResult(t, 1)["result"].(map[string]any)["sessionId"].(string)
+
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "session/fork",
+		"params": map[string]any{"sessionId": sid}})
+	res := h.recvResult(t, 2)
+	if res["error"] != nil {
+		t.Fatalf("fork 失败: %+v", res["error"])
+	}
+	newID := res["result"].(map[string]any)["sessionId"].(string)
+	if newID != "forked-"+sid {
+		t.Fatalf("新会话 id = %q", newID)
+	}
+
+	// 未知会话要报错，不能凭空造一个。
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 3, "method": "session/fork",
+		"params": map[string]any{"sessionId": "nope"}})
+	if h.recvResult(t, 3)["error"] == nil {
+		t.Fatal("未知会话 fork 必须报错")
 	}
 }
 

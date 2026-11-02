@@ -1,3 +1,27 @@
+## 0.2.1-go.7（未发布）· 续 4
+
+**`session/fork`：从已有会话派生新会话，继承 surface 不继承授权。**
+
+- `session.Fork`：读源日志 → 派生 surface → 写成一份**新的合法 v4 日志**
+  - header 记 `parentSession`（血缘可查），cwd 可改
+  - 继承的是 surface 而不是原始事件：被压缩遮蔽过的东西不会跟过去
+  - 压缩替身改成 `source.kind = "compact-checkpoint"` 的 user 消息
+- `dshd session fork --in <f> --home <h> [--cwd] [--id]`
+- ACP：`session/fork`（比 DSH 多实现一个方法，属超集）
+
+**实测（跨会话继承，官方 SDK 客户端）**
+```
+parent: "记住暗号 FORK-KEY-7" → ok
+fork → session-e1a9d319-...
+child : "刚才的暗号是什么" → "FORK-KEY-7"
+PASS
+```
+
+**一个意外收获**：真实语料里 DSH **自己**也用 `user/message` + `source.kind = "compact-checkpoint"`
+来表示压缩替身——我为了 fork 选的那个编码，正好和上游一致。之前 `TestSurfaceRealCorpus`
+的断言"可见摘要 ≤ compaction/summary 次数"因此是错的，已改成把这两种来源都算上。
+
+---
 ## 0.2.1-go.7（未发布）· 续 3
 
 **审批记忆：说过"以后都允许"就真的不再问。**

@@ -101,7 +101,12 @@ func Surface(log *v4.Log) []SurfaceMsg {
 			continue
 		}
 		if m, src, ok := surfaceMessage(ev); ok {
-			out = append(out, SurfaceMsg{Seq: ev.Seq, Type: ev.Type, Source: src, Message: m})
+			// 替身有两种身份：compaction/summary 事件，或 fork 过来的
+			// source.kind = compact-checkpoint 的 user/message。两者都算摘要节点。
+			out = append(out, SurfaceMsg{
+				Seq: ev.Seq, Type: ev.Type, Source: src, Message: m,
+				Summary: src == "compact-checkpoint",
+			})
 		}
 	}
 	return out

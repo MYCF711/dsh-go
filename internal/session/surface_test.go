@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,11 +149,16 @@ func TestSurfaceRealCorpus(t *testing.T) {
 		if err != nil {
 			return nil
 		}
-		eligible, summaries, prunes := 0, 0, 0
+		eligible, summaries, prunes, checkpointMsgs := 0, 0, 0, 0
 		for _, ev := range log.Events {
 			switch ev.Type {
 			case "system/message", "developer/message", "user/message", "assistant/message", "tool/result":
 				eligible++
+				// 真实语料里，DSH 自己的压缩/fork 也会用
+				// source.kind = compact-checkpoint 的 user/message 来放摘要替身。
+				if ev.Type == "user/message" && bytesContains(ev.Data, "compact-checkpoint") {
+					checkpointMsgs++
+				}
 			case "compaction/summary":
 				summaries++
 			case "compaction/prune":
@@ -176,15 +182,17 @@ func TestSurfaceRealCorpus(t *testing.T) {
 		}
 		// 压缩会**级联**：后一次压缩把上一次的摘要节点也遮蔽掉，
 		// 所以可见摘要节点数通常远小于压缩次数（真实语料里 9 次压缩 → 1 个可见摘要）。
-		// 只有 compaction/summary 会产生替身节点；compaction/prune 是纯裁剪，不留摘要。
-		if summaryNodes > summaries {
-			t.Errorf("%s: 可见摘要 %d 多于 summary 事件 %d", filepath.Base(p), summaryNodes, summaries)
+		// 替身有两个来源：compaction/summary 事件，以及 source.kind = compact-checkpoint
+		// 的 user/message（真实语料里 DSH 自己就这么写）。prune 是纯裁剪，不留替身。
+		if summaryNodes > summaries+checkpointMsgs {
+			t.Errorf("%s: 可见摘要 %d 多于替身来源 %d（summary %d + checkpoint 消息 %d）",
+				filepath.Base(p), summaryNodes, summaries+checkpointMsgs, summaries, checkpointMsgs)
 		}
-		if summaries > 0 && summaryNodes == 0 {
-			t.Errorf("%s: 有 %d 次 summary 却没有任何可见摘要", filepath.Base(p), summaries)
+		if summaries+checkpointMsgs > 0 && summaryNodes == 0 {
+			t.Errorf("%s: 有 %d 个替身来源却没有任何可见摘要", filepath.Base(p), summaries+checkpointMsgs)
 		}
-		t.Logf("%s：可派生 %d 条 → surface %d 条（summary %d / prune %d，可见摘要 %d）",
-			filepath.Base(filepath.Dir(p)), eligible, len(surface), summaries, prunes, summaryNodes)
+		t.Logf("%s：可派生 %d 条 → surface %d 条（summary %d / prune %d / checkpoint 消息 %d，可见摘要 %d）",
+			filepath.Base(filepath.Dir(p)), eligible, len(surface), summaries, prunes, checkpointMsgs, summaryNodes)
 		return nil
 	})
 	if err != nil {
@@ -193,4 +201,8 @@ func TestSurfaceRealCorpus(t *testing.T) {
 	if checked == 0 {
 		t.Skip("没有找到压缩过的会话")
 	}
+}
+
+func bytesContains(b []byte, sub string) bool {
+	return bytes.Contains(b, []byte(sub))
 }
