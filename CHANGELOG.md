@@ -10,6 +10,19 @@
 
 ---
 
+## 0.2.1-go.5 · M1 收口 — 2026-11-02
+
+**工具表有了快照与预算：R4 落到测试里，token 有了实测数字。**
+
+- `spi.Tool` 增加 `Description()`：模型靠它决定「要不要用这个工具」，属稳定性契约
+- `dshd tools`：打印模型可见的工具表（name + description + parameters），按名字排序、字节稳定
+- `cmd/dshd/testdata/tools.snapshot.json`：9 个工具的工具表快照
+- 三条测试守着 R4：快照一致、两次装配字节相同、每个工具都有 ≤120 字的描述
+- `docs/tool-budget.md`：实测 **9 工具 / 3,760 字节 / 906 token**（对照 DSH 的 61 / 54,936 / 12,209）
+
+**实测方法**：紧凑 JSON 作为单条 user 消息发给本机网关，读 `usage.prompt_tokens`。
+
+---
 ## 0.2.1-go.5 · M1-d — 2026-11-02
 
 **shell + 后台任务：真实 bash 进程（R6 的第一步落地）。**

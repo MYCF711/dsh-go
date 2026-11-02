@@ -60,7 +60,10 @@ type shellTool struct {
 	budget time.Duration
 }
 
-func (t *shellTool) Name() string            { return "shell" }
+func (t *shellTool) Name() string { return "shell" }
+func (t *shellTool) Description() string {
+	return "在持久 bash 会话里执行命令，cwd 跨命令保留；无输出超时就转后台。"
+}
 func (t *shellTool) Schema() json.RawMessage { return shellSchema }
 
 type shellArgs struct {
@@ -144,7 +147,10 @@ var jobOutputSchema = json.RawMessage(`{
 
 type jobOutputTool struct{ svc *Service }
 
-func (t *jobOutputTool) Name() string            { return "job_output" }
+func (t *jobOutputTool) Name() string { return "job_output" }
+func (t *jobOutputTool) Description() string {
+	return "取后台任务输出（可短等）。任务没结束也能反复取。"
+}
 func (t *jobOutputTool) Schema() json.RawMessage { return jobOutputSchema }
 
 func (t *jobOutputTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
@@ -190,6 +196,7 @@ var jobKillSchema = json.RawMessage(`{
 type jobKillTool struct{ svc *Service }
 
 func (t *jobKillTool) Name() string            { return "job_kill" }
+func (t *jobKillTool) Description() string     { return "终止一个后台任务。" }
 func (t *jobKillTool) Schema() json.RawMessage { return jobKillSchema }
 
 func (t *jobKillTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
@@ -220,6 +227,7 @@ var jobListSchema = json.RawMessage(`{
 type jobListTool struct{ svc *Service }
 
 func (t *jobListTool) Name() string            { return "job_list" }
+func (t *jobListTool) Description() string     { return "列出后台任务及其状态。" }
 func (t *jobListTool) Schema() json.RawMessage { return jobListSchema }
 
 func (t *jobListTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {

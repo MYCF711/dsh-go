@@ -28,7 +28,10 @@ type Tool struct {
 	fs spi.FS
 }
 
-func (t *Tool) Name() string            { return "write" }
+func (t *Tool) Name() string { return "write" }
+func (t *Tool) Description() string {
+	return "新建或整体覆盖文件。覆盖已有文件前必须先 read。"
+}
 func (t *Tool) Schema() json.RawMessage { return schema }
 
 type args struct {

@@ -13,6 +13,7 @@ import (
 type fakeTool struct{ name string }
 
 func (f *fakeTool) Name() string            { return f.name }
+func (f *fakeTool) Description() string     { return "fake" }
 func (f *fakeTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (f *fakeTool) Exec(context.Context, json.RawMessage) (spi.Result, error) {
 	return spi.Result{Summary: "ok"}, nil

@@ -31,7 +31,10 @@ type Tool struct {
 	fs spi.FS
 }
 
-func (t *Tool) Name() string            { return "edit" }
+func (t *Tool) Name() string { return "edit" }
+func (t *Tool) Description() string {
+	return "把文件中的 old_string 逐字替换为 new_string；要求唯一匹配，多处须显式 replace_all。"
+}
 func (t *Tool) Schema() json.RawMessage { return schema }
 
 type args struct {

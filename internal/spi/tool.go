@@ -17,6 +17,9 @@ import (
 type Tool interface {
 	// Name 是模型看到的工具名，全局唯一、稳定。
 	Name() string
+	// Description 是模型看到的「什么时候用它」——不是功能介绍。
+	// 与 Schema 一样属于稳定性契约（R4）：改了要走快照。
+	Description() string
 	// Schema 必须稳定：不得含时间戳、绝对路径、随机 id。
 	Schema() json.RawMessage
 	// Exec 执行。失败时必须通过 Result.Hint 给出下一步。

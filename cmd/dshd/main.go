@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 
 	"dshgo/internal/kernel"
+	"dshgo/internal/spi"
 	"dshgo/modules/exec/bash"
 	"dshgo/modules/fs/local"
 	"dshgo/modules/tool/edit"
@@ -51,6 +53,8 @@ func main() {
 		err = cmdModules(os.Args[2:])
 	case "exec":
 		err = cmdExec(os.Args[2:])
+	case "tools":
+		err = cmdTools(os.Args[2:])
 	case "version":
 		fmt.Printf("dshd %s\n", version)
 	case "-h", "--help", "help":
@@ -73,6 +77,7 @@ func usage() {
   dshd modules graph [--manifest dsh.toml]   打印装配图（按能力排序后的激活顺序）
   dshd modules list  [--manifest dsh.toml]   列出可装配模块
   dshd exec --tool <name> --args <json>      装配后执行一个工具
+  dshd tools [--manifest dsh.toml]           打印模型看到的工具表（JSON）
   dshd version                               版本
 `)
 }
@@ -118,6 +123,64 @@ func cmdModules(argv []string) error {
 	default:
 		return fmt.Errorf("未知子命令 modules %s", argv[0])
 	}
+}
+
+// ToolEntry 是模型看到的工具表里的一行（R4：这张表属于稳定性契约）。
+type ToolEntry struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// buildToolTable 按名字排序，保证同一装配产生同样的字节。
+func buildToolTable(reg spi.ToolRegistry) ([]ToolEntry, error) {
+	tools := reg.Tools()
+	entries := make([]ToolEntry, 0, len(tools))
+	for _, t := range tools {
+		if !json.Valid(t.Schema()) {
+			return nil, fmt.Errorf("工具 %q 的 schema 不是合法 JSON", t.Name())
+		}
+		entries = append(entries, ToolEntry{
+			Name:        t.Name(),
+			Description: t.Description(),
+			Parameters:  t.Schema(),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	return entries, nil
+}
+
+func cmdTools(argv []string) error {
+	fs := flag.NewFlagSet("tools", flag.ContinueOnError)
+	manifest := fs.String("manifest", "dsh.toml", "manifest 路径")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	mods, err := loadMods(*manifest)
+	if err != nil {
+		return err
+	}
+	k := kernel.New("dshd")
+	root := k.Root()
+	defer root.Dispose()
+	if _, err := kernel.Assemble(root, mods); err != nil {
+		return err
+	}
+	reg, err := kernel.Inject(root, spi.ToolsKey)
+	if err != nil {
+		return err
+	}
+	table, err := buildToolTable(reg)
+	if err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(table, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	fmt.Fprintf(os.Stderr, "工具 %d 个，%d 字节\n", len(table), len(out))
+	return nil
 }
 
 func cmdExec(argv []string) error {

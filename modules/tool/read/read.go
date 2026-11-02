@@ -36,6 +36,9 @@ type Tool struct {
 }
 
 func (t *Tool) Name() string { return "read" }
+func (t *Tool) Description() string {
+	return "读文件（按行窗口）。改文件前必须先读；大文件用 offset/limit 分段。"
+}
 
 func (t *Tool) Schema() json.RawMessage { return schema }
 

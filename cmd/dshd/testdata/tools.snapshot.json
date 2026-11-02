@@ -1,0 +1,214 @@
+[
+  {
+    "name": "edit",
+    "description": "把文件中的 old_string 逐字替换为 new_string；要求唯一匹配，多处须显式 replace_all。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "文件路径（正斜杠，相对工作区根）"
+        },
+        "old_string": {
+          "type": "string",
+          "description": "要被替换的原文，必须逐字匹配（含缩进）"
+        },
+        "new_string": {
+          "type": "string",
+          "description": "替换后的内容"
+        },
+        "replace_all": {
+          "type": "boolean",
+          "description": "默认 false：old_string 在文件里必须唯一"
+        }
+      },
+      "required": [
+        "file_path",
+        "old_string",
+        "new_string"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "glob",
+    "description": "按 glob 模式找文件（支持 **）。只返回路径，不读内容。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "glob 模式（相对 path），支持 ** 跨目录，如 **/*.go"
+        },
+        "path": {
+          "type": "string",
+          "description": "起始目录，默认工作区根"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "最多返回多少条，默认 200"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "grep",
+    "description": "按 Go 正则搜索文件内容，返回 文件:行:文本。找文件请用 glob。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Go 正则语法"
+        },
+        "path": {
+          "type": "string",
+          "description": "起始目录，默认工作区根"
+        },
+        "include": {
+          "type": "string",
+          "description": "只搜匹配该 glob 的文件，如 **/*.go"
+        },
+        "ignore_case": {
+          "type": "boolean",
+          "description": "默认 false"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "最多返回多少条匹配，默认 100"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "job_kill",
+    "description": "终止一个后台任务。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "任务 id"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "job_list",
+    "description": "列出后台任务及其状态。",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "job_output",
+    "description": "取后台任务输出（可短等）。任务没结束也能反复取。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "任务 id，如 job-1"
+        },
+        "wait_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120,
+          "description": "最多等多久，默认 0（立即返回当前输出）"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "read",
+    "description": "读文件（按行窗口）。改文件前必须先读；大文件用 offset/limit 分段。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "文件路径（正斜杠，相对工作区根）"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "起始行号（1 基），默认 1"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "最多返回多少行，默认 2000"
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "shell",
+    "description": "在持久 bash 会话里执行命令，cwd 跨命令保留；无输出超时就转后台。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "要执行的 bash 命令；cwd 跨命令保留"
+        },
+        "idle_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900,
+          "description": "多久无输出转后台，默认 600"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "write",
+    "description": "新建或整体覆盖文件。覆盖已有文件前必须先 read。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "文件路径（正斜杠，相对工作区根）"
+        },
+        "content": {
+          "type": "string",
+          "description": "完整文件内容"
+        }
+      },
+      "required": [
+        "file_path",
+        "content"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

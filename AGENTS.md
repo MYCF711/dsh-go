@@ -9,8 +9,8 @@
 ## 0. 当前状态（2026-11-02）
 
 - ✅ **M0 完成**：内核四件事（Scope/Registry/Bus/Assemble）+ 工具 SPI + 装配器 + CLI；`scripts/check.sh` 全绿，CI（windows-latest，含 `-race`）绿
-- 🚧 **M1 进行中**：流水线三件套 + `Result → content[]` 投影 + 文件组 `read/write/edit/glob/grep` 已完成（读后写策略在 `modules/fs/local`）
-- 下一步（顺序不可换）：`shell`（真实 bash 进程 + 持久会话 + 自动转后台）→ 工具一致性套件 + `testdata/tools.snapshot.json` + 工具表 token 实测
+- 🚧 **M1 收口**：工具层已齐（`read/write/edit/glob/grep/shell/job_*` 共 9 个），流水线 + 投影 + schema 快照 + token 实测（**906**）都已落地
+- 下一步：进 **M2** —— LLM(SSE) + agent loop + 会话 v4 codec（先写字节级 golden test 再写编码器）
 
 ---
 
@@ -139,6 +139,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | DSH 内存（私有工作集） | 870 MB | 本机 `tasklist` |
 | 其中 Chromium / Node 宿主 | ~500 / ~367 MB | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
+| **dsh-go 工具表（本人实测 2026-11-02）** | 9 个 / 3,760 字节 / **906 token** | `docs/tool-budget.md` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |
 | 3,002 次调用的工具分布 | `bash` 83.7% / `job_output` 8.7% / 其余 7.6% | `HANDOFF.md` §1.5 |
 | 工具回显占上下文 | **85.5%** | 同上 |
