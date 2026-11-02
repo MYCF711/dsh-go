@@ -287,7 +287,18 @@
   全部 CAUGHT，`MUTATE=1 bash scripts/check.sh` 一次跑完
 - ✅ 真机：`跑 session-…1524  巡检 （只读：登记时没开 allow_writes）`
 - ⚠️ 第五次栽在"python 往 Go 里写带反斜杠的字符串"——改成**按行号替换**才稳。以后动这类代码一律按行号
-- 下一步 **M84**：把"权限相关分支必须有测试"变成门禁（扫 `policy`/`allow`/`deny` 关键字附近是否有测试覆盖）
+- ✅ **`scripts/perm-guard.py` + `perm-gates.json`**（`docs/permission-gates.md`）：自动扫出 10 个
+  "决定放不放行"的函数，要求每个都登记并写明钉住它的测试；新加放行分支不登记 → 门禁红
+- ✅ 顺带补掉两处**真没有测试**的判定：`spi.Caps.NeedsApproval`（删一个字段就静默放行）与
+  `modes.Builtins` 的 read-only 必须 `deny`
+- ✅ **`guardedRunner.Run` 现在有五条测试**（跳过审批 / 拒绝不执行 / 模式 deny 不问 / 同意执行 /
+  审批出错必须 fail-closed）——这是整个审批的**执行点**，以前一条都没有
+- ✅ 变异条目到 **10 条**；新增 `needs-approval-drops-destructive`、
+  `guarded-runner-executes-on-refusal`（后者第一版**编译不过**被 `mutate.py` 判 BAD，
+  改成能编译的语义反转才 CAUGHT——**编译不过的变异什么都没证明**）
+- ✅ 修了门禁自己的一个误报：`git status --porcelain` 会把**未跟踪的新测试文件**算成"没恢复干净"，
+  改成只看 `git diff --name-only`（已跟踪文件的改动）
+- 下一步 **M85**：HTTP/界面的权限面（transport 落地时同样要有守卫）
 
 ### 界面线现状（2026-11-03）
 

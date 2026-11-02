@@ -62,5 +62,21 @@
     "new": "if false {",
     "pkg": "./cmd/dshd",
     "test": "TestSchedulePolicyHonorsExplicitOptIn"
+  },
+  {
+    "name": "needs-approval-drops-destructive",
+    "file": "internal/spi/tool.go",
+    "old": "return c.Writes || c.Executes || c.Network || c.Destructive",
+    "new": "return c.Writes || c.Executes || c.Network",
+    "pkg": "./internal/spi",
+    "test": "TestNeedsApproval"
+  },
+  {
+    "name": "guarded-runner-executes-on-refusal",
+    "file": "cmd/dshd/acp.go",
+    "old": "\t\t\treturn spi.Result{Hint: \"用户拒绝了这次调用：换成只读方式确认，或先说明你要做什么再请求\"},\n\t\t\t\tfmt.Errorf(\"用户拒绝了 %s\", name)",
+    "new": "\t\t\t_ = ok\n\t\t\treturn g.inner.Run(ctx, name, args)",
+    "pkg": "./cmd/dshd",
+    "test": "TestGuardedRunnerRefusalDoesNotExecute"
   }
 ]

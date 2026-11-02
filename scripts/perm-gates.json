@@ -1,0 +1,17 @@
+{
+  "_说明": "权限分支登记表：每个决定『放不放行』的函数都必须写明钉住它的测试函数名。scripts/perm-guard.py 会检查这张表与代码一致。",
+  "gates": {
+    "cmd/dshd/acp.go::approvalDecision": "TestApprovalDecision",
+    "cmd/dshd/acp.go::Run": "TestGuardedRunnerRefusalDoesNotExecute",
+    "cmd/dshd/main.go::deniesSilently": "TestDeniesSilently",
+    "cmd/dshd/main.go::makeAskFuncWith": "TestMakeAskFuncPolicies",
+    "cmd/dshd/schedule_policy.go::schedulePolicy": "TestSchedulePolicyDefaultsToReadOnly",
+    "internal/spi/tool.go::NeedsApproval": "TestNeedsApproval",
+    "internal/modes/modes.go::Builtins": "TestReadOnlyModeDeniesApprovals"
+  },
+  "exempt": {
+    "cmd/dshd/acp.go::Prompt": "ACP 的 prompt 处理器：它只是把 modeApproval 传下去，判定本身在 approvalDecision 与 Run",
+    "cmd/dshd/schedule.go::cmdSchedule": "循环体：判定已抽到 schedulePolicy，这里只调用",
+    "internal/prompt/prompt.go::Build": "只决定提示词里把工具怎么分组，不影响是否放行"
+  }
+}

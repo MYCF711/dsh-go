@@ -33,6 +33,19 @@ else
     bad "go test -race"
   fi
 
+  # 权限分支守卫：每个"放不放行"的函数都得有测试钉着。
+  # 这条改坏了**不一定报错**（删掉一个 Caps 字段，所有测试照样绿），所以单独设闸。
+  if [ -f scripts/perm-guard.py ]; then
+    if pg_out="$(python scripts/perm-guard.py 2>&1)"; then
+      pass "$(printf '%s' "$pg_out" | tail -1)"
+    else
+      bad "权限分支守卫: $(printf '%s' "$pg_out" | tail -2 | tr '
+' ' ')"
+    fi
+  else
+    skip "没有权限分支守卫"
+  fi
+
   # 变异清单自洽：每条的 old 片段必须**恰好出现一次**，
   # 否则那条变异永远是 BAD，等于验收清单里混着一条废条目。
   if [ -f scripts/mutate.py ] && [ -f scripts/mutations.json ]; then
@@ -53,8 +66,11 @@ else
       bad "变异测试有没抓住的（看 /tmp/mutate.log）"
     fi
     # 跑完源码必须原样：临时改坏却恢复失败是最坏的结果。
-    if [ -n "$(git status --porcelain modules internal 2>/dev/null)" ]; then
-      bad "变异测试跑完源码没恢复干净"
+    # 只看**已跟踪文件**的改动：未跟踪的新文件是正常的开发中间态，
+    # 变异测试留下的痕迹一定是"改动了本来就在库里的文件"。
+    if [ -n "$(git diff --name-only -- modules internal cmd 2>/dev/null)" ]; then
+      bad "变异测试跑完源码没恢复干净（$(git diff --name-only -- modules internal cmd | head -3 | tr '
+' ' ')）"
     fi
   fi
 
