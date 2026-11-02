@@ -848,6 +848,10 @@
           "type": "string",
           "description": "claim 必填：你的名字或角色"
         },
+        "force": {
+          "type": "boolean",
+          "description": "action=delete 专用：强行删掉别人认领的任务（会进归档）"
+        },
         "subject": {
           "type": "string",
           "description": "action=edit 时传，才改"

@@ -258,8 +258,17 @@
   靠 `find state -name agents.json` 才发现——**build 过 ≠ 落对地方**
 - ✅ 工具表 42 个：完整表 6,048 token（超 P0 的 6k），**默认压缩表 4,149**
 - ✅ **新增 `docs/dshd-shortboards.md`**：记它作为执行者的真实短板，比单测值钱
-- 下一步 **M80**：`team_task_update` 的 delete（删共享板条目且无历史），或把 shortboards 的教训
-  写成 dshd 任务书的固定模板
+- ✅ **`team_task_update` 的 delete 上了两道闸**：别人认领的任务不能直接删（要 `force`，
+  且 Hint 指名道姓）；删之前**先归档**到 `team-tasks.deleted.jsonl`——任务板是共享的，
+  删完就没人能回答"谁、什么时候、为什么删的"
+- ✅ 真机：`← team_task_update [ERR] … 已被认领，需要 force`
+- ✅ **测试也由 dshd 写**（9 次调用，4 个测试）：再用**变异测试**验它不是废的——
+  去掉守卫 → 只有 Refuses 那条红；去掉归档 → 只有 Archives 那条红。全绿 ≠ 有用
+- ✅ **派活模板写进 `docs/WORKER.md` §6.5**：「接口都给全了吗 / 第一步是不是 write /
+  怎么知道做对了」三问，外加"自检必须验真实落点，不能只 build"
+- ✅ 第三次踩 `
+` 坑（python 写进 Go 的 rune 字面量）
+- 下一步 **M81**：把变异测试做成脚本（`scripts/mutate.py`），验收任何"它写的测试"都跑一遍
 
 ### 界面线现状（2026-11-03）
 

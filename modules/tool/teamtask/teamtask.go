@@ -107,6 +107,28 @@ func (b *board) load() ([]Task, error) {
 
 // save 先写 .tmp 再 rename：崩在中间时旧文件仍然完整，不会留下半截 JSON。
 // 调用方必须已持锁。
+// archive 把被删掉的条目追加到 <dir>/team-tasks.deleted.jsonl。
+//
+// 为什么不直接删：任务板是**共享**的，删完就没有任何东西能回答
+// "这条是谁、什么时候、以什么理由删的"。一行追加的成本换一次可追溯。
+func (b *board) archive(t Task) error {
+	if err := os.MkdirAll(b.dir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(b.dir, "team-tasks.deleted.jsonl"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	line, err := json.Marshal(map[string]any{"deleted_at": now(), "task": t})
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(append(line, '\n'))
+	return err
+}
+
 func (b *board) save(tasks []Task) error {
 	if tasks == nil {
 		tasks = []Task{}
@@ -341,6 +363,7 @@ func (t *Tool) Schema() json.RawMessage {
                "enum": ["claim", "release", "complete", "reopen", "edit", "set_dependencies", "delete"],
                "description": "claim=认领并置 in_progress；release=退回 pending 并清 owner；complete=完成；reopen=重开；edit=改 subject/description；set_dependencies=整份替换 blocked_by；delete=删除"},
     "owner": {"type": "string", "description": "claim 必填：你的名字或角色"},
+    "force": {"type": "boolean", "description": "action=delete 专用：强行删掉别人认领的任务（会进归档）"},
     "subject": {"type": "string", "description": "action=edit 时传，才改"},
     "description": {"type": "string", "description": "action=edit 时传，才改（传空串表示清空）"},
     "blocked_by": {"type": "array", "items": {"type": "string"},
@@ -578,13 +601,22 @@ func (t *Tool) execGet(ctx context.Context, raw json.RawMessage) (spi.Result, er
 
 // ---------------------------------------------------------------- update
 
+// ownerOf 是"这次调用代表谁"。认领时默认用它署名（见 claim 分支），
+// 删除时也用它判断"这条是不是我认领的"。
+func ownerOf(ctx context.Context) string {
+	q := spi.SessionFrom(ctx)
+	return strings.TrimSpace(q)
+}
+
 type updateArgs struct {
 	ID string `json:"task_id"`
 	// ExpectedRevision 留着占位：DSH 的契约里有这个参数，我们暂时不做 CAS
 	ExpectedRevision *int `json:"expected_revision"`
 
-	Action      string    `json:"action"`
-	Owner       string    `json:"owner"`
+	Action string `json:"action"`
+	Owner  string `json:"owner"`
+	// Force 只对 delete 生效：强行删掉别人认领的任务（会进归档）。
+	Force       bool      `json:"force"`
 	Subject     *string   `json:"subject"`
 	Description *string   `json:"description"`
 	BlockedBy   *[]string `json:"blocked_by"`
@@ -702,6 +734,17 @@ func (t *Tool) execUpdate(ctx context.Context, raw json.RawMessage) (spi.Result,
 		task.BlockedBy = deps
 		hint = withDepNote("", missingDeps(tasks, deps))
 	case "delete":
+		// 别人认领的任务不能随手删：那是在删**别人正在做的活**，
+		// 而且删完没有任何痕迹。要删得显式 force，并且照样进归档。
+		if owner := strings.TrimSpace(task.Owner); owner != "" && owner != ownerOf(ctx) && !a.Force {
+			return spi.Result{Hint: fmt.Sprintf(
+				"%s 正被 %s 认领，不能直接删。要么让认领者先 release，要么带 force=true 强行删（会进归档）",
+				task.ID, owner)}, fmt.Errorf("team_task_update: %s 已被认领，需要 force", task.ID)
+		}
+		// 归档再删：任务板上删掉就没有历史了，事后想追"谁把这条删了"无从查起。
+		if err := t.b.archive(task); err != nil {
+			return spi.Result{Hint: "归档没写成：删除已中止，任务还在板上。检查状态目录权限后重试"}, err
+		}
 		tasks = append(tasks[:i], tasks[i+1:]...)
 		if err := t.b.save(tasks); err != nil {
 			return spi.Result{Hint: "删除没落盘：检查状态目录权限与磁盘空间，重试一次"}, err
