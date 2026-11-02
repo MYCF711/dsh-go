@@ -311,7 +311,9 @@ func cmdRun(argv []string) error {
 	maxChars := fs.Int("max-chars", 4000, "工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	resumeSession := fs.String("session", "", "续这个会话（空=新建）；cwd 可省，按 id 找")
-	compactTools := fs.Bool("tool-schema-compact", false, "工具表压掉参数说明（省约四成字节，可能影响参数填对率）")
+	// 工具表默认压掉参数说明：20 次 A/B（10 个任务 × 两种表）结果一致，输入省 22%。
+	// 要完整表就显式写 --tool-schema=full——比如排查"模型没填对参数"时。
+	toolSchema := fs.String("tool-schema", "compact", "工具表形态：compact=压掉参数说明（省约两成输入）| full=完整")
 	// 规则文件：默认工作区的 AGENTS.md；给"执行者"喂精简手册时指到 docs/WORKER.md。
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	policy := fs.String("policy", "auto", "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
@@ -438,7 +440,7 @@ func cmdRun(argv []string) error {
 		Model:        *model,
 		System:       sys,
 		SessionID:    sessID,
-		CompactTools: *compactTools,
+		CompactTools: *toolSchema != "full",
 		MaxSteps:     *maxSteps,
 		Emit: func(e agent.Event) error {
 			switch e.Kind {
