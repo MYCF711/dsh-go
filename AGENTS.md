@@ -397,7 +397,14 @@
 - ✅ 变异第 12 条 `load-swallows-source-error`（把错误换成 `nil`）→ **CAUGHT**
 - ✅ 它**自己顺手做了两次变异验证**（吞错误 / 删空 id 拦截各红一次，然后恢复、`git status` 干净）——
   这是第一次不用我要求就自己验"测试是不是废的"
-- 下一步 **M96**：宿主侧实现 `Source`（`v4.ReadFile` → `[]Message`），用真实会话做 golden test
+- ✅ **宿主侧 `Source` 实现落地**（dshd 写，22 次调用，撞满 16 步）：`cmd/dshd/transport_source.go`
+  把 v4 事件映射成 `transport.Message`——只认 user/assistant/tool 三类，其它**跳过，不造 role**
+- ✅ golden test 在真实会话上跑通：**664 条事件 → 210 条消息**，seq 严格递增，含非空 user 消息
+- ⚠️ **我的任务书写死了一条错规则**：断言"至少 1 条消息"。实测有会话只有 header + 控制类事件
+  （4 条事件、0 条消息），映射出 0 条是**对的**。改成 `t.Skipf("这个会话没有消息事件，换一个")`——
+  拿一个没消息的会话做 golden 什么也证明不了，应该换样本而不是让它红
+- ✅ 三种路径都验过：没消息的会话 → skip；有消息的会话 → PASS；没设 `DSH_TEST_SESSION` → skip（CI 正确行为）
+- 下一步 **M97**：`session.list` 的宿主实现（读磁盘列会话，`title` 要能看懂），同样用真实语料验
 
 ### 界面线现状（2026-11-03）
 
