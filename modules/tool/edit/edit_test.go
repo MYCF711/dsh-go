@@ -126,3 +126,20 @@ func TestNoOpEditRejected(t *testing.T) {
 		t.Fatal("无变化的编辑应被拒绝（避免噪声工具调用）")
 	}
 }
+
+// 没读过就改：错误文本必须和 DSH 一样，一句话说清下一步。
+// 真实语料里这是 edit 失败的最大来源（853 次调用 / 75 次失败，其中 29 次是它）。
+func TestEditWithoutReadSaysHowToFix(t *testing.T) {
+	tl, _, root := newTool(t)
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := tl.Exec(context.Background(), json.RawMessage(`{"file_path":"a.txt","old_string":"hello","new_string":"world"}`))
+	if err == nil {
+		t.Fatal("没读过就改必须被拒绝")
+	}
+	if !strings.Contains(err.Error(), "file has not been read") ||
+		!strings.Contains(err.Error(), "read the file, then retry") {
+		t.Fatalf("措辞不一致（模型得靠这句话学会下一步）: %v", err)
+	}
+}

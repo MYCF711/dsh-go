@@ -96,3 +96,21 @@
 2. **取消 ≠ 失败**。DSH 对"记录下来但没收到结果"的调用，写的是
    *outcome is unknown*，不是 failed——因为命令可能已经跑完了。
    → 我们把 `context.Canceled` 单独处理成同一句话 + 引导先看现场。
+
+## edit 的 75 个失败样本（2026-11-02）
+
+| 条数 | 归类 |
+|---:|---|
+| **34** | `cannot edit "<p>": file changed since it was read — re-read the file, then retry` |
+| **29** | `cannot modify "<p>": file has not been read — read the file, then retry` |
+| 10 | `old_string was not found in "<p>"` |
+| 1 | `old_string matched 2 times in "<p>"; provide a more specific old_string or set replace_all to true` |
+| 1 | `unknown tool "edit"` |
+
+**84%（63/75）来自读后写策略。** 这不是"edit 不好用"，而是模型在盲改——
+而这条错误信息本身就是它的教程：一句话写清「做了什么（cannot modify）/
+为什么不行（file has not been read）/ 下一步（read the file, then retry）」。
+
+我们把这条措辞逐字对齐了（含破折号），并让动词跟着工具走：
+`write` 用 `cannot write`、`edit` 用 `cannot edit`。
+测试用同构比对（把路径换成占位符）钉住，防止以后"顺手改文案"改跑偏。

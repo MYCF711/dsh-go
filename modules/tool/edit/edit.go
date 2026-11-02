@@ -68,7 +68,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		return spi.Result{Hint: "old_string 与 new_string 相同，这次编辑没有任何效果"}, fmt.Errorf("替换内容相同")
 	}
 
-	if err := t.fs.CheckWritable(a.FilePath); err != nil {
+	if err := t.fs.CheckWritable(a.FilePath, "edit"); err != nil {
 		return spi.Result{Hint: "改文件之前必须先 read 它，确认当前内容与你以为的一致"}, err
 	}
 

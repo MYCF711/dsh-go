@@ -51,7 +51,7 @@ func TestReadThenWriteAllowed(t *testing.T) {
 	if _, err := fs.Read("a.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.CheckWritable("a.txt"); err != nil {
+	if err := fs.CheckWritable("a.txt", "write"); err != nil {
 		t.Fatalf("读过之后应允许写: %v", err)
 	}
 	if err := fs.Write("a.txt", []byte("world")); err != nil {
@@ -69,12 +69,17 @@ func TestReadThenWriteAllowed(t *testing.T) {
 func TestBlindWriteRejected(t *testing.T) {
 	fs, root := newFS(t)
 	write(t, root, "a.txt", "hello")
-	err := fs.CheckWritable("a.txt")
+	err := fs.CheckWritable("a.txt", "write")
 	if err == nil {
 		t.Fatal("没读过就改必须被拒绝")
 	}
-	if !strings.Contains(err.Error(), "还没读过") {
+	// 一句话要说清「做了什么、为什么不行、下一步怎么做」——真实语料里 edit 的
+	// 失败 84% 来自这条策略，措辞直接决定模型能不能一次改对。
+	if !strings.Contains(err.Error(), "file has not been read") {
 		t.Fatalf("错误信息要能指导下一步: %v", err)
+	}
+	if !strings.Contains(err.Error(), "read the file, then retry") {
+		t.Fatalf("要直接给出下一步动作: %v", err)
 	}
 }
 
@@ -91,21 +96,25 @@ func TestStaleWriteRejected(t *testing.T) {
 	if err := os.Chtimes(p, time.Now(), time.Now().Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	err := fs.CheckWritable("a.txt")
-	if err == nil || !strings.Contains(err.Error(), "改过") {
+	err := fs.CheckWritable("a.txt", "write")
+	if err == nil || !strings.Contains(err.Error(), "file changed since it was read") {
 		t.Fatalf("过期观测必须要求重读，得到 %v", err)
+	}
+	// 措辞按工具区分动词：写用 cannot write，改用 cannot edit。
+	if !strings.Contains(err.Error(), `cannot write "a.txt"`) {
+		t.Fatalf("动词不对: %v", err)
 	}
 	if _, err := fs.Read("a.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.CheckWritable("a.txt"); err != nil {
+	if err := fs.CheckWritable("a.txt", "write"); err != nil {
 		t.Fatalf("重读之后应允许写: %v", err)
 	}
 }
 
 func TestCreateNewFileNeedsNoRead(t *testing.T) {
 	fs, root := newFS(t)
-	if err := fs.CheckWritable("new/dir/b.txt"); err != nil {
+	if err := fs.CheckWritable("new/dir/b.txt", "write"); err != nil {
 		t.Fatalf("新建文件不该要求先读: %v", err)
 	}
 	if err := fs.Write("new/dir/b.txt", []byte("x")); err != nil {
@@ -121,7 +130,7 @@ func TestWriteMarksObserved(t *testing.T) {
 	if err := fs.Write("c.txt", []byte("1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.CheckWritable("c.txt"); err != nil {
+	if err := fs.CheckWritable("c.txt", "write"); err != nil {
 		t.Fatalf("自己写的文件应视为已观测: %v", err)
 	}
 }

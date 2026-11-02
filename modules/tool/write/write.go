@@ -60,7 +60,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	if err != nil {
 		return spi.Result{Hint: "路径越界或不可访问；只允许写工作区内的文件"}, err
 	}
-	if err := t.fs.CheckWritable(a.FilePath); err != nil {
+	if err := t.fs.CheckWritable(a.FilePath, "write"); err != nil {
 		return spi.Result{Hint: "覆盖已有文件前必须先 read 它；要新建文件就不用读"}, err
 	}
 

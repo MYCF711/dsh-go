@@ -49,7 +49,8 @@
 - ✅ `session/list` 读磁盘（项目过滤 + 一句话摘要 + 坏文件也列出来）+ `TestListSessions*` 四条
 - ✅ 行为对拍：从 2.3 万个真实结果里挖失败形状，修掉 read offset 越界静默返空、grep 坏路径返 0 命中、失败事件正文为空
 - ✅ bash 失败样本归类：84/110 是 `unknown tool`（措辞已对齐）；取消改为 "outcome is unknown" 语义
-- 下一步 **M15**：`edit` 的失败形态（853 次调用 / 75 次失败，是核心工具里失败率最高的）
+- ✅ edit 失败归类：84% 是读后写策略；措辞逐字对齐 DSH（含 `cannot write`/`cannot edit` 动词区分）
+- 下一步 **M15**：`0.2.1-go.14` 发版
 
 ---
 

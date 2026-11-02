@@ -84,7 +84,10 @@ func (f *FS) Read(p string) ([]byte, error) {
 }
 
 // CheckWritable 实施读后写策略。
-func (f *FS) CheckWritable(p string) error {
+//
+// 措辞对齐 DSH（真实语料实测）：一句话说清「做了什么、为什么不行、下一步怎么做」，
+// 模型不用再去看别的字段就能改。这三类占 edit 失败的 84%。
+func (f *FS) CheckWritable(p, op string) error {
 	abs, err := f.Resolve(p)
 	if err != nil {
 		return err
@@ -102,10 +105,14 @@ func (f *FS) CheckWritable(p string) error {
 	f.mu.Unlock()
 
 	if !seen {
-		return fmt.Errorf("还没读过 %s；先 read 它再改（读后写策略：不做盲改）", p)
+		return fmt.Errorf(`cannot modify %q: file has not been read — read the file, then retry`, p)
 	}
 	if !s.mod.Equal(st.ModTime()) || s.size != st.Size() {
-		return fmt.Errorf("%s 在读过之后被改过；重新 read 再改，避免覆盖别人的修改", p)
+		verb := op
+		if verb == "" {
+			verb = "modify"
+		}
+		return fmt.Errorf(`cannot %s %q: file changed since it was read — re-read the file, then retry`, verb, p)
 	}
 	return nil
 }

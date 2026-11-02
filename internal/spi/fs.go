@@ -15,7 +15,10 @@ type FS interface {
 	// Read 读文件，并登记「已观测」；登记发生在读之前，宁可多要求一次重读。
 	Read(path string) ([]byte, error)
 	// CheckWritable 在写之前确认读后写策略。文件不存在时允许创建。
-	CheckWritable(path string) error
+	//
+	// op 是动词（"write" / "edit"），只影响报错措辞：
+	// 真实语料里 edit 的失败 84% 来自这条策略，措辞要能让模型当场学会怎么改。
+	CheckWritable(path, op string) error
 	// Stat 查文件是否存在与大小（不改观测状态）。
 	Stat(path string) (size int64, exists bool, err error)
 	// Write 写文件（自动建父目录），成功后把新内容登记为已观测。

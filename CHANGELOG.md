@@ -1,3 +1,27 @@
+## 0.2.1-go.14（未发布）
+
+**edit 的 75 个失败：84% 来自读后写策略，而那条错误信息就是它自己的教程。**
+
+```
+ 34  cannot edit "<p>": file changed since it was read — re-read the file, then retry
+ 29  cannot modify "<p>": file has not been read — read the file, then retry
+ 10  old_string was not found in "<p>"
+  1  old_string matched 2 times in "<p>"; provide a more specific old_string or set replace_all to true
+  1  unknown tool "edit"
+```
+
+我们原来写的是中文（`还没读过 a.txt；先 read 它再改`），意思对，但：
+- 没有 `Error: ` 前缀（客户端识别不了）
+- 没有动词（看不出是 write 还是 edit 被拦）
+- 措辞和 DSH 不一致 → 对拍结论没法复用
+
+现在逐字对齐（含破折号），并且动词跟着工具走：`write` 用 `cannot write`、
+`edit` 用 `cannot edit`。`FS.CheckWritable(path, op)` 加了一个 op 参数，
+只是为了措辞——策略本身没变。
+
+**测试用同构比对**（把路径换成占位符再比）钉住这两句，防止以后"顺手改文案"改跑偏。
+
+---
 ## 0.2.1-go.13（2026-11-02）
 
 **bash 的 110 个失败样本：最常见的"bash 失败"其实不是 bash 失败。**
