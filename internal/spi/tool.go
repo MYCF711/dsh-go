@@ -1,0 +1,85 @@
+// Package spi 是本仓的全部接口与数据类型，零实现。
+//
+// 规则：模块之间只能看见这里的类型；任何“模块 A 直接 import 模块 B”都是违规。
+package spi
+
+import (
+	"context"
+	"encoding/json"
+)
+
+// Tool 是模型可见的一个工具。这是本项目的产品本体（PLAN §7）。
+//
+// 三条硬约束由中间件统一实现，工具作者不要自己写：
+//  1. 序列化层：Data → JSON，键名 snake_case；
+//  2. 截断层：超阈值自动外置 artifact + 指针，替换体本身永不超阈值；
+//  3. 提示层：error 必须带 Hint。
+type Tool interface {
+	// Name 是模型看到的工具名，全局唯一、稳定。
+	Name() string
+	// Schema 必须稳定：不得含时间戳、绝对路径、随机 id。
+	Schema() json.RawMessage
+	// Exec 执行。失败时必须通过 Result.Hint 给出下一步。
+	Exec(ctx context.Context, args json.RawMessage) (Result, error)
+}
+
+// Result 是宿主内部的工具结果契约。
+//
+// 注意与 DSH 的差异：DSH 只有 {isError, content[], meta?}，会话 v4 也只认这个形状。
+// 所以结构化是我们的内部契约，v4 是**边界上的编码**——由投影函数把 Data 压成 content。
+type Result struct {
+	Summary   string       // 一行，给人看（TUI/桌面端）
+	Data      any          // 结构化，给模型
+	Artifacts []Artifact   // 大结果外置后的引用
+	Truncated *Truncation  // 发生截断时的证据
+	Hint      string       // 失败或为空时的下一步建议
+	View      *ViewSpec    // 客户端渲染契约
+}
+
+// Artifact 是一份被外置的大结果。
+type Artifact struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	Bytes int64  `json:"bytes"`
+}
+
+// Truncation 记录“保留了多少、总共多少、去哪儿取”。
+type Truncation struct {
+	Kept    int    `json:"kept"`
+	Total   int    `json:"total"`
+	Pointer string `json:"pointer"`
+}
+
+// ViewKind 是三种版式。
+type ViewKind string
+
+const (
+	ViewCard  ViewKind = "card"
+	ViewTable ViewKind = "table"
+	ViewPlain ViewKind = "plain"
+)
+
+// ViewSpec 是给客户端（TUI / 桌面端）的结构化视图声明。
+// 未声明时客户端退化为键值卡片，再退化为原文。
+type ViewSpec struct {
+	Kind    ViewKind  `json:"kind"`
+	Title   string    `json:"title,omitempty"`
+	Badge   string    `json:"badge,omitempty"`
+	Fields  []Field   `json:"fields,omitempty"`
+	Columns []string  `json:"columns,omitempty"`
+	Rows    [][]string `json:"rows,omitempty"`
+	Body    string    `json:"body,omitempty"`
+}
+
+// Field 是 card 版式的一行键值。
+type Field struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// ToolRegistry 是工具目录。中间件链与可见性都由它负责，工具自己不管。
+type ToolRegistry interface {
+	Register(Tool) error
+	Tools() []Tool
+	Get(name string) (Tool, bool)
+}

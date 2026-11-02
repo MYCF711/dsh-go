@@ -19,8 +19,9 @@
 
 ```
 分支        main
-里程碑      M0 未开始（产品代码零行）
-已有资产    方案 PLAN.md / 手册 AGENTS.md / 调研 research 6 份 / 审计 evidence 3 份
+里程碑      M0 完成（内核四件事 + 工具 SPI + 装配器 + CLI，门禁全绿）
+版本        0.2.1-go.5（未打 tag）
+已有资产    方案 / 手册 / 调研 6 份 / 审计 3 份 / Go 骨架 13 个文件
 ```
 
 | 资产 | 数量 |
@@ -32,9 +33,21 @@
 
 ## 三、下一步
 
-1. **M0**：`go mod init dshgo` → `internal/kernel`（scope/registry/eventbus/assemble）→ `internal/spi/tool.go`。
-2. **M0 验收**：`scripts/check.sh` 全绿 + 删 `modules/` 仍能编译 + 禁用任意模块报「缺 X 能力」。
-3. 之后按 `PLAN.md` §14 推进 M1→M5，一里程一个 tag。
+1. **M1**：工具中间件三件套（序列化 / 截断外置 / 提示）+ `Result → content[]` 投影的 golden test。
+2. 补齐文件组（`write` `edit` `glob` `grep`）与 `shell`——**shell 走真实 bash 进程**，不用 mvdan 执行（R6）。
+3. 之后按 `PLAN.md` §14 推进 M2→M5。
+
+### M0 的验收证据（已跑）
+
+| 判据 | 结果 |
+|---|---|
+| `dshd modules graph` 打印激活顺序 | `tools` → `tool-read`（由能力依赖决定，与 manifest 行顺序无关） |
+| 删 `modules/` 后 `go build ./internal/...` | 通过 |
+| 禁用提供者模块 | `模块 "tool-read" 需要能力 "tools"，但没有模块提供它` |
+| manifest 写不存在的 id | `模块 "ghost" 没有编译进二进制；可用模块: [tool-read tools]` |
+| `dshd exec --tool read` | 返回结构化 `Data` + `Hint` + `View` |
+| `scripts/check.sh` | ALL GREEN（9 项 PASS） |
+| `-race` | **未验证**：本机 `CGO_ENABLED=0` 且无 gcc |
 
 ## 四、硬约束（违反即返工）
 

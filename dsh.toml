@@ -1,0 +1,15 @@
+# dsh-go manifest —— 对应 DSH 的 cordis.patch.yml
+#
+# 语义：按 id 命中；`enabled = false` 禁用；config 是**整块替换**而不是 merge。
+# 激活顺序由能力依赖决定，本文件的书写顺序不承载语义。
+
+[profile]
+name = "default"
+
+[[module]]
+id      = "tools"
+backend = "static"
+
+[[module]]
+id      = "tool-read"
+backend = "static"

@@ -17,7 +17,14 @@ if [ ! -f go.mod ]; then
 else
   go build ./...      && pass "go build"      || bad "go build"
   go vet ./...        && pass "go vet"        || bad "go vet"
-  go test ./... -race && pass "go test -race" || bad "go test -race"
+
+  # -race 需要 cgo；本机没有 C 编译器时降级为普通测试，并明说未验证什么。
+  cc="$(go env CC)"
+  if [ "$(go env CGO_ENABLED)" = "1" ] && command -v "$cc" >/dev/null 2>&1; then
+    go test ./... -race && pass "go test -race" || bad "go test -race"
+  else
+    go test ./... && pass "go test（-race 未验证：CGO_ENABLED=$(go env CGO_ENABLED)，CC=$cc 不可用）" || bad "go test"
+  fi
 
   # R1 内核零业务
   if [ -d internal/kernel ]; then
