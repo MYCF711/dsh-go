@@ -235,7 +235,7 @@ func (t *Tool) Schema() json.RawMessage {
     "weekly_at": {"type": "string", "description": "kind=weekly 时的 HH:MM，本地时区"},
     "weekdays": {"type": "array", "items": {"type": "integer"}, "description": "kind=weekly 时的星期集合，0=周日"}
   },
-  "required": ["id"],
+
   "additionalProperties": false
 }`)
 	case kindDelete:
@@ -244,7 +244,7 @@ func (t *Tool) Schema() json.RawMessage {
   "properties": {
     "id": {"type": "string", "description": "要删的定时任务 id"}
   },
-  "required": ["id"],
+
   "additionalProperties": false
 }`)
 	}
@@ -405,6 +405,26 @@ func (t *Tool) list(ctx context.Context, raw json.RawMessage) (spi.Result, error
 
 // ---------------------------------------------------------------- update
 
+// pickID 处理"只有一个任务时不填 id"的情形。
+// 有多条时必须让模型选——猜错就改/删了别人的任务。
+func pickID(items []Schedule, id, who string) (string, error) {
+	if id != "" {
+		return id, nil
+	}
+	switch len(items) {
+	case 0:
+		return "", fmt.Errorf("还没有定时任务：先 schedule_create 建一个")
+	case 1:
+		return items[0].ID, nil
+	default:
+		ids := make([]string, 0, len(items))
+		for _, it := range items {
+			ids = append(ids, it.ID)
+		}
+		return "", fmt.Errorf("%s：这个会话有 %d 条定时任务（%s），id 必须填一个", who, len(items), strings.Join(ids, "、"))
+	}
+}
+
 func (t *Tool) update(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
 	var a updateArgs
 	if err := json.Unmarshal(raw, &a); err != nil {
@@ -420,18 +440,18 @@ func (t *Tool) update(ctx context.Context, raw json.RawMessage) (spi.Result, err
 		return spi.Result{Hint: "这次调用没有会话上下文，就不知道改谁的任务：别重试，告诉维护者接线要带会话"},
 			fmt.Errorf("schedule_update: %w", err)
 	}
-	id := strings.TrimSpace(a.ID)
-	if id == "" {
-		return spi.Result{Hint: `id 不能为空：先 schedule_list 拿 id，再带上它重调`},
-			fmt.Errorf("schedule_update: id 为空")
-	}
-
 	t.st.mu.Lock()
 	defer t.st.mu.Unlock()
 	items, err := t.st.load(sessionID)
 	if err != nil {
 		return spi.Result{Hint: "定时任务文件读不出来或已损坏：先让人看一眼 " + t.st.display(sessionID) + "，别覆盖它"},
 			fmt.Errorf("schedule_update: %w", err)
+	}
+	// id 不填就用唯一的那条：一个会话通常只挂一两个定时任务，
+	// 让模型抄一遍刚建出来的 id 只是多一次被拒的机会；有多条时必须自己选。
+	id, err := pickID(items, strings.TrimSpace(a.ID), "schedule_update")
+	if err != nil {
+		return spi.Result{Hint: err.Error()}, err
 	}
 	idx := indexOf(items, id)
 	if idx < 0 {
@@ -545,11 +565,6 @@ func (t *Tool) delete(ctx context.Context, raw json.RawMessage) (spi.Result, err
 		return spi.Result{Hint: "这次调用没有会话上下文，就不知道删谁的任务：别重试，告诉维护者接线要带会话"},
 			fmt.Errorf("schedule_delete: %w", err)
 	}
-	id := strings.TrimSpace(a.ID)
-	if id == "" {
-		return spi.Result{Hint: `id 不能为空：先 schedule_list 拿 id，再带上它重调`},
-			fmt.Errorf("schedule_delete: id 为空")
-	}
 
 	t.st.mu.Lock()
 	defer t.st.mu.Unlock()
@@ -557,6 +572,11 @@ func (t *Tool) delete(ctx context.Context, raw json.RawMessage) (spi.Result, err
 	if err != nil {
 		return spi.Result{Hint: "定时任务文件读不出来或已损坏：先让人看一眼 " + t.st.display(sessionID) + "，别覆盖它"},
 			fmt.Errorf("schedule_delete: %w", err)
+	}
+	// 与 update 同一条规则：只有一条时可以省 id。
+	id, err := pickID(items, strings.TrimSpace(a.ID), "schedule_delete")
+	if err != nil {
+		return spi.Result{Hint: err.Error()}, err
 	}
 	idx := indexOf(items, id)
 	if idx < 0 {

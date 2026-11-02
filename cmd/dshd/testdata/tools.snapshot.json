@@ -591,9 +591,6 @@
           "description": "要删的定时任务 id"
         }
       },
-      "required": [
-        "id"
-      ],
       "additionalProperties": false
     },
     "caps": {
@@ -656,9 +653,6 @@
           "description": "kind=weekly 时的星期集合，0=周日"
         }
       },
-      "required": [
-        "id"
-      ],
       "additionalProperties": false
     },
     "caps": {
