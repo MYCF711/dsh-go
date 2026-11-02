@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,7 +159,11 @@ func TestSurfaceRealCorpus(t *testing.T) {
 				eligible++
 				// 真实语料里，DSH 自己的压缩/fork 也会用
 				// source.kind = compact-checkpoint 的 user/message 来放摘要替身。
-				if ev.Type == "user/message" && bytesContains(ev.Data, "compact-checkpoint") {
+				// 必须解析 source.kind，不能用「正文里含 compact-checkpoint 字样」判。
+				// 实测踩过：有的消息正文在讨论这个协议（第 10,340 字符处），
+				// source.kind 是 plugin:hindsight；用子串判会误算成替身，
+				// 于是「有替身却没有可见摘要」这条断言误报。
+				if ev.Type == "user/message" && sourceKind(ev.Data) == "compact-checkpoint" {
 					checkpointMsgs++
 				}
 			case "compaction/summary":
@@ -207,4 +212,17 @@ func TestSurfaceRealCorpus(t *testing.T) {
 
 func bytesContains(b []byte, sub string) bool {
 	return bytes.Contains(b, []byte(sub))
+}
+
+// sourceKind 取 user/message 的 source.kind；没有就返回空串。
+func sourceKind(data []byte) string {
+	var d struct {
+		Source struct {
+			Kind string `json:"kind"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil {
+		return ""
+	}
+	return d.Source.Kind
 }

@@ -179,3 +179,23 @@ func TestUnknownToolWording(t *testing.T) {
 		t.Fatalf("措辞不一致: %q", err.Error())
 	}
 }
+
+// 参数不是 JSON 对象时，**在执行前**就拦下。
+//
+// 让每个工具自己 Unmarshal 也行，但不校验参数的工具会拿着垃圾照跑。
+func TestPipelineRejectsNonJSONArgs(t *testing.T) {
+	ran := false
+	p, k := newPipe(t, Options{}, &stubTool{name: "loose", ran: &ran})
+	defer k.Root().Dispose()
+
+	res, err := p.Run(context.Background(), "loose", json.RawMessage(`"{not json"`))
+	if err == nil {
+		t.Fatal("非 JSON 参数必须报错")
+	}
+	if ran {
+		t.Fatal("参数不合法时不该执行工具")
+	}
+	if !strings.Contains(res.Hint, "JSON") {
+		t.Fatalf("Hint 要说清是 JSON 的问题: %q", res.Hint)
+	}
+}

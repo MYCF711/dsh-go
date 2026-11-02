@@ -372,3 +372,47 @@ func TestCancelledToolIsUnknownNotFailed(t *testing.T) {
 		t.Fatal("结果未知时必须给下一步提示")
 	}
 }
+
+// 模型发疯时的三种形态：参数不是 JSON、工具名不存在、参数缺字段。
+// 三种都必须让模型**看懂并继续**，而不是把 turn 搞崩。
+func TestMalformedToolCallsKeepTheTurnAlive(t *testing.T) {
+	bad := `{"arguments": "{not json"`
+	chat := &scriptedChat{steps: []*llm.Response{
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Function: llm.Func{Name: "read", Arguments: bad}}}},
+		{ToolCalls: []llm.ToolCall{{ID: "c2", Function: llm.Func{Name: "no_such_tool", Arguments: "{}"}}}},
+		{ToolCalls: []llm.ToolCall{{ID: "c3", Function: llm.Func{Name: "read", Arguments: "{}"}}}},
+		{Content: "好了", FinishReason: "stop"},
+	}}
+	read := &fakeTool{name: "read", res: spi.Result{Summary: "ok"}, err: nil}
+	l, _ := newLoop(t, chat, read)
+	l.MaxSteps = 6
+
+	hist, err := l.Run(context.Background(), 1, []llm.Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("三种坏工具调用都不该让 turn 崩: %v", err)
+	}
+
+	// 每条 tool 消息都要有内容可读——空的正文明天没人能 debug
+	var toolMsgs []string
+	for _, m := range hist {
+		if m.Role == "tool" {
+			toolMsgs = append(toolMsgs, m.Content)
+		}
+	}
+	if len(toolMsgs) != 3 {
+		t.Fatalf("应该有 3 条 tool 消息，实际 %d 条", len(toolMsgs))
+	}
+	for i, c := range toolMsgs {
+		if strings.TrimSpace(c) == "" {
+			t.Fatalf("第 %d 条 tool 消息是空的（模型只会看到空白，没法自我纠正）", i+1)
+		}
+	}
+	// 未知工具必须说清——这条是 agent 层自己的保证
+	if !strings.Contains(toolMsgs[1], "不存在") && !strings.Contains(toolMsgs[1], "Error") {
+		t.Fatalf("未知工具要说清: %q", toolMsgs[1])
+	}
+	// 最后一条正常工具的返回不该被前面带偏
+	if !strings.Contains(toolMsgs[2], "ok") {
+		t.Fatalf("第 3 条是正常工具，应该拿到结果: %q", toolMsgs[2])
+	}
+}

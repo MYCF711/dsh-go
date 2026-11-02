@@ -69,6 +69,20 @@ func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (
 		return call.Result, call.Err
 	}
 
+	// 0. 参数必须是 JSON 对象。
+	//
+	// 模型偶尔会吐 `{"arguments": "{not json"` 这种。以前直接透传给工具——
+	// 大多数工具自己 Unmarshal 会失败，但**不校验参数的工具会拿着垃圾照跑**。
+	// 在执行前拦一次，比让每个工具各写一遍可靠。
+	if len(call.Args) > 0 {
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(call.Args, &probe); err != nil {
+			call.Err = fmt.Errorf("参数不是 JSON 对象: %w", err)
+			call.Result.Hint = "tool_call.arguments 必须是 JSON 对象（键值对）；常见原因是引号没转义或写成了字符串"
+			return call.Result, call.Err
+		}
+	}
+
 	tool, ok := p.reg.Get(call.Name)
 	if !ok {
 		// 措辞对齐 DSH：这是最常见的一类失败（真实语料里 367 个失败样本中 84 个是它，

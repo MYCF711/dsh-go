@@ -84,3 +84,37 @@ surface: 3 节点，其中摘要 0
 
 测试也改了：`TestCorruptTailIsReported` 从"必须报错"改成
 "**必须返回前缀 + 必须报出截断**"——契约变了，测试要跟着变，但不能变成静默。
+
+## 模型发出坏掉的 tool_call（2026-11-03）
+
+三种形态：参数不是 JSON、工具名不存在、参数缺字段。
+
+**工具名不存在**和**缺字段**本来就处理得对（`unknown tool "x"` + Hint、
+`file_path 为空` + Hint）。**参数不是 JSON 这条原来直接透传给工具**：
+
+- 大多数工具自己 `json.Unmarshal` 会失败 → 报错；
+- 但**不校验参数的工具会拿着垃圾照跑**（`TestMalformedToolCalls` 里的假工具就返回了 "ok"）。
+
+修法是在流水线入口拦一次，而不是让每个工具各写一遍：
+
+```
+执行失败: 参数不是 JSON 对象: json: cannot unmarshal string into Go value of type map[string]jsontext.Value
+提示: tool_call.arguments 必须是 JSON 对象（键值对）；常见原因是引号没转义或写成了字符串
+```
+
+同时确认：坏调用**不会把 turn 搞崩**——三条坏调用之后模型仍能拿到结果继续
+（`TestMalformedToolCallsKeepTheTurnAlive`），每条 tool 消息都有正文可读。
+
+## 又一次"是夹具的问题"（语料测试）
+
+`TestSurfaceRealCorpus` 突然红了：某个会话「有 1 个替身来源却没有任何可见摘要」。
+
+查下去发现那条消息的正文在**讨论** `compact-checkpoint` 这个协议（第 10,340 字符处），
+而它的 `source.kind` 是 `plugin:hindsight`。测试用**子串**判断替身，于是把一句
+"我在说明这个协议"误算成"这是一份压缩替身"。
+
+改成解析 `source.kind == "compact-checkpoint"` 之后通过。
+
+顺带确认这不是我的改动引起的：`git stash` 之后同一条测试照样红——
+**真实语料每天都在长大，测试会随新数据变红**，这是"拿真数据当夹具"的代价，
+也是它的价值。

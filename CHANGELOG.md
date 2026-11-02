@@ -1,3 +1,33 @@
+## 0.2.1-go.21（未发布）· 续 2
+
+**坏掉的 tool_call：参数不是 JSON 时，执行前就拦。**
+
+三种形态里两种本来就对（`unknown tool "x"`、`file_path 为空`，都带 Hint）。
+第三种原来是**直接透传**：
+
+- 多数工具自己 Unmarshal 会失败 → 报错；
+- **不校验参数的工具会拿着垃圾照跑**。
+
+改在流水线入口拦一次：
+
+```
+执行失败: 参数不是 JSON 对象: json: cannot unmarshal string into Go value of type map[string]jsontext.Value
+提示: tool_call.arguments 必须是 JSON 对象（键值对）；常见原因是引号没转义或写成了字符串
+```
+
+同时确认坏调用**不会把 turn 搞崩**：三条坏调用之后模型仍能拿到结果继续，
+每条 tool 消息都有正文可读。
+
+### 顺带修掉一个测试的假阳性
+
+`TestSurfaceRealCorpus` 变红，报「有 1 个替身来源却没有任何可见摘要」。
+查下去：那条消息的正文在**讨论** `compact-checkpoint` 协议（第 10,340 字符处），
+`source.kind` 是 `plugin:hindsight`。测试用**子串**判断替身，把"我在说明这个协议"
+误算成"这是一份压缩替身"。改成解析 `source.kind` 后通过。
+
+`git stash` 验证过：这不是本次改动引起的——**真实语料每天在长，测试会随新数据变红**。
+
+---
 ## 0.2.1-go.21（未发布）· 续
 
 **尾部半帧不再泼掉整份历史。**

@@ -82,7 +82,9 @@
 - ✅ 一个假警报：Git Bash 的 `ln -s` 会静默降级成复制，"遍历跟了符号链接"是夹具的问题，不是代码
 - ✅ 双宿主并发写：两个 writer 各 20 帧，**一帧不丢**（`O_APPEND`）；编码器里没有截断式回滚，无"A 截掉 B"风险
 - ✅ **尾部半帧不再泼掉整份历史**：`splitFrames` 返回 `truncatedAt`，`Log.TailTruncatedAt` 带给调用方，`session info` 打警告；真损坏仍报错
-- 下一步 **M28**：剩三类——极深目录（MAX_PATH）、模型输出非法 tool_call JSON、只读 home
+- ✅ 坏 tool_call：参数不是 JSON 时在**流水线入口**拦下（原来直接透传给工具，不校验参数的会拿着垃圾照跑）；坏调用不会让 turn 崩
+- ✅ 修掉 `TestSurfaceRealCorpus` 的假阳性：用子串判 `compact-checkpoint` 会把"正文里讨论这个协议"误算成替身，改为解析 `source.kind`
+- 下一步 **M29**：剩两类——极深目录（MAX_PATH）、只读 home
 
 ---
 
