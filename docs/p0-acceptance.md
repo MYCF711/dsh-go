@@ -102,9 +102,28 @@ python tmp/measure_start.py   # ACP 就绪延迟
 
 ---
 
+## 发布件验证
+
+```bash
+gh release view v0.2.1-go.6 --json assets --jq '.assets[] | "\(.size) \(.name)"'
+```
+
+附件体积与本地 `dist/` 逐字节一致（7,710,498 / 8,175,776 / 8,415,232），
+`SHA256SUMS` 里的 windows 摘要 `1d2ef64f…` 与本地文件一致。
+
+**空目录验证**（v0.2.1-go.5 就是在这里翻的车）：
+
+```
+$ cd /tmp/empty && ./dshd.exe modules list | wc -l
+9
+$ ./dshd.exe tools
+工具 9 个，5832 字节
+```
+
 ## 没达成的部分（诚实清单）
 
-1. **Martty 真机未验**：用的同款 SDK，不是那个应用本体。
+1. **Martty 真机未验**：本机没有安装 Martty（`AppData/Local/Programs` 下只有 codebuff / magpie / xiezuo），
+   验收用的是 Martty 也会用的同一个 `@agentclientprotocol/sdk@1.4.0`。要真机验收得先装那个客户端。
 2. **工具语义未与 DSH 逐项对拍**：只保证结构与边界，不保证措辞一致。
 3. **ACP 未实现的方法**：`session/load`、`session/delete`、`session/fork`、`session/set_mode`、`providers/*`。
 4. **审批目前按工具粒度**：没有"同类操作记住选择"。
