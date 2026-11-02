@@ -10,6 +10,27 @@
 
 ---
 
+## 0.2.1-go.5 · M1-d — 2026-11-02
+
+**shell + 后台任务：真实 bash 进程（R6 的第一步落地）。**
+
+- `modules/exec/bash`
+  - 常驻 bash 进程（`--noprofile --norc -s`），**cwd 跨命令保留**
+  - 结束哨兵 `DSHD:<seq>:<rc><cwd>`；输出与退出码从同一条流里解析（stdout/stderr 合流，M1 取舍）
+  - **自动转后台**：闲置超过 `idle_seconds`（默认 600s）就把整个会话交给后台任务，下次调用自动换新会话
+  - **会话自愈**：命令把 shell 打死（如裸 `exit`）时报错并重建，不伪装成功
+- `shell` / `job_output` / `job_kill` / `job_list` 四个工具（`exec` 模块提供 `exec` 与 `jobs` 两个服务）
+- 大输出不需要工具自己截断：流水线的截断层会把 >4000 字符的结果外置成 artifact
+
+**实测（CLI）**
+```
+dshd exec --tool shell --args '{"command":"echo hello && pwd"}'
+→ 退出码 0，输出 hello / D:/DeepSeek Harness/default-workspace/DSH-GO
+```
+
+**已知取舍**：`export` 不跨命令保留；`job_kill` 只杀 bash 进程，其子进程可能存活。
+
+---
 ## 0.2.1-go.5 · M1-c — 2026-11-02
 
 **glob / grep：独立工具，不是 shell 的包装。**

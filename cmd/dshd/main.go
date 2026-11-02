@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"dshgo/internal/kernel"
+	"dshgo/modules/exec/bash"
 	"dshgo/modules/fs/local"
 	"dshgo/modules/tool/edit"
 	"dshgo/modules/tool/glob"
@@ -29,6 +30,7 @@ func builtinModules() []kernel.Module {
 	return []kernel.Module{
 		// 默认实现也是插件（A3）：它们与第三方插件走同一个 Register(scope)。
 		tools.Module(tools.Options{}),
+		bash.Module(wd, bash.Options{}),
 		local.Module(wd),
 		read.Module(),
 		write.Module(),

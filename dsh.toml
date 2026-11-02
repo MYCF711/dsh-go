@@ -11,6 +11,10 @@ id      = "tools"
 backend = "static"
 
 [[module]]
+id      = "exec"
+backend = "static"
+
+[[module]]
 id      = "fs"
 backend = "static"
 

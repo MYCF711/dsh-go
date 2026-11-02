@@ -19,7 +19,7 @@
 
 ```
 分支        main
-里程碑      M1 进行中（流水线 + 投影 + 文件组 read/write/edit/glob/grep 已完成）
+里程碑      M1 工具层完成（流水线 + 投影 + read/write/edit/glob/grep/shell + job_*）
 版本        0.2.1-go.5（未打 tag）
 已有资产    方案 / 手册 / 调研 6 份 / 审计 3 份 / Go 骨架 13 个文件
 ```

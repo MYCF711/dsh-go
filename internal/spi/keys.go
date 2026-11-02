@@ -10,4 +10,6 @@ var (
 	ToolsKey      = kernel.NewKey[ToolRegistry]("tools")
 	ToolRunnerKey = kernel.NewKey[Runner]("toolrunner")
 	FSKey         = kernel.NewKey[FS]("fs")
+	ExecKey       = kernel.NewKey[Exec]("exec")
+	JobKey        = kernel.NewKey[Job]("jobs")
 )
