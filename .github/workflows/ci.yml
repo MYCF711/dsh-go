@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gate — 是否已有 go.mod
+        id: gate
+        shell: bash
+        run: |
+          if [ -f go.mod ]; then echo "go=1" >> "$GITHUB_OUTPUT"; else echo "go=0" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: actions/setup-go@v5
+        if: steps.gate.outputs.go == '1'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 门禁（build / vet / test -race / R1 / A3 / 文档 / 卫生）
+        shell: bash
+        run: ./scripts/check.sh

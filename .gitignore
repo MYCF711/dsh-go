@@ -1,0 +1,17 @@
+# 本地临时
+/tmp/
+*.log
+*.tmp
+
+# Go 构建产物
+/bin/
+/dist/
+/probe/bin/
+/probe/tmp/
+
+# 第三方参考源码：不 vendor，用 scripts/fetch-refs.sh 拉取到 refs/
+/refs/dsc/
+
+# 编辑器
+.vscode/
+.idea/
