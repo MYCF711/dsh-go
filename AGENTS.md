@@ -37,7 +37,8 @@
 - ✅ 冷启动定位：`BurntSushi/toml` 的 init 占 23 ms，换成 `pelletier/go-toml/v2` 后 init 26→2 ms、ACP 就绪 65.9→**55.9 ms**
 - ✅ 模式落地（`internal/modes`）：`default` / `read-only`，工具可见性按模式裁剪，`set_mode` 真的换表
 - ✅ 用户自建模式（`$DSH_HOME/modes/*.toml`，支持 `copy_of` 继承）：四道 fail-loud 校验，实测 strict 模式下无 bash
-- 下一步 **M9**：模式决定审批倾向（`Approval` 字段目前还没接进审批判定）
+- ✅ 模式决定审批倾向（`approvalDecision`）：deny 不问直接拒、allow 不问放行、deny 压过记忆；实测 no-exec 模式零打扰
+- 下一步 **M9**：`history_search` 工具 / `session/fork` 的授权与模式继承规则
 
 ---
 

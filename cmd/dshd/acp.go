@@ -185,6 +185,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		runner = &guardedRunner{
 			inner: r.runner, reg: r.reg, ask: r.ask,
 			sessionID: sessionID, approvals: r.approvals,
+			modeApproval: r.modeOf(sessionID).Approval,
 		}
 	}
 
@@ -223,12 +224,22 @@ type guardedRunner struct {
 	ask       func(ctx context.Context, sessionID, tool string, args string) (bool, error)
 	sessionID string
 	approvals *approval.Memory
+	// modeApproval 是当前模式的审批倾向（""=沿用宿主 / ask / allow / deny）。
+	modeApproval string
 }
 
 func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
 	if t, ok := g.reg.Get(name); ok && t.Caps().NeedsApproval() {
-		if g.approvals != nil && g.approvals.Allowed(g.sessionID, name) {
+		remembered := g.approvals != nil && g.approvals.Allowed(g.sessionID, name)
+		allow, needAsk := approvalDecision(g.modeApproval, remembered)
+		switch {
+		case allow:
 			return g.inner.Run(ctx, name, args)
+		case needAsk:
+			// 落到下面去问
+		default:
+			return spi.Result{Hint: "当前模式的审批策略是 deny：换成只读工具，或让用户切到别的模式"},
+				fmt.Errorf("模式策略拒绝了 %s", name)
 		}
 		ok, err := g.ask(ctx, g.sessionID, name, string(args))
 		if err != nil {
@@ -700,4 +711,24 @@ func (r *acpRunner) registry() *modes.Registry {
 		reg, _ = modes.NewRegistry(nil)
 	}
 	return reg
+}
+
+// approvalDecision 决定"这次要不要问"。
+//
+// 顺序是有讲究的：**模式的 deny 压过记忆**，但模式的 allow 压不过记忆里的拒绝
+// （记忆里只有"允许"，所以实际上 allow 只是省一次问）。
+//
+// 为什么 deny 优先：模式是会话级策略（用户或宿主显式选的），
+// 记忆是单个工具的便利。策略不该被便利覆盖。
+func approvalDecision(modeApproval string, remembered bool) (allow bool, needAsk bool) {
+	switch modeApproval {
+	case "deny":
+		return false, false // 直接拒，连问都不问
+	case "allow":
+		return true, false // 不问，直接放行
+	}
+	if remembered {
+		return true, false
+	}
+	return false, true
 }
