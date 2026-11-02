@@ -58,13 +58,21 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 
 	resp, err := c.HTTP.Do(hr)
 	if err != nil {
-		return nil, fmt.Errorf("请求模型失败(%s): %w", url, err)
+		// 这条错误会原样出现在 ACP 客户端上。原来带的是完整 URL 和 Go 的原始
+		// 网络错误（`dial tcp ... connectex: ...`），客户端拿到只会觉得莫名其妙。
+		// 这里只留"连不上哪个网关"，底层原因用 %w 留给日志。
+		return nil, &GatewayError{Kind: GatewayConnect, Base: c.BaseURL, Err: err}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return nil, fmt.Errorf("模型返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		// 网关的响应体可能有几 KB（HTML 错误页、堆栈、内部主机名），
+		// 全塞给客户端既不安全也没用。留 300 字符够定位了。
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		return nil, &GatewayError{
+			Kind: GatewayStatus, Base: c.BaseURL,
+			Code: resp.StatusCode, Body: strings.TrimSpace(string(b)),
+		}
 	}
 
 	acc := newAccumulator(onEvent)

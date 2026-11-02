@@ -145,14 +145,31 @@ func TestStreamUsage(t *testing.T) {
 	}
 }
 
+// 401 是"认证"，不是"随便一个 HTTP 错误"——给客户端的说法要能直接去改 key。
 func TestStreamHTTPError(t *testing.T) {
 	c, _ := sseServerStatus(t, http.StatusUnauthorized)
 	_, err := c.Stream(context.Background(), Request{Model: "m"}, nil)
 	if err == nil {
 		t.Fatal("401 必须报错")
 	}
-	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "bad key") {
-		t.Fatalf("错误应包含状态码与响应体: %v", err)
+	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "认证") {
+		t.Fatalf("401 应该说认证问题: %v", err)
+	}
+	// 网关的原始响应体不该出现在给客户端的文案里
+	if strings.Contains(err.Error(), "bad key") {
+		t.Fatalf("不该把网关响应体原样抛出: %v", err)
+	}
+}
+
+// 其它 4xx 才把响应体带出来（截断），因为那些原因只能从正文看。
+func TestStreamHTTPErrorKeepsBodyForOtherCodes(t *testing.T) {
+	c, _ := sseServerStatus(t, http.StatusBadRequest)
+	_, err := c.Stream(context.Background(), Request{Model: "m"}, nil)
+	if err == nil {
+		t.Fatal("400 必须报错")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Fatalf("应包含状态码: %v", err)
 	}
 }
 

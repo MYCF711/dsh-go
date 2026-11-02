@@ -1,3 +1,32 @@
+## 0.2.1-go.19（未发布）· 续
+
+**模型调用失败时，客户端不再看到 Go 的错误长什么样。**
+
+```
+修前: 第 1 步模型调用失败: 请求模型失败(http://127.0.0.1:1/v1/chat/completions):
+      Post "http://...": dial tcp 127.0.0.1:1: connectex: No connection could be made ...
+修后: 第 1 步模型调用失败: 连不上模型网关 http://127.0.0.1:1/v1：确认网关在跑、--base 地址对
+```
+
+`internal/llm.GatewayError` 按种类分开说：
+
+| 情况 | 客户端看到 |
+|---|---|
+| 连不上 | `连不上模型网关 <base>：确认网关在跑、--base 地址对` |
+| 401/403 | `模型网关拒绝认证（401）：检查 API key 与 --base` |
+| 404 | `模型网关没有这个接口（404）：--base 是不是少了 /v1？` |
+| 429 | `模型网关限流（429）：稍等再试` |
+| 5xx | `模型网关出错（500）` |
+| 其它 4xx | `模型网关返回 400：<正文最多 200 字>` |
+
+- 原始错误用 `%w` 留着（日志与 `errors.Is` 还能用），不进 `Error()`
+- 网关正文原来整段 8KB 塞给客户端，现在截到 300 字符
+- API key 实测从未泄漏
+
+新增 `TestGatewayErrorHidesInternals` / `TestGatewayErrorByStatus` / `TestGatewayErrorTruncatesBody`，
+并改掉 `TestStreamHTTPError`（401 现在说的"认证"而不是把网关正文抛出来）。
+
+---
 ## 0.2.1-go.19（未发布）
 
 **`session/load` / `session/resume` 不再把宿主路径漏给客户端。**
