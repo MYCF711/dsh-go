@@ -88,7 +88,9 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 
 	patSegs := strings.Split(strings.ReplaceAll(a.Pattern, "\\", "/"), "/")
 	var matches []string
-	err = fsutil.WalkFiles(absBase, fsutil.DefaultSkipDirs, func(abs string) error {
+	// 仓库级声明优先：<root>/.dshdignore 里写的东西不该被扫到。
+	ig, _ := fsutil.LoadIgnore(t.fs.Root())
+	err = fsutil.WalkFilesWith(absBase, fsutil.WalkOptions{Root: t.fs.Root(), Ignore: ig}, func(abs string) error {
 		relBase, err := filepath.Rel(absBase, abs)
 		if err != nil {
 			return nil

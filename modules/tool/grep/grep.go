@@ -140,7 +140,12 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		patSegs = strings.Split(strings.ReplaceAll(a.Include, "\\", "/"), "/")
 	}
 
-	walkErr := fsutil.WalkFiles(absBase, fsutil.DefaultSkipDirs, func(abs string) error {
+	// .dshdignore 生效：仓库自己声明的"别扫我"（例如 vendored 参考代码）。
+	ig, _ := fsutil.LoadIgnore(t.fs.Root())
+	var ignoredDirs int
+	walkErr := fsutil.WalkFilesWith(absBase, fsutil.WalkOptions{
+		Root: t.fs.Root(), Ignore: ig, Ignored: &ignoredDirs,
+	}, func(abs string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -220,8 +225,14 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		Truncated:    truncated,
 		Matches:      matches,
 	}
-	summary := fmt.Sprintf("%s 下 /%s/ 命中 %d 处（扫描 %d 文件，跳过 %d）",
-		p.Base, a.Pattern, p.Count, scanned, skipped)
+	// 跳过的数字要分成两截说：目录名规则 + 仓库自己的 .dshdignore。
+	// 混成一个数字的话，模型没法判断"是不是这一层把结果挡掉了"。
+	skipNote := fmt.Sprintf("%d 个噪声目录", skipped)
+	if ignoredDirs > 0 {
+		skipNote += fmt.Sprintf(" + %d 个 .dshdignore 目录", ignoredDirs)
+	}
+	summary := fmt.Sprintf("%s 下 /%s/ 命中 %d 处（扫描 %d 文件，跳过 %s）",
+		p.Base, a.Pattern, p.Count, scanned, skipNote)
 	hint := ""
 	switch {
 	case len(matches) == 0:

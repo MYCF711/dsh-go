@@ -63,7 +63,9 @@
 - ✅ 基线读数：基座 ≈4,200 token，第一次工具调用 ≈+4,300；该用工具的任务不多调（不存在"过度用工具"通病）
 - ✅ 一次真实"多调"的解剖：`refs/` 3,569 文件让答案从 252 变 9,852（39×），模型第 3 次才自己排除；**改工具描述实测无效**
 - ✅ `stats` 改 `defer`：失败的那一轮（最贵的）也有账
-- 下一步 **M20**：给 `refs/` 这类"会误导统计"的目录提供仓库级声明（`.dshdignore`）
+- ✅ `.dshdignore`（前缀 + glob，目录层剪枝）：glob/grep 认它，摘要里把"噪声目录"和"声明目录"分开报
+- ✅ 实测对比：`bash grep -r` 6 次 / 28,541 token vs `grep` 工具 1 次 / 8,584 token（3.3×）；**ignore 对 bash 无效**
+- 下一步 **M20**：长会话（10 轮以上）的压缩与记忆实测
 
 ---
 
@@ -92,7 +94,7 @@
 | `cmd/dshd/` | main：manifest → kernel → blank import 默认模块 | 只有装配代码，禁止业务分支 |
 | `internal/kernel/` | scope / registry / eventbus / assembler **四件事** | 改动需在 PLAN 里有理由 |
 | `internal/spi/` | 全部接口 + 数据类型 + 服务键，**零实现** | 加接口要同步加"默认实现 + 替换样本"测试 |
-| `internal/fsutil/` | 文件遍历小工具（跳过噪声目录、二进制判定） | 零业务；只给 glob/grep 这类工具共用 |
+| `internal/fsutil/` | 文件遍历（噪声目录 + `.dshdignore`）、二进制判定 | 零业务；只给 glob/grep 这类工具共用 |
 | `<home>/artifacts/` | 工具大输出的外置工件 | 宿主写、模型只读（`FS.WithExtraReadRoot` 放行） |
 | `internal/session/` | 事件溯源 + canonical 模型 + 会话列举 | 唯一允许直接读日志的包 |
 | `internal/agent/` | turn/step 双循环 | 不许内联压缩逻辑 |
