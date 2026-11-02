@@ -30,11 +30,13 @@ type acpRunner struct {
 	reg spi.ToolRegistry
 	// fsRoot 可选：FS 支持换根时，用它把工作区根切到客户端给的 cwd。
 	fsRoot spi.RootFollower
-	runner spi.Runner
-	base   string
-	model  string
-	home   string
-	steps  int
+	// execCwd 可选：bash 支持换默认目录时，跟着一起换（否则 read 在 B、bash 在 A）。
+	execCwd spi.CwdFollower
+	runner  spi.Runner
+	base    string
+	model   string
+	home    string
+	steps   int
 
 	// ask 是审批闸门：返回 false 表示用户拒绝这次工具调用。
 	ask func(ctx context.Context, sessionID, tool string, args string) (bool, error)
@@ -450,6 +452,11 @@ func cmdACP(argv []string) error {
 			acpRunner.fsRoot = rf
 		}
 	}
+	if ex, err := kernel.Inject(root, spi.ExecKey); err == nil {
+		if cf, ok := ex.(spi.CwdFollower); ok {
+			acpRunner.execCwd = cf
+		}
+	}
 	acpRunner.modeReg = modeReg
 	acpRunner.modeID = m.ID
 	if *remember {
@@ -811,6 +818,10 @@ func (r *acpRunner) ensureSession(sessionID, cwd string) (*session.Log, error) {
 	// 全是宿主仓库的文件）。FS 支持换根就换，不支持就保持原样。
 	if r.fsRoot != nil && strings.TrimSpace(cwd) != "" {
 		_ = r.fsRoot.SetRoot(cwd)
+	}
+	// bash 的起始目录也要跟着换：同一个会话里两个世界是最难查的那种 bug。
+	if r.execCwd != nil && strings.TrimSpace(cwd) != "" {
+		_ = r.execCwd.SetCwd(cwd)
 	}
 	p, err := session.SessionPath(r.home, cwd, sessionID)
 	if err != nil {

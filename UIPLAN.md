@@ -1,0 +1,268 @@
+# UIPLAN · 界面线
+
+> **本文件只管界面。** 宿主（内核 / 工具 / 会话 / ACP）在 `PLAN.md`，那条线不动。
+> 两条线只在 **Transport 契约**上握手：宿主不 import 界面，界面不 import 宿主，中间只有 HTTP + WS + 一份 ViewSpec。
+> 怎么干看 `AGENTS.md` §11；为什么这么干看本文件。**待拍板项见 §7，未拍板前不许开工。**
+
+---
+
+## 0. 一句话与成功判据
+
+**用 Go 重做「壳 + 契约」，用 Web 重做界面；界面的一切可替换性由 slots 授权树保证，而不是靠把界面切得足够碎。**
+
+| 判据 | 现在的官方 | 目标 | 怎么量 |
+|---|---:|---:|---|
+| 壳的进程数 | 2（Electron 主 + 宿主子进程） | **2**（壳 + 宿主，职责不变） | 进程树 |
+| 安装体积 | 182 MB（asar） | **≤ 25 MB 单 exe + 系统 WebView2** | `ls -l` |
+| 壳的空载内存 | ~500 MB（Chromium 主） | **不设独立目标**（见 §2.4） | `tasklist` |
+| 宿主内存 | 870 MB | **≤ 150 MB**（PLAN §0 不变） | `tasklist` 私有工作集 |
+| 冷启动到能输入 | 数秒 | **≤ 1.5 s**（宿主 35 ms + 窗口 + 首屏） | 秒表 / 埋点 |
+| 前端产物 | 11.7 MB / 76 包 / 23.7 万行 | **≤ 9 万行 / ≤ 3 MB** | 构建产物 |
+| 第三者插一个 UI 面板 | 可以（87 个 slot） | **可以**，且只改一个文件 | 写一个 demo 插件验证 |
+
+---
+
+## 1. 官方壳的真相（全部可验证，证据在 `research/40`）
+
+这一节是**推翻直觉**的部分。以前的讨论默认「GUI = Electron + 147k 行 React」，实测不是这样。
+
+### 1.1 界面从来不是 Electron
+
+| 事实 | 值 | 证据 |
+|---|---|---|
+| 主窗口加载的 URL | `dsh-app://app/` —— 壳自己注册的特权 scheme，**不是** `http://localhost` | `main.js:12134`、`12009` |
+| `dsh-app://app/` 背后是谁 | `@deepseek-ai/dsh-web-frontend/dist` 的静态文件 + 其余全部反代给宿主 | `main.js:12410-12412` |
+| 主窗口 `webPreferences` | `nodeIntegration:false`、`contextIsolation:true`、**`sandbox:true`** | `main.js:11960-11968` |
+| 前端有没有 Electron 痕迹 | **没有**。`dist/index.html` 全文 18 行，两个 module preload + 两个 CSS | `dsh-web-frontend/dist/index.html` |
+| 同一份前端在浏览器里能跑吗 | **能**。`dsh web` 起服务，浏览器直接打开（我们此刻用的 56319 就是） | `lib/client.browser.js:1348` |
+
+**结论：官方架构 = 一份纯 Web 前端 + 两个壳（Electron / 浏览器）。** 「Electron」只是它的第一个 WebView 宿主。
+**推论：换掉壳的代价很小，换掉前端的代价很大。** 任何「语言选型」讨论都必须先把这两件事分开。
+
+### 1.2 宿主是壳的子进程，端口是随机的
+
+```
+壳 spawn 宿主（ELECTRON_RUN_AS_NODE=1, stdio:['ignore','pipe','pipe','ipc']）
+   ↓
+宿主 runProfile({profile:'desktop', args:['--no-open','--host','127.0.0.1','--port','0']})
+   ↓
+宿主 process.send({type:'ready', url, injections})   // url 已带 launch token
+   ↓
+壳 用 url 换 cookie（期望 303 + set-cookie），之后所有 /api 反代都带 cookie
+   ↓
+渲染进程永远拿不到 cookie（WITHHELD_RESPONSE_HEADERS 丢掉 set-cookie）
+```
+
+证据：`main.js:3793-3811`、`dsh-desktop-host/lib/index.js:226-240`、`:342-349`、`main.js:8229-8255`。
+
+| 对 Go 的硬约束 | 为什么 |
+|---|---|
+| 端口必须 `:0` 由 OS 分配 | 写死会在多实例、端口被占时直接不可用 |
+| 壳与宿主之间只走一条 IPC | 崩溃隔离 + 「退出前问一句」全靠它；同进程就没有恢复力 |
+| cookie 不进渲染进程 | 前端一旦能读 token，一个 XSS 就等于把宿主交出去 |
+
+### 1.3 前端与宿主之间有三层协议，别混
+
+| 层 | 载体 | 内容 | 谁产 |
+|---|---|---|---|
+| **RPC** | HTTP `POST /api` | 一元调用（`{path:[...], key}`） | `dsh-client-connection` |
+| **流** | WS `/api/remote.mux` | 所有流复用一条连接（会话事件、终端、任务日志） | `dsh-api-gateway` |
+| **静态** | HTTP `/plugins` | client bundle 的 combo 下发（超 3 KiB 再切段） | `dsh-client-modules` |
+
+数据本身又分三层（`research/40` §5.2）：
+
+1. **会话事件**：v4 落盘的 62 种 type —— 和本仓 `codecs/v4` 是同一张词汇表。
+2. **journal 增量**：`replace` / `prepend` / `append` / `settle-assistant`，**必须连续**，断号用尾页补。
+3. **助手流式 chunk**：`text-delta` / `reasoning-delta` / `tool-call-delta`，外层是 `start/chunk/end` + `revision`/`index` 双连续，重连给基线快照而不是重放。
+
+> **ACP 不是这套。** ACP 是 `session/update` 的 4~5 种投影。**Go 侧不要拿 ACP 的编码层去喂 GUI**——我们已经会读会写 v4，直接吐原始事件便宜得多（`research/40` §5.3）。
+
+### 1.4 「一切皆插件」在前端是真的，而且有硬规则
+
+| 机制 | 形状 |
+|---|---|
+| 装载 | 每个包一个 `lib/client.js`，内容是 `window.__ModuleLoader__.load({id, factory})`；**执行只注册 factory**，副作用全在闭包里 |
+| 启动图 | 宿主下发 `window.__DSH_BOOT__`（带 `release` 版本闸），`/plugins` combo 拉取 |
+| 可依赖面 | **11 个平台种子模块**（`react` … `dsh-client-ui-slots`）冻结；插件 `dsh.client.external` 只能追加精确请求 |
+| 挂载 | **slot 声明 + 授权树**：注册组件时同时声明它下面有哪些子槽，**只能往父条目声明过的槽里注册**，否则 `SlotOwnershipError` |
+| 槽类型 | `single` / `list` / `keyed`（按 key 取一，中栏用）/ `chain`（瀑布，输入框用） |
+| 槽作用域 | `root` / `session` / `session-maybe` |
+| 规模 | 76 个前端包、**87 个 slot id**、55 个 `ui-*` 包之间**零 import** |
+
+证据：`research/40` §6、§7；`research/42`。
+
+**这条授权规则是整个设计里最值得抄的一条**：它把「插件互相踩」从"运行期玄学"变成了"注册期抛错"。
+
+---
+
+## 2. 语言怎么分：三层分账（我的判断）
+
+问「单个还是混合」是个错问题——官方自己就是混合的（Node 宿主 + Web 界面），只是混在**进程边界**上。我们的答案同样在进程边界上：
+
+| 层 | 语言 | 行数量级 | 换掉的代价 | 为什么是它 |
+|---|---|---:|---|---|
+| **宿主** | Go | 21.7k（已有） | 极高 | 已定，不动 |
+| **契约** | Go | **3–5k** | 中 | HTTP/WS/静态托管/注入图，全是 I/O 与序列化，Go 最舒服 |
+| **界面** | TypeScript | **4.5–9 万**（估） | 极高 | 见 §2.2 |
+| **壳** | Go | **0.5–1k** | 低 | 一个窗口 + 四个原生能力，见 §2.3 |
+
+**四个数字放在一起看**：界面占总代码量 **80%+**，契约 + 壳合计不到 6k 行。所以真正的决策不是「用什么语言」，而是「界面写多少」。
+
+### 2.1 为什么界面不能是 Go 原生（Fyne / Gio）
+
+不是口味问题，是**四个具体缺口**，每一个都是 Go UI 生态的空白：
+
+| 缺口 | 官方用了什么 | 规模 | Go 侧的现状 |
+|---|---|---:|---|
+| 富文本输入框（@ / 斜杠 / 粘贴图片 / 输入法） | **Lexical** | 8,344 行 | 无。中文输入法候选框在自绘 Canvas 上是最经典的翻车点 |
+| schema 驱动的设置表单 | **schemastery** | 5,679 行 | 无。官方设置页 100% 由 schema 生成 |
+| 长会话虚拟滚动 | `@tanstack/react-virtual` | — | 无内建；必须自己实现回收，否则一千条消息就卡 |
+| Markdown + 代码高亮 + diff | micromark + Shiki + 自研 unified-diff | — | `goldmark`/`chroma` 有，但**只能产出 HTML/ANSI**，不能产出「可增量更新的行级 diff」 |
+
+这四件事占了「最小可用 UI」的绝大部分工时。用 Go 重写它们，等价于用 Go 重写一个浏览器排版引擎的子集——**收益为零，因为你在做的本来就是 Web 的活**。
+
+### 2.2 为什么界面不能是 Go→WASM
+
+用 Go 写 WASM 再操作 DOM，等于同时背两套工具链（Go 的构建 + JS 的构建），而 DOM 只能经 `syscall/js`——每次属性读写都是跨边界的反射调用。你在 Vugu/Veva 这类框架上最终写的还是「声明式 UI 组件」，只是语法更差、生态更空、调试更难。
+
+**它解决的问题（"我想用一个语言"）不存在**：宿主是 Go，界面是另一个进程，两者之间是一条 HTTP。你不需要「用 Go 写前端」，你需要「后端是 Go」——这已经成立了。
+
+### 2.3 壳为什么可以先不做
+
+浏览器方案（`dsh ui` 起服务 + 打开默认浏览器）能覆盖 90% 的使用，代价是三个原生能力拿不到：
+
+| 能力 | 浏览器 | 壳 |
+|---|---|---|
+| 选目录（工作区） | 只能上传，拿不到真实路径 | `showOpenDialog(openDirectory)` |
+| 拖入文件 | 拿不到真实路径 | `webUtils.getPathForFile` |
+| 外链 / 导航白名单 | 管不住 | `will-navigate` → `openExternal` |
+
+而这三件事**在桌面壳里一共 200 行**，且不影响前端一行代码。所以顺序是：**先契约 → 再界面 → 最后壳**，壳永远可以推迟。
+
+### 2.4 内存这笔账必须现在算
+
+| 组合 | 宿主 | WebView2 | 合计 | 过 150 MB 吗 |
+|---|---:|---:|---:|---|
+| 纯 Go UI（Fyne/Gio） | 15.7 MB | 0 | **~45 MB** | 过 |
+| 浏览器打开 | 15.7 MB | 浏览器自己算 | ~15.7 MB（不记浏览器） | 过 |
+| **WebView2 壳** | 15.7 MB | **~100–150 MB** | **~120–165 MB** | **可能不过** |
+
+**这是本项目唯一一个"混合方案可能打脸"的地方**：`PLAN.md` §0 的 150 MB 目标是按「整个产品」写的，而 WebView2 一个渲染进程就能吃掉 100 MB+。
+
+必须先拍板：**150 MB 是"宿主进程"还是"整个产品"**（§7 Q4）。这是全部选型里唯一一条会反过来推翻技术路线的。
+
+---
+
+## 3. UI 的「一切皆插件」= 四个契约
+
+宿主侧的内核是四件事（Scope / Registry / Bus / Assemble）。界面侧对应四条，定死这四条，其余都随版本演进：
+
+| # | 契约 | 是什么 | 参照官方 | 我们的取舍 |
+|---|---|---|---|---|
+| **C1** | **Slot**（在哪儿渲染） | 声明 + 授权树；`single/list/keyed/chain`；`root/session` | 87 个槽、`SlotOwnershipError` | **机制全抄，粒度砍到 8–12 个槽** |
+| **C2** | **View**（拿什么数据） | `spi.ViewSpec`（已有定义，`internal/spi/tool.go:105`），服务端给 `card/table/plain` | 官方没有统一 ViewSpec，各包自己画 | **我们的差异化优势**：工具卡由宿主声明，界面只负责画 |
+| **C3** | **Command**（能做什么） | `/api` 的 method 表；**必须列表化、可枚举、有快照** | 官方约 10 个 `api-*` 控制器 | **先做 12 个 method**，见 §4 |
+| **C4** | **Transport**（怎么说话） | 一条 WS 复用所有流 + 连续序号 + 尾页补洞 | `remote.mux` | **照抄语义，不复用其编码** |
+
+**判据不是"有多碎"，是"能不能被一个文件换掉"。** 官方 76 个包是 5 年演化的结果，不是设计目标——`research/42` 证明其中 32% 根本不用写（第三方库 11.9%、共享模块 20.2%），另有 9 个包可以直接砍。
+
+### 3.1 建议的包粒度（8 个，不是 55 个）
+
+| # | 包 | 职责 | 对应官方 |
+|---|---|---|---|
+| 1 | `ui-shell` | 布局骨架 + 三栏 + 拖拽 + 主题挂载 | `ui-layout` |
+| 2 | `ui-slots` | 授权树运行时（**唯一不可替换的内核**） | `ui-renderer` |
+| 3 | `ui-chat` | 消息流 + Markdown + 代码高亮 + 虚拟滚动 | `ui-chat` |
+| 4 | `ui-composer` | 输入框（含 IME）+ 附件 + 命令触发 | `ui-conversation` 的输入半 |
+| 5 | `ui-tools` | 工具调用卡片（吃 `ViewSpec`）+ 审批浮层 | `ui-tool` + `ui-approval` |
+| 6 | `ui-session` | 会话列表 / 切换 / 搜索 / 标题 | `ui-session` + `ui-sidebar` |
+| 7 | `ui-diff` | 文件 diff 视图（49 处 `hunk`，官方在 `deliverables` 里） | `ui-deliverables` |
+| 8 | `ui-settings` | 设置表单（先手写，不做 schemastery） | `ui-settings*` 共 9 个包 |
+
+**其余官方包一律不做**（plugin-market / schedule / goal / workflow-run / sidebar-browser / documentpreview / speech / cot-translation / account …）。
+
+---
+
+## 4. 里程碑
+
+顺序不可换：**C3 → C1 → 壳 → 剩余面板**。先契约，后界面，最后壳——壳永远可以推迟，契约不能。
+
+| # | 交付 | 验收（跑得出来） | 规模 |
+|---|---|---|---:|
+| **U0** | `internal/transport`：`/connect` token→cookie、`POST /api`、`WS /api/remote.mux`、`/plugins` 静态 | 用 `curl` + `websocat` **手工跑完一次完整对话**（发消息 → 收流式 → 收工具卡 → 审批 → 落 v4）；12 个 method 全绿 | 2–3k |
+| **U1** | 最小可用界面：对话 / 工具卡 / 审批 / 会话列表 / 断线重连 | 自己用它干一天活（而不是用官方 GUI）；长会话 1000 条滚动不掉帧 | 4–5 万行 |
+| **U2** | 桌面壳：WebView2 窗口 + 目录选择 + 拖入真实路径 + 外链白名单 + 单实例 | 双击 exe → 能选工作区 → 能拖文件进对话；`dshd` 崩溃后壳能提示并重启宿主 | 0.5–1k |
+| **U3** | 插件化：slots 授权树 + `/plugins` combo + 启动图 | 写**一个第三方 UI 插件**（比如"会话 token 用量角标"），只加一个目录就能出现 | 3–4k |
+| **U4** | 收口：diff 视图 / 终端（xterm + `creack/pty`）/ 主题 / i18n(en+zh) | 与官方同任务对比，操作步数不劣于官方 | 1–2 万行 |
+
+**U0 的 12 个 method（先定这些，不许膨胀）**
+
+```
+session.list / session.create / session.history / session.prompt / session.cancel
+session.delete / session.fork / session.load
+workspace.list / fs.read / fs.write
+config.get / config.set
+```
+
+> 每个 method 要同时产出一份 `testdata/api.snapshot.json`——**method 表就是契约**，改它要像改工具 schema 一样显式 diff（对齐宿主线 R4）。
+
+---
+
+## 5. 与宿主线的接口（不许越界的地方）
+
+| 规则 | 内容 | 怎么验 |
+|---|---|---|
+| **U-R1** | 界面**不得**直接读会话日志。历史只能经 `Transport` 拿 | `grep -r 'codecs/v4' ui/` 必须为空 |
+| **U-R2** | 宿主**不得** import 界面。`internal/transport` 只认 `spi`，不认 `ui/` | `go list -deps ./internal/transport \| grep ui` 必须为空 |
+| **U-R3** | 前端产物以 `//go:embed` 打进二进制，**不引 npm 运行时** | 构建产物里没有 `node_modules` |
+| **U-R4** | 壳只做四件事：窗口 / 目录选择 / 真实路径 / 外链白名单 | 壳的 `main.go` ≤ 1000 行 |
+| **U-R5** | 界面的一切可替换性走 slot 授权树，**不许**用全局事件名/全局单例绕过 | 注册未声明的槽必须抛错（有测试） |
+| **U-R6** | **WebView 里的 JS 不计入宿主 JS 运行时**（R6 原意是"别在 dshd 进程里塞 V8"） | 见 §7 Q3 —— **未拍板前这条不算数** |
+
+---
+
+## 6. 明确不做
+
+| 不做 | 理由 |
+|---|---|
+| 复刻 76 个前端包 | 32% 是第三方库与共享模块，另有 9 个包可砍（`research/42`） |
+| plugin-market / 插件市场 UI | 我们还没有插件生态，先做市场是本末倒置 |
+| schedule / goal / workflow / agent-team 面板 | P0 明确不做这些能力，界面自然没有 |
+| 侧栏浏览器（内嵌 `<webview>`） | 等于壳里再装一个浏览器，攻击面与复杂度都极高 |
+| PDF / Excel 内联预览 | 官方为它付了 14.2 MB 前端字节；交给系统默认程序 |
+| 账号 / 充值 / 登录页 | 平台生意，不是编辑器能力 |
+| 自动更新 / 崩溃上报 / 埋点 / 托盘 | 与我们「不上报、单二进制、用户自己管更新」的定位冲突 |
+| monaco / 完整 IDE | 我们是 agent 客户端，不是编辑器 |
+| 移动端 | 生态里已有 `dsh-Go`（Dart）；Transport 做对了，移动端是别人的事 |
+
+---
+
+## 7. 待拍板（**未拍板不许开工**）
+
+| # | 问题 | 选项 | 我的判断 | 错了会怎样 |
+|---|---|---|---|---|
+| **Q1** | 目标到底是「一个自己的 GUI」还是「一个能被任何 GUI 接上来的宿主」？ | A 前者 / B 后者 / C 后者优先、前者跟上 | **C** | 选 A 会把 3k 行契约写成 8k，且永远只有一种界面 |
+| **Q2** | 「重新编译」是**从零写**前端，还是**复用官方 MIT 前端包**只写契约？ | A 从零 / B 复用 / C 先复用保命、再逐块替换 | **C** | 选 B 会永远背着官方版本漂移；选 A 会 6 个月没有界面 |
+| **Q3** | R6「不引 JS 运行时」管不管 WebView 里的 JS？ | A 管 / B 不管 / C 只对宿主进程有效（改写 R6） | **C** | 选 A 则必须纯 Go UI，§2.2 的四个缺口全部要自己填 |
+| **Q4** | 150 MB 是「宿主进程」还是「整个产品」？ | A 宿主 / B 整个产品 | **A**（否则 WebView2 方案当场出局） | 选 B 则只剩纯 Go 原生 UI 一条路 |
+| **Q5** | 界面框架：React / Solid / Svelte / 原生 TS？ | — | **和官方一致（React）**，理由是复用其组件时零翻译成本 | 选小众框架，复用官方代码的成本立刻翻倍 |
+| **Q6** | 包粒度：8 个 / 20 个 / 76 个？ | — | **8**（§3.1） | 切太碎，U1 之前全在搭架子 |
+| **Q7** | U0 的 12 个 method 够不够？ | — | **够**，但 `fs.read`/`fs.write` 可能要拆成树 + 读 + 写 三个 | 少一个，界面就得多一条直连后门（违反 U-R1） |
+| **Q8** | 壳用 Wails v3 / 自研 WebView2 / 浏览器？ | — | **浏览器先上，Wails 后补** | 先做壳会把 3 周的活挪到最前面，且前端还没定型 |
+| **Q9** | 界面要不要长得像官方？ | A 像 / B 不像 | **B**（长得一样就没有换的理由） | 选 A 等于做一个更慢的官方客户端 |
+| **Q10** | TUI 与 GUI 并行还是串行？ | A 并行 / B 串行 | **并行，TUI 只做够用** | 串行会让 GUI 晚 2 个月拿到第一个真实反馈 |
+| **Q11** | 会话事件直接用 v4 词汇，还是再造一层 GUI 专用事件？ | A 直接 / B 再造 | **A** | 再造一层等于两套真相，压缩/遮蔽语义会分叉 |
+| **Q12** | 交付形态：单 exe / exe+目录 / 安装包？ | — | **单 exe**（前端 `//go:embed`） | 多一个文件就多一类"文件丢了"的支持成本 |
+
+---
+
+## 8. 证据索引
+
+| 路径 | 内容 |
+|---|---|
+| `research/40-official-shell.md` | 官方 Electron 壳解剖：4 个窗口、45 个 IPC、preload 面、路由表、三层协议、slots、必须复刻 10 条 |
+| `research/41-gui-stack-options.md` | 技术栈对比与产品先例（Zed / VS Code / 1Password / Raycast …） |
+| `research/42-frontend-inventory.md` | 前端资产盘点：76 包 / 23.7 万行、按 `#region` 归因、最小可用集 9 万行 / 95–115 人日 |
+| `research/22-dsh-acp.md` | ACP（另一条客户端路，与 GUI 互不替代） |
+| `research/23-dsh-plugin-surface.md` §4 | 客户端插件双面包协议 |
+| `cmd/dshd-bridge/main.go` | **已验证的原型**：595 行把 dshd 伪装成 DSH 的 `/api` + `events.mux`，dsh-TUI 能连 |

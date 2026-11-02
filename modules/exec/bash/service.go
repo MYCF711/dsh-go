@@ -2,6 +2,7 @@ package bash
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,24 @@ type Service struct {
 	jobs  map[string]*job
 	seq   int
 	order []string
+}
+
+// SetCwd 换掉"新会话的默认工作目录"。
+//
+// 为什么需要：ACP 客户端在 session/new 里带来的 cwd 会改 FS 的根，但 bash 的
+// 起始目录是装配期定的——不跟着换，同一个会话里 read 在 B、bash 在 A，
+// 模型会看到两个世界。已经开着的会话不动（它有自己的 cwd，这是设计）。
+func (s *Service) SetCwd(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return fmt.Errorf("工作目录不能为空")
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return fmt.Errorf("不是目录: %s", dir)
+	}
+	s.mu.Lock()
+	s.cwd = dir
+	s.mu.Unlock()
+	return nil
 }
 
 // NewService 以 cwd 为初始工作目录。

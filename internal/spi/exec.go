@@ -3,6 +3,14 @@ package spi
 import "time"
 
 // Exec 是命令执行接缝。按 R6：**真实 shell 进程**，不做进程内解释。
+// CwdFollower 是 Exec 的可选能力：换掉"新会话的默认工作目录"。
+//
+// 和 FS 的 RootFollower 同一套思路：客户端带来的 cwd 要两边一起生效，
+// 否则同一个会话里 read 在 B、bash 在 A。
+type CwdFollower interface {
+	SetCwd(dir string) error
+}
+
 type Exec interface {
 	// Run 在持久 shell 里执行一条命令。
 	//

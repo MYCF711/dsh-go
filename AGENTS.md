@@ -146,11 +146,12 @@
 - ⚠️ 真机踩到两个自己的 bug：`cwd` 参数是摆设（runner 没读）；子循环没设 `Project` 导致子代理看不到工具正文、撞满步数
 - ✅ **P0 工具集 18/18 完成并发版 `0.2.1-go.27`**（工具表 2,657 token，P0 目标 ≤6k）
 - ✅ **ACP 的 cwd 现在真的生效**：`FS.SetRoot` + `spi.RootFollower`；实测进程在 A、客户端要求 B，B 里的文件读得到
+- ✅ `bash` 的默认目录也跟着换（`spi.CwdFollower` + `Service.SetCwd`）——否则同一会话里 read 在 B、bash 在 A
 - 下一步 **M54**：真人长跑验收——真拿它干一天活，看哪里先崩（这是"能长期托付"最后一段距离）
 
 ### 界面线现状（2026-11-03）
 
-- ✅ 调研落盘三份：`research/40-official-shell.md`（壳解剖）、`research/41-gui-stack-options.md`（选型与先例）、`research/42-frontend-inventory.md`（前端资产）
+- ✅ 调研落盘（40、42 已完成，41 生成中）：`research/40-official-shell.md`（壳解剖）、`research/41-gui-stack-options.md`（选型与先例）、`research/42-frontend-inventory.md`（前端资产）
 - ✅ `UIPLAN.md` 已成稿，**Q1–Q12 待用户拍板**
 - 🚧 **代码零行**：`internal/transport/`、`ui/`、`cmd/dshui/` 都还不存在；`spi.ViewSpec` 有定义、无渲染器
 - ✅ 唯一已验证的原型是 `cmd/dshd-bridge/main.go`（595 行，把 dshd 伪装成 DSH `/api` + `events.mux`，dsh-TUI 能连）
