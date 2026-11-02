@@ -101,3 +101,7 @@ backend = "static"
 [[module]]
 id      = "tool-execlit"
 backend = "static"
+
+[[module]]
+id      = "tool-nowline"
+backend = "static"

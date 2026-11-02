@@ -351,6 +351,16 @@
     "caps": {}
   },
   {
+    "name": "now_line",
+    "description": "当前时间、日期、时区名与星期，一次拿全；别为这个跑 bash date。",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "present",
     "description": "把已存在的文件声明为交付物（不复制内容）。人需要单独打开某个文件时用。",
     "parameters": {

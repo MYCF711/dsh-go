@@ -33,6 +33,7 @@ import (
 	"dshgo/modules/tool/glob"
 	"dshgo/modules/tool/grep"
 	"dshgo/modules/tool/history"
+	"dshgo/modules/tool/nowline"
 	"dshgo/modules/tool/present"
 	"dshgo/modules/tool/pwsh"
 	"dshgo/modules/tool/read"
@@ -95,6 +96,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		github.Module(),
 		repohere.Module(),
 		execlit.Module(),
+		nowline.Module(),
 		subagentModule(sub),
 		subagenttool.Module(),
 	}
@@ -296,6 +298,8 @@ func cmdRun(argv []string) error {
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
 	maxChars := fs.Int("max-chars", 4000, "工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
+	// 规则文件：默认工作区的 AGENTS.md；给"执行者"喂精简手册时指到 docs/WORKER.md。
+	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	policy := fs.String("policy", "auto", "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
 	autoCompact := fs.Int("auto-compact", 40000, "每步前估算超过多少 token 就自动压缩（0=关闭）")
 	if err := fs.Parse(argv); err != nil {

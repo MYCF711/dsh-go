@@ -387,6 +387,7 @@ func cmdACP(argv []string) error {
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
 	steps := fs.Int("max-steps", 8, "每轮最多几步")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
+	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	autoCompact := fs.Int("auto-compact", 40000, "surface 估算超过多少 token 就自动压缩（0=关闭）")
 	ctxWindow := fs.Int("context-window", 128000, "上下文窗口大小（usage_update 的分母）")
 	modeID := fs.String("mode", modes.DefaultID, "启动模式 id（见 --modes-dir 与内置）")
@@ -539,6 +540,10 @@ func cmdACP(argv []string) error {
 	return serveErr
 }
 
+// rulesPath 指向要注入的规则文件；空 = 用工作区自己的 AGENTS.md。
+// 用途：给"写代码的执行者"喂精简手册（docs/WORKER.md），而不是维护者那本。
+var rulesPath = flag.String("agents", "", "规则文件路径（默认工作区 AGENTS.md）")
+
 // buildSystemPrompt 用现有工具表装配系统提示（确定性：同输入同输出）。
 func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes int) string {
 	return prompt.Default(prompt.Context{
@@ -548,6 +553,7 @@ func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes i
 		Date:              time.Now().Format("2006-01-02"),
 		Tools:             reg.Tools(),
 		MaxWorkspaceBytes: workspaceBytes,
+		ExtraRulesPath:    *rulesPath,
 	})
 }
 

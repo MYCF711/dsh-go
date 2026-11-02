@@ -1,0 +1,169 @@
+# DSH-GO 实现者手册
+
+> 这份手册是给**写代码的那一方**看的（dshd 自己）。维护者手册在 `AGENTS.md`，
+> 里面有里程碑、决策史、界面线规划——那些与你无关，别去读。
+>
+> 你只做一件事：**按任务书写一个工具模块**。下面全是这件事需要的规矩。
+
+---
+
+## 1. 你的产出长什么样
+
+一个目录、一个文件、一个工具：
+
+```
+modules/tool/<名字>/<名字>.go      ← 你写这个
+```
+
+**除非任务书明确说，否则你不碰任何其他文件。** 接线（`cmd/dshd/main.go`、
+`dsh.toml`、快照）由监工做。
+
+---
+
+## 2. 骨架（照抄，别自创结构）
+
+```go
+// Package foo 提供 `foo` 工具：<一句话说明何时用它>。
+package foo
+
+import (
+	"context"
+	"encoding/json"
+
+	"dshgo/internal/kernel"
+	"dshgo/internal/spi"
+)
+
+type Tool struct{}
+
+func (t *Tool) Name() string { return "foo" }
+
+// Description 必须 ≤120 字。超了有测试会红。
+func (t *Tool) Description() string { return "……" }
+
+func (t *Tool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{...},"required":[...]}`)
+}
+
+// Caps 必填：审批与沙箱全靠它，不许按工具名猜。
+func (t *Tool) Caps() spi.Caps { return spi.Caps{} }
+
+type args struct {
+	// 字段用 snake_case 的 json tag
+}
+
+func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
+	var a args
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return spi.Result{Hint: `参数不合法：期望 {"x": ...}`}, err
+	}
+	// ...
+	return spi.Result{Summary: "一行给人看的结果", Text: "正文", Data: map[string]any{}}, nil
+}
+
+func Module() kernel.Module {
+	return kernel.Module{
+		ID:       "tool-foo",
+		Backend:  kernel.BackendStatic,
+		Requires: []string{"tools"},
+		Register: func(s *kernel.Scope) error {
+			reg, err := kernel.Inject(s, spi.ToolsKey)
+			if err != nil {
+				return err
+			}
+			reg.Register(&Tool{})
+			return nil
+		},
+	}
+}
+```
+
+---
+
+## 3. 八条硬约束（每条都有测试或评审在查）
+
+| # | 约束 | 违反的后果 |
+|---|---|---|
+| 1 | **`Description` ≤120 字** | `TestEveryToolHasDescription` 直接红 |
+| 2 | **每个 `error` 分支必须设 `Hint`** | AST 扫描会查；没有 Hint 等于让模型自己猜下一步 |
+| 3 | **`Caps()` 必填且如实** | 写盘→`Writes`，起进程→`Executes`，联网→`Network`，删东西→`Destructive`。**宁可多声明**：任意程序都可能写盘，那就两个都标 |
+| 4 | **输出有界**（建议 ≤200 KB），截断时 `Hint` 说清怎么办 | 无界输出会撑爆上下文 |
+| 5 | **`Data` 是结构化 JSON，键名 snake_case**；`Summary` 只给人看 | 投影层靠 Data |
+| 6 | **路径一律正斜杠**，绝不把 `os.Getwd()` 的原生反斜杠喂出去 | Windows 上必炸 |
+| 7 | **失败返回 `(Result{}, err)`**，不要半截结果 + nil error | 上层会当成成功 |
+| 8 | **不写测试、不改测试、不动别的模块** | 越界即返工 |
+
+---
+
+## 4. 写 `Hint` 的正确姿势
+
+`Hint` 是**给模型看的下一步动作**，不是给人看的道歉。
+
+```go
+// ✗ 空话
+Hint: "参数错误"
+
+// ✗ 只描述现象
+Hint: "5xx 错误，正文为空"
+
+// ✓ 可执行
+Hint: "5xx：这是对方的问题，不是你写错了。别连着重试——隔一会儿再来，或用 gh CLI 对照"
+```
+
+判断标准：模型读完这句，**下一句该发什么**是不是就确定了。
+
+---
+
+## 5. 自检（收工前必须自己跑）
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+gofmt -w modules/tool/<名字>
+go build ./modules/tool/<名字> && go vet ./modules/tool/<名字>
+python scripts/desc-len.py modules/tool/<名字>/<名字>.go    # 必须 ≤120，这条最常翻车
+echo OK
+```
+
+**`desc-len.py` 是给你用的，不是给我的。** 你数不准中文字数（实测连着四次超限），
+跑一下它，红了就砍，直到绿。
+
+三条全过才算交活。**`go build` 通过 ≠ 装配生效**——接线是监工的活，你不用管，
+但要在收工时说明「已建文件、未接线」。
+
+---
+
+## 6. 你已经栽过的坑（先看这个，能省一轮返工）
+
+1. **`Description` 写超 120 字——连续三次。** 写完自己数一遍：中文字符也算一个字。
+2. **无限调研。** 拿到"实现一个功能"这种大任务时，你会不停读文件、写临时脚本、
+   造夹具验证，最后步数用完、**一行正式代码都没有**。
+   正确做法：**先写文件，再验证**。任务书写"只写一个文件"时，那个文件就是全部产出。
+3. **越界改文件。** 任务书说"不许改别的文件"，就一个都不要改——即使你觉得
+   `main.go` 少一行 import。报告即可，让监工加。
+4. **`Description` 里塞了实现细节。** 它是"什么时候用它"，不是文档。
+
+---
+
+## 7. 代码风格（与本仓一致）
+
+- 注释写**为什么**，不写"这里做了什么"。
+- 中文注释，句号结尾；代码标识符保持英文。
+- 错误信息带上下文：`fmt.Errorf("读配置失败: %w", err)`。
+- 不引新依赖。标准库够用——`go.mod` 加一行要写清「为什么标准库不够」。
+- 不用 `log.Fatal`、不 `panic`；把错误返回上去。
+
+---
+
+## 8. 这个仓的目录（你只需要知道这些）
+
+```
+modules/tool/<名字>/    ← 你写的地方（一模块一目录）
+modules/exec/bash/      起进程的参考实现
+modules/fs/local/       文件读写的参考实现
+internal/spi/           Tool 接口、Caps、Result——定义在这里，零实现
+internal/kernel/        Scope / Module / Inject / Provide——装配用的
+cmd/dshd/               入口；接线在这里，但**由监工改**
+```
+
+**先读 `internal/spi/tool.go` 的 Tool 接口**，再读一个最近的同类工具当模板
+（`modules/tool/github/`、`modules/tool/pwsh/`）。别读整个仓库。

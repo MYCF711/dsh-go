@@ -22,6 +22,10 @@ type Context struct {
 	Platform string
 	Date     string
 	Tools    []spi.Tool
+	// ExtraRulesPath 是额外要注入的规则文件（绝对路径或相对 Cwd）。
+	// 用途：给不同角色的会话喂不同的手册——维护者读 AGENTS.md，
+	// 写代码的执行者读 docs/WORKER.md。两者内容差一个量级。
+	ExtraRulesPath string
 	// MaxWorkspaceBytes 是 AGENTS.md 这类外部内容的字节上限。
 	MaxWorkspaceBytes int
 }
@@ -119,9 +123,15 @@ func (WorkspaceRules) Build(c Context) string {
 	if c.Cwd == "" {
 		return ""
 	}
-	candidates := []string{
-		filepath.Join(c.Cwd, "AGENTS.md"),
+	candidates := make([]string, 0, 2)
+	if c.ExtraRulesPath != "" {
+		p := c.ExtraRulesPath
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(c.Cwd, p)
+		}
+		candidates = append(candidates, p)
 	}
+	candidates = append(candidates, filepath.Join(c.Cwd, "AGENTS.md"))
 	for _, p := range candidates {
 		b, err := os.ReadFile(p)
 		if err != nil || len(b) == 0 {
