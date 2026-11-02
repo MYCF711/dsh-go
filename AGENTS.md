@@ -50,6 +50,8 @@
 - ✅ 行为对拍：从 2.3 万个真实结果里挖失败形状，修掉 read offset 越界静默返空、grep 坏路径返 0 命中、失败事件正文为空
 - ✅ bash 失败样本归类：84/110 是 `unknown tool`（措辞已对齐）；取消改为 "outcome is unknown" 语义
 - ✅ edit 失败归类：84% 是读后写策略；措辞逐字对齐 DSH（含 `cannot write`/`cannot edit` 动词区分）
+- ✅ **Martty 真客户端验收**（`docs/martty.md`）：`initialize ok → dsh-go-acp`，流式 reasoning 显示为「推理：…」，usage/模式/Caps 全对
+- ✅ `v4.NormalizeCwd`：去掉 `\?\` 前缀（Martty 传的 workspace 带它，会写出真实 DSH 永远不会产生的 projectKey）
 - 下一步 **M16**：工具回显的 token 效率（占上下文 85.5%，长会话的真正压力来源）
 
 ---
@@ -227,6 +229,7 @@ export PATH="/c/Program Files/Go/bin:$PATH"     # go 1.27.3，未入 PATH
 | DSH 产物（asar） | `D:/DeepSeek Harness/Desktop/resources/app.asar/dsh` | **bash 读不了**，要 `ELECTRON_RUN_AS_NODE=1 "D:/DeepSeek Harness/Desktop/DeepSeek Harness.exe" script.mjs` |
 | 存量会话 | `D:/DeepSeek Harness/home/sessions/**` | **只读**，考古与 golden test 的输入 |
 | 模型网关 | `http://127.0.0.1:3425/v1`（magpie，OpenAI 兼容） | LLM 客户端联调 |
+| Martty（真 ACP 客户端） | `C:/Users/Administrator/AppData/Roaming/npm/martty-cli.cmd` | `--agent <dshd> --agent-arg acp --check-runtime` 验握手；见 `docs/martty.md` |
 | dsc 参考 | `refs/dsc/` | **只读**；借鉴处必须注明 `refs/dsc/<file>:<line>` |
 
 **行尾**：仓库统一 LF（`.gitattributes` 的 `eol=lf`）。CRLF 会让 `gofmt -l` 把所有文件判成"未格式化"，CI 直接红——编辑器别开自动转 CRLF。

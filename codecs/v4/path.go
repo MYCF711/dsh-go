@@ -6,6 +6,26 @@ import (
 	"unicode/utf16"
 )
 
+// NormalizeCwd 去掉 Windows 的扩展长度前缀（`\\?\` 与 `\\.\`）。
+//
+// Node 侧客户端（Martty 等）会把 workspace 原样传过来，常常带着 `\\?\` 前缀。
+// 原样落盘的话 projectKey 会变成一个真实 DSH 永远不会产生的目录名
+// （形如 `--~003F-D-...`），两边就互相看不见对方的会话了。
+// 真实语料里 116 个会话目录**零个**带 `~003F`。
+func NormalizeCwd(p string) string {
+	const (
+		extended   = `\\?\` // \\?\  —— 扩展长度路径
+		devicePath = `\\.\` // \\.\ —— 设备命名空间
+	)
+	if strings.HasPrefix(p, extended) {
+		return p[len(extended):]
+	}
+	if strings.HasPrefix(p, devicePath) {
+		return p[len(devicePath):]
+	}
+	return p
+}
+
 // ProjectKey 把 cwd 变成项目目录名。规则逐字对齐（research/21 §1）：
 //
 //  1. `/` `\` `:` 各变一个 `-`，连续 `-` 折叠；
@@ -13,6 +33,7 @@ import (
 //  3. 去前导 `-`；空 → `root`；截 251；
 //  4. 包成 `--<key>--`。
 func ProjectKey(cwd string) string {
+	cwd = NormalizeCwd(cwd)
 	var b strings.Builder
 	for _, r := range cwd {
 		if r == '/' || r == '\\' || r == ':' {

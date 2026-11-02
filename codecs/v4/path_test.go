@@ -1,6 +1,9 @@
 package v4
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestProjectKeyMatchesRealDirectories(t *testing.T) {
 	// 这些名字是从 $DSH_HOME/sessions 的真实目录抄下来的——它们就是契约。
@@ -52,5 +55,36 @@ func TestEncodeSegment(t *testing.T) {
 	}
 	if _, err := EncodeSegment(""); err == nil {
 		t.Fatal("空 id 必须报错")
+	}
+}
+
+// 客户端常把 workspace 带着扩展长度前缀传过来（Node 的 \\?\ 形式）。
+// 原样落盘会造出真实 DSH 永远不会产生的目录名，两边互相看不见。
+//
+// 注意这里的字面量：用普通字符串（双引号）写，四个反斜杠才能得到两个真实反斜杠。
+// 用反引号写会被"看起来像转义"骗过去——这个测试自己就踩过一次。
+func TestNormalizeCwdStripsExtendedPrefix(t *testing.T) {
+	ext := "\\\\?\\" // 真实内容：\ \ ? \
+	dev := "\\\\.\\" // 真实内容：\ \ . \
+	plain := "D:\\work\\proj"
+
+	cases := []struct{ in, want string }{
+		{ext + plain, plain},
+		{dev + plain, plain},
+		{plain, plain},
+	}
+	for _, c := range cases {
+		if got := NormalizeCwd(c.in); got != c.want {
+			t.Fatalf("NormalizeCwd(%q) = %q，期望 %q", c.in, got, c.want)
+		}
+	}
+
+	// 关键：归一化之后 projectKey 不能出现 ~003F（问号的编码），
+	// 且必须和直接给普通路径算出来的完全一致。
+	if got := ProjectKey(ext + "D:\\a b"); strings.Contains(got, "~003F") {
+		t.Fatalf("projectKey 里还有问号编码: %s", got)
+	}
+	if ProjectKey(ext+"D:\\a b") != ProjectKey("D:\\a b") {
+		t.Fatal("带前缀和不带前缀算出来的 projectKey 应该一样")
 	}
 }

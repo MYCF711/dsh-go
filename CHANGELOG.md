@@ -1,3 +1,42 @@
+## 0.2.1-go.15（未发布）
+
+**Martty 真客户端连上了，并抓到一个只有真客户端才会暴露的 bug。**
+
+`martty@0.3.3` 装好后指向我们的 agent：
+
+```
+$ martty --agent …/dshd.exe --agent-arg acp --check-runtime
+initialize ok in 0.1s → dsh-go-acp
+```
+
+真跑一轮（睡莲题），屏幕上出现了流式推理：
+
+```
+ 推理：睡莲每天翻倍，所以"满池塘"前一天，必然正好盖住一半…
+  1 turn · 0 step | TTFT avg 1.1s
+ ↑4.2K · ↓105 | 3.4%/128K | 1 turn · 0 steps | Cache hit 0%
+                             ╰· standard · Workspace Write   dsh-go-acp ·
+```
+
+—— `agent_thought_chunk` / `usage_update` / 模式 / Caps 标签全对上了。
+**判据 ① 从此有真客户端证据，不再只是 SDK 脚本**（见 `docs/martty.md`）。
+
+### 抓到的 bug：`~003F`
+
+第一轮跑完，会话落到了 `--~003F-D-DeepSeek~0020Harness-…`。
+`~003F` 是 `?` 的编码——Martty 传的 workspace 带着 Windows 扩展长度前缀 `\?\D:\…`，
+我们原样拿去算 `projectKey` 了。
+
+真实 DSH 永远不会产生这种目录名（116 个真实会话目录**零个**带 `~003F`），
+所以后果是**两边互相看不见对方的会话**。
+
+- 新增 `v4.NormalizeCwd`（去 `\?\` / `\.\`），`session/new` 收到 cwd 先归一化
+- 修完目录变成 `--D-DeepSeek~0020Harness-default-workspace-DSH-GO--`
+
+写测试时又踩了一次：反引号 `` `\?\` `` 看着像四个字符，实际三个
+（Go raw string 不处理转义）。改用 `"\\?\\"` 才写对。
+
+---
 ## 0.2.1-go.14（2026-11-02）
 
 **edit 的 75 个失败：84% 来自读后写策略，而那条错误信息就是它自己的教程。**

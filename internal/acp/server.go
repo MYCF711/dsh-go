@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"dshgo/codecs/v4"
 	"dshgo/internal/agent"
 	"dshgo/internal/session"
 )
@@ -189,6 +190,9 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()})
 			return
 		}
+		// 客户端可能带着 `\?\` 前缀（Node 的扩展长度路径），先归一化，
+		// 否则会话会落进一个真实 DSH 永远不会产生的 projectKey 目录。
+		p.Cwd = v4.NormalizeCwd(p.Cwd)
 		if p.Cwd == "" || !filepath.IsAbs(filepath.FromSlash(strings.ReplaceAll(p.Cwd, "\\", "/"))) {
 			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "cwd 必须是绝对路径"})
 			return
