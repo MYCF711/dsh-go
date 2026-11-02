@@ -154,3 +154,43 @@ func TestDoctorWarningIsVisibleInSummary(t *testing.T) {
 		t.Fatal("警告不是致命项，Failed 应为 false")
 	}
 }
+
+// 出事之后第一件事是翻日志。doctor 要能把"哪份日志、最后一条错误原文"指出来，
+// 而不是让人自己去找。
+func TestDoctorPointsAtLastLogError(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		`{"level":"INFO","msg":"会话开始","session":"s1"}`,
+		`{"level":"WARN","msg":"工具调用失败","tool":"read","error":"/x 不存在"}`,
+	}
+	path := filepath.Join(dir, "dshd-2026-11-03.log")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := checkRecentLog(home)
+	if !c.OK || !c.Warn {
+		t.Fatalf("有警告的日志应该是「可读但有警告」: %+v", c)
+	}
+	if !strings.Contains(c.Detail, "1 条警告") {
+		t.Fatalf("要说清几条警告: %q", c.Detail)
+	}
+	if !strings.Contains(c.Next, "/x 不存在") {
+		t.Fatalf("要带出最后一条错误原文: %q", c.Next)
+	}
+	if !strings.Contains(c.Next, "dshd-2026-11-03.log") {
+		t.Fatalf("要指到文件: %q", c.Next)
+	}
+}
+
+// 没有日志时不该报警——第一次跑本来就没有。
+func TestDoctorNoLogYet(t *testing.T) {
+	c := checkRecentLog(t.TempDir())
+	if !c.OK || c.Warn {
+		t.Fatalf("没有日志是正常的: %+v", c)
+	}
+}

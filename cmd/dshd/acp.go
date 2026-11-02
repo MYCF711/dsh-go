@@ -391,6 +391,10 @@ func cmdACP(argv []string) error {
 	if err := checkHome(*home); err != nil {
 		return err
 	}
+	// 同一套诊断日志：ACP 模式下 stdout 是协议，只能靠文件事后查。
+	if d, err := openDiag(*home); err == nil {
+		defer d.Close()
+	}
 	mods, err := loadMods(*manifest, *home, *maxChars)
 	if err != nil {
 		return err
@@ -789,12 +793,17 @@ func (r *acpRunner) ensureSession(sessionID, cwd string) (*session.Log, error) {
 		return nil, err
 	}
 	if _, statErr := os.Stat(p); statErr == nil {
-		return session.OpenSession(r.home, cwd, sessionID)
+		l, err := session.OpenSession(r.home, cwd, sessionID)
+		if err == nil {
+			logSessionStart(r.home, sessionID, l.Path, cwd, r.modeOf(sessionID).ID)
+		}
+		return l, err
 	}
 	l, err := session.CreateSession(r.home, cwd, sessionID, r.modeOf(sessionID).ID)
 	if err != nil {
 		return nil, fmt.Errorf("建会话失败: %w", err)
 	}
+	logSessionStart(r.home, sessionID, l.Path, cwd, r.modeOf(sessionID).ID)
 	// 系统提示作为**耐久事件**落盘：DSH 退休 request/header.header.system 后的做法，
 	// 这样 resume 之后模型仍然知道自己是谁。
 	if err := l.Append("system/message", session.SystemMessageData(1, 1, r.system)); err != nil {

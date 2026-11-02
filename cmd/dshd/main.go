@@ -277,6 +277,17 @@ func cmdRun(argv []string) error {
 		return err
 	}
 
+	// 从这里开始，所有 slog 落到 <home>/logs/<日期>.log。
+	// 它不替代 stderr——只是让"事后能查"这件事成立。
+	if d, err := openDiag(*home); err == nil {
+		defer d.Close()
+		defer func() {
+			if d.Path != "" {
+				fmt.Fprintf(os.Stderr, "日志: %s"+string(rune(10)), d.Path)
+			}
+		}()
+	}
+
 	mods, err := loadMods(*manifest, *home, *maxChars)
 	if err != nil {
 		return err
@@ -307,6 +318,7 @@ func cmdRun(argv []string) error {
 		return err
 	}
 	defer logw.Close()
+	logSessionStart(*home, sessID, logw.Path, cwd, modes.DefaultID)
 	// 把"当前会话"指给 history_search——`run` 以前没这一步，模型回查只会得到
 	// "没有活动会话"。ACP 那边早就指了，这里补上。
 	attachHistory(logw)

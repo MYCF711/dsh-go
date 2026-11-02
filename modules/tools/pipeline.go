@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"dshgo/internal/kernel"
@@ -61,6 +62,23 @@ func (p *Pipeline) Violations() []string {
 // Run 是唯一执行入口：绕过它直接调 Tool.Exec 会跳过审批、沙箱、截断与提示。
 func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
 	call := &spi.Call{Name: name, Args: args}
+	started := time.Now()
+	// 每次工具调用都在日志里留一条：名字、耗时、成败、错误原文。
+	// 出事之后人要能回答"它到底跑了什么、跑了多久、成没成"。
+	defer func() {
+		attrs := []any{
+			"tool", name,
+			"ms", time.Since(started).Milliseconds(),
+			"ok", call.Err == nil,
+			"args_bytes", len(args),
+		}
+		if call.Err != nil {
+			attrs = append(attrs, "error", call.Err.Error())
+			p.log.Warn("工具调用失败", attrs...)
+			return
+		}
+		p.log.Info("工具调用", attrs...)
+	}()
 
 	// 1. pre-execute：waterfall，可 veto。
 	if _, err := p.bus.Waterfall(spi.EventToolPreExecute, call); err != nil {

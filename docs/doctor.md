@@ -111,3 +111,48 @@ python scripts/doctor-drills.py
 警告项（`OK && Warn`）原来渲染成 `✓`，但结尾那行说"上面 **!** 那行"——
 **人对不上号**。现在警告优先：`Warn` 就先画 `!`，不管 OK 是不是 true。
 `TestDoctorWarningIsVisibleInSummary` 钉住：有警告时不许打"一切正常"、警告行必须是 `!`。
+
+## 运行日志：出事之后去哪儿查
+
+`<home>/logs/<日期>.log`，一行一个 JSON。`run` 与 `acp` 都会写。
+
+```
+{"time":"2026-11-03T00:55:50Z","level":"INFO","msg":"会话开始",
+ "session":"session-b953b7cc-…","path":"…/session.v4.jsonl.zstd",
+ "cwd":"D:/…/DSH-GO","mode":"default","home":"tmp/log3"}
+{"time":"2026-11-03T00:55:51Z","level":"WARN","msg":"工具调用失败",
+ "tool":"read","ms":0,"ok":false,"args_bytes":33,"error":"/nonexistent.txt 不存在"}
+```
+
+三个刻意的选择：
+
+1. **一行一个 JSON**——能 grep、能 `jq`、能直接贴给人看，不需要额外工具。
+2. **失败也照打**：`run` 结束时会打一行 `日志: <path>`，**出错时也打**（`defer`）。
+   以前出错只有一句 stderr，会话一关就没了。
+3. **不替代 stderr**：原来的输出一个字都没变，日志是附加的。
+
+### doctor 会指到那份日志
+
+```
+  ! 运行日志           dshd-2026-11-03.log 里有 1 条警告
+    → 最后一条: 工具调用失败: /nonexistent.txt 不存在（完整内容见 …/dshd-2026-11-03.log）
+```
+
+数警告、带出最后一条错误原文、给文件路径——三步都不用你自己找。
+
+### 一次失败现在长这样
+
+```
+$ dshd run --prompt "用 read 读 /nonexistent.txt"
+  → read {"file_path": "/nonexistent.txt"}
+  ← read [ERR]
+…
+日志: tmp/log3/logs/dshd-2026-11-03.log
+```
+
+翻日志能直接看到：**哪份会话**（id + 路径 + cwd + 模式）、**哪一步**（tool）、
+**跑了多久**（ms）、**成没成**（ok）、**错误原文**。
+
+钉住的测试：`TestPipelineLogsEveryToolCall`（每次调用都记，成败与错误原文都在）、
+`TestDoctorPointsAtLastLogError`（doctor 指到文件并带出最后一条错误）、
+`TestDoctorNoLogYet`（第一次跑没日志不算问题）。

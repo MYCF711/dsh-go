@@ -1,3 +1,33 @@
+## 0.2.1-go.22（未发布）· 续 3
+
+**运行日志：出事之后有东西可查。**
+
+以前出错只有一行 stderr，会话一关就没了。现在 `run` / `acp` 都会写
+`<home>/logs/<日期>.log`，一行一个 JSON：
+
+```
+{"time":"…","level":"INFO","msg":"会话开始","session":"session-b953b7cc-…",
+ "path":"…/session.v4.jsonl.zstd","cwd":"D:/…","mode":"default","home":"tmp/log3"}
+{"time":"…","level":"WARN","msg":"工具调用失败","tool":"read","ms":0,
+ "ok":false,"args_bytes":33,"error":"/nonexistent.txt 不存在"}
+```
+
+- **一行一个 JSON**：能 grep、能 `jq`、能直接贴给人看
+- **失败也照打**：`run` 结束时打 `日志: <path>`，出错时也打（`defer`）
+- **不替代 stderr**：原来的输出一个字都没变，日志是附加的
+
+### doctor 指到那份日志
+
+```
+  ! 运行日志           dshd-2026-11-03.log 里有 1 条警告
+    → 最后一条: 工具调用失败: /nonexistent.txt 不存在（完整内容见 …/dshd-2026-11-03.log）
+```
+
+数警告、带出最后一条错误原文、给路径——三步都不用自己找。
+
+新增 `TestPipelineLogsEveryToolCall` / `TestDoctorPointsAtLastLogError` / `TestDoctorNoLogYet`。
+
+---
 ## 0.2.1-go.22（未发布）· 续 2
 
 **故障演练：四种真故障，doctor 四项全中。**

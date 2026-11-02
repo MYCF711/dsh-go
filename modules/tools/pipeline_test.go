@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -11,6 +13,8 @@ import (
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
 )
+
+var errTestBoom = errors.New("炸了")
 
 type stubTool struct {
 	name string
@@ -197,5 +201,57 @@ func TestPipelineRejectsNonJSONArgs(t *testing.T) {
 	}
 	if !strings.Contains(res.Hint, "JSON") {
 		t.Fatalf("Hint 要说清是 JSON 的问题: %q", res.Hint)
+	}
+}
+
+// 每次工具调用都要在日志里留一条：名字、耗时、成败、错误原文。
+// 出事之后人要能回答"它到底跑了什么、跑了多久、成没成"。
+func TestPipelineLogsEveryToolCall(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(prev)
+
+	ran := false
+	p, k := newPipe(t, Options{},
+		&stubTool{name: "ok_tool", ran: &ran, res: spi.Result{Summary: "fine"}},
+		&stubTool{name: "bad_tool", err: errTestBoom, res: spi.Result{Hint: "换个办法"}},
+	)
+	defer k.Root().Dispose()
+
+	if _, err := p.Run(context.Background(), "ok_tool", json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(context.Background(), "bad_tool", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("bad_tool 应该失败")
+	}
+
+	var okRec, errRec map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		switch rec["tool"] {
+		case "ok_tool":
+			okRec = rec
+		case "bad_tool":
+			errRec = rec
+		}
+	}
+	if okRec == nil || errRec == nil {
+		t.Fatalf("两次调用都该有日志，实际:\n%s", buf.String())
+	}
+	if okRec["ok"] != true || errRec["ok"] != false {
+		t.Fatalf("成败要写清: ok=%v err=%v", okRec["ok"], errRec["ok"])
+	}
+	if _, has := okRec["ms"]; !has {
+		t.Fatal("要记耗时")
+	}
+	if msg, _ := errRec["msg"].(string); !strings.Contains(msg, "失败") {
+		t.Fatalf("失败那条的 msg 要说失败: %q", msg)
+	}
+	if e, _ := errRec["error"].(string); e == "" {
+		t.Fatal("失败那条要带错误原文")
 	}
 }

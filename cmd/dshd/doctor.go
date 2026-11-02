@@ -86,6 +86,7 @@ func runDoctor(home, base string) doctorReport {
 		checkStaleLocks(home),
 		checkGateway(base),
 		checkManifest("dsh.toml"),
+		checkRecentLog(home),
 	)
 	return rep
 }
@@ -278,4 +279,81 @@ func countWarns(r doctorReport) int {
 		}
 	}
 	return n
+}
+
+// 6. 最近的日志里有没有错误——出事之后第一件事就是翻它。
+func checkRecentLog(home string) checkResult {
+	c := checkResult{Name: "运行日志"}
+	dir := filepath.Join(home, "logs")
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		c.OK = true
+		c.Detail = "还没有日志（跑一次 run/acp 就会写）"
+		return c
+	}
+	var latest string
+	var latestTime time.Time
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".log" {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(latestTime) {
+			latestTime = info.ModTime()
+			latest = filepath.Join(dir, e.Name())
+		}
+	}
+	if latest == "" {
+		c.OK = true
+		c.Detail = "日志目录里没有 .log 文件"
+		return c
+	}
+	// 数一下里面有多少条 WARN/ERROR，并把最后一条错误原文带出来
+	raw, err := os.ReadFile(latest)
+	if err != nil {
+		c.OK = true
+		c.Warn = true
+		c.Detail = "最新日志读不出来: " + err.Error()
+		c.Next = "检查文件权限: " + latest
+		return c
+	}
+	var warns int
+	var lastErr string
+	for _, line := range strings.Split(string(raw), string(rune(10))) {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if rec.Level == "WARN" || rec.Level == "ERROR" {
+			warns++
+			if rec.Error != "" {
+				lastErr = rec.Msg + ": " + rec.Error
+			} else {
+				lastErr = rec.Msg
+			}
+		}
+	}
+	c.OK = true
+	if warns > 0 {
+		c.Warn = true
+		c.Detail = fmt.Sprintf("%s 里有 %d 条警告", filepath.Base(latest), warns)
+		if lastErr != "" {
+			c.Next = "最后一条: " + lastErr + "（完整内容见 " + latest + "）"
+		} else {
+			c.Next = "完整内容见 " + latest
+		}
+		return c
+	}
+	c.Detail = fmt.Sprintf("%s 里没有警告（%d 行）", filepath.Base(latest), strings.Count(string(raw), string(rune(10))))
+	return c
 }
