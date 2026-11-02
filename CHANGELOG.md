@@ -1,3 +1,34 @@
+## 0.2.1-go.9（未发布）
+
+**模式（preset）真正落地：工具可见性由模式决定。**
+
+之前 `session/set_mode` 只有个 `default` 的空壳——有接口没实现。
+
+- `internal/modes`：`Mode`（ID/Name/Description/Builtin/Tools/Approval）+ `Builtins()` / `Resolve()` / `OverrideBuiltin()`
+  - 内置两个：`default`（全开）、`read-only`（只有 read/glob/grep，approval=deny）
+  - **未知模式明确报错**，不静默回落到 default
+  - 内置模式只读：用户层想改就往报错里撞（PLAN §6）
+- `modes.Filter`：按模式裁剪 registry 的**只读视图**（`Register` 直接拒绝）
+- `dshd acp --mode read-only`；`session/set_mode` 真的会换工具表
+
+**实测**
+```
+# read-only 下模型看不到 bash
+prompt1 stopReason: end_turn | 调用过的工具: []
+
+# 未知模式
+未知模式被拒 ✅: 未知模式 "turbo"（可选：default, read-only）
+
+# 切回 default
+切到 default: {"modeId":"default"}
+切换后的工具调用: ["bash"]
+切换后的回答片段: "`bash` 已经挂上了。执行结果：AFTER-SWITCH"
+```
+
+**这一条为什么重要**：模式在会话内不变，工具表才稳定（PLAN §6），前缀缓存才不会被击穿。
+`modeOf()` 只在 `SetMode` 时改变，prompt 路径不碰它。
+
+---
 ## 0.2.1-go.8（未发布）· 续
 
 **查冷启动变慢的原因：一个 TOML 库的 init 占了 23 ms。**

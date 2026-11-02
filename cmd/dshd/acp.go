@@ -18,6 +18,7 @@ import (
 	"dshgo/internal/compact"
 	"dshgo/internal/kernel"
 	"dshgo/internal/llm"
+	"dshgo/internal/modes"
 	"dshgo/internal/prompt"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
@@ -46,6 +47,9 @@ type acpRunner struct {
 	approvals *approval.Memory
 	// approvalsStore 非 nil 时，授权跨进程保留（需要 --remember-approvals）。
 	approvalsStore *approval.Store
+	// modeID 是启动时的默认模式；sessionModes 记每个会话当前模式。
+	modeID       string
+	sessionModes map[string]string
 
 	mu    sync.Mutex
 	logs  map[string]*session.Log
@@ -60,7 +64,7 @@ func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home str
 		reg: reg, runner: runner, base: base, model: model, home: home, steps: steps,
 		logs: map[string]*session.Log{}, turns: map[string]int{}, hist: map[string][]llm.Message{},
 		used: map[string]int{}, ctxWindow: 128000, meter: map[string]*session.Meter{}, keepRecent: 8,
-		approvals: approval.New(),
+		approvals: approval.New(), sessionModes: map[string]string{}, modeID: modes.DefaultID,
 	}
 }
 
@@ -185,7 +189,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 
 	loop := &agent.Loop{
 		Chat:     llm.New(r.base, os.Getenv("DSHD_LLM_KEY")),
-		Tools:    r.reg,
+		Tools:    modes.Filter(r.reg, r.modeOf(sessionID)),
 		Runner:   runner,
 		Project:  session.ProjectResult,
 		Model:    r.model,
@@ -338,6 +342,7 @@ func cmdACP(argv []string) error {
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	autoCompact := fs.Int("auto-compact", 40000, "surface 估算超过多少 token 就自动压缩（0=关闭）")
 	ctxWindow := fs.Int("context-window", 128000, "上下文窗口大小（usage_update 的分母）")
+	modeID := fs.String("mode", modes.DefaultID, "启动模式："+modes.IDs())
 	remember := fs.Bool("remember-approvals", false, "把\"以后都允许\"记到磁盘，resume 后仍然生效")
 	if err := fs.Parse(argv); err != nil {
 		return err
@@ -371,6 +376,11 @@ func cmdACP(argv []string) error {
 	if *ctxWindow > 0 {
 		acpRunner.ctxWindow = *ctxWindow
 	}
+	m, err := modes.Resolve(*modeID)
+	if err != nil {
+		return err
+	}
+	acpRunner.modeID = m.ID
 	if *remember {
 		acpRunner.approvalsStore = &approval.Store{Dir: filepath.Join(*home, "state", "approvals")}
 	}
@@ -634,12 +644,32 @@ func (r *acpRunner) Delete(ctx context.Context, sessionID, cwd string) error {
 	return nil
 }
 
-// SetMode 目前只有 default 一种模式；未知模式明确报错，不静默接受。
+// SetMode 切换会话模式。未知模式明确报错，不静默接受。
 func (r *acpRunner) SetMode(ctx context.Context, sessionID, modeID string) (string, error) {
-	switch modeID {
-	case "default", "":
-		return "default", nil
-	default:
-		return "", fmt.Errorf("未知模式 %q（可选：default）", modeID)
+	m, err := modes.Resolve(modeID)
+	if err != nil {
+		return "", err
 	}
+	r.mu.Lock()
+	r.sessionModes[sessionID] = m.ID
+	r.mu.Unlock()
+	return m.ID, nil
+}
+
+// modeOf 返回会话当前的模式（没设过就用默认）。
+//
+// 模式在会话内不变（PLAN §6）：换了模式，工具表会变，前缀缓存就废了。
+// 所以这里只在 SetMode 显式切换时变，prompt 路径不碰。
+func (r *acpRunner) modeOf(sessionID string) modes.Mode {
+	r.mu.Lock()
+	id := r.sessionModes[sessionID]
+	r.mu.Unlock()
+	if id == "" {
+		id = r.modeID
+	}
+	m, err := modes.Resolve(id)
+	if err != nil {
+		m, _ = modes.Resolve(modes.DefaultID)
+	}
+	return m
 }

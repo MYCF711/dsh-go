@@ -35,7 +35,8 @@
 - ✅ 压缩批量回归（15 个真实会话）：**发现并修掉"摘要被放到末尾"的顺序 bug**（现在插回遮蔽起点）
 - ✅ 压缩语义回归（`scripts/acp-compact-semantics.mjs`）：**又抓到一个 bug**——替身 seq 顺序与 surface 顺序不一致导致筛空；`compact.Select` 改为直接返回节点
 - ✅ 冷启动定位：`BurntSushi/toml` 的 init 占 23 ms，换成 `pelletier/go-toml/v2` 后 init 26→2 ms、ACP 就绪 65.9→**55.9 ms**
-- 下一步 **M8**：`modes/` 真正落地（现在 `session/set_mode` 只有 default）
+- ✅ 模式落地（`internal/modes`）：`default` / `read-only`，工具可见性按模式裁剪，`set_mode` 真的换表
+- 下一步 **M8**：用户自建模式（`$DSH_HOME/modes/*.toml`）+ 从内置复制
 
 ---
 
@@ -75,7 +76,7 @@
 | `modules/*` | 静态默认实现，一模块一目录一个 `Register(scope)` | 新模块必须过 `PLAN.md` §2.4 的三条判据 |
 | `codecs/v4/` | DSH 会话 v4 编解码 | 字节级对齐，见 §4 |
 | `wasmhost/` `pluginhost/` | wazero / go-plugin 装载器 | 载入层只做装载，不含业务 |
-| `modes/` | 内置模式（`builtin = true`，只读） | 用户层命中即报错 |
+| `internal/modes/` | 模式定义 + 工具可见性视图（只读） | 内置模式 `builtin=true` 只读；未知模式必须报错，不许回落 |
 | `docs/` | 设计文档 | 决策变更必须同时改 `PLAN.md` |
 | `research/` `evidence/` `refs/` | **只读**：调研与参考 | 只许追加新调研，不许改结论 |
 
