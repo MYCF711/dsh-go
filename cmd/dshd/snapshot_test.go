@@ -132,6 +132,10 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"team_task_list":   {},
 		"team_task_get":    {},
 		"team_task_update": {Writes: true},
+		// 会话间通信：发信写盘，读信与列会话只读。
+		"send_message": {Writes: true},
+		"wait_agent":   {},
+		"list_agents":  {},
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},

@@ -351,6 +351,16 @@
     "caps": {}
   },
   {
+    "name": "list_agents",
+    "description": "列出用过信箱的会话和各自消息数，看谁在等你，或核对会话 id 有没有写错。",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "now_line",
     "description": "当前时间、日期、时区名与星期，一次拿全；别为这个跑 bash date。",
     "parameters": {
@@ -479,6 +489,31 @@
       "additionalProperties": false
     },
     "caps": {}
+  },
+  {
+    "name": "send_message",
+    "description": "给另一个会话留一条消息，等它用 wait_agent 取走；要叫醒别人时用。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "description": "目标会话 id，例如 acp-aaa"
+        },
+        "message": {
+          "type": "string",
+          "description": "消息正文"
+        }
+      },
+      "required": [
+        "agent_id",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
   },
   {
     "name": "subagent",
@@ -667,6 +702,21 @@
       "required": [
         "todos"
       ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
+    "name": "wait_agent",
+    "description": "取自己信箱里的新消息，有就立刻返回，超时返回空列表；接手别人的活之前用。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "timeout_seconds": {
+          "type": "integer",
+          "description": "最多等多少秒，默认 60，上限 300"
+        }
+      },
       "additionalProperties": false
     },
     "caps": {}

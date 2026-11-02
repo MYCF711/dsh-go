@@ -162,7 +162,14 @@
 - ✅ **team 一族最小闭环落地**（dshd 自己写，749 行）：`team_task_create/list/get/update` 四个工具，
   板子落 `<home>/state/team-tasks.json`。真机验过 create→list→claim→complete 全链
 - 它这次**自己跑了 desc-len.py**（前四次的教训生效），四个 Description 全在限制内
-- 下一步 **M60**：`send_message` + `wait_agent`（会话间通信，需要宿主侧一个信箱通道）
+- ✅ **会话间通信落地**：`spi.WithSession/SessionFrom`（工具靠 ctx 知道"我是哪个会话"）+ 文件信箱
+  `<home>/state/mail/<会话>.jsonl`；`send_message` / `wait_agent` / `list_agents` 由 dshd 自己写
+- ✅ 真机验过**发信**：A 会话发给 B，B 的信箱文件出现 `{"from": A, "message": ...}`
+- ⚠️ **收信侧没验通**：`session/resume` 按 id 恢复失败，`wait_agent` 的端到端还没跑到（单测过）
+- ✅ 对拍拦住一次真错：DSH 的 `send_message` 参数是 `agent_id`/`message`，我们写成了 `to`/`text`
+- ⚠️ 我的 python 字符串替换**静默失效**过一次（签名写错 → 什么都没替换 → 以为改好了），
+  以后替换必须断言命中
+- 下一步 **M61**：修 `session/resume` 按 id 的查找（收信侧验证的前置）
 
 ### 界面线现状（2026-11-03）
 
@@ -326,7 +333,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 其余 8 个渲染进程 | 378.6 / 182.0 / 43.0 / 42.8 / 42.7 / 42.3 / 38.4 / 2.9 MB | 同上（**每开一个窗口多一个**） |
 | 空转 CPU | **2.0%**（没在跑任务） | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 27 个 / 20,626 字节 / **3,647 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 30 个 / 21,948 字节 / **3,911 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |

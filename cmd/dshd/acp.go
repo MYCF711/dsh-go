@@ -200,14 +200,15 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	}
 
 	loop := &agent.Loop{
-		Chat:     llm.New(r.base, os.Getenv("DSHD_LLM_KEY")),
-		Tools:    modes.Filter(r.reg, r.modeOf(sessionID)),
-		Runner:   runner,
-		Project:  session.ProjectResult,
-		Model:    r.model,
-		System:   r.system,
-		MaxSteps: r.steps,
-		Emit:     sink,
+		Chat:      llm.New(r.base, os.Getenv("DSHD_LLM_KEY")),
+		Tools:     modes.Filter(r.reg, r.modeOf(sessionID)),
+		Runner:    runner,
+		Project:   session.ProjectResult,
+		Model:     r.model,
+		System:    r.system,
+		SessionID: sessionID,
+		MaxSteps:  r.steps,
+		Emit:      sink,
 	}
 
 	// hist 必须在压缩**之后**取：autoCompactNow 会把 r.hist 换成压缩后的历史，

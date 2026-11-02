@@ -73,9 +73,12 @@ type Loop struct {
 	// Project 把工具结果压成模型可见的文本块（默认用 session.ProjectResult 的同类语义）。
 	Project func(spi.Result) []spi.Block
 	// Model 与系统提示由调用方给；Loop 不猜。
-	Model    string
-	System   string
-	MaxSteps int
+	Model  string
+	System string
+	// SessionID 绑到每一步的 ctx 上，让工具能回答"我在为哪个会话干活"。
+	// 空字符串不算错——单会话场景（`dshd run`）本来就是匿名的。
+	SessionID string
+	MaxSteps  int
 	// Emit 观测量；返回错误即中断整个 turn。
 	Emit func(Event) error
 	// lastImages 暂存"上一步工具产出的图片"，由 runTool2 写、调用方读走即清。
@@ -106,6 +109,10 @@ func (l *Loop) maxSteps() int {
 //
 // messages 会被追加（assistant 消息与 tool 结果都进历史），返回值是新历史。
 func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.Message, error) {
+	// 工具靠这个知道"我是哪个会话"；不设的话读信箱一类的工具只能拒绝。
+	if l.SessionID != "" {
+		ctx = spi.WithSession(ctx, l.SessionID)
+	}
 	if l.Chat == nil {
 		return history, fmt.Errorf("agent: 没有配置 Chat")
 	}

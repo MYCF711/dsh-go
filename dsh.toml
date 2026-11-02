@@ -109,3 +109,7 @@ backend = "static"
 [[module]]
 id      = "tool-teamtask"
 backend = "static"
+
+[[module]]
+id      = "tool-team"
+backend = "static"

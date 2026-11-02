@@ -40,6 +40,7 @@ import (
 	"dshgo/modules/tool/readimage"
 	"dshgo/modules/tool/repohere"
 	subagenttool "dshgo/modules/tool/subagent"
+	team "dshgo/modules/tool/team"
 	teamtask "dshgo/modules/tool/teamtask"
 	todo "dshgo/modules/tool/todo"
 	wdtool "dshgo/modules/tool/wd"
@@ -98,6 +99,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		repohere.Module(),
 		execlit.Module(),
 		teamtask.Module(filepath.Join(home, "state")),
+		team.Module(filepath.Join(home, "state", "mail")),
 		nowline.Module(),
 		subagentModule(sub),
 		subagenttool.Module(),
@@ -396,14 +398,15 @@ func cmdRun(argv []string) error {
 		model: *model, maxSteps: 8, timeout: 5 * time.Minute,
 	})
 	loop := &agent.Loop{
-		Chat:     chat,
-		Compact:  runCompactor(chat, logw, *autoCompact, *model, meter),
-		Tools:    reg,
-		Runner:   guarded,
-		Project:  session.ProjectResult,
-		Model:    *model,
-		System:   sys,
-		MaxSteps: *maxSteps,
+		Chat:      chat,
+		Compact:   runCompactor(chat, logw, *autoCompact, *model, meter),
+		Tools:     reg,
+		Runner:    guarded,
+		Project:   session.ProjectResult,
+		Model:     *model,
+		System:    sys,
+		SessionID: sessID,
+		MaxSteps:  *maxSteps,
 		Emit: func(e agent.Event) error {
 			switch e.Kind {
 			case agent.EventAssistantMsg:

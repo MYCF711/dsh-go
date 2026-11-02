@@ -203,3 +203,41 @@ research/UIPLAN 那些——那些是**维护者**的上下文，不是**执行�
 
 前两次缺 2，前四次缺 3。
 
+## 派活 10：team 消息（send_message / wait_agent / list_agents）
+
+**它交得不错（452 行），但这次是监工的失误更多。**
+
+### 我漏的基础设施
+
+工具要在相互通信时知道「我是哪个会话」，而 dshd 原来**没有任何机制**把会话 id
+传给工具。这不是它的问题——是我的任务书假设了一个不存在的东西。
+
+补了 `spi.WithSession/SessionFrom`，绑在 `agent.Loop.Run` 入口。
+
+### 两次"以为改好了"
+
+1. 第一次给 `Loop` 加 `SessionID` 字段成功，但 `Run` 里注入 ctx 的补丁**没生效**——
+   我按 `history` 写的签名，实际是 `hist`，`replace` 静默什么都不做。
+   结果真机跑起来还是「缺少会话上下文」。
+2. `dsh.toml` 里判断 `'tool-team' not in s` —— 而 `tool-teamtask` 包含这个子串，
+   于是**模块根本没登记**，工具数一直是 27 不是 30。
+
+两条都是同一个病：**改完没验证**。后来改成替换后立刻 `assert`/`grep` 回读，才没再犯。
+
+### 对拍测试救了一次
+
+DSH 的真实契约是 `send_message(agent_id, message)`，它按我的任务书写成了
+`to`/`text`。`TestToolParityWithDSH` 直接报红——**这个测试的价值就在这**：
+参数名错了，模型永远调不到。
+
+### 真机结果
+
+发信通了：
+```
+A: → send_message {"agent_id":"session-9ff...","message":"..."}   ← [ok]
+B 的信箱: {"from":"session-6b68...","message":"...","id":"msg-0001"}
+```
+
+收信**没验通**：`session/resume` 按 id 恢复失败，`wait_agent` 的端到端没跑到。
+单测过了（`TestSendWritesMailbox` / `TestSendWithoutSessionRejected`），但真机链路缺一环。
+
