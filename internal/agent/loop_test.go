@@ -334,3 +334,41 @@ type errRunner struct {
 func (r *errRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
 	return spi.Result{Hint: r.hint}, r.err
 }
+
+// 取消 ≠ 失败。命令可能已经跑完，只是结果没收到。
+// 说成 failed 会让模型以为"什么都没发生"，于是做出错误判断。
+func TestCancelledToolIsUnknownNotFailed(t *testing.T) {
+	chat := &scriptedChat{steps: []*llm.Response{
+		{ToolCalls: []llm.ToolCall{{ID: "c1", Type: "function", Function: llm.Func{
+			Name: "bash", Arguments: `{"command":"sleep 10"}`,
+		}}}, FinishReason: "tool_calls"},
+	}}
+	var got *spi.Result
+	l := &Loop{
+		Chat:     chat,
+		Tools:    &fakeRegistry{tools: map[string]spi.Tool{"bash": &fakeTool{name: "bash"}}},
+		Runner:   &errRunner{err: context.Canceled},
+		Model:    "m",
+		MaxSteps: 1,
+		Project:  func(r spi.Result) []spi.Block { return []spi.Block{{Type: "text", Text: r.Summary}} },
+		Emit: func(e Event) error {
+			if e.Kind == EventToolResult && e.IsError {
+				got = e.Result
+			}
+			return nil
+		},
+	}
+	_, _ = l.Run(context.Background(), 1, nil)
+	if got == nil {
+		t.Fatal("没有发出 tool/result 事件——日志里会留下一个有调用没结果的洞")
+	}
+	if !strings.Contains(got.Summary, "outcome is unknown") {
+		t.Fatalf("取消应该报「结果未知」，实际: %q", got.Summary)
+	}
+	if strings.Contains(got.Summary, "canceled") {
+		t.Fatalf("不该说成失败/取消: %q", got.Summary)
+	}
+	if got.Hint == "" {
+		t.Fatal("结果未知时必须给下一步提示")
+	}
+}

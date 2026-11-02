@@ -7,6 +7,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -202,6 +203,14 @@ func (l *Loop) runTool(ctx context.Context, turn, step int, call llm.ToolCall) l
 		shown := spi.Result{
 			Summary: "Error: " + err.Error(),
 			Hint:    res.Hint,
+		}
+		// 取消/中断 ≠ 失败：命令可能已经跑完了，只是我们没收到结果。
+		// DSH 的措辞就是这个意思——"结果未知，你自己决定要不要重试"。
+		// 说成 "failed" 会让模型以为命令没执行，从而做出错误判断。
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			shown.Summary = "The tool call was interrupted after it was recorded, but no result was durably recorded. " +
+				"Its outcome is unknown. Decide whether to retry from the tool's output or a safer read."
+			shown.Hint = "结果未知：先读一下现场（文件/进程/日志）确认它到底做没做，再决定重试与否"
 		}
 		msg.Content = renderBlocks(l.project(shown))
 		_ = l.emit(Event{

@@ -74,3 +74,25 @@
 | 不要静默返回空结果 | 路径不对 → 报错，不是"0 处命中" |
 
 按这三条改掉的三处：`read` 的 offset 越界、`grep` 的坏路径、失败事件正文为空。
+
+## bash 的 110 个失败样本（2026-11-02）
+
+按首行归类：
+
+| 条数 | 首行 |
+|---:|---|
+| **84** | `Error: unknown tool "bash"` |
+| 13 | `The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown.` |
+| 5 | `Error: this destroys the runtime DSH would need in order to undo it; there is no recovery path` |
+| 4 | `Error: tool call aborted` |
+| 2 | `Error: sandbox mode "workspace-write" is requested but no sandbox backend…` |
+| 2 | `Error: redirect overwrites $HOME/.dsh/state/…` |
+
+两个结论：
+
+1. **最常见的"bash 失败"根本不是 bash 失败**，而是工具名不在当前工具表里（84/110）。
+   工具集随模式/配置变，模型手里的旧上下文可能还记着 `bash`。
+   → 我们的措辞改成 `unknown tool "<name>"`。
+2. **取消 ≠ 失败**。DSH 对"记录下来但没收到结果"的调用，写的是
+   *outcome is unknown*，不是 failed——因为命令可能已经跑完了。
+   → 我们把 `context.Canceled` 单独处理成同一句话 + 引导先看现场。

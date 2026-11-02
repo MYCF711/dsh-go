@@ -48,7 +48,8 @@
 - ✅ 断连语义：EOF → 取消在飞 turn → 等收尾（≤3s）→ `Shutdown()` 刷盘；`TestEOFDisconnectsAndCancels`
 - ✅ `session/list` 读磁盘（项目过滤 + 一句话摘要 + 坏文件也列出来）+ `TestListSessions*` 四条
 - ✅ 行为对拍：从 2.3 万个真实结果里挖失败形状，修掉 read offset 越界静默返空、grep 坏路径返 0 命中、失败事件正文为空
-- 下一步 **M14**：`bash` 的失败形态对拍（18,183 次调用里 110 次失败，样本最多的一类还没细看）
+- ✅ bash 失败样本归类：84/110 是 `unknown tool`（措辞已对齐）；取消改为 "outcome is unknown" 语义
+- 下一步 **M14**：`0.2.1-go.13` 发版
 
 ---
 

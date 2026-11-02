@@ -164,3 +164,16 @@ func TestPostExecuteCanRewrite(t *testing.T) {
 		t.Fatalf("post-execute 的改写没生效: %q", res.Summary)
 	}
 }
+
+// 调用工具表里没有的名字：措辞必须和 DSH 一致（真实语料里这是最常见的失败类，
+// 367 个失败样本里 84 个是 `Error: unknown tool "bash"`）。
+func TestUnknownToolWording(t *testing.T) {
+	p, _ := newPipe(t, Options{}, &stubTool{name: "read"})
+	_, err := p.Run(context.Background(), "no_such_tool", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("不存在的工具必须报错")
+	}
+	if err.Error() != `unknown tool "no_such_tool"` {
+		t.Fatalf("措辞不一致: %q", err.Error())
+	}
+}

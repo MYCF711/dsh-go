@@ -69,8 +69,10 @@ func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (
 
 	tool, ok := p.reg.Get(call.Name)
 	if !ok {
-		call.Err = fmt.Errorf("工具 %q 不存在", call.Name)
-		call.Result.Hint = "用工具目录里真实存在的名字；不确定就先列出已注册的工具"
+		// 措辞对齐 DSH：这是最常见的一类失败（真实语料里 367 个失败样本中 84 个是它，
+		// 因为工具集会随模式/配置变）。模型看到的名字和它调用的名字必须一致。
+		call.Err = fmt.Errorf(`unknown tool %q`, call.Name)
+		call.Result.Hint = "用工具表里真实存在的名字；不确定就先看当前模式给了哪些工具"
 		return call.Result, call.Err
 	}
 

@@ -1,3 +1,24 @@
+## 0.2.1-go.13（未发布）
+
+**bash 的 110 个失败样本：最常见的"bash 失败"其实不是 bash 失败。**
+
+```
+  84  Error: unknown tool "bash"
+  13  The tool call was interrupted after it was recorded, but no result was durably recorded…
+   5  Error: this destroys the runtime DSH would need in order to undo it…
+   4  Error: tool call aborted
+```
+
+- **84/110 是"工具不在表里"**：工具集会随模式/配置变，模型手里的上下文可能还记着 `bash`。
+  我们的措辞改成 DSH 的 `unknown tool "<name>"`，并提示"先看当前模式给了哪些工具"。
+- **取消 ≠ 失败**：DSH 对"记录了但没收到结果"的调用写的是 *outcome is unknown*。
+  我们原来把它当 `context.Canceled` 错误上报，措辞是"失败"——
+  这会让模型以为"命令没执行"，从而重试一个已经生效的命令。
+  现在单独处理成同一句话 + 引导先看现场（文件/进程/日志）再决定。
+
+**新增测试**：`TestUnknownToolWording`、`TestCancelledToolIsUnknownNotFailed`。
+
+---
 ## 0.2.1-go.12（2026-11-02）
 
 **行为对拍：从 2.3 万个真实工具结果里挖出「失败长什么样」，照着重修了三个地方。**
