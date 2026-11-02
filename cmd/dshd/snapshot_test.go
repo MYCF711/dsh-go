@@ -127,6 +127,11 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"exec_literal": {Writes: true, Executes: true},
 		// 纯读时钟。
 		"now_line": {},
+		// 团队任务板：读两个、写两个。
+		"team_task_create": {Writes: true},
+		"team_task_list":   {},
+		"team_task_get":    {},
+		"team_task_update": {Writes: true},
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},

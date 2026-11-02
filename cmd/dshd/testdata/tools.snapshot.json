@@ -508,6 +508,129 @@
     "caps": {}
   },
   {
+    "name": "team_task_create",
+    "description": "建一条团队任务并返回 id；分工前先建任务。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "type": "string",
+          "description": "一句话目标，祈使句"
+        },
+        "description": {
+          "type": "string",
+          "description": "细节与验收标准"
+        },
+        "blocked_by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "依赖的任务 id；它们没完成前不该开工"
+        }
+      },
+      "required": [
+        "subject",
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
+    "name": "team_task_get",
+    "description": "按 id 取一条任务：内容、认领人、未完成依赖。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "任务 id，形如 task-0001-3f9a"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
+    "name": "team_task_list",
+    "description": "列出任务，可按 status 过滤；开工前先看板子。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed"
+          ],
+          "description": "只看这个状态；省略表示全部"
+        }
+      },
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
+    "name": "team_task_update",
+    "description": "改任务：claim 认领、complete 完成、delete 删除等七个动作。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "任务 id，形如 task-0001-3f9a"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "claim",
+            "release",
+            "complete",
+            "reopen",
+            "edit",
+            "set_dependencies",
+            "delete"
+          ],
+          "description": "claim=认领并置 in_progress；release=退回 pending 并清 owner；complete=完成；reopen=重开；edit=改 subject/description；set_dependencies=整份替换 blocked_by；delete=删除"
+        },
+        "owner": {
+          "type": "string",
+          "description": "claim 必填：你的名字或角色"
+        },
+        "subject": {
+          "type": "string",
+          "description": "action=edit 时传，才改"
+        },
+        "description": {
+          "type": "string",
+          "description": "action=edit 时传，才改（传空串表示清空）"
+        },
+        "blocked_by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "action=set_dependencies 时必填：整份替换（空数组=清空依赖）"
+        }
+      },
+      "required": [
+        "id",
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
     "name": "todo_write",
     "description": "记录或更新任务清单（整份替换）。多步骤工作时用它把计划摆出来、让人看得见进度。",
     "parameters": {

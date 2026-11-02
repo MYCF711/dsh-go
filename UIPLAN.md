@@ -328,6 +328,46 @@
 
 ---
 
+### 2.9 2026-10 的新变量：Go 的 GPU 原生 UI 家族出现了
+
+用户 2026-11-03 指出本文引用停在半年前（Raycast 那篇是 2026-05-14）。补查最近一个月，结论要改。
+
+| 项目 | 出现时间 | 星 | 是什么 |
+|---|---|---:|---|
+| **vivaui/viva** | 创建 **2026-10-22**，现 **v0.2.3** | 160 | Go-first、GPU 原生桌面框架。Cocoa+Metal / **Win32+D3D11** / XCB+Vulkan，**无 WebView、无浏览器内核、无捆绑运行时**；Apache-2.0 |
+| **egoist/mygo** | — | — | 同类底座，被 Mayoi / onevra / MyGit / MySpotify / Hop / qq-music-go 一批应用使用 |
+| **sorrycc/Mayoi** | 2026-10-09 | 299 | **Go 写的代码编辑器**，GPU 绘制，无 webview/无 Electron，**打包 18 MB**；已含 Chroma 高亮、Vim 模式、Git 图形、Ghostty 终端 |
+| **t8y2/motty** | 2026-10-22 | 469 | 基于 Viva 的桌面应用（SSH/SFTP/VNC/AI 助手） |
+
+**Viva 自述已经有的能力**（README，2026-11-02）：
+
+- **中文 IME**：macOS `NSTextInputClient` 真实候选词组合；**macOS / Windows / Linux 都有 focus 驱动的原生文本编辑器**；Linux 走 IBus（含 Fcitx5 前端）
+- **完整无障碍树**：NSAccessibility / **Windows UI Automation** / Linux AT-SPI / 浏览器 ARIA
+- **Windows 渲染**：Win32 事件 + D3D11 + **DirectWrite 测量** + GDI 标签纹理 —— 但自标 **Experimental**
+- **组件库**：把 shadcn 的组件目录静态翻译成 Go（表单、覆盖层、菜单、日历、滚动、图表）
+- 事件驱动渲染，**空闲零帧**；Retained Flex 布局，O(1) 未变检测
+- **关键一条**：「需要 web 内容的应用，可以把系统的 web view 挂在 Viva 旁边（WebKitGTK / WKWebView / WebView2）；**opt-in，首次打开网页才加载，不捆绑任何东西**」——原文见 `vivaui/viva` README
+
+**这推翻了 §2.1 的"四个缺口全是空白"**：缺口不是空白了，是"有，但很新"。
+
+**于是多出第三条路**：
+
+| 路线 | 主界面 | 内存 | 插件 | 生态 |
+|---|---|---:|---|---|
+| A WebView + TS | HTML/CSS | 90–150 MB | npm（JS） | 现成 |
+| B Viva 原生 + WASM 插件 | GPU 自绘 | **~50 MB** | WASM（任意语言） | 自建 |
+| **C Viva 原生 + 按需 WebView** | GPU 自绘，**需要时才挂 WebView2** | **空闲 ~50 MB / 开网页时才叠加** | WASM + 可选 JS | 混合 |
+
+**风险照实写，不粉饰**：
+
+- Viva 只有 **2 周大**（v0.2.3，160★），用它就是和框架一起长大；
+- **Windows 侧自标 Experimental**，而我们主战场是 Windows；
+- 上面的"能力清单"是作者自述，**我们没有一条实测**。
+
+**所以它不改变"要先测"这个结论，但改变了"测什么"**：不再只测 WebView 的六种参数组合，还要测 **Viva 在 Windows 上渲染一段真实会话（中文 + 代码块 + emoji + IME 输入）到底什么样、吃多少内存**。
+
+---
+
 ## 3. UI 的「一切皆插件」= 四个契约
 
 宿主侧的内核是四件事（Scope / Registry / Bus / Assemble）。界面侧对应四条，定死这四条，其余都随版本演进：

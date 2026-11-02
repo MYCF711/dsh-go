@@ -165,3 +165,41 @@ research/UIPLAN 那些——那些是**维护者**的上下文，不是**执行�
 **教训升级**：约束不可执行 = 没有约束。"≤120 字"是要求，`python scripts/desc-len.py X.go`
 才是能落地的指令。这跟 `Hint` 的道理是同一条——**给下一步动作，不给形容词**。
 
+## 派活 9：team_task 一族（四个工具，749 行）
+
+**结果：成了，而且第一次主动自检。**
+
+任务书给的是一个文件里放四个工具——这是历来最大的一次单文件任务。
+它交的 749 行里有几处设计**比我的任务书更干净**：
+
+- 一个 `Tool` 结构体 + `kind` 字段，`Name()` 返回 `t.kind`，
+  `Description()`/`Schema()` 按 kind 分支——**省了三份重复类型**
+- 存储用「写 tmp 再 rename」（我要求了），进程内 mutex 串行化（我要求了）
+- 生成 id 用 `task-0001-89d1` 形状（我给了形状，它照做）
+
+**最关键的**：它**自己跑了 `python scripts/desc-len.py`**。
+前四次连续超限的坑，靠「给一条能跑的命令」治好了——手册里那句
+「desc-len.py 是给你用的，不是给我的」起了作用。
+
+**真机验证**（不是看代码，是真跑）：
+```
+→ team_task_create {"subject":"给 demo 加测试"}   ← [ok]
+→ team_task_list {}                                ← [ok]  task-0001-89d1
+→ team_task_update {action:"claim", owner:"监工"}  ← [ok]
+→ team_task_update {action:"complete"}             ← [ok]
+最终状态: completed | owner: 监工
+板子文件：<home>/state/team-tasks.json 真的写出来了
+```
+
+**监工补的**：接线（main.go import + Module(home/state)、dsh.toml、snapshot caps）。
+
+## 一条方法论
+
+这次没返工的真正原因不是模型变强了，是**三件事同时到位**：
+
+1. 任务粒度：一个文件、四个工具的边界写死
+2. 手册：`docs/WORKER.md`（4.8k token）说清了 `Hint`/`Caps`/`Data`/边界
+3. **可执行的约束**：`desc-len.py` 而不是「≤120 字」
+
+前两次缺 2，前四次缺 3。
+

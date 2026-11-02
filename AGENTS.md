@@ -159,7 +159,10 @@
 - ✅ **给执行者单独的瘦手册**：`docs/WORKER.md`（6 KB）+ `--agents` 参数。
   实测系统提示 16,692 → **4,833 token**（-71%）；它不需要里程碑史、界面线规划、主理鱼流程
 - ✅ `scripts/desc-len.py`：给执行者量的工具，四次超限之后才想明白——**约束要可执行，不能只写"≤120 字"**
-- 下一步 **M57**：等 §9 那族是否放开的结论；放开就先做 `send_message` + `team_task_*` 的最小闭环
+- ✅ **team 一族最小闭环落地**（dshd 自己写，749 行）：`team_task_create/list/get/update` 四个工具，
+  板子落 `<home>/state/team-tasks.json`。真机验过 create→list→claim→complete 全链
+- 它这次**自己跑了 desc-len.py**（前四次的教训生效），四个 Description 全在限制内
+- 下一步 **M60**：`send_message` + `wait_agent`（会话间通信，需要宿主侧一个信箱通道）
 
 ### 界面线现状（2026-11-03）
 
@@ -323,7 +326,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | 其余 8 个渲染进程 | 378.6 / 182.0 / 43.0 / 42.8 / 42.7 / 42.3 / 38.4 / 2.9 MB | 同上（**每开一个窗口多一个**） |
 | 空转 CPU | **2.0%**（没在跑任务） | 同上 |
 | 工具表（最新一次请求） | 61 个 / 54,936 字符 / **12,209 token** | `research/20` |
-| **dsh-go 工具表（实测 2026-11-03）** | 23 个 / 17,420 字节 / **3,091 token** | 网关实测 |
+| **dsh-go 工具表（实测 2026-11-03）** | 27 个 / 20,626 字节 / **3,647 token** | 网关实测 |
 | 工具契约对拍 | 6 项完全一致、3 项超集 | `docs/tool-parity.md` |
 | **系统提示成本（实测 2026-11-02）** | 无 AGENTS 1,909 / 8KB 上限 **4,077** / 全量 14KB 6,248 inputTokens | 本机 `dshd run` |
 | 工具集变体 | 4 种（54/59/60/61） | 同上 |
