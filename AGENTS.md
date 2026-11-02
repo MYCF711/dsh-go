@@ -24,7 +24,8 @@
 - ✅ 自动压缩（`internal/compact` + `session compact --auto`）：区间自算、提示词有界、真机跑通（surface 111→10）
 - ✅ 自动压缩已接进 ACP：`--auto-compact <tokens>`（默认 40000），token meter 带锚点校准，超预算无处可压时放宽 keep
 - ✅ `session.HistoryGuard`：拒绝改写 `$DSH_HOME` 下的历史（要 `--force`）
-- 下一步 **M7**：审批记忆 + `session/fork`
+- ✅ 审批记忆（`internal/approval`，会话×工具，进程内不落盘）+ `allow-always` 选项：实测 3 次调用只问 1 次
+- 下一步 **M7**：`session/fork`
 
 ---
 
@@ -60,6 +61,7 @@
 | `internal/llm/` | OpenAI 兼容 SSE 客户端 | 先只做 magpie |
 | `internal/prompt/` | 系统提示装配（确定性、可组合、有界） | 加段必须同时加"空段消失"与"确定性"测试 |
 | `internal/compact/` | 压缩策略（选区间 + 生成摘要） | 只做策略；写事件一律走 `session.Compact` |
+| `internal/approval/` | 审批记忆（会话×工具，进程内） | **不落盘**；resume 后必须重新批准 |
 | `modules/*` | 静态默认实现，一模块一目录一个 `Register(scope)` | 新模块必须过 `PLAN.md` §2.4 的三条判据 |
 | `codecs/v4/` | DSH 会话 v4 编解码 | 字节级对齐，见 §4 |
 | `wasmhost/` `pluginhost/` | wazero / go-plugin 装载器 | 载入层只做装载，不含业务 |

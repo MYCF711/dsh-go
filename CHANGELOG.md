@@ -1,3 +1,23 @@
+## 0.2.1-go.7（未发布）· 续 3
+
+**审批记忆：说过"以后都允许"就真的不再问。**
+
+- `internal/approval.Memory`：按 **会话 × 工具** 记批准，进程内、不落盘
+  - 不落盘是刻意的：resume 之后要重新批准——宁可多问一次，也不让旧会话带着别人的授权继续改文件
+  - 批准 `shell` 不等于批准 `write`
+- `session/request_permission` 增加第三个选项 `allow-always`（kind `allow_always`，ACP 标准里本来就有四类，
+  DSH 只发两个；我们多发一个，对只认两个的客户端无影响）
+- `guardedRunner` 先查记忆，命中就**跳过**协议往返
+
+**实测（3 次 shell 调用，客户端第一次就选 allow-always）**
+```
+prompt → end_turn ×3
+审批请求次数: 1
+第一次请求的选项: allow-once|allow-always|reject-once
+结果: PASS（记住后不再打扰）
+```
+
+---
 ## 0.2.1-go.7（未发布）· 续 2
 
 **压缩接进 agent 循环：每轮前自检，超预算自动压。**

@@ -13,6 +13,7 @@ import (
 	"dshgo/codecs/v4"
 	"dshgo/internal/acp"
 	"dshgo/internal/agent"
+	"dshgo/internal/approval"
 	"dshgo/internal/compact"
 	"dshgo/internal/kernel"
 	"dshgo/internal/llm"
@@ -40,6 +41,8 @@ type acpRunner struct {
 	autoCompact int
 	// keepRecent 是自动压缩时保留的最近消息数。
 	keepRecent int
+	// approvals 记住"这个会话里这个工具已经批准过了"。
+	approvals *approval.Memory
 
 	mu    sync.Mutex
 	logs  map[string]*session.Log
@@ -54,6 +57,7 @@ func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home str
 		reg: reg, runner: runner, base: base, model: model, home: home, steps: steps,
 		logs: map[string]*session.Log{}, turns: map[string]int{}, hist: map[string][]llm.Message{},
 		used: map[string]int{}, ctxWindow: 128000, meter: map[string]*session.Meter{}, keepRecent: 8,
+		approvals: approval.New(),
 	}
 }
 
@@ -164,7 +168,10 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 
 	var runner spi.Runner = r.runner
 	if r.ask != nil {
-		runner = &guardedRunner{inner: r.runner, reg: r.reg, ask: r.ask, sessionID: sessionID}
+		runner = &guardedRunner{
+			inner: r.runner, reg: r.reg, ask: r.ask,
+			sessionID: sessionID, approvals: r.approvals,
+		}
 	}
 
 	loop := &agent.Loop{
@@ -201,10 +208,14 @@ type guardedRunner struct {
 	reg       spi.ToolRegistry
 	ask       func(ctx context.Context, sessionID, tool string, args string) (bool, error)
 	sessionID string
+	approvals *approval.Memory
 }
 
 func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
 	if t, ok := g.reg.Get(name); ok && t.Caps().NeedsApproval() {
+		if g.approvals != nil && g.approvals.Allowed(g.sessionID, name) {
+			return g.inner.Run(ctx, name, args)
+		}
 		ok, err := g.ask(ctx, g.sessionID, name, string(args))
 		if err != nil {
 			return spi.Result{Hint: "审批失败：客户端可能断开了；重试或改用只读工具"}, fmt.Errorf("审批失败: %w", err)
@@ -244,6 +255,9 @@ func (r *acpRunner) Resume(ctx context.Context, sessionID, cwd string) error {
 }
 
 func (r *acpRunner) Close(sessionID string) error {
+	if r.approvals != nil {
+		r.approvals.Forget(sessionID)
+	}
 	r.mu.Lock()
 	l := r.logs[sessionID]
 	delete(r.logs, sessionID)
@@ -313,6 +327,7 @@ func cmdACP(argv []string) error {
 			},
 			"options": []any{
 				map[string]any{"optionId": "allow-once", "name": "允许这一次", "kind": "allow_once"},
+				map[string]any{"optionId": "allow-always", "name": "这个会话里以后都允许", "kind": "allow_always"},
 				map[string]any{"optionId": "reject-once", "name": "拒绝", "kind": "reject_once"},
 			},
 		})
@@ -330,7 +345,20 @@ func cmdACP(argv []string) error {
 		if err := json.Unmarshal(raw, &resp); err != nil {
 			return false, err
 		}
-		return resp.Result.Outcome.Outcome == "selected" && resp.Result.Outcome.OptionID == "allow-once", nil
+		if resp.Result.Outcome.Outcome != "selected" {
+			return false, nil
+		}
+		switch resp.Result.Outcome.OptionID {
+		case "allow-once":
+			return true, nil
+		case "allow-always":
+			if acpRunner.approvals != nil {
+				acpRunner.approvals.Remember(sessionID, tool)
+			}
+			return true, nil
+		default:
+			return false, nil
+		}
 	}
 	return srv.Serve(context.Background())
 }
