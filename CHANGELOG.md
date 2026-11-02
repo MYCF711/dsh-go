@@ -1,4 +1,43 @@
-## 0.2.1-go.25（未发布）
+## 0.2.1-go.25（2026-11-03）
+
+**会话列表：同一个 id 只出现一次。**
+
+换机器/换挂载点会让 `projectKey` 变，同一份会话就"住"到别的项目目录里去了。实测：
+
+```
+项目目录: ['--C-…-tmpear80qu7--', '--other-project--']
+
+按 A 的 cwd 列 → 1 条
+按 B 的 cwd 列 → 0 条
+不给 cwd     → 2 条  ← 同一个 session id 出现两次
+```
+
+面板上两行一模一样，用户分不出；更糟的是**按 id 删除会撞「多处命中，请显式给 cwd」**
+——列表给了两条、删除却报歧义。
+
+修法：`ListSessions` 按 session id 合并，保留最新那份（列表本来就按更新倒序），
+份数写进 `copies`：
+
+```json
+{"sessionId": "session-3fc8a85c-…", "copies": 2, …}
+```
+
+只有一份时不打这个字段，不给面板添噪声。
+
+新增 `TestListSessionsDedupesSameIDAcrossProjects` / `TestListSessionsSingleHasNoCopies`。
+
+### 实测量
+
+| 指标 | 目标 | 实测 |
+|---|---:|---:|
+| 常驻内存 | <150 MB | **15.4 MB** |
+| 冷启动（紧探针 p50） | <100 ms | **33.7 ms** |
+| 工具表 | ≤6k token | **1,418 token** |
+| 二进制 | ≤25 MB | **8.4 MB** |
+
+---
+
+## 0.2.1-go.25（2026-11-03）
 
 **会话列表：同一个 id 只出现一次。**
 

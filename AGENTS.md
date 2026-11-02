@@ -1,6 +1,6 @@
 # AGENTS.md · DSH-GO
 
-> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.24`**。
+> **本仓**：用 Go 重写 DeepSeek Harness（DSH）的宿主。上游基线 `0.2.1-rc.5`，本仓版本 **`0.2.1-go.25`**。
 > **先读** `PLAN.md` §1 的十项决策——那是用户逐条拍板的结论，**不要再讨论、不要"顺便优化"**。
 > 本文件是操作手册：冲突时以本文件为准；本文件没写的，以 `PLAN.md` 为准。
 
@@ -103,7 +103,7 @@
 - ✅ 写不下去的三种情况（`docs/edge-cases.md`）：句柄已关报错且历史不坏、重开无重复 seq（本来就对）；只读文件的 resume 错误改成「能读、打不开写入、已有 N 条不受影响」；失败不留锁
 - ✅ 第 7 次夹具骗人：`attrib +R` 命令没执行成功却以为造好了只读文件；现在先自证夹具生效再测
 - ✅ 会话列表去重（B 线 ④）：同一个 session id 在多个项目目录下时合并成一条 + `copies` 字段（原来出现两行同样 id，按 id 删还会报「多处命中」）
-- 下一步 **M41**：`0.2.1-go.25` 发版（列表去重）
+- 下一步 **M42**（A 线补测）：日志目录本身可写、但**单个日志文件**写满/只读时——slog 写失败会不会影响工具执行
 
 ---
 
@@ -235,7 +235,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 
 ## 6. 版本、提交、文档
 
-- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.24`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
+- **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.25`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
 - **提交**：`M<里程碑>: <一句话>`，例如 `M1: tools/read 与观测策略`。一个提交只做一件事。
 - **决策**：任何改变 §1 决策的实现，**先改 `PLAN.md` 并写理由**，再动代码。禁止"代码先行、文档追认"。
 - **文档**：`docs/cordis-alignment.md` 是 cordis 概念 → Go 概念的逐条对照，是设计约束，不是宣传材料。
@@ -261,7 +261,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 | **dsh-go 冷启动（实测 2026-11-03）** | `measure-start.py` 报 55–115（含探针开销）；**紧探针 p50 27.0–34.8 ms**（本机底噪，见 `docs/cold-start.md`） | `docs/cold-start.md` |
 | 进程 init 总和 | **2.0 ms**（换掉 BurntSushi/toml 之前是 26.0 ms） | `GODEBUG=inittrace=1` |
 | **dsh-go 二进制（实测 2026-11-02）** | `-ldflags "-s -w"` → **8.4 MB**（目标 ≤25 MB） | `scripts/build.sh` |
-| **dsh-go 内存（实测 2026-11-03）** | 整轮峰值 **15.1 MB**（DSH 本体 870 MB） | `scripts/measure-mem.py` |
+| **dsh-go 内存（实测 2026-11-03）** | 整轮峰值 **15.4 MB**（DSH 本体 870 MB） | `scripts/measure-mem.py` |
 | **`dshd version` 启动（实测 2026-11-02）** | median **42.8 ms**（不含装配，纯进程+init） | 本机 12 次 |
 | go-plugin / wazero 二进制开销 | **+14.8 MB** / +3.5 MB | 同上 |
 | 进程插件工作集 | **14.4 MiB** | 同上 |
