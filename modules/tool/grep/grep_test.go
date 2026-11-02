@@ -166,3 +166,19 @@ func TestGrepMissingPathErrors(t *testing.T) {
 		t.Fatal("路径不存在必须报错")
 	}
 }
+
+// 0 命中且有 .dshdignore 时，Hint 必须点出"可能被挡住了"。
+// 和 glob 同一个坑：把"声明挡住了"说成"没有匹配"，模型会去改 pattern。
+func TestGrepZeroHitMentionsIgnore(t *testing.T) {
+	tl, root := newTool(t)
+	touch(t, root, ".dshdignore", "vendor")
+	touch(t, root, "vendor/a.txt", "NEEDLE_XYZ")
+
+	res, err := tl.Exec(context.Background(), json.RawMessage(`{"pattern":"NEEDLE_XYZ"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Hint, ".dshdignore") {
+		t.Fatalf("0 命中且有声明时，Hint 必须点出 .dshdignore: %q（summary=%q）", res.Hint, res.Summary)
+	}
+}

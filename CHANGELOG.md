@@ -1,3 +1,23 @@
+## 0.2.1-go.18（未发布）· 续 6
+
+**`glob`/`grep` 的「0 命中」要说清是哪种 0。**
+
+```
+$ glob {"pattern":"**/*.lua"}
+0 个文件（扫过 157），.dshdignore 挡掉 2 个目录
+提示: 0 个匹配，但有 2 个目录被 .dshdignore 挡掉了；要搜就把它从 .dshdignore 里去掉，或者用 bash 直接找
+```
+
+- `glob` 的摘要现在报「扫过 N」「挡掉 N 个目录」
+- `grep` 的 0 命中分支也补上同样的提示
+- 没有 `.dshdignore` 时措辞不变（不能因为加了分支就让老路径变味）
+
+理由：「真的没有」和「被声明挡住」的下一步动作不同——前者改 pattern，后者改声明或换工具。
+和上一轮的「参数缺失 vs 目标不存在」是同一类错误。
+
+新增 `TestGlobZeroMatchMentionsIgnore`、`TestGrepZeroHitMentionsIgnore`。
+
+---
 ## 0.2.1-go.18（未发布）· 续 5
 
 **`job_output` / `job_kill` 把"你没给参数"报成了"任务不存在"。**

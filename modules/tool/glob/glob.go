@@ -90,7 +90,13 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	var matches []string
 	// 仓库级声明优先：<root>/.dshdignore 里写的东西不该被扫到。
 	ig, _ := fsutil.LoadIgnore(t.fs.Root())
-	err = fsutil.WalkFilesWith(absBase, fsutil.WalkOptions{Root: t.fs.Root(), Ignore: ig}, func(abs string) error {
+	// 记下"被 .dshdignore 挡掉了多少个目录"：0 命中时，
+	// "真的没有这个文件"和"被声明挡住了"是两件事，模型要能分清。
+	var ignoredDirs, scanned int
+	err = fsutil.WalkFilesWith(absBase, fsutil.WalkOptions{
+		Root: t.fs.Root(), Ignore: ig, Ignored: &ignoredDirs,
+	}, func(abs string) error {
+		scanned++
 		relBase, err := filepath.Rel(absBase, abs)
 		if err != nil {
 			return nil
@@ -127,11 +133,19 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		Truncated: truncated,
 		Paths:     matches,
 	}
-	summary := fmt.Sprintf("%s 下匹配 %s：%d 个文件", p.Base, p.Pattern, p.Count)
+	summary := fmt.Sprintf("%s 下匹配 %s：%d 个文件（扫过 %d）", p.Base, p.Pattern, p.Count, scanned)
+	if ignoredDirs > 0 {
+		summary += fmt.Sprintf("，.dshdignore 挡掉 %d 个目录", ignoredDirs)
+	}
 	hint := ""
-	if truncated {
+	switch {
+	case truncated:
 		hint = fmt.Sprintf("结果被截到 %d 条；缩小 path 或用更具体的 pattern", a.Limit)
-	} else if len(matches) == 0 {
+	case len(matches) == 0 && ignoredDirs > 0:
+		// 这条最容易误判：文件可能就在被挡住的那个目录里。
+		hint = fmt.Sprintf("0 个匹配，但有 %d 个目录被 .dshdignore 挡掉了；"+
+			"要搜就把它从 .dshdignore 里去掉，或者用 bash 直接找", ignoredDirs)
+	case len(matches) == 0:
 		hint = "没有匹配：确认 pattern 的相对基准（相对 path），或先 ls 一下目录结构"
 	}
 	return spi.Result{Summary: summary, Data: p, Hint: hint}, nil

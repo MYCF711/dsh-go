@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"dshgo/internal/spi"
@@ -170,5 +171,26 @@ func TestGlobEscapeRejected(t *testing.T) {
 	}
 	if res.Hint == "" {
 		t.Fatal("失败要带 Hint")
+	}
+}
+
+// 0 命中可能是"被 .dshdignore 挡住了"，不是"真的没有"。
+// 两种情况模型下一步不一样：前者去改声明或换工具，后者去改 pattern。
+func TestGlobZeroMatchMentionsIgnore(t *testing.T) {
+	tl, root := newTool(t)
+	if err := os.WriteFile(filepath.Join(root, ".dshdignore"), []byte("vendor"+string(rune(10))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	touch(t, root, "vendor/x/a.lua")
+
+	res, err := tl.Exec(context.Background(), json.RawMessage(`{"pattern":"**/*.lua"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Hint, ".dshdignore") {
+		t.Fatalf("0 命中且有声明时，Hint 必须点出 .dshdignore: %q（summary=%q）", res.Hint, res.Summary)
+	}
+	if !strings.Contains(res.Summary, "挡掉") {
+		t.Fatalf("摘要也要说清挡掉了多少: %q", res.Summary)
 	}
 }

@@ -235,6 +235,10 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		p.Base, a.Pattern, p.Count, scanned, skipNote)
 	hint := ""
 	switch {
+	case len(matches) == 0 && ignoredDirs > 0:
+		// 和 glob 同一个坑：0 命中可能是"被 .dshdignore 挡住了"，不是"真的没有"。
+		hint = fmt.Sprintf("0 处命中，但有 %d 个目录被 .dshdignore 挡掉了；"+
+			"确认要找的东西不在那些目录里，或把它从 .dshdignore 去掉", ignoredDirs)
 	case len(matches) == 0:
 		hint = "没有命中：确认 base 路径对不对，或把 pattern 放宽（这是正则，不是通配符）"
 	case truncated:

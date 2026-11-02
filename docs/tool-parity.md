@@ -143,3 +143,33 @@ $ dshd exec --tool job_output --args '{"job_id":"nope"}'
 **两类错误的下一步动作不同，就不能用同一句话。**
 `TestJobToolsRejectEmptyID` 把两条都钉住：空 id 不许出现「没有任务」，
 未知 id 必须出现「没有任务」。
+
+## 「0 命中」也要分清是哪种 0（2026-11-02）
+
+`glob` 原来只说 `匹配 0 个文件`。可模型需要知道的是：**是真的没有，还是被挡住了？**
+
+两件事的下一步动作完全不同：
+
+| 情况 | 模型该做什么 |
+|---|---|
+| 真的没有这个文件 | 改 pattern / 换 base 路径 |
+| 被 `.dshdignore` 挡住了 | 改声明，或者换 `bash` 直接找 |
+
+修完两个工具都分开说了：
+
+```
+$ glob {"pattern":"**/*.lua"}
+. 下匹配 **/*.lua：0 个文件（扫过 157），.dshdignore 挡掉 2 个目录
+提示: 0 个匹配，但有 2 个目录被 .dshdignore 挡掉了；要搜就把它从 .dshdignore 里去掉，或者用 bash 直接找
+```
+
+```
+$ grep {"pattern":"zzz_no_such_symbol"}
+. 下 /zzz_no_such_symbol/ 命中 0 处（扫描 156 文件，跳过 1 个噪声目录 + 2 个 .dshdignore 目录）
+提示: 0 处命中，但有 2 个目录被 .dshdignore 挡掉了；确认要找的东西不在那些目录里，或把它从 .dshdignore 去掉
+```
+
+没有 `.dshdignore` 时仍是原来的措辞（`没有匹配：确认 pattern 的相对基准…`）——
+**不能因为加了新分支就让老路径的说法变味。**
+
+钉住的两条测试：`TestGlobZeroMatchMentionsIgnore`、`TestGrepZeroHitMentionsIgnore`。

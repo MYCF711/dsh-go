@@ -72,7 +72,8 @@
 - ✅ 体积账（`docs/cold-start.md`）：自身代码 0.29 MB / 8.7 MB；runtime 3.07 MB 不可减；**决定不减**（只剩 TLS ~1.2MB≈3ms 可减，代价是放弃 https）
 - ✅ 装配 11 个模块 = **0.5 ms**；initialize 往返 33.1 ms 里 30 ms 是加载可执行文件
 - ✅ 参数缺失 vs 目标不存在：`job_output`/`job_kill` 原把空 id 报成「没有任务」，已分开（其余六个工具本来就对）
-- 下一步 **M23**：`glob` 的返回没像 `grep` 那样报「跳过多少」；`edit` 的 `matched 2 times` 恢复路径未实测
+- ✅ `glob`/`grep` 的「0 命中」分清"真的没有"与"被 .dshdignore 挡住"（摘要带「扫过 N」和「挡掉 N 个目录」）
+- 下一步 **M23**：`edit` 的 `old_string matched 2 times` 恢复路径未实测（措辞已对齐，但模型拿到后能不能改对没验过）
 
 ---
 
