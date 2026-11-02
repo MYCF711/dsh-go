@@ -3,6 +3,7 @@ package bash
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -94,6 +95,9 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 
 	res, err := t.svc.Run(a.Command, budget)
 	if err != nil {
+		if errors.Is(err, ErrSessionEnded) {
+			return spi.Result{Hint: "命令自己结束了 shell（例如 exit）；下一条命令会自动开新会话，但 cwd 会回到起点"}, err
+		}
 		return spi.Result{Hint: "命令没能执行：确认 shell 可用（Git Bash）、命令语法正确"}, err
 	}
 

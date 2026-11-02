@@ -9,6 +9,7 @@ package bash
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +25,9 @@ import (
 
 // markerRe 匹配命令结束哨兵：\x01DSHD:<seq>:<rc>\x01<cwd>\x01\n
 var markerRe = regexp.MustCompile("\x01DSHD:(\\d+):(-?\\d+)\x01([^\x01]*)\x01\n")
+
+// ErrSessionEnded 表示命令结束了 shell 自己（如裸 exit）。
+var ErrSessionEnded = errors.New("bash 会话被命令结束")
 
 // findBash 找 bash：环境变量优先，其次 PATH，最后 Git for Windows 的常见位置。
 func findBash() (string, error) {
@@ -172,7 +176,7 @@ func (s *session) run(cmd string, idle time.Duration) (spi.ExecResult, *task, er
 			}
 			if rc == -1 && s.isDead() {
 				return spi.ExecResult{Output: t.text(), ExitCode: -1, Cwd: cwd}, t,
-					fmt.Errorf("命令结束了 bash 会话（比如 exit）：已丢弃该会话，下次调用会自动重开")
+					fmt.Errorf("%w（比如 exit）：已丢弃该会话，下次调用会自动重开", ErrSessionEnded)
 			}
 			return spi.ExecResult{Output: t.text(), ExitCode: rc, Cwd: cwd}, t, nil
 		}
