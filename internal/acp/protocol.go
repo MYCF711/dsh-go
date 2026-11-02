@@ -106,6 +106,9 @@ type SessionNewRequest struct {
 	Cwd                   string           `json:"cwd"`
 	McpServers            []map[string]any `json:"mcpServers"`
 	AdditionalDirectories []string         `json:"additionalDirectories,omitempty"`
+	// Mode 可选：建会话时就定模式。
+	// 不给的话客户端得"先建再 set_mode"，中间存在一个全权限窗口。
+	Mode string `json:"mode,omitempty"`
 }
 
 // ConfigOption 是 configOptions 的一行。

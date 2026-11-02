@@ -17,6 +17,7 @@ import (
 var errNotExist = fmt.Errorf("会话不存在")
 
 type fakeAgent struct {
+	lastMode   string
 	events     []agent.Event
 	stop       string
 	blockOnCtx bool
@@ -58,6 +59,7 @@ func (a *fakeAgent) SetMode(ctx context.Context, sessionID, modeID string) (stri
 	if modeID != "default" {
 		return "", fmt.Errorf("未知模式 %q", modeID)
 	}
+	a.lastMode = modeID
 	return modeID, nil
 }
 
@@ -439,5 +441,29 @@ func TestSessionSetMode(t *testing.T) {
 		"params": map[string]any{"sessionId": "s1", "modeId": "turbo"}})
 	if h.recvResult(t, 2)["error"] == nil {
 		t.Fatal("未知模式必须报错，不能静默接受")
+	}
+}
+
+func TestSessionNewWithMode(t *testing.T) {
+	fa := &fakeAgent{}
+	h := start(t, fa)
+	defer h.close()
+
+	// 正常：模式在建会话时就定下来。
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 1, "method": MethodSessionNew,
+		"params": map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}, "mode": "default"}})
+	res := h.recvResult(t, 1)
+	if res["error"] != nil {
+		t.Fatalf("带合法 mode 建会话失败: %+v", res["error"])
+	}
+	if fa.lastMode != "default" {
+		t.Fatalf("SetMode 收到 %q", fa.lastMode)
+	}
+
+	// 非法模式：必须当场拒绝，不能建出一个"全权限但标着只读"的会话。
+	h.send(t, map[string]any{"jsonrpc": "2.0", "id": 2, "method": MethodSessionNew,
+		"params": map[string]any{"cwd": t.TempDir(), "mcpServers": []any{}, "mode": "turbo"}})
+	if h.recvResult(t, 2)["error"] == nil {
+		t.Fatal("未知模式必须报错")
 	}
 }

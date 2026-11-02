@@ -42,7 +42,8 @@
 - ✅ `history_search`（`spi.HistorySearch` + `modules/tool/history`）：在原始日志里回查含被压缩内容，带 `hidden` 标记
 - ✅ history 接线统一为 `attachHistory`（run / acp prompt / acp resume 三处）；`read-only` 模式允许 `history_search`
 - ✅ `dshd run --auto-compact`：`agent.Loop.Compact` 每步钩子 + `runCompactor`，与 ACP 同一套零件
-- 下一步 **M10**：ACP 的 `session/new` 支持传 mode 参数（现在只能启动时定或事后 set_mode）
+- ✅ `session/new` 支持 `mode` 参数（建会话即定模式，没有"先建后切"的窗口）
+- 下一步 **M10**：端到端回归一轮 P0 四条（内存/冷启动/工具表/二进制）+ 会话格式 Node 复验
 
 ---
 

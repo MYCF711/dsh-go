@@ -156,6 +156,14 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 			return
 		}
 		id := "acp-" + NewUUID()
+		// 建会话就定模式：先定再建文件，这样 header.agentPreset 从一开始就是对的，
+		// 不存在"建完全权限、再切只读"的窗口。
+		if p.Mode != "" {
+			if _, err := s.Agent.SetMode(ctx, id, p.Mode); err != nil {
+				_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()})
+				return
+			}
+		}
 		s.mu.Lock()
 		s.sessions[id] = &sess{id: id, cwd: p.Cwd}
 		s.order = append(s.order, id)
