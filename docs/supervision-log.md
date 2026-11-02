@@ -241,3 +241,19 @@ B 的信箱: {"from":"session-6b68...","message":"...","id":"msg-0001"}
 收信**没验通**：`session/resume` 按 id 恢复失败，`wait_agent` 的端到端没跑到。
 单测过了（`TestSendWritesMailbox` / `TestSendWithoutSessionRejected`），但真机链路缺一环。
 
+## 派活 10 的收尾：收信侧补验
+
+上一轮留下的「`session/resume` 按 id 恢复失败」根因很简单：
+ACP 的 handler 要求 **cwd 与 sessionId 都必填**，而 `session.ResolvePath` 本来就有按 id 兜底。
+
+改成只要求 sessionId，补三条测试（只给 id / 给错 cwd / id 不存在），真机验通：
+
+```
+A → send_message → B 信箱 {"message":"暗号是蓝鲸七号"}
+B: session/resume {"sessionId": "..."}（不给 cwd）→ ok
+B: wait_agent → cursor 0 → 1，日志 ok:true
+```
+
+**这条修的是能力而不是 bug**：客户端手里常常只有 id（收别人的信、接别人没干完的活），
+要求 cwd 就等于要求"你必须知道它当初建在哪个目录"。
+

@@ -245,8 +245,11 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()})
 			return
 		}
-		if p.SessionID == "" || p.Cwd == "" {
-			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "sessionId 与 cwd 都必填"})
+		// cwd 不是必填：session id 全局唯一，按 id 就能找到日志。
+		// 要求 cwd 的话，"换个盘符/别人机器上恢复"就做不到了——客户端手里常常
+		// 只有 id（比如收回信、接别人的活）。cwd 给了就优先按它算。
+		if p.SessionID == "" {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "sessionId 必填"})
 			return
 		}
 		if s.Agent == nil {
@@ -279,8 +282,11 @@ func (s *Server) dispatch(ctx context.Context, req Request) {
 			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: err.Error()})
 			return
 		}
-		if p.SessionID == "" || p.Cwd == "" {
-			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "sessionId 与 cwd 都必填"})
+		// cwd 不是必填：session id 全局唯一，按 id 就能找到日志。
+		// 要求 cwd 的话，"换个盘符/别人机器上恢复"就做不到了——客户端手里常常
+		// 只有 id（比如收回信、接别人的活）。cwd 给了就优先按它算。
+		if p.SessionID == "" {
+			_ = s.reply(req.ID, nil, &RPCError{Code: CodeInvalidParams, Message: "sessionId 必填"})
 			return
 		}
 		if s.Agent == nil {

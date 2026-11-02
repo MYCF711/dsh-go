@@ -165,11 +165,12 @@
 - ✅ **会话间通信落地**：`spi.WithSession/SessionFrom`（工具靠 ctx 知道"我是哪个会话"）+ 文件信箱
   `<home>/state/mail/<会话>.jsonl`；`send_message` / `wait_agent` / `list_agents` 由 dshd 自己写
 - ✅ 真机验过**发信**：A 会话发给 B，B 的信箱文件出现 `{"from": A, "message": ...}`
-- ⚠️ **收信侧没验通**：`session/resume` 按 id 恢复失败，`wait_agent` 的端到端还没跑到（单测过）
+- ✅ **收信侧也验通了**：`session/resume` 的 cwd 改成可选（按 id 兜底），实测 B 只给 id 就能恢复，
+  `wait_agent` 把信箱里那条读走（cursor 0→1，日志 ok:true）
 - ✅ 对拍拦住一次真错：DSH 的 `send_message` 参数是 `agent_id`/`message`，我们写成了 `to`/`text`
 - ⚠️ 我的 python 字符串替换**静默失效**过一次（签名写错 → 什么都没替换 → 以为改好了），
   以后替换必须断言命中
-- 下一步 **M61**：修 `session/resume` 按 id 的查找（收信侧验证的前置）
+- 下一步 **M62**：`get_goal/create_goal/update_goal`（162 次）——目标要跨会话持久，正好复用信箱那套文件存储
 
 ### 界面线现状（2026-11-03）
 
