@@ -958,6 +958,10 @@
             "type": "integer"
           },
           "description": "已处理完的 issue/PR 编号"
+        },
+        "confirm_skip": {
+          "type": "boolean",
+          "description": "跳过的编号超过 3 个时必须显式确认：水位跳过去的编号以后不会再被处理"
         }
       },
       "required": [

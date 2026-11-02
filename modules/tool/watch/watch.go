@@ -166,7 +166,9 @@ func (t *Tool) Schema() json.RawMessage {
 	default:
 		return json.RawMessage(`{"type":"object","properties":{
   "repo":{"type":"string","description":"要记帐的仓库，形如 owner/name"},
-  "numbers":{"type":"array","items":{"type":"integer"},"description":"已处理完的 issue/PR 编号"}
+  "numbers":{"type":"array","items":{"type":"integer"},"description":"已处理完的 issue/PR 编号"},
+  "confirm_skip":{"type":"boolean",
+                  "description":"跳过的编号超过 3 个时必须显式确认：水位跳过去的编号以后不会再被处理"}
 },"required":["numbers"],"additionalProperties":false}`)
 	}
 }
@@ -194,7 +196,17 @@ type stopArgs struct {
 type ackArgs struct {
 	Repo    string `json:"repo"`
 	Numbers []int  `json:"numbers"`
+	// ConfirmSkip 用于显式承认"这一跳会漏掉一批编号"。
+	// 小批跳号（<= maxSilentSkip）不问；大批必须承认一次。
+	ConfirmSkip bool `json:"confirm_skip"`
 }
+
+// maxSilentSkip 是"可以直接跳过去"的编号个数上限。
+//
+// 定 3 的理由：正常批量记账很少连号且中间空两三个以上；
+// 跳过 4 个以上通常在说明"我一次性把范围推到了很后面"——
+// 那正是最容易把没处理的东西说成处理完的动作。
+const maxSilentSkip = 3
 
 func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
 	switch t.kind {
@@ -476,6 +488,31 @@ func (t *Tool) ack(_ context.Context, raw json.RawMessage) (spi.Result, error) {
 			top = n
 		}
 	}
+	// 一次 ack [15] 会静默吞掉 4..14 —— 这比多处理一批更难发现，
+	// 所以把"跳过了哪些"算出来，写在人看的那一行里。
+	acked := make(map[int]bool, len(nums))
+	for _, n := range nums {
+		acked[n] = true
+	}
+	// 注意用 top 而不是 w.Watermark：这段挪到了落盘**之前**，
+	// 那时 w.Watermark 还是旧值，写成 w.Watermark 会让循环一次都不跑。
+	var skipped []int
+	for n := prev + 1; n <= top; n++ {
+		if !acked[n] {
+			skipped = append(skipped, n)
+		}
+	}
+
+	// 跳太多就停下来问一次：水位跳过去的编号**永远不会再被处理**，
+	// 而这个动作不会报错、不会重试，下轮也不再提。报告不够——要拦。
+	if len(skipped) > maxSilentSkip && !a.ConfirmSkip {
+		return spi.Result{Hint: fmt.Sprintf(
+				"这次会把水位从 %d 推到 %d，跳过 %d 个编号（%s）——它们以后不会再被当成新活。"+
+					"要么把这批编号也列进 numbers，要么带上 confirm_skip=true 明确认下这个后果",
+				prev, top, len(skipped), spanText(skipped))},
+			fmt.Errorf("watch_ack: 跳过了 %d 个编号，需要 confirm_skip", len(skipped))
+	}
+
 	// 只增不减：水位回退会让同一批 issue 被反复当成新活。
 	advanced := top > prev
 	if advanced {
@@ -484,20 +521,6 @@ func (t *Tool) ack(_ context.Context, raw json.RawMessage) (spi.Result, error) {
 		list[i] = w
 		if err := t.st.save(list); err != nil {
 			return spi.Result{Hint: fmt.Sprintf("没落盘：检查 %s 的权限和磁盘空间，重试一次；别当作已记账，否则下一轮会重复报这批", t.st.display())}, err
-		}
-	}
-
-	// 水位跳过去的编号**永远不会再被当成新活**。
-	// 一次 ack [15] 会静默吞掉 4..14 —— 这比多处理一批更难发现，
-	// 所以把"跳过了哪些"算出来，写在人看的那一行里。
-	acked := make(map[int]bool, len(nums))
-	for _, n := range nums {
-		acked[n] = true
-	}
-	var skipped []int
-	for n := prev + 1; n <= w.Watermark; n++ {
-		if !acked[n] {
-			skipped = append(skipped, n)
 		}
 	}
 

@@ -17,7 +17,7 @@ func TestAckDefaultsToSingleWatcher(t *testing.T) {
 	if _, err := mk(dir, kindStart).Exec(ctx, json.RawMessage(`{"repo":"o/n"}`)); err != nil {
 		t.Fatal(err)
 	}
-	res, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[3,7]}`))
+	res, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[1,2,3]}`))
 	if err != nil {
 		t.Fatalf("只有一个仓库时应当能省略 repo: %v / %q", err, res.Hint)
 	}
@@ -59,7 +59,7 @@ func TestAckReportsSkippedNumbers(t *testing.T) {
 	if _, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[3]}`)); err != nil {
 		t.Fatal(err)
 	}
-	res, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[15]}`))
+	res, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[15],"confirm_skip":true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,5 +111,45 @@ func TestSpanText(t *testing.T) {
 		if got := spanText(c.in); got != c.want {
 			t.Fatalf("spanText(%v) = %q，期望 %q", c.in, got, c.want)
 		}
+	}
+}
+
+// 跳太多就拦下来——只报不拦，模型会照样把一整段说成处理完。
+func TestAckBlocksLargeSkipWithoutConfirm(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	if _, err := mk(dir, kindStart).Exec(ctx, json.RawMessage(`{"repo":"o/n"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[3]}`)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[15]}`))
+	if err == nil {
+		t.Fatal("跳过 11 个编号不带 confirm_skip 时必须拒绝")
+	}
+	if !strings.Contains(res.Hint, "confirm_skip") {
+		t.Fatalf("Hint 要说清怎么才能继续: %q", res.Hint)
+	}
+	// 被拒之后水位不能动：拒绝必须是原子的。
+	list, err := (&store{dir: dir}).load()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("读回名单: %v %v", list, err)
+	}
+	if list[0].Watermark != 3 {
+		t.Fatalf("拒绝后水位变成 %d，期望仍是 3", list[0].Watermark)
+	}
+}
+
+// 跳一两个不该打扰——正常批量记账常常中间空号。
+func TestAckAllowsSmallSkipSilently(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	if _, err := mk(dir, kindStart).Exec(ctx, json.RawMessage(`{"repo":"o/n"}`)); err != nil {
+		t.Fatal(err)
+	}
+	// 跳过 1、2 两个号（<= 3）
+	if _, err := mk(dir, kindAck).Exec(ctx, json.RawMessage(`{"numbers":[3]}`)); err != nil {
+		t.Fatalf("跳 2 个不该被拦: %v", err)
 	}
 }
