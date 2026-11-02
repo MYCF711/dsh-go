@@ -129,3 +129,28 @@ func TestDoctorGatewayOK(t *testing.T) {
 		t.Fatalf("要报出模型数: %q", c.Detail)
 	}
 }
+
+// 警告要出现在**结尾那行**，而且它自己那行要是 !——
+// 结尾说"上面 ! 那行"，那行就不能显示成 ✓。
+func TestDoctorWarningIsVisibleInSummary(t *testing.T) {
+	rep := doctorReport{Home: "x", Results: []checkResult{
+		{Name: "a", OK: true, Detail: "fine"},
+		{Name: "c", OK: true, Warn: true, Detail: "尾巴坏了但能读", Next: "不用管"},
+	}}
+	var buf bytes.Buffer
+	rep.Render(&buf)
+	out := buf.String()
+
+	if strings.Contains(out, "一切正常") {
+		t.Fatalf("有警告时不能打「一切正常」: %q", out)
+	}
+	if !strings.Contains(out, "值得看一眼") {
+		t.Fatalf("结尾要说清有几项值得看: %q", out)
+	}
+	if !strings.Contains(out, "! c") {
+		t.Fatalf("警告那行要用 ! 打头，才能和结尾对上号: %q", out)
+	}
+	if rep.Failed() {
+		t.Fatal("警告不是致命项，Failed 应为 false")
+	}
+}

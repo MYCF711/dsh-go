@@ -44,13 +44,14 @@ func (r doctorReport) Failed() bool {
 func (r doctorReport) Render(w io.Writer) {
 	fmt.Fprintf(w, "dshd doctor · home=%s\n\n", r.Home)
 	for _, c := range r.Results {
+		// 警告优先于 ✓：结尾那行说的是"上面 ! 那行"，
+		// 这一行就**必须**是 !，否则人对不上号。
 		mark := "✓"
-		if !c.OK {
-			if c.Warn {
-				mark = "!"
-			} else {
-				mark = "✗"
-			}
+		switch {
+		case c.Warn:
+			mark = "!"
+		case !c.OK:
+			mark = "✗"
 		}
 		fmt.Fprintf(w, "  %s %-14s %s\n", mark, c.Name, c.Detail)
 		if c.Next != "" {
@@ -62,9 +63,11 @@ func (r doctorReport) Render(w io.Writer) {
 		fmt.Fprintln(w, "有致命问题：见上面 ✗ 那几行。")
 		return
 	}
+	// 警告要出现在**最后一行**：只看结尾的人不能漏掉它。
+	// 踩过：尾部半帧那项是 OK+Warn，原来结尾照样打"一切正常"。
 	for _, c := range r.Results {
-		if !c.OK && c.Warn {
-			fmt.Fprintln(w, "能跑，但有一项值得看一眼（上面 ! 那行）。")
+		if c.Warn {
+			fmt.Fprintf(w, "能跑，但有 %d 项值得看一眼（上面 ! 那行）。"+string(rune(10)), countWarns(r))
 			return
 		}
 	}
@@ -264,4 +267,15 @@ func cmdDoctor(argv []string) error {
 		return fmt.Errorf("诊断发现致命问题")
 	}
 	return nil
+}
+
+// countWarns 数有几项是"能用但值得看一眼"。
+func countWarns(r doctorReport) int {
+	n := 0
+	for _, c := range r.Results {
+		if c.Warn {
+			n++
+		}
+	}
+	return n
 }
