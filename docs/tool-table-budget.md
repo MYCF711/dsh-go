@@ -150,3 +150,21 @@ Hint: schedule_update：这个会话有 2 条定时任务（sch-0001-2771、sch-
   3. 按模式裁剪：给一个"精简"模式，只给常用十几个工具
 
 相关：[`docs/token-budget.md`](token-budget.md)（工具**回显**占上下文的账，是另一个问题）。
+
+## 防止默认值被悄悄改坏
+
+默认值这种东西，坏起来是无声的：没人会为了"把 compact 改回 full"专门开个 PR，
+但总有人为了排查一个 bug 顺手改一行，然后忘了改回来。
+
+两道闸：
+
+1. **`TestCompactTableKeepsContract`**（`cmd/dshd/tool_schema_test.go`）：
+   逐个工具比对压缩前后的结构（去掉 description 后必须**完全相等**）。
+   少一个 `required`、少一个 `enum`，这条就红。
+   顺带报数：**41 个工具，参数区 16,088 → 7,167 字节（省 55%）**。
+
+2. **`scripts/check.sh` 里两行**：
+   - `dshd run --help` 必须出现 `default "compact"`，否则 FAIL
+   - 工具表体积超过 32 KB 打 WARN（不是 FAIL——加工具当然会变大，
+     但它必须**显式**变大，而不是悄悄涨到没人注意）
+

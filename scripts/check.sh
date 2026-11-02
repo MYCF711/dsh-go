@@ -33,6 +33,26 @@ else
     bad "go test -race"
   fi
 
+  # 工具表：默认形态 + 体积预算
+  #
+  # compact 默认是 20 次 A/B 换来的（scripts/tool-table-ab.py），不是随手写的。
+  # 体积预算不是硬门槛——加工具当然会变大；但它必须**显式**变大，
+  # 而不是悄悄涨到一个没人注意的数。
+  help_out="$(go run ./cmd/dshd run --help 2>&1 || true)"
+  if printf '%s' "$help_out" | grep -q 'default "compact"'; then
+    pass "工具表默认 compact"
+  else
+    bad "工具表默认不是 compact（改了默认？先跑 scripts/tool-table-ab.py 拿数据）"
+  fi
+  table_line="$(go run ./cmd/dshd tools 2>&1 >/dev/null | tail -1 || true)"
+  table_bytes="$(printf '%s' "$table_line" | grep -oE '[0-9]+ 字节' | grep -oE '[0-9]+' || echo 0)"
+  if [ "${table_bytes:-0}" -le 32000 ]; then
+    pass "工具表体积 ${table_line:-未知}"
+  else
+    printf '  WARN  工具表 ${table_line}（超过 32 KB：删描述或合并工具）
+'
+  fi
+
   # R1 内核零业务
   if [ -d internal/kernel ]; then
     deps=$(go list -deps ./internal/kernel 2>/dev/null \

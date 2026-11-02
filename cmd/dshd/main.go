@@ -297,6 +297,17 @@ func cmdTools(argv []string) error {
 	return nil
 }
 
+// defaultToolSchema 是工具表的默认形态。
+//
+// compact = 投影时去掉参数的说明文字（结构不动），实测输入省 22%，
+// 10 个任务的正误与完整表一致（scripts/tool-table-ab.py，20 次采样）。
+// 要改这个默认值，先重跑那个脚本——别凭感觉。
+//
+// 注意：这条默认能成立，前提是工具自己兜住了"可推导的参数"
+// （claim 认领到会话、update_goal.watch.schedule.job 的 id 可省），
+// 不再依赖说明文字提醒模型该填什么。
+const defaultToolSchema = "compact"
+
 // cmdRun 跑一个真实 turn：装配 → 模型 → 工具 → 回灌 → 收尾。
 //
 // 这是 M2 的验收动作：它同时踩到装配、工具流水线、LLM 流式、agent 双循环四条线。
@@ -313,7 +324,7 @@ func cmdRun(argv []string) error {
 	resumeSession := fs.String("session", "", "续这个会话（空=新建）；cwd 可省，按 id 找")
 	// 工具表默认压掉参数说明：20 次 A/B（10 个任务 × 两种表）结果一致，输入省 22%。
 	// 要完整表就显式写 --tool-schema=full——比如排查"模型没填对参数"时。
-	toolSchema := fs.String("tool-schema", "compact", "工具表形态：compact=压掉参数说明（省约两成输入）| full=完整")
+	toolSchema := fs.String("tool-schema", defaultToolSchema, "工具表形态：compact=压掉参数说明（省约两成输入）| full=完整")
 	// 规则文件：默认工作区的 AGENTS.md；给"执行者"喂精简手册时指到 docs/WORKER.md。
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	policy := fs.String("policy", "auto", "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
