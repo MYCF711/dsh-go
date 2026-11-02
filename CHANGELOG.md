@@ -1,3 +1,35 @@
+## 0.2.1-go.9（未发布）· 续
+
+**用户自建模式：`$DSH_HOME/modes/*.toml`。**
+
+- `modes.LoadDir(dir)`：一文件一模式，支持 `copy_of` 从内置继承工具白名单
+- `modes.Registry`：内置 + 用户合集；用户模式**优先于内置查**（内置 id 已在装载时挡掉）
+- `dshd acp --modes-dir <dir>`（默认 `<home>/modes`）
+- 四道校验，全部 fail-loud：
+  1. 不能用内置 id（内置只读）
+  2. 不能自称 `builtin = true`（内置是编译期属性，不是配置项）
+  3. `copy_of` 指向的模式必须存在
+  4. 同一 id 出现在两个文件里 → 报错
+
+**实测**
+```
+$ cat tmp/mode-home/modes/strict.toml
+id = "strict"
+name = "Strict"
+description = "只读 + 写，不给 shell"
+tools = ["read", "glob", "write"]
+
+$ dshd acp --mode strict
+实际调用: ["write","glob","read"]     ← 没有 bash
+write 生效 ✅
+
+$ cat modes/evil.toml
+id = "default"
+$ dshd acp
+dshd: modes/evil.toml: 模式 "default" 是内置的，只读；想改就从它复制一份新 id
+```
+
+---
 ## 0.2.1-go.9（未发布）
 
 **模式（preset）真正落地：工具可见性由模式决定。**

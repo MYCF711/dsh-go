@@ -50,6 +50,7 @@ type acpRunner struct {
 	// modeID 是启动时的默认模式；sessionModes 记每个会话当前模式。
 	modeID       string
 	sessionModes map[string]string
+	modeReg      *modes.Registry
 
 	mu    sync.Mutex
 	logs  map[string]*session.Log
@@ -342,7 +343,8 @@ func cmdACP(argv []string) error {
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	autoCompact := fs.Int("auto-compact", 40000, "surface 估算超过多少 token 就自动压缩（0=关闭）")
 	ctxWindow := fs.Int("context-window", 128000, "上下文窗口大小（usage_update 的分母）")
-	modeID := fs.String("mode", modes.DefaultID, "启动模式："+modes.IDs())
+	modeID := fs.String("mode", modes.DefaultID, "启动模式 id（见 --modes-dir 与内置）")
+	modesDir := fs.String("modes-dir", "", "用户自建模式目录（默认 <home>/modes）")
 	remember := fs.Bool("remember-approvals", false, "把\"以后都允许\"记到磁盘，resume 后仍然生效")
 	if err := fs.Parse(argv); err != nil {
 		return err
@@ -376,10 +378,23 @@ func cmdACP(argv []string) error {
 	if *ctxWindow > 0 {
 		acpRunner.ctxWindow = *ctxWindow
 	}
-	m, err := modes.Resolve(*modeID)
+	dir := *modesDir
+	if dir == "" {
+		dir = filepath.Join(*home, "modes")
+	}
+	userModes, err := modes.LoadDir(dir)
 	if err != nil {
 		return err
 	}
+	modeReg, err := modes.NewRegistry(userModes)
+	if err != nil {
+		return err
+	}
+	m, err := modeReg.Resolve(*modeID)
+	if err != nil {
+		return err
+	}
+	acpRunner.modeReg = modeReg
 	acpRunner.modeID = m.ID
 	if *remember {
 		acpRunner.approvalsStore = &approval.Store{Dir: filepath.Join(*home, "state", "approvals")}
@@ -667,9 +682,22 @@ func (r *acpRunner) modeOf(sessionID string) modes.Mode {
 	if id == "" {
 		id = r.modeID
 	}
-	m, err := modes.Resolve(id)
+	m, err := r.registry().Resolve(id)
 	if err != nil {
-		m, _ = modes.Resolve(modes.DefaultID)
+		m, _ = r.registry().Resolve(modes.DefaultID)
 	}
 	return m
+}
+
+// registry 返回模式表（内置 + 用户自建）。没配就只读内置。
+func (r *acpRunner) registry() *modes.Registry {
+	if r.modeReg != nil {
+		return r.modeReg
+	}
+	reg, err := modes.NewRegistry(nil)
+	if err != nil {
+		// 内置模式自己冲突只可能是代码 bug；退化成只用内置。
+		reg, _ = modes.NewRegistry(nil)
+	}
+	return reg
 }

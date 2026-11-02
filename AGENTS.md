@@ -36,7 +36,8 @@
 - ✅ 压缩语义回归（`scripts/acp-compact-semantics.mjs`）：**又抓到一个 bug**——替身 seq 顺序与 surface 顺序不一致导致筛空；`compact.Select` 改为直接返回节点
 - ✅ 冷启动定位：`BurntSushi/toml` 的 init 占 23 ms，换成 `pelletier/go-toml/v2` 后 init 26→2 ms、ACP 就绪 65.9→**55.9 ms**
 - ✅ 模式落地（`internal/modes`）：`default` / `read-only`，工具可见性按模式裁剪，`set_mode` 真的换表
-- 下一步 **M8**：用户自建模式（`$DSH_HOME/modes/*.toml`）+ 从内置复制
+- ✅ 用户自建模式（`$DSH_HOME/modes/*.toml`，支持 `copy_of` 继承）：四道 fail-loud 校验，实测 strict 模式下无 bash
+- 下一步 **M9**：模式决定审批倾向（`Approval` 字段目前还没接进审批判定）
 
 ---
 
