@@ -32,6 +32,7 @@ import (
 	"dshgo/modules/tool/grep"
 	"dshgo/modules/tool/history"
 	"dshgo/modules/tool/present"
+	"dshgo/modules/tool/pwsh"
 	"dshgo/modules/tool/read"
 	"dshgo/modules/tool/readimage"
 	subagenttool "dshgo/modules/tool/subagent"
@@ -87,6 +88,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		webfetch.Module(),
 		websearch.Module(),
 		readimage.Module(),
+		pwsh.Module(),
 		subagentModule(sub),
 		subagenttool.Module(),
 	}

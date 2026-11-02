@@ -116,6 +116,8 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"web_search": {Network: true},
 		// 只读图片文件并把图交给模型，不写不跑不联。
 		"read_image": {},
+		// 跑 PowerShell：起进程 = Executes（写盘拦不住，Writes 由工具自己声明）。
+		"pwsh": {Executes: true, Writes: true},
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},

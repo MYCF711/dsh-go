@@ -85,3 +85,7 @@ backend = "static"
 [[module]]
 id      = "tool-subagent"
 backend = "static"
+
+[[module]]
+id      = "tool-pwsh"
+backend = "static"

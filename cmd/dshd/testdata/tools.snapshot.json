@@ -314,6 +314,35 @@
     "caps": {}
   },
   {
+    "name": "pwsh",
+    "description": "执行 PowerShell 命令（优先 pwsh，退回 powershell）。查系统、跑脚本时用。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "要执行的 PowerShell 命令（一条或多条，用分号分隔）"
+        },
+        "workdir": {
+          "type": "string",
+          "description": "可选：工作目录（相对当前工作目录），默认当前目录"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "description": "可选：超时秒数，默认 120，上限 600"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true,
+      "executes": true
+    }
+  },
+  {
     "name": "read",
     "description": "读文件（按行窗口）。改文件前必须先读；大文件用 offset/limit 分段。",
     "parameters": {
