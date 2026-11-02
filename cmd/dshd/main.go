@@ -308,6 +308,7 @@ func cmdRun(argv []string) error {
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
 	maxChars := fs.Int("max-chars", 4000, "工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
+	resumeSession := fs.String("session", "", "续这个会话（空=新建）；cwd 可省，按 id 找")
 	// 规则文件：默认工作区的 AGENTS.md；给"执行者"喂精简手册时指到 docs/WORKER.md。
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	policy := fs.String("policy", "auto", "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
@@ -359,12 +360,34 @@ func cmdRun(argv []string) error {
 		return err
 	}
 	sys := buildSystemPrompt(reg, *model, cwd, *workspaceBytes)
-	sessID := "session-" + session.NewID()
-	logw, err := session.CreateSession(*home, cwd, sessID, modes.DefaultID)
+	// --session：续一个已经存在的会话，而不是新建。
+	// 定时任务的"到期后跑一轮"就是靠这个——它必须落在**原会话**里，
+	// 新建会话会让上下文断掉（模型不记得之前聊过什么）。
+	sessID := *resumeSession
+	var logw *session.Log
+	if sessID == "" {
+		sessID = "session-" + session.NewID()
+		logw, err = session.CreateSession(*home, cwd, sessID, modes.DefaultID)
+	} else {
+		var path string
+		path, err = session.ResolvePath(*home, cwd, sessID)
+		if err == nil {
+			logw, err = session.OpenSessionAt(path)
+		}
+	}
 	if err != nil {
 		return err
 	}
 	defer logw.Close()
+
+	// 续会话时必须把**已有历史**读进来，否则模型看到的是一张白纸：
+	// 它会在旧日志上追加新消息，却不知道前面聊过什么（实测会回答"这是第一条消息"）。
+	var baseHist []llm.Message
+	if *resumeSession != "" {
+		if back, rerr := v4.ReadFile(logw.Path); rerr == nil {
+			baseHist = session.History(back)
+		}
+	}
 	logSessionStart(*home, sessID, logw.Path, cwd, modes.DefaultID)
 	// 把"当前会话"指给 history_search——`run` 以前没这一步，模型回查只会得到
 	// "没有活动会话"。ACP 那边早就指了，这里补上。
@@ -480,7 +503,8 @@ func cmdRun(argv []string) error {
 			toolCalls, inTokens, outTokens)
 	}()
 
-	hist, err := loop.Run(context.Background(), 1, []llm.Message{{Role: "user", Content: *prompt}})
+	hist := append(append([]llm.Message(nil), baseHist...), llm.Message{Role: "user", Content: *prompt})
+	hist, err = loop.Run(context.Background(), 1, hist)
 	if err != nil {
 		return err
 	}

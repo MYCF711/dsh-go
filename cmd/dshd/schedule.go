@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,13 +25,16 @@ import (
 // 谁来处理（cron、shell 循环、以后的客户端）由调用方决定。
 func cmdSchedule(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("用法: dshd schedule list|due [--home <dir>]")
+		return fmt.Errorf("用法: dshd schedule list|due|run [--home <dir>]")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("schedule "+sub, flag.ContinueOnError)
 	home := fs.String("home", defaultHome(), "会话根目录")
 	only := fs.String("session", "", "只看这个会话")
 	advance := fs.Bool("advance", false, "把到期的推进到下一次（不写就不动）")
+	// run 子命令用：跑一轮时的审批策略与步数上限，透传给 cmdRun。
+	policy := fs.String("policy", "allow", "schedule run 的审批策略：ask/allow/deny/auto")
+	maxSteps := fs.Int("max-steps", 12, "schedule run 每轮最多几步")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -63,6 +67,41 @@ func cmdSchedule(args []string) error {
 			return nil
 		}
 		fmt.Printf("共 %d 条\n", total)
+		return nil
+
+	case "run":
+		// 把到期的任务真的变成一轮对话。
+		// 复用 cmdRun（同一个进程内），而不是另写一套：审批、压缩、日志、落盘全都一致。
+		now := time.Now()
+		var ran int
+		for _, sid := range sessions {
+			items, err := schedule.Load(dir, sid)
+			if err != nil {
+				fmt.Printf("  ! %s: %v\n", shortID(sid), err)
+				continue
+			}
+			dues := schedule.DueAt(items, now)
+			for _, d := range dues {
+				fmt.Printf("跑 %s  %s\n", shortID(sid), d.Item.Title)
+				args := []string{"--home", *home, "--session", sid, "--prompt", d.Item.Prompt,
+					"--policy", *policy, "--max-steps", strconv.Itoa(*maxSteps), "--agents", "docs/WORKER.md"}
+				if err := cmdRun(args); err != nil {
+					fmt.Printf("  ! 这一轮失败: %v\n", err)
+					continue
+				}
+				ran++
+			}
+			if len(dues) > 0 {
+				if n, err := schedule.Advance(dir, sid, dues, now); err != nil {
+					fmt.Printf("  ! 推进失败 %s: %v\n", shortID(sid), err)
+				} else {
+					fmt.Printf("  已推进 %d 条\n", n)
+				}
+			}
+		}
+		if ran == 0 {
+			fmt.Println("现在没有到期的任务")
+		}
 		return nil
 
 	case "due":
@@ -99,7 +138,7 @@ func cmdSchedule(args []string) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("未知子命令 %q：只有 list / due", sub)
+	return fmt.Errorf("未知子命令 %q：只有 list / due / run", sub)
 }
 
 func shortID(s string) string {
