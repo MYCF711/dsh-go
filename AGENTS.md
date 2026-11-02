@@ -98,7 +98,9 @@
 - ✅ 演练五项全中（新增「日志写不了」）
 - ✅ 协作一致性实测（`docs/collab.md` + `scripts/collab-probe.py`）：三条疑点里**一条真问题**（换 cwd 找不到会话，已修：`session.ResolvePath` 回退按 id）、两条本来就对
 - ✅ 实测顺带挖出后门：`OpenSessionAt`（ACP resume / CLI compact 的入口）**不抢写锁**，绕过了 M30 的防线；已修 + `TestOpenSessionAtAlsoClaimsLock`
-- 下一步 **M37**（A 线）：只读 home 下 `run`/`acp` 的行为实测——会话建不出来时模型调用还发不发（不该发）
+- ✅ 顺序保证（`scripts/probe-no-persist.py`）：会话存不下来时**不调模型**——`run` 与 ACP 两条路都是 0 次网关请求
+- ✅ 纠正过度宣称：`icacls /deny (W)` 只挡住"在目录里新建文件"，挡不住建子目录/往子目录写；那条演练没覆盖"会话存不下来"
+- 下一步 **M38**（A 线）：磁盘写满时正在写的会话会怎样（Can't 直接造，考虑用只读的会话文件模拟）
 
 ---
 
