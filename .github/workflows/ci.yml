@@ -23,6 +23,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # staticcheck 不在 runner 镜像里。不装它，check.sh 的那一条永远红——
+      # 而且红的是"没装"，不是"代码有问题"，跟真的 staticcheck 报错长得一样。
+      # 版本钉死（本机 2026.2.2 = 0.8.2），别用 @latest：CI 不该随上游漂移。
+      - name: 装 staticcheck
+        if: steps.gate.outputs.go == '1'
+        shell: bash
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
+
       - name: 门禁（build / vet / test -race / R1 / A3 / 文档 / 卫生）
         shell: bash
         run: ./scripts/check.sh
