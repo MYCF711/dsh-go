@@ -143,6 +143,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Publish 往某个 topic 推一帧。宿主侧在 turn 产生事件时调它。
+func (s *Server) Publish(topic string, f ServerFrame) {
+	if s == nil || s.hub == nil {
+		return
+	}
+	s.hub.Publish(topic, f)
+}
+
 // handleWS 是界面订阅事件流的地方。
 //
 // 和 /api 一样要 cookie：**没有 cookie 就不许升级**。
