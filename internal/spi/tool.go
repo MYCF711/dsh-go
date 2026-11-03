@@ -141,8 +141,13 @@ type Call struct {
 	// 需要知道"这是哪个会话在调"，而 Call 原本没有 ctx——拿不到会话就只能
 	// 做一个进程级开关，那会让 A 会话进计划模式把 B 会话也锁住。
 	Session string
-	Result  Result
-	Err     error
+	// Nested 表示这次调用是"工具里再调工具"（例如 workflow 的子调用）。
+	//
+	// 谁需要它：宿主写 v4 时只给**顶层**调用写（单写者，R5）。
+	// 子调用若也写入，必须能被区分出来，否则同一次调用会被记两遍。
+	Nested bool
+	Result Result
+	Err    error
 }
 
 // 工具流水线的四个槽。顺序固定，监听器按注册顺序执行。

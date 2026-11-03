@@ -398,12 +398,11 @@ python scripts/guard-selftest.py
 
 **仍未解决（本轮如实记下）**：
 
-1. **子调用不进 v4 日志。** 目前 `tool/call` 只由 `internal/agent/loop.go:236` 为**顶层**调用写；
-   workflow 的子调用走 Pipeline，只有总线事件，没有 v4 事件。
-   后果：`session.history` 里看不到"编排里那 5 次 grep"。
-   为什么不当场补：**v4 是单写者模型**（R5），现在补等于开第二个写者，
-   最可能的结果是同一次调用被记两遍。正确做法是宿主订阅总线工具事件统一落盘，
-   而不是让 workflow 自己写。
+1. ~~**子调用不进 v4 日志。**~~ **已解决（M316）**：`spi.Call` 加 `Nested` 标记
+   （Pipeline 从 ctx 的 SubDispatch 层数推出），宿主订阅 `tools/result`，
+   **只给 Nested 的写** v4——顶层仍由循环自己写，所以不会重复。
+   真机验过：一次 2 步 workflow → 会话里 `tool/call` 3 条、`tool/result` 3 条
+   （1 条顶层 + 2 条子调用），正好对得上。
 2. **`Stop` 被子调用吞掉**：`exit_plan_mode` / `ask_user_question` 若出现在 script 里，
    它们的 `Stop` 不会传出去（`loop.go:281` 只看顶层结果）。已在 Hint 里避免引导，
    但没在代码上拦。

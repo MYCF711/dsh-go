@@ -62,6 +62,8 @@ func (p *Pipeline) Violations() []string {
 // Run 是唯一执行入口：绕过它直接调 Tool.Exec 会跳过审批、沙箱、截断与提示。
 func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
 	call := &spi.Call{Name: name, Args: args, Session: spi.SessionFrom(ctx)}
+	// 子调用（workflow 里发的）标出来：宿主据此决定"这条要不要额外落 v4"。
+	call.Nested = spi.SubDispatchFrom(ctx).Depth > 0
 	started := time.Now()
 	// 每次工具调用都在日志里留一条：名字、耗时、成败、错误原文。
 	// 出事之后人要能回答"它到底跑了什么、跑了多久、成没成"。

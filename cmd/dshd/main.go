@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"dshgo/codecs/v4"
@@ -450,6 +451,30 @@ func cmdRun(argv []string) error {
 	// 把"当前会话"指给 history_search——`run` 以前没这一步，模型回查只会得到
 	// "没有活动会话"。ACP 那边早就指了，这里补上。
 	attachHistory(logw)
+
+	// 子调用（workflow 里发的那些）不属于 agent 循环的事件流，循环不会为它们写 v4。
+	// 结果就是：编排跑了 5 次 grep，回去看 session.history 却什么都没有。
+	// 这里补一条**只给 Nested** 的写入点——顶层调用仍由循环自己写，
+	// 不加这个判断就会把同一次调用记两遍（v4 是单写者模型）。
+	var nestedN atomic.Int64
+	kernel.OnTyped[*spi.Call](root.Bus(), root, spi.EventToolResult, func(c *spi.Call) error {
+		if c == nil || !c.Nested {
+			return nil
+		}
+		id := fmt.Sprintf("wf-%d", nestedN.Add(1))
+		if err := logw.Append("tool/call", session.ToolCallEvent(1, 0, id, c.Name, string(c.Args))); err != nil {
+			return nil // 记账失败不该打断真正在干活的调用
+		}
+		var blocks []spi.Block
+		switch {
+		case c.Result.Text != "":
+			blocks = []spi.Block{{Type: "text", Text: c.Result.Text}}
+		case c.Result.Summary != "":
+			blocks = []spi.Block{{Type: "text", Text: c.Result.Summary}}
+		}
+		return logw.Append("tool/result",
+			session.ToolResultEvent(1, 0, id, blocks, c.Err != nil, "", nil))
+	})
 
 	if err := logw.Append("system/message", session.SystemMessageData(1, 1, sys)); err != nil {
 		return err
