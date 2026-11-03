@@ -83,6 +83,17 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 func (t *Tool) list() (spi.Result, error) {
 	lines, entries, _, err := t.read()
 	if err != nil {
+		// 没有 manifest **不是错误**：宿主没有白名单时就是"全开"，
+		// 这是合法配置。当成错误会让模型以为"插件系统坏了"，
+		// 而其实只是这台机器没建过这个文件（真机上就是这种情况）。
+		if os.IsNotExist(err) {
+			return spi.Result{
+				Summary: "没有 manifest 文件（默认全开）",
+				Text: "没有找到 " + filepath.ToSlash(t.manifest) +
+					"：这种情况下宿主不用白名单，编译进来的模块全开。\n" +
+					"要能逐个开关，先建这个文件并在里面写 [[module]] 块。",
+			}, nil
+		}
 		return spi.Result{
 			Hint: "读不到 manifest：" + filepath.ToSlash(t.manifest) + "；确认路径可用（--manifest 指向哪里）",
 		}, err

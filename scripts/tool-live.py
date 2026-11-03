@@ -36,6 +36,19 @@ BATCHES = [
         "team_task_create(subject=s,description=d)；team_task_list()。全部做完只回答'完'。",
     ),
     (
+        # 计划模式**单独一批**：exit_plan_mode 的 Stop=true 会让这一轮就结束，
+        # 后面再挂别的工具，模型根本没机会调——那样它俩会被记成"没验"。
+        ["enter_plan_mode", "exit_plan_mode"],
+        "严格按顺序调用这两个工具，每个只调一次，不要解释："
+        "enter_plan_mode(reason=体检)；然后 exit_plan_mode(plan=体检方案)。",
+    ),
+    (
+        ["plugin", "workflow"],
+        "严格按顺序调用这两个工具，每个只调一次，不要解释："
+        "plugin(action=list)；workflow(script=[{\"tool\":\"repo_here\",\"args\":{}}])。"
+        "全部做完只回答'完'。",
+    ),
+    (
         ["watch_status", "load_workspace_dependencies", "repo_here",
          "unlag_refresh", "skill"],
         "严格按顺序调用这 5 个工具，每个只调一次，不要解释：watch_status、"

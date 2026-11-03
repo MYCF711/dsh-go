@@ -162,3 +162,26 @@ func TestDisablePutsFlagInsideBlock(t *testing.T) {
 	}
 	t.Fatalf("enabled=false 没紧跟在块内容后面：\n%s", body)
 }
+
+// 没有 manifest 不是错误：宿主没有白名单时就是"全开"，这是合法配置。
+//
+// 真机上（tool-live 探针用一个空 home）就是这种情况：
+// 以前它返回 ERR，看起来像"插件系统坏了"，其实只是这台机器没建过这个文件。
+func TestMissingManifestIsNotAnError(t *testing.T) {
+	tl := &Tool{manifest: filepath.Join(t.TempDir(), "no-such.toml")}
+	res, err := tl.Exec(context.Background(), json.RawMessage(`{"action":"list"}`))
+	if err != nil {
+		t.Fatalf("没有 manifest 不该报错：%v", err)
+	}
+	if !strings.Contains(res.Text, "默认全开") && !strings.Contains(res.Summary, "全开") {
+		t.Fatalf("要说清这是'默认全开'：%s / %s", res.Summary, res.Text)
+	}
+}
+
+// 但 enable/disable 没有 manifest 就没法改，得报错并指路。
+func TestToggleWithoutManifestFails(t *testing.T) {
+	tl := &Tool{manifest: filepath.Join(t.TempDir(), "no-such.toml")}
+	if _, err := tl.Exec(context.Background(), json.RawMessage(`{"action":"disable","id":"tool-a"}`)); err == nil {
+		t.Fatal("没有 manifest 时改不了，应当报错")
+	}
+}
