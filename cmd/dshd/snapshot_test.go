@@ -158,6 +158,9 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"subagent": {},
 		// 刷新按钮：只动 <home>/state/unlag.json 这一份宿主状态，不算写用户文件。
 		"unlag_refresh": {},
+		// 带上下文的子代理：和 subagent 一样本身不写盘/不联网，
+		// 真正干什么由它调用的工具各自声明。
+		"subagent_fork": {},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {

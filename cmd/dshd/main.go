@@ -42,6 +42,7 @@ import (
 	"dshgo/modules/tool/repohere"
 	schedule "dshgo/modules/tool/schedule"
 	subagenttool "dshgo/modules/tool/subagent"
+	subagentfork "dshgo/modules/tool/subagentfork"
 	team "dshgo/modules/tool/team"
 	teamtask "dshgo/modules/tool/teamtask"
 	todo "dshgo/modules/tool/todo"
@@ -111,6 +112,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		nowline.Module(),
 		subagentModule(sub),
 		subagenttool.Module(),
+		subagentfork.Module(inheritFromCtx(home)),
 	}
 }
 

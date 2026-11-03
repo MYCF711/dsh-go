@@ -748,6 +748,33 @@
     "caps": {}
   },
   {
+    "name": "subagent_fork",
+    "description": "派一个能看到本会话上下文的子代理去办一件事；它只回结果，不带回中间步骤。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "type": "string",
+          "description": "子代理的初始工作目录；相对路径按当前目录算，省略表示继承"
+        },
+        "description": {
+          "type": "string",
+          "description": "3-5 个词的短描述，给人看"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "任务本身；子代理能看到本会话最近的对话"
+        }
+      },
+      "required": [
+        "description",
+        "prompt"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "team_task_create",
     "description": "建一条团队任务并返回 id；分工前先建任务。",
     "parameters": {

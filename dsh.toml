@@ -128,3 +128,6 @@ backend = "static"
 
 [[module]]
 id      = "tool-unlag"
+
+[[module]]
+id      = "tool-subagentfork"
