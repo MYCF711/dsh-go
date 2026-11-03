@@ -54,6 +54,18 @@ type ModuleEntry struct {
 	Config   map[string]any `toml:"config"`
 }
 
+// implementedBackends 是**真的能被装载**的后端集合。
+//
+// wasm / process 目前只有常量声明，没有任何实现（PLAN §3.1 写的是门槛，不是完成）。
+// 把它们列进来的意义是：manifest 一旦声明，就**当场报错**，而不是静默按 static 处理。
+//
+// 为什么这行代码值得存在：声明了 `backend = "wasm"` 而实际按静态跑的后果是
+// "我改了配置，却什么都没发生"——这类静默失效最难查，因为它连个错误都没有。
+var implementedBackends = map[Backend]bool{
+	"":            true, // 未声明 = 编译进来的默认实现
+	BackendStatic: true,
+}
+
 // LoadManifest 读 dsh.toml。文件不存在不算错（返回空 manifest）。
 func LoadManifest(path string) (*Manifest, error) {
 	m := &Manifest{}
@@ -129,6 +141,14 @@ func (m *Manifest) Apply(mods []Module) ([]Module, error) {
 			return nil, fmt.Errorf("manifest 里模块 %q 出现多次", e.ID)
 		}
 		seen[e.ID] = true
+
+		if e.Backend != "" && !implementedBackends[e.Backend] {
+			return nil, fmt.Errorf(
+				"模块 %q 声明的 backend %q 还没有实现（当前只有 static）；"+
+					"要么去掉这一行用编译进来的实现，要么等这一层落地——"+
+					"静默降级会让\"我改了配置却什么都没发生\"变成一类查不出来的故障",
+				e.ID, e.Backend)
+		}
 
 		mod := mods[idx]
 		if e.Backend != "" {

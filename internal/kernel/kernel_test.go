@@ -289,3 +289,43 @@ func TestEmptyManifestDisablesAll(t *testing.T) {
 		t.Fatalf("空 manifest 应该什么都不开，得到 %d 个", len(got))
 	}
 }
+
+// TestUnimplementedBackendFailsLoud：manifest 声明了还没实现的后端，必须**当场报错**。
+//
+// 为什么值得一条测试：静默降级的后果是"我改了配置，却什么都没发生"——
+// 这类故障没有任何错误信息可查，而它的成本全部落在下一个人身上。
+func TestUnimplementedBackendFailsLoud(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dsh.toml")
+	body := "[profile]\nname = \"x\"\n\n[[module]]\nid = \"a\"\nbackend = \"wasm\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Apply([]Module{{ID: "a"}}); err == nil {
+		t.Fatal("声明的 wasm 后端还没实现，Apply 必须报错，而不是静默按 static 跑")
+	} else if !strings.Contains(err.Error(), "wasm") {
+		t.Fatalf("错误信息要指出是哪个后端：%v", err)
+	}
+}
+
+// 反过来：static（以及不写 backend）必须照常通过。
+func TestStaticBackendStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dsh.toml")
+	body := "[profile]\nname = \"x\"\n\n[[module]]\nid = \"a\"\nbackend = \"static\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := LoadManifest(path)
+	got, err := m.Apply([]Module{{ID: "a"}})
+	if err != nil {
+		t.Fatalf("static 是实现了的，不该报错：%v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("应当装配 1 个模块，得到 %d", len(got))
+	}
+}
