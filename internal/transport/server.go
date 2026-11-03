@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -144,6 +145,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/connect":
 		s.handleConnect(w, r)
+	case r.URL.Path == "/debug/stats":
+		s.handleDebugStats(w, r)
 	case r.URL.Path == "/ws":
 		s.handleWS(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/"):
@@ -159,6 +162,25 @@ func (s *Server) Publish(topic string, f ServerFrame) {
 		return
 	}
 	s.hub.Publish(topic, f)
+}
+
+// handleDebugStats 暴露两个"长跑才会出问题"的数：goroutine 数与堆大小。
+//
+// 为什么需要它：serve 会为每一轮起 follow goroutine。
+// 它有没有按时退出，从外面完全看不出来——除非把数打出来。
+// 要 cookie：这不是给公网看的东西。
+func (s *Server) handleDebugStats(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		writeJSON(w, http.StatusUnauthorized, errorBody("unauthorized"))
+		return
+	}
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"goroutines": runtime.NumGoroutine(),
+		"heap_bytes": m.HeapAlloc,
+		"sys_bytes":  m.Sys,
+	})
 }
 
 // handleWS 是界面订阅事件流的地方。
