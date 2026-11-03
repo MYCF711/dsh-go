@@ -18,6 +18,14 @@ var ErrNoSuchSession = errors.New("没有这个会话")
 var ErrNoSuchFile = errors.New("文件不存在")
 
 // LoadSession 是 session.load 的实现：首屏，取最新一屏。
+// TailSourcer 是 Source 的可选增强：只取最后 limit 条消息，同时给出总数。
+//
+// 与 SeqSourcer 同一个理由：`session.load` 只要首屏 50 条，
+// 但"先投影全部再截尾"在 24k 事件的会话上要 480 ms。
+type TailSourcer interface {
+	MessagesTail(sessionID string, limit int) ([]Message, int, error)
+}
+
 func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 	if src == nil {
 		return LoadResult{}, errors.New("transport: LoadSession 需要 Source，传了 nil")
@@ -25,6 +33,14 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 	if sessionID == "" {
 		return LoadResult{}, ErrNoSuchSession
 	}
+	if ts, ok := src.(TailSourcer); ok {
+		msgs, total, err := ts.MessagesTail(sessionID, limit)
+		if err != nil {
+			return LoadResult{}, err
+		}
+		return LoadResult{Messages: msgs, Total: total, Truncated: total > len(msgs)}, nil
+	}
+
 	all, err := src.Messages(sessionID)
 	if err != nil {
 		return LoadResult{}, err

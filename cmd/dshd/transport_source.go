@@ -54,7 +54,66 @@ func (s *sessionSource) MessagesSince(sessionID string, sinceSeq int) ([]transpo
 		}
 		log.Events = kept
 	}
-	return s.messagesOf(log)
+	return s.messagesOf(log.Events)
+}
+
+// MessagesTail 只投影最后 limit 条消息，同时把总数算出来。
+//
+// 为什么要单独一个：`session.load` 是界面点开会话时的第一条 method，
+// 它只要首屏 50 条，但现在走的是"先投影全部再截尾"——24k 事件的会话要 480 ms。
+// 计数只需要认事件类型，投影才要解 JSON、拼正文，两者代价差一个数量级。
+func (s *sessionSource) MessagesTail(sessionID string, limit int) ([]transport.Message, int, error) {
+	path, err := s.resolve(sessionID)
+	if err != nil {
+		return nil, 0, err
+	}
+	log, err := v4.ReadFile(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	isMsg := func(t string) bool {
+		return t == "user/message" || t == "assistant/message" || t == "tool/result"
+	}
+	total := 0
+	for _, ev := range log.Events {
+		if isMsg(ev.Type) {
+			total++
+		}
+	}
+	if limit <= 0 || limit > total {
+		limit = total
+	}
+	if limit == 0 {
+		return []transport.Message{}, 0, nil
+	}
+	// 从后往前取 limit 个，保持原顺序。
+	keep := make([]v4.Event, 0, limit)
+	seen := 0
+	for i := len(log.Events) - 1; i >= 0; i-- {
+		if !isMsg(log.Events[i].Type) {
+			continue
+		}
+		if seen == limit {
+			break
+		}
+		keep = append(keep, log.Events[i])
+		seen++
+	}
+	for i, j := 0, len(keep)-1; i < j; i, j = i+1, j-1 {
+		keep[i], keep[j] = keep[j], keep[i]
+	}
+	msgs, err := s.messagesOf(keep)
+	if err != nil {
+		return nil, 0, err
+	}
+	return msgs[:min(len(msgs), limit)], total, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (s *sessionSource) Messages(sessionID string) ([]transport.Message, error) {
@@ -68,15 +127,15 @@ func (s *sessionSource) Messages(sessionID string) ([]transport.Message, error) 
 	if err != nil {
 		return nil, err
 	}
-	return s.messagesOf(log)
+	return s.messagesOf(log.Events)
 }
 
 // messagesOf 把一份（可能已被过滤过的）日志投影成消息。
-func (s *sessionSource) messagesOf(log *v4.Log) ([]transport.Message, error) {
-	calls := indexToolCalls(log.Events)
+func (s *sessionSource) messagesOf(events []v4.Event) ([]transport.Message, error) {
+	calls := indexToolCalls(events)
 
-	out := make([]transport.Message, 0, len(log.Events))
-	for _, ev := range log.Events {
+	out := make([]transport.Message, 0, len(events))
+	for _, ev := range events {
 		switch ev.Type {
 		case "user/message":
 			text, ok := textOf(ev.Data, false)
