@@ -83,7 +83,13 @@ func cmdServe(args []string) error {
 	// H12：会话内容列宽（逻辑像素）。0 = 不知道，界面自己算。
 	// 为什么不给默认值：官方是 min(748*0.702, 82%)，直接抄 748 会让别的窗口尺寸下偏宽/偏窄。
 	serveWidth := fs.Int("content-width", 0, "会话内容列宽（逻辑像素）；0 = 不知道，界面自己算")
-	servePolicy := fs.String("policy", "deny", "子进程用哪个审批策略：deny/allow（serve 没有终端，ask 等于永远挂起）")
+	// ask 现在是**能用**的：子进程走 @@APPROVAL@@ 标记通道，把问题转给界面（H13）。
+	// 这条帮助文字以前写着"ask 等于永远挂起"，那是 H13 之前的事实，
+	// 留着它会让人以为审批不能用——**过期的帮助文本比没有帮助更糟**。
+	servePolicy := fs.String("policy", "deny", "子进程用哪个审批策略：deny/allow/ask（ask 会把审批转给界面）")
+	// 推理强度透传给子进程；空 = 不要。界面线要能看到 reasoning 就得从这里打开。
+	serveReasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
+		"推理强度：空=不要（默认）| xhigh | max")
 	addr := fs.String("addr", "", "监听地址（默认 127.0.0.1:0，端口由 OS 分配）")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -113,7 +119,8 @@ func cmdServe(args []string) error {
 	// 所以"共用表"不等于"共用序号"（H14）。
 	var epochSeq int64
 	journals := transport.NewJournals(func() int64 { epochSeq++; return epochSeq })
-	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps, journals: journals}
+	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps,
+		journals: journals, reasoning: *serveReasoning}
 	mr := &modelRunner{home: *home, journals: journals}
 
 	// 审批的父进程半边（H13）：整进程一个 broker，每轮换 stdin。
