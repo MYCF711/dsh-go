@@ -85,6 +85,12 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 // 而"看不到过程"正是这类 agent 界面最不能接受的事。
 func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan struct{}) {
 	src := newSessionSource(r.home, "")
+	// 全程复用一个解码器：这个循环每 200ms 跑一次，建一次解码器就够。
+	rd, rerr := v4.NewReader()
+	if rerr != nil {
+		return
+	}
+	defer rd.Close()
 	var (
 		offset  int64
 		lastSeq int64
@@ -108,7 +114,7 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 			}
 			// 增量读：只解上次之后的新帧。全量重读在 2.2 万事件的会话上是 301ms，
 			// 而这里每 200ms 读一次——读得比跑得还慢，界面会越落越远。
-			evs, next, err := v4.ReadSince(path, offset)
+			evs, next, err := rd.ReadSince(path, offset)
 			if err != nil {
 				continue
 			}

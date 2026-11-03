@@ -21,7 +21,45 @@ import (
 //   - 文件变短（被重建）→ 从头读
 //
 // 返回的 next 是**下一个安全起点**，不是文件长度：只把完整解开的帧算进去。
+// Reader 复用同一个 zstd 解码器。
+//
+// 为什么要复用一个：`follow` 每 200ms 读一次，一轮 20 秒就是 100 次。
+// 每次都 NewReader 会让解码器缓冲区反复申请——实测 serve 长跑时
+// Sys 以约 19KB/轮 单调增长，怀疑就是它。**这是待验证的怀疑，不是结论。**
+type Reader struct {
+	dec *zstd.Decoder
+}
+
+func NewReader() (*Reader, error) {
+	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+	if err != nil {
+		return nil, err
+	}
+	return &Reader{dec: dec}, nil
+}
+
+func (r *Reader) Close() {
+	if r != nil && r.dec != nil {
+		r.dec.Close()
+	}
+}
+
+// ReadSince 是复用解码器版本，语义与包级 ReadSince 完全一致。
+func (r *Reader) ReadSince(path string, offset int64) ([]Event, int64, error) {
+	return readSince(r.dec, path, offset)
+}
+
+// ReadSince 一次性读：内部借一个解码器，读完关掉。
 func ReadSince(path string, offset int64) (events []Event, next int64, err error) {
+	r, err := NewReader()
+	if err != nil {
+		return nil, offset, err
+	}
+	defer r.Close()
+	return r.ReadSince(path, offset)
+}
+
+func readSince(dec *zstd.Decoder, path string, offset int64) (events []Event, next int64, err error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, offset, err
@@ -33,12 +71,6 @@ func ReadSince(path string, offset int64) (events []Event, next int64, err error
 	if err != nil {
 		return nil, offset, err
 	}
-	dec, derr := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
-	if derr != nil {
-		return nil, offset, derr
-	}
-	defer dec.Close()
-
 	for _, f := range frames {
 		raw, eerr := decodeFrame(dec, b[offset+int64(f.offset):offset+int64(f.offset)+int64(f.length)])
 		if eerr != nil {
