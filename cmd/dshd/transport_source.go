@@ -275,8 +275,16 @@ func textOf(data json.RawMessage, nested bool) (string, bool) {
 	if err := json.Unmarshal(data, &d); err != nil {
 		return "", false
 	}
+	// 两种落法都要认（H7）：真实语料把助手内容放在 message.content，
+	// 但也见过放在顶层 content 的日志。**只认一种，那些会话就是一条消息都没有**，
+	// 而界面上"整会话空白"看起来像会话坏了。
 	blocks := d.Content
 	if nested {
+		blocks = d.Message.Content
+		if len(blocks) == 0 {
+			blocks = d.Content
+		}
+	} else if len(blocks) == 0 {
 		blocks = d.Message.Content
 	}
 	return joinText(blocks), true
