@@ -16,6 +16,14 @@ python scripts/h-suite.py --fast   # 不调模型的（约 30 秒）
 **2026-11-03 全量记录**：10 条探针 / 60 项断言全绿（help-guard 15、contract-evidence 2、
 h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
 
+### `-race` 已经能跑了（2026-11-03 晚）
+
+装了 MinGW-w64 GCC 16.2.0 之后，`bash scripts/race.sh` **全仓 39 个包全 ok、0 DATA RACE**。
+第一次跑就抓出三处测试夹具的竞争（`fakeStdin` / `emitted` / `asked` 都是裸变量），已修。
+细节与两个坑见 `docs/race.md`。
+
+下面这段是**装工具链之前**的记录，保留下来是因为它说明了为什么这条长期没验：
+
 ### `-race` 为什么跑不起来（2026-11-03 实测）
 
 本机**没有任何 C 工具链**：`go env CGO_ENABLED` = 0，`gcc` / `cc` / `clang` / `cl` 都不存在。
@@ -72,19 +80,19 @@ h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
 
 | # | 状态快照 | 需求、已有证据与剩余完成判据 |
 |---|---|---|
-| **H1 usage** | 🟡 宿主侧已验（M245），界面消费未验 | `usageTotal{inputTokens,outputTokens,totalTokens,cacheReadTokens}` 是**全会话累计**，`contextTokens` 是**最近一条** totalTokens（累计一直涨、上下文随压缩回落，两件事）。证据：`TestLoadSessionUsageTotalIndependentOfTail`（tail=1 与 50 合计一致）、真机同会话两次 load 得到同一组 `input 7409 / output 211 / total 7620`。**仍未验**：界面实际消费这两个数、未知时不补零 |
+| **H1 usage** | 🟡 宿主侧已验（M245）；UI 状态栏有真机数字，未知/同版本联合待验 | `usageTotal{inputTokens,outputTokens,totalTokens,cacheReadTokens}` 是**全会话累计**，`contextTokens` 是**最近一条** totalTokens（累计一直涨、上下文随压缩回落，两件事）。证据：`TestLoadSessionUsageTotalIndependentOfTail`（tail=1 与 50 合计一致）、真机同会话两次 load 得到同一组 `input 7409 / output 211 / total 7620`。UI `tmp/h1-statusbar.png` 已有非零真值与空 home 隐藏记录；**仍未验**：当前同版本联合复核及未知字段不补零的全部分支 |
 | **H2 time** | 🟡 宿主侧已验（M247），界面消费未验 | 消息与**流帧**都带墙钟 `time`。证据：40,231 条真实事件 `time<=0` 0 条、回退 0 处；WS 修前 4/5（`turn/done` 终局帧漏 time）→ 修后 5/5 且单调不减；`TestServerFrameCarriesTime`。**仍未验**：界面遇到缺时/非正间隔时显示未知；相邻 assistant 差值含等待与工具耗时，只能当区间估算 |
 | **H3 ViewSpec** | ✅ 提供端历史证据 | `messages[].view` 透传 card/table/plain，nil 省略；联调仍需核三种 view 与无 view 回退。 证据：`TestLoadPassesViewThrough` |
 | **H4 model** | ✅ 提供端历史证据 | 取最近一条非空 `request/context.model`；UI LoadResult/顶栏实际消费，空值不画。 证据：`TestLoadCarriesModelOrOmitsIt` |
 | **H5 permission** | ✅ 提供端字段存在 | 是当前进程 policy（deny/ask/allow/auto），不是 mode；UI 显示真实 policy，空值不画。 证据：`TestLoadCarriesProcessPolicy` |
-| **H6 原始流** | ✅ 宿主侧闭环（2026-11-03 M265） | 两处修复：① `dshd run` 原来在 `Emit` 里**没有 reasoning 分支**，思考被当场丢弃（这就是"27,983 条 assistant 里 0 条带思考块"的真正原因，与模型无关）；② 网关支持 `reasoning` 参数但宿主从不发。现在 `Loop.Reasoning` ← `DSHD_REASONING_EFFORT`，思考作为 content **首块**写入同一条 `assistant/message` 证据：`TestReasoningBlockSurvivesEvent` | 真机（`DSHD_REASONING_EFFORT=max`）：盘上 `assistant/message 含 reasoning 块: true`；经 serve 的帧里 `流里有 reasoning: True`，顺序为 reasoning → text。仍未验：界面实际渲染 reasoning |
+| **H6 原始流** | 🟡 真实生成与 UI 显示已有证据；**跨轮去重/恢复未闭环** | M264/M265 已让 reasoning 进入日志与流，`TestReasoningBlockSurvivesEvent` 和真机 reasoning→text 有证据；UI 产品清单已有 text/reasoning/tool 消费。**2026-11-03 18:21 源码复核**：serve follow 从零水位重发旧事件、debug runner 绕过 journal，且整条 message 到齐不等于逐 token 增量；剩余跨轮不重复、统一 journal/time、断线恢复与同版本 UI 复验 |
 | **H7 content** | ✅ 两种落法有单测 | 固定已完成且原日志确有 assistant 的样本验 `data.content` 与 `data.message.content`；失败/取消/在途可合法无 assistant。 证据：`TestAssistantMessageBothContentShapes`、`TestAssistantMessageKeepsToolCalls`。**2026-11-03 补测时发现顶层 `content` 那种落法根本没被认**（正文投影成空串），已修。|
-| **H8 HTTP 响应** | ✅ 宿主侧闭环（2026-11-03 M262） | 任意成功类型包 `result`；**所有错误出口四字段**——含序列化失败：`writeJSON` 的兜底正文改走 `errorBody`，`encode_failure` 有可照做的 hint。测试 `TestWriteJSONEncodeFailureHasFourFields`（用 chan 触发真失败）、`TestWriteJSONEnvelopesAnyType`（map/struct/slice/pointer）、`TestEncodeFailureHintIsActionable` | 仍未验：真实 apiclient 对契约夹具复验（跨仓）。 |
+| **H8 HTTP 响应** | 🟡 通用信封/encode_failure 已修；**stale_epoch 特殊出口未闭环** | M262 与 `TestWriteJSONEncodeFailureHasFourFields`、`TestWriteJSONEnvelopesAnyType`、`TestEncodeFailureHintIsActionable` 证明通用 result/error。**2026-11-03 18:21 复核**：`server.go` stale_epoch 特构造 error 只有 code/message/hint，缺 `retryable`，现有测试未查四字段；需统一 errorBody、补失败测试与真实 apiclient 复验 |
 | **H9 load 入参** | 🟡 宿主侧已验（M243），界面只发契约名未验 | `id`/`sessionId`、`limit`/`tailMessages` 都收；sessionId 优先 id，limit 优先 tailMessages。证据：`TestLoadAcceptsContractNames`（只发 id/tailMessages 时 limit=2 生效）。**仍未验**：界面只用契约名调一次 |
-| **H10 list→load** | 🟡 宿主侧 5/5（M244），跨仓未验 | `scripts/h10-chain.py`：同一新二进制 + 全新临时 home，create 给 id、list 含它、**list 里每个 id 用两种入参名（`sessionId` / `id`+`tailMessages`）都能 load**、prompt 后能 load 到 assistant、响应是 `{result:…}` 信封 —— OK=5 FAIL=0。**仍未验**：真实 home 全量 id 遍历（home 只读，要把项目目录复制到临时 home）与界面消费 |
+| **H10 list→load** | 🔴 M286 发现当前回归，未修 | 历史 M244 曾 5/5；**当前 `scripts/h10-chain.py` 在 prompt→load assistant 项变红，等待 240s 仍失败**：history 有完整 turn，load 原会话 assistant=0，且 create 返回 id 与子进程 stderr「会话：」id 不同。下一步查 `serve_tools.go` args 与 `main.go --session`；修到 id 相同、load 有 assistant、h10 回 5/5，不能沿用历史 PASS |
 | **H11 ready stdout** | ✅ 进程级 4/4 | 完整 stdout 恰好一行 ready，后续为合法 JSON 且含 url/token；policy 诊断只去 stderr。 证据：`scripts/h11-stdout.py` |
 | **H12 contentWidth** | ✅ 宿主侧闭环（2026-11-03 M263） | 只有**正数**才算"知道宽度"：0 与负数都按未知处理、字段直接不出现（负数放过去会让界面画出负宽度容器：怪但没崩，没人会去查宿主）。值以裸数字传输 证据：`TestContentWidthContract` | 真机：`--content-width 748` → `contentWidth=748`；不传 → 字段不存在。单测三条（0/748/负数）+ 一条"必须是数字不是字符串"。仍未验：原生壳提供真实列宽并消费 |
-| **H13 真审批** | ✅ 宿主侧整链（2026-11-03 M258–M261） | `session.approve`；子进程 `@@APPROVAL@@` 标记通道；父进程 broker 逐行扫 stderr → `approval/request`（进 journal 可重放）；120s 超时按拒绝并推 `approval/timeout`；`allow_always` 按「会话+工具」记忆且只在内存/本进程。证据：`scripts/h13-approval-e2e.py`（允许→文件真出现 2/2）、`scripts/h13-timeout.py`（4/4）、`scripts/h13-replay.py`（断线重连 3/3）、`scripts/h13-allow-always.py`（只问一次 2/2）、`TestBrokerResolveWritesAllowBack`。**仍未验**：界面实际回传（本仓无界面） |
-| **H14 契约门** | 🟡 宿主侧闭环（M253–M277），**界面仓那一半未动** | 已落地：每会话 journal（seq 单源）、history 返回原始 `frames`+`journalEpoch`/`lastSeq`、`stale_epoch` 409、订阅过期发 `session/reset`、`load` 带水位与世代、共享夹具 `internal/transport/testdata/ws-golden.jsonl` 与重放测试、两会话隔离。证据：`TestJournalSeqIsPerSession`、`TestHistoryReturnsRawFrames`、`TestSubscribeWithStaleEpochEmitsSessionReset`、`TestGoldenFramesMatchContract`、`scripts/h14-isolation.py`（7/7）。**仍未验**：界面仓换 `/ws`+裸参数+消费 frames（不在本仓） |
+| **H13 真审批** | 🟡 宿主 allow/deny/timeout/replay/allow_always 已验；**pending cancel 未闭环** | `session.approve`；子进程标记通道；父进程 broker 推 `approval/request` 并入 journal；120s 超时拒绝；allow_always 仅进程内。证据：`scripts/h13-approval-e2e.py`、`h13-timeout.py`、`h13-replay.py`、`h13-allow-always.py`、`TestBrokerResolveWritesAllowBack`；UI 已有 allow/deny 真机记录，`72e4e3d` 另有 allow_always 第二次自动放行证据。**2026-11-03 18:08 复核**：`serve_approval.go` 尚无取消挂起审批分支，缺 cancel→拒绝+不执行+`approval/cancel`+第二轮 prompt 证据，故不签整链完成 |
+| **H14 契约门** | 🟡 epoch/reset、后台水位、分批补洞已提交；**快照/golden/serve/重启凭据未闭环** | UI `6363bf3`、`d04bade`、`7e010ab` 等已有新证据；剩余首启既有会话非零 epoch、reset 后局部 since=0、history 409 触发重建、History 请求带 epoch、UI 快照旧 `/api/mux`/`kind`/messages、共享 golden 与特殊事件样本、FrameSub 重放修复提交、serve 跨轮去重/debug 统一、宿主重启 cookie 自愈与同版本联合复验。未提交 wssession 改动不计完成 |
 
 H14 通过后才能做 H6/H13 的线上联调。H8 可与 H14 并行；其余独立字段消费按任务书并行，不从本表符号自行推断任务。
