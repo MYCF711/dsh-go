@@ -87,7 +87,9 @@ func TestSessionAPISnapshot(t *testing.T) {
 	// UIPLAN.md 给 U0 定的是 13 个方法；我们做到 8 个（会话那 6 个 + delete/fork）。
 	// 这里写 8 不是"缩水"，是**如实记录当前进度**——涨到 13 时要同步改这个数，
 	// 否则快照会在无人察觉的情况下跟着缩。
-	const done, target = 13, 13
+	// U0 原本 13 个（会话 8 + 工作区 1 + 文件 2 + 配置 2）。
+	// H13 审批要一条真实回传，所以多了第 14 个 session.approve——**契约变了，这里也跟着改**。
+	const done, target = 14, 14
 	if got := len(SessionMethods()); got != done {
 		t.Fatalf("SessionMethods() 有 %d 个方法，当前进度应当是 %d 个（U0 目标 %d 个）", got, done, target)
 	}

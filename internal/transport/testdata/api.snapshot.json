@@ -5,6 +5,7 @@
     "session.history",
     "session.prompt",
     "session.cancel",
+    "session.approve",
     "session.create",
     "session.delete",
     "session.fork",

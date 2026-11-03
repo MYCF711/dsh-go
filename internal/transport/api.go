@@ -15,6 +15,8 @@ const (
 	MethodSessionHistory Method = "session.history"
 	MethodSessionPrompt  Method = "session.prompt"
 	MethodSessionCancel  Method = "session.cancel"
+	// MethodSessionApprove 回一次审批（H13）。请求走 WS，应答走 HTTP，与 prompt/cancel 一致。
+	MethodSessionApprove Method = "session.approve"
 	MethodSessionCreate  Method = "session.create"
 	MethodSessionDelete  Method = "session.delete"
 	MethodSessionFork    Method = "session.fork"
@@ -29,7 +31,7 @@ const (
 func SessionMethods() []Method {
 	return []Method{
 		MethodSessionList, MethodSessionLoad, MethodSessionHistory,
-		MethodSessionPrompt, MethodSessionCancel, MethodSessionCreate,
+		MethodSessionPrompt, MethodSessionCancel, MethodSessionApprove, MethodSessionCreate,
 		MethodSessionDelete, MethodSessionFork, MethodWorkspaceList,
 		MethodFSRead, MethodFSWrite, MethodConfigGet, MethodConfigSet,
 	}

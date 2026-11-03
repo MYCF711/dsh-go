@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -75,6 +76,8 @@ type Options struct {
 	ConfigSet func(kv map[string]string) error
 	// Cancel 取消在飞的一轮；没有在飞的返回 ErrNoSuchTurn。
 	Cancel func(sessionID string) error
+	// Approve 回一次审批（H13）：requestID 是服务端推给客户端的那个，optionID 是客户端选的。
+	Approve func(requestID, optionID string) error
 	// SetMode 换模式；宿主注入。
 	Create func(mode string) (string, error)
 }
@@ -290,6 +293,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionHistory(w, r)
 	case MethodSessionPrompt:
 		s.handleSessionPrompt(w, r)
+	case MethodSessionApprove:
+		s.handleSessionApprove(w, r)
 	case MethodSessionCancel:
 		s.handleSessionCancel(w, r)
 	case MethodSessionCreate:
@@ -420,6 +425,33 @@ func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+// handleSessionApprove 是 /api/session.approve：客户端对一次审批给出决定（H13）。
+func (s *Server) handleSessionApprove(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		RequestID string `json:"requestId"`
+		OptionID  string `json:"optionId"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	if in.RequestID == "" || in.OptionID == "" {
+		writeJSON(w, http.StatusBadRequest, errorBody("缺参数：要 requestId 与 optionId"))
+		return
+	}
+	if s.opt.Approve == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("session.approve 未接线"))
+		return
+	}
+	switch err := s.opt.Approve(in.RequestID, in.OptionID); {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]any{"accepted": true, "optionId": in.OptionID})
+	case errors.Is(err, ErrNoSuchRequest):
+		writeJSON(w, http.StatusNotFound, errorBody("no_such_request"))
+	case errors.Is(err, ErrBadOption):
+		writeJSON(w, http.StatusBadRequest, errorBody("bad_option"))
+	default:
+		writeJSON(w, http.StatusInternalServerError, errorBody(err.Error()))
+	}
+}
+
 // handleSessionHistory 是 /api/session.history：断流后按 seq 补洞。
 func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -547,6 +579,10 @@ func errorHint(code string) string {
 		return "宿主这一侧还没接线，换一个 method 或等它实现"
 	case "no_such_session":
 		return "先 session.list 拿 id；确认 --home 指向的目录里有这个会话"
+	case "no_such_request":
+		return "这个审批请求已经不在了（已应答或已超时）；等下一次 approval/request"
+	case "bad_option":
+		return "optionId 必须是 allow_once / allow_always / reject_once 之一"
 	case "bad_request":
 		return "检查入参名字（id/sessionId 都认）与类型"
 	case "internal":
@@ -566,6 +602,10 @@ func errorCode(msg string) string {
 		return "not_implemented"
 	case "没有这个会话":
 		return "no_such_session"
+	}
+	// 这两个是审批（H13）的稳定错误码，调用方按码判断，不按中文猜。
+	if msg == "no_such_request" || msg == "bad_option" {
+		return msg
 	}
 	if strings.Contains(msg, "未接线") {
 		return "not_implemented"

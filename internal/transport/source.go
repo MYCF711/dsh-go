@@ -26,6 +26,12 @@ type TailSourcer interface {
 	MessagesTail(sessionID string, limit int) ([]Message, int, error)
 }
 
+// ErrNoSuchRequest 表示审批请求 id 不认识（已超时、已应答、或伪造）。
+var ErrNoSuchRequest = errors.New("no_such_request")
+
+// ErrBadOption 表示 optionId 不在这一轮的 options 里。
+var ErrBadOption = errors.New("bad_option")
+
 // UsageSourcer 是 Source 的可选增强：给出**整个会话**的累计用量与当前上下文占用。
 //
 // 为什么单独一个接口：tail 快路只读尾部，拿不到全会话统计；
