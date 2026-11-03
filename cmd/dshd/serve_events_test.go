@@ -12,7 +12,7 @@ import (
 func TestPublishTurnError(t *testing.T) {
 	var got []transport.ServerFrame
 	pub := func(topic string, f transport.ServerFrame) { got = append(got, f) }
-	publishTurn(pub, "session:a", "turn-1", errors.New("模型连不上"), 1)
+	emitTurnFrame(transport.NewJournals(nil), pub, "a", "turn-1", errors.New("模型连不上"))
 	if len(got) != 1 {
 		t.Fatalf("该推一帧，推了 %d", len(got))
 	}
@@ -30,16 +30,51 @@ func TestPublishTurnError(t *testing.T) {
 
 func TestPublishTurnDone(t *testing.T) {
 	var got []transport.ServerFrame
-	publishTurn(func(_ string, f transport.ServerFrame) { got = append(got, f) }, "session:a", "turn-2", nil, 2)
+	emitTurnFrame(transport.NewJournals(nil),
+		func(_ string, f transport.ServerFrame) { got = append(got, f) }, "a", "turn-2", nil)
 	if len(got) != 1 || got[0].Type != TurnDone {
 		t.Fatalf("拿到 %+v", got)
 	}
 }
 
-// nil pub / 空 topic 静默返回，不许 panic——serve 关掉时 pub 可能已经被置空。
+// pub 为 nil 时不许 panic——serve 关掉时 pub 可能已经被置空。
 func TestPublishTurnQuiet(t *testing.T) {
-	publishTurn(nil, "session:a", "t", errors.New("x"), 1)
-	publishTurn(func(string, transport.ServerFrame) { t.Fatal("空 topic 不该推") }, "", "t", errors.New("x"), 1)
+	emitTurnFrame(transport.NewJournals(nil), nil, "a", "t", errors.New("x"))
+}
+
+// 结局帧的 seq 必须接在事件之后（H14）：
+// 以前它来自全局 serveTurnSeq，和事件帧用的 v4 seq 是两个域；
+// 现在两者都在同一条 journal 里发号，所以"事件 1..3 之后是 4"是构造上成立的。
+func TestTurnSeqContinuesFromEvents(t *testing.T) {
+	js := transport.NewJournals(nil)
+	var got []int
+	pub := func(_ string, f transport.ServerFrame) { got = append(got, f.Seq) }
+
+	emitFrame(js, pub, "a", "user/message", nil)       // 1
+	emitFrame(js, pub, "a", "assistant/message", nil)  // 2
+	emitTurnFrame(js, pub, "a", "t1", nil)             // 3
+	emitTurnFrame(js, pub, "a", "t2", nil)             // 4
+
+	want := []int{1, 2, 3, 4}
+	if len(got) != len(want) {
+		t.Fatalf("帧数不对：%v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("seq 应是 %v，实际 %v", want, got)
+		}
+	}
+}
+
+// 两条会话的结局帧各自从 1 开始——**这正是旧全局计数器做不到的**。
+func TestTurnSeqIsPerSession(t *testing.T) {
+	js := transport.NewJournals(nil)
+	var a, b []int
+	emitFrame(js, func(_ string, f transport.ServerFrame) { a = append(a, f.Seq) }, "sa", "text", nil)
+	emitFrame(js, func(_ string, f transport.ServerFrame) { b = append(b, f.Seq) }, "sb", "text", nil)
+	if a[0] != 1 || b[0] != 1 {
+		t.Fatalf("两条会话第一帧都该是 1，实际 a=%v b=%v", a, b)
+	}
 }
 
 // serve 无人值守：默认必须是 deny，不许默认 allow。
@@ -70,19 +105,5 @@ func TestAnnouncedMaxSteps(t *testing.T) {
 	announcePolicy(&buf, "deny", 9)
 	if !strings.Contains(buf.String(), "9") {
 		t.Fatalf("播报里要有实际步数 9：%s", buf.String())
-	}
-}
-
-// 结局帧的 seq 必须能接在事件之后。
-//
-// 这是真机抓到的 bug：结局帧原来固定 seq=1，客户端按水位（max seq）过滤时，
-// 第二轮的 turn/done 会被当成"已经见过的"丢掉——界面永远等不到"这一轮结束了"。
-func TestTurnSeqContinuesFromEvents(t *testing.T) {
-	serveTurnSeq.Store(7) // 假装事件流已经走到 7
-	var got []int
-	publishTurn(func(_ string, f transport.ServerFrame) { got = append(got, f.Seq) }, "session:a", "t1", nil, int(serveTurnSeq.Add(1)))
-	publishTurn(func(_ string, f transport.ServerFrame) { got = append(got, f.Seq) }, "session:a", "t2", nil, int(serveTurnSeq.Add(1)))
-	if len(got) != 2 || got[0] != 8 || got[1] != 9 {
-		t.Fatalf("结局帧应当接在事件之后（8、9），实际 %v", got)
 	}
 }

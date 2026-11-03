@@ -20,10 +20,12 @@ import (
 // 落盘：这一轮的用户消息与助手回答都会追加进 v4 日志（append-only），
 // 所以关掉 serve 再打开，这轮对话还在。
 type modelRunner struct {
-	pub   func(topic string, f transport.ServerFrame)
-	home  string
-	base  string
-	model string
+	// journals 同上（H14）：所有推给界面的帧都从这一处发号。
+	journals *transport.Journals
+	pub      func(topic string, f transport.ServerFrame)
+	home     string
+	base     string
+	model    string
 }
 
 func (r *modelRunner) Run(ctx context.Context, sessionID, turnID, text string) error {
@@ -32,7 +34,7 @@ func (r *modelRunner) Run(ctx context.Context, sessionID, turnID, text string) e
 	src := newSessionSource(r.home, "")
 	msgs, err := src.Messages(sessionID)
 	if err != nil {
-		publishTurn(r.pub, topic, turnID, err, int(serveTurnSeq.Add(1)))
+		emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
 		return err
 	}
 
@@ -48,7 +50,7 @@ func (r *modelRunner) Run(ctx context.Context, sessionID, turnID, text string) e
 	resp, err := llm.New(r.base, os.Getenv("DSHD_LLM_KEY")).Stream(ctx,
 		llm.Request{Model: r.model, Messages: history, Stream: true}, nil)
 	if err != nil {
-		publishTurn(r.pub, topic, turnID, err, int(serveTurnSeq.Add(1)))
+		emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
 		return err
 	}
 
@@ -62,11 +64,11 @@ func (r *modelRunner) Run(ctx context.Context, sessionID, turnID, text string) e
 	// 落盘。顺序：先用户、再助手——与真实会话一致，读回时才对得上。
 	// 存不下来必须说出来：**"回答看见了但没存"** 比"没回答"更难查。
 	if perr := r.persist(sessionID, text, resp); perr != nil {
-		publishTurn(r.pub, topic, turnID, perr, int(serveTurnSeq.Add(1)))
+		emitTurnFrame(r.journals, r.pub, sessionID, turnID, perr)
 		return perr
 	}
 
-	publishTurn(r.pub, topic, turnID, nil, int(serveTurnSeq.Add(1)))
+	emitTurnFrame(r.journals, r.pub, sessionID, turnID, nil)
 	return nil
 }
 

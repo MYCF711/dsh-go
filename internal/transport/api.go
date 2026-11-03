@@ -101,6 +101,20 @@ type LoadResult struct {
 	// ContextTokens 是**最近一条** assistant 的 totalTokens，也就是"当前上下文占多少"。
 	// 它跟累计值是两件事：累计一直涨，上下文会随压缩回落。
 	ContextTokens int `json:"contextTokens,omitempty"`
+	// JournalEpoch/LastSeq 让客户端拿到"我现在该从哪个水位接着收"（H14）。
+	// load 只是首屏投影，**不能用来补洞**；但它必须告诉客户端 journal 在哪。
+	JournalEpoch int64 `json:"journalEpoch,omitempty"`
+	LastSeq      int   `json:"lastSeq,omitempty"`
+}
+
+// HistoryResult 是 session.history 的返回值（H14）。
+//
+// **frames 是原始帧，不是投影后的 messages**：补洞要能恢复 reasoning/tool/approval，
+// 而投影只保留 text。lastSeq/journalEpoch 一并给出，客户端据此判断水位是否可用。
+type HistoryResult struct {
+	Frames       []ServerFrame `json:"frames"`
+	LastSeq      int           `json:"lastSeq"`
+	JournalEpoch int64         `json:"journalEpoch"`
 }
 
 // PromptResult 是 session.prompt 的返回值：**立刻返回**，回答走 WS。

@@ -41,7 +41,9 @@
       "permission",
       "contentWidth",
       "usageTotal",
-      "contextTokens"
+      "contextTokens",
+      "journalEpoch",
+      "lastSeq"
     ],
     "PromptResult": [
       "accepted",

@@ -76,6 +76,9 @@ type Options struct {
 	ConfigSet func(kv map[string]string) error
 	// Cancel 取消在飞的一轮；没有在飞的返回 ErrNoSuchTurn。
 	Cancel func(sessionID string) error
+	// Journals 是每会话的序号域（H14）。非 nil 时 session.history 直接读它，
+	// 保证与 WS 推送同一个 seq 域；nil 时退回宿主注入的 History（老行为）。
+	Journals *Journals
 	// Approve 回一次审批（H13）：requestID 是服务端推给客户端的那个，optionID 是客户端选的。
 	Approve func(requestID, optionID string) error
 	// SetMode 换模式；宿主注入。
@@ -453,15 +456,51 @@ func (s *Server) handleSessionApprove(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleSessionHistory 是 /api/session.history：断流后按 seq 补洞。
+//
+// H14：补洞必须返回**同一 journal 的原始帧**，不是抽过 text 的 messages。
+// 用投影补洞会丢掉 reasoning/tool/approval——那些恰恰是断线后最需要恢复的。
 func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		SessionID string `json:"sessionId"`
 		// ID 是契约快照里的名字（H9）。两个都收：只认一个就是静默 404。
-		ID       string `json:"id"`
-		SinceSeq int    `json:"sinceSeq"`
-		Limit    int    `json:"limit"`
+		ID           string `json:"id"`
+		SinceSeq     int    `json:"sinceSeq"`
+		Limit        int    `json:"limit"`
+		JournalEpoch int64  `json:"journalEpoch"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
+
+	// 有 journal 时以它为准：WS 推的和这里补的是同一个序号域。
+	if s.opt.Journals != nil {
+		sid := fillID(in.SessionID, in.ID)
+		if sid == "" {
+			writeJSON(w, http.StatusBadRequest, errorBody("缺参数：要 id 或 sessionId"))
+			return
+		}
+		j := s.opt.Journals.Get(sid)
+		// 客户端带着一个不认识的老世代，或水位比当前还大：说明两边对不上，
+		// 继续"按 seq 补"只会补出错位的数据。明确告诉它重建基线。
+		if (in.JournalEpoch != 0 && in.JournalEpoch != j.Epoch()) || in.SinceSeq > j.LastSeq() {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": map[string]any{
+					"code":    "stale_epoch",
+					"message": "journal 世代或水位对不上，需要重新 load 基线",
+					"hint":    "丢弃旧水位，重新 session.load 拿 journalEpoch/lastSeq",
+				},
+				"journalEpoch": j.Epoch(),
+				"lastSeq":      j.LastSeq(),
+			})
+			return
+		}
+		frames, last, epoch := j.Since(in.SinceSeq, in.Limit)
+		writeJSON(w, http.StatusOK, HistoryResult{
+			Frames:       frames,
+			LastSeq:      last,
+			JournalEpoch: epoch,
+		})
+		return
+	}
+
 	if s.opt.History == nil {
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 		return

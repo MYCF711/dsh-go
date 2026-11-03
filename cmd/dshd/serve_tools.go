@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"dshgo/codecs/v4"
@@ -23,9 +22,10 @@ import (
 //
 // 写锁：子进程按既有规矩拿会话写锁；这里**只读**日志，不抢锁。
 type loopRunner struct {
-	// turnSeq 是结局帧用的序号。它是 loopRunner 的字段而不是包级变量：
-	// 两个 loopRunner 并存时各自计数，不会互相把水位推到对方那边。
-	turnSeq  atomic.Int64
+	// journals 是**每会话一条**的序号域（H14）。帧的 seq 由它分配，
+	// WS 推送与 session.history 读同一份——否则客户端判断断号时看到的是假象。
+	// nil 时 emit 退化成"只推不记账"（老测试不必改）。
+	journals *transport.Journals
 	pub      func(topic string, f transport.ServerFrame)
 	home     string
 	policy   string
@@ -35,7 +35,7 @@ type loopRunner struct {
 func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) error {
 	exe, err := os.Executable()
 	if err != nil {
-		publishTurn(r.pub, "session:"+sessionID, turnID, err, int(serveTurnSeq.Add(1)))
+		r.emitTurn(sessionID, turnID, err)
 		return err
 	}
 	args := []string{"run",
@@ -50,7 +50,7 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
-		publishTurn(r.pub, "session:"+sessionID, turnID, err, int(serveTurnSeq.Add(1)))
+		r.emitTurn(sessionID, turnID, err)
 		return err
 	}
 	// 把子进程的身份写在 stderr 上：出问题时第一句该问的是"它到底起没起来"。
@@ -86,23 +86,13 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	topic := "session:" + sessionID
 	if werr != nil {
 		e := fmt.Errorf("run 失败：%v；stderr: %s", werr, strings.TrimSpace(tail(stderr.String(), 400)))
-		publishTurn(r.pub, topic, turnID, e, int(serveTurnSeq.Add(1)))
+		r.emitTurn(sessionID, turnID, e)
 		return e
 	}
-	// 结局帧的 seq 必须真接在事件之后。**不依赖 follow 跑过**：
-	// 直接把日志补读到末尾，取最后一个事件的 seq——日志是事实，计数器只是影子。
-	seq := int(serveTurnSeq.Add(1))
-	if prog.path != "" {
-		if evs, _, rerr := v4.ReadSince(prog.path, prog.offset); rerr == nil {
-			for _, ev := range evs {
-				if ev.Seq > serveTurnSeq.Load() {
-					serveTurnSeq.Store(ev.Seq)
-				}
-			}
-			seq = int(serveTurnSeq.Add(1))
-		}
-	}
-	publishTurn(r.pub, topic, turnID, nil, seq)
+	// 结局帧的序号由 journal 统一分配：它一定排在已经推出去的那些事件之后，
+	// 不再需要"把计数器推到日志末尾"这种影子同步——那样两个来源迟早对不上。
+	_ = topic
+	r.emitTurn(sessionID, turnID, nil)
 	return nil
 }
 
@@ -189,15 +179,9 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 					continue
 				}
 				lastSeq = ev.Seq
-				if ev.Seq > r.turnSeq.Load() {
-					r.turnSeq.Store(ev.Seq)
-				}
-				if r.pub == nil {
-					continue
-				}
-				r.pub("session:"+sessionID, transport.ServerFrame{
-					Seq: int(ev.Seq), Type: ev.Type, Data: ev.Data, Time: ev.Time,
-				})
+				// 走 emit：由 journal 发号。**不要再拿 ev.Seq 当送达序号**——
+				// 那是 v4 日志的序号，跟这条连接上推了几帧没关系。
+				r.emit(sessionID, ev.Type, ev.Data)
 			}
 		}
 	}
@@ -226,9 +210,7 @@ func (r *loopRunner) drain(rd *v4.Reader, noReuse bool, path string, offset *int
 				continue
 			}
 			*lastSeq = ev.Seq
-			if r.pub != nil {
-				r.pub("session:"+sessionID, transport.ServerFrame{Seq: int(ev.Seq), Type: ev.Type, Data: ev.Data, Time: ev.Time})
-			}
+			r.emit(sessionID, ev.Type, ev.Data)
 		}
 	}
 }

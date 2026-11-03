@@ -31,6 +31,9 @@ var errNoModel = errors.New("serve 还没接模型；prompt 用来看链路，�
 // promptService 会把这个错误丢掉（它只负责清 busy），但接口语义是对的：
 // 这一轮**失败了**，不是"还在跑"。
 type noModelRunner struct {
+	// journals 是所有帧的序号来源（H14）。这一类型通常没有流事件，
+	// 但结局帧仍要与其它帧同一个域，否则客户端补洞时缺了"这一轮结束了"。
+	journals *transport.Journals
 	// pub 是推事件的出口。为 nil 时只记错误，不推。
 	pub func(topic string, f transport.ServerFrame)
 }
@@ -39,7 +42,7 @@ func (r noModelRunner) Run(_ context.Context, sessionID, turnID, _ string) error
 	err := errNoModel
 	// prompt 已经回过 200 了，界面唯一的消息来源就是这里。
 	// 不推这一帧，界面会永远停在"正在思考"。
-	publishTurn(r.pub, "session:"+sessionID, turnID, err, int(serveTurnSeq.Add(1)))
+	emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
 	return err
 }
 
@@ -106,8 +109,12 @@ func cmdServe(args []string) error {
 	// 只为二分长跑时的内存增长：增长到底来自"跑一轮"，还是"子进程 + follow"。
 	var runner turnRunner
 	useModelRunner := os.Getenv("DSHD_SERVE_MODEL_RUNNER") == "1"
-	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps}
-	mr := &modelRunner{home: *home}
+	// 一个 serve 进程内所有会话共用一张 journal 表：里面按 sessionID 分域，
+	// 所以"共用表"不等于"共用序号"（H14）。
+	var epochSeq int64
+	journals := transport.NewJournals(func() int64 { epochSeq++; return epochSeq })
+	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps, journals: journals}
+	mr := &modelRunner{home: *home, journals: journals}
 	if useModelRunner {
 		runner = mr
 	} else {
@@ -124,6 +131,9 @@ func cmdServe(args []string) error {
 	srv, err := transport.NewServer(transport.Options{
 		Source: src,
 		Addr:   *addr,
+		// H14：把序号域交给 server——WS 推送与 session.history 必须读同一份，
+		// 否则客户端补洞时补到的是另一个 seq 域的数据。
+		Journals: journals,
 		// H5：把这一进程真正的审批策略报给界面。**不是 mode**。
 		Policy:       *servePolicy,
 		ContentWidth: *serveWidth,
