@@ -59,7 +59,7 @@ func (t *Tool) Description() string {
 func (t *Tool) Schema() json.RawMessage {
 	switch t.kind {
 	case kindSend:
-		return json.RawMessage(`{"type":"object","properties":{"agent_id":{"type":"string","description":"目标会话 id，例如 acp-aaa"},"message":{"type":"string","description":"消息正文"}},"required":["agent_id","message"],"additionalProperties":false}`)
+		return json.RawMessage(`{"type":"object","properties":{"agent_id":{"type":"string","description":"目标会话 id，例如 acp-aaa"},"target":{"type":"string","description":"同 agent_id，DSH 的写法"},"message":{"type":"string","description":"消息正文"}},"required":["message"],"additionalProperties":false}`)
 	case kindWait:
 		return json.RawMessage(`{"type":"object","properties":{"timeout_seconds":{"type":"integer","description":"最多等多少秒，默认 60，上限 300"}},"additionalProperties":false}`)
 	default:
@@ -76,8 +76,11 @@ func (t *Tool) Caps() spi.Caps {
 }
 
 type sendArgs struct {
-	To   string `json:"agent_id"`
-	Text string `json:"message"`
+	To string `json:"agent_id"`
+	// Target 是 DSH 的另一种写法（对齐测试报「DSH 要求但我们不认 target」）。
+	// 两个都收：模型按 DSH 的 schema 写 target 时不该失败。
+	Target string `json:"target"`
+	Text   string `json:"message"`
 }
 
 type waitArgs struct {
@@ -114,6 +117,10 @@ func (t *Tool) send(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		return spi.Result{Hint: `参数不合法：期望 {"agent_id":"<会话 id>","message":"<正文>"}`}, err
 	}
 	self := spi.SessionFrom(ctx)
+	// target 是 DSH schema 里的名字；agent_id 是我们的。两者都给时以 agent_id 为准。
+	if a.To == "" {
+		a.To = a.Target
+	}
 	if self == "" {
 		return spi.Result{Hint: "这个工具要在会话里跑：发件人靠当前会话 id 署名，没有会话就没法发"}, errors.New("team: 缺少会话上下文")
 	}

@@ -481,3 +481,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_, _ = w.Write(append(body, '\n'))
 }
+
+// statusRecorder 记住实际写出去的 HTTP 状态码。
+//
+// 为什么需要：`/api` 的日志原来只有方法名，看不出这一调用是成功还是 404/501。
+// 界面联调时"它调了但报错"和"它调成功了"在日志上必须能分开。
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}

@@ -667,13 +667,16 @@
           "type": "string",
           "description": "目标会话 id，例如 acp-aaa"
         },
+        "target": {
+          "type": "string",
+          "description": "同 agent_id，DSH 的写法"
+        },
         "message": {
           "type": "string",
           "description": "消息正文"
         }
       },
       "required": [
-        "agent_id",
         "message"
       ],
       "additionalProperties": false
