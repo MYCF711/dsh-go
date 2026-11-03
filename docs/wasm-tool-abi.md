@@ -1257,7 +1257,14 @@ exit=1
 
 ### 10.8 本轮没做 / 已知限制
 
-1. **工具名跨模块的唯一性没在装载层提前查**：两个不同模块声明同一个工具名时，报错来自工具表的 `Register`（"wasm 工具 X 注册失败"），而不是 manifest 校验那一遍。仍是启动期失败，只是文案不如 provides 那几条具体。要提前查就得在 `loadWasmModules` 里维护全局工具名表——本轮没做（收益是一条更早的错，风险是多一处要跟注册表语义同步的状态）。
+1. ~~**工具名跨模块的唯一性没在装载层提前查**~~ **已补（M351）**：`loadWasmModules` 的**第一遍校验**里多了一张"本次装载范围"的全局工具名表（`toolOwner`，`claimWasmToolNames` 维护）。同名工具第二次出现时，在**读任何 .wasm 文件之前**报错，并说清三件事：
+   - **哪两处撞了**：两个模块 id；同一个模块里 `[[module.tool]]` 写了两遍同名时，则点名"第 1 项与第 2 项"（不说成"模块 A 与 A"）；
+   - **改哪个文件/哪一行**：manifest 路径 + 第几个 `[[module]]` + 那一行到底是 `tool_name = "…"` 还是 `[[module.tool]] 第 N 项（name = "…"）`；
+   - **怎么改**：改其中一个的名字，并把两者的能力键改成两个不同的值（例：`provides = ["tool:echo"]` 与 `["tool:echo2"]`），新写法同步 `[[module.tool]].name`。
+
+   旧写法 `tool_name` 与新写法 `[[module.tool]]` 共用这一条（判的是名字，不是写法）。`newWasmToolSpecs` 里原来那份"同一模块内重名"的报错已并入这里，免得同一个笔误出现两种文案；判重排在能力键判重**之前**，因为能力键 `tool:<名>` 是工具名的投影，名字撞了才是根因（两个模块直接抄了同一段 `[[module]]` 时两条错都成立，先报能一处改掉的那条）。`spi.ToolsKey` 的 `Register` 判重仍然在，只是不再是第一个报错的。
+
+   当时为什么没做（判断原文保留）：*"收益是一条更早的错，风险是多一处要跟注册表语义同步的状态"*。这一轮把这个状态收在装载层的第一遍里、与 `checkWasmTools` 共用同一份 spec 列表，注册表语义没变——工具名仍然是工具表那一侧的唯一键，装载层只是把同一个判据说清楚、说早一点。用例：`TestWasmDuplicateToolNameAcrossModulesFails`（旧写法 × 旧写法，并断言错误停在 manifest 上、两条 `.wasm` 路径一个字节都没碰）/ `TestWasmDuplicateToolNameOtherFormsFails`（两处都是 `[[module.tool]]`；一处 `tool_name`、一处 `[[module.tool]]`）/ `TestWasmDuplicateToolNameInsideModuleFails`（同一模块第 1 项与第 2 项同名）/ `TestWasmDistinctToolNamesAcrossFormsAssemble`（**不误伤**：名字不同照常装配、两个工具都调得通）。
 2. ~~**`dshd wasm call` 仍用模块级默认工具名**~~ **已补（M348）**：新增 `dshd wasm tool --module x.wasm --tool <名> --args '<json>'`，直接走 ABI 按工具名调，**连 manifest 都不用写**。`wasm call --fn` 仍是"手动调裸导出函数"的入口，两者分工写进了用法行。
 3. **模块级 `timeout_ms` 取的是最大值**：`Exec` 会用自己的 `ctx` 收紧，所以走 `spi.Tool` 的每个工具都拿到自己声明的 deadline；不经过 `Exec` 的入口（上面第 2 条）拿到的是最大那个。
 4. **宿主无法验证客人真的按 `tool` 分了流**：客人完全可以无视这个字段。判据只能是测试与夹具（`TestWasmTwoToolsRouteByToolField` 断言两个工具**输出不同**）。这一点写进作者手册了。

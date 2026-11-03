@@ -610,18 +610,19 @@ func dupWasmToolNameErr(manifestPath string, prev, cur wasmToolClaim) error {
 	// 同一个模块里的两项撞了：说"模块 A 与 A 都声明了"是废话，直接给"第几项"。
 	if prev.id == cur.id {
 		return fmt.Errorf(
-			"模块 %q 里工具 %q 出现了两次：%s 与 %s（位置：%s 的 %s）。"+
-				"同一个模块里的工具名也必须唯一（模型按名字调、工具表按名字存，第二处登记必然失败）。"+
-				"改其中一项的 name，并把 provides 里重复的那个 %q 跟着改",
-			cur.id, cur.name, prev.decl(), cur.decl(), file, cur.section(),
-			wasmToolCapPrefix+cur.name)
+			"模块 %q 里工具 %q 出现了两次：%s与 %s。同一个模块里的工具名也必须唯一"+
+				"（模型按名字调、工具表按名字存，第二处登记必然失败）。"+
+				"改其中一项的 name，并把 provides 里重复的那个 %q 跟着改"+
+				"（位置：manifest %s，%s）",
+			cur.id, cur.name, prev.decl(), cur.decl(),
+			wasmToolCapPrefix+cur.name, file, cur.section())
 	}
 	return fmt.Errorf(
 		"模块 %q 与 %q 都声明了工具 %q：工具名在装配范围内必须唯一"+
 			"（模型按名字调、工具表按名字存，第二处登记必然失败）。"+
 			"改其中一个的名字，并把两者的能力键改成两个不同的值——"+
 			"例如 provides = [%q] 与 [%q]，并同步 tool_name / [[module.tool]].name。"+
-			"位置：%s 的 %s 的 %s，与 %s 的 %s",
+			"位置：manifest %s：%s的 %s；%s的 %s",
 		prev.id, cur.id, cur.name,
 		wasmToolCapPrefix+cur.name, wasmToolCapPrefix+cur.name+"2",
 		file, prev.section(), prev.decl(), cur.section(), cur.decl())
