@@ -46,6 +46,12 @@ type Options struct {
 	Load func(sessionID string, limit int) (LoadResult, error)
 	// History 取断流之后补洞的那些（seq > sinceSeq）；宿主注入。
 	History func(sessionID string, sinceSeq, limit int) (Page, error)
+	// Prompt 发起一轮，立刻返回（回答走 WS）；宿主注入。
+	Prompt func(sessionID, text string) (PromptResult, error)
+	// Cancel 取消在飞的一轮；没有在飞的返回 ErrNoSuchTurn。
+	Cancel func(sessionID string) error
+	// SetMode 换模式；宿主注入。
+	Create func(mode string) (string, error)
 }
 
 // Server 是界面线的宿主入口。
@@ -226,9 +232,72 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionLoad(w, r)
 	case MethodSessionHistory:
 		s.handleSessionHistory(w, r)
+	case MethodSessionPrompt:
+		s.handleSessionPrompt(w, r)
+	case MethodSessionCancel:
+		s.handleSessionCancel(w, r)
+	case MethodSessionCreate:
+		s.handleSessionCreate(w, r)
 	default:
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 	}
+}
+
+// handleSessionPrompt 是 /api/session.prompt：**立刻返回**，回答走 WS/
+// 宿主侧实现负责不阻塞——这里只做协议。
+func (s *Server) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		SessionID string `json:"sessionId"`
+		Text      string `json:"text"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	if s.opt.Prompt == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
+		return
+	}
+	res, err := s.opt.Prompt(in.SessionID, in.Text)
+	if err != nil {
+		// 宿主侧对"上一轮还没结束"会返回错误；协议层不认具体错误类型，
+		// 一律按冲突报——界面据此提示"等这一轮结束"，而不是当成参数错误。
+		writeJSON(w, http.StatusConflict, errorBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleSessionCancel 是 /api/session.cancel。
+func (s *Server) handleSessionCancel(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	if s.opt.Cancel == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
+		return
+	}
+	if err := s.opt.Cancel(in.SessionID); err != nil {
+		writeJSON(w, http.StatusConflict, errorBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cancelled": true})
+}
+
+// handleSessionCreate 是 /api/session.create：建会话，返回 id。
+func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Mode string `json:"mode"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	if s.opt.Create == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
+		return
+	}
+	id, err := s.opt.Create(in.Mode)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessionId": id})
 }
 
 // handleSessionLoad 是 /api/session.load：首屏。

@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -171,3 +172,57 @@ func TestHistoryPassesSinceSeqThrough(t *testing.T) {
 		t.Fatalf("入参没原样透传：%+v", got)
 	}
 }
+
+// prompt 的两种结局要分开报：被接受 → 200；上一轮没结束 → 409。
+// 界面靠状态码决定"等一下再说"还是"参数错了"，混成一个就再也分不出来。
+func TestPromptStatusCodes(t *testing.T) {
+	s, err := NewServer(Options{Prompt: func(sid, text string) (PromptResult, error) {
+		if text == "busy" {
+			return PromptResult{}, errBusyForTest
+		}
+		return PromptResult{Accepted: true, TurnID: "t-1"}, nil
+	}, Cancel: func(sid string) error { return nil },
+		Create: func(mode string) (string, error) { return "session-new", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := s.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	jar, _ := cookiejar.New(nil)
+	c := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	if r, err := c.Get(base + "/connect?token=" + s.Token()); err != nil {
+		t.Fatal(err)
+	} else {
+		r.Body.Close()
+	}
+	post := func(method, body string) (int, string) {
+		resp, err := c.Post(base+"/api/"+method, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+
+	if code, body := post("session.prompt", `{"sessionId":"a","text":"hi"}`); code != 200 {
+		t.Fatalf("正常 prompt 要 200，拿到 %d：%s", code, body)
+	}
+	if code, _ := post("session.prompt", `{"sessionId":"a","text":"busy"}`); code != 409 {
+		t.Fatalf("上一轮没结束要 409，拿到 %d", code)
+	}
+	if code, _ := post("session.cancel", `{"sessionId":"a"}`); code != 200 {
+		t.Fatalf("cancel 要 200，拿到 %d", code)
+	}
+	code, body := post("session.create", `{"mode":"default"}`)
+	if code != 200 || !strings.Contains(body, "session-new") {
+		t.Fatalf("create 要 200 且带 id，拿到 %d：%s", code, body)
+	}
+}
+
+var errBusyForTest = errors.New("上一轮还没结束")
