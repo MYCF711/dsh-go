@@ -43,10 +43,15 @@ const (
 	// 和 setModel 同构：`load` 里的 permission 是只读投影，界面要能改就得有这个方法。
 	// 覆盖存 `<home>/state/session-permission.json`（**不碰 v4**）。
 	MethodSessionSetPermission Method = "session.setPermission"
-	MethodFSRead               Method = "fs.read"
-	MethodFSWrite              Method = "fs.write"
-	MethodConfigGet            Method = "config.get"
-	MethodConfigSet            Method = "config.set"
+	// MethodModelsList 问网关有哪些模型（OpenAI 兼容的 GET /v1/models）。
+	//
+	// 为什么必须由宿主转发：网关地址与凭据只在宿主这一侧（R7 界面不直连模型出口）。
+	// 界面要模型下拉就只能走这里——或者在界面里硬编码模型名，那会过期、且会骗人。
+	MethodModelsList Method = "models.list"
+	MethodFSRead     Method = "fs.read"
+	MethodFSWrite    Method = "fs.write"
+	MethodConfigGet  Method = "config.get"
+	MethodConfigSet  Method = "config.set"
 )
 
 // SessionMethods 是 U0 第一版要兑现的全部方法（顺序固定，快照按它排）。
@@ -56,7 +61,7 @@ func SessionMethods() []Method {
 		MethodSessionPrompt, MethodSessionCancel, MethodSessionApprove, MethodSessionCreate,
 		MethodSessionDelete, MethodSessionFork, MethodSessionCompact, MethodWorkspaceList,
 		MethodJobsList, MethodJobsOutput, MethodScheduleList,
-		MethodSessionSetModel, MethodSessionSetPermission,
+		MethodSessionSetModel, MethodSessionSetPermission, MethodModelsList,
 		MethodFSRead, MethodFSWrite, MethodConfigGet, MethodConfigSet,
 	}
 }

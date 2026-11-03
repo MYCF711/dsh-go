@@ -16,6 +16,7 @@
     "schedule.list",
     "session.setModel",
     "session.setPermission",
+    "models.list",
     "fs.read",
     "fs.write",
     "config.get",
