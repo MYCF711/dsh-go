@@ -67,6 +67,13 @@ def main():
     chk("method-wired 对缺失的分发会红", code != 0 and "MethodSessionApprove" in out,
         out.strip()[-160:])
 
+    # ---- 3.5) bin-check：把二进制摸旧，必须红 ----
+    stale = os.path.join(TMP, "stale.exe")
+    shutil.copy("tmp/dshd.exe", stale)
+    os.utime(stale, (1577836800, 1577836800))  # 2020-01-01
+    code, out = run(["scripts/bin-check.py", stale])
+    chk("bin-check 对陈旧二进制会红", code != 0 and "旧" in out, out.strip()[-160:])
+
     # ---- 4) 空转保护：守卫在没有输入时不许报绿 ----
     empty = os.path.join(TMP, "empty")
     os.makedirs(empty, exist_ok=True)

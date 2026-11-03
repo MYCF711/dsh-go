@@ -18,6 +18,9 @@ import time
 
 # (脚本, 它证明哪几条 H, 是否需要真模型, 超时秒)
 PROBES = [
+    # 第一条就该查它：探针跑的是**哪个版本的二进制**。
+    # 二进制旧了/两份分叉，后面所有真机结论都不作数。
+    ("bin-check", "二进制体检：不比源码旧、多份副本不分叉", False, 120),
     ("help-guard", "CLI 帮助：三入口同一开关、无过期说法、都有说明", False, 180),
     ("contract-evidence", "契约表：每个 ✅ 都点名真实存在的证据", False, 120),
     ("flag-wired", "开关：定义了就一定接到调用链上，同函数内不撞名", False, 120),
@@ -107,6 +110,14 @@ def main():
             continue
         if fails:
             bad += 1
+            if name == "bin-check":
+                # 二进制不可信 → 后面的真机探针**别跑了**，跑了也只是在浪费时间去解释假象。
+                print("→ 二进制不可信，跳过其余真机探针（先重建再跑）", flush=True)
+                for rest, rlabel, _, _ in [(x[0], x[1], x[2], x[3]) for x in PROBES]:
+                    if rest == name:
+                        continue
+                    rows.append((rest, rlabel, "跳过", "", "前置：二进制体检未过"))
+                break
         # 只报 "4/5" 等于没说：要说出**哪一条**红了，否则下次还得手动重跑。
         # 红行由 run() 带回来——它才持有探针的完整输出。
         # （第一版在这里引用了一个不存在的局部变量 out，于是**只有探针失败时**才炸；

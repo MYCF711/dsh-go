@@ -10,6 +10,10 @@ python scripts/h-suite.py          # 7 条真机探针，36 项，对回本表
 python scripts/h-suite.py --fast   # 不调模型的（约 30 秒）
 ```
 
+跑之前第一条永远是 `bin-check`：**探针用的二进制比源码旧、或者两份副本分叉，就直接中止**。
+2026-11-03 出现过一次：h10 的红被记成"宿主丢消息"，实际是探针用着 70 分钟前的二进制。
+**探针跑的是已经不存在的版本，结论却记在当前代码头上**——这比大多数 bug 都贵。
+
 它要求每条探针交出**机器可读的汇总行**；交不出来（崩了、只写进文件、被跳过）一律算失败——
 "没跑出结论"和"通过"是两件事。
 
@@ -93,6 +97,6 @@ h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
 | **H11 ready stdout** | ✅ 进程级 4/4 | 完整 stdout 恰好一行 ready，后续为合法 JSON 且含 url/token；policy 诊断只去 stderr。 证据：`scripts/h11-stdout.py` |
 | **H12 contentWidth** | ✅ 宿主侧闭环（2026-11-03 M263） | 只有**正数**才算"知道宽度"：0 与负数都按未知处理、字段直接不出现（负数放过去会让界面画出负宽度容器：怪但没崩，没人会去查宿主）。值以裸数字传输 证据：`TestContentWidthContract` | 真机：`--content-width 748` → `contentWidth=748`；不传 → 字段不存在。单测三条（0/748/负数）+ 一条"必须是数字不是字符串"。仍未验：原生壳提供真实列宽并消费 |
 | **H13 真审批** | 🟡 宿主 allow/deny/timeout/replay/allow_always 已验；**pending cancel 未闭环** | `session.approve`；子进程标记通道；父进程 broker 推 `approval/request` 并入 journal；120s 超时拒绝；allow_always 仅进程内。证据：`scripts/h13-approval-e2e.py`、`h13-timeout.py`、`h13-replay.py`、`h13-allow-always.py`、`TestBrokerResolveWritesAllowBack`；UI 已有 allow/deny 真机记录，`72e4e3d` 另有 allow_always 第二次自动放行证据。**2026-11-03 18:08 复核**：`serve_approval.go` 尚无取消挂起审批分支，缺 cancel→拒绝+不执行+`approval/cancel`+第二轮 prompt 证据，故不签整链完成 |
-| **H14 契约门** | 🟡 epoch/reset、后台水位、分批补洞已提交；**快照/golden/serve/重启凭据未闭环** | UI `6363bf3`、`d04bade`、`7e010ab` 等已有新证据；剩余首启既有会话非零 epoch、reset 后局部 since=0、history 409 触发重建、History 请求带 epoch、UI 快照旧 `/api/mux`/`kind`/messages、共享 golden 与特殊事件样本、FrameSub 重放修复提交、serve 跨轮去重/debug 统一、宿主重启 cookie 自愈与同版本联合复验。未提交 wssession 改动不计完成 |
+| **H14 契约门** | 🟡 epoch/reset、后台水位、分批补洞已提交；**快照/golden/serve/重启凭据未闭环** | UI `6363bf3`、`d04bade`、`7e010ab` 等已有新证据；剩余首启既有会话非零 epoch、reset 后局部 since=0、history 409 触发重建、History 请求带 epoch、UI 快照旧 `/api/mux`/`kind`/messages 且 `counts.total=13`、缺 `session.approve`，共享 golden 与特殊事件样本、FrameSub 重放修复提交、serve 跨轮去重/debug 统一、宿主重启 cookie 自愈与同版本联合复验。未提交 wssession 改动不计完成 |
 
 H14 通过后才能做 H6/H13 的线上联调。H8 可与 H14 并行；其余独立字段消费按任务书并行，不从本表符号自行推断任务。
