@@ -210,6 +210,18 @@ func (s *sessionSource) resolve(sessionID string) (string, error) {
 		return "", transport.ErrNoSuchSession
 	}
 
+	// 出问题时按行看：`DSHD_DEBUG_RESOLVE=1 dshd serve ...`。
+	// 为什么要有：界面报"列表能拿到会话、点进去 404"时，光看 404 分不清是哪一步——
+	// home 不对、seg 不对、还是 glob 没命中。这三件事长得一模一样。
+	dbg := func(step string, extra ...any) {
+		if os.Getenv("DSHD_DEBUG_RESOLVE") == "" {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "resolve[%s] home=%q id=%q segs=%v cwd=%q %v\n",
+			step, s.home, sessionID, segs, s.cwd, extra)
+	}
+	dbg("start")
+
 	var matches []string
 	for _, seg := range segs {
 		if s.cwd != "" {
@@ -227,8 +239,10 @@ func (s *sessionSource) resolve(sessionID string) (string, error) {
 			break
 		}
 	}
+	dbg("glob", "matches", matches)
 	switch len(matches) {
 	case 0:
+		dbg("miss")
 		return "", transport.ErrNoSuchSession
 	case 1:
 		return matches[0], nil
