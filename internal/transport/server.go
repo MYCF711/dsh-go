@@ -428,6 +428,13 @@ func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
 	// H5：权限状态是进程级事实，在这里补上（宿主注入的 Load 只关心会话内容）。
 	res.Permission = s.opt.Policy
 	res.ContentWidth = s.opt.ContentWidth
+	// H14：load 是首屏投影，不能拿来补洞；但它必须告诉客户端
+	// "从哪个世代、哪个水位接着收"——否则客户端只能猜。
+	if s.opt.Journals != nil {
+		j := s.opt.Journals.Get(fillID(in.SessionID, in.ID))
+		res.JournalEpoch = j.Epoch()
+		res.LastSeq = j.LastSeq()
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 
