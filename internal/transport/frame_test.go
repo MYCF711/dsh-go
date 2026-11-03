@@ -32,11 +32,11 @@ func TestParseClientFrameRejectsUnknown(t *testing.T) {
 		``,
 		`not json`,
 		`{"t":"subscribe","topic":"session:abc"}`, // 拼错一个字母就静默不生效最糟
-		`{"t":"sub"}`,                            // 缺 topic
-		`{"t":"sub","topic":""}`,                 // 空 topic
-		`{"t":"sub","topic":"sessions:abc"}`,     // 前缀不对
-		`{"t":"sub","topic":"session:"}`,         // id 为空
-		`{"t":"unsub"}`,                          // 缺 topic
+		`{"t":"sub"}`,                        // 缺 topic
+		`{"t":"sub","topic":""}`,             // 空 topic
+		`{"t":"sub","topic":"sessions:abc"}`, // 前缀不对
+		`{"t":"sub","topic":"session:"}`,     // id 为空
+		`{"t":"unsub"}`,                      // 缺 topic
 	}
 	for _, raw := range bad {
 		if _, err := ParseClientFrame([]byte(raw)); err == nil {
