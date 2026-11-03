@@ -30,9 +30,18 @@ func main() {
 		fmt.Print(renderSplash(*color))
 		return
 	}
+	// 没给 --send 就是进全屏界面（这才是默认用法）
 	if *prompt == "" {
-		fmt.Fprintln(os.Stderr, "用法：dshtui --dump-splash | --send <文本> --addr <宿主地址> --token <token>")
-		os.Exit(2)
+		a, err := newApp(*addr, *token)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "dshtui:", err)
+			os.Exit(1)
+		}
+		if err := a.run(); err != nil {
+			fmt.Fprintln(os.Stderr, "dshtui:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if err := sendAndTail(*addr, *token, *prompt); err != nil {
 		fmt.Fprintln(os.Stderr, "dshtui:", err)
