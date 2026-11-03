@@ -258,6 +258,244 @@ func TestNormalKeysStillTypeWhenNoApproval(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------- 工具卡折叠
+
+// 默认折叠：tool/call 那一行必须还在，tool/result 的内容不许出现在 view() 里。
+// 内容本身仍然要记下来——折叠是显示层的事，不是把历史丢掉。
+func TestToolResultCollapsedByDefault(t *testing.T) {
+	a := newTestApp(100, 20)
+	a.handleFrame(ServerFrame{Type: "tool/call", Data: json.RawMessage(`{"name":"bash","title":"列出目录"}`)})
+	a.handleFrame(ServerFrame{Type: "tool/result", Data: json.RawMessage(`{"summary":"退出码 0，输出 12 字节"}`)})
+
+	if a.showToolResults {
+		t.Fatal("默认应当是折叠的")
+	}
+	if !strings.Contains(strings.Join(a.lines, "\n"), "退出码 0") {
+		t.Fatal("结果行应当被记下来，展开时要能立刻显示")
+	}
+	screen := strings.Join(a.view(), "\n")
+	if !strings.Contains(screen, "bash") || !strings.Contains(screen, "列出目录") {
+		t.Fatalf("折叠后工具卡那一行必须还在：\n%s", screen)
+	}
+	if strings.Contains(screen, "退出码 0") {
+		t.Fatalf("默认折叠时结果内容不该出现在屏幕上：\n%s", screen)
+	}
+}
+
+// Ctrl+T 展开：已有的结果行立刻出现；再按一次消失。
+func TestToggleToolResults(t *testing.T) {
+	a := newTestApp(100, 20)
+	a.handleFrame(ServerFrame{Type: "tool/call", Data: json.RawMessage(`{"name":"bash","title":"列出目录"}`)})
+	a.handleFrame(ServerFrame{Type: "tool/result", Data: json.RawMessage(`{"summary":"退出码 0，输出 12 字节"}`)})
+
+	if strings.Contains(strings.Join(a.view(), "\n"), "退出码 0") {
+		t.Fatal("折叠状态下不该看到结果")
+	}
+
+	a.handleRune(20) // Ctrl+T
+	if !a.showToolResults {
+		t.Fatal("Ctrl+T 应当切到展开")
+	}
+	if !strings.Contains(strings.Join(a.view(), "\n"), "退出码 0") {
+		t.Fatalf("展开后结果行没出现：\n%s", strings.Join(a.view(), "\n"))
+	}
+
+	a.handleRune(20) // Ctrl+T 再来一次
+	if a.showToolResults {
+		t.Fatal("再按一次应当切回折叠")
+	}
+	if strings.Contains(strings.Join(a.view(), "\n"), "退出码 0") {
+		t.Fatal("折叠后结果行应当再次消失")
+	}
+
+	// /tools 是同一个动作的可打字入口
+	a.command("/tools")
+	if !a.showToolResults {
+		t.Fatal("/tools 应当也能展开")
+	}
+}
+
+// 错误结果在折叠状态下**必须照样显示**：折叠是省地方，不是把失败藏起来。
+// 两种落法（顶层 isError / message.isError）都要认。
+func TestErrorResultVisibleWhenCollapsed(t *testing.T) {
+	cases := []string{
+		`{"isError":true,"summary":"bash: 没有这个文件"}`,
+		`{"message":{"isError":true,"content":[{"type":"text","text":"拒绝执行 rm"}]}}`,
+	}
+	for _, payload := range cases {
+		a := newTestApp(100, 20)
+		a.handleFrame(ServerFrame{Type: "tool/call", Data: json.RawMessage(`{"name":"bash","title":"rm"}`)})
+		a.handleFrame(ServerFrame{Type: "tool/result", Data: json.RawMessage(payload)})
+
+		if a.showToolResults {
+			t.Fatal("这条用例要在折叠状态下验")
+		}
+		joined := strings.Join(a.view(), "\n")
+		if !strings.Contains(joined, "ERROR") {
+			t.Fatalf("%s：错误结果被折叠藏起来了：\n%s", payload, joined)
+		}
+		if !strings.Contains(joined, "没有这个文件") && !strings.Contains(joined, "拒绝执行") {
+			t.Fatalf("%s：错误正文没显示：\n%s", payload, joined)
+		}
+	}
+}
+
+// 折叠/展开/搜索都不能破坏"每屏恰好高度行"的契约。
+func TestViewHeightStableAcrossFoldAndSearch(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {120, 30}, {40, 10}} {
+		w, h := size[0], size[1]
+		a := newTestApp(w, h)
+		for i := 0; i < 40; i++ {
+			a.push("正文 " + string(rune('a'+i%26)))
+		}
+		a.handleFrame(ServerFrame{Type: "tool/call", Data: json.RawMessage(`{"name":"bash","title":"ls"}`)})
+		a.handleFrame(ServerFrame{Type: "tool/result", Data: json.RawMessage(`{"summary":"ok"}`)})
+		a.handleFrame(ServerFrame{Type: "tool/result", Data: json.RawMessage(`{"isError":true,"summary":"失败"}`)})
+
+		check := func(stage string) {
+			got := a.view()
+			if len(got) != h {
+				t.Fatalf("%dx%d/%s：view 给了 %d 行，应为 %d", w, h, stage, len(got), h)
+			}
+			for i, ln := range got {
+				if n := len([]rune(ln)); n > w {
+					t.Fatalf("%dx%d/%s：第 %d 行宽 %d 超过 %d", w, h, stage, i, n, w)
+				}
+			}
+		}
+		check("折叠")
+		a.handleRune(20)
+		check("展开")
+		a.handleRune(20)
+		check("再折叠")
+		a.handleRune(6)
+		for _, r := range "正文" {
+			a.handleRune(r)
+		}
+		check("搜索中")
+		a.handleSpecial("esc")
+		check("退出搜索")
+	}
+}
+
+// ---------------------------------------------------------------- 会话内搜索
+
+// 搜索：进搜索模式 → 输入关键词 → 状态行报命中数；Esc 退出后不再显示。
+// 命中数只算**显示得出来的行**：被折叠的工具结果不参与，否则数字和屏幕对不上。
+func TestSearchCountsMatchesAndEscClears(t *testing.T) {
+	a := newTestApp(100, 20)
+	a.push("第一行 有 needle 在这里")
+	a.push("第二行 没有关键词")
+	a.push("第三行 也有 Needle") // 大小写不同也要命中
+
+	a.handleFrame(ServerFrame{Type: "tool/call", Data: json.RawMessage(`{"name":"bash","title":"grep"}`)})
+	a.handleFrame(ServerFrame{Type: "tool/result", Data: json.RawMessage(`{"summary":"needle 在第 7 行"}`)})
+
+	a.handleRune(6) // Ctrl+F
+	if !a.searching {
+		t.Fatal("Ctrl+F 应当进入搜索模式")
+	}
+	if got := a.view(); !strings.HasPrefix(got[len(got)-1], "/ ") {
+		t.Fatalf("搜索时输入行前缀应当是 /：%q", got[len(got)-1])
+	}
+	for _, r := range "needle" {
+		a.handleRune(r)
+	}
+	if a.searchQuery != "needle" {
+		t.Fatalf("查询串没跟上输入：%q", a.searchQuery)
+	}
+
+	got := a.view()
+	status := got[len(got)-2]
+	if !strings.Contains(status, "匹配 2 处") {
+		t.Fatalf("状态行没报命中数（应为 2 处，折叠的结果行不算）：%q", status)
+	}
+
+	a.handleSpecial("esc")
+	if a.searching || a.searchQuery != "" || len(a.input) != 0 {
+		t.Fatalf("Esc 之后搜索状态没清干净：searching=%v query=%q input=%q",
+			a.searching, a.searchQuery, string(a.input))
+	}
+	after := a.view()
+	if strings.Contains(after[len(after)-2], "匹配") {
+		t.Fatalf("退出搜索后状态行不该还留着命中数：%q", after[len(after)-2])
+	}
+	if !strings.HasPrefix(after[len(after)-1], "› ") {
+		t.Fatalf("退出搜索后输入行前缀应回到 ›：%q", after[len(after)-1])
+	}
+}
+
+// 搜索串不是消息：Enter 只退出搜索，不许把它当 prompt 发出去。
+func TestSearchEnterDoesNotSend(t *testing.T) {
+	a := newTestApp(100, 20)
+	a.push("一些内容")
+	a.handleRune(6)
+	for _, r := range "内容" {
+		a.handleRune(r)
+	}
+	a.handleRune(13) // Enter
+	if a.searching || a.searchQuery != "" {
+		t.Fatal("Enter 应当退出搜索并清空查询")
+	}
+	if strings.Contains(strings.Join(a.lines, "\n"), "› 内容") {
+		t.Fatal("搜索串被当成消息发出去了")
+	}
+}
+
+// 超过 maxLines 裁剪之后，meta 必须仍然和 lines 对齐——
+// 错位的后果是"折叠藏错行"，屏幕上看起来只是少了一行，极难查。
+func TestTrimKeepsMetaAligned(t *testing.T) {
+	a := newTestApp(100, 12)
+	call := ServerFrame{Type: "tool/call", Data: json.RawMessage(`{"name":"bash","title":"ls"}`)}
+	result := ServerFrame{Type: "tool/result", Data: json.RawMessage(`{"summary":"ok"}`)}
+	for i := 0; i < 600; i++ {
+		a.handleFrame(call)
+		a.handleFrame(result)
+	}
+	if len(a.lines) != maxLines || len(a.meta) != maxLines {
+		t.Fatalf("裁剪后 lines=%d meta=%d，应都为 %d", len(a.lines), len(a.meta), maxLines)
+	}
+	if strings.Contains(strings.Join(a.view(), "\n"), "← ok") {
+		t.Fatal("折叠时结果行不该出现")
+	}
+	a.handleRune(20)
+	if !strings.Contains(strings.Join(a.view(), "\n"), "← ok") {
+		t.Fatal("展开后结果行没出现——meta 很可能和 lines 错位了")
+	}
+}
+
+// 键盘解码：ASCII 与 Ctrl 键必须真能发到 handleRune。
+//
+// 这条是**前置缺陷**的回归测试：旧解码器"等到续字节才解码"，
+// 对多字节字符成立，但 ASCII 永远等不到续字节——于是字母、Ctrl+T、
+// Ctrl+F、y/a/n（审批）、Ctrl+C（退出）在真机上按了全都没反应，
+// 而单测直接调 handleRune，看不出这个问题。
+// 同时验证方向键（ESC [ A）被整段吞掉，不会往输入行塞 "[A"。
+func TestReadKeysDecodesASCIIAndControlKeys(t *testing.T) {
+	rch := make(chan rune, 64)
+	sch := make(chan string, 8)
+	readKeysFrom(strings.NewReader("ab中\x14\x06\x1b[A\n"), rch, sch)
+	close(rch)
+	close(sch)
+
+	var got []rune
+	for r := range rch {
+		got = append(got, r)
+	}
+	want := []rune{'a', 'b', '中', 20, 6, '\n'}
+	if string(got) != string(want) {
+		t.Fatalf("解码结果 %q（%v），期望 %q（%v）", string(got), got, string(want), want)
+	}
+
+	esc := 0
+	for range sch {
+		esc++
+	}
+	if esc != 1 {
+		t.Fatalf("ESC 应当只发一次 esc 事件，实际 %d 次", esc)
+	}
+}
+
 // 上下文进度条：知道上限才画百分比，不知道就只报数字。
 // 只给一半信息（有分子没分母）的进度条比没有更糟——数字看着精确，其实分母是猜的。
 func TestCtxPercent(t *testing.T) {
