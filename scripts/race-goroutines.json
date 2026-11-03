@@ -25,19 +25,19 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:156",
+      "site": "internal/transport/server.go:170",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:239",
+      "site": "internal/transport/server.go:253",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/serve_tools.go:77",
+      "site": "cmd/dshd/serve_tools.go:92",
       "what": "每轮一个 follow",
       "sync": "读过：follow 只读日志，向 hub 推送；prog 仅在 fw.Wait() 之后读，无并发窗口",
       "verified_at": "2026-11-03"
@@ -79,27 +79,33 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/serve_approval.go:186",
+      "site": "cmd/dshd/serve_approval.go:213",
       "what": "等这一次审批的结果（客户端回答 或 超时）",
       "sync": "ch 由 pending[id] 取出、只被结算一次；写子进程走 reply 内的 writeMu 串行；b.mu 只护 map，不在锁内调 emit",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/serve_tools.go:108",
+      "site": "cmd/dshd/serve_tools.go:123",
       "what": "follow 子进程日志并把事件推进 journal",
       "sync": "fw 计数收尾；ctx 取消即退出；写 journal 经 hub 自己的锁",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshtui/app.go:68",
+      "site": "cmd/dshtui/app.go:118",
       "what": "读键盘（stdin → rune/特殊键两个 channel）",
       "sync": "只往带缓冲的 channel 发送；进程退出时 stdin 关闭即返回；不碰 app 的可变状态",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshtui/client.go:200",
+      "site": "cmd/dshtui/client.go:224",
       "what": "WS 收帧 + 断线重连循环",
       "sync": "帧只经 channel 交给渲染循环（channel 满时阻塞，不丢）；lastSeq 是该 goroutine 的局部变量；stop 用 sync.Once 关 done",
+      "verified_at": "2026-11-04"
+    },
+    {
+      "site": "cmd/dshtui/app.go:900",
+      "what": "从 stdin 泵字节（读一个发一个，关掉 channel 表示输入结束）",
+      "sync": "只往带缓冲 channel 发；Read 出错或 EOF 就 close；不碰 app 的任何可变状态",
       "verified_at": "2026-11-04"
     }
   ]

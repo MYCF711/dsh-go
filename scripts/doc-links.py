@@ -14,8 +14,17 @@ import re
 import sys
 from pathlib import Path
 
+# **`../` 前缀必须一起匹配**：正则是从 `docs/` 起匹配的，
+# 于是 `../dsh-ui/docs/progress.md` 会被截成 `docs/progress.md`，
+# 再拿去本仓校验就是必然的 MISS——而那个文件本来就在**姊妹仓**里。
+# 跨仓引用不在本仓能校验的范围，识别出来跳过即可。
+# **alphabet 顺序有意义**：`../` 那条必须排在 `docs/` 前面。
+# 写成可选前缀 `(?:\.\./)?docs/...` 时，正则引擎会优先尝试"不带前缀"那条，
+# 于是 `../dsh-ui/docs/progress.md` 仍然被截成 `docs/progress.md`
+# ——加了前缀等于没加（实测过）。
 REF_RE = re.compile(
-    r"(?:docs/[A-Za-z0-9_.\-/]+\.md"
+    r"(\.\./[A-Za-z0-9_.\-/]+\.md"
+    r"|docs/[A-Za-z0-9_.\-/]+\.md"
     r"|scripts/[A-Za-z0-9_.\-/]+\.(?:py|sh))"
 )
 
@@ -57,6 +66,11 @@ def main() -> int:
     missing = 0
     bad = 0
     for ref in refs:
+        # 跨仓引用（`../dsh-ui/...`）不在本仓校验：文件在姊妹仓里，
+        # 本仓永远看不到它。误报会让人去"修"一个根本不缺的引用。
+        if ref.startswith("../"):
+            print(f"SKIP {ref}（跨仓）")
+            continue
         target = root / ref
         if not target.is_file():
             print(f"MISS {ref}")
