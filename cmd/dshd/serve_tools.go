@@ -124,6 +124,11 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 				}
 				path = p
 			}
+			// 二分用：DSHD_FOLLOW_MODE=resolve 只解析路径就睡；=read 再读但不推。
+			mode := os.Getenv("DSHD_FOLLOW_MODE")
+			if mode == "resolve" {
+				continue
+			}
 			// 增量读：只解上次之后的新帧。全量重读在 2.2 万事件的会话上是 301ms，
 			// 而这里每 200ms 读一次——读得比跑得还慢，界面会越落越远。
 			var evs []v4.Event
@@ -138,6 +143,9 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 				continue
 			}
 			offset = next
+			if mode == "read" {
+				continue
+			}
 			for _, ev := range evs {
 				if ev.Seq <= lastSeq {
 					continue
