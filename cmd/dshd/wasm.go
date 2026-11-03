@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"dshgo/internal/wasmhost"
 )
@@ -28,12 +30,15 @@ import (
 // 没有 CLI 语义的 main；设了 _start 反而会让这类模块装不上。
 func cmdWasm(argv []string) error {
 	if len(argv) == 0 {
-		return fmt.Errorf("用法: dshd wasm inspect|call " +
-			"（inspect --module <path>；call --module <path> --fn <name> [--args 1,2] [--timeout 2s]）")
+		return fmt.Errorf("用法: dshd wasm inspect|call|tool " +
+			"（inspect --module <path>；call --module <path> --fn <name> [--args 1,2] [--timeout 2s]；" +
+			"tool --module <path> --tool <工具名> --args '<json>'）")
 	}
 	switch argv[0] {
 	case "inspect":
 		return cmdWasmInspect(argv[1:])
+	case "tool":
+		return cmdWasmTool(argv[1:])
 	case "call":
 		return cmdWasmCall(argv[1:])
 	default:
@@ -209,4 +214,87 @@ func hasExport(names []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// cmdWasmTool 走**工具 ABI** 调一次，而不是直接调导出函数。
+//
+// 为什么需要它：`wasm call` 调的是裸导出函数（add/spin），而工具插件的真入口是
+// `alloc` + `call` 这对信封函数。一个模块挂多个工具时，`call` 按信封里的 `tool`
+// 字段分流——所以不带 `--tool` 就只能落到模块级默认名上，多出来的工具根本调不到。
+// 这个子命令把"选哪个工具"显式摆出来，也让人能不经 manifest 单独验一个插件。
+func cmdWasmTool(argv []string) error {
+	fs := flag.NewFlagSet("wasm tool", flag.ContinueOnError)
+	modulePath := fs.String("module", "", "wasm 模块路径")
+	tool := fs.String("tool", "", "工具名（信封 tool 字段；单工具模块可与 manifest 里的 tool_name 不一致）")
+	argsJSON := fs.String("args", "{}", "工具参数（JSON 对象）")
+	timeout := fs.Duration("timeout", 10*time.Second, "调用超时")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if *modulePath == "" {
+		return fmt.Errorf("缺 --module")
+	}
+	if *tool == "" {
+		return fmt.Errorf("缺 --tool：这是信封里的工具名；只看导出函数用 `dshd wasm inspect`")
+	}
+	if *timeout < 0 {
+		return fmt.Errorf("--timeout 不能是负数")
+	}
+	var probe map[string]any
+	if err := json.Unmarshal([]byte(*argsJSON), &probe); err != nil {
+		return fmt.Errorf("--args 要是 JSON 对象：%v（例：--args '{\"text\":\"hi\"}'）", err)
+	}
+
+	ctx := context.Background()
+	if *timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		defer cancel()
+	}
+	m, err := wasmhost.Load(ctx, filepath.Base(*modulePath), *modulePath)
+	if err != nil {
+		return err
+	}
+	defer m.Close(context.Background())
+
+	m.SetToolName(*tool)
+	m.SetTimeout(*timeout)
+
+	raw, err := m.InvokeTool(ctx, []byte(*argsJSON))
+	if err != nil {
+		return toolCallError(err)
+	}
+	reply, err := wasmhost.ParseReply(raw)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("summary: %s\n", reply.Summary)
+	if reply.Text != "" {
+		fmt.Printf("text:    %s\n", reply.Text)
+	}
+	if reply.IsError {
+		fmt.Printf("isError: true\n")
+		if reply.Hint != "" {
+			fmt.Printf("hint:    %s\n", reply.Hint)
+		}
+		return fmt.Errorf("工具自己报告失败（isError=true）")
+	}
+	return nil
+}
+
+// toolCallError 把三类失败翻成人能照着做的话。
+//
+// 三类的处置完全不同：业务失败要改参数、trap 要修插件、协议错要修 ABI。
+// 混成一句"调用失败"，排查时间会翻几倍。
+func toolCallError(err error) error {
+	switch {
+	case errors.Is(err, wasmhost.ErrGuestTrap):
+		return fmt.Errorf("%v\n→ 插件内部崩了（wasm trap），不是参数错；看上面的客人 stderr", err)
+	case errors.Is(err, wasmhost.ErrProtocol):
+		return fmt.Errorf("%v\n→ 插件返回的不像 ABI 信封；检查它是否按 {v,summary,text,isError} 回", err)
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("%v\n→ 超时：这个工具自己跑太久了（实例会被重建，下次调用是新的）", err)
+	default:
+		return err
+	}
 }
