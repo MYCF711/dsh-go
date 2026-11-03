@@ -78,3 +78,33 @@ prompt2 → accepted turn-2
 整件事就从"分不清"变成"看得见"。
 
 **排障的第一步永远是让失败可见，而不是猜它为什么失败。**
+
+---
+
+## 续（第三轮）：抓到了 WS —— 界面确实被告知了
+
+```
+prompt → accepted turn-1
+杀掉子进程 46780（它正在跑 bash sleep 30）
+WS 帧类型（按到达顺序）: turn/start, user/message, text, assistant/message,
+                        tool-call, finish, tool/call, tool/result, text, text, turn/error
+最后一个是 turn/error: True
+```
+
+至此三件事都齐了：
+
+1. 子进程确实会起来（`spawn pid=…`）
+2. 杀掉它之后宿主不卡（下一句 prompt 被接受）
+3. **界面收到 `turn/error`**，而且是这一轮的最后一帧
+
+### 一个必须写明的读数瑕疵
+
+上面的"帧类型"是用正则从**原始字节流**里抓 `"type":"…"` 得到的，
+所以会混进**事件 data 里嵌套的** JSON 字段——
+`tool-call`、`finish`、`text` 这几个就是嵌套内容，不是顶层帧。
+
+真正可信的是最后一条：`turn/error` 是最后一个出现的类型，
+而它确实是我们在这条路径上最后 publish 的那一帧。
+
+要看干净的序列得按 WS 帧边界解包，不能拿正则扫字节流。
+这一条记在这里，免得下次有人拿这份读数当"帧类型清单"用。
