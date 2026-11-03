@@ -505,10 +505,14 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 		// 继续"按 seq 补"只会补出错位的数据。明确告诉它重建基线。
 		if (in.JournalEpoch != 0 && in.JournalEpoch != j.Epoch()) || in.SinceSeq > j.LastSeq() {
 			writeJSON(w, http.StatusConflict, map[string]any{
+				// 四字段信封，跟其它错误保持一致。少了 retryable 的后果是
+				// 通用客户端解不出这个字段（界面审计实测），而这条恰恰是
+				// "必须让用户知道可以重试"的那一类错误。
 				"error": map[string]any{
-					"code":    "stale_epoch",
-					"message": "journal 世代或水位对不上，需要重新 load 基线",
-					"hint":    "丢弃旧水位，重新 session.load 拿 journalEpoch/lastSeq",
+					"code":      "stale_epoch",
+					"message":   "journal 世代或水位对不上，需要重新 load 基线",
+					"hint":      "丢弃旧水位，重新 session.load 拿 journalEpoch/lastSeq",
+					"retryable": true,
 				},
 				"journalEpoch": j.Epoch(),
 				"lastSeq":      j.LastSeq(),

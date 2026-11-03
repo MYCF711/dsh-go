@@ -17,13 +17,19 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		SessionID string `json:"sessionId"`
+		ID        string `json:"id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
 		return
 	}
+	// `id` 是同一个东西的另一个名字：界面那边两种写法都有（审计实测）。
+	// 只认一种的后果是 400，而调用方以为自己传对了。
 	if req.SessionID == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 sessionId"))
+		req.SessionID = req.ID
+	}
+	if req.SessionID == "" {
+		writeJSON(w, http.StatusBadRequest, errorBody("缺 sessionId（或 id）"))
 		return
 	}
 	if err := s.opt.Delete(req.SessionID); err != nil {
@@ -47,14 +53,20 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		SessionID string `json:"sessionId"`
+		ID        string `json:"id"`
 		Title     string `json:"title"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
 		return
 	}
+	// `id` 是同一个东西的另一个名字：界面那边两种写法都有（审计实测）。
+	// 只认一种的后果是 400，而调用方以为自己传对了。
 	if req.SessionID == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 sessionId"))
+		req.SessionID = req.ID
+	}
+	if req.SessionID == "" {
+		writeJSON(w, http.StatusBadRequest, errorBody("缺 sessionId（或 id）"))
 		return
 	}
 	id, err := s.opt.Fork(req.SessionID, req.Title)

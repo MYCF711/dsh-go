@@ -120,3 +120,60 @@ func unwrapResult(t interface{ Helper() }, raw []byte) map[string]any {
 	_ = json.Unmarshal(raw, &env)
 	return env.Result
 }
+
+// delete / fork 认 `id` 这个别名。
+//
+// 界面审计实测：界面那边两种写法都有，宿主只认 sessionId 时回 400，
+// 而调用方以为自己传对了——它不会去读 400 的 body。
+func TestDeleteAndForkAcceptIDAlias(t *testing.T) {
+	var gotDelete string
+	s := newTestServer(t, Options{
+		Delete: func(sid string) error { gotDelete = sid; return nil },
+		Fork:   func(sid, title string) (string, error) { return "new-session", nil },
+	})
+
+	if rec := postJSON(t, s, "/api/session.delete", `{"id":"s-1"}`); rec.Code != 200 {
+		t.Fatalf("delete 用 id 应当 200，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	if gotDelete != "s-1" {
+		t.Fatalf("delete 没拿到 id：%q", gotDelete)
+	}
+	if rec := postJSON(t, s, "/api/session.fork", `{"id":"s-1","title":"分支"}`); rec.Code != 200 {
+		t.Fatalf("fork 用 id 应当 200，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+}
+
+// 409 stale_epoch 也必须是**四字段信封**。
+//
+// 少 retryable 的后果：通用客户端解不出这个字段，而这条恰恰是
+// "必须让用户知道可以重试"的那一类错误（界面审计实测）。
+func TestStaleEpochEnvelopeIsComplete(t *testing.T) {
+	// 要有 journal 才会走到 409 那条分支；没有 journals 是 501。
+	js := NewJournals(func() int64 { return 7 })
+	js.Get("s-1") // 先建出这个会话的 journal（epoch=7）
+	s := newTestServer(t, Options{Journals: js})
+	rec := postJSON(t, s, "/api/session.history", `{"sessionId":"s-1","sinceSeq":99,"journalEpoch":1}`)
+	if rec.Code != 409 {
+		t.Fatalf("应当 409，实际 %d：%s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Hint      string `json:"hint"`
+			Retryable *bool  `json:"retryable"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "stale_epoch" {
+		t.Fatalf("code 不对：%q", env.Error.Code)
+	}
+	if env.Error.Retryable == nil {
+		t.Fatal("缺 retryable —— 客户端没法判断该不该重试")
+	}
+	if env.Error.Hint == "" {
+		t.Fatal("缺 hint")
+	}
+}
