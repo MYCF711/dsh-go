@@ -80,6 +80,12 @@ func cmdServe(args []string) error {
 	// runner 现在固定拒绝（见 errNoModel 的注释）。
 	prompts := newPromptService(noModelRunner{})
 
+	// 建会话的能力在起来之前就确定（cwd 定一次，不随后续请求漂移）。
+	create, err := serveCreate(*home, "")
+	if err != nil {
+		return err
+	}
+
 	srv, err := transport.NewServer(transport.Options{
 		Source: src,
 		Addr:   *addr,
@@ -103,13 +109,9 @@ func cmdServe(args []string) error {
 		Cancel: func(sessionID string) error {
 			return prompts.Cancel(sessionID)
 		},
-		// Create 不做：建会话要落到 v4 日志（session.OpenSessionAt 那套，
-		// 还要抢 <会话文件>.lock 保证同一份日志只有一个写入者），那是另一块活。
-		// 这里明确报错，而不是返回一个假 id——假 id 会让界面把不存在的会话
-		// 写进左栏，用户点进去才发现打不开。
-		Create: func(mode string) (string, error) {
-			return "", errors.New("serve 还没实现建会话")
-		},
+		// Create 真建一份 v4 会话（见 serve_create.go）：id 用 crypto/rand、
+		// header 带 agentPreset、返回前 Close 刷盘。cwd 传空 = serve 自己的当前目录。
+		Create: create,
 	})
 	if err != nil {
 		return err
