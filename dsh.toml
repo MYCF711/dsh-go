@@ -51,6 +51,10 @@ id      = "tool-wd"
 backend = "static"
 
 [[module]]
+id      = "tool-wsdeps"
+backend = "static"
+
+[[module]]
 id      = "tool-todo"
 backend = "static"
 

@@ -163,6 +163,9 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"subagent_fork": {},
 		// 只读自己的技能目录，不写盘、不起进程、不联网。
 		"skill": {},
+		// 查运行时依赖：**起 python/node 子进程**读版本，所以 Executes 为真。
+		// 不写盘、不联网（子进程只读版本号）。
+		"load_workspace_dependencies": {Executes: true},
 		// 写本机记忆目录（<home>/memory），不联网、不起进程。
 		"hindsight_ingest_document":        {Writes: true},
 		"hindsight_list_knowledge_pages":   {},

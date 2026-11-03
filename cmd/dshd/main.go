@@ -54,6 +54,7 @@ import (
 	"dshgo/modules/tool/webfetch"
 	"dshgo/modules/tool/websearch"
 	"dshgo/modules/tool/write"
+	wsdeps "dshgo/modules/tool/wsdeps"
 	"dshgo/modules/tools"
 )
 
@@ -95,6 +96,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		search.Module(),
 		history.Module(),
 		wdtool.Module(),
+		wsdeps.Module(),
 		todo.Module(),
 		present.Module(),
 		ask.Module(),
