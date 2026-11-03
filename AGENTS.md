@@ -53,12 +53,15 @@ staticcheck(SA*,S1*) / 工具表体积与 token 预算 / 安全默认值 3 条 /
 **CI 七条里 5 条严格过关，2 条是代理**（第 6 条估算器 -6%，第 4 条缺 `-race`），
 明细在 `docs/ci-rules.md`。
 
-### 界面线现状（2026-11-03）
+### 界面线现状（2026-11-03 复核）
 
-- ✅ 调研落盘（三份全部完成）：`research/40-official-shell.md`（壳解剖）、`research/41-gui-stack-options.md`（选型与先例）、`research/42-frontend-inventory.md`（前端资产）
-- ✅ `UIPLAN.md` 已成稿，**Q1–Q12 待用户拍板**
-- 🚧 **代码零行**：`internal/transport/`、`ui/`、`cmd/dshui/` 都还不存在；`spi.ViewSpec` 有定义、无渲染器
-- ✅ 唯一已验证的原型是 `cmd/dshd-bridge/main.go`（595 行，把 dshd 伪装成 DSH `/api` + `events.mux`，dsh-TUI 能连）
+- ✅ 调研三份已成稿：`research/40`（壳解剖）、`research/41`（选型）、`research/42`（前端资产）
+- ✅ `UIPLAN.md` §2.10 **已拍板**：押注 Go 原生（Viva）、仓库独立成 `dsh-ui`
+- ✅ **本仓 `internal/transport` 的 U0 已交付**：13 个 method 全部实现 + WS + `/connect`
+  + 心跳 + 重连水位，端到端 `scripts/ui-e2e.py` 14/14
+- ⏳ U1（前端工程）在 `dsh-ui` 仓库，本仓只管契约
+- ⚠️ 上面「两条线」表里那句「界面线：只有规划，一行代码都没有」是**旧话**，
+  现在宿主侧这一半已经有了（13 个 method）；界面那一半仍不在本仓
 
 ---
 
