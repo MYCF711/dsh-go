@@ -132,6 +132,12 @@ func cmdServe(args []string) error {
 		History: func(sessionID string, sinceSeq, limit int) (transport.Page, error) {
 			return transport.HistorySession(src, sessionID, sinceSeq, limit)
 		},
+		Delete: func(sessionID string) error {
+			return serveDelete(*home, sessionID)
+		},
+		Fork: func(sessionID, title string) (string, error) {
+			return serveFork(*home, sessionID, title)
+		},
 		Prompt: func(sessionID, text string) (transport.PromptResult, error) {
 			// Submit 立刻返回，回答走 WS；这里绝不能等模型。
 			// ctx 用 Background：turn 的生命周期长于这次 HTTP 请求，

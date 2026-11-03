@@ -14,6 +14,8 @@ const (
 	MethodSessionPrompt  Method = "session.prompt"
 	MethodSessionCancel  Method = "session.cancel"
 	MethodSessionCreate  Method = "session.create"
+	MethodSessionDelete  Method = "session.delete"
+	MethodSessionFork    Method = "session.fork"
 )
 
 // SessionMethods 是 U0 第一版要兑现的全部方法（顺序固定，快照按它排）。
@@ -21,6 +23,7 @@ func SessionMethods() []Method {
 	return []Method{
 		MethodSessionList, MethodSessionLoad, MethodSessionHistory,
 		MethodSessionPrompt, MethodSessionCancel, MethodSessionCreate,
+		MethodSessionDelete, MethodSessionFork,
 	}
 }
 

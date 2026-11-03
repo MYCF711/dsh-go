@@ -49,6 +49,10 @@ type Options struct {
 	History func(sessionID string, sinceSeq, limit int) (Page, error)
 	// Prompt 发起一轮，立刻返回（回答走 WS）；宿主注入。
 	Prompt func(sessionID, text string) (PromptResult, error)
+	// Delete 删掉一个会话；宿主注入（删除是不可逆操作，由宿主决定物理删还是标记）。
+	Delete func(sessionID string) error
+	// Fork 从一个会话开分支；宿主注入。
+	Fork func(sessionID, title string) (string, error)
 	// Cancel 取消在飞的一轮；没有在飞的返回 ErrNoSuchTurn。
 	Cancel func(sessionID string) error
 	// SetMode 换模式；宿主注入。
@@ -264,6 +268,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionCancel(w, r)
 	case MethodSessionCreate:
 		s.handleSessionCreate(w, r)
+	case MethodSessionDelete:
+		s.handleSessionDelete(w, r)
+	case MethodSessionFork:
+		s.handleSessionFork(w, r)
 	default:
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 	}

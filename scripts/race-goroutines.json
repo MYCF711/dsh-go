@@ -8,8 +8,8 @@
     },
     {
       "site": "internal/acp/server.go:422",
-      "what": "每轮 prompt 独立跑",
-      "sync": "读过：handlePrompt 走 wg.Add/Done；写响应经 server 的写锁（同文件其它路径一致）",
+      "what": "等 WG 收尾的观察者",
+      "sync": "读过：只等 s.wg，不碰共享可写状态；ch 只 close 一次",
       "verified_at": "2026-11-03"
     },
     {
@@ -25,13 +25,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:120",
+      "site": "internal/transport/server.go:124",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:203",
+      "site": "internal/transport/server.go:207",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"

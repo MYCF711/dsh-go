@@ -5,7 +5,9 @@
     "session.history",
     "session.prompt",
     "session.cancel",
-    "session.create"
+    "session.create",
+    "session.delete",
+    "session.fork"
   ],
   "types": {
     "Message": [

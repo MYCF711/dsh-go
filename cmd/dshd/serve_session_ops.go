@@ -1,0 +1,59 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"dshgo/codecs/v4"
+	"dshgo/internal/session"
+	"dshgo/internal/transport"
+)
+
+// serveDelete 删掉一个会话目录（整个 id 目录，不只是一份文件）。
+//
+// 为什么删整个目录：v4 的一份会话就是 `<project>/<id>/session.v4.jsonl.zstd`，
+// 只删文件会留下一个空目录，下次列表还会扫到它、报"坏会话"。
+func serveDelete(home, sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("会话 id 为空")
+	}
+	path, err := session.FindByID(home, sessionID)
+	if err != nil {
+		// "找不到"必须和"删失败"分开：界面看到 404 才知道该换个 id，
+		// 看到 500 只会以为服务坏了、反复重试同一个不存在的会话。
+		// 真机就是靠这条抓到的：删不存在的会话回了 500。
+		return fmt.Errorf("%w: %v", transport.ErrNoSuchSession, err)
+	}
+	// 删的是这个会话的**目录**（内含 session.v4.jsonl.zstd 与 .lock）：
+	// 只删文件会留下空目录，列表下次还会扫到它并报"坏会话"。
+	return os.RemoveAll(filepath.Dir(path))
+}
+
+// serveFork 从已有会话开一个分支，返回新会话 id。
+//
+// 继承 surface、记 parentSession，**不继承授权**——这些语义全在 session.Fork 里，
+// 这里只做参数转换，不重复实现一遍。
+func serveFork(home, sessionID, title string) (string, error) {
+	if sessionID == "" {
+		return "", fmt.Errorf("会话 id 为空")
+	}
+	srcPath, err := session.FindByID(home, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", transport.ErrNoSuchSession, err)
+	}
+	src, err := v4.ReadFile(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("读源会话失败: %w", err)
+	}
+	newID := "session-" + session.NewID()
+	forked, err := session.Fork(src, home, src.Header.Cwd, newID)
+	if err != nil {
+		return "", fmt.Errorf("%w", err)
+	}
+	// 必须 Close 刷盘：否则新会话文件不完整，界面立刻 list 会看不到它。
+	if cerr := forked.Close(); cerr != nil {
+		return "", fmt.Errorf("新会话落盘失败: %w", cerr)
+	}
+	return newID, nil
+}
