@@ -107,6 +107,15 @@ func TextBlock(text string) map[string]any {
 	return map[string]any{"type": "text", "text": text}
 }
 
+// ReasoningBlock 是 assistant 消息里的思考块（H6）。
+//
+// 为什么放在 content 里而不是单独一种事件：v4 的 type 词汇表里没有
+// `assistant/reasoning`，而 content 块本来就是"一次回答由哪些块组成"的答案。
+// 单独造事件还要改词汇表与两侧折叠逻辑，收益抵不上风险。
+func ReasoningBlock(text string) map[string]any {
+	return map[string]any{"type": "reasoning", "text": text}
+}
+
 // ToolCallBlock 是 assistant 消息里的工具调用块。
 func ToolCallBlock(id, name, arguments string) map[string]any {
 	return map[string]any{"type": "tool-call", "id": id, "name": name, "arguments": arguments}

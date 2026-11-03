@@ -450,6 +450,9 @@ func cmdRun(argv []string) error {
 	var lastCallSeq int64
 	// 一轮的累计账（给 stats 行用）
 	var toolCalls, inTokens, outTokens int
+	// stepReasoning 攒这一步的思考文本：模型先吐 reasoning 再吐正文，
+	// 而我们要把它们放进**同一条** assistant/message 的 content 里（H6）。
+	var stepReasoning strings.Builder
 
 	// 审批守卫：`dshd run` 原来对写类工具是完全放行的，现在按 --policy 判定。
 	askFn, err := makeAskFunc(*policy)
@@ -485,9 +488,19 @@ func cmdRun(argv []string) error {
 		MaxSteps:     *maxSteps,
 		Emit: func(e agent.Event) error {
 			switch e.Kind {
+			case agent.EventReasoning:
+				// 只攒不推：v4 没有 assistant/reasoning 这个 type，
+				// 硬造一种事件要改词汇表和两侧折叠，收益抵不上风险。
+				stepReasoning.WriteString(e.Text)
+				return nil
 			case agent.EventAssistantMsg:
 				a := e.Assistant
-				blocks := make([]map[string]any, 0, 1+len(a.ToolCalls))
+				blocks := make([]map[string]any, 0, 2+len(a.ToolCalls))
+				// 思考块放在正文之前：折叠出来就是"先想了什么、再回答什么"。
+				if stepReasoning.Len() > 0 {
+					blocks = append(blocks, session.ReasoningBlock(stepReasoning.String()))
+					stepReasoning.Reset()
+				}
 				if a.Content != "" {
 					blocks = append(blocks, session.TextBlock(a.Content))
 				}
