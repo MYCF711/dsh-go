@@ -1,3 +1,13 @@
+## 当前状态（2026-11-03）
+
+- 宿主 44 工具 / 覆盖真实语料 99.7%；U0 13 个 method 全实现
+- 门禁 `bash scripts/check.sh` 13 项全绿（含 staticcheck、体积、token 预算、doc-links、race-guard）
+- 验证脚本三件套：`ui-e2e.py`（空 home 14/14）、`real-home-e2e.py`（真语料只读 10/10）、
+  `full-e2e.py`（13 method 15/15）
+- 跨界对账：`ui-contract-usage.py` → 界面引用的 13 个 method 与我们实现的**完全一致**
+- 派活模板（`docs/WORKER.md`）三条硬规矩：①没贴输出=没完成 ②造失败分支 ③失败分支不许碰仓外路径
+- 未完成：接口接 `dsh-ui` 实跑（那边 `cmd/app` 启动 panic，已出报告；等它修完再测）
+
 # MAINTENANCE.md —— 维护台账（给接手的 agent 看）
 
 > 接手前先读这一页，读完再按 `AGENTS.md` §5 的流程开工。
