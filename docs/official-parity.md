@@ -30,7 +30,7 @@
 | 缺的 | 官方插件 | 影响 |
 |---|---|---|
 | ~~**计划模式**~~ ✅ 已补 | `planning` + `plan-mode` | M306 落地：状态按会话落盘，跨轮生效（serve 每轮是新子进程） |
-| **程序化工具调用** | `workflow-ptc` + `tool-workflow` | 不能把"调用编排"写成脚本一次跑完；只能一轮一轮让模型自己调 |
+| ~~**程序化工具调用**~~ ✅ 已补（有限形态） | `workflow-ptc` + `tool-workflow` | M312：`workflow` 工具，参数名对齐 DSH（`script`/`meta`），但 **script 内容是 JSON 步骤表，不是 JS**（本仓 R6 不嵌 JS 运行时）。子调用走 ctx 里的 `spi.SubDispatch`，照样过审批/闸门/spill |
 | ~~**工具结果裁剪**~~ ✅ 已补 | `tool-result-pruner` | M307/M308：`internal/prune` 按字节/行预算裁，接在 `session.ProjectResult`，默认 16KB 高于 spill 最坏产出 |
 | **斜杠命令** | `command-goal` / `command-compact` 等 | 宿主没有 `/compact`、`/resume`、`/new` 这类入口，只能靠自然语言 |
 | **插件管理 / 市场** | `tool-plugin-manager` / `tool-plugin-market` | 装/停/看插件没有工具面；只能改 `dsh.toml` 重启 |

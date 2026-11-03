@@ -1397,6 +1397,28 @@
     }
   },
   {
+    "name": "workflow",
+    "description": "把一串工具调用写成步骤表一次跑完：前一步结果可用 ${var} 喂给后一步，省掉来回往返。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "script": {
+          "type": "string",
+          "description": "JSON 步骤表：[{\"tool\":\"grep\",\"args\":{…},\"save\":\"hit\"}]；后一步可用 ${hit} 引用前一步结果"
+        },
+        "meta": {
+          "type": "object",
+          "description": "可选的元信息，原样回显在结果里，便于调用方对账"
+        }
+      },
+      "required": [
+        "script"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "working_directory",
     "description": "查看或切换当前工作目录（影响 read/write/glob/grep 与新开的 bash）",
     "parameters": {

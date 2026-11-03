@@ -1,0 +1,165 @@
+package workflow
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"dshgo/internal/spi"
+)
+
+// fakeRunner 记录每次子调用的工具名与参数，并按预设返回。
+type fakeRunner struct {
+	calls []string
+	args  []string
+	reply func(tool string, args json.RawMessage) (spi.Result, error)
+}
+
+func (f *fakeRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
+	f.calls = append(f.calls, name)
+	f.args = append(f.args, string(args))
+	if f.reply != nil {
+		return f.reply(name, args)
+	}
+	return spi.Result{Summary: name + " 成功", Data: map[string]any{"from": name}}, nil
+}
+
+func ctxWith(r spi.Runner) context.Context {
+	return spi.WithSubDispatch(context.Background(), spi.SubDispatch{Runner: r})
+}
+
+// scriptArg 按宿主契约包一层：参数名是 script（内容是 JSON 步骤表）。
+func scriptArg(t *testing.T, steps string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{"script": steps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func run(t *testing.T, ctx context.Context, raw string) (spi.Result, error) {
+	t.Helper()
+	return (&Tool{}).Exec(ctx, json.RawMessage(raw))
+}
+
+// 顺序执行 + ${var} 把上一步结果喂给下一步。
+func TestSequentialStepsPassResults(t *testing.T) {
+	f := &fakeRunner{}
+	steps := `[{"tool":"glob","args":{"pattern":"*.go"},"save":"files"},
+	           {"tool":"grep","args":{"in":"${files}"}}]`
+	res, err := run(t, ctxWith(f), scriptArg(t, steps))
+	if err != nil {
+		t.Fatalf("不该失败：%v", err)
+	}
+	if len(f.calls) != 2 || f.calls[0] != "glob" || f.calls[1] != "grep" {
+		t.Fatalf("调用顺序不对：%v", f.calls)
+	}
+	// 第二步的参数里必须是第一步的结果，而不是字面量 "${files}"
+	if !strings.Contains(f.args[1], "glob") {
+		t.Fatalf("${files} 没被替换成上一步结果：%s", f.args[1])
+	}
+	if !strings.Contains(res.Text, "glob [ok]") || !strings.Contains(res.Text, "grep [ok]") {
+		t.Fatalf("trace 不完整：%s", res.Text)
+	}
+}
+
+// 单步失败**不是**脚本失败：错误记进 trace，继续往下跑，整体 err=nil。
+//
+// 这条是硬要求：宿主 agent 循环在 error 路径上会丢掉 Text/Data，
+// 那样"第几步失败了"这个最有用的信息就没了。
+func TestStepFailureDoesNotAbortScript(t *testing.T) {
+	f := &fakeRunner{reply: func(tool string, _ json.RawMessage) (spi.Result, error) {
+		if tool == "boom" {
+			return spi.Result{Hint: "炸了"}, context.DeadlineExceeded
+		}
+		return spi.Result{Summary: "还行"}, nil
+	}}
+	res, err := run(t, ctxWith(f), scriptArg(t, `[{"tool":"boom"},{"tool":"ok"}]`))
+	if err != nil {
+		t.Fatalf("单步失败不该让整个脚本返回 error：%v", err)
+	}
+	if !strings.Contains(res.Text, "boom [ERR]") {
+		t.Fatalf("失败步骤没标出来：%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "ok [ok]") {
+		t.Fatalf("失败之后应当继续执行后面的步骤：%s", res.Text)
+	}
+	m, _ := res.Data.(map[string]any)
+	if m["ok"] != false {
+		t.Fatalf("Data.ok 应当是 false：%v", m)
+	}
+	if m["failed"] != 1 {
+		t.Fatalf("失败计数应当是 1：%v", m)
+	}
+}
+
+// 没有编排通道时必须明确拒绝，并告诉模型改用普通工具。
+func TestNoSubDispatchIsRefused(t *testing.T) {
+	res, err := run(t, context.Background(), scriptArg(t, `[{"tool":"bash"}]`))
+	if err == nil {
+		t.Fatal("没有通道时必须报错")
+	}
+	if !strings.Contains(res.Hint, "SubDispatch") && !strings.Contains(res.Hint, "没有编排通道") {
+		t.Fatalf("Hint 要说清为什么不行：%q", res.Hint)
+	}
+}
+
+// script 不是合法 JSON 步骤表时，Hint 要指出**参数名对、语法不对**，
+// 否则模型会以为是自己拼错了参数名。
+func TestBadScriptExplainsSyntax(t *testing.T) {
+	_, err := run(t, ctxWith(&fakeRunner{}), scriptArg(t, `not json`))
+	if err == nil {
+		t.Fatal("坏 script 必须报错")
+	}
+}
+
+// 嵌套上限：workflow 里再套 workflow 要被拦住，别把栈打穿。
+func TestDepthLimit(t *testing.T) {
+	ctx := spi.WithSubDispatch(context.Background(),
+		spi.SubDispatch{Runner: &fakeRunner{}, Depth: spi.MaxSubDepth})
+	if _, err := run(t, ctx, scriptArg(t, `[{"tool":"bash"}]`)); err == nil {
+		t.Fatal("超过嵌套上限必须报错")
+	}
+}
+
+// 输出必须有界：步数一多，正文不能无限长。
+func TestTextIsBounded(t *testing.T) {
+	var steps []map[string]any
+	for i := 0; i < 300; i++ {
+		steps = append(steps, map[string]any{"tool": "t" + strings.Repeat("x", 40)})
+	}
+	stepsJSON, _ := json.Marshal(steps)
+	res, err := run(t, ctxWith(&fakeRunner{}), scriptArg(t, string(stepsJSON)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len([]rune(res.Text)); n > maxTextRunes+40 {
+		t.Fatalf("正文 %d 字，超过上限 %d", n, maxTextRunes)
+	}
+}
+
+// foreach：对数组逐项执行。
+func TestForeachRunsPerItem(t *testing.T) {
+	f := &fakeRunner{reply: func(string, json.RawMessage) (spi.Result, error) {
+		return spi.Result{Summary: "ok", Data: []any{"a", "b", "c"}}, nil
+	}}
+	res, err := run(t, ctxWith(f), scriptArg(t, `[{"tool":"list","save":"items"},
+		{"tool":"one","foreach":"${items}"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 4 { // list + 3 次 one
+		t.Fatalf("foreach 应当执行 3 次，总调用 %d：%v", len(f.calls), f.calls)
+	}
+	_ = res
+}
+
+// Caps：编排工具自己不写盘、不起进程——真正干活的是子调用。
+func TestCapsDeclareNothing(t *testing.T) {
+	c := (&Tool{}).Caps()
+	if c.Writes || c.Executes || c.Destructive {
+		t.Fatalf("workflow 自己不碰盘不起进程，Caps 应为空：%+v", c)
+	}
+}

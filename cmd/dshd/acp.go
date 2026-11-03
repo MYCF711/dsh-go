@@ -253,6 +253,13 @@ type guardedRunner struct {
 }
 
 func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
+	// 给"工具里再调工具"留一条**同样受管**的通道：放进去的是 g 自己，
+	// 所以子调用照样过审批、照样过计划模式闸门、照样过 spill。
+	// 不放这个，模块就只能去 Inject 裸 Pipeline —— 那等于绕开"问人"这一层。
+	if spi.SubDispatchFrom(ctx).Runner == nil {
+		ctx = spi.WithSubDispatch(ctx, spi.SubDispatch{Runner: g})
+	}
+
 	if t, ok := g.reg.Get(name); ok && t.Caps().NeedsApproval() {
 		remembered := g.approvals != nil && g.approvals.Allowed(g.sessionID, name)
 		allow, needAsk := approvalDecision(g.modeApproval, remembered)

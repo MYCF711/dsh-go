@@ -63,6 +63,10 @@ id      = "tool-plan"
 backend = "static"
 
 [[module]]
+id      = "tool-workflow"
+backend = "static"
+
+[[module]]
 id      = "tool-present"
 backend = "static"
 
