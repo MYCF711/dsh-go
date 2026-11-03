@@ -86,11 +86,19 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan struct{}) {
 	src := newSessionSource(r.home, "")
 	// 全程复用一个解码器：这个循环每 200ms 跑一次，建一次解码器就够。
-	rd, rerr := v4.NewReader()
-	if rerr != nil {
-		return
+	//
+	// DSHD_SERVE_NO_REUSE=1 时退回"每次新建"，只为做 A/B——
+	// 改动的收益必须能被同一台机器上的一次对照证明，不能靠"改完看着好了"。
+	noReuse := os.Getenv("DSHD_SERVE_NO_REUSE") == "1"
+	var rd *v4.Reader
+	if !noReuse {
+		var rerr error
+		rd, rerr = v4.NewReader()
+		if rerr != nil {
+			return
+		}
+		defer rd.Close()
 	}
-	defer rd.Close()
 	var (
 		offset  int64
 		lastSeq int64
@@ -114,7 +122,14 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 			}
 			// 增量读：只解上次之后的新帧。全量重读在 2.2 万事件的会话上是 301ms，
 			// 而这里每 200ms 读一次——读得比跑得还慢，界面会越落越远。
-			evs, next, err := rd.ReadSince(path, offset)
+			var evs []v4.Event
+			var next int64
+			var err error
+			if noReuse {
+				evs, next, err = v4.ReadSince(path, offset)
+			} else {
+				evs, next, err = rd.ReadSince(path, offset)
+			}
 			if err != nil {
 				continue
 			}
