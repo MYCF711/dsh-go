@@ -48,7 +48,9 @@ func ReadSummary(path string, maxBytes, maxRunes int) (string, error) {
 			if json.Unmarshal([]byte(line), &e) != nil {
 				continue
 			}
-			text := firstText(raw)
+			// 注意：要在**这一条事件的 data** 里找，不是在整帧 raw 里找——
+			// 一帧装很多行 JSON，拿它整体去 Unmarshal 必然失败，于是永远找不到文字。
+			text := firstText(e.Data)
 			if strings.TrimSpace(text) == "" {
 				continue
 			}

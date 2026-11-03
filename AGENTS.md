@@ -445,7 +445,17 @@
 - ✅ 变异第 14 条 `unknown-frame-treated-as-ping`（未知帧返回 ping）→ **CAUGHT**
 - ⚠️ 它第一版变异我写错了（`fmt.Errorf` 挪进闭包 → 编译不过 → `mutate.py` 判 **BAD**）。
   **编译不过的变异什么都没证明**——这条教训第 4 次踩，改成「default 直接返回 ping」才 CAUGHT
-- 下一步 **M103**：把六个 method + WS 串成一个能起来的 `http.Server`（`--port 0` + token 换 cookie）
+- ✅ **U0 端到端验收通过**（模拟界面，真实语料）：`/connect` 303+cookie → `/api/session.list`
+  **183 条真实会话** → `/ws` 101（Accept 校验）→ 收到 `{"seq":1,"type":"user/message"}`
+- ✅ 验收顺带抓到两条只在真连时才暴露的缝：CWD 带反斜杠（已修 `ToSlash`）、第一条会话标题是占位符
+- ⚠️ **我上一轮的结论是错的**：说「4.37s → 0.75s 且标题还在」。前半句对，**后半句错**——
+  `ReadSummary` 对 183 个会话**一个都没取到摘要**，全部退到 `(无标题)`，
+  而旧断言只要求 `Title != ""`，**占位符恰好骗过它**。已回滚，列表回到 4.37s
+- ✅ 新断言抓住它：`占位符不能占多数` → 当场 183/183 红。**「标题还在」不是断言，是愿望**
+- ✅ **`ReadSummary` 的真 bug 找到了**：`firstText(raw)` 传的是**整帧**（一帧装很多行 JSON），
+  `json.Unmarshal` 必然失败 → 永远返回空。改成 `firstText(e.Data)` 就对了
+- ✅ 重新接上后：**183 条会话 0.23 秒，标题都是真的**（占位符断言通过）
+- 下一步 **M112**：把 `session.load` / `history` 也接到 `/api` 路由上（现在只有 `list` 是真的）
 
 ### 界面线现状（2026-11-03）
 
