@@ -110,5 +110,13 @@
     "new": "\tdefault:\n\t\treturn ClientFrame{T: \"ping\"}, nil",
     "pkg": "./internal/transport",
     "test": "TestParseClientFrameRejectsUnknown"
+  },
+  {
+    "name": "api-allows-without-cookie",
+    "file": "internal/transport/server.go",
+    "old": "if !s.authorized(r) {",
+    "new": "if false && !s.authorized(r) {",
+    "pkg": "./internal/transport",
+    "test": "TestAPIRequiresCookie"
   }
 ]
