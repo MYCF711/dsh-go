@@ -469,7 +469,17 @@
   **查证工具自己错的时候，给的是一个很干净的错答案**
 - ⚠️ dshd 在"跨文件 + 要调外部 API + 要真跑起来验证"这三类任务上稳定失败：
   `serve.go`（漏接线两行）、`serve_turn.go`（25 次调用 0 产出）。这两块我接手的
-- 下一步 **M121**：`serve` 的 runner 接**工具循环**（现在只调一次模型，不跑工具）
+- ✅ **`serve` 真的跑工具了**（curl 驱动真进程，不是测试进程）：
+  `session.prompt "用 bash 执行 echo hello-dsh"` → 会话日志事件
+  `['session','system/message','turn/start','user/message','assistant/message',
+    'tool/call','tool/result','assistant/message','turn/end']`
+  实现方式：`loopRunner` 起子进程 `<自己> run --session … --policy deny`，
+  **不搬 cmdRun 的装配**（搬家会同时影响 run / schedule run / subagent 三条已验过的路）
+- ⚠️ **WS 上还没有 tool/call**：`follow` 只映射消息，盘上有、WS 上没有——
+  界面看得到"回答"，看不到"它调了什么工具"。下一轮按 seq 推全部事件
+- ⚠️ 探针自己不可靠时给的是"服务坏了"这个错结论：subprocess 读 ready 行时
+  第二次 readline 吞了后续输出，看起来像卡死。换 curl + 落盘文件立刻就好
+- 下一步 **M125**：`follow` 改成按 seq 增量推**全部事件**（tool/call、tool/result 也要）
 
 ### 界面线现状（2026-11-03）
 
