@@ -39,7 +39,7 @@ func (r noModelRunner) Run(_ context.Context, sessionID, turnID, _ string) error
 	err := errNoModel
 	// prompt 已经回过 200 了，界面唯一的消息来源就是这里。
 	// 不推这一帧，界面会永远停在"正在思考"。
-	publishTurn(r.pub, "session:"+sessionID, turnID, err)
+	publishTurn(r.pub, "session:"+sessionID, turnID, err, int(serveTurnSeq.Add(1)))
 	return err
 }
 

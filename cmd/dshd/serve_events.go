@@ -49,7 +49,13 @@ type turnErrorData struct {
 //
 // pub 为 nil（测试）或 topic 为空（不知道推给谁）时静默返回：
 // 这两种情况都不是"这一轮失败了"，不该伪造一条事件。
-func publishTurn(pub func(topic string, f transport.ServerFrame), topic, turnID string, err error) {
+// serveTurnSeq 是结局帧的序号源。
+//
+// 必须和事件流同一条线：以前它从 1 开始，跑第二轮时 turn/done 的 seq
+// 比客户端水位小，被 sinceSeq 过滤掉——界面永远等不到"这一轮结束了"。
+var serveTurnSeq atomic.Int64
+
+func publishTurn(pub func(topic string, f transport.ServerFrame), topic, turnID string, err error, seq int) {
 	if pub == nil || topic == "" {
 		return
 	}
@@ -71,7 +77,7 @@ func publishTurn(pub func(topic string, f transport.ServerFrame), topic, turnID 
 	// 直接构造而不是走 NewServerFrame：它会对 seq<=0 / type 为空 / data 非法报错，
 	// 而这三样在这里都不可能发生（seq 由自增保证 ≥1，type 是常量，data 来自 Marshal）。
 	pub(topic, transport.ServerFrame{
-		Seq:  int(turnSeq.Add(1)),
+		Seq:  seq,
 		Type: typ,
 		Data: data,
 	})

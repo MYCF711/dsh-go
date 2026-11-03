@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"dshgo/codecs/v4"
@@ -22,6 +23,9 @@ import (
 //
 // 写锁：子进程按既有规矩拿会话写锁；这里**只读**日志，不抢锁。
 type loopRunner struct {
+	// turnSeq 是结局帧用的序号，必须跟事件流的 seq 同一条线：
+	// 以前它从 1 开始，于是跑第二轮时 turn/done 的 seq 比客户端水位小，被过滤掉。
+	turnSeq  atomic.Int64
 	pub      func(topic string, f transport.ServerFrame)
 	home     string
 	policy   string
@@ -31,7 +35,7 @@ type loopRunner struct {
 func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) error {
 	exe, err := os.Executable()
 	if err != nil {
-		publishTurn(r.pub, "session:"+sessionID, turnID, err)
+		publishTurn(r.pub, "session:"+sessionID, turnID, err, int(serveTurnSeq.Add(1)))
 		return err
 	}
 	args := []string{"run",
@@ -46,7 +50,7 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
-		publishTurn(r.pub, "session:"+sessionID, turnID, err)
+		publishTurn(r.pub, "session:"+sessionID, turnID, err, int(serveTurnSeq.Add(1)))
 		return err
 	}
 	// 把子进程的身份写在 stderr 上：出问题时第一句该问的是"它到底起没起来"。
@@ -75,10 +79,10 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	topic := "session:" + sessionID
 	if werr != nil {
 		e := fmt.Errorf("run 失败：%v；stderr: %s", werr, strings.TrimSpace(tail(stderr.String(), 400)))
-		publishTurn(r.pub, topic, turnID, e)
+		publishTurn(r.pub, topic, turnID, e, int(serveTurnSeq.Add(1)))
 		return e
 	}
-	publishTurn(r.pub, topic, turnID, nil)
+	publishTurn(r.pub, topic, turnID, nil, int(serveTurnSeq.Add(1)))
 	return nil
 }
 
@@ -151,6 +155,9 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 					continue
 				}
 				lastSeq = ev.Seq
+				if ev.Seq > r.turnSeq.Load() {
+					r.turnSeq.Store(ev.Seq)
+				}
 				if r.pub == nil {
 					continue
 				}
