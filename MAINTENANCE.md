@@ -2,6 +2,7 @@
 
 - 宿主 44 工具 / 覆盖真实语料 99.7%；U0 13 个 method 全实现
 - 门禁 `bash scripts/check.sh` 13 项全绿（含 staticcheck、体积、token 预算、doc-links、race-guard）
+- **一条命令跑完回归**：`bash scripts/regress.sh`（先清残留进程 → 三套 e2e → 门禁）
 - 验证脚本三件套：`ui-e2e.py`（空 home 14/14）、`real-home-e2e.py`（真语料只读 10/10）、
   `full-e2e.py`（13 method 15/15）
 - 跨界对账：`ui-contract-usage.py` → 界面引用的 13 个 method 与我们实现的**完全一致**

@@ -341,3 +341,33 @@ go list -deps ./internal/transport | grep -E 'ui/|cmd/dshui'   # 必须无输出
 - 前端产物体积、`dshd` 二进制体积（含 embed 后）两个数字都要贴。
 - **U1 的唯一验收是"自己用它干一天活"**——不是截图好看，不是测试全绿。
 
+---
+
+## 12. 界面线 → 宿主线的需求（**唯一通道**）
+
+界面线（`dsh-ui` 仓库，原生 Viva 版）需要宿主侧多做一步的东西，**一律写进下面这张表**，
+不要只在对话里口头提——宿主线的会话读的是这份 AGENTS.md，看不到另一个会话的聊天记录。
+
+**约定（两边都要守）**
+
+| 谁 | 做什么 |
+|---|---|
+| 界面线 | 把需求加进本表：写清**要什么字段/语义**、**为什么界面需要它**、**怎么验**。已经有替代做法的写清替代方案 |
+| 宿主线 | 做完把状态改成 ✅，在 `CHANGELOG.md` 记一行（版本号 + 一句话）；没做就保持 ⏳ 并写卡点（卡在哪、需要谁拍板） |
+| 界面线 | 表里还是 ⏳ 的，界面侧**显示「未知 / 整段不显示」，绝不编数据**——假数字比没有更糟，这条已经写进界面线的契约文档 |
+| 两边 | 改契约（字段名、形状）先改 `testdata/api.snapshot.json`，再改代码（对齐 R4） |
+
+**当前需求**
+
+| # | 状态 | 要什么 | 为什么界面需要 | 怎么验 |
+|---|---|---|---|---|
+| H1 | ⏳ | `session.load` 的每条 `assistant/message` 带 `usage{inputTokens,outputTokens,totalTokens,cacheReadTokens}`，响应顶层再给一份合计 | 底部状态栏要显示 `↑输入 ↓输出 · tok/s · 上下文`。现在界面只能从**磁盘日志**里解，真宿主接上后没这个字段就只能退回只显示轮数/步数 | `curl -XPOST /api/session.load` 返回的 usage 里 `outputTokens > 0` |
+| H2 | ⏳ | 事件的墙钟时间 `time`（epoch 毫秒），每条事件都要有 | `tok/s` = outputTokens ÷ 相邻两条 assistant 事件的时间差。没有 `time` 就算不出速率（宿主从不提供耗时） | 同会话相邻两条 `assistant/message` 的 `time` 单调不减；差值 ∈ (0,120]s 时能算出 >0 的速率 |
+| H3 | ⏳ | `session.load` 的 `messages[].view`：把工具的 `spi.ViewSpec` 原样透传（`kind` = card/table/plain + 各自字段） | 界面按 `kind` 选渲染器（卡片/表格/原文）。没有它，工具卡只能是「工具名 + 一行摘要」 | `bash` → `kind:"card"` 且有 `fields`；`grep`/`ls`/`glob` → `kind:"table"` 且有 `columns`/`rows`；`read`/`write` → `kind:"plain"` 且有 `body` |
+| H4 | ⏳ | `session.load`（或 `session.list`）带当前会话的 `model`（模型 id 字符串） | 顶栏要显示「这是哪个模型在答」。没有就本该显示模型的位置整段不画 | 有值时顶栏出现模型名；空值时不出错、不显示占位符 |
+| H5 | ⏳ | 当前权限状态（permission preset 名，例如 `default` / `readonly`） | 顶栏要一个权限徽标。**不许拿 `mode` 冒充权限**：那是两件事 | 返回一个非空 preset 名；界面按名字显示，未知名字显示原文不猜含义 |
+| H6 | ⏳ | WS `/api/mux` 的助手增量里**保留 `reasoning` 块**（别只发 text） | 真实日志里 reasoning 块 **9960 条** vs text **1140 条**——思考比正文多八倍，界面已经把它做成可折叠的「▸ 思考 · N 字」。实时流不带就只能等落盘后再解，流式期间看不到 | 流式期间能收到 `reasoning` 增量；总字数与落盘日志一致 |
+| H7 | ⏳ | `assistant/message` 的 content **落法统一**（统一 `data.content`，或两种都兼容） | 界面上踩过真事故：有的日志放 `data.content`、有的放 `data.message.content`，只读一处会让**整个会话的助手消息一条都不显示** | 抽 20 个真实会话，`session.load` 后每条会话的 `assistant` 消息数 > 0 |
+
+> H1–H7 的界面侧代码都已经写好并跑通（数据来源暂时是 `dsh-ui` 自己的 `cmd/mockd` 解真实日志）。
+> 宿主侧一旦提供，界面侧只需把数据源从 mockd 换到 `internal/transport`，**渲染代码一行不用改**。
