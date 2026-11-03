@@ -62,8 +62,8 @@ h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
 
 | # | 状态快照 | 需求、已有证据与剩余完成判据 |
 |---|---|---|
-| **H1 usage** | 🟡 两端有分项证据，同版本整链待验 | `usageTotal{inputTokens,outputTokens,totalTokens,cacheReadTokens}` 是全会话累计；`contextTokens` 是最近一条 totalTokens。tail=1/50 合计不变的单测/真机记录已有。UI 状态栏已有真机数字证据；仍需同版本联合复核与未知不补零。 |
-| **H2 time** | 🟡 宿主侧有证据，UI 待验 | 消息与流帧带墙钟 time；40,231 真实事件缺时/回退为 0，终局帧 time 已补。缺时/非正间隔 UI 显示未知；相邻 assistant 差值含等待/工具，只能称区间估算。 |
+| **H1 usage** | 🟡 宿主侧已验（M245），界面消费未验 | `usageTotal{inputTokens,outputTokens,totalTokens,cacheReadTokens}` 是**全会话累计**，`contextTokens` 是**最近一条** totalTokens（累计一直涨、上下文随压缩回落，两件事）。证据：`TestLoadSessionUsageTotalIndependentOfTail`（tail=1 与 50 合计一致）、真机同会话两次 load 得到同一组 `input 7409 / output 211 / total 7620`。**仍未验**：界面实际消费这两个数、未知时不补零 |
+| **H2 time** | 🟡 宿主侧已验（M247），界面消费未验 | 消息与**流帧**都带墙钟 `time`。证据：40,231 条真实事件 `time<=0` 0 条、回退 0 处；WS 修前 4/5（`turn/done` 终局帧漏 time）→ 修后 5/5 且单调不减；`TestServerFrameCarriesTime`。**仍未验**：界面遇到缺时/非正间隔时显示未知；相邻 assistant 差值含等待与工具耗时，只能当区间估算 |
 | **H3 ViewSpec** | ✅ 提供端历史证据 | `messages[].view` 透传 card/table/plain，nil 省略；联调仍需核三种 view 与无 view 回退。 证据：`TestLoadPassesViewThrough` |
 | **H4 model** | ✅ 提供端历史证据 | 取最近一条非空 `request/context.model`；UI LoadResult/顶栏实际消费，空值不画。 证据：`TestLoadCarriesModelOrOmitsIt` |
 | **H5 permission** | ✅ 提供端字段存在 | 是当前进程 policy（deny/ask/allow/auto），不是 mode；UI 显示真实 policy，空值不画。 证据：`TestLoadCarriesProcessPolicy` |
@@ -71,7 +71,7 @@ h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
 | **H7 content** | ✅ 两种落法有单测 | 固定已完成且原日志确有 assistant 的样本验 `data.content` 与 `data.message.content`；失败/取消/在途可合法无 assistant。 证据：`TestAssistantMessageBothContentShapes`、`TestAssistantMessageKeepsToolCalls`。**2026-11-03 补测时发现顶层 `content` 那种落法根本没被认**（正文投影成空串），已修。|
 | **H8 HTTP 响应** | ✅ 宿主侧闭环（2026-11-03 M262） | 任意成功类型包 `result`；**所有错误出口四字段**——含序列化失败：`writeJSON` 的兜底正文改走 `errorBody`，`encode_failure` 有可照做的 hint。测试 `TestWriteJSONEncodeFailureHasFourFields`（用 chan 触发真失败）、`TestWriteJSONEnvelopesAnyType`（map/struct/slice/pointer）、`TestEncodeFailureHintIsActionable` | 仍未验：真实 apiclient 对契约夹具复验（跨仓）。 |
 | **H9 load 入参** | ✅ 宿主单测，UI 待验 | id/sessionId、limit/tailMessages 均收；sessionId 优先 id，limit 优先 tailMessages。仅 id/tailMessages 时 limit=2 已测；UI 只发契约名复验。 证据：`TestLoadAcceptsContractNames` |
-| **H10 list→load** | 🟡 宿主 5/5，跨仓待验 | 同新二进制/临时 home：create→list→每个 id 两种名字 load→prompt→再 load 已验。脚本绕开 UI apiclient，不能证明跨仓；真实 home 副本遍历与 UI 消费待做。 |
+| **H10 list→load** | 🟡 宿主侧 5/5（M244），跨仓未验 | `scripts/h10-chain.py`：同一新二进制 + 全新临时 home，create 给 id、list 含它、**list 里每个 id 用两种入参名（`sessionId` / `id`+`tailMessages`）都能 load**、prompt 后能 load 到 assistant、响应是 `{result:…}` 信封 —— OK=5 FAIL=0。**仍未验**：真实 home 全量 id 遍历（home 只读，要把项目目录复制到临时 home）与界面消费 |
 | **H11 ready stdout** | ✅ 进程级 4/4 | 完整 stdout 恰好一行 ready，后续为合法 JSON 且含 url/token；policy 诊断只去 stderr。 证据：`scripts/h11-stdout.py` |
 | **H12 contentWidth** | ✅ 宿主侧闭环（2026-11-03 M263） | 只有**正数**才算"知道宽度"：0 与负数都按未知处理、字段直接不出现（负数放过去会让界面画出负宽度容器：怪但没崩，没人会去查宿主）。值以裸数字传输 证据：`TestContentWidthContract` | 真机：`--content-width 748` → `contentWidth=748`；不传 → 字段不存在。单测三条（0/748/负数）+ 一条"必须是数字不是字符串"。仍未验：原生壳提供真实列宽并消费 |
 | **H13 真审批** | ✅ 宿主侧整链（2026-11-03 M258–M261） | `session.approve`；子进程 `@@APPROVAL@@` 标记通道；父进程 broker 逐行扫 stderr → `approval/request`（进 journal 可重放）；120s 超时按拒绝并推 `approval/timeout`；`allow_always` 按「会话+工具」记忆且只在内存/本进程。证据：`scripts/h13-approval-e2e.py`（允许→文件真出现 2/2）、`scripts/h13-timeout.py`（4/4）、`scripts/h13-replay.py`（断线重连 3/3）、`scripts/h13-allow-always.py`（只问一次 2/2）、`TestBrokerResolveWritesAllowBack`。**仍未验**：界面实际回传（本仓无界面） |
