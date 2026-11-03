@@ -410,10 +410,24 @@ func checkWasmModules(manifest string) checkResult {
 		return c
 	}
 	c.OK = true
-	var names []string
+	// 两种模块要说两种话：`provides=["tool"]` 的已经进工具表（模型能调），
+	// 没写的只能手动调。一句"都不提供工具"对前者是**错的**，
+	// 而它恰恰是最容易让人以为"wasm 还没接上"的那句话。
+	var withTool, withoutTool []string
 	for _, m := range mods {
-		names = append(names, m.ID)
+		if m.Register != nil {
+			withTool = append(withTool, m.ID)
+			continue
+		}
+		withoutTool = append(withoutTool, m.ID)
 	}
-	c.Detail = strings.Join(names, "、") + "（已装载；注意它们不提供工具，只能 dshd wasm call 手动调）"
+	var parts []string
+	if len(withTool) > 0 {
+		parts = append(parts, strings.Join(withTool, "、")+"（已注册工具，模型可见）")
+	}
+	if len(withoutTool) > 0 {
+		parts = append(parts, strings.Join(withoutTool, "、")+"（不提供工具，只能 dshd wasm call 手动调）")
+	}
+	c.Detail = strings.Join(parts, "；")
 	return c
 }

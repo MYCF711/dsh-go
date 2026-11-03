@@ -490,3 +490,279 @@ export WASMOPT="$(cygpath -w /tmp/binaryen-version_133/bin/wasm-opt.exe)"
 cd tmp/abispike/tguest
 /tmp/tinygo-0.44.0/tinygo/bin/tinygo.exe build -buildmode=c-shared -target=wasi -o ../out/tinygo-cshared.wasm .
 ```
+
+---
+
+## 8. 落地记录（2026-11-04）
+
+> 这一节是**已经发生的**，不是计划。§1–§7 的结论一条没改，只是把其中"下一步要改哪几个文件"的前三步做掉了。
+> 下面的输出都是本轮原样摘的。环境：`go1.27.3 windows/amd64`、`wazero v1.12.0`、`GOCACHE=/tmp/gocache-wtool`。
+
+### 8.1 一句话结论
+
+manifest 里写 `provides = ["tool"]` 的 wasm 模块，现在**真的在工具表里有一个工具**：模型看得见、`dshd tools` 打得出、`dshd exec` 调得动、`dshd modules graph` 有它一行。
+没写这个声明的 wasm 模块，行为与落地前**逐字节一致**（工具表 sha256 都相同，见 §8.6 第 4 条）。
+
+### 8.2 改了哪些文件
+
+| 文件 | 改了什么 |
+|---|---|
+| `internal/wasmhost/wasmhost.go` | `Load`：① 装 `wasi_snapshot_preview1`（§1.3 末尾那个 `module[wasi_snapshot_preview1] not instantiated` 就是缺这一步）；② 按导出表判形态——有 `_initialize` 就是 reactor，用 `WithStartFunctions("_initialize")`；只有 `_start` 就明确报错"用 `-buildmode=c-shared` 重编"（配错 start 名 wazero 不报错，见 §1.2(c)）；③ 客人 stdout/stderr 收进 4 KiB 环形缓冲，trap 时拼进错误（§1.3 那句被吃掉的 `call _initialize first` 不再丢） |
+| `internal/wasmhost/abi.go`（新） | `InvokeTool` / `ParseReply` / `Request` / `Reply` / 三个上限 / `ErrGuestTrap` / `ErrProtocol` / `TrapError` / `ProtocolError` / `SetToolName` / `SetTimeout` |
+| `internal/wasmhost/abi_test.go`（新） | 8 条（§8.6） |
+| `internal/wasmhost/testdata/toolplugin/main.go`（新） | Go 源码夹具：`//go:wasmexport alloc/call`，实现 ABI，返回 `{"summary":…,"text":…}` |
+| `internal/wasmhost/testdata/toolplugin.wasm`（新，入库） | 上面那份用 `-buildmode=c-shared` 编出来的 reactor，**4,458,584 字节**（sha256 `35cde818…`，脚本连跑两次同值） |
+| `cmd/dshd/wasmload.go` | `provides = ["tool"]` → 生成 `kernel.Module{Requires:["tools"], Register: 注册一个 spi.Tool}`；新增 `wasmTool` / `wasmToolSpec` / `hintForWasmError` / `parseWasmCaps`；`modules graph` 的 wasm 小节多一列 TOOL |
+| `cmd/dshd/wasmload_test.go` | 新增 6 条、改写 1 条（原 `TestWasmProvidesRejected` 的语义变了） |
+| `scripts/build-wasm-fixture.py` | 继续产出 60 字节纯 wasm；**新增**编 `toolplugin.wasm`（`GOOS=wasip1 GOARCH=wasm -buildmode=c-shared -trimpath`） |
+| `docs/wasm-tool-abi.md` | 这一节 |
+
+**没动**（本轮边界）：`internal/kernel/`、`internal/transport/`、`modules/`、`dsh.toml`、`PLAN.md`、`AGENTS.md`、`cmd/dshd/serve*.go`。
+
+### 8.3 ABI 字段名（定稿）
+
+两个导出（名字写死在宿主里，换客人编译器不用改宿主）：
+
+```
+alloc(n: i32) -> ptr: i32                 客人划 n 字节，返回线性内存偏移
+call(ptr: i32, n: i32) -> (ptr<<32)|len   吃 args JSON，吐结果 JSON
+```
+
+**请求**（宿主 → 客人，JSON，写进客人 `alloc` 出来的区间）：
+
+```json
+{ "v": 1, "tool": "echo", "args": { /* 模型给的参数，原样嵌入，不二次编码成字符串 */ } }
+```
+
+**结果**（客人 → 宿主，JSON，通过返回值的 `ptr<<32|len` 指回来）：
+
+```json
+{ "v": 1, "summary": "一行给人看", "text": "给模型看的正文", "isError": false, "hint": "失败时给下一步" }
+```
+
+| 字段 | 必填 | 谁读 | 规矩 |
+|---|---|---|---|
+| `v` | **是** | 宿主 | 只认 `1`；对不上按**宿主协议错**处理，不按工具失败 |
+| `tool` | 是（请求） | 客人 | 一个模块一个工具时看着多余，但将来一模块多工具不用改 ABI |
+| `args` | 是（请求） | 客人 | 原样嵌入对象，不是字符串 |
+| `summary` | **是** | 人（TUI/桌面） | 一行摘要 |
+| `text` | **是** | 模型 | 已渲染好的正文，非空时投影只用它 |
+| `isError` | **是** | 宿主 | **工具失败的唯一表达方式**（见下表） |
+| `hint` | 否 | 模型 | 失败时的下一步；空则由宿主兜一条可行动的 |
+
+上限与超时（超限 = 宿主协议错，不是工具失败）：args ≤ **1 MiB**、结果 ≤ **1 MiB**、单次调用默认 **10 s**（manifest `timeout_ms` 可改）。
+
+**失败分四层，出口完全不同**（这是整个 ABI 最重要的一条，`abi.go` 就是按它写的）：
+
+| 情况 | 客人侧 | `InvokeTool` 返回 | `Exec` 产出 |
+|---|---|---|---|
+| 业务失败（参数不对、文件不存在…） | 正常返回，信封 `isError:true` | `nil` error + 合法 JSON | `Result{Summary,Text,Hint}, err`（Hint 优先用客人的） |
+| 客人崩溃（panic / 越界 / 断言） | trap，永不返回 | error，`errors.Is(err, ErrGuestTrap)` | `Result{Hint:"插件内部崩溃…不要原样重试"}, err` |
+| 宿主协议错（指针越界、长度超限、坏 JSON、`v` 不认识、返回长度 0） | 客人没做错 | error，`errors.Is(err, ErrProtocol)` | `Result{Hint:"ABI 对不上…报给用户"}, err` |
+| 超时 / 取消 | 执行被打断 | error，`errors.Is(err, context.DeadlineExceeded/Canceled)` | `Result{Hint:"缩小输入再试…"}, err` |
+
+### 8.4 manifest 怎么写（这就是开关）
+
+```toml
+[[module]]
+id      = "wasm-echo"
+backend = "wasm"
+path    = "echo.wasm"          # 相对**manifest 所在目录**解析，不是 cwd
+digest  = "<sha256，64 位十六进制>"   # 可选，但建议写：内容被换要在启动时炸
+provides = ["tool"]            # 开关。不写 = 老行为：装载但不提供任何能力
+tool_name        = "echo"      # 必填：模型看到的工具名
+tool_description = "把 text 原样回显"   # 必填：模型看到的「什么时候用它」
+tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}'''
+tool_caps        = []          # 可选：writes / executes / network / destructive，默认全 false
+timeout_ms       = 2000        # 可选，默认 10000
+```
+
+几条定下来的语义：
+
+- **`provides` 只认 `"tool"`**。写 `["compaction"]` 之类直接报错并点名是哪个能力——这一层做的是"一个模块 = 一个工具"，别的还没实现，写进去就是骗读 manifest 的人。
+- **`"tool"`（单数）不是服务键 `"tools"`（复数）**。`tools` 是**别人提供**的工具目录，wasm 模块靠 `Requires: ["tools"]` 才能 `Inject` 进去注册；`tool` 是它要**贡献**的东西。`modules graph` 的 PROVIDES 列显示 `tool`、REQUIRES 列显示 `tools`，两列都在就是为了让人分清这件事（`provides` 的值由 `kernel.Apply` 原样复制到装配结果，装载层不另编一个）。
+- **身份字段全在 manifest**（Name/Description/Schema/Caps）。不从客人那里问的理由见 §3.6：Caps 决定审批与沙箱，让客人自己声明等于让它自己给自己发许可证。
+- **默认 `caps` 全 false 是沙箱强制的**，不是客人的自我介绍：宿主不给任何 FS preopen、不传 args/env、只挂 `wasi_snapshot_preview1` 的最小面。manifest 写更严的 caps（比如 `destructive`）只是让审批更早介入。
+- 写错任何一项（缺 `tool_name`、schema 不是 JSON 对象、`tool_caps` 拼错）都在**装配期**失败并说清缺什么——这些错误在运行时的表现是"模型不会用这个工具"，从现象归因不到 manifest。
+
+### 8.5 一个 wasm 插件作者要写什么
+
+**两件事：两个导出 + 一个信封。** 没有 WIT、没有 component model、没有绑定库、不用学新语言——Go 客人就是普通 Go。
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"unsafe"
+)
+
+var keep [][]byte // 必须：宿主拿到的只是偏移，Go 看不见还有人在用这块内存
+
+//go:wasmexport alloc
+func alloc(n uint32) uint32 {
+	if n == 0 {
+		return 0
+	}
+	b := make([]byte, n)
+	keep = append(keep, b)
+	return uint32(uintptr(unsafe.Pointer(&b[0])))
+}
+
+//go:wasmexport call
+//go:nocheckptr
+func call(ptr, n uint32) uint64 {
+	in := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(ptr))), n)
+
+	var req struct {
+		V    int             `json:"v"`
+		Tool string          `json:"tool"`
+		Args json.RawMessage `json:"args"`
+	}
+	_ = json.Unmarshal(in, &req)
+
+	// ……你的逻辑：req.Args 里就是模型给的参数……
+	out, _ := json.Marshal(map[string]any{
+		"v": 1, "summary": "一行摘要", "text": "给模型看的正文", "isError": false,
+	})
+	buf := make([]byte, len(out))
+	copy(buf, out)
+	keep = append(keep, buf)
+	return uint64(uint32(uintptr(unsafe.Pointer(&buf[0]))))<<32 | uint64(uint32(len(buf)))
+}
+
+func main() {} // reactor 里不会被执行，但 c-shared 要求有 main 包
+```
+
+构建（**两条都不能少**，见 §1）：
+
+```bash
+GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath -o echo.wasm .
+```
+
+然后写 manifest（§8.4），`dshd tools --manifest …` 里就会出现 `echo`。
+
+**三条不许做的事**（做了宿主会给出错误的方向）：
+
+1. **不要用 trap 表达业务失败。** panic 是"插件崩了"，宿主会告诉模型"别原样重试"；参数不对请正常返回 `isError:true` + `hint`。
+2. **不要返回空结果。** `len=0` 是协议错（宿主会当作 ABI 坏了），不是"工具说没事"。
+3. **不要指望能碰外面。** 没有 FS preopen、没有网络、没有 args/env；Caps 只能由 manifest 声明。
+
+参考实现就在 `internal/wasmhost/testdata/toolplugin/main.go`，测试用的 `toolplugin.wasm` 是它的产物。
+
+### 8.6 验收（逐条，真实输出）
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+export GOCACHE=/tmp/gocache-wtool
+$ go build ./... && go vet ./...
+OK（无输出）
+
+$ go test ./internal/wasmhost ./cmd/dshd -count=1
+ok  	dshgo/internal/wasmhost	5.095s
+ok  	dshgo/cmd/dshd	7.327s
+
+$ python scripts/build-wasm-fixture.py
+生成 internal\wasmhost\testdata\fixture.wasm 60 字节（手写纯 wasm：add / spin）
++ (cd internal\wasmhost\testdata\toolplugin && build -buildmode=c-shared -trimpath -o ...\toolplugin.wasm .)
+生成 internal\wasmhost\testdata\toolplugin.wasm 4458584 字节（Go reactor：_initialize / alloc / call）
+
+$ go build -o tmp/dshd.exe ./cmd/dshd
+OK
+```
+
+**1. ABI 往返**（`internal/wasmhost`）：`TestInvokeToolRoundTrip` 给出 `{"text":"你好"}`，拿回合法 JSON，`summary`/`text` 都含"你好"。
+
+```
+--- PASS: TestInvokeToolRoundTrip (1.15s)
+--- PASS: TestInvokeToolBusinessErrorIsNotTrap (0.93s)   # isError:true 时 InvokeTool 仍是 nil error
+```
+
+**2. trap ≠ 成功**（`TestInvokeToolTrapIsError`）：`{"boom":true}` → `errors.Is(err, ErrGuestTrap)`，返回的字节长度为 0。
+
+```
+--- PASS: TestInvokeToolTrapIsError (1.05s)
+```
+
+**3. `isError:true` → Exec 的 error + Hint**（`cmd/dshd`）
+
+```
+--- PASS: TestWasmToolBusinessErrorGivesHint (0.78s)
+--- PASS: TestWasmToolTrapGivesHint (0.76s)
+```
+
+**4. 没有 `provides=["tool"]` 的 wasm 模块，工具表逐字节不变**（`TestWasmWithoutProvidesKeepsToolTable`）。真机上再验一遍：
+
+```
+$ sha256sum tmp/tools-a.json tmp/tools-b.json
+0807348b2ff99e19f85cc7268962dfe60f15962d6bd52d95306f1f9a7e61baf2  tmp/tools-a.json   # 没有 wasm 模块
+0807348b2ff99e19f85cc7268962dfe60f15962d6bd52d95306f1f9a7e61baf2  tmp/tools-b.json   # 有 wasm 模块，但没写 provides
+$ diff tmp/tools-a.json tmp/tools-b.json && echo 逐字节相同
+逐字节相同
+```
+
+**5. 真机：`modules graph` 能看到它**
+
+```
+$ ./tmp/dshd.exe modules graph --manifest tmp/wasm-tool-manifest.toml
+# 激活顺序（由能力依赖决定，不是 manifest 行顺序）
+MODULE                 BACKEND   PROVIDES                   REQUIRES
+tools                  static    tools,toolrunner
+tool-nowline           static                               tools
+wasm-echo              wasm      tool                       tools
+
+# wasm 后端（已装载 / 已校验；TOOL 列 = 注册进工具表的工具名，空表示不提供能力、只能 `dshd wasm call` 手动调）
+MODULE                 BACKEND   DIGEST       EXPORTS            TOOL                   PATH
+wasm-echo              wasm      35cde81846d2 _initialize,alloc,call echo                   D:\...\internal\wasmhost\testdata\toolplugin.wasm
+```
+
+**6. 真机：`tools` 里出现那个工具名**
+
+```
+$ ./tmp/dshd.exe tools --manifest tmp/wasm-tool-manifest.toml
+[
+  {
+    "name": "echo",
+    "description": "把 text 原样回显（wasm 夹具工具）",
+    "parameters": { "additionalProperties": false, "properties": { "text": { "type": "string" } },
+                    "required": ["text"], "type": "object" },
+    "caps": {}
+  },
+  … 另外 1 个（now_line）
+]
+工具 2 个，600 字节
+```
+
+**7. 真机：真的调得动 / 三种结局**
+
+```
+$ ./tmp/dshd.exe exec --tool echo --args '{"text":"你好"}' --manifest tmp/wasm-tool-manifest.toml
+{ "Summary": "收到 你好", "Data": null, "Text": "echo:你好", … "Hint": "", … }     [exit=0]
+
+$ ./tmp/dshd.exe exec --tool echo --args '{}' --manifest tmp/wasm-tool-manifest.toml
+执行失败: 空输入：args.text 是空的
+提示: 传 {"text": "..."}：这个夹具工具只把 text 原样回显        [exit=1]
+
+$ ./tmp/dshd.exe exec --tool echo --args '{"boom":true}' --manifest tmp/wasm-tool-manifest.toml
+执行失败: wasm 工具 "echo" 执行失败: wasm 模块 "wasm-echo" 在 call 里 trap（插件内部崩溃，不是工具失败）: wasm error: unreachable
+提示: 插件内部崩溃（wasm trap），不是你的参数错了：不要原样重试；换一种做法，或改用别的工具
+```
+
+trap 那一条还带回了客人的 stderr（就是 §1.3 里被丢掉的东西）：
+
+```
+客人 stderr: panic: toolplugin: 故意 panic，用来验证 trap 不等于工具失败
+goroutine 1 [running]:
+main.call(0x2d2000, 0x2a)
+	dshgo/internal/wasmhost/testdata/toolplugin/main.go:99 +0x19
+```
+
+### 8.7 本轮没做 / 已知缺口
+
+1. **实例不重建**：trap 或超时后 wazero 会把 module 关掉，之后这个模块不能用，直到重启宿主。§3.5 推荐的"死亡重建"没做（`CompileModule` 的结果还在手里，重建只要 2–3 ms，是下一步）。
+2. **一个部署只能有一个 wasm 工具模块**：多个都写 `provides = ["tool"]` 会撞 kernel 的"能力被两个模块同时提供"。要放开得换标记（per-module 字段）或让 kernel 认识"能力种类"，**不用改 kernel 也能做**（装载层自己解析 manifest）。
+3. **schema 不从客人取**：仍是 manifest-pinned（§6 第 3 行的建议没变）。
+4. **`cmd/dshd/doctor.go` 的 wasm 文案过期**：`checkWasmModules` 无条件说"它们不提供工具，只能 `dshd wasm call` 手动调"，现在对 `provides=["tool"]` 的模块是错的。该文件不在本轮边界内，未改。
+5. **并发 / `-race` 没跑**：`bash scripts/race.sh` 要在隔离副本里跑，本轮没做；`InvokeTool` 已按"每实例一把锁"串行化同一模块的调用（实测 §3.4 的设计推断，不是压测结论）。
+6. **体积 4.4 MB**（Go 客人固有，见 §2.3）。要小就换 TinyGo，宿主一行不用改。
+7. 上一轮 §7 里没验的那些（interpreter 引擎、c-archive、千次实例化泄漏、恶意客人）本轮同样没验。
