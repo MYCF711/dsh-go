@@ -102,5 +102,13 @@
     "new": "\tfunc() {",
     "pkg": "./cmd/dshd",
     "test": "TestSubmitReturnsImmediately"
+  },
+  {
+    "name": "unknown-frame-treated-as-ping",
+    "file": "internal/transport/frame.go",
+    "old": "\tdefault:",
+    "new": "\tdefault:\n\t\treturn ClientFrame{T: \"ping\"}, nil",
+    "pkg": "./internal/transport",
+    "test": "TestParseClientFrameRejectsUnknown"
   }
 ]

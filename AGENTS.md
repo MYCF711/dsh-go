@@ -436,8 +436,16 @@
   另两条：同会话不许并发两轮（`ErrBusy`）、没有在飞的轮次取消要报错（`ErrNoSuchTurn`，不许静默成功）
 - ✅ 变异第 13 条 `prompt-submit-blocks`（把 `go func()` 改成同步调）→ **CAUGHT**
 - ✅ 对照记一笔：同一个模型，单文件任务 **4 次调用**，跨三文件任务 **33 次调用 0 产出**
-- 下一步 **M102**：`session.history` 的宿主接线（同样单文件、同样先给全接口），
-  之后 U0 六个 method 就只剩 WS 那条流
+- ✅ **WS 帧编解码落地**（dshd 写，**3 次调用**、6.6 KB 单文件）：`internal/transport/frame.go`
+  `ParseClientFrame` / `NewServerFrame`，三种客户端帧按交接文档的形状接死
+- ✅ 验收测试是我写的，最重要一条：**不认识的帧绝不能被当 ping 放过**——
+  客户端 `{"t":"subscribe"}` 拼错一个字母，静默不生效比报错难查一百倍
+- ✅ 另外钉住：`sub` 的 topic 必须是 `session:<非空>`；`NewServerFrame` 不许造 `seq=0`
+  （seq 是客户端判连续性的唯一依据）
+- ✅ 变异第 14 条 `unknown-frame-treated-as-ping`（未知帧返回 ping）→ **CAUGHT**
+- ⚠️ 它第一版变异我写错了（`fmt.Errorf` 挪进闭包 → 编译不过 → `mutate.py` 判 **BAD**）。
+  **编译不过的变异什么都没证明**——这条教训第 4 次踩，改成「default 直接返回 ping」才 CAUGHT
+- 下一步 **M103**：把六个 method + WS 串成一个能起来的 `http.Server`（`--port 0` + token 换 cookie）
 
 ### 界面线现状（2026-11-03）
 
