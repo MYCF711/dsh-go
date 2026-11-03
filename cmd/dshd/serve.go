@@ -183,7 +183,9 @@ func cmdServe(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "ready %s\n", line)
-	announcePolicy(os.Stdout, lr.policy, lr.maxSteps)
+	// 打 stderr，不打 stdout：stdout 只放那一行 ready（壳按行解析握手）。
+	// H11（2026-11-03 界面线报）：这行原来打在 stdout，客户端把第二行当成了协议内容。
+	announcePolicy(os.Stderr, lr.policy, lr.maxSteps)
 
 	// 阻塞到 Ctrl-C / SIGTERM。用信号而不是 stdin EOF：
 	// serve 可能由壳拉起，stdin 会立刻是 EOF，那不代表"该关了"。
