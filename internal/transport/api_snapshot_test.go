@@ -90,7 +90,14 @@ func TestSessionAPISnapshot(t *testing.T) {
 	// U0 原本 13 个（会话 8 + 工作区 1 + 文件 2 + 配置 2）。
 	// H13 审批要一条真实回传，所以多了第 14 个 session.approve——**契约变了，这里也跟着改**。
 	// 第 15 个 session.compact 同理：界面上的"压缩"要有入口，官方 DSH 也有 /compact。
-	const done, target = 15, 15
+	// 第 16/17 个 jobs.list / jobs.output：`spi.Job` 早就实现了 List/Output，
+	// 只是 Transport 上一直没有方法，界面看不到后台任务。**协议层先补，
+	// 接线等子进程通道**（serve 模式下 agent 跑在 loopRunner 子进程里，宿主拿不到 spi.Job）。
+	// 第 18 个 schedule.list：存储层（internal/schedule）早就有，`dshd schedule list`
+	// 一直在用，缺的只是 Transport 方法——界面一直看不到"这个工作区有哪些定时任务"。
+	// 第 19 个 session.setModel：session.load 的 model 是只读投影（上一轮实际用的），
+	// 界面上的模型选择器要能改就得有这个方法。覆盖存 state/session-model.json，不碰 v4。
+	const done, target = 19, 19
 	if got := len(SessionMethods()); got != done {
 		t.Fatalf("SessionMethods() 有 %d 个方法，当前进度应当是 %d 个（U0 目标 %d 个）", got, done, target)
 	}

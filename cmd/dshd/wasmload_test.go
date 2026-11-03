@@ -419,8 +419,8 @@ path    = "` + filepath.ToSlash(fixture) + `"
 	if got := loadedWasm(); len(got) != 1 || got[0].id != "wasm-silent" {
 		t.Fatalf("wasm-silent 应当被装载并登记，实际 %+v", got)
 	}
-	if got := loadedWasm(); got[0].tool != "" {
-		t.Fatalf("没写 provides 的模块不该有工具名，实际 %q", got[0].tool)
+	if got := loadedWasm(); len(got[0].tools) != 0 {
+		t.Fatalf("没写 provides 的模块不该有工具名，实际 %v", got[0].tools)
 	}
 }
 
@@ -530,6 +530,656 @@ provides = ["tool"]
 				t.Fatalf("装配失败后不该留下已装载的 wasm 模块：%v", got)
 			}
 		})
+	}
+}
+
+// --- 缺口 2：多个 wasm 工具模块同时存在 ---
+
+// twoToolManifest 造一个"两个 wasm 工具模块"的 manifest。
+//
+// 两个模块指向**同一个**夹具文件：这一层要证明的是"一个 manifest 能挂多个
+// wasm 工具模块"，不是"能装多个不同文件"——用同一个文件反而排除掉
+// "文件不同所以没撞上"这种解释。
+//
+// 能力键写 "tool:<tool_name>"（不是两个都写 "tool"）：kernel 按字符串判重
+// （internal/kernel/assemble.go:64），而 Apply 会把 manifest 的 provides 原样
+// 复制到每个模块上（internal/kernel/module.go:167），装载层没有钩子能改写它。
+// 所以"两个模块同时存在"的唯一诚实做法，就是它们的能力键本来就是两个字符串。
+func twoToolManifest(t *testing.T, capA, capB, nameA, nameB string) string {
+	t.Helper()
+	fixture := filepath.ToSlash(toolFixturePath(t))
+	return `[profile]
+name = "wasm-two-tools"
+
+[[module]]
+id      = "tools"
+backend = "static"
+
+[[module]]
+id       = "wasm-` + nameA + `"
+backend  = "wasm"
+path     = "` + fixture + `"
+provides = ["` + capA + `"]
+tool_name        = "` + nameA + `"
+tool_description = "第一个 wasm 夹具工具（` + nameA + `）"
+tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''
+
+[[module]]
+id       = "wasm-` + nameB + `"
+backend  = "wasm"
+path     = "` + fixture + `"
+provides = ["` + capB + `"]
+tool_name        = "` + nameB + `"
+tool_description = "第二个 wasm 夹具工具（` + nameB + `）"
+tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''
+`
+}
+
+// TestWasmTwoToolModulesCoexist 是缺口 2 的落点：一个 manifest 里两个 wasm 工具模块，
+// **两个工具都进工具表、都调得通**。
+//
+// 这一条同时钉三件事，缺任何一条都不算"多个 wasm 工具能用"：
+//   - 装配不报"能力被两个模块同时提供"（这正是改造前必然发生的失败）；
+//   - 工具表里两个名字都在，且各自的身份（描述）没有被串台；
+//   - 两次 Exec 都真的跨到客人那边（同一个 .wasm 文件、两个不同实例）。
+func TestWasmTwoToolModulesCoexist(t *testing.T) {
+	resetWasm(t)
+	mp := writeManifest(t, twoToolManifest(t, "tool:echo", "tool:hello", "echo", "hello"))
+
+	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err != nil {
+		t.Fatalf("两个 wasm 工具模块必须能同时装配，实际报错：%v", err)
+	}
+
+	// 装配结果里两个模块的能力键必须不同——相同时 kernel 的判重必然炸。
+	caps := map[string]string{}
+	for _, m := range mods {
+		if m.Backend != kernel.BackendWasm {
+			continue
+		}
+		if len(m.Provides) != 1 {
+			t.Fatalf("wasm 模块 %q 应当正好提供一个能力键，实际 %v", m.ID, m.Provides)
+		}
+		if m.Register == nil {
+			t.Fatalf("wasm 模块 %q 有工具声明就必须有 Register", m.ID)
+		}
+		caps[m.ID] = m.Provides[0]
+	}
+	if caps["wasm-echo"] == caps["wasm-hello"] || caps["wasm-echo"] == "" || caps["wasm-hello"] == "" {
+		t.Fatalf("两个 wasm 模块的能力键必须各不相同，实际 %v", caps)
+	}
+
+	// graph 要能一眼看出谁提供了哪个工具（能力键里带工具名就是为了这个）。
+	var graph bytes.Buffer
+	if err := writeModules(&graph, "graph", mods); err != nil {
+		t.Fatalf("modules graph 失败：%v", err)
+	}
+	for _, want := range []string{"wasm-echo", "wasm-hello", "tool:echo", "tool:hello", "tools"} {
+		if !strings.Contains(graph.String(), want) {
+			t.Fatalf("modules graph 里应当能看到 %q：\n%s", want, graph.String())
+		}
+	}
+
+	reg := assembleForTest(t, mods)
+	for _, name := range []string{"echo", "hello"} {
+		if _, ok := reg.Get(name); !ok {
+			var names []string
+			for _, x := range reg.Tools() {
+				names = append(names, x.Name())
+			}
+			t.Fatalf("工具表里没有 %q，实际有 %v", name, names)
+		}
+	}
+	if got, _ := reg.Get("echo"); got.Description() != "第一个 wasm 夹具工具（echo）" {
+		t.Fatalf("两个工具的 manifest 声明串台了：echo 的描述是 %q", got.Description())
+	}
+	if got, _ := reg.Get("hello"); got.Description() != "第二个 wasm 夹具工具（hello）" {
+		t.Fatalf("两个工具的 manifest 声明串台了：hello 的描述是 %q", got.Description())
+	}
+
+	// 两个工具都要真的调得通：装配成功只证明注册了，不证明能用。
+	cases := []struct{ name, text string }{
+		{"echo", "第一个"},
+		{"hello", "第二个"},
+	}
+	for _, c := range cases {
+		tool, _ := reg.Get(c.name)
+		res, err := tool.Exec(context.Background(), json.RawMessage(`{"text":"`+c.text+`"}`))
+		if err != nil {
+			t.Fatalf("工具 %q 执行失败：%v", c.name, err)
+		}
+		if !strings.Contains(res.Text, c.text) {
+			t.Fatalf("工具 %q 的结果里应当有 %q，实际 %q", c.name, c.text, res.Text)
+		}
+	}
+
+	// 两个模块都登记在 wasm 小节里，且各自记着自己的工具名。
+	list := loadedWasm()
+	if len(list) != 2 {
+		t.Fatalf("应当登记 2 个 wasm 模块，实际 %d：%+v", len(list), list)
+	}
+	tools := map[string]string{}
+	for _, x := range list {
+		tools[x.id] = strings.Join(x.tools, ",")
+	}
+	if tools["wasm-echo"] != "echo" || tools["wasm-hello"] != "hello" {
+		t.Fatalf("wasm 小节里的工具名对不上：%v", tools)
+	}
+}
+
+// TestWasmTwoToolsWithPlainToolKeyFails：两个模块都写 provides = ["tool"] 时，
+// **装载层**必须给出能照着改的错误，而不是 kernel 那句"能力被两个模块同时提供"。
+//
+// 这条是缺口 2 的代价，必须钉住：用户不会去读 kernel 源码，
+// 他只知道自己在 manifest 里写了两行一模一样的 provides。
+func TestWasmTwoToolsWithPlainToolKeyFails(t *testing.T) {
+	resetWasm(t)
+	mp := writeManifest(t, twoToolManifest(t, "tool", "tool", "echo", "hello"))
+
+	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err == nil {
+		t.Fatal(`两个 wasm 工具模块都写 provides = ["tool"] 必须报错（kernel 只允许一个提供者）`)
+	}
+	msg := err.Error()
+	for _, want := range []string{"tool:echo", "tool:<tool_name>", "wasm-echo", "wasm-hello"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误里要有 %q（要能照着改 manifest）：\n%s", want, msg)
+		}
+	}
+	// 校验就该在装载前失败：不留半装好的句柄。
+	if got := loadedWasm(); len(got) != 0 {
+		t.Fatalf("失败后不该留下已装载的模块：%+v", got)
+	}
+}
+
+// TestWasmToolCapKeyMustMatchToolName：能力键冒号后必须与 tool_name 一致。
+//
+// 不校验的话，`modules graph`（能力键）与模型看到的工具表（工具名）会各说各话，
+// 而这种错在 manifest 里只是几个字符。
+func TestWasmToolCapKeyMustMatchToolName(t *testing.T) {
+	resetWasm(t)
+	mp := writeManifest(t, twoToolManifest(t, "tool:eho", "tool:hello", "echo", "hello"))
+
+	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err == nil {
+		t.Fatal("能力键与 tool_name 不一致必须报错")
+	}
+	msg := err.Error()
+	for _, want := range []string{"tool:eho", `"echo"`, "wasm-echo"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误里要有 %q：\n%s", want, msg)
+		}
+	}
+}
+
+// TestWasmToolRebuildsAfterTrapThroughExec 把缺口 1 拉到工具层再验一遍：
+// **同一个 spi.Tool 句柄**先炸一次、再成功一次。
+//
+// 为什么在 cmd/dshd 也测：wasmhost 的用例证明的是"Module 会重建"，
+// 这里证明的是"Register 闭包里握着的那个 Module 就是被重建的那个"——
+// 如果 wasmTool 持有的是别的副本（比如按值拷贝），工具层就永远调不动了。
+func TestWasmToolRebuildsAfterTrapThroughExec(t *testing.T) {
+	resetWasm(t)
+	tool := loadWasmTool(t, "echo", "")
+
+	if _, err := tool.Exec(context.Background(), json.RawMessage(`{"boom":true}`)); err == nil {
+		t.Fatal("客人 trap 必须让 Exec 返回 error")
+	}
+
+	res, err := tool.Exec(context.Background(), json.RawMessage(`{"text":"自愈之后"}`))
+	if err != nil {
+		t.Fatalf("trap 之后同一个工具必须还能调（实例应当自动重建），实际：%v", err)
+	}
+	if !strings.Contains(res.Text, "自愈之后") {
+		t.Fatalf("重建之后应当真的调到客人，实际 %q", res.Text)
+	}
+}
+
+// --- 一个模块多个工具（`[[module.tool]]`） ---
+
+// multiToolHead 造"一个 wasm 模块（可能）挂多个工具"的 manifest 前半段。
+//
+// 与上一轮 §9.2 的"两个模块共用一个文件"不是一回事：那里是两个 [[module]] 行
+// （两份编译产物、两个实例、两个能力键），这里只有**一个** [[module]] 行：
+// 一个实例、多个 spi.Tool，靠请求信封的 tool 字段分流。
+// 用同一个 fixture 文件，也就排除了"文件不同所以没混到一起"这种解释。
+//
+// provides 传空串 = 故意不写 provides 那一行（验"声明了工具却没写能力键"）。
+func multiToolHead(t *testing.T, provides string) string {
+	t.Helper()
+	return multiToolHeadWith(t, provides, "")
+}
+
+// multiToolHeadWith 允许在**模块级**多插几行（比如旧的单工具字段，用来验混写）。
+//
+// 注意 TOML 的位置语义：模块级的键必须写在第一节 `[[module.tool]]` **之前**，
+// 写在后面就属于那个子表了。这既是写法约束，也是混写最容易出现的位置。
+func multiToolHeadWith(t *testing.T, provides, extra string) string {
+	t.Helper()
+	prov := ""
+	if strings.TrimSpace(provides) != "" {
+		prov = "provides = [" + provides + "]\n"
+	}
+	return `[profile]
+name = "wasm-multi-tool"
+
+[[module]]
+id      = "tools"
+backend = "static"
+
+[[module]]
+id      = "wasm-text"
+backend = "wasm"
+path    = "` + filepath.ToSlash(toolFixturePath(t)) + `"
+` + prov + extra
+}
+
+// toolItem 是 `[[module.tool]]` 的一节。extra 用来插 timeout_ms / caps 这类可选项。
+func toolItem(name, desc, extra string) string {
+	return `
+[[module.tool]]
+name        = "` + name + `"
+description = "` + desc + `"
+schema      = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''
+` + extra
+}
+
+// TestWasmModuleServesTwoTools 是这一轮的落点之一：**一个** wasm 模块声明**两个**
+// 工具，工具表里就该出现两个名字。
+//
+// 一条用例钉五件事，缺一条都不算"一个模块真能提供多个工具"：
+//   - 装配结果里只有一个 wasm 模块（不是把文件挂了两遍）；
+//   - 它有两个能力键（kernel 按字符串判重，两个工具 = 两个键）；
+//   - 一个 Register 把两个工具都注册进了表；
+//   - 两个工具的身份（描述/能力声明）没有串台；
+//   - `modules graph` 的 TOOL 列把两个名字都打出来了（人能看见它提供了什么）。
+func TestWasmModuleServesTwoTools(t *testing.T) {
+	resetWasm(t)
+	mp := writeManifest(t, multiToolHead(t, `"tool:echo", "tool:upper"`)+
+		toolItem("echo", "把 text 原样回显（wasm 夹具 · 一号）", "timeout_ms = 2000\n")+
+		toolItem("upper", "把 text 里的字母转成大写（wasm 夹具 · 二号）", "timeout_ms = 5000\n"))
+
+	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err != nil {
+		t.Fatalf("一个模块挂两个工具必须能装配，实际：%v", err)
+	}
+
+	wasmMods := 0
+	var text *kernel.Module
+	for i := range mods {
+		if mods[i].Backend != kernel.BackendWasm {
+			continue
+		}
+		wasmMods++
+		text = &mods[i]
+	}
+	if wasmMods != 1 {
+		t.Fatalf("应当是 **一个** wasm 模块挂两个工具，实际装配出 %d 个", wasmMods)
+	}
+	if len(text.Provides) != 2 || !containsStr(text.Provides, "tool:echo") || !containsStr(text.Provides, "tool:upper") {
+		t.Fatalf(`两个工具就该有两个能力键（tool:echo / tool:upper），实际 %v`, text.Provides)
+	}
+	if text.Register == nil {
+		t.Fatal("有工具声明的模块必须有 Register")
+	}
+
+	reg := assembleForTest(t, mods)
+	for _, name := range []string{"echo", "upper"} {
+		if _, ok := reg.Get(name); !ok {
+			var names []string
+			for _, x := range reg.Tools() {
+				names = append(names, x.Name())
+			}
+			t.Fatalf("工具表里没有 %q，实际有 %v", name, names)
+		}
+	}
+	if got, _ := reg.Get("echo"); got.Description() != "把 text 原样回显（wasm 夹具 · 一号）" {
+		t.Fatalf("两个工具的声明串台了：echo 的描述是 %q", got.Description())
+	}
+	if got, _ := reg.Get("upper"); got.Description() != "把 text 里的字母转成大写（wasm 夹具 · 二号）" {
+		t.Fatalf("两个工具的声明串台了：upper 的描述是 %q", got.Description())
+	}
+
+	// 两个工具都真的调得通（不同 timeout_ms 也要能共存）。
+	for _, c := range []struct{ name, text string }{
+		{"echo", "一号"},
+		{"upper", "二号"},
+	} {
+		tool, _ := reg.Get(c.name)
+		res, err := tool.Exec(context.Background(), json.RawMessage(`{"text":"`+c.text+`"}`))
+		if err != nil {
+			t.Fatalf("工具 %q 执行失败：%v", c.name, err)
+		}
+		if res.Text == "" {
+			t.Fatalf("工具 %q 没有结果正文", c.name)
+		}
+	}
+
+	// 登记的模块仍然是一个，但它记着两个工具名。
+	list := loadedWasm()
+	if len(list) != 1 {
+		t.Fatalf("登记的 wasm 模块应当只有 1 个，实际 %d：%+v", len(list), list)
+	}
+	if strings.Join(list[0].tools, ",") != "echo,upper" {
+		t.Fatalf("登记的工具名应当是 echo,upper（按 manifest 顺序），实际 %v", list[0].tools)
+	}
+
+	// 人能看见它提供了什么：graph 的 TOOL 列必须两个都打。
+	var graph bytes.Buffer
+	if err := writeModules(&graph, "graph", mods); err != nil {
+		t.Fatalf("modules graph 失败：%v", err)
+	}
+	g := graph.String()
+	for _, want := range []string{"wasm-text", "tool:echo", "tool:upper", "echo,upper"} {
+		if !strings.Contains(g, want) {
+			t.Fatalf("modules graph 里应当能看到 %q：\n%s", want, g)
+		}
+	}
+}
+
+// TestWasmTwoToolsRouteByToolField 是这一轮的核心：两个工具走**同一个模块**，
+// 但逻辑各自不同——证明宿主真的把工具名放进了请求信封的 tool 字段，
+// 而不是"注册了两个名字、其实都跑同一段逻辑"。
+//
+// 为什么判据是输出而不是"调用没报错"：夹具里 upper 只比 echo 多一个
+// `req.Tool == "upper"` 的条件，所以"没路由"的表现恰恰是**成功**返回
+// echo 的结果。只断言 err == nil 的测试在这里会全绿，等于什么也没证明。
+//
+// 三次调用按 echo → upper → echo 交叉，是因为工具名在 ABI 层是**模块级状态**
+// （SetToolName）：如果宿主只在装载时设一次、或每次设了却没和调用串起来，
+// 第三次就会拿到上一次的名字——那正是最难看的一种 bug（结果对、身份错）。
+func TestWasmTwoToolsRouteByToolField(t *testing.T) {
+	resetWasm(t)
+	mp := writeManifest(t, multiToolHead(t, `"tool:echo", "tool:upper"`)+
+		toolItem("echo", "原样回显", "")+
+		toolItem("upper", "转大写", ""))
+
+	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err != nil {
+		t.Fatalf("装配失败：%v", err)
+	}
+	reg := assembleForTest(t, mods)
+	echoTool, ok := reg.Get("echo")
+	if !ok {
+		t.Fatal("工具表里没有 echo")
+	}
+	upTool, ok := reg.Get("upper")
+	if !ok {
+		t.Fatal("工具表里没有 upper")
+	}
+
+	args := json.RawMessage(`{"text":"Hi 你好"}`)
+	cases := []struct {
+		tool spi.Tool
+		want string
+	}{
+		{echoTool, "echo:Hi 你好"},
+		{upTool, "upper:HI 你好"}, // 路由没生效的话这里会是 echo:Hi 你好
+		{echoTool, "echo:Hi 你好"},
+		{upTool, "upper:HI 你好"},
+	}
+	for i, c := range cases {
+		res, err := c.tool.Exec(context.Background(), args)
+		if err != nil {
+			t.Fatalf("第 %d 次调用（%s）失败：%v", i+1, c.tool.Name(), err)
+		}
+		if res.Text != c.want {
+			t.Fatalf("第 %d 次调用 %q 的正文应当是 %q，实际 %q。"+
+				"这通常意味着宿主没把工具名写进请求信封的 tool 字段（两个工具跑到同一个分支上了）",
+				i+1, c.tool.Name(), c.want, res.Text)
+		}
+	}
+}
+
+// TestWasmLegacySingleToolFormStillWorks 钉住"旧写法一个字都不用改"。
+//
+// 旧写法（tool_name / tool_description / tool_schema / tool_caps）与新的
+// `[[module.tool]]` 是两条入口，共享同一份校验与同一份运行时；
+// 这一条把旧入口从 manifest 一路走到 Exec，证明它不是"还能解析"而是"还能用"。
+func TestWasmLegacySingleToolFormStillWorks(t *testing.T) {
+	resetWasm(t)
+	fixture := toolFixturePath(t)
+
+	mp := writeManifest(t, `[profile]
+name = "wasm-legacy"
+
+[[module]]
+id      = "tools"
+backend = "static"
+
+[[module]]
+id       = "wasm-echo"
+backend  = "wasm"
+path     = "`+filepath.ToSlash(fixture)+`"
+provides = ["tool"]
+tool_name        = "echo"
+tool_description = "把 text 原样回显（旧写法）"
+tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''
+tool_caps        = ["writes"]
+timeout_ms       = 2000
+`)
+	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err != nil {
+		t.Fatalf("旧的单工具写法必须继续有效，实际报错：%v", err)
+	}
+
+	var got *kernel.Module
+	for i := range mods {
+		if mods[i].ID == "wasm-echo" {
+			got = &mods[i]
+		}
+	}
+	if got == nil || got.Register == nil {
+		t.Fatal("旧写法的模块必须照旧注册工具")
+	}
+	if len(got.Provides) != 1 || got.Provides[0] != "tool" {
+		t.Fatalf(`旧写法的能力键仍然是 "tool"（不是 tool:echo），实际 %v`, got.Provides)
+	}
+
+	reg := assembleForTest(t, mods)
+	tool, ok := reg.Get("echo")
+	if !ok {
+		t.Fatal("工具表里没有 echo")
+	}
+	if tool.Description() != "把 text 原样回显（旧写法）" {
+		t.Fatalf("描述必须来自 manifest，实际 %q", tool.Description())
+	}
+	// tool_caps 也照旧生效：审批靠它判档。
+	if !tool.Caps().Writes || !tool.Caps().NeedsApproval() {
+		t.Fatalf("旧写法的 tool_caps = [\"writes\"] 必须照旧生效，实际 %+v", tool.Caps())
+	}
+	res, err := tool.Exec(context.Background(), json.RawMessage(`{"text":"旧写法"}`))
+	if err != nil {
+		t.Fatalf("旧写法的工具必须调得动：%v", err)
+	}
+	if res.Text != "echo:旧写法" {
+		t.Fatalf("结果不对：%q", res.Text)
+	}
+
+	// 单工具模块仍然把模块级工具名设成它：`dshd wasm call` 这类不经过
+	// spi.Tool 的入口要用这个默认值。
+	list := loadedWasm()
+	if len(list) != 1 || strings.Join(list[0].tools, ",") != "echo" {
+		t.Fatalf("登记的工具名应当是 echo，实际 %+v", list)
+	}
+	if name := list[0].module.ToolName(); name != "echo" {
+		t.Fatalf("单工具模块应当把模块级工具名设成 echo（wasm call 用），实际 %q", name)
+	}
+}
+
+// TestWasmMixedToolFormsRejected：旧的单工具字段与 `[[module.tool]]` 混写 →
+// **启动即炸**，而且不许猜优先级。
+//
+// 为什么必须炸：两种写法都在回答"这个模块有哪些工具"。谁赢都是猜，
+// 猜错的表现是"模型少了一个工具"或"某个工具带着别人的 description 出现在
+// 模型面前"——运行期完全看不出来，只能靠人回头读 manifest。
+func TestWasmMixedToolFormsRejected(t *testing.T) {
+	resetWasm(t)
+	// 混写的现实形态：本来是一个单工具模块，想再加一个工具，于是往模块级
+	// 补了 tool_name，同时又写了 [[module.tool]]。
+	mp := writeManifest(t, multiToolHeadWith(t, `"tool:echo", "tool:upper"`,
+		`tool_name        = "upper"
+tool_description = "也写在模块上（这就是混写）"
+tool_schema      = '''{"type":"object"}'''
+`)+toolItem("echo", "原样回显", "")+toolItem("upper", "转大写", ""))
+
+	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err == nil {
+		t.Fatal("单工具字段与 [[module.tool]] 混写必须报错，不许猜优先级")
+	}
+	msg := err.Error()
+	for _, want := range []string{"wasm-text", "tool_name", "[[module.tool]]", "不能混用"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误里要有 %q（要能照着改 manifest）：\n%s", want, msg)
+		}
+	}
+	if got := loadedWasm(); len(got) != 0 {
+		t.Fatalf("校验失败不能留下已装载的句柄：%+v", got)
+	}
+}
+
+// TestWasmToolCapKeysMustMatchDeclaredTools：能力键与声明的工具必须**一一对上**。
+//
+// 能力键会进 `modules graph`，工具名会进模型看到的工具表；两处不一致时，
+// 图和表各说各话，而这种错在 manifest 里只是几个字符。
+// 所以：少一个键、多一个键、多工具还写单数缩写 "tool"、缩写与具名混写，
+// 全部在启动时炸，并给出能照抄的一行 provides。
+func TestWasmToolCapKeysMustMatchDeclaredTools(t *testing.T) {
+	items := toolItem("echo", "原样回显", "") + toolItem("upper", "转大写", "")
+	cases := []struct {
+		name     string
+		provides string
+		want     []string
+	}{
+		{
+			name:     "少一个键",
+			provides: `"tool:echo"`,
+			want:     []string{"wasm-text", "tool:upper", "没有对应的能力键"},
+		},
+		{
+			name:     "多一个键",
+			provides: `"tool:echo", "tool:upper", "tool:ghost"`,
+			want:     []string{"wasm-text", "tool:ghost", "没有对应的工具声明"},
+		},
+		{
+			name:     "两个工具却写单数缩写 tool",
+			provides: `"tool"`,
+			want:     []string{"wasm-text", "tool", "tool:echo", "tool:upper"},
+		},
+		{
+			name:     "缩写与具名混写",
+			provides: `"tool", "tool:echo"`,
+			want:     []string{"wasm-text", "缩写"},
+		},
+		{
+			name:     "声明了工具却没写 provides",
+			provides: "",
+			want:     []string{"wasm-text", "provides", "tool:echo"},
+		},
+		{
+			name:     "同一个键写两次",
+			provides: `"tool:echo", "tool:echo", "tool:upper"`,
+			want:     []string{"wasm-text", "tool:echo", "两次"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resetWasm(t)
+			mp := writeManifest(t, multiToolHead(t, c.provides)+items)
+			_, err := loadMods(mp, t.TempDir(), 0, nil)
+			if err == nil {
+				t.Fatalf("%s 必须让装配失败", c.name)
+			}
+			for _, want := range c.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("错误里要有 %q：\n%s", want, err)
+				}
+			}
+			if got := loadedWasm(); len(got) != 0 {
+				t.Fatalf("校验失败不能留下已装载的句柄：%+v", got)
+			}
+		})
+	}
+}
+
+// TestWasmMultiToolDeclValidation：`[[module.tool]]` 每一项自己的必填项
+// 也要在装配期炸，并且点名是第几项。
+//
+// 与旧写法共用同一份校验（newWasmToolSpec），但"第几项"必须说出来：
+// 一个模块里写着五节 [[module.tool]] 时，"某个工具没有 description"
+// 这句话等于没说。
+func TestWasmMultiToolDeclValidation(t *testing.T) {
+	cases := []struct {
+		name  string
+		items string
+		want  []string
+	}{
+		{
+			name:  "第二项没有 name",
+			items: toolItem("echo", "原样回显", "") + "\n[[module.tool]]\ndescription = \"x\"\nschema = '''{\"type\":\"object\"}'''\n",
+			want:  []string{"wasm-text", "第 2 项", "name"},
+		},
+		{
+			name:  "第二项没有 description",
+			items: toolItem("echo", "原样回显", "") + "\n[[module.tool]]\nname = \"upper\"\nschema = '''{\"type\":\"object\"}'''\n",
+			want:  []string{"wasm-text", "upper", "description"},
+		},
+		{
+			name:  "schema 不是对象",
+			items: toolItem("echo", "原样回显", "") + "\n[[module.tool]]\nname = \"upper\"\ndescription = \"x\"\nschema = '''[\"a\"]'''\n",
+			want:  []string{"wasm-text", "upper", "JSON 对象"},
+		},
+		{
+			name:  "caps 拼错",
+			items: toolItem("echo", "原样回显", "") + "\n[[module.tool]]\nname = \"upper\"\ndescription = \"x\"\nschema = '''{\"type\":\"object\"}'''\ncaps = [\"write\"]\n",
+			want:  []string{"wasm-text", "upper", "caps"},
+		},
+		{
+			name:  "同一个模块里工具重名",
+			items: toolItem("echo", "一号", "") + toolItem("echo", "二号", ""),
+			want:  []string{"wasm-text", "echo", "唯一"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resetWasm(t)
+			mp := writeManifest(t, multiToolHead(t, `"tool:echo"`)+c.items)
+			_, err := loadMods(mp, t.TempDir(), 0, nil)
+			if err == nil {
+				t.Fatalf("%s 必须让装配失败", c.name)
+			}
+			for _, want := range c.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("错误里要有 %q：\n%s", want, err)
+				}
+			}
+			if got := loadedWasm(); len(got) != 0 {
+				t.Fatalf("校验失败不能留下已装载的句柄：%+v", got)
+			}
+		})
+	}
+}
+
+// TestWasmSingleItemArrayWithBareToolKey：`[[module.tool]]` 只写一项时，
+// `provides = ["tool"]`（单数缩写）仍然成立——数组写法与缩写不是互斥的。
+//
+// 为什么值得单独钉：文档里说"只挂一个工具时两种能力键都允许"，而缩写 `"tool"`
+// 的语义是"这个模块只有一个工具"。这条把"数组 + 缩写"这个组合也拉到启动路径上验一遍，
+// 免得读的人以为数组写法必须写 `tool:<名字>`。
+func TestWasmSingleItemArrayWithBareToolKey(t *testing.T) {
+	resetWasm(t)
+	mp := writeManifest(t, multiToolHead(t, `"tool"`)+toolItem("echo", "数组写法但只有一个工具", ""))
+
+	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err != nil {
+		t.Fatalf(`[[module.tool]] 只有一项时 provides = ["tool"] 应当成立，实际报错：%v`, err)
+	}
+	if len(loadedWasm()) != 1 || strings.Join(loadedWasm()[0].tools, ",") != "echo" {
+		t.Fatalf("应当登记一个模块、工具名 echo，实际 %+v", loadedWasm())
+	}
+	reg := assembleForTest(t, mods)
+	if _, ok := reg.Get("echo"); !ok {
+		t.Fatal("工具表里没有 echo")
 	}
 }
 

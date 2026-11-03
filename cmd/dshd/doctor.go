@@ -423,7 +423,7 @@ func checkWasmModules(manifest string) checkResult {
 	}
 	var parts []string
 	if len(withTool) > 0 {
-		parts = append(parts, strings.Join(withTool, "、")+"（已注册工具，模型可见）")
+		parts = append(parts, strings.Join(withTool, "、")+"（已注册工具，模型可见；多工具的模块用 provides=[\"tool:<工具名>\"] 各占一个能力键）")
 	}
 	if len(withoutTool) > 0 {
 		parts = append(parts, strings.Join(withoutTool, "、")+"（不提供工具，只能 dshd wasm call 手动调）")

@@ -67,7 +67,19 @@ type Options struct {
 	// Fork 从一个会话开分支；宿主注入。
 	Fork func(sessionID, title string) (string, error)
 	// WorkspaceList 列当前工作区的顶层条目；宿主注入。
-	WorkspaceList func() ([]WorkspaceEntry, error)
+	// WorkspaceList 列目录。**path 为空 = 进程工作目录**（向后兼容旧调用）。
+	//
+	// 为什么收 path：只列根目录做不出文件树——界面点进子目录时就断了。
+	// 收了口之后调用方传绝对路径，就能一层层往下走。
+	WorkspaceList func(path string) ([]WorkspaceEntry, error)
+	// JobsList 列后台任务；JobsOutput 取某个任务的输出。
+	// **nil = 这个宿主没有后台任务能力**（比如不带 exec 模块），回 501 不是 500。
+	JobsList   func() []JobInfo
+	JobsOutput func(id string, wait time.Duration) (JobOutput, error)
+	// ScheduleList 列定时任务。nil = 这个宿主没有 schedule 能力（回 501）。
+	ScheduleList func() []ScheduleItem
+	// SetSessionModel 改一个会话的模型覆盖。nil = 这个宿主不支持（回 501）。
+	SetSessionModel func(sessionID, model string) error
 	// FSRead 读一个文件；路径解析、大小上限、越界检查都在宿主那边。
 	FSRead func(path string) (FSContent, error)
 	// FSWrite 写一个文件；宿主注入。
@@ -318,6 +330,14 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionCompact(w, r)
 	case MethodWorkspaceList:
 		s.handleWorkspaceList(w, r)
+	case MethodJobsList:
+		s.handleJobsList(w, r)
+	case MethodJobsOutput:
+		s.handleJobsOutput(w, r)
+	case MethodScheduleList:
+		s.handleScheduleList(w, r)
+	case MethodSessionSetModel:
+		s.handleSessionSetModel(w, r)
 	case MethodFSRead:
 		s.handleFSRead(w, r)
 	case MethodFSWrite:

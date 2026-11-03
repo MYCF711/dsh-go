@@ -182,6 +182,11 @@ func (m *Module) SetTimeout(d time.Duration) {
 //
 // 三步：alloc(len) → 写 args → call(ptr,len) → 按返回值读回结果。
 //
+// 进入调用前会先看一眼实例：上次 trap / 超时 / 取消死掉的实例在这里**自动重建一次**
+// （编译产物常驻，重建 2–4 ms，见 §3.5）。所以"插件崩一次就要重启宿主"这件事
+// 在这一层被消灭了——但重建只发生在**下一次调用开始时**，不是在同一次调用里重试：
+// 客人 panic 之前可能已经改了自己一半的状态，宿主不该替它重放。
+//
 // **返回 nil error 不等于工具成功**：成功与否在结果 JSON 的 isError 里。
 // 这里只对「客人崩了」和「协议对不上」报错，因为这两类根本读不到结果。
 func (m *Module) InvokeTool(ctx context.Context, args []byte) ([]byte, error) {
@@ -207,8 +212,11 @@ func (m *Module) InvokeTool(ctx context.Context, args []byte) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.closed || m.mod == nil {
-		return nil, fmt.Errorf("模块 %s 已卸载，不能再调用", m.name)
+	// 实例不可用（上次 trap / 超时 / 取消）就先重建一次再调。
+	// 这一步是"插件崩了不用重启宿主"的落点：重建失败会被说清是"重建也失败了"，
+	// 而不是让人继续在一个死实例上反复失败。
+	if err := m.ensureLiveLocked(ctx); err != nil {
+		return nil, err
 	}
 
 	payload, err := json.Marshal(Request{V: ABIVersion, Tool: m.tool, Args: args})
@@ -224,7 +232,17 @@ func (m *Module) InvokeTool(ctx context.Context, args []byte) ([]byte, error) {
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	return m.invokeLocked(callCtx, payload)
+	out, err := m.invokeLocked(callCtx, payload)
+	if err != nil {
+		// 判死而不是就地重试：trap 可能带着副作用（客人已经改了自己一半的状态），
+		// 同一份 args 自动再跑一遍可能做两次。让**下一次**调用重建，
+		// 那一次是模型/用户明确发起的新调用，重试语义才干净。
+		if why, dead := instanceFailureReason(err); dead {
+			m.markDeadLocked(why)
+		}
+		return nil, err
+	}
+	return out, nil
 }
 
 // invokeLocked 是 ABI 的三步本体。调用方必须持有 m.mu。
@@ -325,10 +343,11 @@ func (m *Module) invokeLocked(ctx context.Context, payload []byte) ([]byte, erro
 //
 // 为什么必须分：超时/取消时 wazero 会把整个 module 关掉（IsClosed），
 // 那不是客人写错了，是宿主给的时间到了；把它说成 trap，会让人去查客人的 bug。
+// 两类都会让调用方把实例判死（见 instanceFailureReason），**下一次**调用自动重建。
 func (m *Module) wrapCallError(fn string, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return fmt.Errorf("wasm 模块 %q 的 %s 被中断（%w）："+
-			"wazero 在 ctx 结束时关闭实例，这个模块需要重建才能再用", m.name, fn, err)
+			"wazero 在 ctx 结束时关闭实例，这个实例已判死，下一次调用会自动重建", m.name, fn, err)
 	}
 	return &TrapError{Module: m.name, Fn: fn, Cause: err, Stderr: m.stderrTail()}
 }

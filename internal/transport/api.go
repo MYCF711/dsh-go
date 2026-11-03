@@ -23,10 +23,25 @@ const (
 	// MethodSessionCompact 让客户端能主动压一次（界面上的"压缩"，官方 /compact）。
 	MethodSessionCompact Method = "session.compact"
 	MethodWorkspaceList  Method = "workspace.list"
-	MethodFSRead         Method = "fs.read"
-	MethodFSWrite        Method = "fs.write"
-	MethodConfigGet      Method = "config.get"
-	MethodConfigSet      Method = "config.set"
+	// MethodJobsList / MethodJobsOutput 是**后台任务**（bash 的
+	// `run_in_background: true` 起出来的那批）。底层 `spi.Job` 早就实现了
+	// List/Output/Kill，只是 Transport 上一直没有这两个方法，界面就看不到它们。
+	MethodJobsList   Method = "jobs.list"
+	MethodJobsOutput Method = "jobs.output"
+	// MethodScheduleList 列定时任务。存储层（internal/schedule）早就有了，
+	// `dshd schedule list` 一直在用；缺的只是 Transport 上这个方法，
+	// 所以界面一直看不到"这个工作区有哪些定时任务"。
+	MethodScheduleList Method = "schedule.list"
+	// MethodSessionSetModel 给会话设一个"下一轮用哪个模型"的覆盖。
+	//
+	// 为什么需要：`session.load` 里的 model 是**上一轮实际用的**（只读投影），
+	// 而界面上的模型选择器要能改。没有这个方法，那个下拉就只能画死。
+	// 覆盖存在 `<home>/state/session-model.json`（**不碰 v4**：R5 说读路径不写盘）。
+	MethodSessionSetModel Method = "session.setModel"
+	MethodFSRead          Method = "fs.read"
+	MethodFSWrite         Method = "fs.write"
+	MethodConfigGet       Method = "config.get"
+	MethodConfigSet       Method = "config.set"
 )
 
 // SessionMethods 是 U0 第一版要兑现的全部方法（顺序固定，快照按它排）。
@@ -35,6 +50,7 @@ func SessionMethods() []Method {
 		MethodSessionList, MethodSessionLoad, MethodSessionHistory,
 		MethodSessionPrompt, MethodSessionCancel, MethodSessionApprove, MethodSessionCreate,
 		MethodSessionDelete, MethodSessionFork, MethodSessionCompact, MethodWorkspaceList,
+		MethodJobsList, MethodJobsOutput, MethodScheduleList, MethodSessionSetModel,
 		MethodFSRead, MethodFSWrite, MethodConfigGet, MethodConfigSet,
 	}
 }
@@ -123,6 +139,13 @@ type LoadResult struct {
 	// load 只是首屏投影，**不能用来补洞**；但它必须告诉客户端 journal 在哪。
 	JournalEpoch int64 `json:"journalEpoch,omitempty"`
 	LastSeq      int   `json:"lastSeq,omitempty"`
+	// CWD 是这条会话的工作目录（绝对路径，Windows 风格）。
+	//
+	// 为什么必须由宿主给：`workspace.list` 只回 `{name,isDir,size}`（没有 path），
+	// 界面要读某个文件就得拼「工作区根 + name」——而界面不知道根在哪，
+	// 于是 `fs.read` 永远调不出来。空字符串表示不知道（omitempty），
+	// **不许填当前进程 cwd 冒充**：多会话可能属于不同工作区。
+	CWD string `json:"cwd,omitempty"`
 }
 
 // HistoryResult 是 session.history 的返回值（H14）。

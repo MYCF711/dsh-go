@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -35,24 +36,65 @@ var wasmMagic = []byte{0x00, 0x61, 0x73, 0x6d}
 // Module 是一个已装载的 wasm 模块。
 //
 // 用法：Load → Call / InvokeTool（可多次）→ Close。Close 幂等。
+//
+// **实例会死**：客人 trap、超时、取消之后，这个实例就不能再用了
+// （超时/取消时 wazero 直接把 module 关掉，实测 IsClosed=true；
+// trap 时 wazero **不**关，但客人是 panic 出来的，Go 运行时状态没人担保——
+// 见 docs/wasm-tool-abi.md §3.3/§3.4）。死了就该丢，让它下次调用重建，
+// 而不是把"这个模块永远调不动"留给用户重启宿主。
+//
+// 重建靠的是**常驻的编译产物**（compiled）：重新 InstantiateModule 只要 2–4 ms，
+// 而重新读文件 + 编译 4.4 MB 的 Go 模块要 ~0.9 s（§3.5 实测）。
+// 所以这里把 compiled 与装载参数（reactor / tool / timeout）一起留在 Module 上，
+// 重建时一个字节都不用再去磁盘拿——文件在运行期间被换掉也不会静默改变行为
+// （内容身份由 digest 在装载时钉死）。
 type Module struct {
 	name   string
 	path   string
 	digest string
 
 	// tool 是写进 ABI 请求信封的工具名，默认等于模块名。
+	// 它是**装载层参数**，不是客人状态：重建实例后必须原样继续用。
 	tool string
 	// timeout 是单次 InvokeTool 的 deadline（0 = DefaultTimeout）。
 	timeout time.Duration
 
-	runtime wazero.Runtime
-	mod     api.Module
-	// log 保留客人最近几 KiB 的 stdout/stderr，trap 时拼进错误。
+	runtime  wazero.Runtime
+	compiled wazero.CompiledModule // 常驻：实例重建的唯一凭据
+	// reactor 说的是这个模块有没有 _initialize（重建时要再跑一次）。
+	// 不重跑它，Go 客人一进导出函数就 runtime.notInitialized（unreachable）。
+	reactor bool
+
+	mod api.Module
+	// log 保留**当前实例**最近几 KiB 的 stdout/stderr，trap 时拼进错误。
+	// 重建时换一个新的：上一个实例的输出属于上一次失败，混进来只会误导。
 	log *outputLog
+
+	// dead 是"当前实例不可信了"。不靠 IsClosed 一个信号：
+	// trap 之后 IsClosed 仍是 false（实测），但那个实例不该再用。
+	dead       bool
+	deadReason string
+	// rebuildErr 是**上一次重建**失败的原因（成功就清空）。
+	// 与 deadReason 分开存：错一次不该把"实例为什么死"这句话改写成
+	// "实例已失效（实例已失效（…））"——排查的人需要的是两条独立的事实。
+	rebuildErr string
+	// gen 是实例代数（装载时 1，每重建一次 +1），rebuilds 是自动重建次数。
+	// 两个都只用于诊断与测试：并发用例靠 Rebuilds() 证明"只重建一次"。
+	gen      int64
+	rebuilds int64
+	// onRebuild 只有测试会设置：让"重建发生了"这件事可观察、可放慢。
+	onRebuild func()
 
 	mu     sync.Mutex
 	closed bool
 }
+
+// RebuildTimeout 是一次自动重建的上限。
+//
+// 为什么要有上限：实例化本身只要 2–4 ms，但 `_initialize` 里跑的是插件作者的代码。
+// 没有上限，一个卡住的 _initialize 会把"从坏状态里恢复"变成一次永久等待——
+// 正是这次要消灭的那种故障。
+const RebuildTimeout = 30 * time.Second
 
 // outputLog 是客人 stdout/stderr 的环形缓冲（只留最后 4 KiB）。
 //
@@ -143,7 +185,7 @@ func Load(ctx context.Context, name, path string) (m *Module, err error) {
 
 	log := &outputLog{}
 	cfg := wazero.NewModuleConfig().
-		WithName("plugin").
+		WithName(instanceName(1)).
 		WithStdout(log).WithStderr(log)
 	if hasInit {
 		// reactor：先把 Go/TinyGo 运行时拉起来，再允许调用导出。
@@ -164,8 +206,156 @@ func Load(ctx context.Context, name, path string) (m *Module, err error) {
 	return &Module{
 		name: name, path: path, digest: hex.EncodeToString(sum[:]),
 		tool: name, timeout: DefaultTimeout,
-		runtime: rt, mod: mod, log: log,
+		runtime: rt, compiled: compiled, reactor: hasInit,
+		mod: mod, log: log, gen: 1,
 	}, nil
+}
+
+// instanceName 是这个实例在 wazero store 里的名字。
+//
+// 为什么带代数：死掉的实例可能还挂在 store 里（trap 之后 wazero 并不关它），
+// 用同一个名字再实例化会撞 "module already instantiated"——
+// 那就把"重建"变成了新的坑。名字只是诊断标识，客人不 import 自己。
+func instanceName(gen int64) string {
+	if gen <= 1 {
+		return "plugin"
+	}
+	return fmt.Sprintf("plugin#%d", gen)
+}
+
+// Rebuilds 返回这个模块自动重建实例的次数（诊断用；并发用例靠它断言"只重建一次"）。
+func (m *Module) Rebuilds() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rebuilds
+}
+
+// InstanceGen 返回当前实例的代数（装载时 1，每重建一次 +1）。
+func (m *Module) InstanceGen() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.gen
+}
+
+// deadReasonOr 给"实例为什么不能用"一句人话；有记录就用记录。
+// 调用方必须持有 m.mu。
+func (m *Module) deadReasonOr(fallback string) string {
+	if s := strings.TrimSpace(m.deadReason); s != "" {
+		if m.rebuildErr != "" {
+			// 上一次重建也失败过：这句话对下一个读错误的人有用——
+			// 它说明"不是第一次了"，别把希望押在重试上。
+			return s + "；之后自动重建也失败过（" + m.rebuildErr + "）"
+		}
+		return s
+	}
+	if m.mod != nil && m.mod.IsClosed() {
+		return "实例已被 wazero 关闭（超时、取消或客人自己 proc_exit）"
+	}
+	return fallback
+}
+
+// ensureLiveLocked 保证 m.mod 是一个还能调的实例；不能就**重建一次**。
+//
+// 调用方必须持有 m.mu。并发语义就落在"必须持锁"这一条上：
+// 两个 goroutine 同时撞上死实例时，先到的那个重建、后到的那个在锁外等，
+// 拿到的是重建好的实例再顺手判一次——所以是"只重建一次"，
+// 而不是"两个都重建、把其中一个实例漏在 store 里"。
+func (m *Module) ensureLiveLocked(ctx context.Context) error {
+	if m.closed {
+		return fmt.Errorf("模块 %s 已卸载，不能再调用", m.name)
+	}
+	if m.mod != nil && !m.dead && !m.mod.IsClosed() {
+		return nil
+	}
+	why := m.deadReasonOr("实例状态未知")
+	// 死掉的实例先收干净：它自己不会回来，留着白占线性内存（Go 产物 3.5 MiB）。
+	if m.mod != nil {
+		_ = m.mod.Close(context.Background())
+		m.mod = nil
+	}
+	if m.runtime == nil || m.compiled == nil {
+		return fmt.Errorf(
+			"wasm 模块 %q 的实例已失效（%s），而且装载时的编译产物已经释放，**无法重建**：只能重启宿主",
+			m.name, why)
+	}
+	return m.rebuildLocked(ctx, why)
+}
+
+// rebuildLocked 用常驻的编译产物重新实例化一次（并再跑一遍 _initialize）。
+//
+// 失败时把**两句话**都写进错误：实例为什么死、重建为什么也失败。
+// 只写"重建失败"等于把排查起点从"插件的哪个错误"挪到"宿主的哪一层"，那是在帮倒忙。
+func (m *Module) rebuildLocked(ctx context.Context, why string) error {
+	rctx, cancel := context.WithTimeout(ctx, RebuildTimeout)
+	defer cancel()
+
+	gen := m.gen + 1
+	log := &outputLog{}
+	cfg := wazero.NewModuleConfig().
+		WithName(instanceName(gen)).
+		WithStdout(log).WithStderr(log)
+	if m.reactor {
+		// 重建必须重跑 _initialize：Go 客人的运行时状态是每个实例各自的。
+		cfg = cfg.WithStartFunctions("_initialize")
+	}
+
+	mod, err := m.runtime.InstantiateModule(rctx, m.compiled, cfg)
+	if err != nil {
+		cause := err
+		if tail := log.tail(); tail != "" {
+			cause = fmt.Errorf("%w\n客人输出: %s", err, tail)
+		}
+		m.dead = true
+		m.deadReason = why           // 原话保留：不把两层失败拼成一句绕口令
+		m.rebuildErr = cause.Error() // 下一次再失败时把这条也带上
+		return fmt.Errorf(
+			"wasm 模块 %q 的实例已失效（%s），**自动重建也失败了**: %v。"+
+				"这个模块现在调不动——先按上面的原因修插件或环境再重启宿主；"+
+				"原样重试不会成功", m.name, why, cause)
+	}
+
+	m.mod = mod
+	m.log = log
+	m.dead = false
+	m.deadReason = ""
+	m.rebuildErr = ""
+	m.gen = gen
+	m.rebuilds++
+	if m.onRebuild != nil {
+		m.onRebuild()
+	}
+	return nil
+}
+
+// markDeadLocked 把当前实例判死：下一次调用会重建它。
+//
+// 判死只有两类理由（都是"这次调用之后实例不可信"）：客人 trap、
+// 调用被超时/取消打断。**宿主协议错不在此列**：那是两边对不上，
+// 重建一万次也还是对不上，把实例丢掉只会让下一个错误更难查。
+//
+// 调用方必须持有 m.mu。
+func (m *Module) markDeadLocked(reason string) {
+	if m.closed {
+		return
+	}
+	m.dead = true
+	m.deadReason = reason
+}
+
+// instanceFailureReason 判断一次调用失败是不是"实例坏了"，坏了就返回判死理由。
+//
+// 为什么必须区分：trap 之后 wazero 不关实例，宿主若不管，下次调用会拿到
+// 一个 panic 过的 Go 运行时继续跑——那是"看起来能用"的最坏形态。
+func instanceFailureReason(err error) (string, bool) {
+	switch {
+	case errors.Is(err, ErrGuestTrap):
+		return "上一次调用里客人 trap（插件崩溃）", true
+	case errors.Is(err, context.DeadlineExceeded):
+		return "上一次调用超时，wazero 把实例关掉了", true
+	case errors.Is(err, context.Canceled):
+		return "上一次调用被取消，wazero 把实例关掉了", true
+	}
+	return "", false
 }
 
 // stderrTail 返回客人最近的输出（trap 时拼进错误）。
@@ -191,10 +381,11 @@ func (m *Module) Digest() string { return m.digest }
 // 已卸载的模块返回 nil（没有导出可说了），不报错：
 // 这个方法描述的是"模块里有什么"，不是一次可能失败的操作。
 func (m *Module) Exports() []string {
+	// 导出表来自编译产物，重建实例不会改变它；但 m.mod 会被重建换掉，
+	// 所以整段持锁读——否则 -race 会抓到"重建正在换指针"。
 	m.mu.Lock()
-	closed := m.closed
-	m.mu.Unlock()
-	if closed || m.mod == nil {
+	defer m.mu.Unlock()
+	if m.closed || m.mod == nil {
 		return nil
 	}
 	defs := m.mod.ExportedFunctionDefinitions()
@@ -210,12 +401,16 @@ func (m *Module) Exports() []string {
 //
 // 找不到这个导出函数时**报错而不是返回零值**：把"没有这个函数"说成"调用成功、结果是 0"
 // 是最难查的一类错误。用 ExportedFunction 先查，就是为了这个。
+//
+// 实例死了（上次 trap / 超时）会先重建一次再调，与 InvokeTool 走同一条路：
+// 这条是给 `dshd wasm call` 用的诊断入口，它尤其不能"一次 trap 之后就永久坏掉"。
 func (m *Module) Call(ctx context.Context, fn string, args ...uint64) ([]uint64, error) {
+	// 一次只有一条调用能进实例：call 是同步导出，重入会踩客人自己的全局状态。
 	m.mu.Lock()
-	closed := m.closed
-	m.mu.Unlock()
-	if closed {
-		return nil, fmt.Errorf("模块 %s 已卸载，不能再调用", m.name)
+	defer m.mu.Unlock()
+
+	if err := m.ensureLiveLocked(ctx); err != nil {
+		return nil, err
 	}
 	f := m.mod.ExportedFunction(fn)
 	if f == nil {
@@ -223,12 +418,19 @@ func (m *Module) Call(ctx context.Context, fn string, args ...uint64) ([]uint64,
 	}
 	res, err := f.Call(ctx, args...)
 	if err != nil {
-		return nil, fmt.Errorf("调用 %s.%s 失败: %w", m.name, fn, err)
+		wrapped := fmt.Errorf("调用 %s.%s 失败: %w", m.name, fn, err)
+		if why, dead := instanceFailureReason(wrapped); dead {
+			m.markDeadLocked(why)
+		}
+		return nil, wrapped
 	}
 	return res, nil
 }
 
 // Close 卸载模块并释放 runtime。可重复调用。
+//
+// 字段在锁里取快照、关闭动作在锁外做：关闭一个正在被调用的实例本来就是误用，
+// 但"读字段"和"重建换指针"之间的数据竞争不该顺带存在。
 func (m *Module) Close(ctx context.Context) error {
 	m.mu.Lock()
 	if m.closed {
@@ -236,16 +438,18 @@ func (m *Module) Close(ctx context.Context) error {
 		return nil
 	}
 	m.closed = true
+	mod := m.mod
+	rt := m.runtime
 	m.mu.Unlock()
 
 	var first error
-	if m.mod != nil {
-		if err := m.mod.Close(ctx); err != nil {
+	if mod != nil {
+		if err := mod.Close(ctx); err != nil {
 			first = err
 		}
 	}
-	if m.runtime != nil {
-		if err := m.runtime.Close(ctx); err != nil && first == nil {
+	if rt != nil {
+		if err := rt.Close(ctx); err != nil && first == nil {
 			first = err
 		}
 	}

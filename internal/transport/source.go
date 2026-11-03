@@ -11,6 +11,12 @@ type Source interface {
 	Messages(sessionID string) ([]Message, error)
 }
 
+// CwdSourcer 是**可选**能力：告诉协议层某个会话的工作目录。
+// 不实现就不填，界面按"不知道"处理（不猜）。
+type CwdSourcer interface {
+	Cwd(sessionID string) (string, error)
+}
+
 var ErrNoSuchSession = errors.New("没有这个会话")
 
 // ErrNotImplemented 表示这个宿主没实现某个可选能力。
@@ -114,6 +120,11 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 		if ms, ok := src.(ModelSourcer); ok {
 			if m, merr := ms.Model(sessionID); merr == nil {
 				res.Model = m
+			}
+		}
+		if cs, ok := src.(CwdSourcer); ok {
+			if cwd, cerr := cs.Cwd(sessionID); cerr == nil && cwd != "" {
+				res.CWD = cwd
 			}
 		}
 		return res, nil

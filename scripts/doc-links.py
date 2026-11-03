@@ -14,21 +14,30 @@ import re
 import sys
 from pathlib import Path
 
+# **`../` 前缀必须一起匹配**：正则是从 `docs/` 起匹配的，
+# 于是 `../dsh-ui/docs/progress.md` 会被截成 `docs/progress.md`，
+# 再拿去本仓校验就是必然的 MISS——而那个文件本来就在**姊妹仓**里。
+# 跨仓引用不在本仓能校验的范围，识别出来跳过即可。
+# **alphabet 顺序有意义**：`../` 那条必须排在 `docs/` 前面。
+# 写成可选前缀 `(?:\.\./)?docs/...` 时，正则引擎会优先尝试"不带前缀"那条，
+# 于是 `../dsh-ui/docs/progress.md` 仍然被截成 `docs/progress.md`
+# ——加了前缀等于没加（实测过）。
 REF_RE = re.compile(
-    r"(?:docs/[A-Za-z0-9_.\-/]+\.md"
+    r"(\.\./[A-Za-z0-9_.\-/]+\.md"
+    r"|docs/[A-Za-z0-9_.\-/]+\.md"
     r"|scripts/[A-Za-z0-9_.\-/]+\.(?:py|sh))"
 )
 
 MANUAL = "AGENTS.md"
 
 
-def find_root() -> Path | None:
+def find_root(manual: str = MANUAL) -> Path | None:
     """脚本在 <root>/scripts/ 下，先按这个推；失败再退回 CWD。"""
     script_root = Path(__file__).resolve().parent.parent
-    if (script_root / MANUAL).is_file():
+    if (script_root / manual).is_file():
         return script_root
     cwd = Path.cwd()
-    if (cwd / MANUAL).is_file():
+    if (cwd / manual).is_file():
         return cwd
     return None
 
@@ -46,17 +55,27 @@ def syntax_error_name(path: Path) -> str | None:
 
 
 def main() -> int:
-    root = find_root()
+    # 可选参数：换一份「手册」来查。**只给自测用**——
+    # 正式跑（scripts/check.sh）不带参数，查的是 AGENTS.md。
+    # 需要这个开关是为了反证「弄坏必红」：得造一份坏手册，
+    # 而不能去改仓库里真实的 AGENTS.md（那会把别人的文档搞坏）。
+    manual = sys.argv[1] if len(sys.argv) > 1 else MANUAL
+    root = find_root(manual)
     if root is None:
-        print(f"\u627e\u4e0d\u5230 {MANUAL}")
+        print(f"找不到 {manual}")
         return 2
 
-    text = (root / MANUAL).read_text(encoding="utf-8", errors="replace")
+    text = (root / manual).read_text(encoding="utf-8", errors="replace")
     refs = sorted(set(REF_RE.findall(text)))
 
     missing = 0
     bad = 0
     for ref in refs:
+        # 跨仓引用（`../dsh-ui/...`）不在本仓校验：文件在姊妹仓里，
+        # 本仓永远看不到它。误报会让人去"修"一个根本不缺的引用。
+        if ref.startswith("../"):
+            print(f"SKIP {ref}（跨仓）")
+            continue
         target = root / ref
         if not target.is_file():
             print(f"MISS {ref}")

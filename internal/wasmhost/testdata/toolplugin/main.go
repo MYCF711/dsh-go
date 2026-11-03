@@ -5,8 +5,13 @@
 //
 // 构建（宿主侧固定用这条命令，见 scripts/build-wasm-fixture.py）：
 //
-//	GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath \
+//	GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath -buildvcs=false \
 //	    -o ../toolplugin.wasm .
+//
+// `-buildvcs=false` 不是可选项：go 默认把仓库的 VCS 身份（`vcs.revision` /
+// `vcs.modified`）写进 main 包的 build info，于是同一个源文件在不同 commit 上
+// 编出来的 .wasm 字节不同。产物是入库夹具、manifest 又按 digest 钉内容，
+// 那它就不该随仓库指针漂（实例见 docs/wasm-tool-abi.md §10.8）。
 //
 // 两个硬前提（docs/wasm-tool-abi.md §1 有实测支撑，不是约定俗成）：
 //   - 必须 -buildmode=c-shared：默认 go build 产出的是 command 形态，
@@ -19,6 +24,14 @@
 //	alloc(n) -> ptr                 客人划 n 字节，返回线性内存偏移
 //	call(ptr, n) -> (ptr<<32)|len    吃 args JSON，吐结果 JSON
 //
+// 这个夹具提供**两个**工具，按请求信封里的 tool 字段分流（§10）：
+//
+//	echo   把 text 原样回显（默认分支）
+//	upper  把 text 里的 ASCII 字母转成大写
+//
+// 两个工具逻辑不同，所以"上游到底有没有把工具名送进来"是可以用输出判定的：
+// 送对了是 upper:HI，没送是 echo:Hi。
+//
 // 为什么不引入调用约定库：两个 i32/i64 导出就够，且这样 Go / TinyGo 两种客人
 // 用同一套宿主代码——切换客人编译器不需要改宿主。
 package main
@@ -30,8 +43,9 @@ import (
 
 // request 是宿主写进线性内存的请求信封。
 //
-// tool 字段现在看着多余（一个模块一个工具），但它让「一个模块挂多个工具」
-// 将来不需要改 ABI：宿主不用猜，客人也不用从 args 里反推。
+// tool 字段不是一个装饰：**一个模块可以挂多个工具**，客人靠它知道自己这次是谁。
+// 宿主每次调用都会把当前工具名写进来（cmd/dshd 的 wasmToolRouter），
+// 所以客人这边必须按它分流——不看它，两个工具就会跑到同一个分支上。
 type request struct {
 	V    int             `json:"v"`
 	Tool string          `json:"tool"`
@@ -99,17 +113,54 @@ func call(ptr, n uint32) uint64 {
 		panic("toolplugin: 故意 panic，用来验证 trap 不等于工具失败")
 	}
 
-	r := reply{V: 1}
-	if args.Text == "" {
-		r.Summary = "空输入"
-		r.Text = "args.text 是空的"
-		r.IsError = true
-		r.Hint = `传 {"text": "..."}：这个夹具工具只把 text 原样回显`
-	} else {
-		r.Summary = "收到 " + args.Text
-		r.Text = "echo:" + args.Text
+	// **按 tool 字段分流**：同一个 .wasm 里两个工具，逻辑完全不同。
+	//
+	// 宿主没把 tool 写进信封时（老宿主 / internal/wasmhost 里不设工具名的直接调用），
+	// upper 会落到 echo 分支上、返回 "echo:…"——这正是 cmd/dshd 的路由用例
+	// 要钉住的失败形态：它证明"路由"不是摆设，而是这一层唯一的落点。
+	if req.Tool == "upper" {
+		return writeReply(upperReply(args.Text))
 	}
-	return writeReply(r)
+	// echo 是默认分支：不设工具名的直接调用落在这里，行为与加 upper 之前一致。
+	return writeReply(echoReply(args.Text))
+}
+
+// echoReply 是第一个工具：把 text 原样回显。
+func echoReply(text string) reply {
+	if text == "" {
+		return reply{
+			V: 1, Summary: "空输入", Text: "args.text 是空的", IsError: true,
+			Hint: `传 {"text": "..."}：这个夹具工具只把 text 原样回显`,
+		}
+	}
+	return reply{V: 1, Summary: "收到 " + text, Text: "echo:" + text}
+}
+
+// upperReply 是第二个工具：把 text 里的 ASCII 字母转成大写。
+//
+// 与 echo **只差 tool 字段一个条件**，所以两者的输出可以拿来判定
+// "宿主到底有没有把工具名送进来"：送对了是 upper:HI，没送是 echo:Hi。
+func upperReply(text string) reply {
+	if text == "" {
+		return reply{
+			V: 1, Summary: "空输入", Text: "args.text 是空的", IsError: true,
+			Hint: `传 {"text": "..."}：这个夹具工具把 text 里的 ASCII 字母转成大写`,
+		}
+	}
+	up := upperASCII(text)
+	return reply{V: 1, Summary: "大写 " + up, Text: "upper:" + up}
+}
+
+// upperASCII 只转 ASCII 字母，不引 unicode 表（那会把产物撑大几百 KB）。
+// 非 ASCII 原样保留，顺带证明 UTF-8 跨边界不受影响。
+func upperASCII(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'a' && c <= 'z' {
+			b[i] = c - 'a' + 'A'
+		}
+	}
+	return string(b)
 }
 
 // writeReply 把结果信封放进线性内存，返回 (ptr<<32)|len。

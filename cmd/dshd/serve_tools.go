@@ -22,6 +22,11 @@ import (
 //
 // 写锁：子进程按既有规矩拿会话写锁；这里**只读**日志，不抢锁。
 type loopRunner struct {
+	// jobsMu 保护 jobs：后台任务清单由子进程推上来（stderr 的 @@JOBS@@ 行），
+	// jobs.list 从这里读。**子进程推、父进程存**——因为 spi.Job 在子进程的
+	// kernel Scope 里，宿主这边没有那个实例。
+	jobsMu sync.Mutex
+	jobs   []transport.JobInfo
 	// journals 是**每会话一条**的序号域（H14）。帧的 seq 由它分配，
 	// WS 推送与 session.history 读同一份——否则客户端判断断号时看到的是假象。
 	// nil 时 emit 退化成"只推不记账"（老测试不必改）。
@@ -67,20 +72,30 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	// **顺序很要紧**：先 StderrPipe 再决定 cmd.Stderr——StderrPipe 在 cmd.Stderr 已设时
 	// 会直接返回错误，而那个错误如果不看，就变成"子进程卡在等审批、父进程一无所知"。
 	var watchWG sync.WaitGroup
-	if r.policy == "ask" && r.broker != nil {
-		cmd.Env = append(os.Environ(), "DSHD_APPROVAL_STDIO=1")
-		stdin, serr := cmd.StdinPipe()
+	// **不论什么策略都要挂 Watch**：这条 stderr 通道不只跑审批，还跑子进程推上来的
+	// `@@JOBS@@`（后台任务清单）。只在 ask 时挂的话，`--policy allow` 下 jobs.list
+	// 永远是空的——实测过一次：模型真起了 job-1、子进程真写了 @@JOBS@@ 行，
+	// 而父进程因为没挂 Watch 什么都没收到，界面上看到一个空列表。
+	if r.broker != nil {
+		if r.policy == "ask" {
+			cmd.Env = append(os.Environ(), "DSHD_APPROVAL_STDIO=1")
+			stdin, serr := cmd.StdinPipe()
+			if serr == nil {
+				r.broker.useStdin(stdin)
+			} else {
+				fmt.Fprintf(os.Stderr, "审批 stdin 没建起来（%v），这一轮不会问人\n", serr)
+			}
+		}
 		epipe, eerr := cmd.StderrPipe()
-		if serr == nil && eerr == nil {
-			r.broker.useStdin(stdin)
+		if eerr == nil {
 			watchWG.Add(1)
 			go func() {
 				defer watchWG.Done()
 				r.broker.Watch(epipe, &stderr)
 			}()
 		} else {
-			// 拿不到管道就别假装有审批：退回缓冲，至少错误播报还在。
-			fmt.Fprintf(os.Stderr, "审批通道没建起来（stdin=%v stderr=%v），这一轮不会问人\n", serr, eerr)
+			// 拿不到管道就退回缓冲：至少错误播报还在（jobs 就看不到了）。
+			fmt.Fprintf(os.Stderr, "stderr 管道没建起来（%v），这一轮看不到后台任务\n", eerr)
 			cmd.Stderr = &stderr
 		}
 	} else {

@@ -127,6 +127,12 @@ func cmdServe(args []string) error {
 		return err
 	}
 
+	// 会话级模型覆盖（读盘失败不拦启动：界面上少一个下拉，比启不来好）。
+	modelOverrides := newModelOverrideStore(*home)
+	if err := modelOverrides.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "会话模型覆盖读盘失败（%v），本轮全部按默认模型跑\n", err)
+	}
+
 	// 会话数据的来源：宿主这一侧才被允许读 v4 日志（红线 R7）。
 	// cwd 传空 = 按 id 全盘找，与 `session.resume` 的兜底一致。
 	src := newSessionSource(*home, "")
@@ -160,6 +166,12 @@ func cmdServe(args []string) error {
 	// emit 用 lr 的方法，所以帧一样进 journal、一样可重放。
 	broker := newApprovalBroker(nil, nil)
 	broker.setEmit(func(sid, typ string, data json.RawMessage) { lr.emit(sid, typ, data) })
+	// 子进程推上来的后台任务清单 → 存到 lr，jobs.list 从这里读。
+	broker.onJobs = func(jobs []transport.JobInfo) {
+		lr.jobsMu.Lock()
+		lr.jobs = jobs
+		lr.jobsMu.Unlock()
+	}
 	lr.broker = broker
 	if useModelRunner {
 		runner = mr
@@ -176,7 +188,25 @@ func cmdServe(args []string) error {
 
 	srv, err := transport.NewServer(transport.Options{
 		Source: src,
-		Addr:   *addr,
+		// 后台任务：**只读子进程推上来的那份**。JobsOutput 仍然空着——
+		// 取某一条的实时输出需要子进程那边有"按 id 查"的应答通道，
+		// 而当前协议是单向推清单，没有 request/response 对。
+		JobsList: func() []transport.JobInfo {
+			lr.jobsMu.Lock()
+			defer lr.jobsMu.Unlock()
+			return lr.jobs
+		},
+		// 定时任务：直接读 `<home>/state/schedules/`（和 `dshd schedule list` 同一个来源）。
+		// **不复用 lr**：它不是子进程推的，是磁盘上的文件，每次问都能拿到最新的。
+		ScheduleList: func() []transport.ScheduleItem {
+			return serveScheduleList(*home)
+		},
+		// 会话级模型覆盖：写 <home>/state/session-model.json。
+		// **不写 v4**（R5 读路径不写盘）；这是界面状态，进了日志会污染重放。
+		SetSessionModel: func(sessionID, model string) error {
+			return modelOverrides.Set(sessionID, model)
+		},
+		Addr: *addr,
 		// H14：把序号域交给 server——WS 推送与 session.history 必须读同一份，
 		// 否则客户端补洞时补到的是另一个 seq 域的数据。
 		Journals: journals,
@@ -206,8 +236,8 @@ func cmdServe(args []string) error {
 		FSWrite: func(path, content string) error {
 			return serveFSWrite(path, content)
 		},
-		WorkspaceList: func() ([]transport.WorkspaceEntry, error) {
-			return serveWorkspaceList()
+		WorkspaceList: func(path string) ([]transport.WorkspaceEntry, error) {
+			return serveWorkspaceList(path)
 		},
 		Delete: func(sessionID string) error {
 			return serveDelete(*home, sessionID)

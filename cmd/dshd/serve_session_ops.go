@@ -64,12 +64,19 @@ func serveFork(home, sessionID, title string) (string, error) {
 //
 // 为什么只列顶层：界面左栏要的是"这个工作区里有什么项目/目录"，
 // 递归会让一次调用扫几万个文件——那是 grep 工具的事，不是这个 method 的事。
-func serveWorkspaceList() ([]transport.WorkspaceEntry, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("取当前目录失败: %w", err)
+func serveWorkspaceList(path string) ([]transport.WorkspaceEntry, error) {
+	// path 为空就用进程工作目录（旧行为）；给了就列那个目录。
+	// **不再用进程 cwd 冒充会话 cwd**：多会话可能属于不同工作区，
+	// 界面传进来的是 session.load.cwd，那才是"这条会话自己的"。
+	dir := path
+	if dir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("取当前目录失败: %w", err)
+		}
+		dir = wd
 	}
-	ents, err := os.ReadDir(wd)
+	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("读目录失败: %w", err)
 	}
