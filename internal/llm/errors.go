@@ -42,7 +42,7 @@ func (e *GatewayError) Error() string {
 		case 401, 403:
 			return fmt.Sprintf("模型网关拒绝认证（%d）：检查 API key 与 --base", e.Code)
 		case 404:
-			return fmt.Sprintf("模型网关没有这个接口（404）：--base 是不是少了 /v1？")
+			return "模型网关没有这个接口（404）：--base 是不是少了 /v1？"
 		case 429:
 			return "模型网关限流（429）：稍等再试"
 		}

@@ -5,7 +5,7 @@
 | 1 | kernel 不依赖业务包 | `check.sh` 的 R1 检查 | ✅ |
 | 2 | 删 `modules/` 仍能 `go build ./internal/...` | `check.sh` 的 A3 | ✅ |
 | 3 | 每个 `Exec` 的 error 有 Hint | `TestEveryToolErrorHasHint`（扫 32 文件 / 297 处） | ✅ |
-| 4 | `go vet` + `staticcheck` + `-race` | vet ✅ / **staticcheck 未装** / **-race 缺 C 编译器** | ⚠️ 1/3 |
+| 4 | `go vet` + `staticcheck` + `-race` | vet ✅ / **staticcheck 已装并接入门禁** / `-race` 缺 C 编译器 | ⚠️ 2/3 |
 | 5 | 工具 schema 快照 | `TestToolTableSnapshot` + `-update` | ✅ |
 | 6 | 工具表 ≤ 6000 token | **本轮新加** `TestToolTableTokenBudget`（本仓估算器）+ 体积守卫 32 KB | ⚠️ 估算器，非真分词 |
 | 7 | 二进制 ≤ 25 MB | **本轮新加**：`check.sh` 直接量产物 | ✅ 13 MB |
@@ -58,3 +58,49 @@
 
 真分词要联网或引依赖。门禁必须能在离线、无凭据的环境跑。
 **宁可要一个每次都跑、偏差已知的代理，也不要一个需要条件的真测量**——后者在 CI 上大概率变成"跳过"。
+
+---
+
+## 第 4 条：staticcheck 装上了，第 4 条从 1/3 变 2/3
+
+`go install honnef.co/go/tools/cmd/staticcheck@latest` 成功（有网络）。
+
+### 第一次跑就抓到 17 条，修掉 3 条真问题
+
+只跑 `-checks=SA*,S1*`（真 bug 与可疑写法）时剩 3 条：
+
+| 位置 | 问题 | 处置 |
+|---|---|---|
+| `internal/llm/errors.go:45` | 无参数的 `fmt.Sprintf` | 改成普通字符串 |
+| `cmd/dshd/history_test.go:35` | 读了 `err` 从不使用 | 改成真的断言读得回 |
+| `internal/spi/ctx_test.go:21` | nil ctx（SA1012） | **`//lint:ignore`**：这里就是要传 nil 验不 panic |
+
+第三条是**误报**，但误报也要显式写出来——用 `//lint:ignore` 加一句理由，
+而不是把整类检查关掉。
+
+### 为什么不跑 U1000（未使用符号）
+
+第一次跑出来的 17 条里 12 条是 U1000：`turnSeq`、`errNoModel`、`noModelRunner`、
+`(*Loop).runTool`、`summarize` 等——**都是真死代码**，但删它们要动 12 个文件，
+不该和"接入 staticcheck"这一步混在一起。
+
+已记在下面，作为独立的一笔债。
+
+### 实演过
+
+塞回一个无参数 `Sprintf` → `FAIL staticcheck: internal\llm\errors.go:47:11: unnecessary use of fmt.Sprintf (S1039)`，
+还原 → ALL GREEN。**它是真门禁，不是装饰。**
+
+### 遗留：12 处未使用符号
+
+```
+cmd/dshd/serve.go            errNoModel / noModelRunner / noModelRunner.Run
+cmd/dshd/serve_events.go     turnSeq
+internal/acp/server.go       msgSeq
+internal/agent/loop.go       (*Loop).runTool
+internal/session/list.go     summarize
+cmd/dshd/meter_calib_test.go stubChat
+internal/acp/server_test.go  mu
+```
+
+删之前要逐条确认"真没用"——**U1000 也会误报反射/接口实现**，不能批量删。

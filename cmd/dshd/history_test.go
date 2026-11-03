@@ -32,8 +32,10 @@ func buildSessionForHistory(t *testing.T) string {
 		t.Fatal(err)
 	}
 	// 把 0..1 压掉，让暗号只存在于原始日志里
-	back, err := os.ReadFile(w.Path)
-	_ = back
+	// 读一遍只为确认压缩后文件仍可读；内容由下面的 Events 断言。
+	if _, rerr := os.ReadFile(w.Path); rerr != nil {
+		t.Fatalf("压缩后读不回会话文件: %v", rerr)
+	}
 	if _, _, err := session.Compact(w, mustRead(t, w.Path).Events,
 		session.Span{Start: 0, End: 1},
 		[]spi.Block{{Type: "text", Text: "（摘要）"}}, session.CompactionMeta{}); err != nil {

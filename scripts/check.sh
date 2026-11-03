@@ -167,6 +167,20 @@ else
     bad "构建不出二进制，量不了体积"
   fi
 
+  # PLAN §15 第 4 条：staticcheck。只跑 SA*（真 bug）与 S1*（可疑写法），
+  # 不跑 U1000（未使用符号，已有清单在 docs/ci-rules.md）与 ST*（风格）。
+  # 没装就 FAIL 而不是 SKIP——"没跑"和"跑过"在门禁里不能长得一样。
+  if sc="$(go env GOPATH)/bin/staticcheck.exe"; [ -x "$sc" ] || sc="$(go env GOPATH)/bin/staticcheck"; [ -x "$sc" ]; then
+    if sc_out=$("$sc" -checks=SA*,S1* ./... 2>&1); then
+      pass "staticcheck（SA*/S1*）"
+    else
+      bad "staticcheck: $(printf '%s' "$sc_out" | head -2 | tr '
+' ' ')"
+    fi
+  else
+    bad "staticcheck 没装：go install honnef.co/go/tools/cmd/staticcheck@latest"
+  fi
+
   # R1 内核零业务
   if [ -d internal/kernel ]; then
     deps=$(go list -deps ./internal/kernel 2>/dev/null \

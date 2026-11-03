@@ -18,6 +18,7 @@ func TestSessionAbsentIsEmpty(t *testing.T) {
 		t.Fatalf("没绑会话时应当返回空串，得到 %q", got)
 	}
 	// nil ctx 也不许 panic：工具在异常路径下照样会被调用。
+	//lint:ignore SA1012 这里就是要在 nil ctx 上验"不 panic"，传 context.TODO 就测不到
 	if got := SessionFrom(nil); got != "" {
 		t.Fatalf("nil ctx 应当返回空串，得到 %q", got)
 	}
