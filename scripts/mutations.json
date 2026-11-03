@@ -134,5 +134,13 @@
     "new": "\n",
     "pkg": "./internal/transport",
     "test": "TestServeConnUnsubscribesOnClose"
+  },
+  {
+    "name": "ws-allows-without-cookie",
+    "file": "internal/transport/server.go",
+    "old": "\tif !s.authorized(r) {\n\t\twriteJSON(w, http.StatusUnauthorized, errorBody(\"unauthorized\"))\n\t\treturn\n\t}\n\tconn, err := Upgrade(w, r)",
+    "new": "\tconn, err := Upgrade(w, r)",
+    "pkg": "./internal/transport",
+    "test": "TestWSRequiresCookie"
   }
 ]

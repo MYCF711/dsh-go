@@ -112,3 +112,21 @@ func TestTokenIsSingleUse(t *testing.T) {
 		t.Fatalf("token 用第二次要 401，拿到 %d", resp2.StatusCode)
 	}
 }
+
+// /ws 和 /api 一样要 cookie：没有 cookie 不许升级。
+func TestWSRequiresCookie(t *testing.T) {
+	_, base, c := startServer(t)
+	req, _ := http.NewRequest(http.MethodGet, base+"/ws", nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("没 cookie 升级要 401，拿到 %d", resp.StatusCode)
+	}
+}

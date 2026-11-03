@@ -46,6 +46,7 @@ type Options struct {
 
 // Server 是界面线的宿主入口。
 type Server struct {
+	hub   *Hub
 	opt   Options
 	token string // 一次性 launch token，只经 Token() 交出
 
@@ -64,6 +65,7 @@ func NewServer(opt Options) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
+		hub:     NewHub(),
 		opt:     opt,
 		token:   token,
 		cookies: make(map[string]struct{}),
@@ -132,11 +134,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/connect":
 		s.handleConnect(w, r)
+	case r.URL.Path == "/ws":
+		s.handleWS(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/"):
 		s.handleAPI(w, r)
 	default:
 		writeJSON(w, http.StatusNotFound, errorBody("not found"))
 	}
+}
+
+// handleWS 是界面订阅事件流的地方。
+//
+// 和 /api 一样要 cookie：**没有 cookie 就不许升级**。
+// 升级之后这条连接交给 ServeConn，它负责把 Hub 的帧写回来。
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		writeJSON(w, http.StatusUnauthorized, errorBody("unauthorized"))
+		return
+	}
+	conn, err := Upgrade(w, r)
+	if err != nil {
+		return // Upgrade 已经写过 400
+	}
+	go ServeConn(conn, s.hub)
 }
 
 // handleConnect 拿 launch token 换 cookie。同一个 token 只换一次。
