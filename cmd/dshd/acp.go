@@ -261,7 +261,14 @@ func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessa
 	}
 
 	if t, ok := g.reg.Get(name); ok && t.Caps().NeedsApproval() {
-		remembered := g.approvals != nil && g.approvals.Allowed(g.sessionID, name)
+		// 「以后都允许」**不能被子调用继承**。
+		//
+		// 理由：记忆是按（会话, 工具）记的，而一段 workflow 里同一个写类工具
+		// 可以跑 N 次。若子调用也吃这份记忆，人点一次"允许"就等于给 N 次写盘
+		// 盖了章——批准被脚本放大了，而人只看到一次弹窗。
+		// 所以嵌套调用一律重新问（无人值守策略下就是一律拒）。
+		nested := spi.SubDispatchFrom(ctx).Depth > 0
+		remembered := !nested && g.approvals != nil && g.approvals.Allowed(g.sessionID, name)
 		allow, needAsk := approvalDecision(g.modeApproval, remembered)
 		switch {
 		case allow:

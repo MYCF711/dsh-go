@@ -146,3 +146,51 @@ func TestGuardedRunnerAskErrorFailsClosed(t *testing.T) {
 		t.Fatal("审批出错时工具不能执行——失败要关，不能开")
 	}
 }
+
+// 「以后都允许」不能被**子调用**继承。
+//
+// 记忆按（会话, 工具）记，而一段 workflow 里同一个写类工具能跑 N 次。
+// 若子调用也吃这份记忆，人点一次"允许"就等于给 N 次写盘盖章，
+// 而人只看到一次弹窗——批准被脚本放大了。
+func TestNestedCallDoesNotInheritAllowAlways(t *testing.T) {
+	reg := &fakeReg{tools: map[string]spi.Tool{
+		"write": &fakeTool{name: "write", caps: spi.Caps{Writes: true}},
+	}}
+	mem := approval.New()
+	mem.Remember("s1", "write") // 人早先点过"以后都允许"
+
+	asked := 0
+	g := &guardedRunner{
+		inner:     &fakeRunnerInner{},
+		reg:       reg,
+		sessionID: "s1",
+		approvals: mem,
+		ask: func(context.Context, string, string, string) (bool, error) {
+			asked++
+			return true, nil
+		},
+	}
+
+	// ① 顶层调用：应当吃记忆，不问
+	if _, err := g.Run(context.Background(), "write", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("顶层调用失败：%v", err)
+	}
+	if asked != 0 {
+		t.Fatalf("顶层调用该直接放行（有记忆），实际问了 %d 次", asked)
+	}
+
+	// ② 子调用（Depth=1）：必须重新问
+	nestedCtx := spi.WithSubDispatch(context.Background(), spi.SubDispatch{Runner: g, Depth: 1})
+	if _, err := g.Run(nestedCtx, "write", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("子调用失败：%v", err)
+	}
+	if asked != 1 {
+		t.Fatalf("子调用必须重新问一次，实际问了 %d 次", asked)
+	}
+}
+
+type fakeRunnerInner struct{}
+
+func (fakeRunnerInner) Run(context.Context, string, json.RawMessage) (spi.Result, error) {
+	return spi.Result{Summary: "执行了"}, nil
+}

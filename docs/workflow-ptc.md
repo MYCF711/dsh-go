@@ -406,5 +406,7 @@ python scripts/guard-selftest.py
 2. **`Stop` 被子调用吞掉**：`exit_plan_mode` / `ask_user_question` 若出现在 script 里，
    它们的 `Stop` 不会传出去（`loop.go:281` 只看顶层结果）。已在 Hint 里避免引导，
    但没在代码上拦。
-3. **`allow_always` 会被脚本放大**：一次批准 → 脚本里同一工具跑 N 次。
-   这是 `SubDispatch` 设计上的取舍（子调用照样要过审批，但"以后都允许"是按工具记的）。
+3. ~~**`allow_always` 会被脚本放大**~~ **已修（M319）**：子调用**不再继承**"以后都允许"。
+   判据在 `guardedRunner.Run`：`spi.SubDispatchFrom(ctx).Depth > 0` 时忽略审批记忆、重新问，
+   无人值守策略下就是一律拒。理由：记忆按（会话, 工具）记，而一段脚本能让同一工具跑 N 次——
+   人只看到一次弹窗，却给 N 次写盘盖了章。
