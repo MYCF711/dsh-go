@@ -109,3 +109,49 @@ func TestCapsDoNotNeedApproval(t *testing.T) {
 		t.Fatal("skill 只读本地文件，不该要求审批")
 	}
 }
+
+// DSHD_SKILLS_EXTRA：主目录空着时，额外根里的 skill 也要能列、能取。
+//
+// 这台机器就是这种情况——<home>/skills 根本不存在，真正的 skill 在别处。
+// 没有这条，工具在真机上等于不可用，而单测全绿。
+func TestExtraRootIsSearched(t *testing.T) {
+	main := t.TempDir()
+	extra := t.TempDir()
+	writeSkill(t, extra, "hindsight-coding-agent", "---\ndescription: 记忆插件怎么用\n---\n正文\n")
+	t.Setenv("DSHD_SKILLS_EXTRA", extra)
+
+	tool := &Tool{dir: main}
+
+	res, err := tool.Exec(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("列清单失败：%v", err)
+	}
+	if !strings.Contains(res.Text, "hindsight-coding-agent") || !strings.Contains(res.Text, "记忆插件怎么用") {
+		t.Fatalf("额外根没被列出来：%s", res.Text)
+	}
+
+	got, err := tool.Exec(context.Background(), json.RawMessage(`{"name":"hindsight-coding-agent"}`))
+	if err != nil {
+		t.Fatalf("从额外根加载失败：%v", err)
+	}
+	if !strings.Contains(got.Text, "正文") {
+		t.Fatalf("正文没取到：%s", got.Text)
+	}
+}
+
+// 主目录有的优先：同名时不能被额外根盖掉。
+func TestMainRootWinsOverExtra(t *testing.T) {
+	main := t.TempDir()
+	extra := t.TempDir()
+	writeSkill(t, main, "dup", "主目录的版本\n")
+	writeSkill(t, extra, "dup", "额外根的版本\n")
+	t.Setenv("DSHD_SKILLS_EXTRA", extra)
+
+	got, err := (&Tool{dir: main}).Exec(context.Background(), json.RawMessage(`{"name":"dup"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Text, "主目录的版本") {
+		t.Fatalf("同名时应当主目录优先：%s", got.Text)
+	}
+}

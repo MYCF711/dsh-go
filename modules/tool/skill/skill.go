@@ -70,28 +70,32 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		return t.list()
 	}
 
-	dir := t.dir
-	slashDir := filepath.ToSlash(dir)
-
-	// 先确认根目录存在：它决定 hint 该说"没装任何 skill"还是"没有这个名字"。
-	info, statErr := os.Stat(dir)
-	if statErr != nil || !info.IsDir() {
+	// 按 roots() 的顺序找：第一个有 <root>/<name>/SKILL.md 的就是它。
+	// 多个根的理由：主 home 可能是空的，而真正的 skill 目录在别处（本机就是这种情况）。
+	var dir string
+	for _, r := range t.roots() {
+		cand := filepath.Join(r, name, "SKILL.md")
+		if !underDir(r, cand) {
+			continue // 带 ../ 的 name：不许逃出任何一根
+		}
+		if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+			dir = r
+			break
+		}
+	}
+	if dir == "" {
+		slashDir := filepath.ToSlash(strings.Join(t.roots(), ", "))
 		return spi.Result{
-			Hint: "这台机器上没有装任何 skill（" + slashDir + " 不存在）。先建目录并放入 <名字>/SKILL.md。",
-		}, skillErr("skill 目录不可用：" + slashDir)
+			Hint: notFoundHintAll(t.roots(), name),
+		}, skillErr("没有名为「" + name + "」的 skill（找过：" + slashDir + "）")
 	}
 
-	// 防越界：name 里带 ../ 时 Join 会逃出 dir。这种情况一律按"没有这个 skill"处理，
-	// 而不是去读目录外面的文件。
 	path := filepath.Join(dir, name, "SKILL.md")
-	if !underDir(dir, path) {
-		return spi.Result{Hint: notFoundHint(dir, name)}, skillErr("没有名为「" + name + "」的 skill")
-	}
 
 	body, readErr := os.ReadFile(path)
 	if readErr != nil {
 		if os.IsNotExist(readErr) {
-			return spi.Result{Hint: notFoundHint(dir, name)}, skillErr("没有名为「" + name + "」的 skill")
+			return spi.Result{Hint: notFoundHintAll(t.roots(), name)}, skillErr("没有名为「" + name + "」的 skill")
 		}
 		return spi.Result{
 			Hint: "确认该文件可读（不是目录、没有被权限挡住），或换一个 skill 名。",
@@ -129,17 +133,18 @@ func (e skillErr) Error() string { return string(e) }
 //
 // 说明取不到就不编：只给名字。**空描述比假描述好**——假描述会让模型挑错 skill。
 func (t *Tool) list() (spi.Result, error) {
-	names := existingSkills(t.dir)
+	names := existingSkillsAll(t.roots())
 	if len(names) == 0 {
 		return spi.Result{
-			Hint: "这台机器上没装任何 skill（" + filepath.ToSlash(t.dir) + " 下没有 <名字>/SKILL.md）。先建一个再来。",
-		}, skillErr("没有可用的 skill：" + filepath.ToSlash(t.dir))
+			Hint: "这台机器上没装任何 skill（找过：" + filepath.ToSlash(strings.Join(t.roots(), ", ")) +
+				"）。先建 <根>/<名字>/SKILL.md，或用 DSHD_SKILLS_EXTRA 指一个已有的目录。",
+		}, skillErr("没有可用的 skill")
 	}
 
 	var b strings.Builder
 	b.WriteString("本机可用 skill（用 {\"name\":\"<名字>\"} 取全文）：\n")
 	for _, n := range names {
-		desc := readDescription(filepath.Join(t.dir, n, "SKILL.md"))
+		desc := readDescriptionAny(t.roots(), n)
 		if desc == "" {
 			b.WriteString("- " + n + "\n")
 			continue
@@ -152,6 +157,65 @@ func (t *Tool) list() (spi.Result, error) {
 		Text:    strings.TrimRight(b.String(), "\n"),
 		Data:    map[string]any{"count": len(names), "names": names},
 	}, nil
+}
+
+// roots 是查找顺序：主目录在前，`DSHD_SKILLS_EXTRA` 里的追加在后（用 ; 分隔）。
+//
+// 为什么需要额外根：主 home 的 skills 可能是空的，而真正的 skill 目录在别处。
+// 不给一条"指过去"的路，这个工具在那种机器上就等于没有。
+func (t *Tool) roots() []string {
+	out := []string{}
+	if strings.TrimSpace(t.dir) != "" {
+		out = append(out, t.dir)
+	}
+	for _, p := range strings.Split(os.Getenv("DSHD_SKILLS_EXTRA"), ";") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// existingSkillsAll 合并多个根里的 skill 名（同名只算一次，先出现的根优先）。
+func existingSkillsAll(roots []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range roots {
+		for _, n := range existingSkills(r) {
+			if seen[n] {
+				continue
+			}
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// readDescriptionAny 按 roots 顺序找第一个有这个 skill 的根，读它的 description。
+func readDescriptionAny(roots []string, name string) string {
+	for _, r := range roots {
+		p := filepath.Join(r, name, "SKILL.md")
+		if !underDir(r, p) {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			return readDescription(p)
+		}
+	}
+	return ""
+}
+
+// notFoundHintAll 把"真实存在的名字"跨根汇总给模型。
+func notFoundHintAll(roots []string, name string) string {
+	names := existingSkillsAll(roots)
+	if len(names) == 0 {
+		return "没有名为「" + name + "」的 skill，而且一个都没装（找过：" +
+			filepath.ToSlash(strings.Join(roots, ", ")) + "）。"
+	}
+	return "没有名为「" + name + "」的 skill。现有：" + strings.Join(names, "、")
 }
 
 // readDescription 从 SKILL.md 顶部的 YAML frontmatter 里取 description。
