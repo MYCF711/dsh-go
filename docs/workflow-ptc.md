@@ -379,3 +379,33 @@ python scripts/guard-selftest.py
 - **门禁**：`cmd/dshd/snapshot_test.go:23-35`、`:39-67`、`:93-201`、`cmd/dshd/tool_budget_test.go:16-31`、`docs/tool-table-budget.md:3`
 - **上游形态**：`docs/official-parity.md:30`、`:50`、`research/21-dsh-session-v4.md:118-119`、`research/20-dsh-tool-schemas.index.md:90`
 - **规矩**：`AGENTS.md:21`（R3）、`:24`（R6）、`:67`（守卫可反证）、`PLAN.md:440`（不做宿主内 JS 桥）
+
+---
+
+## 落地记录（2026-11-04，M312/M315）
+
+**已实现**：`workflow` 工具（`modules/tool/workflow/`），参数名对齐官方 `script` / `meta`，
+内容是**声明式 JSON 步骤表**（不是 JS，本仓 R6）。
+
+| 要求 | 落点 |
+|---|---|
+| 子调用必须重新穿过受管通道 | `spi.SubDispatch` 由 `guardedRunner.Run` 放进 ctx；workflow 只从 ctx 取，**不许 Inject 裸 Pipeline** |
+| 失败不丢现场 | 单步失败记进 trace、`err=nil`、脚本继续；整体 `Data.ok=false` |
+| 输出预算 | 正文 ≤3000 rune（低于 spill 4000 字符阈值，链路可验证） |
+| 递归 | `spi.MaxSubDepth = 3`，超过就拒 |
+| `meta` 回显 | 原样带回 `Data.meta`，供调用方对账 |
+| 每步时长 | `trace.MS` |
+
+**仍未解决（本轮如实记下）**：
+
+1. **子调用不进 v4 日志。** 目前 `tool/call` 只由 `internal/agent/loop.go:236` 为**顶层**调用写；
+   workflow 的子调用走 Pipeline，只有总线事件，没有 v4 事件。
+   后果：`session.history` 里看不到"编排里那 5 次 grep"。
+   为什么不当场补：**v4 是单写者模型**（R5），现在补等于开第二个写者，
+   最可能的结果是同一次调用被记两遍。正确做法是宿主订阅总线工具事件统一落盘，
+   而不是让 workflow 自己写。
+2. **`Stop` 被子调用吞掉**：`exit_plan_mode` / `ask_user_question` 若出现在 script 里，
+   它们的 `Stop` 不会传出去（`loop.go:281` 只看顶层结果）。已在 Hint 里避免引导，
+   但没在代码上拦。
+3. **`allow_always` 会被脚本放大**：一次批准 → 脚本里同一工具跑 N 次。
+   这是 `SubDispatch` 设计上的取舍（子调用照样要过审批，但"以后都允许"是按工具记的）。

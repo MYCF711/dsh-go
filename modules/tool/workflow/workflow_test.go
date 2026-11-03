@@ -163,3 +163,38 @@ func TestCapsDeclareNothing(t *testing.T) {
 		t.Fatalf("workflow 自己不碰盘不起进程，Caps 应为空：%+v", c)
 	}
 }
+
+// meta 必须原样回显：调用方拿它跟自己的任务批次对账，
+// 不然一次编排的结果回来，谁也不知道它对应哪一次请求。
+func TestMetaEchoed(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{
+		"script": `[{"tool":"repo_here"}]`,
+		"meta":   map[string]any{"batch": "B-7", "by": "lead"},
+	})
+	res, err := (&Tool{}).Exec(ctxWith(&fakeRunner{}), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := res.Data.(map[string]any)
+	got, ok := m["meta"].(map[string]any)
+	if !ok || got["batch"] != "B-7" {
+		t.Fatalf("meta 没回显：%v", m["meta"])
+	}
+}
+
+// 每步要带时长：编排慢的时候，人第一个问题就是"哪一步慢"。
+func TestStepCarriesDuration(t *testing.T) {
+	res, err := (&Tool{}).Exec(ctxWith(&fakeRunner{}),
+		json.RawMessage(`{"script":"[{\"tool\":\"slow\"}]"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := res.Data.(map[string]any)
+	steps, _ := m["steps"].([]trace)
+	if len(steps) != 1 {
+		t.Fatalf("步数不对：%v", m["steps"])
+	}
+	if steps[0].MS < 0 {
+		t.Fatalf("时长不能为负：%d", steps[0].MS)
+	}
+}

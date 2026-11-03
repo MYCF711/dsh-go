@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
@@ -65,11 +66,14 @@ type args struct {
 
 // trace 是一步的结果，**成功失败都记**：模型要的是"哪一步出了什么事"。
 type trace struct {
-	Step   int    `json:"step"`
-	Tool   string `json:"tool"`
-	OK     bool   `json:"ok"`
+	Step int    `json:"step"`
+	Tool string `json:"tool"`
+	OK   bool   `json:"ok"`
+	// Brief 是一行摘要；MS 是这一步花了多久。
+	// 记时长不是为了好看：编排慢的时候，人第一个问题就是"哪一步慢"。
 	Brief  string `json:"brief,omitempty"`
 	Detail string `json:"detail,omitempty"`
+	MS     int64  `json:"ms,omitempty"`
 }
 
 func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
@@ -115,7 +119,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 			traces = append(traces, tr)
 			if hardErr != nil {
 				// 只有"通道坏了/被取消"才向上报错；工具自身的失败记进 trace 继续。
-				res := buildResult(traces, vars, failed)
+				res := buildResult(traces, vars, failed, a.Meta)
 				res.Hint = hardHint(hardErr)
 				return res, hardErr
 			}
@@ -140,7 +144,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 			_ = j
 			traces = append(traces, tr)
 			if hardErr != nil {
-				res := buildResult(traces, vars, failed)
+				res := buildResult(traces, vars, failed, a.Meta)
 				res.Hint = hardHint(hardErr)
 				return res, hardErr
 			}
@@ -155,7 +159,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		}
 	}
 
-	return buildResult(traces, vars, failed), nil
+	return buildResult(traces, vars, failed, a.Meta), nil
 }
 
 // runOne 执行一步，并把结果折成 trace。
@@ -168,18 +172,20 @@ func runOne(ctx context.Context, r spi.Runner, idx int, st step, callArgs map[st
 	if err != nil {
 		return trace{Step: idx, Tool: st.Tool, OK: false, Brief: "参数序列化失败"}, nil, nil
 	}
+	start := time.Now()
 	res, err := r.Run(ctx, st.Tool, rawArgs)
+	ms := time.Since(start).Milliseconds()
 	if err != nil {
-		return trace{Step: idx, Tool: st.Tool, OK: false, Brief: trunc(err.Error(), 200)}, nil, nil
+		return trace{Step: idx, Tool: st.Tool, OK: false, Brief: trunc(err.Error(), 200), MS: ms}, nil, nil
 	}
 	brief := res.Summary
 	if brief == "" {
 		brief = trunc(firstLine(res.Text), 120)
 	}
-	return trace{Step: idx, Tool: st.Tool, OK: true, Brief: trunc(brief, 200)}, dataOf(res), nil
+	return trace{Step: idx, Tool: st.Tool, OK: true, Brief: trunc(brief, 200), MS: ms}, dataOf(res), nil
 }
 
-func buildResult(traces []trace, vars map[string]any, failed int) spi.Result {
+func buildResult(traces []trace, vars map[string]any, failed int, meta map[string]any) spi.Result {
 	var b strings.Builder
 	for _, tr := range traces {
 		mark := "ok"
@@ -204,6 +210,9 @@ func buildResult(traces []trace, vars map[string]any, failed int) spi.Result {
 			"failed": failed,
 			"steps":  traces,
 			"vars":   vars,
+			// meta 原样回显：调用方拿它和自己的那批任务对账，
+			// 不用再去猜"这条结果对应我发的哪一次编排"。
+			"meta": meta,
 		},
 	}
 }
