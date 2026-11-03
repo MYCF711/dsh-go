@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 
+	"dshgo/internal/llm"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
 )
@@ -216,6 +217,22 @@ func cmdServe(args []string) error {
 		// 审批策略覆盖：写 <home>/state/session-permission.json（白名单在 handler 里校）。
 		SetSessionPermission: func(sessionID, perm string) error {
 			return permissionOverrides.Set(sessionID, perm)
+		},
+		// 模型列表：由宿主转发（网关地址与凭据只在这一侧，R7 界面不直连）。
+		// 和 `run`/`acp` 用同一组环境变量，免得界面看到的模型和实际能跑的不是一套。
+		ModelsList: func(ctx context.Context) ([]transport.ModelEntry, error) {
+			cli := llm.New(envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"),
+				envOr("DSHD_LLM_KEY", ""))
+			cli.UserAgent = "dshd/" + version
+			models, err := cli.ListModels(ctx)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]transport.ModelEntry, 0, len(models))
+			for _, m := range models {
+				out = append(out, transport.ModelEntry{ID: m.ID, OwnedBy: m.OwnedBy})
+			}
+			return out, nil
 		},
 		Addr: *addr,
 		// H14：把序号域交给 server——WS 推送与 session.history 必须读同一份，

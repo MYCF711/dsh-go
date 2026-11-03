@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -82,6 +83,8 @@ type Options struct {
 	SetSessionModel func(sessionID, model string) error
 	// SetSessionPermission 改一个会话的审批策略覆盖。nil = 不支持（回 501）。
 	SetSessionPermission func(sessionID, perm string) error
+	// ModelsList 列网关上的模型。nil = 这个宿主没接模型出口（回 501）。
+	ModelsList func(ctx context.Context) ([]ModelEntry, error)
 	// FSRead 读一个文件；路径解析、大小上限、越界检查都在宿主那边。
 	FSRead func(path string) (FSContent, error)
 	// FSWrite 写一个文件；宿主注入。
@@ -342,6 +345,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionSetModel(w, r)
 	case MethodSessionSetPermission:
 		s.handleSessionSetPermission(w, r)
+	case MethodModelsList:
+		s.handleModelsList(w, r)
 	case MethodFSRead:
 		s.handleFSRead(w, r)
 	case MethodFSWrite:

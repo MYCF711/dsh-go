@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -169,4 +170,32 @@ func (s *Server) handleSessionSetPermission(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"ok": true}})
+}
+
+// ModelEntry 是 `models.list` 的一行。
+type ModelEntry struct {
+	ID      string `json:"id"`
+	OwnedBy string `json:"owned_by,omitempty"`
+}
+
+// handleModelsList 是 /api/models.list。
+//
+// **失败不回空列表**：空列表在界面上等于"没有可用模型"，而真实原因可能是
+// 网关没起、凭据过期。两者长得一样，但用户该做的事完全不同。
+func (s *Server) handleModelsList(w http.ResponseWriter, r *http.Request) {
+	if s.opt.ModelsList == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("models.list 未接线"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	list, err := s.opt.ModelsList(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, errorBody("列模型失败："+err.Error()))
+		return
+	}
+	if list == nil {
+		list = []ModelEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"models": list}})
 }
