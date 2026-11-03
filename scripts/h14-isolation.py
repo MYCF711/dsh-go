@@ -35,7 +35,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def main():
+def attempt():
     ok = fail = 0
 
     def chk(name, cond, detail=""):
@@ -149,8 +149,24 @@ def main():
         proc.kill()
         proc.wait(timeout=10)
 
+    # 把"两边一条帧都没收到"单独标出来：那多半不是隔离坏了，
+    # 而是整条链路在负载下没起来（全量跑时 13 个探针抢同一个网关，实测过一次）。
+    # 这种情况整条重跑一次，而不是报一条看着像"隔离失效"的 FAIL。
+    empty = len(seqs_a) == 0 and len(seqs_b) == 0
+    return ok, fail, empty
+
+
+def main():
+    # 一次全空就重跑；第二次还空就把结果如实报出来。
+    for round_no in (1, 2):
+        ok, fail, empty = attempt()
+        if empty and round_no == 1:
+            print("（第 1 次两边一条帧都没收到——多半是负载下链路没起来，重跑一次）")
+            continue
+        print("合计 OK=%d FAIL=%d" % (ok, fail))
+        return 0 if fail == 0 else 1
     print("合计 OK=%d FAIL=%d" % (ok, fail))
-    return 0 if fail == 0 else 1
+    return 1
 
 
 if __name__ == "__main__":
