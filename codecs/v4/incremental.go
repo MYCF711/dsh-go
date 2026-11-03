@@ -2,6 +2,7 @@ package v4
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"strings"
 
@@ -60,19 +61,33 @@ func ReadSince(path string, offset int64) (events []Event, next int64, err error
 }
 
 func readSince(dec *zstd.Decoder, path string, offset int64) (events []Event, next int64, err error) {
-	b, err := os.ReadFile(path)
+	// 只读尾巴：从 offset 处 seek 进去读剩下的。
+	//
+	// 原来这里是 os.ReadFile(path) 再切片——省了 CPU（不解压前面的帧），
+	// 但**没省内存**：每次都把整份文件读进内存，会话越长分配越大。
+	// serve 长跑里 Sys 每轮涨二三十 KB，来源就是它。
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, offset, err
 	}
-	if offset < 0 || offset > int64(len(b)) {
+	defer f.Close()
+
+	if st, serr := f.Stat(); serr == nil && (offset < 0 || offset > st.Size()) {
 		offset = 0
 	}
-	frames, _, err := splitFrames(b[offset:])
+	if _, serr := f.Seek(offset, io.SeekStart); serr != nil {
+		return nil, offset, serr
+	}
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return nil, offset, err
+	}
+	frames, _, err := splitFrames(b)
 	if err != nil {
 		return nil, offset, err
 	}
 	for _, f := range frames {
-		raw, eerr := decodeFrame(dec, b[offset+int64(f.offset):offset+int64(f.offset)+int64(f.length)])
+		raw, eerr := decodeFrame(dec, b[f.offset:f.offset+f.length])
 		if eerr != nil {
 			// 帧坏了就停在这帧之前，下次从同一处重试，不要吞掉后面的。
 			break
