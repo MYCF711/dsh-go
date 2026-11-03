@@ -54,7 +54,26 @@ func main() {
 	seen := map[string]bool{}
 	files, _ := filepath.Glob(filepath.Join(root, "*", "*", "session.v4.jsonl.zstd"))
 	sort.Sort(sort.Reverse(sort.StringSlice(files)))
+	skippedNoCwd := 0
 	for _, f := range files {
+		// 只留"原工作目录现在还活着"的会话。
+		//
+		// 为什么必须先过这一关：上一轮抠出来的 8 条里有一半指向
+		// E:\Downloads\sub2api_poc 这类已经不在的路径。拿它们重放，
+		// 失败原因是"路径不存在"而不是被测的那个变量——**测的是环境**。
+		h, herr := v4.ReadHeader(f)
+		if herr != nil {
+			skippedNoCwd++
+			continue
+		}
+		if h.Cwd == "" {
+			skippedNoCwd++
+			continue
+		}
+		if st, serr := os.Stat(h.Cwd); serr != nil || !st.IsDir() {
+			skippedNoCwd++
+			continue
+		}
 		lg, err := v4.ReadFile(f)
 		if err != nil {
 			continue
@@ -82,6 +101,7 @@ func main() {
 	for i, t := range out {
 		fmt.Printf("%d. %s\n", i+1, strings.ReplaceAll(t, "\n", " "))
 	}
+	fmt.Fprintf(os.Stderr, "可重放: %d 条；cwd 已不在而跳过: %d 个会话\n", len(out), skippedNoCwd)
 	if err := os.WriteFile("tmp/realprompts.txt", []byte(strings.Join(out, "\n")), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
