@@ -140,6 +140,10 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 	for {
 		select {
 		case <-done:
+			// 收尾再读一次。子进程刚写完的 assistant/message、turn/end
+			// 常常在 done 之后才落盘；不读这一次，界面永远看不到最后一条回答。
+			// 2026-11-03 实测：会话文件里有 seq=3 assistant/message，流里没有。
+			r.drain(rd, noReuse, path, &offset, &lastSeq, sessionID)
 			return
 		case <-ctx.Done():
 			return
@@ -173,8 +177,15 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 			if mode == "read" {
 				continue
 			}
+			dbgFollow := os.Getenv("DSHD_DEBUG_FOLLOW") != ""
 			for _, ev := range evs {
+				if dbgFollow {
+					fmt.Fprintf(os.Stderr, "follow: got seq=%d type=%s lastSeq=%d\n", ev.Seq, ev.Type, lastSeq)
+				}
 				if ev.Seq <= lastSeq {
+					if dbgFollow {
+						fmt.Fprintf(os.Stderr, "follow: SKIP seq=%d (<= lastSeq=%d)\n", ev.Seq, lastSeq)
+					}
 					continue
 				}
 				lastSeq = ev.Seq
@@ -187,6 +198,36 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 				r.pub("session:"+sessionID, transport.ServerFrame{
 					Seq: int(ev.Seq), Type: ev.Type, Data: ev.Data,
 				})
+			}
+		}
+	}
+}
+
+// drain 把 offset 之后的所有事件读完并推出去。
+//
+// 存在的理由只有一个：follow 的 select 会在 done 时立刻 return，
+// 而子进程最后写的那几帧（assistant/message、turn/end）往往晚一步落盘。
+func (r *loopRunner) drain(rd *v4.Reader, noReuse bool, path string, offset *int64, lastSeq *int64, sessionID string) {
+	for {
+		var evs []v4.Event
+		var next int64
+		var err error
+		if noReuse {
+			evs, next, err = v4.ReadSince(path, *offset)
+		} else {
+			evs, next, err = rd.ReadSince(path, *offset)
+		}
+		if err != nil || len(evs) == 0 {
+			return
+		}
+		*offset = next
+		for _, ev := range evs {
+			if ev.Seq <= *lastSeq {
+				continue
+			}
+			*lastSeq = ev.Seq
+			if r.pub != nil {
+				r.pub("session:"+sessionID, transport.ServerFrame{Seq: int(ev.Seq), Type: ev.Type, Data: ev.Data})
 			}
 		}
 	}
