@@ -24,4 +24,15 @@ export CGO_ENABLED=1
 
 cd "$(dirname "$0")/.."
 echo "编译器：$(gcc --version | head -1)"
-exec go test -race "$@" -count=1 ./...
+set +e
+go test -race "$@" -count=1 ./...
+rc=$?
+set -e
+# 统一跑步器（h-suite）只认这一行：**没有汇总行就等于没跑**。
+if [ $rc -eq 0 ]; then
+  echo "合计 OK=1 FAIL=0"
+else
+  echo "  FAIL -race 有包没过（见上面的 DATA RACE / FAIL 行）"
+  echo "合计 OK=0 FAIL=1"
+fi
+exit $rc

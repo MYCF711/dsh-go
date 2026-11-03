@@ -51,7 +51,27 @@ Previous read at ... by goroutine 100: TestBrokerResolveWritesAllowBack
 go test -race ./...   39 个包全 ok，0 DATA RACE
 ```
 
-## 说明
+## 它不在成品里
+
+这条很重要，别搞混：
+
+| | 成品（`dshd.exe`） | 开发脚本 |
+|---|---|---|
+| C 工具链 | **不需要，也不包含** | `scripts/race.sh` 自己找 |
+| 构建 | `CGO_ENABLED=0`（默认） | `CGO_ENABLED=1`，只在那条命令里 |
+| 体积 | 14.5 MB，`mingw` 字符串 0 处 | 工具链在 `C:/toolchains/mingw64`，仓外 |
+
+验证方式（2026-11-03 实测）：
+
+```bash
+env -u CGO_ENABLED go build -o tmp/dshd-plain.exe ./cmd/dshd   # 成功
+strings tmp/dshd-plain.exe | grep -ci mingw                    # 0
+grep -rn "toolchains\|mingw" --include=*.go cmd/ internal/ modules/ codecs/   # 无输出
+```
+
+`h-suite.py` 里它也是**默认关闭**的：不加 `--race` 就只打印一行"跳过"。
+
+## 成品里没有它
 
 `-race` 变绿**不等于并发就对了**：它只覆盖被跑到的那些交错。
 `TestConcurrentJournalAndHubInvariants` 仍然有用（它专门去撞 journal/hub 的交错），

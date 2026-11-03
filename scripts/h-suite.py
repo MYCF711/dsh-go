@@ -24,23 +24,30 @@ PROBES = [
     ("method-wired", "Transport 方法：声明了就一定在分发里，快照不越界", False, 120),
     ("guard-selftest", "把每个守卫弄坏一次：必须红（空转也必须红）", False, 200),
     ("h11-stdout", "H11 stdout 恰好一行 ready", False, 90),
-    ("h10-chain", "H10 create→list→每个 id 两种入参名 load→prompt", False, 240),
+    ("h10-chain", "H10 create→list→每个 id 两种入参名 load→prompt", False, 400),
     ("h14-isolation", "H14 两会话各自 seq、互不串流", True, 300),
     ("h13-approval-e2e", "H13 允许真执行 / 拒绝真不执行", True, 400),
     ("h13-timeout", "H13 超时按拒绝 + approval/timeout 帧", True, 300),
     ("h13-replay", "H13 断线重连重放挂起审批", True, 300),
     ("h13-allow-always", "H13 以后都允许 → 不再问", True, 300),
     ("ui-e2e", "U0/H8/H14 界面调用序列（16 项）", True, 400),
+    # 并发验（-race）。**默认关闭**：它要 C 工具链，而工具链不属于成品的一部分
+    # （只在 C:/toolchains 下，脚本自己找）。开启方式：加 --race。
+    ("race.sh", "并发：-race 全仓（需要 C 工具链，默认关闭）", False, 1800),
 ]
+
+# 默默认关的探针名（只有显式 --race 才跑）。
+DEFAULT_OFF = {"race.sh"}
 
 SUM = re.compile(r"合计 OK=(\d+) FAIL=(\d+)")
 
 
 def run(name, timeout):
-    path = "scripts/%s.py" % name
+    path = "scripts/%s" % name if name.endswith(".sh") else "scripts/%s.py" % name
+    argv = ["bash", path] if name.endswith(".sh") else [sys.executable, "-u", path]
     started = time.time()
     try:
-        p = subprocess.run([sys.executable, "-u", path], capture_output=True,
+        p = subprocess.run(argv, capture_output=True,
                            text=True, timeout=timeout)
         out = (p.stdout or "") + (p.stderr or "")
         code = p.returncode
@@ -74,6 +81,7 @@ def main():
     args = sys.argv[1:]
     fast = "--fast" in args
     only = None
+    want_race = "--race" in args
     if "--only" in args:
         i = args.index("--only")
         if i + 1 < len(args):
@@ -83,6 +91,9 @@ def main():
     bad = 0
     for name, label, needs_model, timeout in PROBES:
         if only and only not in name:
+            continue
+        if name in DEFAULT_OFF and not (want_race or only):
+            rows.append((name, label, "跳过", "", "默认关闭：加 --race 打开（需要 C 工具链，不属成品）"))
             continue
         if fast and needs_model:
             rows.append((name, label, "跳过", "", ""))
