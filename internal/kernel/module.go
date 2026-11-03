@@ -150,6 +150,13 @@ func (m *Manifest) Apply(mods []Module) ([]Module, error) {
 				e.ID, e.Backend)
 		}
 
+		// enabled = false 是**真的关掉**。
+		// 踩过：这个字段以前只解析不使用，于是 manifest 里写着 enabled=false，
+		// 模块照样装配、工具照样在表里——"改了配置却什么都没发生"。
+		if e.Enabled != nil && !*e.Enabled {
+			continue
+		}
+
 		mod := mods[idx]
 		if e.Backend != "" {
 			mod.Backend = e.Backend

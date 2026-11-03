@@ -67,6 +67,10 @@ id      = "tool-workflow"
 backend = "static"
 
 [[module]]
+id      = "tool-plugin"
+backend = "static"
+
+[[module]]
 id      = "tool-present"
 backend = "static"
 

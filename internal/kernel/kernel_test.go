@@ -329,3 +329,27 @@ func TestStaticBackendStillWorks(t *testing.T) {
 		t.Fatalf("应当装配 1 个模块，得到 %d", len(got))
 	}
 }
+
+// enabled = false 必须真的把模块关掉。
+//
+// 这条是真机验出来的：字段以前只解析、不使用，于是 manifest 里写着 enabled=false，
+// 模块照样装配、工具照样在表里——"改了配置却什么都没发生"，而且没有任何提示。
+func TestDisabledModuleIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dsh.toml")
+	body := "[profile]\nname = \"x\"\n\n[[module]]\nid = \"a\"\n\n[[module]]\nid = \"b\"\nenabled = false\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.Apply([]Module{{ID: "a"}, {ID: "b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "a" {
+		t.Fatalf("只该剩 a，实际 %v", got)
+	}
+}

@@ -581,6 +581,35 @@
     "caps": {}
   },
   {
+    "name": "plugin",
+    "description": "看/开/关本仓的模块（dsh.toml 里的 [[module]]）：list 列出，enable/disable 改配置（下次启动生效）。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "enable",
+            "disable"
+          ],
+          "description": "list=看有哪些模块；enable/disable=改 manifest（下次启动生效）"
+        },
+        "id": {
+          "type": "string",
+          "description": "模块 id，例如 tool-watch。enable/disable 时必填"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
     "name": "present",
     "description": "把已存在的文件声明为交付物（不复制内容）。人需要单独打开某个文件时用。",
     "parameters": {

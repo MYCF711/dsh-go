@@ -38,6 +38,7 @@ import (
 	"dshgo/modules/tool/history"
 	"dshgo/modules/tool/nowline"
 	planmod "dshgo/modules/tool/plan"
+	pluginmod "dshgo/modules/tool/plugin"
 	"dshgo/modules/tool/present"
 	"dshgo/modules/tool/pwsh"
 	"dshgo/modules/tool/read"
@@ -105,6 +106,8 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		// 装配顺序由 Requires("tools") 保证；这里只是挨着 todo 放，好找。
 		planmod.Module(filepath.Join(home, "state", "plan")),
 		workflowmod.Module(),
+		// 插件管理只管 manifest 那层（static）；wasm/process 还没实现，声明它们会被拒。
+		pluginmod.Module(filepath.Join(home, "dsh.toml")),
 		present.Module(),
 		ask.Module(),
 		webfetch.Module(),
