@@ -188,6 +188,20 @@ func (b *approvalBroker) handle(req approvalReq) {
 	payload, _ := json.Marshal(map[string]any{
 		"requestId": req.RequestID,
 		"sessionId": req.SessionID,
+		// 超时**必须报给界面**，否则界面只能显示"等你批准"：
+		// 人离开一会儿回来，命令已经被拒了，屏幕上却什么都没变——
+		// 分不清"还没人答"和"早就超时了"。
+		//
+		// 两个字段都发，缺一不可：
+		//
+		//	timeoutMs  —— 总等待时长（就是下面 time.After 用的那个数，不是另编的）
+		//	deadlineMs —— 绝对截止时刻（Unix 毫秒）
+		//
+		// 为什么要绝对时刻：断线重连时重放的是**当初这条负载**（见 payloads）；
+		// 只发时长的旧负载会被客户端当成"从现在起再等一整轮"，屏幕上说还有 90s，
+		// 宿主 3s 后就拒了——那比不显示倒计时更坏。
+		"timeoutMs":  b.timeout.Milliseconds(),
+		"deadlineMs": time.Now().Add(b.timeout).UnixMilli(),
 		"toolCall": map[string]any{
 			"toolCallId": req.RequestID,
 			"title":      approvalTitle(req.Tool, string(req.Args)),

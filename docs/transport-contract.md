@@ -76,9 +76,15 @@ h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
 - **HTTP**：`POST /api/<method>`，body 直接是该 method 的参数对象，不包 `{"params":…}`；成功为 `{result:…}`，错误为 `{error:{code,message,hint,retryable}}`。
 - **认证**：launch token 经 `/connect` 换 cookie；HTTP 与 WS 同 cookie；先 Connect 再 list/load/subscribe。
 - **WS**：路径 `/ws`。客户端控制帧为 `t=sub/unsub/ping`，sub 带 `topic/session:<id>`、`sinceSeq`、`journalEpoch`。服务端事件为 `{seq,type,data,time}`，不是 `{t:"ev",kind:…}`。
+- **`approval/request` 的 data 里有两个时间字段**（2026-11-04 加，只加不改）：
+  `timeoutMs`（这次等多久）与 `deadlineMs`（墙钟截止，Unix 毫秒）。
+  为什么两个都发：断线重连**重放的是当初那条负载**，只发时长会让客户端把剩余时间重新算成满额
+  （屏上还有 30s、宿主 10s 后就拒），那比没有倒计时更糟。
+  老宿主没有这两个字段时，客户端**不许编秒数**，只能显示"倒计时不可用"。
 - **type 白名单**：v4 原始事件名 + 显式登记的 `turn/done`、`turn/error`、`approval/request`、`approval/timeout`、`approval/cancel`、`session/reset`、`pong`。新增必须 snapshot-first。
 - **连接拓扑**：当前 ServerFrame 不带 topic，每会话一条独立 WS 订阅/连接，按连接归属隔离；不得同连接混订多个会话。
 - **seq**：每会话一个 Transport journal，事件只在追加时分配一次单调 seq。不是 v4 `ev.Seq`、全局 `serveTurnSeq` 或连接序号。turn/done、turn/error 与 approval 事件同入此域；pong 无 seq 且不入日志。
+- **消息身份（MSGID P0，待契约 owner 冻结字段）**：Transport seq 只用于水位、gap 和重放，不得作为 v4 内容身份。load↔WS 去重需要 data 内携带原始 `v4Seq` 或 `messageId`（工具另需 `turnId/callId`）；当前 `cmd/dshd/serve_journal.go:21-33` 只透传原始 data，而 `internal/session/log.go:183-198` 的 assistant data 没有 v4 seq/messageId。**字段未冻结前，UI 只能用 scoped fallback 防止误覆盖，不得宣称缺真值时可精确去重**；新增字段必须先改契约、两边快照/golden 与还原测试。
 - **恢复**：`session.load` 是首屏视图投影，同时返回 `journalEpoch/lastSeq`；不能用于断流补洞。`session.history` 收 `id/sessionId + journalEpoch + sinceSeq + limit`，返回同一 journal 的原始 `frames:[]ServerFrame` 与当前 epoch，不是投影 messages。
 - **重启**：epoch 不匹配时宿主发无 seq 的 `session/reset{journalEpoch,lastSeq}`，history 返回 `stale_epoch`；客户端丢弃旧水位并重新 load。reasoning/tool/approval 必须可恢复，pending approval 由 serve 重放真实请求，UI 不编造。
 - **断号**：客户端按同一会话 seq 检测，只 history 补缺，不整页 load，不等待宿主新增 gap 帧。
@@ -96,10 +102,31 @@ h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
 | **H7 content** | ✅ 两种落法有单测 | 固定已完成且原日志确有 assistant 的样本验 `data.content` 与 `data.message.content`；失败/取消/在途可合法无 assistant。 证据：`TestAssistantMessageBothContentShapes`、`TestAssistantMessageKeepsToolCalls`。**2026-11-03 补测时发现顶层 `content` 那种落法根本没被认**（正文投影成空串），已修。|
 | **H8 HTTP 响应** | 🟡 通用信封/encode_failure 已修；**stale_epoch 特殊出口未闭环** | M262 与 `TestWriteJSONEncodeFailureHasFourFields`、`TestWriteJSONEnvelopesAnyType`、`TestEncodeFailureHintIsActionable` 证明通用 result/error。**2026-11-03 18:21 复核**：`server.go` stale_epoch 特构造 error 只有 code/message/hint，缺 `retryable`，现有测试未查四字段；需统一 errorBody、补失败测试与真实 apiclient 复验 |
 | **H9 load 入参** | 🟡 宿主侧已验（M243），界面只发契约名未验 | `id`/`sessionId`、`limit`/`tailMessages` 都收；sessionId 优先 id，limit 优先 tailMessages。证据：`TestLoadAcceptsContractNames`（只发 id/tailMessages 时 limit=2 生效）。**仍未验**：界面只用契约名调一次 |
-| **H10 list→load** | 🔴 M286 发现当前回归，未修 | 历史 M244 曾 5/5；**当前 `scripts/h10-chain.py` 在 prompt→load assistant 项变红，等待 240s 仍失败**：history 有完整 turn，load 原会话 assistant=0，且 create 返回 id 与子进程 stderr「会话：」id 不同。下一步查 `serve_tools.go` args 与 `main.go --session`；修到 id 相同、load 有 assistant、h10 回 5/5，不能沿用历史 PASS |
+| **H10 list→load** | 🟡 M289/M290 已澄清陈旧二进制误判；跨仓/真实 home 待验 | M286 的红曾疑似 create id 与子进程 id 不同；M289 查明探针使用 17:35 旧二进制而源码已 18:48，**同新二进制恢复 6/6，非宿主 bug**。M290 把 `scripts/bin-check.py` 设为套件首门并有摸旧必红反证。不得再按 id bug 派修复；仍需真实 home 副本遍历与 UI 消费 |
 | **H11 ready stdout** | ✅ 进程级 4/4 | 完整 stdout 恰好一行 ready，后续为合法 JSON 且含 url/token；policy 诊断只去 stderr。 证据：`scripts/h11-stdout.py` |
 | **H12 contentWidth** | ✅ 宿主侧闭环（2026-11-03 M263） | 只有**正数**才算"知道宽度"：0 与负数都按未知处理、字段直接不出现（负数放过去会让界面画出负宽度容器：怪但没崩，没人会去查宿主）。值以裸数字传输 证据：`TestContentWidthContract` | 真机：`--content-width 748` → `contentWidth=748`；不传 → 字段不存在。单测三条（0/748/负数）+ 一条"必须是数字不是字符串"。仍未验：原生壳提供真实列宽并消费 |
 | **H13 真审批** | 🟡 宿主 allow/deny/timeout/replay/allow_always 已验；**pending cancel 未闭环** | `session.approve`；子进程标记通道；父进程 broker 推 `approval/request` 并入 journal；120s 超时拒绝；allow_always 仅进程内。证据：`scripts/h13-approval-e2e.py`、`h13-timeout.py`、`h13-replay.py`、`h13-allow-always.py`、`TestBrokerResolveWritesAllowBack`；UI 已有 allow/deny 真机记录，`72e4e3d` 另有 allow_always 第二次自动放行证据。**2026-11-03 18:08 复核**：`serve_approval.go` 尚无取消挂起审批分支，缺 cancel→拒绝+不执行+`approval/cancel`+第二轮 prompt 证据，故不签整链完成 |
-| **H14 契约门** | 🟡 epoch/reset、后台水位、分批补洞已提交；**快照/golden/serve/重启凭据未闭环** | UI `6363bf3`、`d04bade`、`7e010ab` 等已有新证据；剩余首启既有会话非零 epoch、reset 后局部 since=0、history 409 触发重建、History 请求带 epoch、UI 快照旧 `/api/mux`/`kind`/messages 且 `counts.total=13`、缺 `session.approve`，共享 golden 与特殊事件样本、FrameSub 重放修复提交、serve 跨轮去重/debug 统一、宿主重启 cookie 自愈与同版本联合复验。未提交 wssession 改动不计完成 |
+| **H14 契约门** | 🟡 epoch/reset、后台水位、分批补洞已提交；**快照/golden/serve/重启凭据未闭环** | UI `6363bf3`、`d04bade`、`7e010ab` 等已有新证据；`80a5754` 已关闭首启 epoch/lastSeq；剩余 reset 后局部 since=0、history 409 换代真机、History 请求带 epoch、UI 快照旧 `/api/mux`/`kind`/messages、共享 golden 与特殊事件样本、**MSGID 所需 v4/messageId/callId 内容身份字段**、FrameSub 重放修复提交、serve 跨轮去重/debug 统一、宿主重启 cookie 自愈与同版本联合复验。未提交 wssession 改动不计完成 |
 
 H14 通过后才能做 H6/H13 的线上联调。H8 可与 H14 并行；其余独立字段消费按任务书并行，不从本表符号自行推断任务。
+
+## 4. 后续契约需求登记（来自 CGAP，未冻结、不得冒充已实现）
+
+以下是 `../dsh-ui/docs/conversation-gap.md` §3.2 的跨仓需求。每项必须先由唯一契约 owner 冻结字段/方法、两仓快照与 golden，再让宿主和 UI 并行实现；不得只画本地假状态。
+
+| 能力 | 最小真值需求 | 禁止替代 |
+|---|---|---|
+| 完整工具树与 Inspect | `callId,parentCallId,phase,argsRaw,result,isError,error,startedAt,endedAt,subCalls` 与原始 Inspect 载荷 | 用 `Tool+Args` 当唯一身份、把最近结果塞给最近调用 |
+| 向前历史与 Turn 大纲 | `loadOlder(beforeSeq,limit)` 返回 prepend/hasMore；`loadThrough(turn/start seq)`；`turnOutline{turn,seq,promptPreview,responsePreview}` | 用断号 `session.history(sinceSeq)` 冒充向前分页，或编造未加载预览 |
+| 本地提交对账 | prompt 接收并回传 `rpcId`，durable user event 携带同一 rpcId；失败返回可恢复草稿/附件状态 | 永久 `Seq:-1`、失败同时丢草稿和留下假成功气泡 |
+| 附件与引用 | 有序 content blocks；attachment id/name/bytes/dimensions；授权读取；file/session reference 稳定身份 | 假缩略图、0 bytes、从标题反推 session id |
+| 消息反馈与分支 | messageId；`messageFeedback.list/put/retract` 与 version；`session.fork` 收 `fromSeq` | 只存在内存的 👍/👎、fork 整个会话冒充指定 Turn 分支 |
+| Trajectory 计时/统计 | start/end/token timestamps、TTFT/decode、requestNumber、usage routes 与错误详情 | 用墙钟虚构耗时、把消息数当 Turn 数、编 0 tok/s |
+| 面板导航（FRAME-GAP C-PANEL） | `panel.open` 路由与已注册 panel registry | 把当前 profile/第三方扩展硬编码成官方固定入口 |
+| 团队/子智能体（C-TEAM） | `agentPreset` 与 mode/模型真值；每个会话稳定关联 | 把单一进程 `serveTurnSeq` 或静态“3 个子智能体”当团队真值 |
+| 模型选择（MODEL-WIRE） | `session.setModel{id,model}` 后下一轮 request/context 必须使用覆盖，空值回默认，重启持久；catalog 另列。**`648bdea` 目前只有 Set/store，未见 Get 消费** | 只写 `state/session-model.json` 或只加快照就画可点下拉；把上一轮 model 当选择目录 |
+| Dock 指标（C-STATS） | turn/assistant-step 真值、cache 命中分子/分母、contextWindow/百分比容量。**`111e250` 已提供 contextWindow（0=未知）；turn/step/cache 分母与 UI 归约仍未闭环** | 用 assistant 消息数当轮、tool 消息数当步、缺分母仍显示缓存率或上下文百分比 |
+| 工作区（C-WORKSPACE） | OS 目录选择、workspace add/remove、归档/pin/rename、跨会话搜索 | 把标题包含过滤称为语义搜索，或不改目录却显示已切换 |
+| 扩展视图（C-EXTENSION-VIEWS） | 第三方 view descriptor 与实际 painter/数据、按会话选择持久化 | 注册前显示主题鱼/压缩，卸载后残留入口 |
+
+宿主已经提供但 UI 适配层丢掉的 `time`、`turn/error{turnId,error}`、`toolCallId/parentCallId`、原始 Turn/Assistant 事件，不属于新增方法：优先在 MSGID/WP-C 保留并消费，不要误列成宿主待开发能力。

@@ -261,6 +261,262 @@ func TestNormalKeysStillTypeWhenNoApproval(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------- 审批倒计时
+
+// fakeClock 是可控时钟。倒计时不能靠真等待来验：真等待既慢又会抖
+// （CI 上一卡，断言"还剩 12s"就红了），而且验不出"秒数到底有没有变小"。
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+// newApprovalApp 建一个带假时钟的 app：起点固定，便于断言"还剩几秒"。
+func newApprovalApp(w, h int) (*app, *fakeClock) {
+	a := newTestApp(w, h)
+	clk := &fakeClock{t: time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)}
+	a.now = clk.now
+	return a, clk
+}
+
+// approvalFrame 造一条**带超时字段**的 approval/request（宿主现在会发这两个）。
+// deadlineMs 用绝对时刻：重放时它不会被重新算成满额。
+func approvalFrame(reqID, title string, deadline time.Time, total time.Duration) ServerFrame {
+	return ServerFrame{Type: "approval/request", Data: json.RawMessage(fmt.Sprintf(
+		`{"requestId":%q,"sessionId":"s1","timeoutMs":%d,"deadlineMs":%d,"toolCall":{"title":%q}}`,
+		reqID, total.Milliseconds(), deadline.UnixMilli(), title))}
+}
+
+// statusLine 取状态行（倒数第二行：最后一行是输入行）。
+func statusLine(a *app) string {
+	got := a.view()
+	return got[len(got)-2]
+}
+
+// 1. 收到审批 → 状态行带剩余秒数。
+//
+// 没有这个数的时候，人离开一会儿回来只看到"命令被拒了"，屏幕上什么都没变；
+// 而屏幕上什么都没有的那段时间，宿主其实一直在倒计时。
+func TestApprovalCountdownShowsRemainingSeconds(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	a.handleFrame(approvalFrame("req-1", "bash · rm -rf build/", clk.t.Add(30*time.Second), 30*time.Second))
+
+	status := statusLine(a)
+	if !strings.Contains(status, "等你批准（30s）") {
+		t.Fatalf("状态行没显示剩余秒数：%q", status)
+	}
+	// 倒计时不能把标题或按键提示挤没：看不见怎么答比看不见标题更糟。
+	if !strings.Contains(status, "rm -rf build/") || !strings.Contains(status, "[y]") ||
+		!strings.Contains(status, "[n]") {
+		t.Fatalf("标题或按键提示被挤掉了：%q", status)
+	}
+}
+
+// 2. 时间推进 → 秒数变小；≤5s 换成更强提示（`!! 还有 3s`）。
+func TestApprovalCountdownTicksDownAndWarns(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	a.handleFrame(approvalFrame("req-1", "bash · rm", clk.t.Add(30*time.Second), 30*time.Second))
+
+	clk.advance(18 * time.Second)
+	a.tickStatus() // 生产路径：主循环每 250ms 调一次
+	if s := statusLine(a); !strings.Contains(s, "等你批准（12s）") {
+		t.Fatalf("18s 之后应剩 12s：%q", s)
+	}
+
+	clk.advance(7 * time.Second) // 还剩 5s：进告警档
+	a.tickStatus()
+	if s := statusLine(a); !strings.Contains(s, "!! 还有 5s") {
+		t.Fatalf("≤5s 应换成更强提示：%q", s)
+	}
+	clk.advance(2 * time.Second)
+	a.tickStatus()
+	if s := statusLine(a); !strings.Contains(s, "!! 还有 3s") {
+		t.Fatalf("剩余 3s 应显示 !! 还有 3s：%q", s)
+	}
+	if a.pending.id != "req-1" {
+		t.Fatalf("还没到点就不该清掉 pending：%q", a.pending.id)
+	}
+}
+
+// 3. 到 0 → 显示"已超时，按拒绝处理"并清掉 pending；y/a/n 不再被当成应答。
+//
+// 第二条尤其重要：pending 没清干净的话，用户按 y 只会拿到 404，
+// 而屏幕上看起来他明明还能答——这正是"莫名其妙被拒"的另一种形态。
+func TestApprovalExpiresAtZero(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	var answered []string
+	a.approve = func(reqID, opt string) error {
+		answered = append(answered, reqID+":"+opt)
+		return nil
+	}
+	a.handleFrame(approvalFrame("req-1", "bash · rm -rf build/", clk.t.Add(10*time.Second), 10*time.Second))
+
+	clk.advance(10 * time.Second)
+	a.tickStatus()
+
+	if a.pending.id != "" || !a.pending.deadline.IsZero() {
+		t.Fatalf("超时后 pending 应清干净：id=%q deadline=%v", a.pending.id, a.pending.deadline)
+	}
+	if s := statusLine(a); !strings.Contains(s, "已超时，按拒绝处理") {
+		t.Fatalf("状态行没说超时：%q", s)
+	}
+	// 正文也要留一行：状态行会被下一个事件顶掉，人回来时要能查到被拒的是哪条。
+	joined := strings.Join(a.lines, "\n")
+	if !strings.Contains(joined, "审批超时") || !strings.Contains(joined, "rm -rf build/") {
+		t.Fatalf("正文没留下超时的那一条：\n%s", joined)
+	}
+
+	a.input = nil
+	a.handleRune('y')
+	if len(answered) != 0 {
+		t.Fatalf("超时之后不该再发出应答：%v", answered)
+	}
+	if string(a.input) != "y" {
+		t.Fatalf("超时之后 y 应退回普通输入，实际 %q", string(a.input))
+	}
+}
+
+// 4. 收到 approval/answered → 倒计时立刻消失，且这一问不再被判超时。
+func TestApprovalAnsweredClearsCountdown(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	a.handleFrame(approvalFrame("req-1", "bash · rm -rf build/", clk.t.Add(30*time.Second), 30*time.Second))
+	if !strings.Contains(statusLine(a), "等你批准（30s）") {
+		t.Fatalf("前置：应当先有倒计时：%q", statusLine(a))
+	}
+
+	a.handleFrame(ServerFrame{Type: "approval/answered",
+		Data: json.RawMessage(`{"requestId":"req-1","optionId":"allow_once"}`)})
+
+	if a.pending.id != "" || !a.pending.deadline.IsZero() {
+		t.Fatalf("答过之后 pending 没清干净：id=%q deadline=%v", a.pending.id, a.pending.deadline)
+	}
+	if s := statusLine(a); strings.Contains(s, "等你批准") || strings.Contains(s, "还有") {
+		t.Fatalf("答过之后状态行还挂着倒计时：%q", s)
+	}
+
+	// 已经答过的这一问，时钟再怎么走也不该冒出"已超时"。
+	clk.advance(time.Minute)
+	a.tickStatus()
+	if s := statusLine(a); strings.Contains(s, "已超时") {
+		t.Fatalf("答过的审批不该再判超时：%q", s)
+	}
+}
+
+// 5. 收到 approval/timeout 帧 → 立刻清掉倒计时，而且只说一次。
+func TestApprovalTimeoutFrameClearsCountdown(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	a.handleFrame(approvalFrame("req-1", "bash · rm", clk.t.Add(30*time.Second), 30*time.Second))
+
+	a.handleFrame(ServerFrame{Type: "approval/timeout",
+		Data: json.RawMessage(`{"requestId":"req-1","sessionId":"s1"}`)})
+
+	if a.pending.id != "" || !a.pending.deadline.IsZero() {
+		t.Fatalf("收到 approval/timeout 后 pending 应清干净：id=%q", a.pending.id)
+	}
+	if s := statusLine(a); !strings.Contains(s, "已超时，按拒绝处理") {
+		t.Fatalf("状态行没说超时：%q", s)
+	}
+
+	// 宿主那一帧和本地 tick 不该各记一行（重复的"超时"会让人以为拒了两次）。
+	before := len(a.lines)
+	a.tickStatus()
+	if len(a.lines) != before {
+		t.Fatalf("重复记了超时行：%d → %d", before, len(a.lines))
+	}
+}
+
+// 5b. 上一问超时的提示不许"继承"到下一问。
+//
+// 不清的话，用户答完新的一问，状态行会突然冒出"审批已超时"——
+// 看起来像刚答的那条超时了，而这正是让人不敢信任审批提示的那类错觉。
+func TestApprovalTimeoutNoteDoesNotLeakIntoNextQuestion(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	a.handleFrame(approvalFrame("req-1", "bash · rm", clk.t.Add(10*time.Second), 10*time.Second))
+	clk.advance(10 * time.Second)
+	a.tickStatus()
+	if !strings.Contains(statusLine(a), "已超时") {
+		t.Fatalf("前置：应先看到超时：%q", statusLine(a))
+	}
+
+	a.approve = func(string, string) error { return nil }
+	a.handleFrame(approvalFrame("req-2", "write · a.txt", clk.t.Add(30*time.Second), 30*time.Second))
+	a.handleRune('y') // 答掉下一问
+
+	if s := statusLine(a); strings.Contains(s, "已超时") {
+		t.Fatalf("答完下一问后状态行还挂着上一问的超时提示：%q", s)
+	}
+}
+
+// 6. 老宿主没有超时字段 → 明说"倒计时不可用"，**不许编一个假秒数**，也不许自行判超时。
+func TestApprovalWithoutTimeoutShowsNoFakeCountdown(t *testing.T) {
+	a, _ := newApprovalApp(120, 16)
+	// 老宿主的形状：只有 requestId / toolCall（当前 HEAD 之前就是这样）
+	a.handleFrame(ServerFrame{Type: "approval/request", Data: json.RawMessage(
+		`{"requestId":"req-1","toolCall":{"title":"bash · rm -rf build/"}}`)})
+
+	if a.pending.id != "req-1" {
+		t.Fatalf("没记住 requestId：%q", a.pending.id)
+	}
+	s := statusLine(a)
+	if !strings.Contains(s, "倒计时不可用") {
+		t.Fatalf("宿主没报超时时应明说倒计时不可用：%q", s)
+	}
+	if strings.Contains(s, "还有") || strings.Contains(s, "（0s）") {
+		t.Fatalf("不该编出一个假秒数：%q", s)
+	}
+
+	// 没有时限就不该自己判超时：清了 pending 等于凭空拒掉一次真实请求。
+	a.now = func() time.Time { return time.Now().Add(24 * time.Hour) }
+	a.tickStatus()
+	if a.pending.id != "req-1" {
+		t.Fatal("没有时限时不该自行判超时")
+	}
+}
+
+// 7. 只有时长、没有绝对截止时也能量出倒计时（向后兼容中间形态的宿主）。
+func TestApprovalCountdownFromDurationOnly(t *testing.T) {
+	a, _ := newApprovalApp(120, 16)
+	a.handleFrame(ServerFrame{Type: "approval/request", Data: json.RawMessage(
+		`{"requestId":"req-1","timeoutMs":15000,"toolCall":{"title":"bash · ls"}}`)})
+	if s := statusLine(a); !strings.Contains(s, "等你批准（15s）") {
+		t.Fatalf("只有 timeoutMs 时也应按它算剩余：%q", s)
+	}
+}
+
+// 8. 断线重连重放的是**原来那条负载**：截止时刻不能被重算成满额。
+//
+// 重放时若按"现在 + 时长"重算，屏幕上说还有 30s，而宿主 10s 后就拒了——
+// 那比不显示倒计时更坏，因为它主动给了个错的预期。
+func TestApprovalReplayKeepsOriginalDeadline(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	deadline := clk.t.Add(30 * time.Second)
+	a.handleFrame(approvalFrame("req-1", "bash · rm", deadline, 30*time.Second))
+
+	// 断线 20 秒
+	clk.advance(20 * time.Second)
+	// 宿主重放同一条（截止时刻还是当初那个）
+	a.handleFrame(approvalFrame("req-1", "bash · rm", deadline, 30*time.Second))
+
+	if s := statusLine(a); !strings.Contains(s, "等你批准（10s）") {
+		t.Fatalf("重放应按原截止时刻算剩 10s，而不是满额 30s：%q", s)
+	}
+}
+
+// 9. 时钟不一致不许**替宿主提前拒掉**：刚收到的请求按绝对时刻已经"过期"时，
+// 只可能是两边时钟不一样，退回按时长算——提前判超时等于把这一问从用户手里拿走，
+// 而宿主那边明明还挂着等。
+func TestApprovalClockSkewDoesNotPreemptivelyDeny(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	// 客户端时钟比宿主快 10 分钟：这条的 deadline 落在过去
+	a.handleFrame(approvalFrame("req-1", "bash · rm", clk.t.Add(-10*time.Minute), 30*time.Second))
+
+	if a.pending.id != "req-1" {
+		t.Fatalf("不该把这一问清掉：%q", a.pending.id)
+	}
+	if s := statusLine(a); !strings.Contains(s, "等你批准（30s）") {
+		t.Fatalf("时钟不一致时应退回按时长算，而不是立刻说超时：%q", s)
+	}
+}
+
 // ---------------------------------------------------------------- 工具卡折叠
 
 // 默认折叠：tool/call 那一行必须还在，tool/result 的内容不许出现在 view() 里。
