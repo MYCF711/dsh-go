@@ -1,5 +1,7 @@
 # wasm 工具 ABI 技术验证（spike）
 
+> **只想写插件？** 看 `docs/wasm-plugin-author-guide.md`（不含设计理由，只有"你要写什么"）。
+
 - 日期：2026-11-04
 - 基线：`ade4b00`（M334）+ 工作树；`internal/wasmhost/` 与 `cmd/dshd/wasmload.go` 本轮**无改动**（`git status` 里没有它们）。
 - 目标：回答「wasm 里的一段逻辑，能不能变成 dsh 的一个工具」。**只做验证，不做落地**。
