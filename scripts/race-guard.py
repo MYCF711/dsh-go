@@ -67,7 +67,13 @@ def main():
         for s in stale:
             print(f"WARN  清单里的位置已经不存在：{s}（删掉这条，或它被挪走了）", file=sys.stderr)
 
-    if missing:
+    # 登记了但没读：和没登记一样危险——"有人写了名字"不等于"有人想过"。
+    unread = [e["site"] for e in data["goroutines"]
+              if not e.get("verified_at") or len(e.get("sync", "")) < 12]
+    for s in unread:
+        print(f"FAIL  登记了但没读过：{s}（sync 写清靠什么同步，并填 verified_at）", file=sys.stderr)
+
+    if missing or unread:
         return 1
     print(f"PASS  跨 goroutine 的起点已全部登记（{len(found)} 处）")
     return 0

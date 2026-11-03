@@ -252,3 +252,38 @@ HeapAlloc 锯齿无斜坡，Sys 在重负载下 12 轮只涨 16 KB。见 `docs/s
 
 WS 连接、每轮的 follow、每轮的 turn、桥的读写、bash 后台任务的两处——都是**已知的**并发点。
 数字不重要，重要的是"再多一个就得先回答它跟谁抢"。
+
+### 续（第 108 轮）：13 处全部读过一遍，并把"读过"变成门禁条件
+
+补了两件事：
+
+1. 每条登记都带 `verified_at` 和一句**具体的**同步依据（写到行号，例如
+   「Hub 每个入口先 h.mu.Lock（hub.go:60/83/95/115）」），而不是「有锁」这种空话
+2. `race-guard.py` 现在要求 `sync` 至少 12 个字、且 `verified_at` 非空，否则红
+
+实演：
+
+```
+手动插一条只有名字、没有同步说明的登记 → FAIL  登记了但没读过：internal/transport/heartbeat.go:44
+删掉                                 → PASS  13 处
+```
+
+### 13 处分别是什么
+
+| 位置 | 谁 | 靠什么 |
+|---|---|---|
+| transport/server.go | 每条 WS 连接 | Hub 的 mu + 连接自己的写序列化 |
+| transport/heartbeat.go | 心跳 ticker | atomic.Int32 与主循环通信 |
+| dshd/serve_tools.go | 每轮 follow | 只读日志；prog 只在 wg.Wait 后读 |
+| dshd/transport_prompt.go | 每轮 turn | promptService 的 mu（4 处入口全加锁） |
+| acp/server.go ×2 | WG 收尾 + 每轮 prompt | wg.Add/Done，响应走写锁 |
+| kernel/eventbus.go | 事件分发 | wg 等全部订阅返回 |
+| dshd-bridge/main.go ×3 | 桥 | 独立二进制，不共享宿主内存 |
+| exec/bash ×2 | 后台任务 | job 表同一把 mu |
+
+### 这一步的意义与边界
+
+它把「我审过了」变成了「**每一处都有名字、有行号、有日期**」。
+
+但它仍然**不证明这些说明是对的**——只证明有人逐个读过并写下来了。
+`-race` 没跑过这件事，仍然记在这里。

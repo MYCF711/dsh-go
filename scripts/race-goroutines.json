@@ -2,68 +2,81 @@
   "goroutines": [
     {
       "site": "internal/acp/server.go:157",
-      "what": "未分类",
-      "sync": "待补：说明它碰什么、靠什么同步"
+      "what": "等 WG 收尾的观察者",
+      "sync": "读过：只等 s.wg，不碰共享可写状态；ch 只 close 一次",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "internal/acp/server.go:422",
-      "what": "未分类",
-      "sync": "待补：说明它碰什么、靠什么同步"
+      "what": "每轮 prompt 独立跑",
+      "sync": "读过：handlePrompt 走 wg.Add/Done；写响应经 server 的写锁（同文件其它路径一致）",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "internal/kernel/eventbus.go:147",
-      "what": "未分类",
-      "sync": "待补：说明它碰什么、靠什么同步"
+      "what": "事件分发给各订阅者",
+      "sync": "读过：wg 等全部订阅返回；订阅者各自的 channel 有自己的缓冲，Event 每次现造",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "internal/transport/heartbeat.go:44",
-      "what": "未分类",
-      "sync": "待补：说明它碰什么、靠什么同步"
+      "what": "心跳 ticker",
+      "sync": "读过：只读 last / 调 conn.Ping；idle 用 atomic.Int32 与主循环通信",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "internal/transport/server.go:120",
       "what": "每个 WS 连接一条",
-      "sync": "Hub 的 mu + connSubscriber 自己的写序列化"
+      "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "internal/transport/server.go:203",
       "what": "每个 WS 连接一条",
-      "sync": "Hub 的 mu + connSubscriber 自己的写序列化"
+      "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "cmd/dshd/serve_tools.go:70",
       "what": "每轮一个 follow",
-      "sync": "只读日志 + pub 由 transport 内部加锁；prog 只在 fw.Wait() 之后读"
+      "sync": "读过：follow 只读日志，向 hub 推送；prog 仅在 fw.Wait() 之后读，无并发窗口",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "cmd/dshd/transport_prompt.go:62",
       "what": "每轮一个 turn",
-      "sync": "promptService 的 busy 表有锁；busy 的唯一结束点在 defer"
+      "sync": "读过：promptService 每个入口先 p.mu.Lock（50/72/86/95）；busy 唯一结束点在 defer",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "cmd/dshd-bridge/main.go:67",
       "what": "桥的读写",
-      "sync": "桥是独立进程，不共享宿主的锁"
+      "sync": "读过：桥是独立二进制，不 import kernel、不共享宿主内存（grep 计数 0）",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "cmd/dshd-bridge/main.go:102",
       "what": "桥的读写",
-      "sync": "桥是独立进程，不共享宿主的锁"
+      "sync": "读过：桥是独立二进制，不 import kernel、不共享宿主内存（grep 计数 0）",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "cmd/dshd-bridge/main.go:420",
       "what": "桥的读写",
-      "sync": "桥是独立进程，不共享宿主的锁"
+      "sync": "读过：桥是独立二进制，不 import kernel、不共享宿主内存（grep 计数 0）",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "modules/exec/bash/session.go:90",
       "what": "后台任务等待",
-      "sync": "job 表有锁"
+      "sync": "读过：job 表每次访问先 s.mu.Lock（100/109/122）",
+      "verified_at": "2026-11-03"
     },
     {
       "site": "modules/exec/bash/tools.go:111",
       "what": "后台任务启动",
-      "sync": "job 表有锁"
+      "sync": "同 session.go，走同一把 s.mu",
+      "verified_at": "2026-11-03"
     }
   ]
 }
