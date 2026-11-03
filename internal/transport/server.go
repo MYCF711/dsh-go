@@ -5,8 +5,10 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -265,7 +267,13 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch name := strings.TrimPrefix(r.URL.Path, "/api/"); Method(name) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/")
+	// 每个 /api 调用打一行到 stderr。
+	//
+	// 为什么单独记：界面连没连上宿主，从进程表看不出来（窗口开着、进程在跑，
+	// 也可能一次都没调过来）。有了这行，"它到底说没说话"从猜变成查。
+	fmt.Fprintf(os.Stderr, "transport: /api/%s\n", name)
+	switch Method(name) {
 	case MethodSessionList:
 		s.handleSessionList(w)
 	case MethodSessionLoad:

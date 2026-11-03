@@ -44,3 +44,52 @@ tmp/uiconn/logs/       → 不存在
 2. 再起 `cmd/app`，带 `-session <id>` 直接打开它
 3. **判据**：宿主侧 `logs/` 出现记录，或该会话文件多出新的 user/message 帧
    —— 这证明"界面真的调用了宿主"，而不是"窗口打开了"
+
+---
+
+## 为什么两次都"起来了但没说话"（2026-11-03 12:16 查明）
+
+**`dsh-ui` 正在被另一个进程同时修改。**
+
+```
+-rw-r--r-- 23977 12:15:55  cmd/app/main.go        ← 5 秒前改的
+-rw-r--r--  9664 12:14:01  plugins/dscore/dscore.go
+当前时间                    12:16:00
+```
+
+`git status` 还有一批未提交的改动与新包（`internal/pluginapi/`、`internal/uikernel/`）。
+
+现在编译直接失败：
+
+```
+cmd/app/main.go:24:2: "github.com/MYCF711/dsh-ui/plugins/dscore" imported and not used
+```
+
+**所以两次实验里那个 55 MB 的 `app.exe` 是旧二进制**——不是我们连不上，
+是那一刻它根本编不出来，跑的是别人之前留下的产物。
+
+### 这不是我们这侧的问题
+
+- 宿主侧：`ready` 正常、`/api` 全部可用、12 个 method 有测试
+- 界面侧：正在重构（插件内核 `uikernel` / `pluginapi` 刚建）
+
+**两边都在动的时候，硬测"能不能连"没有意义。** 测出来的失败无法归因。
+
+### 这轮真正交付的东西
+
+给宿主加了**调用日志**：
+
+```
+transport: /api/session.list
+transport: /api/session.load
+```
+
+每个 `/api` 请求打一行到 stderr。在此之前，"界面到底有没有调过来"
+只能靠猜（窗口开了、进程在跑，也可能一次都没说过话）。
+
+**这条日志是下次验收的唯一判据**：只要界面真的连上，宿主这侧一定会有这几行。
+
+### 下一轮的条件
+
+等 `cd dsh-ui && go build ./...` 重新变成 OK 再测。
+在那之前不测——**在别人重构中途测连接，等于测一个正在动的目标。**
