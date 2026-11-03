@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -78,14 +79,17 @@ func (r doctorReport) Render(w io.Writer) {
 //
 // 设计原则：**每项都要有实测到的具体东西**（路径、数量、状态码），
 // 而不是"正常/异常"。出问题时人最需要的是"到底哪里、什么值"。
-func runDoctor(home, base string) doctorReport {
+func runDoctor(home, base string) doctorReport { return runDoctorWith(home, base, "dsh.toml") }
+
+func runDoctorWith(home, base, manifest string) doctorReport {
 	rep := doctorReport{Home: home}
 	rep.Results = append(rep.Results,
 		checkHomeWritable(home),
 		checkSessionsReadable(home),
 		checkStaleLocks(home),
 		checkGateway(base),
-		checkManifest("dsh.toml"),
+		checkManifest(manifest),
+		checkWasmModules(manifest),
 		checkRecentLog(home),
 	)
 	return rep
@@ -259,10 +263,11 @@ func cmdDoctor(argv []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
 	base := fs.String("base", "http://127.0.0.1:3425/v1", "OpenAI 兼容端点")
+	manifest := fs.String("manifest", "dsh.toml", "manifest 路径（体检用它检查模块声明）")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	rep := runDoctor(*home, *base)
+	rep := runDoctorWith(*home, *base, *manifest)
 	rep.Render(os.Stdout)
 	if rep.Failed() {
 		return fmt.Errorf("诊断发现致命问题")
@@ -372,5 +377,43 @@ func checkRecentLog(home string) checkResult {
 		return c
 	}
 	c.Detail = fmt.Sprintf("%s 里没有警告（%d 行）", filepath.Base(latest), strings.Count(string(raw), string(rune(10))))
+	return c
+}
+
+// checkWasmModules 检查 manifest 里的 wasm 模块能不能真的装起来。
+//
+// 为什么放进体检：wasm 装载失败**只在启动时**报一次，跑起来之后就没人再看了；
+// 而它的失败形态是"模块静默不生效"，跟配置写错一个样。体检要能提前说出来。
+func checkWasmModules(manifest string) checkResult {
+	c := checkResult{Name: "wasm 模块可装载"}
+	entries, err := readWasmEntries(manifest)
+	if err != nil {
+		// 没有 manifest / 解析不了，交给 checkManifest 报，这里不重复喊。
+		c.OK = true
+		c.Detail = "跳过（manifest 不可用）"
+		return c
+	}
+	// readWasmEntries 返回的是 manifest 里**所有** [[module]] 块（它只做解析），
+	// 到底有几个 wasm 模块要看装载结果——按 entries 判会把"一个都没有"
+	// 说成"已装载"，而那句谎话会让人以为 wasm 这条线已经在跑。
+	_ = entries
+	mods, err := loadWasmModules(manifest)
+	if err != nil {
+		c.Detail = err.Error()
+		c.Next = "按错误里的路径/digest 修 manifest，或先把那条 wasm 模块删掉"
+		return c
+	}
+	closeLoadedWasm(context.Background())
+	if len(mods) == 0 {
+		c.OK = true
+		c.Detail = "没有 wasm 模块"
+		return c
+	}
+	c.OK = true
+	var names []string
+	for _, m := range mods {
+		names = append(names, m.ID)
+	}
+	c.Detail = strings.Join(names, "、") + "（已装载；注意它们不提供工具，只能 dshd wasm call 手动调）"
 	return c
 }

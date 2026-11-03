@@ -263,3 +263,34 @@ func TestDiagFailsWhenLogFileReadOnly(t *testing.T) {
 		t.Fatal("拿不到日志应该返回 nil")
 	}
 }
+
+// 体检要能提前说出"wasm 模块装不起来"。
+//
+// 为什么值得单独一条：wasm 装载失败**只在启动时**报一次，跑起来之后就没人看了，
+// 而它的失败形态是"模块静默不生效"，跟配置写错一个样。
+func TestDoctorChecksWasmModules(t *testing.T) {
+	dir := t.TempDir()
+
+	// ① 没有 wasm → 明确说"没有"，不能含糊成"已装载"
+	plain := filepath.Join(dir, "plain.toml")
+	if err := os.WriteFile(plain, []byte("[[module]]\nid = \"tool-todo\"\nbackend = \"static\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c := checkWasmModules(plain); !c.OK || !strings.Contains(c.Detail, "没有 wasm") {
+		t.Fatalf("没有 wasm 时应当如实说，实际 ok=%v detail=%q", c.OK, c.Detail)
+	}
+
+	// ② 指向不存在的文件 → 红，且错误里带路径
+	broken := filepath.Join(dir, "broken.toml")
+	body := "[[module]]\nid = \"wasm-x\"\nbackend = \"wasm\"\npath = \"nope.wasm\"\n"
+	if err := os.WriteFile(broken, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := checkWasmModules(broken)
+	if c.OK {
+		t.Fatal("装不起来的 wasm 模块必须报红")
+	}
+	if !strings.Contains(c.Detail, "nope.wasm") {
+		t.Fatalf("错误里要带路径：%q", c.Detail)
+	}
+}
