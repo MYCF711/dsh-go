@@ -54,10 +54,52 @@ def main():
         print(f"FAIL  找不到清单 {MANIFEST}", file=sys.stderr)
         return 1
     data = json.load(open(MANIFEST, encoding="utf-8"))
-    declared = {e["site"]: e for e in data["goroutines"]}
 
-    missing = [s for s in found if s not in declared]
-    stale = [s for s in declared if s not in found]
+    # 按「文件 + 该文件里第几个 goroutine」配对，**不按绝对行号**。
+    #
+    # 为什么改：插两行 import 就会让所有位置平移，于是检查红成一片——
+    # 而红的是"行号变了"，不是"多了并发点"。噪声会训练人去忽略它。
+    # 序号配对仍然抓得住真正的增删：文件里多一个 goroutine，序号就对不上。
+    def by_file(sites):
+        g = {}
+        for s in sites:
+            f, _, ln = s.rpartition(":")
+            g.setdefault(f, []).append(int(ln))
+        for f in g:
+            g[f].sort()
+        return g
+
+    found_by_file = by_file(found)
+    declared_by_file = by_file([e["site"] for e in data["goroutines"]])
+
+    missing, stale = [], []
+    for f, lines in found_by_file.items():
+        have = len(declared_by_file.get(f, []))
+        if len(lines) != have:
+            for ln in lines[have:]:
+                missing.append(f"{f}:{ln}")
+        elif len(lines) < len(declared_by_file.get(f, [])):
+            stale.append(f)
+    for f, lines in declared_by_file.items():
+        if f not in found_by_file:
+            stale.append(f)
+
+    # 序号对得上，就把清单里的行号刷新成实际行号（幂等，不产生 diff 噪声以外的东西）。
+    if not missing:
+        fresh = {}
+        for f, lines in found_by_file.items():
+            lines = sorted(lines)
+            i = 0
+            for e in data["goroutines"]:
+                ef, _, _ = e["site"].rpartition(":")
+                if ef == f and i < len(lines):
+                    fresh[e["site"]] = f"{f}:{lines[i]}"
+                    i += 1
+        for e in data["goroutines"]:
+            if e["site"] in fresh:
+                e["site"] = fresh[e["site"]]
+        with open(MANIFEST, "w", encoding="utf-8", newline="") as fh:
+            fh.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
     if missing:
         for s in missing:
