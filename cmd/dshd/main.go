@@ -679,6 +679,7 @@ func cmdRun(argv []string) error {
 	// 把后台任务清单推给父进程（serve 的 jobs.list 读它）。
 	// **失败不影响主流程**：这只是给界面看的信息，不是本轮结果。
 	emitJobs(root)
+	go serveJobsOut(root)
 	if err := logw.Close(); err != nil {
 		return err
 	}

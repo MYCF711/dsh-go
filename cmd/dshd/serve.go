@@ -196,13 +196,32 @@ func cmdServe(args []string) error {
 
 	srv, err := transport.NewServer(transport.Options{
 		Source: src,
-		// 后台任务：**只读子进程推上来的那份**。JobsOutput 仍然空着——
-		// 取某一条的实时输出需要子进程那边有"按 id 查"的应答通道，
-		// 而当前协议是单向推清单，没有 request/response 对。
+		// 后台任务：清单是**子进程推上来的那份**；输出要**当场问子进程**。
+		//
+		// **JobsOutput 只在轮次进行中可用**：每轮起一个新的子进程（`loopRunner`），
+		// 跑完就退，`spi.Job` 也跟着没了。轮次之外调它会拿到
+		// 「这条会话的子进程还没起来（没有 stdin）」——那不是 bug，是真实限制
+		// （后台任务跟着子进程活，「任务还在跑但子进程已退」本身就说不通）。
 		JobsList: func() []transport.JobInfo {
 			lr.jobsMu.Lock()
 			defer lr.jobsMu.Unlock()
 			return lr.jobs
+		},
+		JobsOutput: func(id string, wait time.Duration) (transport.JobOutput, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), wait+5*time.Second)
+			defer cancel()
+			payload, err := broker.askJobsOut(ctx, id)
+			if err != nil {
+				return transport.JobOutput{}, err
+			}
+			var out transport.JobOutput
+			if err := json.Unmarshal([]byte(payload), &out); err != nil {
+				return transport.JobOutput{}, err
+			}
+			if out.ID == "" {
+				out.ID = id
+			}
+			return out, nil
 		},
 		// 定时任务：直接读 `<home>/state/schedules/`（和 `dshd schedule list` 同一个来源）。
 		// **不复用 lr**：它不是子进程推的，是磁盘上的文件，每次问都能拿到最新的。

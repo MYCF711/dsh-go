@@ -25,13 +25,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:170",
+      "site": "internal/transport/server.go:175",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:253",
+      "site": "internal/transport/server.go:258",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
@@ -79,7 +79,7 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/serve_approval.go:213",
+      "site": "cmd/dshd/serve_approval.go:305",
       "what": "等这一次审批的结果（客户端回答 或 超时）",
       "sync": "ch 由 pending[id] 取出、只被结算一次；写子进程走 reply 内的 writeMu 串行；b.mu 只护 map，不在锁内调 emit",
       "verified_at": "2026-11-04"
@@ -91,7 +91,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshtui/app.go:118",
+      "site": "cmd/dshtui/app.go:154",
       "what": "读键盘（stdin → rune/特殊键两个 channel）",
       "sync": "只往带缓冲的 channel 发送；进程退出时 stdin 关闭即返回；不碰 app 的可变状态",
       "verified_at": "2026-11-04"
@@ -103,9 +103,21 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshtui/app.go:900",
+      "site": "cmd/dshtui/app.go:1085",
       "what": "从 stdin 泵字节（读一个发一个，关掉 channel 表示输入结束）",
       "sync": "只往带缓冲 channel 发；Read 出错或 EOF 就 close；不碰 app 的任何可变状态",
+      "verified_at": "2026-11-04"
+    },
+    {
+      "site": "cmd/dshd/approval_stdio.go:56",
+      "what": "从 stdin 逐行分发（审批应答 / 后台任务输出请求），进程内只起一次（stdinOnce）",
+      "sync": "只向带缓冲 channel 发送（approvalCh 容量 1、jobsOutCh 容量 4）；EOF 即退出；不碰会话状态",
+      "verified_at": "2026-11-04"
+    },
+    {
+      "site": "cmd/dshd/main.go:682",
+      "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
+      "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"
     }
   ]
