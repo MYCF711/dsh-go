@@ -37,7 +37,8 @@
       "total",
       "truncated",
       "model",
-      "permission"
+      "permission",
+      "contentWidth"
     ],
     "PromptResult": [
       "accepted",

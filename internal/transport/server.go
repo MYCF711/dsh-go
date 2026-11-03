@@ -40,6 +40,8 @@ const (
 type Options struct {
 	// Source 提供会话数据；nil 时 /api/session.list 返回空数组（测试用）。
 	Source Source
+	// ContentWidth 是会话内容列宽（0 = 不知道，界面自己算）。由壳/宿主注入。
+	ContentWidth int
 	// Policy 是宿主这一进程实际用的审批策略（deny/ask/allow/auto）。
 	//
 	// 它是**进程级事实**，不是会话级"预设"——H5 要的是"当前权限状态"，
@@ -404,6 +406,7 @@ func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	// H5：权限状态是进程级事实，在这里补上（宿主注入的 Load 只关心会话内容）。
 	res.Permission = s.opt.Policy
+	res.ContentWidth = s.opt.ContentWidth
 	writeJSON(w, http.StatusOK, res)
 }
 

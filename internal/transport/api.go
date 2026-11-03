@@ -84,6 +84,12 @@ type LoadResult struct {
 	// Permission 是当前审批策略（deny/ask/allow/auto，H5）。
 	// **不是 mode**：mode 决定模型能看见哪些工具，权限决定写操作要不要问人。
 	Permission string `json:"permission,omitempty"`
+	// ContentWidth 是会话内容列的宽度（逻辑像素，H12）。
+	//
+	// 为什么由宿主给而不是界面自己算：界面在槽位里只拿得到整窗宽度，
+	// 而官方气泡上限是 `min(列宽*0.702, 82%)`——没有列宽这个数就只能瞎猜比例。
+	// **0 表示不知道**（omitempty），界面沿用自己那套；不许填一个"看着像"的默认值。
+	ContentWidth int `json:"contentWidth,omitempty"`
 }
 
 // PromptResult 是 session.prompt 的返回值：**立刻返回**，回答走 WS。

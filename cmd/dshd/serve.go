@@ -77,6 +77,9 @@ func cmdServe(args []string) error {
 	home := fs.String("home", envOr("DSHD_HOME", ""), "会话根目录（必填）")
 	// 留空 = 让 transport 用 127.0.0.1:0，端口由 OS 分配。
 	serveSteps := fs.Int("max-steps", 6, "每轮最多几步（子进程 run 的上限）")
+	// H12：会话内容列宽（逻辑像素）。0 = 不知道，界面自己算。
+	// 为什么不给默认值：官方是 min(748*0.702, 82%)，直接抄 748 会让别的窗口尺寸下偏宽/偏窄。
+	serveWidth := fs.Int("content-width", 0, "会话内容列宽（逻辑像素）；0 = 不知道，界面自己算")
 	servePolicy := fs.String("policy", "deny", "子进程用哪个审批策略：deny/allow（serve 没有终端，ask 等于永远挂起）")
 	addr := fs.String("addr", "", "监听地址（默认 127.0.0.1:0，端口由 OS 分配）")
 	if err := fs.Parse(args); err != nil {
@@ -122,7 +125,8 @@ func cmdServe(args []string) error {
 		Source: src,
 		Addr:   *addr,
 		// H5：把这一进程真正的审批策略报给界面。**不是 mode**。
-		Policy: *servePolicy,
+		Policy:       *servePolicy,
+		ContentWidth: *serveWidth,
 		// List 复用 transport_list.go 的转换：列表只有一份真相，
 		// 不要在这里写第二套"读磁盘 → SessionSummary"。
 		List: func() ([]transport.SessionSummary, error) {
