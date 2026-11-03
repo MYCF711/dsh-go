@@ -49,7 +49,12 @@ func firstText(raw json.RawMessage) string {
 
 func main() {
 	root := os.Args[1]
-	max := 8
+	// 0 = 全部扫完（用来数"到底有多少条能重放"这个分母）。
+	max := 0
+	if v := os.Getenv("MINE_MAX"); v != "" {
+		fmt.Sscanf(v, "%d", &max)
+	}
+	scanned := 0
 	var out []string
 	seen := map[string]bool{}
 	files, _ := filepath.Glob(filepath.Join(root, "*", "*", "session.v4.jsonl.zstd"))
@@ -74,6 +79,7 @@ func main() {
 			skippedNoCwd++
 			continue
 		}
+		scanned++
 		lg, err := v4.ReadFile(f)
 		if err != nil {
 			continue
@@ -94,7 +100,7 @@ func main() {
 			out = append(out, t)
 			break
 		}
-		if len(out) >= max {
+		if max > 0 && len(out) >= max {
 			break
 		}
 	}
@@ -102,6 +108,7 @@ func main() {
 		fmt.Printf("%d. %s\n", i+1, strings.ReplaceAll(t, "\n", " "))
 	}
 	fmt.Fprintf(os.Stderr, "可重放: %d 条；cwd 已不在而跳过: %d 个会话\n", len(out), skippedNoCwd)
+	fmt.Fprintf(os.Stderr, "扫过 %d 个会话文件\n", scanned)
 	if err := os.WriteFile("tmp/realprompts.txt", []byte(strings.Join(out, "\n")), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
