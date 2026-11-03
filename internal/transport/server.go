@@ -310,14 +310,16 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		SessionID string `json:"sessionId"`
-		Text      string `json:"text"`
+		// ID 是契约快照里的名字（H9）。两个都收：只认一个就是静默 404。
+		ID   string `json:"id"`
+		Text string `json:"text"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	if s.opt.Prompt == nil {
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 		return
 	}
-	res, err := s.opt.Prompt(in.SessionID, in.Text)
+	res, err := s.opt.Prompt(fillID(in.SessionID, in.ID), in.Text)
 	if err != nil {
 		// 宿主侧对"上一轮还没结束"会返回错误；协议层不认具体错误类型，
 		// 一律按冲突报——界面据此提示"等这一轮结束"，而不是当成参数错误。
@@ -331,13 +333,15 @@ func (s *Server) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessionCancel(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		SessionID string `json:"sessionId"`
+		// ID 是契约快照里的名字（H9）。两个都收：只认一个就是静默 404。
+		ID string `json:"id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	if s.opt.Cancel == nil {
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 		return
 	}
-	if err := s.opt.Cancel(in.SessionID); err != nil {
+	if err := s.opt.Cancel(fillID(in.SessionID, in.ID)); err != nil {
 		writeJSON(w, http.StatusConflict, errorBody(err.Error()))
 		return
 	}
@@ -362,18 +366,32 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessionId": id})
 }
 
+// fillID 把契约里的 id 别名补进 SessionID。
+//
+// 为什么必须有：界面按快照发 `{"id":...}`，宿主只读 `sessionId` → 一律 404，
+// 而那个 404 长得像"会话不存在"（2026-11-03 H10 就是这么来的）。
+// **同一个字段两个名字，等于两套真相；收下两个名字至少不会静默失败。**
+func fillID(sessionID, id string) string {
+	if sessionID != "" {
+		return sessionID
+	}
+	return id
+}
+
 // handleSessionLoad 是 /api/session.load：首屏。
 func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		SessionID string `json:"sessionId"`
-		Limit     int    `json:"limit"`
+		// ID 是契约快照里的名字（H9）。两个都收：只认一个就是静默 404。
+		ID    string `json:"id"`
+		Limit int    `json:"limit"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	if s.opt.Load == nil {
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 		return
 	}
-	res, err := s.opt.Load(in.SessionID, in.Limit)
+	res, err := s.opt.Load(fillID(in.SessionID, in.ID), in.Limit)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorBody(err.Error()))
 		return
@@ -385,15 +403,17 @@ func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		SessionID string `json:"sessionId"`
-		SinceSeq  int    `json:"sinceSeq"`
-		Limit     int    `json:"limit"`
+		// ID 是契约快照里的名字（H9）。两个都收：只认一个就是静默 404。
+		ID       string `json:"id"`
+		SinceSeq int    `json:"sinceSeq"`
+		Limit    int    `json:"limit"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	if s.opt.History == nil {
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 		return
 	}
-	pg, err := s.opt.History(in.SessionID, in.SinceSeq, in.Limit)
+	pg, err := s.opt.History(fillID(in.SessionID, in.ID), in.SinceSeq, in.Limit)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorBody(err.Error()))
 		return
