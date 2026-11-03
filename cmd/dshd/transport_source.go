@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/session"
@@ -169,6 +170,19 @@ func (s *sessionSource) Model(sessionID string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// ContextWindow 报这条会话模型的上限（token）。
+//
+// 从哪来：环境变量 DSHD_CONTEXT_WINDOW。**没有就返回 0**——界面据此不画进度条。
+// 不做"按模型名查表猜一个数"：猜错的话百分比是假精确，比不给更糟。
+func (s *sessionSource) ContextWindow(string) int {
+	if v := os.Getenv("DSHD_CONTEXT_WINDOW"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
 }
 
 func (s *sessionSource) Messages(sessionID string) ([]transport.Message, error) {

@@ -43,6 +43,7 @@
       "contentWidth",
       "usageTotal",
       "contextTokens",
+      "contextWindow",
       "journalEpoch",
       "lastSeq"
     ],

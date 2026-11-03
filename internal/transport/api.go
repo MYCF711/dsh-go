@@ -115,6 +115,10 @@ type LoadResult struct {
 	// ContextTokens 是**最近一条** assistant 的 totalTokens，也就是"当前上下文占多少"。
 	// 它跟累计值是两件事：累计一直涨，上下文会随压缩回落。
 	ContextTokens int `json:"contextTokens,omitempty"`
+	// ContextWindow 是这条会话模型的上限（token）。
+	// **0 表示不知道**：界面据此决定"画进度条"还是"只报数字"。
+	// 不许填一个"看着像"的默认值——那会让百分比永远算错。
+	ContextWindow int `json:"contextWindow,omitempty"`
 	// JournalEpoch/LastSeq 让客户端拿到"我现在该从哪个水位接着收"（H14）。
 	// load 只是首屏投影，**不能用来补洞**；但它必须告诉客户端 journal 在哪。
 	JournalEpoch int64 `json:"journalEpoch,omitempty"`

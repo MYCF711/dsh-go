@@ -164,6 +164,7 @@ func (c *client) loadMessages(sid string, limit int) ([]message, error) {
 // stats 是会话当前的用量快照（来自 session.load）。
 type stats struct {
 	ContextTokens int // 最近一条 assistant 的 totalTokens：当前上下文占多少
+	ContextWindow int // 模型上限；0 = 不知道（不画进度条）
 	OutputTotal   int // 全会话累计输出 token
 	LastSeq       int
 }
@@ -176,6 +177,7 @@ func (c *client) loadStats(sid string) (stats, error) {
 	}
 	var r struct {
 		ContextTokens int `json:"contextTokens"`
+		ContextWindow int `json:"contextWindow"`
 		LastSeq       int `json:"lastSeq"`
 		UsageTotal    *struct {
 			OutputTokens int `json:"outputTokens"`
@@ -184,7 +186,7 @@ func (c *client) loadStats(sid string) (stats, error) {
 	if err := json.Unmarshal(res, &r); err != nil {
 		return stats{}, err
 	}
-	st := stats{ContextTokens: r.ContextTokens, LastSeq: r.LastSeq}
+	st := stats{ContextTokens: r.ContextTokens, ContextWindow: r.ContextWindow, LastSeq: r.LastSeq}
 	if r.UsageTotal != nil {
 		st.OutputTotal = r.UsageTotal.OutputTokens
 	}

@@ -44,6 +44,12 @@ type UsageSourcer interface {
 	UsageTotal(sessionID string) (total UsageMsg, contextTokens int, err error)
 }
 
+// WindowSourcer 是 Source 的可选增强：给出这条会话模型的上限（token）。
+// 说不出来就返回 0——界面会退化成"只报数字"，而不是画一根永远不准的进度条。
+type WindowSourcer interface {
+	ContextWindow(sessionID string) int
+}
+
 // ModelSourcer 是 Source 的可选增强：给出这条会话用的模型 id。
 type ModelSourcer interface {
 	Model(sessionID string) (string, error)
@@ -98,6 +104,11 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 					res.UsageTotal = &tot
 				}
 				res.ContextTokens = ctx
+			}
+		}
+		if ws, ok := src.(WindowSourcer); ok {
+			if w := ws.ContextWindow(sessionID); w > 0 {
+				res.ContextWindow = w
 			}
 		}
 		if ms, ok := src.(ModelSourcer); ok {

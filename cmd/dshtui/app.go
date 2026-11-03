@@ -30,6 +30,7 @@ type app struct {
 
 	// 用量与速率：都来自 session.load，**不自己估**。
 	ctxTokens  int
+	ctxWindow  int
 	outTokens  int
 	outAtStart int
 	tps        float64
@@ -380,6 +381,7 @@ func (a *app) handleFrame(f ServerFrame) {
 		if a.busy {
 			if st, err := a.cl.loadStats(a.sid); err == nil {
 				a.ctxTokens = st.ContextTokens
+				a.ctxWindow = st.ContextWindow
 				delta := st.OutputTotal - a.outAtStart
 				secs := time.Since(a.start).Seconds()
 				if secs > 0.2 && delta > 0 {
@@ -434,7 +436,7 @@ func (a *app) view() []string {
 
 	// 状态行
 	left := fmt.Sprintf(" %s · 会话 %s · 工具 %d · ctx %s",
-		"dsh-go", short(a.sid), a.tools, fmtTokens(a.ctxTokens))
+		"dsh-go", short(a.sid), a.tools, ctxPercent(a.ctxTokens, a.ctxWindow))
 	if a.tps > 0 {
 		left += fmt.Sprintf(" · %.1f tok/s", a.tps)
 	}
@@ -500,6 +502,26 @@ func utf8Valid(b []byte) bool {
 }
 
 // ---------------------------------------------------------------- 小工具
+
+// ctxPercent 画上下文占用：**知道上限才画百分比**，不知道就只报用了多少。
+//
+// 只给一半信息的进度条比没有更糟：数字看着精确，其实分母是猜的。
+func ctxPercent(used, window int) string {
+	if used <= 0 {
+		return "?"
+	}
+	if window <= 0 {
+		return fmtTokens(used) // 不知道上限：如实报数字
+	}
+	pct := float64(used) / float64(window) * 100
+	if pct > 100 {
+		pct = 100
+	}
+	const width = 10
+	filled := int(pct / 100 * width)
+	bar := strings.Repeat("▓", filled) + strings.Repeat("░", width-filled)
+	return fmt.Sprintf("%s %.0f%% (%s/%s)", bar, pct, fmtTokens(used), fmtTokens(window))
+}
 
 // renderMarkdown 把消息列表排成 markdown。**保留角色**：
 // 导出的东西多半是拿去回看"谁说了什么"，把角色抹掉就没用了。

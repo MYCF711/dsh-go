@@ -257,3 +257,22 @@ func TestNormalKeysStillTypeWhenNoApproval(t *testing.T) {
 		t.Fatalf("没有审批时 y 应当正常输入，实际 %q", string(a.input))
 	}
 }
+
+// 上下文进度条：知道上限才画百分比，不知道就只报数字。
+// 只给一半信息（有分子没分母）的进度条比没有更糟——数字看着精确，其实分母是猜的。
+func TestCtxPercent(t *testing.T) {
+	cases := []struct {
+		used, window int
+		want         string
+	}{
+		{0, 0, "?"},         // 什么都还不知道
+		{12000, 0, "12.0k"}, // 知道用了多少，不知道上限 → 只报数字
+		{50000, 100000, "▓▓▓▓▓░░░░░ 50% (50.0k/100.0k)"},    // 两样都知道 → 画条
+		{200000, 100000, "▓▓▓▓▓▓▓▓▓▓ 100% (200.0k/100.0k)"}, // 超了也不画成 120%
+	}
+	for _, c := range cases {
+		if got := ctxPercent(c.used, c.window); got != c.want {
+			t.Fatalf("ctxPercent(%d,%d) = %q，期望 %q", c.used, c.window, got, c.want)
+		}
+	}
+}
