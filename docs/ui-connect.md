@@ -93,3 +93,64 @@ transport: /api/session.load
 
 等 `cd dsh-ui && go build ./...` 重新变成 OK 再测。
 在那之前不测——**在别人重构中途测连接，等于测一个正在动的目标。**
+
+---
+
+## 第三次尝试：这次拿到的是**真错误**（2026-11-03 12:20）
+
+`dsh-ui` 现在能编译了（`go build ./...` → OK），所以又跑了一次。结果：
+
+```
+panic: runtime error: invalid memory address or nil pointer dereference
+
+github.com/MYCF711/dsh-ui/plugins/dssidebar.(*Plugin).Fields(...)
+    plugins/dssidebar/sidebar.go:57
+main.newConfig(...)
+    cmd/app/main.go:498
+main.main()
+    cmd/app/main.go:741
+
+宿主收到的 /api 调用：0 次
+```
+
+### 根因
+
+```go
+// sidebar.go:56-57
+// Fields 让壳把搜索框登记进 cfg.TextInput（不登记就收不到键盘）。
+func (p *Plugin) Fields() []*flex.Field { return []*flex.Field{&p.search} }
+```
+
+`p.search` 是一个**从未初始化的 `*flex.Field`**（`Register` 里只设了 theme/prims/collapsed/width）。
+`Fields()` 把一个 nil 指针包进切片交给 `flex.Fields(...)`，之后被解引用 → panic。
+
+### 为什么宿主 0 次调用
+
+**它没走到"连宿主"那一步就崩了。** 这解释了前面两次"窗口起来了但没说话"——
+之前那次是旧二进制；这次是新的、能编译，但启动即崩。
+
+### 该谁修
+
+这是 `dsh-ui` 侧的问题，而且那边**正在被别人改**（`cmd/app` 12:15 还在变）。
+所以我没有动它——**两边同时改同一个文件，只会让下一次实验更难归因**。
+
+修法很直接：`Fields()` 里跳过 nil，或者 `Register` 里真的把 `search` 初始化出来：
+
+```go
+func (p *Plugin) Fields() []*flex.Field {
+    if p.search == nil { return nil }
+    return []*flex.Field{p.search}
+}
+```
+
+### 这一轮的价值
+
+三次尝试，三种不同的失败：
+
+| 次数 | 现象 | 真因 |
+|---|---|---|
+| 1-2 | 窗口起来了、宿主 0 调用 | 旧二进制（隔壁在重构，编不出来） |
+| 3 | 进程立刻退出 | **`dssidebar.Fields` 返回 nil 字段** |
+
+**同一句"没连上"，背后是三个完全不同的原因。** 每加一个观测点（`/api` 日志、捕获 stderr），
+能排除掉的可能就多一层。
