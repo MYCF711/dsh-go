@@ -42,7 +42,9 @@ func TestListSessionsAllProjects(t *testing.T) {
 		if !l.Readable {
 			t.Fatalf("这几份都得读得动: %+v", l)
 		}
-		if l.Events != 2 {
+		// 只读首帧之后事件数是未知的（-1）——列会话不再为了数事件把整份日志解一遍。
+		// 这条断言原本钉的是"读得动且有内容"，现在改钉"要么不知道，要么真数到了"。
+		if l.Events != -1 && l.Events != 2 {
 			t.Fatalf("%s 事件数 = %d", l.SessionID, l.Events)
 		}
 		if l.Preset != "read-only" {
