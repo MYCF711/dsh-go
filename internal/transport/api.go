@@ -17,6 +17,8 @@ const (
 	MethodSessionDelete  Method = "session.delete"
 	MethodSessionFork    Method = "session.fork"
 	MethodWorkspaceList  Method = "workspace.list"
+	MethodFSRead         Method = "fs.read"
+	MethodFSWrite        Method = "fs.write"
 )
 
 // SessionMethods 是 U0 第一版要兑现的全部方法（顺序固定，快照按它排）。
@@ -25,6 +27,7 @@ func SessionMethods() []Method {
 		MethodSessionList, MethodSessionLoad, MethodSessionHistory,
 		MethodSessionPrompt, MethodSessionCancel, MethodSessionCreate,
 		MethodSessionDelete, MethodSessionFork, MethodWorkspaceList,
+		MethodFSRead, MethodFSWrite,
 	}
 }
 
@@ -68,4 +71,11 @@ type WorkspaceEntry struct {
 	Name  string `json:"name"`
 	IsDir bool   `json:"isDir"`
 	Size  int64  `json:"size"`
+}
+
+// FSContent 是 fs.read 的返回：路径、正文、字节数。
+type FSContent struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Size    int64  `json:"size"`
 }

@@ -13,6 +13,10 @@ type Source interface {
 
 var ErrNoSuchSession = errors.New("没有这个会话")
 
+// ErrNoSuchFile 由宿主在读文件时返回，协议层据此回 404。
+// "文件不存在"和"读失败"在界面上长得一样，但前者该换路径、后者该重试。
+var ErrNoSuchFile = errors.New("文件不存在")
+
 // LoadSession 是 session.load 的实现：首屏，取最新一屏。
 func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 	if src == nil {

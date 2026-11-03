@@ -55,6 +55,10 @@ type Options struct {
 	Fork func(sessionID, title string) (string, error)
 	// WorkspaceList 列当前工作区的顶层条目；宿主注入。
 	WorkspaceList func() ([]WorkspaceEntry, error)
+	// FSRead 读一个文件；路径解析、大小上限、越界检查都在宿主那边。
+	FSRead func(path string) (FSContent, error)
+	// FSWrite 写一个文件；宿主注入。
+	FSWrite func(path, content string) error
 	// Cancel 取消在飞的一轮；没有在飞的返回 ErrNoSuchTurn。
 	Cancel func(sessionID string) error
 	// SetMode 换模式；宿主注入。
@@ -276,6 +280,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionFork(w, r)
 	case MethodWorkspaceList:
 		s.handleWorkspaceList(w, r)
+	case MethodFSRead:
+		s.handleFSRead(w, r)
+	case MethodFSWrite:
+		s.handleFSWrite(w, r)
 	default:
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 	}

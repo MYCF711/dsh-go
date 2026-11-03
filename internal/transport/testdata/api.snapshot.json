@@ -8,7 +8,9 @@
     "session.create",
     "session.delete",
     "session.fork",
-    "workspace.list"
+    "workspace.list",
+    "fs.read",
+    "fs.write"
   ],
   "types": {
     "Message": [

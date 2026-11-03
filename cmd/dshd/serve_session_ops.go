@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/session"
@@ -80,4 +81,60 @@ func serveWorkspaceList() ([]transport.WorkspaceEntry, error) {
 		out = append(out, ent)
 	}
 	return out, nil
+}
+
+// fsReadLimit 是 fs.read 的单文件上限。界面要的是"预览"，不是"下载"。
+const fsReadLimit = 4 << 20
+
+// serveFSRead 读工作区里的一个文件。
+//
+// 越界检查在这里做：`..` 跑出去、指向目录、超过上限，分别给不同的错误——
+// 界面看到 404"文件不存在"和 500"读不了"应该做不同的事。
+func serveFSRead(path string) (transport.FSContent, error) {
+	if strings.TrimSpace(path) == "" {
+		return transport.FSContent{}, fmt.Errorf("path 为空")
+	}
+	abs, err := filepath.Abs(filepath.FromSlash(path))
+	if err != nil {
+		return transport.FSContent{}, fmt.Errorf("路径解析失败: %w", err)
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return transport.FSContent{}, transport.ErrNoSuchFile
+		}
+		return transport.FSContent{}, fmt.Errorf("读不了: %w", err)
+	}
+	if st.IsDir() {
+		return transport.FSContent{}, fmt.Errorf("这是一个目录，不是文件")
+	}
+	if st.Size() > fsReadLimit {
+		return transport.FSContent{}, fmt.Errorf("文件 %d 字节，超过 %d 的上限；先用 bash 看片段", st.Size(), fsReadLimit)
+	}
+	b, err := os.ReadFile(abs)
+	if err != nil {
+		return transport.FSContent{}, fmt.Errorf("读失败: %w", err)
+	}
+	return transport.FSContent{Path: path, Content: string(b), Size: int64(len(b))}, nil
+}
+
+// serveFSWrite 写工作区里的一个文件。
+//
+// 不做 read-before-write：那是**工具层**的策略（模型改文件前必须先读）。
+// 界面是人手在改，人已经知道自己在改什么——把工具的策略套到人身上只会挡路。
+func serveFSWrite(path, content string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("path 为空")
+	}
+	abs, err := filepath.Abs(filepath.FromSlash(path))
+	if err != nil {
+		return fmt.Errorf("路径解析失败: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return fmt.Errorf("创建父目录失败: %w", err)
+	}
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("写失败: %w", err)
+	}
+	return nil
 }

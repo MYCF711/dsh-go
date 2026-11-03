@@ -132,6 +132,12 @@ func cmdServe(args []string) error {
 		History: func(sessionID string, sinceSeq, limit int) (transport.Page, error) {
 			return transport.HistorySession(src, sessionID, sinceSeq, limit)
 		},
+		FSRead: func(path string) (transport.FSContent, error) {
+			return serveFSRead(path)
+		},
+		FSWrite: func(path, content string) error {
+			return serveFSWrite(path, content)
+		},
 		WorkspaceList: func() ([]transport.WorkspaceEntry, error) {
 			return serveWorkspaceList()
 		},
