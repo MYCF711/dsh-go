@@ -150,5 +150,13 @@
     "new": "pg, err := s.opt.History(in.SessionID, 0, in.Limit)",
     "pkg": "./internal/transport",
     "test": "TestHistoryPassesSinceSeqThrough"
+  },
+  {
+    "name": "heartbeat-never-times-out",
+    "file": "internal/transport/heartbeat.go",
+    "old": "\t\t\t\tif idleLimit > 0 && time.Since(last) > idleLimit {",
+    "new": "\t\t\t\tif idleLimit > 0 && time.Since(last) > idleLimit*1000 {",
+    "pkg": "./internal/transport",
+    "test": "TestServeConnReturnsIdleAfterSilence"
   }
 ]

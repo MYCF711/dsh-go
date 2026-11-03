@@ -490,7 +490,15 @@
 - ✅ 真机：默认打 `policy deny`，`--policy allow` 时打 `policy allow`
 - ⚠️ 又踩一次"python 往 Go 里写 `
 ` 变成真换行"（第 6 次）。修法一律 `chr(92)+'n'`
-- 下一步 **M127**：`serve` 的 WS 没有心跳与断线重连；界面长时间挂着会静默失联
+- ✅ **WS 心跳落地**（`internal/transport/heartbeat.go`）：每 30s 发 ping，**读侧** 90s 没有任何
+  客户端帧 → 关连接并返回 `ErrConnIdle`（不是"use of closed connection"）
+- ✅ 判据是**读侧空闲**不是写侧：半开连接上 ping 发得出去很多次，只有对端发来帧才证明它活着
+- ✅ 心跳是**可选接口** `Pinger`：内存管道不实现，就不启动——不逼它实现空方法，
+  否则测试会"看起来验过了心跳"而其实什么也没发生
+- ✅ 变异第 20 条 `heartbeat-never-times-out` → **CAUGHT**（第一版 `if false` 编译不过被判 BAD——
+  **编译不过的变异什么都没证明**，这条教训第 5 次踩）
+- 下一步 **M128**：`serve` 没有断线重连语义文档；界面重连时应该按 `sinceSeq` 补洞——
+  协议支持了，但没有一处写明"重连就带 lastSeq"
 
 ### 界面线现状（2026-11-03）
 

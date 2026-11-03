@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // Conn 是一条连接的读写面。WS 的真实实现以后补，测试用内存管道。
@@ -73,10 +74,24 @@ func ServeConn(conn Conn, hub *Hub) error {
 	// 而且连接对象（连带它的缓冲）永远收不掉。
 	defer hub.UnsubscribeAll(sub)
 
+	// 心跳：只在连接实现了 Pinger 时启动（内存管道不需要）。
+	// 读侧长时间没有帧 → 关掉连接把读解开，并返回 ErrConnIdle 而不是"use of closed connection"。
+	var idle int32
+	stop := heartbeat(conn, pingEvery, idleLimit, func() {
+		atomic.StoreInt32(&idle, 1)
+		if c, ok := conn.(io.Closer); ok {
+			_ = c.Close()
+		}
+	})
+	defer stop()
+
 	first := true
 	for {
 		frame, err := conn.ReadClientFrame()
 		if err != nil {
+			if atomic.LoadInt32(&idle) == 1 {
+				return ErrConnIdle
+			}
 			// 对端正常关闭：这条连接的活干完了，不算错误。
 			if errors.Is(err, io.EOF) {
 				return nil
