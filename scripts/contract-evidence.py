@@ -14,6 +14,9 @@ import subprocess
 import sys
 
 CONTRACT = "docs/transport-contract.md"
+# 允许传一个路径，只为**反证**用（见 scripts/guard-selftest.py）。
+if len(sys.argv) == 2:
+    CONTRACT = sys.argv[1]
 PAT = re.compile(r"`([^`]+)`")
 
 

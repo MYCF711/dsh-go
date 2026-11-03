@@ -19,6 +19,9 @@ import glob
 import re
 import sys
 
+# 允许传一个目录，只为**反证**用（见 scripts/guard-selftest.py）。
+ROOT = sys.argv[1] if len(sys.argv) == 2 else "cmd/dshd"
+
 DEF = re.compile(r'(\w+)\s*:=\s*fs\.(String|Int|Bool|Duration)\("([\w-]+)"')
 
 
@@ -36,14 +39,18 @@ def main():
 
     dead = []
     total = 0
-    for path in sorted(glob.glob("cmd/dshd/*.go")):
+    for path in sorted(glob.glob(ROOT + "/*.go")):
         if path.endswith("_test.go"):
             continue
         src = open(path, encoding="utf-8").read()
         for var, kind, name in DEF.findall(src):
             total += 1
-            # 去掉定义那一行的匹配，再看剩下还有没有引用
-            uses = len(re.findall(r"\b%s\b" % re.escape(var), src)) - 1
+            # 统计"引用"前必须**先把字符串字面量挖空**：
+            # 变量名常常和 flag 名同名（`dead := fs.String("dead", …)`），
+            # 不挖空就会把定义里的那个 "dead" 当成一次引用——守卫于是永远绿。
+            # （这条是 guard-selftest 逼出来的：自测第一次就跑红，说明守卫漏了。）
+            code_only = re.sub(r'"[^"]*"', '""', src)
+            uses = len(re.findall(r"\b%s\b" % re.escape(var), code_only)) - 1
             if uses <= 0:
                 dead.append("%s: --%s（变量 %s 定义后没再用）" % (path, name, var))
 
@@ -61,7 +68,7 @@ def main():
     # 按**函数**分组：一个文件里可能有好几个子命令，各用各的 FlagSet，
     # 跨函数同名是正常的（`--manifest` 在 run/tools/doctor 里都有）。
     dup = []
-    for path in sorted(glob.glob("cmd/dshd/*.go")):
+    for path in sorted(glob.glob(ROOT + "/*.go")):
         if path.endswith("_test.go"):
             continue
         src = open(path, encoding="utf-8").read()
