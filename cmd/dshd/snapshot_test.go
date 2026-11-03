@@ -153,6 +153,9 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"watch_status": {},
 		"watch_stop":   {Writes: true},
 		"watch_ack":    {Writes: true},
+		// 体检：不写盘，但**起 gh 子进程且 gh 要联网**。漏报就会在 deny 策略下
+		// 静默放行一次联网调用。
+		"watch_doctor": {Executes: true, Network: true},
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},

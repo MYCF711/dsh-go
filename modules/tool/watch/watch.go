@@ -34,6 +34,7 @@ const (
 	kindStatus = "watch_status"
 	kindStop   = "watch_stop"
 	kindAck    = "watch_ack"
+	kindDoctor = "watch_doctor"
 )
 
 const (
@@ -142,6 +143,8 @@ func (t *Tool) Description() string {
 		return "看当前在盯哪些仓库、各自已处理到第几个编号。"
 	case kindStop:
 		return "不再盯某个仓库时把它从名单里摘掉。"
+	case kindDoctor:
+		return "体检：gh 登录、仓库权限、打标标签是否存在。登记完先跑它，别等轮询时才炸。"
 	default:
 		return "打完标后调它，把已处理水位推进到这批编号的最大值。"
 	}
@@ -173,10 +176,16 @@ func (t *Tool) Schema() json.RawMessage {
 	}
 }
 
-// Caps：status 只读文件；另外三个会写名单。
+// Caps：status/doctor 只读文件；另外三个会写名单。
+//
+// doctor 虽然不写盘，但它**起 gh 子进程、而 gh 要联网**——按 AGENTS §2
+// 不能因为"只是查一下"就漏报能力，否则 deny 策略下它会静默放行一次联网调用。
 func (t *Tool) Caps() spi.Caps {
-	if t.kind == kindStatus {
+	switch t.kind {
+	case kindStatus:
 		return spi.Caps{}
+	case kindDoctor:
+		return spi.Caps{Executes: true, Network: true}
 	}
 	return spi.Caps{Writes: true}
 }
@@ -216,6 +225,8 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		return t.status(ctx, raw)
 	case kindStop:
 		return t.stop(ctx, raw)
+	case kindDoctor:
+		return t.doctor(ctx)
 	default:
 		return t.ack(ctx, raw)
 	}
@@ -660,7 +671,7 @@ func Module(dir string) kernel.Module {
 			if err != nil {
 				return err
 			}
-			for _, kind := range []string{kindStart, kindStatus, kindStop, kindAck} {
+			for _, kind := range []string{kindStart, kindStatus, kindStop, kindAck, kindDoctor} {
 				if err := reg.Register(&Tool{st: st, kind: kind}); err != nil {
 					return err
 				}

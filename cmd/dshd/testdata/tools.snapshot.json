@@ -1177,6 +1177,38 @@
     }
   },
   {
+    "name": "watch_doctor",
+    "description": "体检：gh 登录、仓库权限、打标标签是否存在。登记完先跑它，别等轮询时才炸。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "要记帐的仓库，形如 owner/name"
+        },
+        "numbers": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "已处理完的 issue/PR 编号"
+        },
+        "confirm_skip": {
+          "type": "boolean",
+          "description": "跳过的编号超过 3 个时必须显式确认：水位跳过去的编号以后不会再被处理"
+        }
+      },
+      "required": [
+        "numbers"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "executes": true,
+      "network": true
+    }
+  },
+  {
     "name": "watch_start",
     "description": "要开始盯一个新仓库时用它登记，之后由 dshd watch check 轮询。",
     "parameters": {
