@@ -74,6 +74,12 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	}
 
 	werr := cmd.Wait()
+	// 子进程说了什么，运维侧必须看得到。
+	// 没有这一行时，serve 起的子进程失败只能靠 WS 上的 turn/error 观察，
+	// 而 e2e/curl 场景根本没人读 WS——于是"它没写盘"就变成一个无解释的现象。
+	if s := strings.TrimSpace(stderr.String()); s != "" {
+		fmt.Fprintf(os.Stderr, "child(stderr): %s\n", tail(s, 800))
+	}
 	close(done)
 	fw.Wait()
 
