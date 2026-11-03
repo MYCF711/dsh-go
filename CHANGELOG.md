@@ -1,3 +1,45 @@
+## 0.2.1-go.28（2026-11-04）—— **wasm 插件真的能当工具用**
+
+这一版的主线只有一件：把「一切皆插件」从**编译期**推进到**可装载**。
+wasm 模块现在能注册成模型可见的工具，崩了会自动重建实例，一个模块能给多个工具。
+
+### 新能力
+- **wasm 工具插件**：manifest 写 `backend="wasm"` + `path` + `digest`（可选校验）+
+  `provides=["tool"]` 或 `["tool:<名>"]`，模块会注册成真的工具。
+  一个模块可挂多个工具（`[[module.tool]]` 数组），`call` 按信封里的 `tool` 字段分流。
+- **ABI 定稿**：`alloc(n)->ptr` + `call(ptr,n)->(ptr<<32)|len`，请求 `{v,tool,args}`、
+  结果 `{v,summary,text,isError,hint}`。失败分四层（业务失败/trap/协议错/超时），出口互不相同。
+- **实例自动重建**：trap 或超时后下一次调用会自动重建（2.7–3.0 ms），**不再需要重启宿主**。
+- **`dshd wasm` 子命令**：`inspect` / `call --fn` / `tool --tool <名>`（后者连 manifest 都不用写）。
+- **`dshd doctor` 有 wasm 一项**：装不起来在体检里就能看见。
+
+### 修掉的真缺陷
+- `enabled = false` 在 manifest 里**只解析不生效**（写了等于没写，且无提示）。
+- Go wasm 产物调用报 `unreachable` 的根因：缺 `-buildmode=c-shared` 与 `_initialize`，
+  而 `WithStderr(nil)` 把 Go 自己的提示吞掉了。
+- 入库的 `.wasm` 夹具**不可复现**：Go 把 `vcs.revision` 写进 build info，
+  `-trimpath` 关不掉 → 加 `-buildvcs=false`。
+- 审批写子进程 stdin 无锁（审批与超时两个来源会并发写，可能写出半行）。
+- `journalEpoch` 是进程内计数器：宿主重启后撞号 → 客户端静默丢帧（8 秒 0 帧）。
+- 空 journal 的 `frames` 序列化成 `null`；`busy` 错误 code 无意义、hint 为空、不可重试；
+  `config.get/set` 与界面仓形状不一致（静默空配置 / 400 无 hint）。
+
+### TUI（`cmd/dshtui`）
+- 全屏、差分重绘、流式正文、工具卡、状态行；斜杠命令 `/help /new /clear /quit /tools /compact /resume /export`。
+- **滚动**（PgUp/PgDn、方向键、Ctrl+Home/End）、**工具卡折叠**（Ctrl+T）、**会话内搜索**（Ctrl+F）。
+- **审批**：能回答（y/a/n），并带**倒计时**（payload 新增 `timeoutMs`/`deadlineMs`，
+  重放用 `deadlineMs` 算真实剩余）。
+
+### 其它
+- `workflow` 工具（声明式 JSON 步骤表，参数名对齐 DSH 的 `script`/`meta`），
+  子调用走 `spi.SubDispatch`（照样过审批/闸门），子调用也写进 v4 可回溯。
+- `plugin` 工具：list/enable/disable manifest 那层。
+- `session.compact` 成为真的 Transport 方法（CLI 与界面共用一段代码）。
+- 校验：`-race` 全跑（wasmhost/dshtui/transport/dshd 零竞争）；
+  wasm 压测 1000 次调用 56 µs/次、50 轮重建堆只涨 8 KB。
+
+---
+
 ## 0.2.1-go.27（2026-11-03）—— **P0 工具集齐 18/18**
 
 **第 18 个：`subagent`。18/18，PLAN §7.4 的 P0 列表到此全部落地。**
