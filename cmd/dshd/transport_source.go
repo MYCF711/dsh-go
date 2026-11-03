@@ -151,21 +151,27 @@ func (s *sessionSource) messagesOf(events []v4.Event) ([]transport.Message, erro
 			if !ok {
 				continue
 			}
-			out = append(out, transport.Message{Seq: int(ev.Seq), Role: "user", Text: text})
+			out = append(out, transport.Message{Seq: int(ev.Seq), Role: "user", Text: text, Time: ev.Time})
 
 		case "assistant/message":
 			text, ok := textOf(ev.Data, true)
 			if !ok {
 				continue
 			}
-			out = append(out, transport.Message{Seq: int(ev.Seq), Role: "assistant", Text: text})
+			out = append(out, transport.Message{
+				Seq:   int(ev.Seq),
+				Role:  "assistant",
+				Text:  text,
+				Time:  ev.Time,
+				Usage: usageOf(ev.Data),
+			})
 
 		case "tool/result":
 			text, callID, ok := toolResultText(ev.Data)
 			if !ok {
 				continue
 			}
-			msg := transport.Message{Seq: int(ev.Seq), Role: "tool", Text: text}
+			msg := transport.Message{Seq: int(ev.Seq), Role: "tool", Text: text, Time: ev.Time}
 			if c, found := calls[callID]; found {
 				msg.Tool = c.name
 				msg.Args = c.args
@@ -260,6 +266,38 @@ func textOf(data json.RawMessage, nested bool) (string, bool) {
 		blocks = d.Message.Content
 	}
 	return joinText(blocks), true
+}
+
+// usageOf 取助手事件里的用量（H1）。
+//
+// 两种"没有"都要返回 nil，不能返回 &UsageMsg{}：
+//   - data 里根本没有 usage 键；
+//   - usage 存在但四个字段全是 0。
+//
+// 界面靠 nil 与 0 区分「未知」和「确实是 0」——返回空结构体会让状态栏画出
+// "0 tok/s" 这种假数字，比不显示更糟。
+func usageOf(data json.RawMessage) *transport.UsageMsg {
+	var meta struct {
+		Usage *struct {
+			InputTokens     int `json:"inputTokens"`
+			OutputTokens    int `json:"outputTokens"`
+			TotalTokens     int `json:"totalTokens"`
+			CacheReadTokens int `json:"cacheReadTokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil || meta.Usage == nil {
+		return nil
+	}
+	u := meta.Usage
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.TotalTokens == 0 && u.CacheReadTokens == 0 {
+		return nil
+	}
+	return &transport.UsageMsg{
+		InputTokens:     u.InputTokens,
+		OutputTokens:    u.OutputTokens,
+		TotalTokens:     u.TotalTokens,
+		CacheReadTokens: u.CacheReadTokens,
+	}
 }
 
 // toolResultText 取 tool/result 的正文与 callId。

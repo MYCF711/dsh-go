@@ -361,8 +361,8 @@ go list -deps ./internal/transport | grep -E 'ui/|cmd/dshui'   # 必须无输出
 
 | # | 状态 | 要什么 | 为什么界面需要 | 怎么验 |
 |---|---|---|---|---|
-| H1 | ⏳ | `session.load` 的每条 `assistant/message` 带 `usage{inputTokens,outputTokens,totalTokens,cacheReadTokens}`，响应顶层再给一份合计 | 底部状态栏要显示 `↑输入 ↓输出 · tok/s · 上下文`。现在界面只能从**磁盘日志**里解，真宿主接上后没这个字段就只能退回只显示轮数/步数 | `curl -XPOST /api/session.load` 返回的 usage 里 `outputTokens > 0` |
-| H2 | ⏳ | 事件的墙钟时间 `time`（epoch 毫秒），每条事件都要有 | `tok/s` = outputTokens ÷ 相邻两条 assistant 事件的时间差。没有 `time` 就算不出速率（宿主从不提供耗时） | 同会话相邻两条 `assistant/message` 的 `time` 单调不减；差值 ∈ (0,120]s 时能算出 >0 的速率 |
+| H1 | ✅ 2026-11-03 | `session.load` 的每条 `assistant/message` 带 `usage{inputTokens,outputTokens,totalTokens,cacheReadTokens}`，响应顶层再给一份合计 | 底部状态栏要显示 `↑输入 ↓输出 · tok/s · 上下文`。现在界面只能从**磁盘日志**里解，真宿主接上后没这个字段就只能退回只显示轮数/步数 | `curl -XPOST /api/session.load` 返回的 usage 里 `outputTokens > 0` |
+| H2 | ✅ 2026-11-03 | 事件的墙钟时间 `time`（epoch 毫秒），每条事件都要有 | `tok/s` = outputTokens ÷ 相邻两条 assistant 事件的时间差。没有 `time` 就算不出速率（宿主从不提供耗时） | 同会话相邻两条 `assistant/message` 的 `time` 单调不减；差值 ∈ (0,120]s 时能算出 >0 的速率 |
 | H3 | ⏳ | `session.load` 的 `messages[].view`：把工具的 `spi.ViewSpec` 原样透传（`kind` = card/table/plain + 各自字段） | 界面按 `kind` 选渲染器（卡片/表格/原文）。没有它，工具卡只能是「工具名 + 一行摘要」 | `bash` → `kind:"card"` 且有 `fields`；`grep`/`ls`/`glob` → `kind:"table"` 且有 `columns`/`rows`；`read`/`write` → `kind:"plain"` 且有 `body` |
 | H4 | ⏳ | `session.load`（或 `session.list`）带当前会话的 `model`（模型 id 字符串） | 顶栏要显示「这是哪个模型在答」。没有就本该显示模型的位置整段不画 | 有值时顶栏出现模型名；空值时不出错、不显示占位符 |
 | H5 | ⏳ | 当前权限状态（permission preset 名，例如 `default` / `readonly`） | 顶栏要一个权限徽标。**不许拿 `mode` 冒充权限**：那是两件事 | 返回一个非空 preset 名；界面按名字显示，未知名字显示原文不猜含义 |
