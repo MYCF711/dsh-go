@@ -136,6 +136,8 @@ func main() {
 		err = cmdSchedule(os.Args[2:])
 	case "doctor":
 		err = cmdDoctor(os.Args[2:])
+	case "serve":
+		err = cmdServe(os.Args[2:])
 	case "version":
 		timingf("enter version")
 		fmt.Printf("dshd %s\n", version)
