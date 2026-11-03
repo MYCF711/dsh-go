@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/session"
 	"dshgo/internal/transport"
 )
 
@@ -91,23 +92,37 @@ func (s *sessionSource) resolve(sessionID string) (string, error) {
 	if sessionID == "" {
 		return "", transport.ErrNoSuchSession
 	}
-	seg, err := v4.EncodeSegment(sessionID)
-	if err != nil {
+	// 界面从列表拿到的是 "session-<uuid>"，磁盘上是裸 uuid；两种都得认，
+	// 否则界面把 id 原样传回来就是 404，而那个 404 看起来像"会话不存在"。
+	var segs []string
+	for _, id := range session.CandidateIDs(sessionID) {
+		seg, err := v4.EncodeSegment(id)
+		if err != nil {
+			continue
+		}
+		segs = append(segs, seg)
+	}
+	if len(segs) == 0 {
 		// 非法 id（空、带路径分隔符之类）等于没有这个会话，不是读失败。
 		return "", transport.ErrNoSuchSession
 	}
 
-	if s.cwd != "" {
-		direct := filepath.Join(s.home, "sessions", v4.ProjectKey(s.cwd), seg, "session.v4.jsonl.zstd")
-		if _, statErr := os.Stat(direct); statErr == nil {
-			return direct, nil
+	var matches []string
+	for _, seg := range segs {
+		if s.cwd != "" {
+			direct := filepath.Join(s.home, "sessions", v4.ProjectKey(s.cwd), seg, "session.v4.jsonl.zstd")
+			if _, statErr := os.Stat(direct); statErr == nil {
+				return direct, nil
+			}
 		}
-	}
-
-	pattern := filepath.Join(s.home, "sessions", "*", seg, "session.v4.jsonl.zstd")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return "", err
+		got, gerr := filepath.Glob(filepath.Join(s.home, "sessions", "*", seg, "session.v4.jsonl.zstd"))
+		if gerr != nil {
+			return "", gerr
+		}
+		if len(got) > 0 {
+			matches = got
+			break
+		}
 	}
 	switch len(matches) {
 	case 0:
