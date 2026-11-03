@@ -21,13 +21,23 @@ import (
 func main() {
 	dump := flag.Bool("dump-splash", false, "打印开屏并退出（用于逐格比对）")
 	color := flag.Bool("color", false, "开屏带真彩 ANSI")
+	addr := flag.String("addr", "http://127.0.0.1:7788", "宿主 Transport 地址")
+	token := flag.String("token", "", "宿主 /connect 的一次性 token")
+	prompt := flag.String("send", "", "不带界面地发一条消息并打印收到的帧（验证链路）")
 	flag.Parse()
 
-	if !*dump {
-		fmt.Fprintln(os.Stderr, "现在还只会开屏。用 --dump-splash 看看它长什么样。")
+	if *dump {
+		fmt.Print(renderSplash(*color))
+		return
+	}
+	if *prompt == "" {
+		fmt.Fprintln(os.Stderr, "用法：dshtui --dump-splash | --send <文本> --addr <宿主地址> --token <token>")
 		os.Exit(2)
 	}
-	fmt.Print(renderSplash(*color))
+	if err := sendAndTail(*addr, *token, *prompt); err != nil {
+		fmt.Fprintln(os.Stderr, "dshtui:", err)
+		os.Exit(1)
+	}
 }
 
 // renderWordmark 把一行文字渲染成 5 行点阵。
