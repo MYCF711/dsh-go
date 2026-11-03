@@ -226,3 +226,44 @@
 三类要求 6 条，全部有测试名可查，不是"我记得做过"。
 
 **能报出测试名的才算交付，其余都是说法。**
+
+---
+
+## 更正（第 110 轮）：**U0 不是 6 个 method，是 13 个**
+
+上一轮我写「6 个 method 全在 → U0 宿主侧交付完毕」。**这是错的。**
+
+`UIPLAN.md` 第 573 行把 U0 的 method 表定死为 13 个：
+
+```
+session.list / session.create / session.history / session.prompt / session.cancel
+session.delete / session.fork / session.load
+workspace.list / fs.read / fs.write
+config.get / config.set
+```
+
+我们只做了其中 6 个（list/create/history/prompt/cancel/load）。
+`internal/transport/api.go` 里的 `SessionMethods()` 只列了 6 条，
+**代码里的"全部"是照着我自己的实现写的，不是照着计划写的。**
+
+### 还差 7 个
+
+| method | 手上已有的零件 |
+|---|---|
+| `session.delete` | 有——`session` 包里已能做删除（ACP 侧 `session/delete` 已实现） |
+| `session.fork` | 有——`session.Fork` 已落地，ACP 侧已验过 |
+| `workspace.list` | 无 |
+| `fs.read` / `fs.write` | 无（但有 `spi.FS`，接线为主） |
+| `config.get` / `config.set` | 无（配置格式还没定） |
+
+### 下一刀砍哪个（按"零件已在手"排序）
+
+`session.delete` 和 `session.fork` 的底层都已经验过，只差**多一层 HTTP 转换**。
+这两个最容易落地，也最贴近界面真实需要（删掉一个会话、从某条消息开分支）。
+
+### 记一笔教训
+
+上一轮我核对的依据是「`api.go` 声明了几个、`server.go` 实现了几个」——
+**两边都是我自己写的**，所以核对必然全绿。
+
+用实现去核对实现，永远是对的。**要核对的是计划。**
