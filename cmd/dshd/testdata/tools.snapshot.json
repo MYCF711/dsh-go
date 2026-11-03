@@ -436,6 +436,26 @@
     "caps": {}
   },
   {
+    "name": "interrupt_agent",
+    "description": "给名单里的队友打中断标记：它会在下一回合边界停下，已排队的消息保留。这是标记，不是杀进程。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string",
+          "description": "要中断的队友名"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
     "name": "job_kill",
     "description": "终止一个后台任务。",
     "parameters": {

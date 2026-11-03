@@ -159,6 +159,8 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},
+		// 中断队友：只改 agents.json 里的标记，不杀进程（本仓没有常驻队友进程）。
+		"interrupt_agent": {Writes: true},
 		// 刷新按钮：只动 <home>/state/unlag.json 这一份宿主状态，不算写用户文件。
 		"unlag_refresh": {},
 		// 带上下文的子代理：和 subagent 一样本身不写盘/不联网，
