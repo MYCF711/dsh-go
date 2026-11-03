@@ -1,0 +1,51 @@
+# 官方原生插件 vs dsh-go（对账）
+
+> 依据：本机 `home/cordis.patch.yml` 里**实际启用的插件列表**（163 行，31 个 id）
+> ＋ `./dshd.exe tools` 的 53 个工具。不是拍脑袋，是可复查的两份清单。
+
+## 一、已经对上的（不用再做）
+
+| 官方插件 | 能力 | dsh-go |
+|---|---|---|
+| `tool-bash` | 跑命令 | ✓ `bash` |
+| `tool-pwsh` | PowerShell | ✓ `pwsh` |
+| `tool-fs` | 读写改 | ✓ `read` / `write` / `edit` |
+| `tool-fs-search` | 找文件、搜内容 | ✓ `glob` / `grep` |
+| `tool-jobs` | 后台任务 | ✓ `job_output` / `job_kill` / `job_list` |
+| `tool-schedule` | 定时任务 | ✓ 四个 `schedule_*` |
+| `tool-skill` + `skill-filesystem` | 技能 | ✓ `skill`（刚补了"列清单"与多根） |
+| `tool-goal` | 目标 | ✓ `get/create/update_goal` |
+| `compaction` | 上下文压缩 | ✓ `internal/compact` |
+| `delegation` + `tool-subagent` + `-fork` + `-list-agents` | 子代理 | ✓ `subagent` / `subagent_fork` / `list_agents` / `spawn_teammate` |
+| `tool-ask-user` | 问人 | ✓ `ask_user_question` |
+| `tool-todo` | 待办 | ✓ `todo_write` |
+| `tool-web` | 抓网页 / 搜 | ✓ `web_fetch` / `web_search` |
+| `present` | 交付文件 | ✓ `present` |
+
+## 二、**真缺**的（官方有原生插件，我们没有）
+
+| 缺的 | 官方插件 | 影响 |
+|---|---|---|
+| **计划模式** | `planning` + `plan-mode` | 没有"先出方案、人批了再动手"这一步。所有改动都是直接执行 |
+| **程序化工具调用** | `workflow-ptc` + `tool-workflow` | 不能把"调用编排"写成脚本一次跑完；只能一轮一轮让模型自己调 |
+| **工具结果裁剪** | `tool-result-pruner` | 我们有 `Truncation`/`Artifacts`（事后截断外置），但没有**主动裁剪策略层**：什么该留、什么该压、按什么预算 |
+| **斜杠命令** | `command-goal` / `command-compact` 等 | 宿主没有 `/compact`、`/resume`、`/new` 这类入口，只能靠自然语言 |
+| **插件管理 / 市场** | `tool-plugin-manager` / `tool-plugin-market` | 装/停/看插件没有工具面；只能改 `dsh.toml` 重启 |
+| **棋谱压缩** | `gokifu-compact`（第三方，顶替了官方 compaction） | 那是你自己那套上下文系统。dsh-go 的压缩是通用摘要，不懂"棋谱/节点/死路" |
+
+## 三、**有但对不齐**的
+
+| 项 | 官方 | dsh-go | 差在哪 |
+|---|---|---|---|
+| `bash` 后台 | `run_in_background: true` 立刻转后台 | **只能等 `idle_seconds` 超时**才转 | 想要"起一个长任务马上继续干"，做不到 |
+| 子代理控制 | `tool-subagent-control`（取消/中断在跑的子代理） | 只有 `interrupt_agent`（团队线，**打标记**） | 没有真正"让这个子代理停下"的手段 |
+| 提示层 | `persona` / `agent-instructions` / `time-context` | 有 AGENTS.md 注入 + `now_line` | 没有 persona 注入、没有时间上下文注入 |
+
+## 四、按我的判断排个序
+
+1. **`run_in_background`** —— 半天的活，直接补上官方那套语义（现在只能靠超时转后台，很别扭）
+2. **计划模式** —— "先方案后动手"是安全阀，尤其对有写权限的 agent
+3. **工具结果裁剪** —— 长会话的钱都花在这；我们现在只有事后截断
+4. **斜杠命令** —— TUI 一起做，成本会低很多
+5. **workflow-ptc** —— 撬动最大，但它要一套"脚本宿主"的设计，不能顺手做
+6. **插件管理/市场** —— 等 `wasm`/`process` 装载落地再谈，否则"管理"的是编译期模块
