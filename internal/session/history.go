@@ -51,12 +51,20 @@ func assistantMessage(raw json.RawMessage) (llm.Message, bool) {
 		Message struct {
 			Content []block `json:"content"`
 		} `json:"message"`
+		// 顶层的 content：早期/别处产生的 assistant/message 直接挂在这儿。
+		// 只认 message.content 的后果很隐蔽：**历史里少几条助手消息**，
+		// 看起来像"那次模型没回答"，没人会怀疑到投影这一层。
+		Content []block `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return llm.Message{}, false
 	}
-	msg := llm.Message{Role: "assistant", Content: joinText(d.Message.Content)}
-	for _, b := range d.Message.Content {
+	blocks := d.Message.Content
+	if len(blocks) == 0 {
+		blocks = d.Content
+	}
+	msg := llm.Message{Role: "assistant", Content: joinText(blocks)}
+	for _, b := range blocks {
 		if b.Type == "tool-call" {
 			msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{
 				ID:       b.ID,
