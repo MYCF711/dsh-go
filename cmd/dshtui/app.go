@@ -27,8 +27,14 @@ type app struct {
 	tools  int
 	busy   bool
 	start  time.Time
-	quit   bool
-	err    string
+
+	// 用量与速率：都来自 session.load，**不自己估**。
+	ctxTokens  int
+	outTokens  int
+	outAtStart int
+	tps        float64
+	quit       bool
+	err        string
 
 	frames <-chan ServerFrame
 }
@@ -143,6 +149,8 @@ func (a *app) submit() {
 		return
 	}
 	a.busy = true
+	a.outAtStart = a.outTokens
+	a.start = time.Now()
 }
 
 // command 是最小的一批斜杠命令。**没有实现的不装作有**：明确说"还没有"。
@@ -198,6 +206,17 @@ func (a *app) handleFrame(f ServerFrame) {
 		a.push("！错误：" + string(f.Data))
 		a.busy = false
 	case "turn/done", "turn/end":
+		if a.busy {
+			if st, err := a.cl.loadStats(a.sid); err == nil {
+				a.ctxTokens = st.ContextTokens
+				delta := st.OutputTotal - a.outAtStart
+				secs := time.Since(a.start).Seconds()
+				if secs > 0.2 && delta > 0 {
+					a.tps = float64(delta) / secs
+				}
+				a.outTokens = st.OutputTotal
+			}
+		}
 		a.busy = false
 	}
 }
@@ -243,7 +262,14 @@ func (a *app) view() []string {
 	}
 
 	// 状态行
-	left := fmt.Sprintf(" %s · 会话 %s · 工具 %d", "dsh-go", short(a.sid), a.tools)
+	left := fmt.Sprintf(" %s · 会话 %s · 工具 %d · ctx %s",
+		"dsh-go", short(a.sid), a.tools, fmtTokens(a.ctxTokens))
+	if a.tps > 0 {
+		left += fmt.Sprintf(" · %.1f tok/s", a.tps)
+	}
+	if a.outTokens > 0 {
+		left += fmt.Sprintf(" · 累计 out %s", fmtTokens(a.outTokens))
+	}
 	if a.busy {
 		left += " · 运行中"
 	} else if a.status != "" {
@@ -301,6 +327,18 @@ func utf8Valid(b []byte) bool {
 }
 
 // ---------------------------------------------------------------- 小工具
+
+// fmtTokens 把 token 数压成 k 形式。**未知就说未知**（"?"），不要显示 0——
+// 0 看起来像"没用量"，而"我不知道"和"没有"是两件事。
+func fmtTokens(n int) string {
+	if n <= 0 {
+		return "?"
+	}
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
+}
 
 func short(id string) string {
 	if len(id) <= 8 {

@@ -18,6 +18,10 @@ type Screen struct {
 	width  int
 	height int
 	inAlt  bool
+	// prev 是上一帧的每一行。差分渲染靠它：**只重画变了的行**。
+	// 整屏重画在 30 行时够快，但流式输出每 100ms 一帧就会看出闪，
+	// 而且终端越慢（Windows 控制台）越明显。
+	prev []string
 }
 
 func NewScreen() *Screen {

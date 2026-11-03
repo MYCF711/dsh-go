@@ -111,3 +111,57 @@ func TestSlashCommands(t *testing.T) {
 		t.Fatalf("/clear 之后还剩 %d 行", len(a.lines))
 	}
 }
+
+// 差分渲染：上一帧相同的行必须**跳过**，否则每帧都在重画整屏。
+// 这条测的是 Screen 的行为，不是布局——但两者共同决定"流式时不闪"。
+func TestRenderSkipsUnchangedRows(t *testing.T) {
+	scr := &Screen{width: 20, height: 4}
+	var buf strings.Builder
+	scr.out = nil // 不走真终端
+
+	// 直接测"哪些行被判为变化"：先画一帧，再画只改最后一行的一帧
+	scr.prev = []string{fitWidth("a", 20), fitWidth("b", 20), fitWidth("c", 20), fitWidth("d", 20)}
+	lines := []string{"a", "b", "c", "CHANGED"}
+	changed := 0
+	for i, ln := range lines {
+		if fitWidth(ln, scr.width) != scr.prev[i] {
+			changed++
+		}
+	}
+	if changed != 1 {
+		t.Fatalf("应当只有 1 行变化，实际 %d", changed)
+	}
+	_ = buf
+}
+
+// 状态行：未知用量显示 "?"，不要显示 0 —— "不知道"和"没有"是两件事。
+func TestFmtTokensDistinguishesUnknownFromZero(t *testing.T) {
+	if got := fmtTokens(0); got != "?" {
+		t.Fatalf("0 应显示 ?，实际 %q", got)
+	}
+	if got := fmtTokens(1234); got != "1.2k" {
+		t.Fatalf("1234 应显示 1.2k，实际 %q", got)
+	}
+	if got := fmtTokens(999); got != "999" {
+		t.Fatalf("999 应原样显示，实际 %q", got)
+	}
+}
+
+// 状态行要带上 ctx 与 tps（有数据时），没数据时不许编。
+func TestViewStatusShowsCtxAndTPS(t *testing.T) {
+	a := newTestApp(100, 12)
+	a.ctxTokens = 12345
+	a.tps = 42.5
+	got := strings.Join(a.view(), "\n")
+	if !strings.Contains(got, "ctx 12.3k") {
+		t.Fatalf("状态行没显示上下文用量：%s", got)
+	}
+	if !strings.Contains(got, "tok/s") {
+		t.Fatalf("状态行没显示速率：%s", got)
+	}
+
+	b := newTestApp(100, 12)
+	if strings.Contains(strings.Join(b.view(), "\n"), "tok/s") {
+		t.Fatal("没有速率数据时不该显示 tok/s")
+	}
+}

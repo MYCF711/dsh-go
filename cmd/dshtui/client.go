@@ -117,6 +117,36 @@ func (c *client) createSession() (string, error) {
 	return r.SessionID, nil
 }
 
+// stats 是会话当前的用量快照（来自 session.load）。
+type stats struct {
+	ContextTokens int // 最近一条 assistant 的 totalTokens：当前上下文占多少
+	OutputTotal   int // 全会话累计输出 token
+	LastSeq       int
+}
+
+// loadStats 取一次用量。取不到不是致命错误——状态行显示"?"比显示 0 诚实。
+func (c *client) loadStats(sid string) (stats, error) {
+	res, err := c.post("session.load", map[string]any{"id": sid, "tailMessages": 1})
+	if err != nil {
+		return stats{}, err
+	}
+	var r struct {
+		ContextTokens int `json:"contextTokens"`
+		LastSeq       int `json:"lastSeq"`
+		UsageTotal    *struct {
+			OutputTokens int `json:"outputTokens"`
+		} `json:"usageTotal"`
+	}
+	if err := json.Unmarshal(res, &r); err != nil {
+		return stats{}, err
+	}
+	st := stats{ContextTokens: r.ContextTokens, LastSeq: r.LastSeq}
+	if r.UsageTotal != nil {
+		st.OutputTotal = r.UsageTotal.OutputTokens
+	}
+	return st, nil
+}
+
 // prompt 发一条用户消息（不等回答）。
 func (c *client) prompt(sid, text string) error {
 	_, err := c.post("session.prompt", map[string]any{"id": sid, "text": text})
