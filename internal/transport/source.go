@@ -13,6 +13,10 @@ type Source interface {
 
 var ErrNoSuchSession = errors.New("没有这个会话")
 
+// ErrNotImplemented 表示这个宿主没实现某个可选能力。
+// **要跟"没有这个会话"分开**：前者换个宿主能行，后者换参数才行。
+var ErrNotImplemented = errors.New("这个宿主还没实现该能力")
+
 // ErrNoSuchFile 由宿主在读文件时返回，协议层据此回 404。
 // "文件不存在"和"读失败"在界面上长得一样，但前者该换路径、后者该重试。
 var ErrNoSuchFile = errors.New("文件不存在")
@@ -43,6 +47,30 @@ type UsageSourcer interface {
 // ModelSourcer 是 Source 的可选增强：给出这条会话用的模型 id。
 type ModelSourcer interface {
 	Model(sessionID string) (string, error)
+}
+
+// Compactor 是 Source 的可选增强：能对会话做一次压缩（追加遮蔽事件）。
+//
+// 为什么是可选接口：压缩要读模型、要往日志追加，不是每个 Source 都能干
+// （测试用的假 Source 就不该为了编译而实现它）。宿主没实现时，
+// 协议层回一个**说清楚**的 501，而不是假装成功。
+type Compactor interface {
+	Compact(sessionID string, keep int) (CompactResult, error)
+}
+
+// DoCompact 是 session.compact 的实现。
+func DoCompact(src Source, sessionID string, keep int) (CompactResult, error) {
+	if src == nil {
+		return CompactResult{}, errors.New("transport: DoCompact 需要 Source，传了 nil")
+	}
+	if sessionID == "" {
+		return CompactResult{}, ErrNoSuchSession
+	}
+	c, ok := src.(Compactor)
+	if !ok {
+		return CompactResult{}, ErrNotImplemented
+	}
+	return c.Compact(sessionID, keep)
 }
 
 func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {

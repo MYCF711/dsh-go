@@ -763,33 +763,30 @@ func cmdSessionCompact(argv []string) error {
 		return err
 	}
 	if *auto {
-		surface := session.Surface(before)
-		span, n, ok := compact.Plan(surface, compact.Options{
-			KeepRecent: *keep, MinToCompact: 2, MaxMessages: *maxMessages,
-		})
-		if !ok {
-			fmt.Printf("无需压缩：surface %d 节点，保留最近 %d 条后没有可压的前缀\n", len(surface), *keep)
-			return nil
-		}
-		fmt.Printf("计划：压缩 %d 条（seq %d..%d），保留最近 %d 条\n",
-			n, span.Start, span.End, *keep)
+		// 走和 Transport 的 session.compact 同一段代码：两条入口不该有两套压缩。
 		if *dryRun {
+			surface := session.Surface(before)
+			span, n, ok := compact.Plan(surface, compact.Options{
+				KeepRecent: *keep, MinToCompact: 2, MaxMessages: *maxMessages,
+			})
+			if !ok {
+				fmt.Printf("无需压缩：surface %d 节点，保留最近 %d 条后没有可压的前缀\n", len(surface), *keep)
+				return nil
+			}
+			fmt.Printf("计划：压缩 %d 条（seq %d..%d），保留最近 %d 条\n", n, span.Start, span.End, *keep)
 			return nil
 		}
-		items := make([]session.SurfaceMsg, 0, n)
-		for _, m := range surface {
-			if m.Seq >= span.Start && m.Seq <= span.End {
-				items = append(items, m)
-			}
-		}
-		text, err := compact.Summarize(context.Background(), llm.New(*base, os.Getenv("DSHD_LLM_KEY")), *model, items)
+		res, err := autoCompact(context.Background(), *path, *keep, *maxMessages, *model, *base)
 		if err != nil {
 			return err
 		}
-		*summary = text
-		*from = span.Start
-		*to = span.End
-		fmt.Printf("摘要 %d 字\n", len([]rune(text)))
+		if !res.Compacted {
+			fmt.Printf("无需压缩：保留最近 %d 条后没有可压的前缀\n", *keep)
+			return nil
+		}
+		fmt.Printf("压缩完成：遮蔽 %d 条事件（seq %d..%d），摘要 %d 字\n",
+			res.Shadowed, res.From, res.To, res.Summary)
+		return nil
 	}
 
 	l, err := session.OpenSessionAt(*path)

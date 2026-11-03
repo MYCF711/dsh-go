@@ -9,6 +9,7 @@
     "session.create",
     "session.delete",
     "session.fork",
+    "session.compact",
     "workspace.list",
     "fs.read",
     "fs.write",

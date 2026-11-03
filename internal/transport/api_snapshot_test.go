@@ -89,7 +89,8 @@ func TestSessionAPISnapshot(t *testing.T) {
 	// 否则快照会在无人察觉的情况下跟着缩。
 	// U0 原本 13 个（会话 8 + 工作区 1 + 文件 2 + 配置 2）。
 	// H13 审批要一条真实回传，所以多了第 14 个 session.approve——**契约变了，这里也跟着改**。
-	const done, target = 14, 14
+	// 第 15 个 session.compact 同理：界面上的"压缩"要有入口，官方 DSH 也有 /compact。
+	const done, target = 15, 15
 	if got := len(SessionMethods()); got != done {
 		t.Fatalf("SessionMethods() 有 %d 个方法，当前进度应当是 %d 个（U0 目标 %d 个）", got, done, target)
 	}

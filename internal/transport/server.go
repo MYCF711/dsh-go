@@ -58,6 +58,8 @@ type Options struct {
 	Load func(sessionID string, limit int) (LoadResult, error)
 	// History 取断流之后补洞的那些（seq > sinceSeq）；宿主注入。
 	History func(sessionID string, sinceSeq, limit int) (Page, error)
+	// Compact 主动压一次；宿主注入。nil 时 session.compact 回 501 并说清原因。
+	Compact func(sessionID string, keep int) (CompactResult, error)
 	// Prompt 发起一轮，立刻返回（回答走 WS）；宿主注入。
 	Prompt func(sessionID, text string) (PromptResult, error)
 	// Delete 删掉一个会话；宿主注入（删除是不可逆操作，由宿主决定物理删还是标记）。
@@ -312,6 +314,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionDelete(w, r)
 	case MethodSessionFork:
 		s.handleSessionFork(w, r)
+	case MethodSessionCompact:
+		s.handleSessionCompact(w, r)
 	case MethodWorkspaceList:
 		s.handleWorkspaceList(w, r)
 	case MethodFSRead:

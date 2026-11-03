@@ -248,12 +248,23 @@ func (a *app) command(text string) {
 		a.pickFrom = rows
 		a.push("输入序号切换会话（例如 2），或直接继续打字取消")
 	case "/compact":
-		// 宿主有 session.compact 就调；没有就如实说，不假装压过了
-		if _, err := a.cl.post("session.compact", map[string]any{"id": a.sid}); err != nil {
-			a.err = "这个宿主还没提供 session.compact：" + err.Error()
+		// 宿主有 session.compact 就调；没有就如实说，不假装压过了。
+		res, err := a.cl.post("session.compact", map[string]any{"sessionId": a.sid})
+		if err != nil {
+			a.err = "压缩没做成：" + err.Error()
 			return
 		}
-		a.push("已请求压缩")
+		var r struct {
+			Compacted bool `json:"compacted"`
+			Shadowed  int  `json:"shadowed"`
+		}
+		_ = json.Unmarshal(res, &r)
+		if !r.Compacted {
+			// "没到该压的时候"是正常结果，不是失败——别让人以为点坏了
+			a.push("现在不需要压缩（会话还没长到该压的时候）")
+			return
+		}
+		a.push(fmt.Sprintf("已压缩：遮蔽 %d 条事件", r.Shadowed))
 	default:
 		a.err = "还不支持 " + strings.Fields(text)[0] + "（/help 看现有命令）"
 	}

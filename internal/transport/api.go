@@ -20,6 +20,8 @@ const (
 	MethodSessionCreate  Method = "session.create"
 	MethodSessionDelete  Method = "session.delete"
 	MethodSessionFork    Method = "session.fork"
+	// MethodSessionCompact 让客户端能主动压一次（界面上的"压缩"，官方 /compact）。
+	MethodSessionCompact Method = "session.compact"
 	MethodWorkspaceList  Method = "workspace.list"
 	MethodFSRead         Method = "fs.read"
 	MethodFSWrite        Method = "fs.write"
@@ -32,9 +34,21 @@ func SessionMethods() []Method {
 	return []Method{
 		MethodSessionList, MethodSessionLoad, MethodSessionHistory,
 		MethodSessionPrompt, MethodSessionCancel, MethodSessionApprove, MethodSessionCreate,
-		MethodSessionDelete, MethodSessionFork, MethodWorkspaceList,
+		MethodSessionDelete, MethodSessionFork, MethodSessionCompact, MethodWorkspaceList,
 		MethodFSRead, MethodFSWrite, MethodConfigGet, MethodConfigSet,
 	}
+}
+
+// CompactResult 是 session.compact 的返回值。
+//
+// Compacted=false 表示"现在不需要压"，**不是错误**：会话还没长到该压的时候，
+// 这是正常结果；把它当错误会让界面弹一个红框告诉用户"操作失败"。
+type CompactResult struct {
+	Compacted bool  `json:"compacted"`
+	From      int64 `json:"from,omitempty"`
+	To        int64 `json:"to,omitempty"`
+	Shadowed  int   `json:"shadowed,omitempty"`
+	Summary   int   `json:"summaryChars,omitempty"`
 }
 
 // Message 是 session.load 里的一条消息。

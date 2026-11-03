@@ -134,8 +134,37 @@ func ServeConn(conn Conn, hub *Hub) error {
 					}
 				}
 			}
+			// **把断线期间漏掉的帧重放出去**（H14）。客户端带 sinceSeq 来订阅，
+			// 说明它手里有水位、缺的那一段还在 journal 里——不重放的话"带水位重订"
+			// 名不副实：客户端只能自己再调一次 session.history 兜底。
+			//
+			// 顺序很重要：**先重放、再 Subscribe**。重放期间这个 sub 还不在
+			// hub.topics 里，Publish 不会推给它，所以不会出现"新帧插到旧帧前面"
+			// 的乱序；Subscribe 的起点用重放的最后一条，之后只推更新的。
+			//
+			// `sinceSeq=0` 也重放：那是"首次订阅、从头来"，journal 里的历史
+			// 正是客户端要的。**只重放 sinceSeq>0 是错的**——实测首次订阅一条帧
+			// 都收不到（既没历史、也没等来新事件），界面像是卡住。
+			//
+			// 世代不符时不重放：那种情况上面已经发过 session/reset，
+			// 拿旧水位补新 journal 只会补出错位的数据。
+			replayTo := frame.SinceSeq
+			if hub.journals != nil && frame.SinceSeq >= 0 {
+				j := hub.journals.Get(topicSession(frame.Topic))
+				epochOK := frame.JournalEpoch == 0 || frame.JournalEpoch == j.Epoch()
+				if epochOK {
+					if frames, _, _ := j.Since(frame.SinceSeq, 0); len(frames) > 0 {
+						for _, f := range frames {
+							if err := sub.write(f); err != nil {
+								return err
+							}
+						}
+						replayTo = frames[len(frames)-1].Seq
+					}
+				}
+			}
 			// 重复 sub 由 Hub 处理：以最后一次 sinceSeq 为准，不会重复收帧。
-			hub.Subscribe(frame.Topic, frame.SinceSeq, sub)
+			hub.Subscribe(frame.Topic, replayTo, sub)
 
 		case FrameUnsub:
 			hub.Unsubscribe(frame.Topic, sub)

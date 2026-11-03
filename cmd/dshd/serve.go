@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"dshgo/internal/session"
 	"dshgo/internal/transport"
 )
 
@@ -184,6 +185,24 @@ func cmdServe(args []string) error {
 		},
 		Fork: func(sessionID, title string) (string, error) {
 			return serveFork(*home, sessionID, title)
+		},
+		// Compact：界面上的"压缩"。走和 CLI `dshd session compact --auto`
+		// **同一段代码**（autoCompact），否则两条入口迟早压出两种结果。
+		Compact: func(sessionID string, keep int) (transport.CompactResult, error) {
+			path, err := session.ResolvePath(*home, "", sessionID)
+			if err != nil {
+				return transport.CompactResult{}, err
+			}
+			res, err := autoCompact(context.Background(), path, keep, 0,
+				envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"),
+				envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"))
+			if err != nil {
+				return transport.CompactResult{}, err
+			}
+			return transport.CompactResult{
+				Compacted: res.Compacted, From: res.From, To: res.To,
+				Shadowed: res.Shadowed, Summary: res.Summary,
+			}, nil
 		},
 		Prompt: func(sessionID, text string) (transport.PromptResult, error) {
 			// Submit 立刻返回，回答走 WS；这里绝不能等模型。

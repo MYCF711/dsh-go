@@ -68,3 +68,44 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessionId": id})
 }
+
+// handleSessionCompact 是 /api/session.compact：让界面能主动压一次。
+//
+// 两条要求：
+//   - 没接线就回 501 并说清"是宿主没实现"，不是"你这个会话有问题"；
+//   - "现在不需要压"回 200 + compacted=false——那是正常结果，
+//     不是失败（会话还没长到该压的时候）。
+func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
+	if s.opt.Compact == nil {
+		writeJSON(w, http.StatusNotImplemented,
+			errorBody("这个宿主还没实现 session.compact（压缩仍可在 CLI 用 dshd session compact）"))
+		return
+	}
+	var req struct {
+		SessionID string `json:"sessionId"`
+		ID        string `json:"id"`
+		Keep      int    `json:"keep"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		return
+	}
+	sid := req.SessionID
+	if sid == "" {
+		sid = req.ID
+	}
+	if sid == "" {
+		writeJSON(w, http.StatusBadRequest, errorBody("缺 sessionId"))
+		return
+	}
+	if req.Keep <= 0 {
+		req.Keep = 6
+	}
+	res, err := s.opt.Compact(sid, req.Keep)
+	if err != nil {
+		// 压缩失败要让人知道**是哪一步**：读日志、生成摘要、还是写盘。
+		writeJSON(w, http.StatusInternalServerError, errorBody("压缩失败: "+err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
