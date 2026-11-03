@@ -83,6 +83,9 @@ func (j *Journal) Since(sinceSeq, limit int) (frames []ServerFrame, lastSeq int,
 	if limit <= 0 || limit > j.capacity {
 		limit = j.capacity
 	}
+	// 空集也要是 []，不能是 null：客户端按数组解，"null" 会变成 nil，
+	// 而 nil 在多数语言里一 for 就炸或直接跳过——界面表现为"什么都没有"。
+	frames = make([]ServerFrame, 0, 8)
 	for _, f := range j.frames {
 		if f.Seq > sinceSeq {
 			frames = append(frames, f)

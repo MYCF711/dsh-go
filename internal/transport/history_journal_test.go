@@ -74,3 +74,24 @@ func TestHistoryRejectsStaleEpoch(t *testing.T) {
 		t.Fatalf("超前水位要 409，拿到 %d：%s", rec.Code, rec.Body.String())
 	}
 }
+
+// 空集必须是 []，不能是 null。
+//
+// 界面审计实测：会话还一条事件都没有时，frames 序列化成 null；
+// 客户端按数组解会得到 nil，for 起来什么也不做——界面表现是"什么都没有"，
+// 而它分不清"没数据"和"接口坏了"。
+func TestEmptyFramesSerializeAsArray(t *testing.T) {
+	js := NewJournals(func() int64 { return 1 })
+	j := js.Get("s-empty")
+	frames, _, _ := j.Since(0, 100)
+	if frames == nil {
+		t.Fatal("Since 返回了 nil，序列化会变成 null")
+	}
+	raw, err := json.Marshal(HistoryResult{Frames: frames, LastSeq: 0, JournalEpoch: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"frames":[]`) {
+		t.Fatalf("空集应当序列化成 []，实际 %s", raw)
+	}
+}
