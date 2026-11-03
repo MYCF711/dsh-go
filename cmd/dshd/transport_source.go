@@ -67,46 +67,32 @@ func (s *sessionSource) MessagesTail(sessionID string, limit int) ([]transport.M
 	if err != nil {
 		return nil, 0, err
 	}
-	log, err := v4.ReadFile(path)
-	if err != nil {
-		return nil, 0, err
+	st, serr := os.Stat(path)
+	if serr != nil {
+		return nil, 0, serr
 	}
-	isMsg := func(t string) bool {
-		return t == "user/message" || t == "assistant/message" || t == "tool/result"
-	}
-	total := 0
-	for _, ev := range log.Events {
-		if isMsg(ev.Type) {
-			total++
+
+	// 大会话走尾部快路：只解最后若干帧，total 报 -1（契约允许，见 transport-obligations）。
+	//
+	// 为什么不是"后台补 total"：那要起 goroutine，而并发点必须登记并想清同步方式
+	// （race-guard 会拦）。为了状态栏一行字付这个复杂度不划算——先把首屏做到毫秒级，
+	// total 留成明确的"未知"，比一个永远不来的"稍后"诚实。
+	if st.Size() > tailThresholdBytes {
+		evs, rerr := v4.ReadTail(path, tailFrames)
+		if rerr != nil {
+			return nil, 0, rerr
 		}
-	}
-	if limit <= 0 || limit > total {
-		limit = total
-	}
-	if limit == 0 {
-		return []transport.Message{}, 0, nil
-	}
-	// 从后往前取 limit 个，保持原顺序。
-	keep := make([]v4.Event, 0, limit)
-	seen := 0
-	for i := len(log.Events) - 1; i >= 0; i-- {
-		if !isMsg(log.Events[i].Type) {
-			continue
+		msgs, merr := s.messagesOf(evs)
+		if merr != nil {
+			return nil, 0, merr
 		}
-		if seen == limit {
-			break
+		if limit > 0 && len(msgs) > limit {
+			msgs = msgs[len(msgs)-limit:]
 		}
-		keep = append(keep, log.Events[i])
-		seen++
+		return msgs, -1, nil
 	}
-	for i, j := 0, len(keep)-1; i < j; i, j = i+1, j-1 {
-		keep[i], keep[j] = keep[j], keep[i]
-	}
-	msgs, err := s.messagesOf(keep)
-	if err != nil {
-		return nil, 0, err
-	}
-	return msgs[:min(len(msgs), limit)], total, nil
+
+	return s.messagesTailFull(path, limit)
 }
 
 func min(a, b int) int {
@@ -131,6 +117,29 @@ func (s *sessionSource) Messages(sessionID string) ([]transport.Message, error) 
 }
 
 // messagesOf 把一份（可能已被过滤过的）日志投影成消息。
+// 大会话走尾部快路的阈值：超过 4 MB 或末尾 200 帧时，不再为了 total 全量解压。
+const (
+	tailThresholdBytes = 4 << 20
+	tailFrames         = 200
+)
+
+// messagesTailFull 是小会话的路：全量投影，total 精确。
+func (s *sessionSource) messagesTailFull(path string, limit int) ([]transport.Message, int, error) {
+	log, err := v4.ReadFile(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	msgs, merr := s.messagesOf(log.Events)
+	if merr != nil {
+		return nil, 0, merr
+	}
+	total := len(msgs)
+	if limit > 0 && len(msgs) > limit {
+		msgs = msgs[len(msgs)-limit:]
+	}
+	return msgs, total, nil
+}
+
 func (s *sessionSource) messagesOf(events []v4.Event) ([]transport.Message, error) {
 	calls := indexToolCalls(events)
 

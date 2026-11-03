@@ -38,7 +38,13 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 		if err != nil {
 			return LoadResult{}, err
 		}
-		return LoadResult{Messages: msgs, Total: total, Truncated: total > len(msgs)}, nil
+		// total < 0 表示宿主这次没算（大会话走尾部快路）。
+		// 此时 truncated 必须是 true——"可能还有"是唯一保守的解释。
+		trunc := true
+		if total >= 0 {
+			trunc = total > len(msgs)
+		}
+		return LoadResult{Messages: msgs, Total: total, Truncated: trunc}, nil
 	}
 
 	all, err := src.Messages(sessionID)

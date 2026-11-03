@@ -88,3 +88,26 @@ func TestUnwiredMethodsReturn501(t *testing.T) {
 		}
 	}
 }
+
+// total 未知时必须报 truncated=true：另一种选择会让界面以为已经到底，
+// 而用户看到的是一条被截断的历史——这类错误不报错，只会让人找不到东西。
+func TestLoadWithUnknownTotalIsTruncated(t *testing.T) {
+	src := &fakeTailSrc{msgs: []Message{{Seq: 1, Role: "user", Text: "hi"}}, total: -1}
+	got, err := LoadSession(src, "s-1", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Total != -1 || !got.Truncated {
+		t.Fatalf("total=-1 时 truncated 必须是 true，实际 total=%d truncated=%v", got.Total, got.Truncated)
+	}
+}
+
+type fakeTailSrc struct {
+	msgs  []Message
+	total int
+}
+
+func (f *fakeTailSrc) Messages(string) ([]Message, error) { return f.msgs, nil }
+func (f *fakeTailSrc) MessagesTail(string, int) ([]Message, int, error) {
+	return f.msgs, f.total, nil
+}
