@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 验收 spawn_teammate 的六道校验。任务书要求"每个 error 分支都带 Hint"，
@@ -53,7 +54,13 @@ func TestSpawnReportsExactOverflow(t *testing.T) {
 	}
 }
 
-// 成功路径：落盘、计数、本地时区的 created_at（不是 UTC 的 Z）。
+// 成功路径：落盘、计数、created_at 是 RFC3339 且就是刚才。
+//
+// 曾经这里断言"不以 Z 结尾"，本意是"别把 UTC 当本地时间写出去"。
+// 那条断言验的不是代码，是**跑测试的机器在哪个时区**：CI 的 runner 就是 UTC，
+// `time.Now().Format(time.RFC3339)` 在 UTC 上合法地输出 `...Z`，于是断言在 CI 上恒红、
+// 在开发机上恒绿——两边都不说明产品对不对。改成只验契约：能按 RFC3339 解析、
+// 且与现在相差不到一分钟；时区偏移量本来就该由本机决定，不该由测试决定。
 func TestSpawnPersistsAndCounts(t *testing.T) {
 	dir := t.TempDir()
 	tool := &spawnTool{dir: dir}
@@ -67,8 +74,15 @@ func TestSpawnPersistsAndCounts(t *testing.T) {
 			t.Fatalf("%s 之后 total = %v，期望 %d", name, m["total"], i+1)
 		}
 		created, _ := m["created_at"].(string)
-		if strings.HasSuffix(created, "Z") {
-			t.Fatalf("created_at 不该是 UTC 的 Z: %q", created)
+		if created == "" {
+			t.Fatalf("%s 的 created_at 是空的", name)
+		}
+		ts, err := time.Parse(time.RFC3339, created)
+		if err != nil {
+			t.Fatalf("%s 的 created_at 不是 RFC3339: %q（%v）", name, created, err)
+		}
+		if d := time.Since(ts); d > time.Minute || d < -time.Minute {
+			t.Fatalf("%s 的 created_at 不是刚才: %q（差 %v）", name, created, d)
 		}
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "agents.json"))
