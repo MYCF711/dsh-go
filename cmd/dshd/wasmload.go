@@ -29,10 +29,11 @@ import (
 //     内容被换掉要在**启动时**炸，而不是等第一次调用才发现；
 //   - 通过校验的模块登记进装配结果。
 //
-// 写不写 `provides = ["tool"]`，决定它到底提不提供能力：
+// 写不写工具能力键（`provides = ["tool"]` 或 `["tool:<tool_name>"]`），决定它到底提不提供能力：
 //   - **写了** → 生成一个 kernel.Module，其 Register 往工具表里注册**一个** spi.Tool
 //     （名字/描述/schema/caps/超时全部来自 manifest，不从客人取）。模型能看见它、
 //     能调它，这就是"wasm 插件真的提供了一个工具"的落点。
+//     多个 wasm 工具模块共存时，每个模块必须写 `["tool:<tool_name>"]`（理由见 wasmToolCap）。
 //   - **没写** → 行为与这一层落地之前完全一致：Provides 为空、Register 为 nil、
 //     不进工具表，只能 `dshd wasm call` 手动调。这条"不变"是硬要求：
 //     没声明要提供工具的人，不该因为升级宿主就多出一个模型可见的工具。
@@ -40,13 +41,24 @@ import (
 // 为什么不把 digest 塞进 kernel.Module：kernel 的红线是"不识业务"，
 // 也不该为了一次显示多一个字段；模块的身份（路径 / 摘要 / 导出）留在这一层。
 
-// wasmToolCap 是 wasm 后端在 manifest 里唯一认的能力名。
+// wasmToolCap 是 wasm 后端在 manifest 里认的能力名（单数，不是内核服务键 "tools"）。
 //
-// 为什么是 `"tool"`（单数）而不是内核服务键 `"tools"`（复数）：这是两个概念。
+// 为什么是 `"tool"` 而不是内核服务键 `"tools"`（复数）：这是两个概念。
 // "tools" 是**别人提供的服务**（工具目录），wasm 模块要 `Requires` 它才能注册；
 // "tool" 是**本模块要贡献的东西**。混成一个名字会让模块看起来像在提供工具目录，
 // 而它其实只是往里加一行。
+//
+// 为什么还要有 `"tool:<tool_name>"` 这种写法：kernel 的"一个能力只允许一个提供者"
+// 是按**字符串**判的（internal/kernel/assemble.go:64），而 Apply 会把 manifest 里
+// 的 provides 原样复制到每个模块上（internal/kernel/module.go:167）——
+// 装载层没有任何钩子能在 Apply 之后改写它。所以两个 wasm 工具模块想同时存在，
+// 能力键就必须本来就是两个不同的字符串。"tool" 是单数场景的缩写（只允许出现一次），
+// "tool:<tool_name>" 是多个工具时的写法：它把"哪个模块贡献了哪个工具"直接写进能力名，
+// kernel 的判重于是自然成立，不需要内核认识 wasm、也不需要给它开特例。
 const wasmToolCap = "tool"
+
+// wasmToolCapPrefix 是"能力键带上工具名"的前缀，拼出来的键必须与同一行的 tool_name 一致。
+const wasmToolCapPrefix = wasmToolCap + ":"
 
 // wasmLoaded 是本次装配里真正装起来的一个 wasm 模块。
 //
@@ -146,7 +158,53 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 		return nil, err
 	}
 
-	for _, e := range entries {
+	// 第一遍：只校验 manifest，一个字节的 wasm 都不读。
+	//
+	// 为什么拆成两遍：一个 wasm 工具模块要编译 4.4 MB 的 Go 产物（~0.9 s），
+	// 而"两个模块的能力键撞了""tool_name 写错了"都是几微秒就能查出来的事。
+	// 以前这两件事挤在一个循环里，于是第二行的错要等第一行编译完才报——
+	// 而且多工具场景下这条错**必然**会发生（见 wasmToolCap 的注释）。
+	type decl struct {
+		spec   *wasmToolSpec
+		capKey string
+	}
+	decls := make(map[int]decl, len(entries))
+	capOwner := make(map[string]string, len(entries)) // 能力键 → 模块 id
+	for i, e := range entries {
+		if kernel.Backend(e.Backend) != kernel.BackendWasm || e.ID == "" {
+			continue
+		}
+		if e.Enabled != nil && !*e.Enabled {
+			continue
+		}
+		capKey, unknown := splitWasmProvides(e.Provides)
+		if len(unknown) > 0 {
+			return fail(fmt.Errorf(
+				"模块 %q 声明了 backend = \"wasm\" 和 provides = %v，但 wasm 后端只认 "+
+					"provides = [\"tool\"]（一个工具模块）或 provides = [\"tool:<tool_name>\"]（多个工具模块）："+
+					"这一层做的是「一个 wasm 模块 = 一个工具」，%v 这些能力还没有对应实现。"+
+					"在它们落地之前写进 manifest，就是在骗下一个读 manifest 的人",
+				e.ID, e.Provides, unknown))
+		}
+		if capKey == "" {
+			continue
+		}
+		// 先校验工具声明，再装载 4 MiB 的 wasm：manifest 写错了没必要先编译一遍。
+		spec, serr := newWasmToolSpec(e)
+		if serr != nil {
+			return fail(serr)
+		}
+		if cerr := checkWasmToolCapKey(e.ID, capKey, spec.name); cerr != nil {
+			return fail(cerr)
+		}
+		if prev, dup := capOwner[capKey]; dup {
+			return fail(dupWasmToolCapErr(prev, e.ID, capKey))
+		}
+		capOwner[capKey] = e.ID
+		decls[i] = decl{spec: spec, capKey: capKey}
+	}
+
+	for i, e := range entries {
 		if kernel.Backend(e.Backend) != kernel.BackendWasm {
 			continue
 		}
@@ -163,24 +221,7 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 			mods = append(mods, kernel.Module{ID: e.ID, Backend: kernel.BackendWasm})
 			continue
 		}
-		providesTool, unknown := splitWasmProvides(e.Provides)
-		if len(unknown) > 0 {
-			return fail(fmt.Errorf(
-				"模块 %q 声明了 backend = \"wasm\" 和 provides = %v，但 wasm 后端只认 provides = [\"tool\"]："+
-					"这一层做的是「一个 wasm 模块 = 一个工具」，%v 这些能力还没有对应实现。"+
-					"在它们落地之前写进 manifest，就是在骗下一个读 manifest 的人",
-				e.ID, e.Provides, unknown))
-		}
-
-		// 先校验工具声明，再装载 4 MiB 的 wasm：manifest 写错了没必要先编译一遍。
-		var spec *wasmToolSpec
-		if providesTool {
-			s, serr := newWasmToolSpec(e)
-			if serr != nil {
-				return fail(serr)
-			}
-			spec = s
-		}
+		spec := decls[i].spec
 
 		p := strings.TrimSpace(e.Path)
 		if p == "" {
@@ -208,6 +249,7 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 		if spec != nil {
 			// 工具名与超时是**执行期**参数，直接记在模块上：
 			// 请求信封里的 tool 字段与单次调用的 deadline 都从这里取。
+			// 实例重建之后这两个参数继续生效（它们是宿主侧状态，不在客人里）。
 			m.SetToolName(spec.name)
 			m.SetTimeout(spec.timeout)
 			entry.tool = spec.name
@@ -241,14 +283,16 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 				// 没有它，Register 里的 Inject 会失败；拓扑排序也靠它保证顺序。
 				//
 				// Provides 这里不写：能力的唯一来源是 manifest，Apply 会把
-				// e.Provides（["tool"]）原样复制上来——`modules graph` 的 PROVIDES 列
-				// 因此能看到这一行。注意 "tool" 不是服务键：真正的注册靠下面这个 Register，
+				// e.Provides（"tool" 或 "tool:<tool_name>"）原样复制上来——
+				// `modules graph` 的 PROVIDES 列因此能看到这一行，而 kernel 的
+				// "一个能力一个提供者"也按这个字符串自然成立（多个工具 = 多个不同的键）。
+				// 注意这两种键都不是服务键：真正的注册靠下面这个 Register，
 				// 它 Inject 的是 spi 的 "tools" 服务。两件事别混。
 				Requires: []string{spi.ToolsKey.String()},
 				Register: wasmToolRegister(spec, m),
 			})
 			slog.Info("wasm 模块已装载，并注册工具（模型可见）",
-				"module", e.ID, "tool", spec.name, "path", p,
+				"module", e.ID, "tool", spec.name, "provides", decls[i].capKey, "path", p,
 				"digest", shortDigest(actual), "exports", strings.Join(exports, ","),
 				"timeout", spec.timeout)
 			continue
@@ -271,16 +315,74 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 	return mods, nil
 }
 
-// splitWasmProvides 把 manifest 的 provides 拆成「要工具」与「不认识的能力」两半。
-func splitWasmProvides(provides []string) (tool bool, unknown []string) {
-	for _, c := range provides {
-		if c == wasmToolCap {
-			tool = true
-			continue
+// splitWasmProvides 把 manifest 的 provides 拆成「工具能力键」与「不认识的能力」两半。
+//
+// 认两种写法（理由见 wasmToolCap 的注释）：
+//   - "tool"            —— 缩写：这个模块贡献它那一个工具。全部署只允许出现一次；
+//   - "tool:<tool_name>" —— 多个工具模块时每个模块各写一个，键因此天然不同。
+//
+// 同一行 provides 里出现两个工具键（比如 ["tool","tool:echo"]）是写法自相矛盾，
+// 直接报错而不是取第一个：manifest 说的必须正好是它做的。
+func splitWasmProvides(provides []string) (capKey string, unknown []string) {
+	for _, raw := range provides {
+		c := strings.TrimSpace(raw)
+		switch {
+		case c == wasmToolCap, strings.HasPrefix(c, wasmToolCapPrefix):
+			if capKey != "" && capKey != c {
+				unknown = append(unknown, c) // 第二个工具键：交给上层报"只认一个"
+				continue
+			}
+			capKey = c
+		default:
+			unknown = append(unknown, c)
 		}
-		unknown = append(unknown, c)
 	}
-	return tool, unknown
+	return capKey, unknown
+}
+
+// checkWasmToolCapKey 校验能力键与工具名对得上。
+//
+// 为什么必须校验：能力键会进 `modules graph`，而工具名会进模型看到的工具表。
+// 两个写得不一样时，图和表就各说各话——而这种错在 manifest 里只是少打几个字符，
+// 到运行期完全看不出来。
+func checkWasmToolCapKey(id, capKey, toolName string) error {
+	if capKey == wasmToolCap {
+		return nil
+	}
+	name := strings.TrimSpace(strings.TrimPrefix(capKey, wasmToolCapPrefix))
+	if name == "" {
+		return fmt.Errorf(
+			"模块 %q 的 provides 里写了 %q：冒号后面必须写出工具名（例：provides = [\"tool:echo\"]，"+
+				"与同一行的 tool_name 一致）；"+
+				"只写工具名一类的东西等于让读者自己去猜哪个模块提供了什么", id, capKey)
+	}
+	if name != toolName {
+		return fmt.Errorf(
+			"模块 %q 的能力键 %q 与 tool_name = %q 对不上：能力键冒号后面必须是同一行的工具名。"+
+				"两处不一致时 `modules graph`（能力键）和模型看到的工具表（工具名）会各说各话",
+			id, capKey, toolName)
+	}
+	return nil
+}
+
+// dupWasmToolCapErr 是"两个 wasm 模块争同一个能力键"的报法。
+//
+// 为什么这条错误值得单独写一段：kernel 的原话是"能力 %q 被两个模块同时提供"，
+// 它说的是**症状**；而这里能说的是**改法**。多工具部署下这条错误必然会出现，
+// 让用户自己去 kernel 的报错里反推 provides 该写什么，是把成本推给了最不了解内核的人。
+func dupWasmToolCapErr(prevID, id, capKey string) error {
+	if capKey == wasmToolCap {
+		return fmt.Errorf(
+			"模块 %q 与 %q 都写了 provides = [\"tool\"]：kernel 只允许一个能力一个提供者，"+
+				"所以 %q 这种缩写全署只能用一个。要同时挂多个 wasm 工具，请让每个模块写各自的能力键："+
+				"provides = [\"tool:<tool_name>\"]（例：provides = [\"tool:echo\"]，冒号后必须与同一行的 "+
+				"tool_name 一致）——能力键就是\"哪个模块提供了哪个工具\"，两个模块贡献的不是同一个东西",
+			prevID, id, wasmToolCap)
+	}
+	return fmt.Errorf(
+		"模块 %q 与 %q 都写了能力键 %q：能力键必须独一无二（它标识\"哪个模块提供了哪个工具\"）。"+
+			"两个不同的工具请用各自的工具名，例如 provides = [\"tool:echo\"] 与 provides = [\"tool:hello\"]",
+		prevID, id, capKey)
 }
 
 // wasmToolRegister 返回把工具注册进工具表的 Register。
@@ -484,7 +586,8 @@ func hintForWasmError(err error) string {
 	case errors.Is(err, wasmhost.ErrGuestTrap):
 		return "插件内部崩溃（wasm trap），不是你的参数错了：不要原样重试；换一种做法，或改用别的工具"
 	case errors.Is(err, context.DeadlineExceeded):
-		return "插件执行超时：输入可能太大，缩小范围再试；连续超时要报告给用户（超时后实例已被关闭，需要重启宿主）"
+		return "插件执行超时：输入可能太大，缩小范围再试；连续超时要报告给用户" +
+			"（超时后这个实例已被关闭，下一次调用会自动重建，不用重启宿主）"
 	case errors.Is(err, context.Canceled):
 		return "这次调用被取消（会话被中断）：需要时重新发起，不要把它当成插件失败"
 	case errors.Is(err, wasmhost.ErrProtocol):
@@ -545,9 +648,10 @@ func loadedWasm() []wasmLoaded {
 // writeWasmSection 把 wasm 模块单独打一节：backend、digest 前 12 位、导出的工具名。
 //
 // 为什么单独一节而不是塞进主表：主表的列是"装配后提供哪些**能力（服务键）**"，
-// 而 wasm 模块的 Provides 是**空的**——工具不是一个服务键，它是往工具表里加一行。
-// 混进主表，读的人会以为它提供了 "tools" 这个服务（那是别人提供的）。
-// TOOL 列就是这条区分：写 provides=["tool"] 的模块在这里显示工具名，
+// 而 wasm 模块的能力键（"tool" / "tool:<tool_name>"）**不是服务键**——
+// 工具不是一个被别人 Require 的服务，它是往工具表里加一行。
+// 混进主表，读的人会以为它提供了 "tools" 这个服务（那才是别人提供的服务）。
+// TOOL 列就是这条区分：提供了工具的模块在这里显示工具名，
 // 其余显示"（不提供）"，一眼能分出这两类。
 func writeWasmSection(w io.Writer) {
 	list := loadedWasm()

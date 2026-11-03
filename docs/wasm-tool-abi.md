@@ -572,6 +572,7 @@ backend = "wasm"
 path    = "echo.wasm"          # 相对**manifest 所在目录**解析，不是 cwd
 digest  = "<sha256，64 位十六进制>"   # 可选，但建议写：内容被换要在启动时炸
 provides = ["tool"]            # 开关。不写 = 老行为：装载但不提供任何能力
+                               # 多个 wasm 工具模块共存时必须写 ["tool:<tool_name>"]，见 §9.2
 tool_name        = "echo"      # 必填：模型看到的工具名
 tool_description = "把 text 原样回显"   # 必填：模型看到的「什么时候用它」
 tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}'''
@@ -581,7 +582,7 @@ timeout_ms       = 2000        # 可选，默认 10000
 
 几条定下来的语义：
 
-- **`provides` 只认 `"tool"`**。写 `["compaction"]` 之类直接报错并点名是哪个能力——这一层做的是"一个模块 = 一个工具"，别的还没实现，写进去就是骗读 manifest 的人。
+- **`provides` 只认两种写法：`["tool"]` 与 `["tool:<tool_name>"]`**（后者的来历见 §9.2）。写 `["compaction"]` 之类直接报错并点名是哪个能力——这一层做的是"一个模块 = 一个工具"，别的还没实现，写进去就是骗读 manifest 的人。`"tool"` 这种缩写**全署只能出现一次**；有两个以上 wasm 工具模块时，每个模块写自己的 `"tool:<tool_name>"`（冒号后必须与同一行的 `tool_name` 一致，装载层会校验）。
 - **`"tool"`（单数）不是服务键 `"tools"`（复数）**。`tools` 是**别人提供**的工具目录，wasm 模块靠 `Requires: ["tools"]` 才能 `Inject` 进去注册；`tool` 是它要**贡献**的东西。`modules graph` 的 PROVIDES 列显示 `tool`、REQUIRES 列显示 `tools`，两列都在就是为了让人分清这件事（`provides` 的值由 `kernel.Apply` 原样复制到装配结果，装载层不另编一个）。
 - **身份字段全在 manifest**（Name/Description/Schema/Caps）。不从客人那里问的理由见 §3.6：Caps 决定审批与沙箱，让客人自己声明等于让它自己给自己发许可证。
 - **默认 `caps` 全 false 是沙箱强制的**，不是客人的自我介绍：宿主不给任何 FS preopen、不传 args/env、只挂 `wasi_snapshot_preview1` 的最小面。manifest 写更严的 caps（比如 `destructive`）只是让审批更早介入。
@@ -761,10 +762,217 @@ main.call(0x2d2000, 0x2a)
 
 ### 8.7 本轮没做 / 已知缺口
 
-1. **实例不重建**：trap 或超时后 wazero 会把 module 关掉，之后这个模块不能用，直到重启宿主。§3.5 推荐的"死亡重建"没做（`CompileModule` 的结果还在手里，重建只要 2–3 ms，是下一步）。
-2. **一个部署只能有一个 wasm 工具模块**：多个都写 `provides = ["tool"]` 会撞 kernel 的"能力被两个模块同时提供"。要放开得换标记（per-module 字段）或让 kernel 认识"能力种类"，**不用改 kernel 也能做**（装载层自己解析 manifest）。
+1. **实例不重建**：trap 或超时后 wazero 会把 module 关掉，之后这个模块不能用，直到重启宿主。§3.5 推荐的"死亡重建"没做（`CompileModule` 的结果还在手里，重建只要 2–3 ms，是下一步）。→ **已补：§9.1**。
+2. **一个部署只能有一个 wasm 工具模块**：多个都写 `provides = ["tool"]` 会撞 kernel 的"能力被两个模块同时提供"。要放开得换标记（per-module 字段）或让 kernel 认识"能力种类"，**不用改 kernel 也能做**（装载层自己解析 manifest）。→ **已补：§9.2**（走的是"换能力键"那条）。
 3. **schema 不从客人取**：仍是 manifest-pinned（§6 第 3 行的建议没变）。
 4. **`cmd/dshd/doctor.go` 的 wasm 文案过期**：`checkWasmModules` 无条件说"它们不提供工具，只能 `dshd wasm call` 手动调"，现在对 `provides=["tool"]` 的模块是错的。该文件不在本轮边界内，未改。
 5. **并发 / `-race` 没跑**：`bash scripts/race.sh` 要在隔离副本里跑，本轮没做；`InvokeTool` 已按"每实例一把锁"串行化同一模块的调用（实测 §3.4 的设计推断，不是压测结论）。
 6. **体积 4.4 MB**（Go 客人固有，见 §2.3）。要小就换 TinyGo，宿主一行不用改。
 7. 上一轮 §7 里没验的那些（interpreter 引擎、c-archive、千次实例化泄漏、恶意客人）本轮同样没验。
+
+---
+
+## 9. 补两个缺口：实例重建 + 多个 wasm 工具模块（2026-11-04 二轮）
+
+> §8.7 里列的两条已知缺口，这一节是它们的落地记录。规矩没变：**`internal/kernel/` 一个字节没动**（红线），改动只落在 `internal/wasmhost/`、`cmd/dshd/wasmload.go`（含测试）与这份文档。
+> 环境同 §8：`go1.27.3 windows/amd64`、`wazero v1.12.0`、`GOCACHE=/tmp/gocache-wasm2`。
+
+### 9.1 缺口 1：实例死了要能重建
+
+#### 9.1.1 先把"流传的说法"钉准（实测，不是转述）
+
+§8.7 第 1 条写的是"trap 或超时后 wazero 会把 module 关掉"。实测只有**一半**对：
+
+```
+# 客人 panic（{"boom":true}）之后
+trap 之后 IsClosed=false
+trap 之后第二次调用: out={"v":1,"summary":"收到 hi",…} err=<nil> IsClosed=false
+
+# 超时（纯 wasm 夹具 spin()，deadline 100ms）之后
+超时之后 IsClosed=true
+超时之后再来一次: err=调用 fixture.add 失败: module closed with context deadline exceeded
+```
+
+两句话：
+
+- **超时/取消**：wazero 真的把实例关了（`WithCloseOnContextDone` 的语义，§3.4 已经写过）。
+- **trap**：wazero **不关**实例，而且那个实例看起来还能继续调（§3.3 也记过这条）。但客人是从 `fatalpanic` 里出来的，Go 运行时状态没人担保——"看起来能用"正是最坏的一种形态。
+
+所以"实例不可用"**不能只靠 `IsClosed()` 判定**：只看它的话，trap 这条路根本不触发重建，于是测试里的"trap 后再调一次"会碰巧成功，把 bug 藏起来。判死必须由宿主自己做。
+
+#### 9.1.2 做法
+
+`internal/wasmhost/wasmhost.go`：
+
+| 决定 | 做法 | 理由 |
+|---|---|---|
+| 留什么 | `Module` 常驻 `wazero.CompiledModule` + 装载参数（`reactor` 是否要跑 `_initialize`、`tool`、`timeout`） | 编译 4.4 MB Go 产物 **~0.9 s**（§3.5），实例化只要 **2–3 ms**。贵的那步必须常驻，便宜的那步可以重来。装载参数是宿主侧状态，重建后必须原样生效（否则工具名/超时会跟着丢） |
+| 什么时候判死 | ① 一次调用返回后 `instanceFailureReason(err)` 命中 trap / `DeadlineExceeded` / `Canceled`；② 下一次调用前 `mod.IsClosed()` 为真 | ① 覆盖"wazero 没关但实例已不可信"；② 覆盖"wazero 自己关掉了"（超时、客人 `proc_exit`）。两个信号合起来才完整 |
+| 什么时候重建 | `InvokeTool` / `Call` 进入时 `ensureLiveLocked`：关掉旧实例 → `InstantiateModule(compiled)`（**再跑一遍 `_initialize`**）→ 换 `mod`/`log`、`gen++`、`rebuilds++` | Go 客人的运行时状态是每实例一份，不重跑 `_initialize` 一进导出函数就 `runtime.notInitialized`（unreachable，§1.3） |
+| 要不要在同一次调用里重试 | **不要** | 客人 panic 之前可能已经改了自己一半的状态（`keep` 切片、业务全局量）。宿主替它重放一遍，等于把"一次副作用"变成"两次"。重建留给**下一次**调用——那一次是模型/用户明确发起的新调用，语义才干净 |
+| 重建失败怎么说 | 错误里两句话都在：`实例已失效（<为什么死>），**自动重建也失败了**: <为什么失败>`；再下一次调用还会带"上次重建也失败过（…）" | 只写"重建失败"会把排查起点从"插件的哪个错误"挪到"宿主的哪一层"，那是帮倒忙 |
+| `Close()` 之后 | 不重建，直接报"已卸载，不能再调用" | 卸载是终点。自动重建等于把卸载撤销：调用方以为资源还了，进程里又装了一个回来 |
+| 并发 | 判死、重建、调用全在同一条 `m.mu` 里；`gen` 是实例代数，`Rebuilds()` 是重建次数 | 两个 goroutine 同时撞上死实例：先到的重建，后到的在锁外等、拿到的是重建好的实例，再顺手判一次 → **只重建一次**。若"判死"与"重建"分在两段锁里，就会各建一个实例，漏一个在 wazero store 里白占线性内存 |
+
+重建时实例名带代数（`plugin#2`、`plugin#3`…）：trap 之后旧实例可能还挂在 store 里，同名再实例化会撞 `module already instantiated`——不处理的话"重建"本身就成了新的坑。
+
+代价：
+
+- 常驻 `CompiledModule`：每个工具模块多留一份编译产物。不这样做，每次重建要重编 ~0.9 s，那不叫自愈，叫"每次失败后卡一秒"。
+- 重建瞬间线性内存短暂翻倍（旧实例先 `Close` 再建新的，不会累积；Go 产物 3.5 MiB 量级）。
+- 判死偏保守：trap 之后实例"看起来还能用"也丢掉。这是 §3.3 已经写过的结论，不是新代价。
+- 实测数字（本轮，同一台机器）：重建 + 一次调用 **2.7–3.0 ms**；热路径 **60 µs/次**（100 次平均）。
+
+### 9.2 缺口 2：一个 manifest 里多个 wasm 工具模块
+
+#### 9.2.1 为什么"保留 `tool` 但不让 kernel 判重"做不到
+
+三条事实叠起来就是死路：
+
+1. **判重按字符串**：`internal/kernel/assemble.go:64` —— 能力名 → 提供者，同名即硬错（`能力 %q 被两个模块同时提供`）。
+2. **装载层写的 `Provides` 会被覆盖**：`internal/kernel/module.go:167` —— `if len(e.Provides) > 0 { mod.Provides = e.Provides }`。manifest 里的 provides 会被**原样复制**到装配结果上。
+3. **没有 Apply 之后的钩子**：`loadMods` 是「`loadWasmModules`（装 + 造 `kernel.Module`）→ `LoadManifest` → `Apply` → `TopoSort`」，装载层的输出在 Apply 之前就交出去了，而 TopoSort 在 Apply 之后跑。
+
+所以装载层把 `Provides` 设成什么都白费：只要两个 manifest 行都写 `provides = ["tool"]`，Apply 就把同一个字符串复制到两个模块上，TopoSort 必然报错。
+**不改 kernel 的话，唯一能动的就是写进 manifest 的那个字符串。** 想让两个模块共存，它们的能力键本来就必须是两个不同的字符串。
+
+#### 9.2.2 选择：能力键带上工具名
+
+| manifest 写法 | 什么时候用 | 装配结果里的 PROVIDES |
+|---|---|---|
+| `provides = ["tool"]` | 全署只有一个 wasm 工具模块（**既有 manifest 一个字都不用改**） | `tool` |
+| `provides = ["tool:<tool_name>"]` | 有两个以上 wasm 工具模块时，每个模块写自己的 | `tool:echo` / `tool:hello` |
+
+为什么这条是对的、不是将就：
+
+- 能力键是**部署级身份**（`internal/kernel/registry.go:30` 那句"一个能力全部署只有一个提供者"）。两个 wasm 工具模块贡献的本来就是两件不同的东西，"谁贡献了哪个工具"写进能力名之后，kernel 的判重**自然成立**——不需要内核认识 wasm，也不需要给它开特例。
+- 冒号后面必须是同一行的 `tool_name`，装载层校验（不一致就在启动时炸）：`modules graph`（能力键）与模型看到的工具表（工具名）必须说的是同一件事。两处不一致的错在 manifest 里只是几个字符，运行期完全看不出来。
+- `"tool"` 这种缩写**全署只能用一次**。两个模块都写它时，装载层在**装载任何 wasm 之前**就报错，并给出能照着改的文案（不是 kernel 那句只有症状的"能力被两个模块提供"）。多工具部署下这条错**必然**会发生，让人去 kernel 的报错里反推 provides 该写什么，等于把成本推给最不了解内核的人。
+
+否决的备选：
+
+- **让 `tool_name` 隐式当开关**（provides 留空，装载层自己造 `tool:<名字>` 键）：那样"能力从哪来"就有了两个来源（manifest + 装载层），`modules graph` 会显示 manifest 里根本没写的键；而这一层的既有规矩是"能力的唯一来源是 manifest，装载层不另编一个"（§8.4）。**省下的只是几行 TOML，弄丢的是一条判据。**
+- **改 kernel 支持"能力种类"/per-module 字段**：那是红线段，本轮明令不许动；而且为了一个显示用的装饰性能力去改装配内核，收益与风险不成比例。
+
+代价（必须写出来）：
+
+- **多工具部署要动 manifest**：加第二个 wasm 工具时，得把第一个模块的 `provides` 从 `["tool"]` 改成 `["tool:<它的 tool_name>"]`。单工具部署不受影响。
+- 两种写法并存，读 manifest 的人需要知道区别 —— 由本节与 §8.4 承担。
+- 能力键与工具名的一致性靠**校验**而不是靠推导：用户仍能写错，但一定在启动时炸，而不是在运行期各说各话。
+
+### 9.3 改了哪些文件
+
+| 文件 | 改了什么 |
+|---|---|
+| `internal/wasmhost/wasmhost.go` | `Module` 常驻 `compiled` / `reactor` / `dead` / `deadReason` / `rebuildErr` / `gen` / `rebuilds`；新增 `RebuildTimeout`、`Rebuilds()`、`InstanceGen()`、`ensureLiveLocked`、`rebuildLocked`、`markDeadLocked`、`instanceFailureReason`、`instanceName`；`Call` 改成与 `InvokeTool` 同一条路（进入前重建、失败后判死）；`Exports`/`Close` 的字段读取收进锁里 |
+| `internal/wasmhost/abi.go` | `InvokeTool` 进入前 `ensureLiveLocked`；失败后按 `instanceFailureReason` 判死（**不在同一次调用里重试**）；`wrapCallError`/文档注释改成"已判死，下次调用自动重建" |
+| `internal/wasmhost/rebuild_test.go`（新） | 5 条（§9.4 第 1 组） |
+| `cmd/dshd/wasmload.go` | `wasmToolCap` + `wasmToolCapPrefix`；`splitWasmProvides` 认两种写法；新增 `checkWasmToolCapKey` / `dupWasmToolCapErr`；装载循环拆成"先校验 manifest、再读 wasm"两遍；`hintForWasmError` 的超时文案改成"下次调用自动重建，不用重启宿主" |
+| `cmd/dshd/wasmload_test.go` | 新增 4 条（§9.4 第 2 组） |
+| `docs/wasm-tool-abi.md` | §8.4 的 provides 说明、§8.7 第 1/2 条的指向、这一节 |
+
+**没动**：`internal/kernel/`、`internal/transport/`、`modules/`、`dsh.toml`、`cmd/dshd/serve*.go`、`cmd/dshtui/`、`PLAN.md`、`AGENTS.md`。`scripts/build-wasm-fixture.py` 与两个夹具**都没动**（这轮不需要新客人行为：trap 用夹具已有的 `{"boom":true}`）。
+
+### 9.4 验收（逐条，真实输出）
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+export GOCACHE=/tmp/gocache-wasm2
+
+$ go build ./... && go vet ./...
+build OK / vet OK（无输出）
+
+$ go test ./internal/wasmhost ./cmd/dshd -count=1
+ok  	dshgo/internal/wasmhost	8.746s
+ok  	dshgo/cmd/dshd	8.609s
+
+$ go test ./... -count=1
+exit=0，47 个包 ok，无 FAIL（最后几行是 tmp/ 下若干历史探针包的 `[no test files]`）
+
+$ go build -o tmp/dshd.exe ./cmd/dshd
+OK（18,844,160 字节）
+```
+
+**第 1 组：缺口 1（`internal/wasmhost`）**
+
+```
+--- PASS: TestInvokeToolRebuildsAfterTrap (0.87s)   # 先 trap（失败）→ 再正常调（成功），Rebuilds()==1
+--- PASS: TestConcurrentCallsRebuildOnce (0.82s)    # 8 个 goroutine 撞死实例，Rebuilds()==1，8 个全成功
+--- PASS: TestRebuildFailureSaysWhy (0.74s)         # 重建也失败 → 错误同时说清"为什么死"与"为什么重建失败"
+--- PASS: TestCallTimeoutThenRebuild (0.15s)        # 超时把实例关掉（IsClosed=true）→ 下一次 add(2,3)=5
+--- PASS: TestClosedModuleDoesNotRebuild (0.77s)    # Close 是终点，不重建
+```
+
+三条断言值得单独抄出来（它们是"真的重建了"的证据，不是"碰巧成功"）：
+
+```
+# trap 之后第二次调用成功，且中间重建过一次
+Rebuilds()=1  InstanceGen()=2  ToolName()="echo"（工具名没因为重建丢）
+
+# 8 个并发
+Rebuilds()=1（onRebuild 里故意 sleep 30ms 撑开窗口：实现若在锁外重建，这里会是 2）
+
+# 重建失败（先把 runtime 关掉再撞死实例）
+wasm 模块 "toolplugin" 的实例已失效（上一次调用里客人 trap（插件崩溃）），**自动重建也失败了**: runtime closed with exit_code(0)。这个模块现在调不动——先按上面的原因修插件或环境再重启宿主；原样重试不会成功
+```
+
+**第 2 组：缺口 2（`cmd/dshd`，走 `loadMods → kernel.Assemble → spi.Tool.Exec` 的同一条生产路径）**
+
+```
+--- PASS: TestWasmTwoToolModulesCoexist (2.20s)          # 两个 wasm 工具模块共存，两个工具都在表里且都调得通
+--- PASS: TestWasmTwoToolsWithPlainToolKeyFails (0.01s)  # 两个都写 ["tool"] → 装载前的可照着改的报错
+--- PASS: TestWasmToolCapKeyMustMatchToolName (0.01s)    # tool:eho vs tool_name="echo" → 启动就炸
+--- PASS: TestWasmToolRebuildsAfterTrapThroughExec (0.86s) # 同一个 spi.Tool 句柄：先炸一次、再成功一次
+```
+
+**第 3 组：真机（一个 manifest 两个 wasm 工具模块）**
+
+`tmp/wasm-two-tools.toml`：两个 `[[module]]`，同一个 `toolplugin.wasm`，`provides = ["tool:echo"]` / `["tool:hello"]`。
+
+```
+$ ./tmp/dshd.exe modules graph --manifest tmp/wasm-two-tools.toml
+# 激活顺序（由能力依赖决定，不是 manifest 行顺序）
+MODULE                 BACKEND   PROVIDES                   REQUIRES
+tools                  static    tools,toolrunner
+wasm-echo              wasm      tool:echo                  tools
+wasm-hello             wasm      tool:hello                 tools
+
+# wasm 后端（已装载 / 已校验；TOOL 列 = 注册进工具表的工具名，空表示不提供能力、只能 `dshd wasm call` 手动调）
+MODULE                 BACKEND   DIGEST       EXPORTS            TOOL                   PATH
+wasm-echo              wasm      35cde81846d2 _initialize,alloc,call echo                   D:\…\internal\wasmhost\testdata\toolplugin.wasm
+wasm-hello             wasm      35cde81846d2 _initialize,alloc,call hello                  D:\…\internal\wasmhost\testdata\toolplugin.wasm
+```
+
+```
+$ ./tmp/dshd.exe tools --manifest tmp/wasm-two-tools.toml
+[ { "name": "echo",  "description": "把 text 原样回显（wasm 夹具工具 · 一号）", … },
+  { "name": "hello", "description": "把 text 原样回显（wasm 夹具工具 · 二号）", … } ]
+```
+
+```
+$ ./tmp/dshd.exe exec --tool echo --args '{"text":"一号工具在跑"}' --manifest tmp/wasm-two-tools.toml
+INFO 工具调用 tool=echo ms=1 ok=true args_bytes=29
+{ "Summary": "收到 一号工具在跑", "Text": "echo:一号工具在跑", … }        [exit=0]
+
+$ ./tmp/dshd.exe exec --tool hello --args '{"text":"二号工具在跑"}' --manifest tmp/wasm-two-tools.toml
+INFO 工具调用 tool=hello ms=1 ok=true args_bytes=29
+{ "Summary": "收到 二号工具在跑", "Text": "echo:二号工具在跑", … }       [exit=0]
+```
+
+两个都写 `provides = ["tool"]` 时的真机报错（这就是"多工具部署必然踩到"的那条，必须能照着改）：
+
+```
+$ ./tmp/dshd.exe tools --manifest <两个都写 ["tool"] 的 manifest>
+dshd: 模块 "wasm-echo" 与 "wasm-hello" 都写了 provides = ["tool"]：kernel 只允许一个能力一个提供者，
+所以 "tool" 这种缩写全署只能用一个。要同时挂多个 wasm 工具，请让每个模块写各自的能力键：
+provides = ["tool:<tool_name>"]（例：provides = ["tool:echo"]，冒号后必须与同一行的 tool_name 一致）
+——能力键就是"哪个模块提供了哪个工具"，两个模块贡献的不是同一个东西          [exit=1]
+```
+
+### 9.5 本轮没做 / 已知限制
+
+1. **`-race` 没跑**：本机 `CGO_ENABLED=0`、没有 gcc，Go 的 race detector 需要 cgo。并发那条用例因此靠 `Rebuilds()==1` 的**计数断言**证明"只重建一次"，不是靠 race 检测器；也没做压测。
+2. **真机演示"重建"的边界**：`dshd exec` 是"一次进程一次调用"，trap 与重建在同一个进程里，`exec` 只能演示 trap 报错正确；重建的现场证据是 `TestWasmToolRebuildsAfterTrapThroughExec`（同一条生产路径，只是不换进程）。要真机演示需要长驻进程（`serve`）里连调两次同一个工具，那要过模型/一次 turn，本轮不做。
+3. **`cmd/dshd/doctor.go` 的 wasm 文案仍然过期**（不在本轮边界内）：它无条件说"wasm 模块不提供工具，只能 `dshd wasm call` 手动调"，现在不仅对 `provides=["tool"]` 的模块是错的，还多了 `tool:<tool_name>` 这种写法没提。
+4. **ABI 没变**：仍是一模块一工具（`request.tool` 字段早就留好了，一个模块挂多工具那天不用改信封）。客人侧源码与产物一个字节没动。
+5. §8.7 第 3 / 6 / 7 条（schema 仍 manifest-pinned、体积 4.4 MB、interpreter 引擎等）**不变**。
