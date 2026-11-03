@@ -103,6 +103,47 @@ func min(a, b int) int {
 	return b
 }
 
+// UsageTotal 扫全会话的 assistant/message，算出累计用量与最近一次上下文占用（H1）。
+//
+// 代价是一次全量读——与 load 本身同量级，所以只在 LoadResult 里用。
+func (s *sessionSource) UsageTotal(sessionID string) (transport.UsageMsg, int, error) {
+	path, err := s.resolve(sessionID)
+	if err != nil {
+		return transport.UsageMsg{}, 0, err
+	}
+	lg, err := v4.ReadFile(path)
+	if err != nil {
+		return transport.UsageMsg{}, 0, err
+	}
+	var total transport.UsageMsg
+	ctx := 0
+	for _, ev := range lg.Events {
+		if ev.Type != "assistant/message" {
+			continue
+		}
+		var meta struct {
+			Usage *struct {
+				InputTokens     int `json:"inputTokens"`
+				OutputTokens    int `json:"outputTokens"`
+				TotalTokens     int `json:"totalTokens"`
+				CacheReadTokens int `json:"cacheReadTokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal(ev.Data, &meta) != nil || meta.Usage == nil {
+			continue
+		}
+		total.InputTokens += meta.Usage.InputTokens
+		total.OutputTokens += meta.Usage.OutputTokens
+		total.CacheReadTokens += meta.Usage.CacheReadTokens
+		// 上下文占用取**最后一条**的 totalTokens，不是累加。
+		if meta.Usage.TotalTokens > 0 {
+			ctx = meta.Usage.TotalTokens
+		}
+	}
+	total.TotalTokens = total.InputTokens + total.OutputTokens
+	return total, ctx, nil
+}
+
 // Model 从最近一条 request/context 事件取模型 id（H4）。
 //
 // 为什么是 request/context：真实语料里 model 只出现在这种事件上（实测 3 个会话命中，

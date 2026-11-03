@@ -26,6 +26,14 @@ type TailSourcer interface {
 	MessagesTail(sessionID string, limit int) ([]Message, int, error)
 }
 
+// UsageSourcer 是 Source 的可选增强：给出**整个会话**的累计用量与当前上下文占用。
+//
+// 为什么单独一个接口：tail 快路只读尾部，拿不到全会话统计；
+// 把它交给宿主按需全量扫一次，比在 transport 里重读一遍文件更清楚。
+type UsageSourcer interface {
+	UsageTotal(sessionID string) (total UsageMsg, contextTokens int, err error)
+}
+
 // ModelSourcer 是 Source 的可选增强：给出这条会话用的模型 id。
 type ModelSourcer interface {
 	Model(sessionID string) (string, error)
@@ -50,6 +58,14 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 			trunc = total > len(msgs)
 		}
 		res := LoadResult{Messages: msgs, Total: total, Truncated: trunc}
+		if us, ok := src.(UsageSourcer); ok {
+			if tot, ctx, uerr := us.UsageTotal(sessionID); uerr == nil {
+				if tot != (UsageMsg{}) {
+					res.UsageTotal = &tot
+				}
+				res.ContextTokens = ctx
+			}
+		}
 		if ms, ok := src.(ModelSourcer); ok {
 			if m, merr := ms.Model(sessionID); merr == nil {
 				res.Model = m
@@ -67,6 +83,14 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 		Messages:  page.Messages,
 		Total:     page.Total,
 		Truncated: page.Truncated,
+	}
+	if us, ok := src.(UsageSourcer); ok {
+		if tot, ctx, uerr := us.UsageTotal(sessionID); uerr == nil {
+			if tot != (UsageMsg{}) {
+				res.UsageTotal = &tot
+			}
+			res.ContextTokens = ctx
+		}
 	}
 	if ms, ok := src.(ModelSourcer); ok {
 		if m, merr := ms.Model(sessionID); merr == nil {

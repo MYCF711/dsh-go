@@ -38,7 +38,9 @@
       "truncated",
       "model",
       "permission",
-      "contentWidth"
+      "contentWidth",
+      "usageTotal",
+      "contextTokens"
     ],
     "PromptResult": [
       "accepted",

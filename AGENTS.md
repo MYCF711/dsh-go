@@ -235,7 +235,7 @@ export PATH="/c/Program Files/Go/bin:$PATH"
 
 | # | 状态（2026-11-03 复核） | 需求与当前证据 | 完成判据 |
 |---|---|---|---|
-| **H1** | 🟡 部分实现 | 每条 assistant usage 已有；`LoadResult` 当前无顶层合计（`internal/transport/api.go`）。累计 input/output 与最近上下文 total 分开，tail 切页不得改变全会话统计 | 固定含多次 assistant 的会话验证逐消息与合计；未知不补零；界面实际消费 |
+| **H1** | 🟡 提供端已补齐（顶层合计），界面消费待验 | `LoadResult` 新增 `usageTotal{input,output,total,cacheRead}`（**全会话累计**）与 `contextTokens`（**最近一条**的 totalTokens，即当前上下文占用）。两者是两件事：累计一直涨，上下文会随压缩回落 | **2026-11-03 真机**：同一会话 `tailMessages=1` 与 `=50` 两次 load，`usageTotal` **完全一致**（`input 7409 / output 211 / total 7620`），`contextTokens=7620`；单测 `TestLoadSessionUsageTotalIndependentOfTail` 钉住「切页不改变合计」。**仍未验**：界面实际消费这两个数，以及未知时不补零的显示 |
 | **H2** | 🟡 投影存在，语义待验 | 消息 `time` 已有，缺失省略；未证明所有流事件都带时间或墙钟单调。相邻 assistant 差值含等待/工具时间，只能称区间估算 | 缺时/非正间隔显示未知；事件覆盖与客户端速率计算各有测试 |
 | **H3** | ✅ 提供端实现有历史证据 | `messages[].view` 透传 ViewSpec；nil 时省略。界面按 kind 渲染，缺 view 回退工具名+摘要 | 本轮未重跑端到端；联调时核 card/table/plain 与无 view 分支 |
 | **H4** | ✅ 提供端实现有历史证据 | 取最近一条含非空 model 的 `request/context`；不知道就省略，不拿默认值冒充 | 界面 LoadResult/顶栏实际接入，空值不画 |

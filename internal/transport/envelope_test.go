@@ -82,3 +82,39 @@ func TestLoadAcceptsContractNames(t *testing.T) {
 		t.Fatalf("tailMessages 没生效：limit=%d", gotLimit)
 	}
 }
+
+type usageFake struct {
+	total UsageMsg
+	ctx   int
+}
+
+func (f usageFake) Messages(string) ([]Message, error)       { return nil, nil }
+func (f usageFake) UsageTotal(string) (UsageMsg, int, error) { return f.total, f.ctx, nil }
+
+// H1：全会话合计与当前上下文占用是两个数；**tail 切页不许改变合计**。
+func TestLoadSessionUsageTotalIndependentOfTail(t *testing.T) {
+	src := usageFake{
+		total: UsageMsg{InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
+		ctx:   4321,
+	}
+	small, err := LoadSession(src, "s", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	big, err := LoadSession(src, "s", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if small.UsageTotal == nil || big.UsageTotal == nil {
+		t.Fatalf("两页都该有 usageTotal")
+	}
+	if *small.UsageTotal != *big.UsageTotal {
+		t.Fatalf("切页改变了合计：%+v vs %+v", *small.UsageTotal, *big.UsageTotal)
+	}
+	if small.UsageTotal.InputTokens != 100 || small.UsageTotal.OutputTokens != 20 {
+		t.Fatalf("合计不对：%+v", *small.UsageTotal)
+	}
+	if small.ContextTokens != 4321 {
+		t.Fatalf("上下文占用不对：%d", small.ContextTokens)
+	}
+}

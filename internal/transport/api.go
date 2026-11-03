@@ -90,6 +90,15 @@ type LoadResult struct {
 	// 而官方气泡上限是 `min(列宽*0.702, 82%)`——没有列宽这个数就只能瞎猜比例。
 	// **0 表示不知道**（omitempty），界面沿用自己那套；不许填一个"看着像"的默认值。
 	ContentWidth int `json:"contentWidth,omitempty"`
+	// UsageTotal 是**整个会话**的累计用量（H1 的顶层合计）。
+	//
+	// 与逐条 usage 的关系：逐条是"那一轮花了多少"，这个是"这个会话一共花了多少"。
+	// **tail 切页不许改变它**——切页只影响返回哪几条消息，不影响全会话统计。
+	// 键名与逐条一致（inputTokens/outputTokens），另加 cacheReadTokens 累计。
+	UsageTotal *UsageMsg `json:"usageTotal,omitempty"`
+	// ContextTokens 是**最近一条** assistant 的 totalTokens，也就是"当前上下文占多少"。
+	// 它跟累计值是两件事：累计一直涨，上下文会随压缩回落。
+	ContextTokens int `json:"contextTokens,omitempty"`
 }
 
 // PromptResult 是 session.prompt 的返回值：**立刻返回**，回答走 WS。
