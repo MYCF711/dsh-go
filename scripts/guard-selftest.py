@@ -95,6 +95,15 @@ def main():
     chk("doc-links 对本仓缺失会红", code != 0 and "MISS docs/missing-file.md" in out, out.strip()[-200:])
     chk("doc-links 对跨仓引用跳过", "SKIP ../dsh-ui/docs/progress.md" in out, out.strip()[-200:])
 
+    # 中文文件名：原来的字符类 `[A-Za-z0-9_.\-/]` 根本不匹配中文，
+    # 于是「手册引用了不存在的中文文件名」这类腐烂**静默漏掉**。
+    # 漏报比误报更糟：误报会有人去查，漏报没人知道。
+    zh_manual = os.path.join(dl, "BAD_ZH.md")
+    with open(zh_manual, "w", encoding="utf-8") as fh:
+        fh.write("见 docs/不存在的中文手册.md\n")
+    code, out = run(["scripts/doc-links.py", zh_manual])
+    chk("doc-links 能发现中文文件名的缺失", code != 0 and "MISS docs/不存在的中文手册.md" in out, out.strip()[-200:])
+
     shutil.rmtree(TMP, ignore_errors=True)
     print("合计 OK=%d FAIL=%d" % (ok, fail))
     return 0 if fail == 0 else 1

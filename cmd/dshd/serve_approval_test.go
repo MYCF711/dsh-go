@@ -225,6 +225,62 @@ func TestBrokerTimeoutDenies(t *testing.T) {
 	}
 }
 
+// H13：审批超时必须**报给界面**。
+//
+// 界面不报这个数就只能显示"等你批准"：人离开一会儿回来，命令已经被拒了，
+// 屏幕上却什么都没变——分不清"还没人答"和"早就超时了"。
+//
+// 断言两件事：① 报的时长就是真正计时用的那个数（不是另编的常量）；
+// ② 带绝对截止（Unix 毫秒）——重放时客户端要按**原来**的截止算剩余。
+func TestBrokerEmitsTimeoutInPayload(t *testing.T) {
+	var mu sync.Mutex
+	var got json.RawMessage
+	b := newApprovalBroker(&fakeStdin{}, func(sid, typ string, data json.RawMessage) {
+		if typ != "approval/request" {
+			return
+		}
+		mu.Lock()
+		got = append(json.RawMessage(nil), data...)
+		mu.Unlock()
+	})
+	b.timeout = 45 * time.Second
+
+	before := time.Now()
+	line := approvalRequestTag + `{"requestId":"perm-t","sessionId":"s1","tool":"bash"}`
+	b.Watch(strings.NewReader(line+"\n"), nil)
+
+	waitUntil := time.Now().Add(2 * time.Second)
+	var raw json.RawMessage
+	for {
+		mu.Lock()
+		raw = append(json.RawMessage(nil), got...)
+		mu.Unlock()
+		if len(raw) > 0 {
+			break
+		}
+		if time.Now().After(waitUntil) {
+			t.Fatal("没推出 approval/request")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	var p struct {
+		RequestID  string `json:"requestId"`
+		TimeoutMs  int64  `json:"timeoutMs"`
+		DeadlineMs int64  `json:"deadlineMs"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("负载不是合法 JSON：%v", err)
+	}
+	if p.TimeoutMs != 45000 {
+		t.Fatalf("timeoutMs 应等于真正计时用的 b.timeout（45000），实际 %d", p.TimeoutMs)
+	}
+	// 截止时刻应当在"发出时刻 + 45s"附近；差几秒以上说明算错了。
+	if d := time.UnixMilli(p.DeadlineMs).Sub(before); d < 44*time.Second || d > 46*time.Second {
+		t.Fatalf("deadlineMs 与发出时刻相差 %v，应在 45s 附近", d)
+	}
+}
+
 var _ = io.EOF
 
 // H13：断线重连时要把**还挂着**的审批重放出来。

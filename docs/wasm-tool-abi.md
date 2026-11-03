@@ -1258,9 +1258,11 @@ exit=1
 ### 10.8 本轮没做 / 已知限制
 
 1. **工具名跨模块的唯一性没在装载层提前查**：两个不同模块声明同一个工具名时，报错来自工具表的 `Register`（"wasm 工具 X 注册失败"），而不是 manifest 校验那一遍。仍是启动期失败，只是文案不如 provides 那几条具体。要提前查就得在 `loadWasmModules` 里维护全局工具名表——本轮没做（收益是一条更早的错，风险是多一处要跟注册表语义同步的状态）。
-2. **`dshd wasm call` 仍用模块级默认工具名**（它是"手动调试单个模块"的入口，不经过 `spi.Tool`）。多工具模块里这个默认值是模块 id，不是某个工具名；要指定工具仍得走 `dshd exec --tool`。
+2. ~~**`dshd wasm call` 仍用模块级默认工具名**~~ **已补（M348）**：新增 `dshd wasm tool --module x.wasm --tool <名> --args '<json>'`，直接走 ABI 按工具名调，**连 manifest 都不用写**。`wasm call --fn` 仍是"手动调裸导出函数"的入口，两者分工写进了用法行。
 3. **模块级 `timeout_ms` 取的是最大值**：`Exec` 会用自己的 `ctx` 收紧，所以走 `spi.Tool` 的每个工具都拿到自己声明的 deadline；不经过 `Exec` 的入口（上面第 2 条）拿到的是最大那个。
 4. **宿主无法验证客人真的按 `tool` 分了流**：客人完全可以无视这个字段。判据只能是测试与夹具（`TestWasmTwoToolsRouteByToolField` 断言两个工具**输出不同**）。这一点写进作者手册了。
-5. **`-race` 没跑**（同 §9.5 第 1 条）：`wasmToolRouter` 的并发正确性靠"同一把锁里写名字 + 调用"的设计与单测，不是 race 检测器；也没做压测。
-6. **`cmd/dshd/doctor.go` 的 wasm 文案仍偏旧**（不在本轮边界）：它读 `Register != nil` 判"已注册工具"，对多工具模块是正确的；但文案里"多工具的模块用 `provides=["tool:<工具名>"]` 各占一个能力键"只说了跨模块的场景，没提 `[[module.tool]]`。
+5. ~~**`-race` 没跑**~~ **已补（M349）**：本机 `C:/toolchains/mingw64/bin/gcc.exe` 下
+   `go test -race ./internal/wasmhost ./cmd/dshtui ./internal/transport ./cmd/dshd` 全部 ok、零 DATA RACE。
+   `wasmToolRouter`、重建路径、TUI 的滚动/审批并发都在里面跑过。**压测仍未做**。
+6. ~~**`cmd/dshd/doctor.go` 的 wasm 文案仍偏旧**~~ **已补（M349）**：文案改成"工具多的模块写 `[[module.tool]]`，并让 provides 里的 `tool:<名>` 逐个对齐"，跨模块与单模块两种场景都点到。
 7. §8.7 / §9.5 里没验的那些（interpreter 引擎、c-archive、千次实例化泄漏、恶意客人、体积 4.4 MB）**不变**。

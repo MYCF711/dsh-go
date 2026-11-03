@@ -64,17 +64,44 @@ type app struct {
 	// pickFrom 非空时，下一次输入被当作"选第 N 个会话"。
 	pickFrom []sessionRow
 
-	// pending 是正在等回答的审批（requestId + 给人看的一行标题）。
+	// pending 是正在等回答的审批（requestId + 给人看的一行标题 + 截止时刻）。
 	//
 	// 为什么界面必须处理它：宿主在 ask 策略下会一直等，客户端不回答这一轮就卡死，
 	// 而屏幕上什么都没变——人只会以为"模型卡住了"。
 	pending struct {
 		id    string
 		title string
+		// deadline 是**宿主**给的截止时刻（approval/request 的 deadlineMs）。
+		// 零值 = 宿主没报超时（老宿主）：这时界面只显示"等待中"，
+		// **不拿本地默认值编一个倒计时**——编出来的数字到点不对，比没有更糟。
+		deadline time.Time
 	}
 	// approve 是发审批应答的那个动作；测试里替换它，生产里走 client。
 	approve func(requestID, option string) error
+
+	// now 是时钟。生产里是 time.Now；测试里换成可控的假时钟，
+	// 否则"每秒变小""到 0 超时"只能用真等待来验，测试会又慢又不稳。
+	now func() time.Time
 }
+
+// 审批倒计时的两档显示与阈值。
+//
+// approvalWarnSeconds：剩余 ≤ 这个数就换成更强的提示（`!! 还有 3s`）。
+// 5 秒是个能被"扫一眼"的长度：它大约是"端起杯子放下"的时间，
+// 再短就来不及反应，再长又会一直闪、失去"要出事了"的意味。
+const approvalWarnSeconds = 5
+
+// approvalTitleWidth 是状态行里标题的截断宽度。
+//
+// 从 40 收到 30 是因为加了倒计时前缀：80 列终端上 40 字标题会把
+// 后面的 `[y]/[a]/[n]` 按键提示挤出屏幕外——**看不见怎么答**比看不见标题更糟。
+const approvalTitleWidth = 30
+
+// approvalTimeoutNote 是超时后留在状态行上的那句。
+//
+// 抽成常量是因为它有两个用处：写到 err，以及"新的一问上来时认出它、把它让位"——
+// 两处各写一遍字面量的话，迟早改一处漏一处，症状是状态行上挂着一句过期的"已超时"。
+const approvalTimeoutNote = "审批已超时，按拒绝处理"
 
 // lineMeta 是"这一行从哪来"的标记，跟着 lines 一起走。
 //
@@ -96,7 +123,16 @@ func newApp(addr, token string) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &app{scr: NewScreen(), cl: cl, addr: addr, start: time.Now()}, nil
+	return &app{scr: NewScreen(), cl: cl, addr: addr, start: time.Now(), now: time.Now}, nil
+}
+
+// clock 返回这个 app 的当前时间。now 为空（测试里直接构造的零值 app）时退回真时钟，
+// 免得每个用例都必须记得注入。
+func (a *app) clock() time.Time {
+	if a.now != nil {
+		return a.now()
+	}
+	return time.Now()
 }
 
 // run 是主循环。返回 nil 表示正常退出。
@@ -211,14 +247,16 @@ func (a *app) newSession() error {
 	return nil
 }
 
-// handleRune 处理普通字符（含中文：rune 级）。
 // answerApproval 回一次审批。y=这一次 · a=以后都允许 · n=拒绝。
+//
+// 答完立刻清掉整个 pending（**连截止时刻一起**）：倒计时还挂着的话，
+// 用户会以为那一下没生效、还在等第二个决定。
 func (a *app) answerApproval(option string) {
 	id := a.pending.id
 	if id == "" {
 		return
 	}
-	a.pending.id = ""
+	a.clearPending()
 	approve := a.approve
 	if approve == nil {
 		approve = func(reqID, opt string) error {
@@ -233,6 +271,123 @@ func (a *app) answerApproval(option string) {
 		return
 	}
 	a.push("  → " + option)
+}
+
+// ---------------------------------------------------------------- 审批倒计时
+
+// clearPending 清掉挂起审批的全部状态（id / 标题 / 截止时刻）。
+//
+// 只有这一个入口：回答、界面侧超时、宿主 approval/answered、宿主 approval/timeout
+// 四处都走它。少清一个字段的后果是**倒计时继续跑**——屏幕上还在闪
+// `!! 还有 2s`，而这一问早就结束了。
+func (a *app) clearPending() {
+	a.pending.id = ""
+	a.pending.title = ""
+	a.pending.deadline = time.Time{}
+}
+
+// deadlineFrom 把宿主报的超时换成本地截止时刻。
+//
+// 优先级：绝对 deadlineMs > 时长 timeoutMs > 什么都没有（返回零值）。
+func (a *app) deadlineFrom(deadlineMs, timeoutMs int64) time.Time {
+	now := a.clock()
+	var total time.Duration
+	if timeoutMs > 0 {
+		total = time.Duration(timeoutMs) * time.Millisecond
+	}
+	if deadlineMs > 0 {
+		d := time.UnixMilli(deadlineMs)
+		if total > 0 {
+			left := d.Sub(now)
+			if left > total {
+				// 客户端时钟比宿主慢：剩余时间不可能比总时长还多。
+				d = now.Add(total)
+			} else if left <= 0 {
+				// 刚收到的请求就已经"过期"了：只可能是两边时钟不一致。
+				// 这时**不许替宿主提前判超时**——它还挂着等这一问；
+				// 替它拒掉，用户就再也答不了了，而现象正是"莫名其妙被拒"。
+				d = now.Add(total)
+			}
+		}
+		return d
+	}
+	if total > 0 {
+		// 老宿主只报时长。注意重放时这样会从满额重新算——所以宿主优先发 deadlineMs。
+		return now.Add(total)
+	}
+	return time.Time{}
+}
+
+// approvalLeft 返回距截止还有多久（已过则为 0）以及**有没有时限**。
+//
+// ok=false 只出现在两种时候：没有挂起审批，或宿主没报超时。
+// 这两种都不许编数字——"我不知道还剩多久"和"还剩 0 秒"是两件事。
+func (a *app) approvalLeft() (time.Duration, bool) {
+	if a.pending.id == "" || a.pending.deadline.IsZero() {
+		return 0, false
+	}
+	left := a.pending.deadline.Sub(a.clock())
+	if left < 0 {
+		left = 0
+	}
+	return left, true
+}
+
+// approvalStatus 是状态行上"等你批准"那一行。三档：
+//
+//	有时限、>5s   ? 等你批准（12s）：bash · rm -rf build/  [y]允许 [a]以后都允许 [n]拒绝
+//	有时限、≤5s   !! 还有 3s：bash · rm -rf build/  [y]允许 [a]以后都允许 [n]拒绝
+//	无时限        ? 等你批准（倒计时不可用：宿主未报超时）：…
+//
+// **纯函数**：只读状态、不改。超时那一刻的清理归 expireApproval；
+// 这里看到 secs<=0 只如实说"已超时"。渲染顺手改状态的话 view() 就不再是纯函数，
+// 而布局测试全靠它是纯函数。
+func (a *app) approvalStatus() string {
+	// 按键提示永远在：看不见怎么答才是真的卡死。
+	const keys = "  [y]允许 [a]以后都允许 [n]拒绝"
+	title := trunc(a.pending.title, approvalTitleWidth)
+	left, ok := a.approvalLeft()
+	if !ok {
+		return " ? 等你批准（倒计时不可用：宿主未报超时）：" + title + keys
+	}
+	// 向上取整：还剩 0.4s 也要说 1s，说 0s 会让人以为已经过去了。
+	secs := int((left + time.Second - 1) / time.Second)
+	if secs <= 0 {
+		return " ! " + approvalTimeoutNote
+	}
+	if secs <= approvalWarnSeconds {
+		return fmt.Sprintf(" !! 还有 %ds：%s%s", secs, title, keys)
+	}
+	return fmt.Sprintf(" ? 等你批准（%ds）：%s%s", secs, title, keys)
+}
+
+// expireApproval 在倒计时走到 0 时清掉 pending。返回这次是否真的到期了。
+//
+// 为什么界面这边也要自己判超时（宿主明明会推 approval/timeout）：
+// 那一帧**可能晚到、也可能在断线时丢掉**。界面还挂着"等你批准"的话，
+// 用户按 y 只会拿到 404，而屏幕上看起来他明明还能答。
+func (a *app) expireApproval() bool {
+	left, ok := a.approvalLeft()
+	if !ok || left > 0 {
+		return false
+	}
+	a.noteApprovalTimeout()
+	return true
+}
+
+// noteApprovalTimeout 记一次"超时按拒绝处理"：清 pending + 状态行说明 + 正文留一行。
+//
+// 正文那一行是给"人离开过"准备的：状态行会被下一个事件顶掉，
+// 而正文留在那里，回来看得见刚才被拒的是哪一条。
+func (a *app) noteApprovalTimeout() {
+	title := trunc(a.pending.title, 60)
+	a.clearPending()
+	a.err = approvalTimeoutNote
+	if title == "" {
+		a.push("！审批已超时，这一问按拒绝处理")
+		return
+	}
+	a.push("！审批超时：" + title + " —— 已按拒绝处理")
 }
 
 // 按键：
@@ -643,15 +798,39 @@ func (a *app) handleFrame(f ServerFrame) {
 			ToolCall  struct {
 				Title string `json:"title"`
 			} `json:"toolCall"`
+			// 宿主报的超时：total 与绝对截止（毫秒时间戳）。
+			// **老宿主这两个字段都没有**——那时只显示"等待中"，绝不编一个数字。
+			TimeoutMs  int64 `json:"timeoutMs"`
+			DeadlineMs int64 `json:"deadlineMs"`
 		}
 		if json.Unmarshal(f.Data, &req) == nil && req.RequestID != "" {
+			// 新的一问上来时，把状态行上**上一问留下**的那句"已超时"让位：
+			// 不让位的话，用户答完这一问，状态行会突然冒出"审批已超时"——
+			// 看起来像刚答的那条超时了。别的错误提示（比如"回答审批失败"）不动。
+			if a.err == approvalTimeoutNote {
+				a.err = ""
+			}
 			a.pending.id = req.RequestID
 			a.pending.title = req.ToolCall.Title
+			a.pending.deadline = a.deadlineFrom(req.DeadlineMs, req.TimeoutMs)
 			a.push("！需要你批准：" + req.ToolCall.Title)
 			a.push("  按 y 允许这一次 · a 以后都允许 · n 拒绝")
+			if left, ok := a.approvalLeft(); ok {
+				// 正文里也写一句：状态行只有一行，人不在时会被后来的事件顶掉，
+				// 而"多久会自己拒掉"是回头查这件事时最要紧的一个数。
+				a.push(fmt.Sprintf("  宿主那边 %ds 后按拒绝处理，到点这一问就作废",
+					int((left+time.Second-1)/time.Second)))
+			}
 		}
 	case "approval/answered":
-		a.pending.id = ""
+		a.clearPending()
+	case "approval/timeout":
+		// 宿主已经按拒绝结算。界面必须**立刻**收掉倒计时和按键，
+		// 否则用户按 y 只会拿到 404（这一问不在了），而屏幕上看起来他还能答。
+		// 已经被 expireApproval 处理过的不再重复记一行。
+		if a.pending.id != "" {
+			a.noteApprovalTimeout()
+		}
 	case "turn/error":
 		a.push("！错误：" + string(f.Data))
 		a.busy = false
@@ -711,6 +890,12 @@ func (a *app) pushMeta(s string, m lineMeta) {
 }
 
 func (a *app) tickStatus() {
+	// 先结算审批倒计时：到点就清 pending，别让状态行多显示一帧"还能答"。
+	//
+	// 倒计时**不另起计时器**：主循环里这个 250ms 的 tick 已经在了，
+	// 再用一个 goroutine 去改 a 的字段，就多一种"渲染时状态被改一半"的可能，
+	// 而那种错只会表现为偶尔少画一行。250ms 粒度足够——显示本来就只到秒。
+	a.expireApproval()
 	if a.busy {
 		a.status = fmt.Sprintf("· 工作中 %s", time.Since(a.start).Round(time.Second))
 	} else if a.status == "" {
@@ -789,7 +974,7 @@ func (a *app) view() []string {
 		}
 	}
 	if a.pending.id != "" {
-		left = " ? 等你批准：" + trunc(a.pending.title, 40) + "  [y]允许 [a]以后都允许 [n]拒绝"
+		left = a.approvalStatus()
 	} else if a.err != "" {
 		left = " ! " + a.err
 	}

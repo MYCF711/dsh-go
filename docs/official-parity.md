@@ -65,3 +65,11 @@
 
 wasm 还差的那一步很具体：**工具契约跨边界**（把 `Exec(args) → Result` 序列化进/出线性内存），
 没有它，wasm 模块就只能是"能调用的函数"，变不成模型能用
+
+### 补记（2026-11-04）：wasm 插件现在能当工具用
+
+`provides = ["tool"]` / `["tool:<名>"]` 的 wasm 模块会注册成模型可见的工具；
+一个模块可挂多个工具（`[[module.tool]]`），`call` 按信封里的 `tool` 字段分流。
+trap / 超时后**自动重建实例**，不需要重启宿主。
+
+不写 manifest 也能验一个插件：`dshd wasm tool --module x.wasm --tool echo --args '{"text":"hi"}'`。

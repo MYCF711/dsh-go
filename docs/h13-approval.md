@@ -1,6 +1,6 @@
 # H13：审批走 Transport
 
-> 当前状态（2026-11-03 复核）：**Transport 端点与子进程标记通道已有实现和测试；父进程 serve 桥接、H14 统一序号/重放、界面真实回传与整链验收未闭环。** 详细跨线状态以 `docs/transport-contract.md` 为快照，开工仍须重读最新源码和提交。
+> 当前状态（2026-11-03 18:08 复核）：**Transport 端点、子进程标记通道、父进程 broker、allow/deny/timeout/replay/allow_always 与 UI 回传已有真机证据；pending approval 的 cancel→拒绝+不执行+`approval/cancel`+第二轮 prompt 尚未闭环。** 详细跨线状态以 `docs/transport-contract.md` 为快照，开工仍须重读最新源码和提交。
 
 ## 已有证据与不能外推的结论
 
@@ -9,7 +9,7 @@
 | 工具侧 | `spi.Caps.NeedsApproval()`；ACP 已有 `session/request_permission`；`dshd run --policy ask` 可终端询问 | ACP/终端可用不等于原生 UI 可用 |
 | Transport HTTP | M249：`session.approve`、handler、原样转发/未知 requestId=404/未知 option=400 测试 | handler 单测不证明工具实际执行或拒绝 |
 | 子进程 | M250：`@@APPROVAL@@` 标记通道与 5 条测试，无应答按拒绝处理 | 子进程有标记不等于 serve 父进程已正确转发 |
-| 父进程 | M252 只读核对记录 stderr 是字节缓冲，不是天然消息流 | 尚需验证分帧、requestId 对应、超时/取消、真实 WS/界面链路 |
+| 父进程 | M258–M261 已有 broker 分帧、WS/journal、allow/deny/timeout/replay/allow_always 证据 | **pending cancel 未接**；不能把上述证据外推为取消整链完成 |
 
 ## 契约：与 ACP 同形，HTTP 控制 + WS 事件
 
@@ -45,6 +45,8 @@ POST /api/session.approve
 
 1. `dshd run` 在 ask 且非终端时，向 stderr 写一行：`@@APPROVAL@@ {"requestId":…,"tool":…,"args":…}`。
 2. serve 按字节缓冲正确分帧，解析后把 `approval/request` 追加到该会话 journal 并推 WS，等待 `session.approve`/超时/取消。
+   负载里带 `timeoutMs`（等多久）与 `deadlineMs`（墙钟截止）：客户端据此画倒计时。
+   **重放场景必须用 `deadlineMs` 算剩余**，否则断线重连后屏幕会显示满额剩余时间，而宿主很快就拒了。
 3. serve 向对应子进程 stdin 写一行：`@@APPROVAL-RESP@@ {"requestId":…,"allow":true}`。
 4. 子进程仅在 allow 后执行；reject/timeout/cancel 都不得执行，并返回明确拒绝结果。
 
