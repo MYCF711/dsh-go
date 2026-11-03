@@ -177,3 +177,52 @@ func (p *Plugin) Fields() []*flex.Field {
 我改了，他们下一个人拉取时会遇到冲突，而且**没人知道这行为什么是那样变的**。
 
 跨仓协作里，"写清楚"比"顺手修"更值钱——尤其当对方正在动同一处的时候。
+
+---
+
+## 回归：`serve` 起的子进程不落盘（2026-11-03 13:12 发现，未修）
+
+全仓回归跑出 `full-e2e.py` **11/15**（M201 时是 15/15）：
+
+```
+FAIL  session.load messages=0
+FAIL  session.fork HTTP 500（源会话没有可继承的 surface）
+FAIL  session.delete / delete.gone（没有 fork 出来的 id，跳过）
+```
+
+### 已经排除的
+
+- **不是探针的等待问题**：给 `session.load` 加了"等到有消息或 60 秒超时"，仍然是 0。
+- **不是脚本本身**：会话文件确实只有 **231 字节**（只有 header）。
+
+### 现象
+
+```
+transport: /api/session.prompt
+spawn pid=36692 argv=[run --home tmp/dbg --session 97c1... --prompt 回答 ok --policy allow --max-steps 6]
+```
+
+子进程**起来了**，但**一行都没写进会话文件**。
+
+而**同样的命令我在 shell 里手跑，5 个事件正常写入**。
+
+### 所以问题在 serve 起子进程的方式，不在 `run` 本身
+
+两个还没验证的怀疑（下一轮逐个排除）：
+
+1. **写锁冲突**：serve 里 `session.create` 打开过 writer，`.lock` 还没释放，
+   子进程 `run --session` 抢不到锁 → 直接失败
+2. **子进程看不到错误**：loopRunner 没把子进程的 stderr 接出来，
+   所以我们连它为什么死都不知道——**这本身是个缺陷，不只是诊断困难**
+
+### 下一轮
+
+先补第 2 条（把子进程 stderr 接到 serve 的 stderr，带 `child:` 前缀），
+再重跑这个场景。**在看不到子进程为什么失败之前，任何修复都是猜。**
+
+### 记一笔
+
+这条是**回归**：M201 时同一套脚本 15/15，之后我改了 `statusRecorder`、`/api` 日志、接了 skill 模块。
+三次改动里至少有一次踩到了它——而**门禁没红**，因为门禁不跑 e2e。
+
+> **能跑通的检查越多，越要定期跑那些"不进门禁的"检查。**

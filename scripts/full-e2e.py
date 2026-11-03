@@ -230,6 +230,13 @@ def main():
         msgs = []
         deadline = time.time() + 180
         while time.time() < deadline:
+            # WAIT-FOR-TURN：prompt 只是"已接受"，回答要等子进程写完。
+            # 直接 load 会读到只有 header 的空会话（实测过：231 字节）。
+            for _ in range(60):
+                __st, __r = api("session.load", {"sessionId": sid, "limit": 50})
+                if __st == 200 and __r.get("messages"):
+                    break
+                time.sleep(1)
             st, r = api("session.load", {"sessionId": sid, "limit": 50})
             msgs = pick(r, ("messages",), ("data", "messages")) or []
             if msgs:
