@@ -38,6 +38,16 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 }
 
 // HistorySession 是 session.history 的实现：按 seq 增量补洞。
+// SeqSourcer 是 Source 的可选增强：只取 seq > sinceSeq 的消息。
+//
+// 为什么需要它：`session.history` 是界面断线补洞时反复调用的 method。
+// 只实现 Messages 的源会**先从全量事件投影出所有消息、再按 seq 过滤**——
+// 实测最大的那份会话（24k 事件）即使结果为空也要 425 ms。
+// 实现这个接口就能在投影前先掐掉不需要的事件。
+type SeqSourcer interface {
+	MessagesSince(sessionID string, sinceSeq int) ([]Message, error)
+}
+
 func HistorySession(src Source, sessionID string, sinceSeq int, limit int) (Page, error) {
 	if src == nil {
 		return Page{}, errors.New("transport: HistorySession 需要 Source，传了 nil")
@@ -45,6 +55,15 @@ func HistorySession(src Source, sessionID string, sinceSeq int, limit int) (Page
 	if sessionID == "" {
 		return Page{}, ErrNoSuchSession
 	}
+	// 能增量取就增量取：这是界面轮询最频繁的一条路。
+	if ss, ok := src.(SeqSourcer); ok {
+		newer, err := ss.MessagesSince(sessionID, sinceSeq)
+		if err != nil {
+			return Page{}, err
+		}
+		return SelectPage(newer, PageSince, sinceSeq, limit), nil
+	}
+
 	all, err := src.Messages(sessionID)
 	if err != nil {
 		return Page{}, err

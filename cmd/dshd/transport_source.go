@@ -32,6 +32,31 @@ func newSessionSource(home, cwd string) *sessionSource {
 // 映射只做三件事（表见任务）：user/message → user、assistant/message → assistant、
 // tool/result → tool，其余事件一律跳过。`tool/call` 虽然不是消息，但它带着工具名与参数，
 // 用来给紧随其后的 tool/result 补上 Tool/Args（补不了就留空，不编）。
+// MessagesSince 只投影 seq > sinceSeq 的事件。
+//
+// 先过滤再投影，而不是先投影再过滤：投影要解 JSON、拼 text、查 tool 索引，
+// 在 24k 事件的会话上那是 400 ms 级的活，而界面补洞时通常只要最后几条。
+func (s *sessionSource) MessagesSince(sessionID string, sinceSeq int) ([]transport.Message, error) {
+	path, err := s.resolve(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	log, err := v4.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if sinceSeq > 0 {
+		kept := log.Events[:0]
+		for _, ev := range log.Events {
+			if ev.Seq > int64(sinceSeq) {
+				kept = append(kept, ev)
+			}
+		}
+		log.Events = kept
+	}
+	return s.messagesOf(log)
+}
+
 func (s *sessionSource) Messages(sessionID string) ([]transport.Message, error) {
 	path, err := s.resolve(sessionID)
 	if err != nil {
@@ -43,7 +68,11 @@ func (s *sessionSource) Messages(sessionID string) ([]transport.Message, error) 
 	if err != nil {
 		return nil, err
 	}
+	return s.messagesOf(log)
+}
 
+// messagesOf 把一份（可能已被过滤过的）日志投影成消息。
+func (s *sessionSource) messagesOf(log *v4.Log) ([]transport.Message, error) {
 	calls := indexToolCalls(log.Events)
 
 	out := make([]transport.Message, 0, len(log.Events))
