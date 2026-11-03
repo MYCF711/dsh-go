@@ -87,3 +87,27 @@ func TestHeaderFrameStaysAloneWithManyAppends(t *testing.T) {
 		t.Logf("注意：next=%d 已到文件尾 %d（没有半帧，正常）", next, st.Size())
 	}
 }
+
+// ReadTail 只解最后几帧：拿到的事件必须比全量少，但必须来自文件末尾。
+func TestReadTailReturnsOnlyTheEnd(t *testing.T) {
+	path := writeLog(t, 30)
+	all, err := ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail, err := ReadTail(path, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail) == 0 {
+		t.Fatal("尾部读不到事件")
+	}
+	if len(tail) >= len(all.Events) {
+		t.Fatalf("只解 3 帧不该拿到全部 %d 个事件", len(all.Events))
+	}
+	// 最后一条必须与全量读的最后一条相同——证明读的是结尾不是开头。
+	last, tailLast := all.Events[len(all.Events)-1], tail[len(tail)-1]
+	if last.Seq != tailLast.Seq || last.Type != tailLast.Type {
+		t.Fatalf("尾部最后一条应是 seq=%d，实际 seq=%d", last.Seq, tailLast.Seq)
+	}
+}

@@ -113,3 +113,72 @@ func readSince(dec *zstd.Decoder, path string, offset int64) (events []Event, ne
 	}
 	return events, next, nil
 }
+
+// ReadTail 只解最后 frames 帧，返回其中的事件。
+//
+// 为什么需要：`session.load` 只要首屏 50 条，但为了给出准确的 total，
+// 传统做法是把 13,900 帧全解出来（实测 138 ms 解压 + 200 ms 投影）。
+// 帧之间互相独立（每帧自带 magic），所以从尾部挑几帧解是可行的——实测 0.5 ms。
+//
+// **它拿不出 total。** 要数总条数就必须解完全部，这是契约层面的取舍，
+// 见 docs/transport-obligations.md 的「total 可以迟到」。
+func ReadTail(path string, frames int) ([]Event, error) {
+	if frames <= 0 {
+		return nil, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	starts := frameStarts(b)
+	if len(starts) == 0 {
+		return nil, nil
+	}
+	dec, derr := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
+	if derr != nil {
+		return nil, derr
+	}
+	defer dec.Close()
+
+	// 按帧边界逐段解：最后几帧是连续的一段字节，每段独立。
+	var out []Event
+	for k := len(starts) - frames; k < len(starts); k++ {
+		if k < 0 {
+			continue
+		}
+		end := len(b)
+		if k+1 < len(starts) {
+			end = starts[k+1]
+		}
+		raw, eerr := decodeFrame(dec, b[starts[k]:end])
+		if eerr != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var ev Event
+			if json.Unmarshal([]byte(line), &ev) != nil {
+				continue
+			}
+			if ev.Type == "session" {
+				continue
+			}
+			out = append(out, ev)
+		}
+	}
+	return out, nil
+}
+
+// frameStarts 找出所有帧起点（zstd magic 的位置）。
+func frameStarts(b []byte) []int {
+	var magic = []byte{0x28, 0xb5, 0x2f, 0xfd}
+	var out []int
+	for i := 0; i+4 <= len(b); i++ {
+		if b[i] == magic[0] && b[i+1] == magic[1] && b[i+2] == magic[2] && b[i+3] == magic[3] {
+			out = append(out, i)
+		}
+	}
+	return out
+}
