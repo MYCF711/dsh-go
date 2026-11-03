@@ -16,6 +16,16 @@ python scripts/h-suite.py --fast   # 不调模型的（约 30 秒）
 **2026-11-03 全量记录**：10 条探针 / 60 项断言全绿（help-guard 15、contract-evidence 2、
 h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
 
+### `-race` 为什么跑不起来（2026-11-03 实测）
+
+本机**没有任何 C 工具链**：`go env CGO_ENABLED` = 0，`gcc` / `cc` / `clang` / `cl` 都不存在。
+`go test -race` 因此从来跑不起来——按 AGENTS §5，这**就是未验证**，不是"应该没问题"。
+
+替代品 `TestConcurrentJournalAndHubInvariants`：4 会话 × 200 帧并发写、4 个读者并发取、
+订阅/退订交错，断言每会话 seq 正好 1..N、退订后不再收帧。
+它抓得到**死锁、丢帧、seq 错乱、并发写 map 的 panic**，
+**抓不到没有可见症状的数据竞争**——这条边界必须记着。
+
 ### 守卫的边界（每层能证明什么、不能证明什么）
 
 | 层 | 守卫 | 能证明 | **不能证明** |
