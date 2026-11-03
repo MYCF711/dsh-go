@@ -343,6 +343,50 @@
     "caps": {}
   },
   {
+    "name": "hindsight_read_knowledge_page",
+    "description": "按 id 读一份记忆的正文全文；已知 id、要看完整内容时用它。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "page_id": {
+          "type": "string",
+          "description": "文档 id，先用 list/search 拿到（DSH 的叫法）"
+        },
+        "id": {
+          "type": "string",
+          "description": "同上，另一种叫法；两个都给时以 page_id 为准"
+        }
+      },
+      "required": [
+        "page_id"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
+    "name": "hindsight_search_knowledge_pages",
+    "description": "按关键词搜本机记忆（标题×3 tags×2 正文×1 计分，降序）；记得大概内容但忘了 id 时用它。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "要搜什么；空格分隔多个词，标题×3 tags×2 正文×1 计分"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "最多返回几条；缺省 5，上限 20"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "history_search",
     "description": "在原始日志里按关键词回查（含已被压缩遮蔽的内容）；想找回「之前那段细节」时用。",
     "parameters": {

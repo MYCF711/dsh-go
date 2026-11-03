@@ -257,6 +257,318 @@ func (t *listTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, e
 }
 
 // ---------------------------------------------------------------------------
+// search
+// ---------------------------------------------------------------------------
+
+var searchSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "query": {"type": "string", "description": "要搜什么；空格分隔多个词，标题×3 tags×2 正文×1 计分"},
+    "limit": {"type": "integer", "description": "最多返回几条；缺省 5，上限 20"}
+  },
+  "required": ["query"],
+  "additionalProperties": false
+}`)
+
+const (
+	// defaultSearchLimit 是 limit 缺省值；maxSearchLimit 是硬上限。
+	defaultSearchLimit = 5
+	maxSearchLimit     = 20
+	// snippetRunes 是片段向命中位置两侧各取多少个字符。
+	snippetRunes = 40
+)
+
+type searchTool struct{ dir string }
+
+func (t *searchTool) Name() string { return "hindsight_search_knowledge_pages" }
+
+func (t *searchTool) Description() string {
+	return "按关键词搜本机记忆（标题×3 tags×2 正文×1 计分，降序）；记得大概内容但忘了 id 时用它。"
+}
+
+func (t *searchTool) Schema() json.RawMessage { return searchSchema }
+
+// Caps 全空：只读目录。
+func (t *searchTool) Caps() spi.Caps { return spi.Caps{} }
+
+type searchArgs struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit"`
+}
+
+type searchHit struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Score   int    `json:"score"`
+	Snippet string `json:"snippet,omitempty"`
+}
+
+type searchData struct {
+	Count int         `json:"count"`
+	Query string      `json:"query"`
+	Hits  []searchHit `json:"hits"`
+}
+
+func (t *searchTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
+	var a searchArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return spi.Result{Hint: `参数不合法：期望 {"query": "…", "limit"?: 5}`},
+			fmt.Errorf("参数解析失败: %w", err)
+	}
+	query := strings.TrimSpace(a.Query)
+	if query == "" {
+		return spi.Result{Hint: "缺 query：要搜什么？"}, fmt.Errorf("query 为空")
+	}
+	if err := ctx.Err(); err != nil {
+		return spi.Result{Hint: "这次调用被取消了；原参数重发一次即可"}, err
+	}
+
+	limit := a.Limit
+	if limit <= 0 {
+		limit = defaultSearchLimit
+	}
+	if limit > maxSearchLimit {
+		limit = maxSearchLimit
+	}
+
+	// 分词只做一次：Fields 按空白切，每词小写；空词不可能出现。
+	words := strings.Fields(strings.ToLower(query))
+
+	docs, err := loadDocs(t.dir)
+	if err != nil {
+		return spi.Result{Hint: "读 " + slash(t.dir) + " 失败：先确认这个目录可读"}, err
+	}
+
+	type scored struct {
+		doc   document
+		score int
+	}
+	ranked := make([]scored, 0, len(docs))
+	for _, d := range docs {
+		lowTitle := strings.ToLower(d.Title)
+		lowBody := strings.ToLower(d.Body)
+		lowTags := make([]string, 0, len(d.Tags))
+		for _, tag := range d.Tags {
+			lowTags = append(lowTags, strings.ToLower(tag))
+		}
+
+		titleHits, tagHits, bodyHits := 0, 0, 0
+		for _, w := range words {
+			titleHits += strings.Count(lowTitle, w)
+			bodyHits += strings.Count(lowBody, w)
+			for _, tag := range lowTags {
+				tagHits += strings.Count(tag, w)
+			}
+		}
+		score := titleHits*3 + tagHits*2 + bodyHits*1
+		if score == 0 {
+			continue
+		}
+		ranked = append(ranked, scored{doc: d, score: score})
+	}
+
+	// 分数降序；同分按 created 倒序；再同则按 id 正序，保证输出可重放。
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		if ranked[i].doc.Created != ranked[j].doc.Created {
+			return ranked[i].doc.Created > ranked[j].doc.Created
+		}
+		return ranked[i].doc.ID < ranked[j].doc.ID
+	})
+
+	if len(ranked) == 0 {
+		return spi.Result{
+			Text:    "没有命中",
+			Summary: "命中 0 条",
+			Data:    searchData{Count: 0, Query: query, Hits: []searchHit{}},
+			Hint:    "换个词；或用 hindsight_list_knowledge_pages 看看都有什么",
+		}, nil
+	}
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+
+	var b strings.Builder
+	hits := make([]searchHit, 0, len(ranked))
+	for i, r := range ranked {
+		snippet := makeSnippet(r.doc.Body, words)
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		if snippet == "" {
+			fmt.Fprintf(&b, "%s\t%s\t%d", r.doc.ID, r.doc.Title, r.score)
+		} else {
+			fmt.Fprintf(&b, "%s\t%s\t%d\t%s", r.doc.ID, r.doc.Title, r.score, snippet)
+		}
+		hits = append(hits, searchHit{ID: r.doc.ID, Title: r.doc.Title, Score: r.score, Snippet: snippet})
+	}
+
+	return spi.Result{
+		Text:    b.String(),
+		Summary: fmt.Sprintf("命中 %d 条", len(hits)),
+		Data:    searchData{Count: len(hits), Query: query, Hits: hits},
+	}, nil
+}
+
+// makeSnippet 取正文里**第一个词**首次出现位置前 40 字符到后 40 字符（按 rune 切，
+// 中文才不会被切成半个字）。找不到就不带片段；换行/制表符压成空格，保证一条结果占一行。
+func makeSnippet(body string, words []string) string {
+	if body == "" || len(words) == 0 {
+		return ""
+	}
+	low := strings.ToLower(body)
+	for _, w := range words {
+		byteIdx := strings.Index(low, w)
+		if byteIdx < 0 {
+			continue
+		}
+		runes := []rune(body)
+		// byteIdx 落在 low 上，换算成 body 的 rune 下标（ToLower 只对极少数码元改长度，
+		// 真改了也只会让片段偏几个字符，不会越界——下面有夹紧）。
+		at := utf8.RuneCountInString(low[:byteIdx])
+		if at > len(runes) {
+			at = len(runes)
+		}
+		start := at - snippetRunes
+		if start < 0 {
+			start = 0
+		}
+		end := at + utf8.RuneCountInString(w) + snippetRunes
+		if end > len(runes) {
+			end = len(runes)
+		}
+		return oneLine(string(runes[start:end]))
+	}
+	return ""
+}
+
+// oneLine 把片段里的换行与制表符压成空格：结果按 \t 分列、按行分条，片段不许破坏它。
+func oneLine(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		}
+		return r
+	}, s))
+}
+
+// ---------------------------------------------------------------------------
+// read
+// ---------------------------------------------------------------------------
+
+var readSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "page_id": {"type": "string", "description": "文档 id，先用 list/search 拿到（DSH 的叫法）"},
+    "id": {"type": "string", "description": "同上，另一种叫法；两个都给时以 page_id 为准"}
+  },
+  "required": ["page_id"],
+  "additionalProperties": false
+}`)
+
+type readTool struct{ dir string }
+
+func (t *readTool) Name() string { return "hindsight_read_knowledge_page" }
+
+func (t *readTool) Description() string {
+	return "按 id 读一份记忆的正文全文；已知 id、要看完整内容时用它。"
+}
+
+func (t *readTool) Schema() json.RawMessage { return readSchema }
+
+// Caps 全空：只读目录。
+func (t *readTool) Caps() spi.Caps { return spi.Caps{} }
+
+type readArgs struct {
+	ID string `json:"id"`
+	// PageID 是 DSH 那边用的名字。**两个都收**：只认一个，
+	// 照 DSH 契约写的调用方就会拿到"缺参"（2026-11-03 parity 测抓到的）。
+	PageID string `json:"page_id"`
+}
+
+type readData struct {
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Tags      []string `json:"tags"`
+	Created   int64    `json:"created"`
+	BodyChars int      `json:"body_chars"`
+}
+
+func (t *readTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
+	var a readArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return spi.Result{Hint: `参数不合法：期望 {"id": "…"}`},
+			fmt.Errorf("参数解析失败: %w", err)
+	}
+	id := strings.TrimSpace(a.PageID)
+	if id == "" {
+		id = strings.TrimSpace(a.ID)
+	}
+	if id == "" {
+		return spi.Result{Hint: "缺 id：先用 hindsight_list_knowledge_pages 看看有哪些"},
+			fmt.Errorf("id 为空")
+	}
+	if err := ctx.Err(); err != nil {
+		return spi.Result{Hint: "这次调用被取消了；原参数重发一次即可"}, err
+	}
+
+	docs, err := loadDocs(t.dir)
+	if err != nil {
+		return spi.Result{Hint: "读 " + slash(t.dir) + " 失败：先确认这个目录可读"}, err
+	}
+	for _, d := range docs {
+		if d.ID != id {
+			continue
+		}
+		chars := utf8.RuneCountInString(d.Body)
+		tags := d.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		return spi.Result{
+			Text:    d.Body,
+			Summary: fmt.Sprintf("「%s」（%d 字）", d.Title, chars),
+			Data:    readData{ID: d.ID, Title: d.Title, Tags: tags, Created: d.Created, BodyChars: chars},
+		}, nil
+	}
+
+	return spi.Result{Hint: missingIDHint(id, docs)}, fmt.Errorf("没有 id 为 %s 的记忆", id)
+}
+
+// missingIDHint 把"有哪些 id"直接塞进 Hint：模型下一步就靠这句话换成对的 id，
+// 不必再花一次调用去 list。最多列 5 个，避免 Hint 本身变长。
+func missingIDHint(id string, docs []document) string {
+	if len(docs) == 0 {
+		return "记忆还是空的：先用 hindsight_ingest_document 存一条"
+	}
+	// 与 list 一致：created 倒序，同秒按 id，保证同样的输入给同样的提示。
+	sorted := make([]document, len(docs))
+	copy(sorted, docs)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Created != sorted[j].Created {
+			return sorted[i].Created > sorted[j].Created
+		}
+		return sorted[i].ID < sorted[j].ID
+	})
+	const shown = 5
+	ids := make([]string, 0, shown)
+	for i, d := range sorted {
+		if i >= shown {
+			break
+		}
+		ids = append(ids, d.ID)
+	}
+	hint := "没有 id「" + id + "」；已有的 id：" + strings.Join(ids, ", ")
+	if len(sorted) > shown {
+		hint += fmt.Sprintf("（共 %d 条，用 hindsight_list_knowledge_pages 看全）", len(sorted))
+	}
+	return hint
+}
+
+// ---------------------------------------------------------------------------
 // 存储
 // ---------------------------------------------------------------------------
 
@@ -360,10 +672,17 @@ func Module(home string) kernel.Module {
 				return err
 			}
 			dir := filepath.Join(home, "memory")
-			if err := reg.Register(&ingestTool{dir: dir}); err != nil {
-				return err
+			for _, t := range []spi.Tool{
+				&ingestTool{dir: dir},
+				&listTool{dir: dir},
+				&searchTool{dir: dir},
+				&readTool{dir: dir},
+			} {
+				if err := reg.Register(t); err != nil {
+					return err
+				}
 			}
-			return reg.Register(&listTool{dir: dir})
+			return nil
 		},
 	}
 }
