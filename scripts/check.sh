@@ -141,6 +141,18 @@ else
     warn "工具表体积 $table_line（超过 32 KB：删描述或合并工具）"
   fi
 
+  # 跨 goroutine 起点必须登记（-race 跑不了时的结构性补偿）
+  if [ -f scripts/race-guard.py ]; then
+    if race_out=$(python scripts/race-guard.py 2>&1); then
+      pass "跨 goroutine 起点已登记（$(printf '%s' "$race_out" | grep -oE '[0-9]+ 处' | head -1)）"
+    else
+      bad "race-guard: $(printf '%s' "$race_out" | grep 'FAIL' | head -2 | tr '
+' ' ')"
+    fi
+  else
+    bad "找不到 scripts/race-guard.py —— -race 跑不了时这是唯一的并发检查"
+  fi
+
   # R1 内核零业务
   if [ -d internal/kernel ]; then
     deps=$(go list -deps ./internal/kernel 2>/dev/null \

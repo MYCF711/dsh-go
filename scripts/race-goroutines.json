@@ -1,0 +1,69 @@
+{
+  "goroutines": [
+    {
+      "site": "internal/acp/server.go:157",
+      "what": "未分类",
+      "sync": "待补：说明它碰什么、靠什么同步"
+    },
+    {
+      "site": "internal/acp/server.go:422",
+      "what": "未分类",
+      "sync": "待补：说明它碰什么、靠什么同步"
+    },
+    {
+      "site": "internal/kernel/eventbus.go:147",
+      "what": "未分类",
+      "sync": "待补：说明它碰什么、靠什么同步"
+    },
+    {
+      "site": "internal/transport/heartbeat.go:44",
+      "what": "未分类",
+      "sync": "待补：说明它碰什么、靠什么同步"
+    },
+    {
+      "site": "internal/transport/server.go:120",
+      "what": "每个 WS 连接一条",
+      "sync": "Hub 的 mu + connSubscriber 自己的写序列化"
+    },
+    {
+      "site": "internal/transport/server.go:203",
+      "what": "每个 WS 连接一条",
+      "sync": "Hub 的 mu + connSubscriber 自己的写序列化"
+    },
+    {
+      "site": "cmd/dshd/serve_tools.go:70",
+      "what": "每轮一个 follow",
+      "sync": "只读日志 + pub 由 transport 内部加锁；prog 只在 fw.Wait() 之后读"
+    },
+    {
+      "site": "cmd/dshd/transport_prompt.go:62",
+      "what": "每轮一个 turn",
+      "sync": "promptService 的 busy 表有锁；busy 的唯一结束点在 defer"
+    },
+    {
+      "site": "cmd/dshd-bridge/main.go:67",
+      "what": "桥的读写",
+      "sync": "桥是独立进程，不共享宿主的锁"
+    },
+    {
+      "site": "cmd/dshd-bridge/main.go:102",
+      "what": "桥的读写",
+      "sync": "桥是独立进程，不共享宿主的锁"
+    },
+    {
+      "site": "cmd/dshd-bridge/main.go:420",
+      "what": "桥的读写",
+      "sync": "桥是独立进程，不共享宿主的锁"
+    },
+    {
+      "site": "modules/exec/bash/session.go:90",
+      "what": "后台任务等待",
+      "sync": "job 表有锁"
+    },
+    {
+      "site": "modules/exec/bash/tools.go:111",
+      "what": "后台任务启动",
+      "sync": "job 表有锁"
+    }
+  ]
+}
