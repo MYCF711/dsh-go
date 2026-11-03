@@ -135,6 +135,18 @@ func ToolCallEvent(turn, step int, callID, name, arguments string) map[string]an
 }
 
 // ToolResultEvent 构造 tool/result 的 data。
+// ToolResultEventWithView 在普通 tool/result 上加一份客户端渲染声明（H3）。
+//
+// 为什么单独一个函数而不改签名：ToolResultEvent 有 4 个调用点（含 3 个测试），
+// 改签名会让所有调用点跟着改；而"多带一个可选的 view"本来就是增量的语义。
+func ToolResultEventWithView(turn, step int, callID string, blocks []spi.Block, isError bool, cwd string, sourceSeqs []int64, view json.RawMessage) map[string]any {
+	ev := ToolResultEvent(turn, step, callID, blocks, isError, cwd, sourceSeqs)
+	if len(view) > 0 {
+		ev["view"] = view
+	}
+	return ev
+}
+
 func ToolResultEvent(turn, step int, callID string, blocks []spi.Block, isError bool, cwd string, sourceSeqs []int64) map[string]any {
 	if sourceSeqs == nil {
 		sourceSeqs = []int64{}

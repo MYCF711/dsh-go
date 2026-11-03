@@ -122,3 +122,18 @@ func TestToolCallArgumentsAreStrings(t *testing.T) {
 		t.Fatalf("arguments = %q", s)
 	}
 }
+
+// H3：工具的 ViewSpec 要能落到事件里；没有视图时**不出现 view 键**（不是 null）。
+func TestToolResultEventCarriesView(t *testing.T) {
+	view := json.RawMessage(`{"kind":"plain","body":"内容"}`)
+	ev := ToolResultEventWithView(1, 2, "c1", nil, false, "/w", nil, view)
+	got, ok := ev["view"].(json.RawMessage)
+	if !ok || len(got) == 0 {
+		t.Fatalf("带视图时应当有 view 键，实际 %v", ev["view"])
+	}
+
+	bare := ToolResultEventWithView(1, 2, "c1", nil, false, "/w", nil, nil)
+	if _, has := bare["view"]; has {
+		t.Fatalf("没有视图时不该出现 view 键，实际 %v", bare["view"])
+	}
+}

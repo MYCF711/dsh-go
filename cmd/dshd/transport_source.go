@@ -9,6 +9,7 @@ import (
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/session"
+	"dshgo/internal/spi"
 	"dshgo/internal/transport"
 )
 
@@ -202,6 +203,13 @@ func (s *sessionSource) messagesOf(events []v4.Event) ([]transport.Message, erro
 			if c, found := calls[callID]; found {
 				msg.Tool = c.name
 				msg.Args = c.args
+			}
+			// H3：工具把自己声明的 ViewSpec 落到事件里，这里原样透传给界面。
+			var meta struct {
+				View json.RawMessage `json:"view"`
+			}
+			if json.Unmarshal(ev.Data, &meta) == nil && len(meta.View) > 0 {
+				msg.View = meta.View
 			}
 			out = append(out, msg)
 		}
@@ -403,4 +411,19 @@ func indexToolCalls(events []v4.Event) map[string]toolCallInfo {
 		idx[d.CallID] = toolCallInfo{name: d.Name, args: d.Arguments}
 	}
 	return idx
+}
+
+// viewOf 把工具的 ViewSpec 序列化成可落盘的 JSON（H3）。
+//
+// nil 时返回 nil：**不写 `"view": null`**——那会让界面收到一个"有字段但为空"的值，
+// 而它该看到的是"这次没有视图声明"。
+func viewOf(r *spi.Result) json.RawMessage {
+	if r == nil || r.View == nil {
+		return nil
+	}
+	b, err := json.Marshal(r.View)
+	if err != nil {
+		return nil
+	}
+	return b
 }

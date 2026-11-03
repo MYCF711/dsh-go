@@ -179,7 +179,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 				blocks = []spi.Block{{Type: "text", Text: "（无结果）"}}
 			}
 			if err := logw.Append("tool/result",
-				session.ToolResultEvent(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq})); err != nil {
+				session.ToolResultEventWithView(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}, viewOf(e.Result))); err != nil {
 				return err
 			}
 		case agent.EventTurnEnd:

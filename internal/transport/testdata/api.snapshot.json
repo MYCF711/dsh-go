@@ -23,7 +23,8 @@
       "args",
       "summary",
       "time",
-      "usage"
+      "usage",
+      "view"
     ],
     "SessionSummary": [
       "id",

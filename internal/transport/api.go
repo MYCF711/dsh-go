@@ -4,6 +4,8 @@
 // 界面只认这里的字符串，改了就是破坏契约——先改快照，再两边各改各的。
 package transport
 
+import "encoding/json"
+
 // Method 是 /api 上的一个方法名。界面只认这些字符串，不许改。
 type Method string
 
@@ -49,6 +51,9 @@ type Message struct {
 	// Usage 是助手消息带的用量（H1）。键与 v4 的 usage 一致，界面直接读。
 	// nil 表示这次没有用量信息——**不许编 0**，那样界面会显示"0 tok/s"。
 	Usage *UsageMsg `json:"usage,omitempty"`
+	// View 是工具结果的渲染声明（H3），原样来自 spi.ViewSpec。
+	// 缺省不出现——界面见到 `kind` 才选渲染器，没有就退回「工具名 + 摘要」。
+	View json.RawMessage `json:"view,omitempty"`
 }
 
 // UsageMsg 是一条助手消息的用量。字段名照 v4 的 usage 原样搬，不另起一套。

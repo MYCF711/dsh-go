@@ -540,7 +540,7 @@ func cmdRun(argv []string) error {
 					blocks = []spi.Block{{Type: "text", Text: "（无结果）"}}
 				}
 				return logw.Append("tool/result",
-					session.ToolResultEvent(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}))
+					session.ToolResultEventWithView(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}, viewOf(e.Result)))
 			case agent.EventTurnEnd:
 				return logw.Append("turn/end", session.TurnEndData(e.Turn, "completed", ""))
 			}
