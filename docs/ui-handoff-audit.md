@@ -576,3 +576,38 @@ turn/end        {"reason":{"kind":"completed"},"turn":1}
 - 界面仓 `go build ./...` 也是干净的。
 
 仍未验的（不在这一跑的范围）：图形界面肉眼交互、审批在界面上的真实点选、`session.compact` 由界面触发。
+
+---
+
+## 附录 D：界面线可以直接接、但还没接的两个能力
+
+这两个宿主侧**已经能用**，界面仓目前零调用点（审计实测）：
+
+### 1. `session.compact`（界面上的"压缩"）
+
+```http
+POST /api/session.compact
+{"sessionId":"…","keep":6}
+
+200 {"compacted":true,"from":12,"to":140,"shadowed":129,"summaryChars":880}
+200 {"compacted":false}        # 还没到该压的时候——**这是正常结果，不是失败**
+501 {"error":{"code":"not_implemented",…}}   # 宿主没接线（老版本）
+```
+
+界面要做的：
+- 会话菜单里加一项「压缩」；
+- 成功且 `compacted=true` → 提示"已压缩，遮蔽 N 条"；
+- `compacted=false` → 提示"现在不需要压缩"，**不要弹红框**；
+- 压缩期间不要允许并发 `session.prompt`（压缩会追加事件，prompt 会撞 busy）。
+
+### 2. `contextWindow`（进度条的分母）
+
+`session.load` 现在会带 `contextWindow`（token 上限）：
+
+```json
+{"contextTokens": 12000, "contextWindow": 100000}
+```
+
+- **有 `contextWindow` 才画百分比条**；
+- 没有（字段缺失或 0）就只显示"用了多少 token"——不要自己猜一个分母。
+- 来源：宿主环境变量 `DSHD_CONTEXT_WINDOW`；不设就没有这个字段。
