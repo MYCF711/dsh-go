@@ -479,7 +479,12 @@
   界面看得到"回答"，看不到"它调了什么工具"。下一轮按 seq 推全部事件
 - ⚠️ 探针自己不可靠时给的是"服务坏了"这个错结论：subprocess 读 ready 行时
   第二次 readline 吞了后续输出，看起来像卡死。换 curl + 落盘文件立刻就好
-- 下一步 **M125**：`follow` 改成按 seq 增量推**全部事件**（tool/call、tool/result 也要）
+- ✅ **`follow` 改成按 seq 推全部事件**：WS 现在收得到 `tool/call` 与 `tool/result`
+  （真机实测：2675 字节里五个类型全在：tool/call、tool/result、assistant/message、turn/done）
+- ✅ 为什么必须推全部：只推 assistant/message 的话，用户看得到答案、看不到它调了什么。
+  **"看不到过程"是这类 agent 界面最不能接受的事**
+- 下一步 **M126**：`serve` 的 `--policy` 目前硬编码 deny；给它一个 flag 并在 ready 行之后打印实际策略
+  （现在打的是固定字符串，**说的和做的不一定是一回事**）
 
 ### 界面线现状（2026-11-03）
 

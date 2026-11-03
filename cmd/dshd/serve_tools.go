@@ -3,13 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	"dshgo/codecs/v4"
 	"dshgo/internal/transport"
 )
 
@@ -66,10 +66,14 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	return nil
 }
 
-// follow 每 200ms 看一眼日志，把新出现的消息推出去。
+// follow 每 200ms 看一次日志，把 seq 更大的**全部事件**推出去。
+//
+// 为什么不是只推消息：界面要显示"它调了什么工具"。
+// 只推 assistant/message 的话，用户看到答案却看不到过程——
+// 而"看不到过程"正是这类 agent 界面最不能接受的事。
 func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan struct{}) {
 	src := newSessionSource(r.home, "")
-	seen := 0
+	var lastSeq int64
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -79,17 +83,26 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			msgs, err := src.Messages(sessionID)
-			if err != nil || len(msgs) <= seen {
+			path, err := src.resolve(sessionID)
+			if err != nil {
 				continue
 			}
-			for _, m := range msgs[seen:] {
-				data, _ := json.Marshal(map[string]any{"role": m.Role, "text": m.Text})
-				if r.pub != nil {
-					r.pub("session:"+sessionID, transport.ServerFrame{Seq: m.Seq, Type: "message", Data: data})
-				}
+			log, err := v4.ReadFile(path)
+			if err != nil {
+				continue
 			}
-			seen = len(msgs)
+			for _, ev := range log.Events {
+				if ev.Seq <= lastSeq {
+					continue
+				}
+				lastSeq = ev.Seq
+				if r.pub == nil {
+					continue
+				}
+				r.pub("session:"+sessionID, transport.ServerFrame{
+					Seq: int(ev.Seq), Type: ev.Type, Data: ev.Data,
+				})
+			}
 		}
 	}
 }
