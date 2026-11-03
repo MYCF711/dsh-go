@@ -43,3 +43,38 @@ prompt2           → accepted turn-2
 
 这一轮我差点写下"崩溃处理已验证"。差一点的理由是第 3 点看起来对——
 **"看起来对"正是前面那些假绿（占位符标题、永真 grep、量错对象的门禁）的共同前身。**
+
+---
+
+## 续（第二轮）：加了一行日志才看得见
+
+`loopRunner.Run` 起子进程后往 stderr 写一行：
+
+```
+spawn pid=2696 argv=[run --home tmp/spawnchk --session 18ebf4df-… --prompt … --policy deny --max-steps 6]
+```
+
+加完立刻能回答上一轮回答不了的问题：**子进程确实起来了**。
+上一轮"进程数 1"是因为当时那个任务早已跑完退出，不是没起来。
+
+### 杀掉子进程再试
+
+```
+prompt1 → accepted turn-1（子进程 pid=42872 已起）
+taskkill /PID 42872         （跑 sleep 30 的中途杀掉）
+prompt2 → accepted turn-2
+```
+
+第二句被接受 = busy 已清 = 那一轮的 goroutine 真的收尾了。
+
+### 仍然没验到的
+
+**界面那一侧收到的到底是 `turn/error` 还是别的**，这轮没抓 WS。
+现在能确定的是「宿主不会卡住」；「界面被告知了什么」还差一次 WS 抓包。
+
+### 方法记一笔
+
+上一轮我写下的结论是「没验到」。这一轮只加了一行 `fmt.Fprintf(os.Stderr, "spawn pid=…")`，
+整件事就从"分不清"变成"看得见"。
+
+**排障的第一步永远是让失败可见，而不是猜它为什么失败。**

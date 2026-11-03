@@ -49,6 +49,9 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 		publishTurn(r.pub, "session:"+sessionID, turnID, err)
 		return err
 	}
+	// 把子进程的身份写在 stderr 上：出问题时第一句该问的是"它到底起没起来"。
+	// 上一轮就是因为没有这一行，分不清"被杀"和"压根没起"。
+	fmt.Fprintf(os.Stderr, "spawn pid=%d argv=%v\n", cmd.Process.Pid, args)
 
 	// 边跑边推：日志是 append 的，按条数差量推就够。
 	// 必须**等 follow 真的退出**再发终局帧：否则它可能在我们发出 turn/done 之后
