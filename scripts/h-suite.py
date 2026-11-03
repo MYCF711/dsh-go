@@ -91,8 +91,12 @@ def main():
             continue
         if fails:
             bad += 1
+        # 只报 "4/5" 等于没说：要说出**哪一条**红了，否则下次还得手动重跑。
+        detail = ""
+        if fails:
+            detail = "；".join(ln.strip() for ln in out.splitlines() if "FAIL" in ln)[:200]
         rows.append((name, label, "OK" if fails == 0 else "FAIL",
-                     "%d/%d" % (oks, oks + fails), ""))
+                     "%d/%d" % (oks, oks + fails), detail))
 
     print()
     print("%-18s %-44s %-6s %-6s" % ("探针", "证明什么", "结果", "通过"))

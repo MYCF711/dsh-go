@@ -118,7 +118,9 @@ def main():
         post("session.prompt", {"sessionId": sa, "text": "只回答这一个词：%s" % MARK_A})
         post("session.prompt", {"sessionId": sb, "text": "只回答这一个词：%s" % MARK_B})
 
-        deadline = time.time() + 120
+        # 两个模型轮次并发跑，固定 120 秒在机器忙的时候会不够——
+        # 那红的是**探针的耐心**，不是宿主。给足 240 秒，并在超时后说清是哪边没等到。
+        deadline = time.time() + 240
         while time.time() < deadline:
             time.sleep(1)
             ta_txt = b"".join(bufa).decode(errors="replace")
@@ -141,7 +143,8 @@ def main():
         chk("B 的 seq 从 1 开始", min(seqs_b) == 1 if seqs_b else False, seqs_b[:6])
         chk("A 的流里没有 B 的暗号", MARK_B not in a)
         chk("B 的流里没有 A 的暗号", MARK_A not in b)
-        chk("两边都收到 turn/done", "turn/done" in a and "turn/done" in b)
+        chk("两边都收到 turn/done", "turn/done" in a and "turn/done" in b,
+            "A:%s B:%s" % ("有" if "turn/done" in a else "无", "有" if "turn/done" in b else "无"))
     finally:
         proc.kill()
         proc.wait(timeout=10)
