@@ -908,6 +908,10 @@ func makeAskFuncWith(policy string, interactive bool) (func(ctx context.Context,
 	case "deny":
 		return func(context.Context, string, string, string) (bool, error) { return false, nil }, nil
 	case "ask", "auto":
+		// 宿主把我当子进程养着（serve 会设这个环境变量）：走父子标记通道，不问终端。
+		if approvalViaStdio() {
+			return markerAsk, nil
+		}
 		if policy == "auto" && !interactive {
 			return func(context.Context, string, string, string) (bool, error) { return false, nil }, nil
 		}
