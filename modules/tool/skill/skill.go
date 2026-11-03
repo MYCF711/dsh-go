@@ -22,15 +22,18 @@ const maxBody = 32 << 10
 // truncatedTail 是截断时追加在正文末尾的说明。
 const truncatedTail = "…（内容超过 32KB，已截断）"
 
+// schema：name 变成**可选**。不给 name = 列清单。
+//
+// 为什么要有清单模式：模型不可能凭空知道本机装了哪些 skill。
+// 没有清单时它只能猜名字，猜错一次就是一次往返——而猜错的成本全在用户那里（等待）。
 var schema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "name": {
       "type": "string",
-      "description": "skill 名，即 <dir>/<name>/SKILL.md 里的 <name>"
+      "description": "skill 名。省略则列出本机所有 skill（名字 + 一句话说明）"
     }
   },
-  "required": ["name"],
   "additionalProperties": false
 }`)
 
@@ -61,8 +64,10 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	}
 
 	name := strings.TrimSpace(args.Name)
-	if name == "" {
-		return spi.Result{Hint: "缺 name：要加载哪个 skill？"}, skillErr("skill 缺少 name 参数")
+	// 不给 name（或给 "*" / "list"）= 列清单。这是"先看看有什么"的那一步，
+	// 没有它，模型只能猜名字。
+	if name == "" || name == "*" || name == "list" {
+		return t.list()
 	}
 
 	dir := t.dir
@@ -119,6 +124,67 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 type skillErr string
 
 func (e skillErr) Error() string { return string(e) }
+
+// list 列出本机所有 skill：名字 + 从 SKILL.md 的 frontmatter 里取的一句话说明。
+//
+// 说明取不到就不编：只给名字。**空描述比假描述好**——假描述会让模型挑错 skill。
+func (t *Tool) list() (spi.Result, error) {
+	names := existingSkills(t.dir)
+	if len(names) == 0 {
+		return spi.Result{
+			Hint: "这台机器上没装任何 skill（" + filepath.ToSlash(t.dir) + " 下没有 <名字>/SKILL.md）。先建一个再来。",
+		}, skillErr("没有可用的 skill：" + filepath.ToSlash(t.dir))
+	}
+
+	var b strings.Builder
+	b.WriteString("本机可用 skill（用 {\"name\":\"<名字>\"} 取全文）：\n")
+	for _, n := range names {
+		desc := readDescription(filepath.Join(t.dir, n, "SKILL.md"))
+		if desc == "" {
+			b.WriteString("- " + n + "\n")
+			continue
+		}
+		b.WriteString("- " + n + " — " + desc + "\n")
+	}
+
+	return spi.Result{
+		Summary: "本机有 " + itoa(len(names)) + " 个 skill",
+		Text:    strings.TrimRight(b.String(), "\n"),
+		Data:    map[string]any{"count": len(names), "names": names},
+	}, nil
+}
+
+// readDescription 从 SKILL.md 顶部的 YAML frontmatter 里取 description。
+//
+// 只认最常见的形状：文件以 `---` 开头，之后的若干行 `key: value`，遇到第二个 `---` 结束。
+// 取不到就返回空串——**不猜、不拼**。
+func readDescription(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	lines := strings.SplitN(text, "\n", 40) // 只看前 40 行：frontmatter 不会更长
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return ""
+	}
+	for _, ln := range lines[1:] {
+		t := strings.TrimSpace(ln)
+		if t == "---" {
+			break
+		}
+		if !strings.HasPrefix(t, "description:") {
+			continue
+		}
+		v := strings.TrimSpace(strings.TrimPrefix(t, "description:"))
+		v = strings.Trim(v, `"'`)
+		if len([]rune(v)) > 90 {
+			v = string([]rune(v)[:90]) + "…"
+		}
+		return v
+	}
+	return ""
+}
 
 // underDir 判断 p 是否落在 base 之内（跨盘符一律判否）。
 func underDir(base, p string) bool {

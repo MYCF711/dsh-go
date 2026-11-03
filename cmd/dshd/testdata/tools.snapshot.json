@@ -836,12 +836,9 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "skill 名，即 \u003cdir\u003e/\u003cname\u003e/SKILL.md 里的 \u003cname\u003e"
+          "description": "skill 名。省略则列出本机所有 skill（名字 + 一句话说明）"
         }
       },
-      "required": [
-        "name"
-      ],
       "additionalProperties": false
     },
     "caps": {}
