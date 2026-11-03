@@ -36,11 +36,13 @@ PROBES = [
     ("ui-e2e", "U0/H8/H14 界面调用序列（16 项）", True, 400),
     # 并发验（-race）。**默认关闭**：它要 C 工具链，而工具链不属于成品的一部分
     # （只在 C:/toolchains 下，脚本自己找）。开启方式：加 --race。
+    ("tool-live", "工具活性：每个工具在这台机器上真的有东西可做吗", True, 1800),
     ("race.sh", "并发：-race 全仓（需要 C 工具链，默认关闭）", False, 1800),
 ]
 
 # 默默认关的探针名（只有显式 --race 才跑）。
-DEFAULT_OFF = {"race.sh"}
+# 默认关：要真调模型/花时间，用对应的开关打开（--race / --tool-live）。
+DEFAULT_OFF = {"race.sh": "--race", "tool-live": "--tool-live"}
 
 SUM = re.compile(r"合计 OK=(\d+) FAIL=(\d+)")
 
@@ -84,7 +86,7 @@ def main():
     args = sys.argv[1:]
     fast = "--fast" in args
     only = None
-    want_race = "--race" in args
+    # 默认关的探针各自有开关；这里不用逐个变量，直接查 DEFAULT_OFF。
     if "--only" in args:
         i = args.index("--only")
         if i + 1 < len(args):
@@ -95,8 +97,9 @@ def main():
     for name, label, needs_model, timeout in PROBES:
         if only and only not in name:
             continue
-        if name in DEFAULT_OFF and not (want_race or only):
-            rows.append((name, label, "跳过", "", "默认关闭：加 --race 打开（需要 C 工具链，不属成品）"))
+        if name in DEFAULT_OFF and not (DEFAULT_OFF[name] in args or only):
+            rows.append((name, label, "跳过", "",
+                         "默认关闭：加 %s 打开（会调模型，不属常规档）" % DEFAULT_OFF[name]))
             continue
         if fast and needs_model:
             rows.append((name, label, "跳过", "", ""))
