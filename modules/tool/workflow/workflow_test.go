@@ -198,3 +198,35 @@ func TestStepCarriesDuration(t *testing.T) {
 		t.Fatalf("时长不能为负：%d", steps[0].MS)
 	}
 }
+
+// 子调用要求停（exit_plan_mode / ask_user_question），整段编排就必须停。
+//
+// 吞掉它的后果不是"少停一次"，而是**计划模式当场失效**：
+// 方案交上去了，模型却接着说"好的我这就去改"。
+func TestStopFromSubCallPropagates(t *testing.T) {
+	f := &fakeRunner{reply: func(tool string, _ json.RawMessage) (spi.Result, error) {
+		if tool == "exit_plan_mode" {
+			return spi.Result{Summary: "方案已提交", Text: "## 方案", Stop: true}, nil
+		}
+		return spi.Result{Summary: "ok"}, nil
+	}}
+	res, err := run(t, ctxWith(f), scriptArg(t,
+		`[{"tool":"exit_plan_mode"},{"tool":"write"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Stop {
+		t.Fatal("子调用要求停，编排结果必须也是 Stop——否则模型会越过人批准那一步")
+	}
+}
+
+// 没有子调用要求停时，不许乱停。
+func TestNoStopWhenNoSubCallStops(t *testing.T) {
+	res, err := run(t, ctxWith(&fakeRunner{}), scriptArg(t, `[{"tool":"glob"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Stop {
+		t.Fatal("没人要求停，不许自己停")
+	}
+}

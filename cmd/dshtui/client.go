@@ -139,6 +139,28 @@ func (c *client) listSessions() ([]sessionRow, error) {
 	return r.Sessions, nil
 }
 
+// message 是 session.load 里的一条消息（只取导出要用的字段）。
+type message struct {
+	Seq  int    `json:"seq"`
+	Role string `json:"role"`
+	Text string `json:"text"`
+}
+
+// loadMessages 取会话消息（最多 limit 条），给 /export 用。
+func (c *client) loadMessages(sid string, limit int) ([]message, error) {
+	res, err := c.post("session.load", map[string]any{"id": sid, "tailMessages": limit})
+	if err != nil {
+		return nil, err
+	}
+	var r struct {
+		Messages []message `json:"messages"`
+	}
+	if err := json.Unmarshal(res, &r); err != nil {
+		return nil, err
+	}
+	return r.Messages, nil
+}
+
 // stats 是会话当前的用量快照（来自 session.load）。
 type stats struct {
 	ContextTokens int // 最近一条 assistant 的 totalTokens：当前上下文占多少

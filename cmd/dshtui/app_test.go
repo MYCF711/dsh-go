@@ -191,3 +191,18 @@ func TestResumePickingByNumber(t *testing.T) {
 		t.Fatal("输入非数字后应当取消选择状态")
 	}
 }
+
+// 导出：角色必须保留（导出的东西多半是回看"谁说了什么"），
+// 且序号要带上——不然回看时对不上原始会话。
+func TestRenderMarkdownKeepsRolesAndSeq(t *testing.T) {
+	md := renderMarkdown([]message{
+		{Seq: 1, Role: "user", Text: "你好"},
+		{Seq: 2, Role: "assistant", Text: "在的"},
+		{Seq: 3, Role: "tool", Text: "输出"},
+	})
+	for _, want := range []string{"你", "助手", "工具", "#1", "#2", "#3", "你好", "在的"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("导出内容缺 %q：%s", want, md)
+		}
+	}
+}

@@ -71,6 +71,8 @@ type trace struct {
 	OK   bool   `json:"ok"`
 	// Brief 是一行摘要；MS 是这一步花了多久。
 	// 记时长不是为了好看：编排慢的时候，人第一个问题就是"哪一步慢"。
+	// stop 记这次子调用要不要停（Result.Stop），不对外暴露。
+	stop   bool
 	Brief  string `json:"brief,omitempty"`
 	Detail string `json:"detail,omitempty"`
 	MS     int64  `json:"ms,omitempty"`
@@ -107,6 +109,12 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	vars := map[string]any{}
 	var traces []trace
 	failed := 0
+	// stop 收集子调用里出现的 Result.Stop。
+	//
+	// 为什么必须传出去：exit_plan_mode / ask_user_question 的语义是
+	// "这一步之后停下来，把控制权交回人"。它们的 Stop 若被编排吞掉，
+	// 就会出现"方案交上去了、模型却自己接着动手"——计划模式当场失效。
+	stop := false
 
 	for i, st := range steps {
 		if strings.TrimSpace(st.Tool) == "" {
@@ -119,12 +127,15 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 			traces = append(traces, tr)
 			if hardErr != nil {
 				// 只有"通道坏了/被取消"才向上报错；工具自身的失败记进 trace 继续。
-				res := buildResult(traces, vars, failed, a.Meta)
+				res := buildResult(traces, vars, failed, a.Meta, stop)
 				res.Hint = hardHint(hardErr)
 				return res, hardErr
 			}
 			if !tr.OK {
 				failed++
+			}
+			if tr.stop {
+				stop = true
 			}
 			if st.Save != "" {
 				vars[st.Save] = val
@@ -144,13 +155,16 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 			_ = j
 			traces = append(traces, tr)
 			if hardErr != nil {
-				res := buildResult(traces, vars, failed, a.Meta)
+				res := buildResult(traces, vars, failed, a.Meta, stop)
 				res.Hint = hardHint(hardErr)
 				return res, hardErr
 			}
 			if !tr.OK {
 				failed++
 				continue
+			}
+			if tr.stop {
+				stop = true
 			}
 			got = append(got, val)
 		}
@@ -159,7 +173,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		}
 	}
 
-	return buildResult(traces, vars, failed, a.Meta), nil
+	return buildResult(traces, vars, failed, a.Meta, stop), nil
 }
 
 // runOne 执行一步，并把结果折成 trace。
@@ -182,10 +196,11 @@ func runOne(ctx context.Context, r spi.Runner, idx int, st step, callArgs map[st
 	if brief == "" {
 		brief = trunc(firstLine(res.Text), 120)
 	}
-	return trace{Step: idx, Tool: st.Tool, OK: true, Brief: trunc(brief, 200), MS: ms}, dataOf(res), nil
+	return trace{Step: idx, Tool: st.Tool, OK: true, Brief: trunc(brief, 200), MS: ms,
+		stop: res.Stop}, dataOf(res), nil
 }
 
-func buildResult(traces []trace, vars map[string]any, failed int, meta map[string]any) spi.Result {
+func buildResult(traces []trace, vars map[string]any, failed int, meta map[string]any, stop bool) spi.Result {
 	var b strings.Builder
 	for _, tr := range traces {
 		mark := "ok"
@@ -205,6 +220,8 @@ func buildResult(traces []trace, vars map[string]any, failed int, meta map[strin
 	return spi.Result{
 		Summary: summary,
 		Text:    text,
+		// 子调用里只要有一个要求停，整段就停：宁可多停一次，也不要越过人要批的那一步。
+		Stop: stop,
 		Data: map[string]any{
 			"ok":     failed == 0,
 			"failed": failed,

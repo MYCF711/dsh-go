@@ -247,6 +247,22 @@ func (a *app) command(text string) {
 		}
 		a.pickFrom = rows
 		a.push("输入序号切换会话（例如 2），或直接继续打字取消")
+	case "/export":
+		msgs, err := a.cl.loadMessages(a.sid, 2000)
+		if err != nil {
+			a.err = "导出失败：" + err.Error()
+			return
+		}
+		if len(msgs) == 0 {
+			a.push("这个会话还没有内容可导出")
+			return
+		}
+		path := fmt.Sprintf("dsh-export-%s.md", short(a.sid))
+		if err := os.WriteFile(path, []byte(renderMarkdown(msgs)), 0o644); err != nil {
+			a.err = "写导出文件失败：" + err.Error()
+			return
+		}
+		a.push(fmt.Sprintf("已导出 %d 条消息到 %s", len(msgs), path))
 	case "/compact":
 		// 宿主有 session.compact 就调；没有就如实说，不假装压过了。
 		res, err := a.cl.post("session.compact", map[string]any{"sessionId": a.sid})
@@ -419,6 +435,26 @@ func utf8Valid(b []byte) bool {
 }
 
 // ---------------------------------------------------------------- 小工具
+
+// renderMarkdown 把消息列表排成 markdown。**保留角色**：
+// 导出的东西多半是拿去回看"谁说了什么"，把角色抹掉就没用了。
+func renderMarkdown(msgs []message) string {
+	var b strings.Builder
+	b.WriteString("导出自 dsh-TUI(dsh-go)\n\n")
+	for _, m := range msgs {
+		who := m.Role
+		switch m.Role {
+		case "user":
+			who = "你"
+		case "assistant":
+			who = "助手"
+		case "tool":
+			who = "工具"
+		}
+		fmt.Fprintf(&b, "### %s · #%d\n\n%s\n\n", who, m.Seq, strings.TrimRight(m.Text, "\n"))
+	}
+	return b.String()
+}
 
 // fmtTokens 把 token 数压成 k 形式。**未知就说未知**（"?"），不要显示 0——
 // 0 看起来像"没用量"，而"我不知道"和"没有"是两件事。
