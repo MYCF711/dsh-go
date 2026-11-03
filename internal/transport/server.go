@@ -59,6 +59,10 @@ type Options struct {
 	FSRead func(path string) (FSContent, error)
 	// FSWrite 写一个文件；宿主注入。
 	FSWrite func(path, content string) error
+	// ConfigGet 取全部界面配置；宿主注入。
+	ConfigGet func() (map[string]string, error)
+	// ConfigSet 改若干项（只覆盖给出的 key）；宿主注入。
+	ConfigSet func(kv map[string]string) error
 	// Cancel 取消在飞的一轮；没有在飞的返回 ErrNoSuchTurn。
 	Cancel func(sessionID string) error
 	// SetMode 换模式；宿主注入。
@@ -284,6 +288,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleFSRead(w, r)
 	case MethodFSWrite:
 		s.handleFSWrite(w, r)
+	case MethodConfigGet:
+		s.handleConfigGet(w, r)
+	case MethodConfigSet:
+		s.handleConfigSet(w, r)
 	default:
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 	}

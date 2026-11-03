@@ -10,7 +10,9 @@
     "session.fork",
     "workspace.list",
     "fs.read",
-    "fs.write"
+    "fs.write",
+    "config.get",
+    "config.set"
   ],
   "types": {
     "Message": [

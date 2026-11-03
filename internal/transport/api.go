@@ -19,6 +19,8 @@ const (
 	MethodWorkspaceList  Method = "workspace.list"
 	MethodFSRead         Method = "fs.read"
 	MethodFSWrite        Method = "fs.write"
+	MethodConfigGet      Method = "config.get"
+	MethodConfigSet      Method = "config.set"
 )
 
 // SessionMethods 是 U0 第一版要兑现的全部方法（顺序固定，快照按它排）。
@@ -27,7 +29,7 @@ func SessionMethods() []Method {
 		MethodSessionList, MethodSessionLoad, MethodSessionHistory,
 		MethodSessionPrompt, MethodSessionCancel, MethodSessionCreate,
 		MethodSessionDelete, MethodSessionFork, MethodWorkspaceList,
-		MethodFSRead, MethodFSWrite,
+		MethodFSRead, MethodFSWrite, MethodConfigGet, MethodConfigSet,
 	}
 }
 

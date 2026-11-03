@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -135,6 +136,51 @@ func serveFSWrite(path, content string) error {
 	}
 	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("写失败: %w", err)
+	}
+	return nil
+}
+
+// serveConfigGet 读界面配置：一份扁平的 key→string 表，落 <home>/state/ui-config.json。
+//
+// 为什么不复用 dsh.toml：那份是**模块清单**，改错一个 id 就会少一半工具；
+// 界面偏好（主题、语言）跟它是两种东西，混在一起出一次事故就够受。
+func serveConfigGet(home string) (map[string]string, error) {
+	p := filepath.Join(home, "state", "ui-config.json")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]string{}, nil
+		}
+		return nil, fmt.Errorf("读配置失败: %w", err)
+	}
+	m := map[string]string{}
+	if len(b) > 0 {
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil, fmt.Errorf("配置文件坏了（%s）: %w", p, err)
+		}
+	}
+	return m, nil
+}
+
+// serveConfigSet 只覆盖给出的 key，其它项保持不动——界面每次只改自己关心的那几个。
+func serveConfigSet(home string, kv map[string]string) error {
+	cur, err := serveConfigGet(home)
+	if err != nil {
+		return err
+	}
+	for k, v := range kv {
+		cur[k] = v
+	}
+	p := filepath.Join(home, "state", "ui-config.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return fmt.Errorf("建 state 目录失败: %w", err)
+	}
+	b, err := json.MarshalIndent(cur, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化配置失败: %w", err)
+	}
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		return fmt.Errorf("写配置失败: %w", err)
 	}
 	return nil
 }

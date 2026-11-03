@@ -132,6 +132,8 @@ func cmdServe(args []string) error {
 		History: func(sessionID string, sinceSeq, limit int) (transport.Page, error) {
 			return transport.HistorySession(src, sessionID, sinceSeq, limit)
 		},
+		ConfigGet: func() (map[string]string, error) { return serveConfigGet(*home) },
+		ConfigSet: func(kv map[string]string) error { return serveConfigSet(*home, kv) },
 		FSRead: func(path string) (transport.FSContent, error) {
 			return serveFSRead(path)
 		},
