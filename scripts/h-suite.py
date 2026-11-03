@@ -121,6 +121,13 @@ def main():
         print("一个探针都没跑（检查 --only 的匹配）")
         return 2
 
+    # 有探针根本没跑出结论（超时/崩了）：这时列一个"全部通过"的表格会误导人，
+    # 那条红只在 ↳ 里出现，眼睛容易滑过去。所以先大字说一句。
+    fatal = [n for n, _, v, _, e in rows if v == "FAIL" and not e.startswith("X")]
+    if fatal:
+        print("⚠ %d 条探针没有给出结论：%s（先修它们，再看下面的分项）"
+              % (len(fatal), "、".join(fatal)))
+
     print()
     print("%-18s %-44s %-6s %-6s" % ("探针", "证明什么", "结果", "通过"))
     print("-" * 80)

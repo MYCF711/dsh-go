@@ -9,6 +9,11 @@ import json, os, re, subprocess, sys, time, http.cookiejar, urllib.request, urll
 HOME = "tmp/h10chain"
 BIN = "tmp/serve-dir/dshd.exe"
 
+# 空会话上第一次 prompt 可能要等模型先做一轮工具调用才落下 assistant/message。
+# 这个等待窗口必须**明显短于套件的超时**，否则超时后套件拿到的是"没有汇总行"，
+# 看起来像探针崩了——而不是"这条断言没等到"。
+WARMUP_SEC = 120
+
 def main():
     os.system("rm -rf " + HOME)
     p = subprocess.Popen([BIN, "serve", "--home", HOME, "--policy", "allow"],
@@ -65,17 +70,22 @@ def main():
         chk(f"list 的 {len(ids)} 个 id 全部可 load（两种入参名）", loaded == len(ids) * 2, f"{loaded}")
 
         # prompt → 等回答落盘 → 再 load 必须看得到
-        post("session.prompt", {"id": new_id, "text": "回答：H10 通过", "mode": "default"})
+        # 把 prompt 的应答记下来：如果它根本没被接受（409 有轮次在跑 / 400 参数错），
+        # 后面 load 不到 assistant 就是**必然**，而不是"宿主丢了消息"。
+        pr, _ = post("session.prompt", {"id": new_id, "text": "回答：H10 通过", "mode": "default"})
+        chk("prompt 被接受", (pr or {}).get("accepted") is True, str(pr)[:120])
         # 60 秒在网关忙的时候不够：那红的是**探针的耐心**，不是宿主。
         # （和 h14 同一条教训：先看是哪一条红，再决定改探针还是改宿主。）
         got = 0
-        for _ in range(240):
+        for _ in range(WARMUP_SEC):
             time.sleep(1)
             d, _ = post("session.load", {"id": new_id, "tailMessages": 20})
-            got = sum(1 for m in (d.get("messages") or []) if m.get("role") == "assistant")
+            roles = [m.get("role") for m in (d.get("messages") or [])]
+            got = roles.count("assistant")
             if got:
                 break
-        chk("prompt 之后能 load 到 assistant 消息", got > 0, f"{got}")
+        # 失败时把"到底 load 到了什么"写进断言：只报 0 等于没说。
+        chk("prompt 之后能 load 到 assistant 消息", got > 0, f"assistant={got} roles={roles[:8]}")
 
         # 形状：成功必须带 result 信封（raw 里看得见）
         _, raw = post("session.load", {"id": new_id})
