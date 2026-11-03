@@ -71,6 +71,11 @@ def run_case(decision, fname):
         })
 
         answered = None
+        # 两段等待，不是一段：
+        #  ① 等模型**决定要调用**（它得先想清楚要用 write），120s
+        #  ② 回答之后等这一轮收尾（工具执行 + 落盘 + 回合结束），再给 180s
+        # 合成一段 120s 的后果是：网关忙的时候红的是**探针的耐心**，
+        # 而失败信息看起来像"允许了却没执行"。2026-11-04 全量跑就撞到过。
         deadline = time.time() + 120
         while time.time() < deadline:
             time.sleep(1)
@@ -86,6 +91,7 @@ def run_case(decision, fname):
                         r = post(op, info, "session.approve",
                                  {"requestId": rid, "optionId": decision})
                         answered = (rid, r)
+                        deadline = time.time() + 180  # 进入第二段
                         break
             if "turn/done" in types or "turn/error" in types:
                 break
