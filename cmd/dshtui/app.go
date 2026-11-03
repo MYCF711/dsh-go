@@ -37,6 +37,8 @@ type app struct {
 	err        string
 
 	frames <-chan ServerFrame
+	// pickFrom 非空时，下一次输入被当作"选第 N 个会话"。
+	pickFrom []sessionRow
 }
 
 func newApp(addr, token string) (*app, error) {
@@ -91,6 +93,57 @@ func (a *app) run() error {
 	return nil
 }
 
+// pick 处理"/resume 之后那一次输入"。返回 true 表示这次输入已被消费。
+//
+// 单独成函数是为了可测：不联网络也能验"越界不切、非数字取消"。
+func (a *app) pick(text string) bool {
+	if a.pickFrom == nil {
+		return false
+	}
+	n, err := atoiSmall(text)
+	if err == nil && n >= 1 && n <= len(a.pickFrom) {
+		row := a.pickFrom[n-1]
+		a.pickFrom = nil
+		if err := a.switchTo(row); err != nil {
+			a.err = err.Error()
+		}
+		return true
+	}
+	// 不是有效序号：取消选择，把这次输入当普通消息继续
+	a.pickFrom = nil
+	return false
+}
+
+// switchTo 切到另一个已有会话：换订阅，不新建。
+func (a *app) switchTo(row sessionRow) error {
+	ch, _, err := a.cl.Subscribe(row.ID, 0)
+	if err != nil {
+		return err
+	}
+	a.sid = row.ID
+	a.frames = ch
+	a.lines = nil
+	a.tools = 0
+	a.ctxTokens, a.outTokens, a.tps = 0, 0, 0
+	title := row.Title
+	if title == "" {
+		title = "(无标题)"
+	}
+	a.push("已切到 " + short(row.ID) + " — " + trunc(title, 40))
+	return nil
+}
+
+func atoiSmall(s string) (int, error) {
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, os.ErrInvalid
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, nil
+}
+
 func (a *app) newSession() error {
 	sid, err := a.cl.createSession()
 	if err != nil {
@@ -139,6 +192,10 @@ func (a *app) submit() {
 	if text == "" {
 		return
 	}
+	// /resume 之后输入的数字 = 选第 N 个会话
+	if a.pick(text) {
+		return
+	}
 	if strings.HasPrefix(text, "/") {
 		a.command(text)
 		return
@@ -166,6 +223,30 @@ func (a *app) command(text string) {
 		a.lines = nil
 	case "/quit", "/exit":
 		a.quit = true
+	case "/resume":
+		rows, err := a.cl.listSessions()
+		if err != nil {
+			a.err = "列会话失败：" + err.Error()
+			return
+		}
+		if len(rows) == 0 {
+			a.push("没有可恢复的会话")
+			return
+		}
+		// 只列前 10 条：屏幕上放不下更多，而且这些都是最近的
+		for i, r := range rows {
+			if i >= 10 {
+				a.push(fmt.Sprintf("…还有 %d 条", len(rows)-10))
+				break
+			}
+			title := r.Title
+			if title == "" {
+				title = "(无标题)"
+			}
+			a.push(fmt.Sprintf("  %d. %s  %s", i+1, short(r.ID), trunc(title, 50)))
+		}
+		a.pickFrom = rows
+		a.push("输入序号切换会话（例如 2），或直接继续打字取消")
 	case "/compact":
 		// 宿主有 session.compact 就调；没有就如实说，不假装压过了
 		if _, err := a.cl.post("session.compact", map[string]any{"id": a.sid}); err != nil {

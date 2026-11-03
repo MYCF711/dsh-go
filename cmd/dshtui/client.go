@@ -117,6 +117,28 @@ func (c *client) createSession() (string, error) {
 	return r.SessionID, nil
 }
 
+// sessionRow 是 session.list 的一行。
+type sessionRow struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// listSessions 最近在前的会话列表。
+func (c *client) listSessions() ([]sessionRow, error) {
+	res, err := c.post("session.list", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var r struct {
+		Sessions []sessionRow `json:"sessions"`
+	}
+	if err := json.Unmarshal(res, &r); err != nil {
+		return nil, err
+	}
+	return r.Sessions, nil
+}
+
 // stats 是会话当前的用量快照（来自 session.load）。
 type stats struct {
 	ContextTokens int // 最近一条 assistant 的 totalTokens：当前上下文占多少

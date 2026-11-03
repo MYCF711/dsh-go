@@ -165,3 +165,29 @@ func TestViewStatusShowsCtxAndTPS(t *testing.T) {
 		t.Fatal("没有速率数据时不该显示 tok/s")
 	}
 }
+
+// /resume：列出来的序号必须能选中对应会话；越界/非数字不许误切。
+func TestResumePickingByNumber(t *testing.T) {
+	a := newTestApp(100, 14)
+	a.pickFrom = []sessionRow{
+		{ID: "session-11111111", Title: "第一个"},
+		{ID: "session-22222222", Title: "第二个"},
+	}
+
+	// 越界：不该切，但也要取消选择状态
+	if a.pick("9") {
+		t.Fatal("越界序号不该被认为已消费")
+	}
+	if a.pickFrom != nil {
+		t.Fatal("越界之后应当取消选择状态")
+	}
+
+	// 非数字：不消费
+	a.pickFrom = []sessionRow{{ID: "session-22222222"}}
+	if a.pick("你好") {
+		t.Fatal("非数字不该被当成选择")
+	}
+	if a.pickFrom != nil {
+		t.Fatal("输入非数字后应当取消选择状态")
+	}
+}
