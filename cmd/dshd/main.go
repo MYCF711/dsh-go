@@ -45,6 +45,7 @@ import (
 	team "dshgo/modules/tool/team"
 	teamtask "dshgo/modules/tool/teamtask"
 	todo "dshgo/modules/tool/todo"
+	unlagmod "dshgo/modules/tool/unlag"
 	watch "dshgo/modules/tool/watch"
 	wdtool "dshgo/modules/tool/wd"
 	"dshgo/modules/tool/webfetch"
@@ -104,6 +105,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		teamtask.Module(filepath.Join(home, "state")),
 		team.Module(filepath.Join(home, "state", "mail")),
 		goalmod.Module(filepath.Join(home, "state", "goals")),
+		unlagmod.Module(filepath.Join(home, "state", "unlag")),
 		schedule.Module(filepath.Join(home, "state", "schedules")),
 		watch.Module(filepath.Join(home, "state", "watch")),
 		nowline.Module(),

@@ -125,3 +125,6 @@ backend = "static"
 [[module]]
 id      = "tool-watch"
 backend = "static"
+
+[[module]]
+id      = "tool-unlag"

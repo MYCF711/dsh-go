@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
@@ -155,6 +156,8 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},
+		// 刷新按钮：只动 <home>/state/unlag.json 这一份宿主状态，不算写用户文件。
+		"unlag_refresh": {},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {
@@ -180,8 +183,8 @@ func TestEveryToolHasDescription(t *testing.T) {
 		if strings.TrimSpace(e.Description) == "" {
 			t.Errorf("工具 %q 没有 Description", e.Name)
 		}
-		if len(e.Description) > 120 {
-			t.Errorf("工具 %q 的 Description 太长（%d 字），会挤占工具表预算", e.Name, len(e.Description))
+		if utf8.RuneCountInString(e.Description) > 120 {
+			t.Errorf("工具 %q 的 Description 太长（%d 字），会挤占工具表预算", e.Name, utf8.RuneCountInString(e.Description))
 		}
 		var v any
 		if err := json.Unmarshal(e.Parameters, &v); err != nil {

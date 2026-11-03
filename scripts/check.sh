@@ -14,6 +14,9 @@ pass() { printf '  PASS  %s
 skip() { printf '  SKIP  %s
 ' "$1"; printf 'SKIP %s
 ' "$1" >> "$gate_log"; }
+warn() { printf '  WARN  %s
+' "$1"; printf 'WARN %s
+' "$1" >> "$gate_log"; }
 bad()  { printf '  FAIL  %s
 ' "$1"; printf 'FAIL %s
 ' "$1" >> "$gate_log"; fail=1; }
@@ -134,8 +137,8 @@ else
   elif [ "$table_bytes" -le 32000 ]; then
     pass "工具表体积 ${table_line}"
   else
-    printf '  WARN  工具表 ${table_line}（超过 32 KB：删描述或合并工具）
-'
+    # WARN 也要进 gate_log：否则"守卫在跑但只警告"会被清单核对当成"守卫被删了"。
+    warn "工具表体积 $table_line（超过 32 KB：删描述或合并工具）"
   fi
 
   # R1 内核零业务

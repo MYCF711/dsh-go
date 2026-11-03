@@ -920,6 +920,21 @@
     "caps": {}
   },
   {
+    "name": "unlag_refresh",
+    "description": "界面看起来卡住或不刷新时按一下；同一个 request_id 只生效一次，重复调用会告诉你已经刷过。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "description": "这次刷新的名字；同一个名字只生效一次。不传就用会话 id"
+        }
+      },
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "update_goal",
     "description": "改目标：edit/pause/resume/complete/blocked，要带最新 revision。",
     "parameters": {
