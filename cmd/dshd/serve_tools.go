@@ -26,6 +26,10 @@ type loopRunner struct {
 	// WS 推送与 session.history 读同一份——否则客户端判断断号时看到的是假象。
 	// nil 时 emit 退化成"只推不记账"（老测试不必改）。
 	journals *transport.Journals
+	// broker 是审批的父进程半边（H13）。只在 --policy ask 时用；
+	// 它把子进程 stderr 上的 @@APPROVAL@@ 转成 approval/request 帧，
+	// 并把界面 session.approve 的决定写回子进程 stdin。
+	broker   *approvalBroker
 	pub      func(topic string, f transport.ServerFrame)
 	home     string
 	policy   string
@@ -47,7 +51,30 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	}
 	cmd := exec.CommandContext(ctx, exe, args...)
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+
+	// 审批要"跑到一半停下来问"（H13），所以 ask 策略下不能等子进程跑完再读 stderr。
+	// **顺序很要紧**：先 StderrPipe 再决定 cmd.Stderr——StderrPipe 在 cmd.Stderr 已设时
+	// 会直接返回错误，而那个错误如果不看，就变成"子进程卡在等审批、父进程一无所知"。
+	var watchWG sync.WaitGroup
+	if r.policy == "ask" && r.broker != nil {
+		cmd.Env = append(os.Environ(), "DSHD_APPROVAL_STDIO=1")
+		stdin, serr := cmd.StdinPipe()
+		epipe, eerr := cmd.StderrPipe()
+		if serr == nil && eerr == nil {
+			r.broker.useStdin(stdin)
+			watchWG.Add(1)
+			go func() {
+				defer watchWG.Done()
+				r.broker.Watch(epipe, &stderr)
+			}()
+		} else {
+			// 拿不到管道就别假装有审批：退回缓冲，至少错误播报还在。
+			fmt.Fprintf(os.Stderr, "审批通道没建起来（stdin=%v stderr=%v），这一轮不会问人\n", serr, eerr)
+			cmd.Stderr = &stderr
+		}
+	} else {
+		cmd.Stderr = &stderr
+	}
 
 	if err := cmd.Start(); err != nil {
 		r.emitTurn(sessionID, turnID, err)
@@ -74,6 +101,9 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	}
 
 	werr := cmd.Wait()
+	// 等 stderr 那条扫描 goroutine 收尾：它在写 stderr 缓冲区，
+	// 而下面读那个缓冲区——不等就是一个数据竞争（也读不全最后几行）。
+	watchWG.Wait()
 	// 子进程说了什么，运维侧必须看得到。
 	// 没有这一行时，serve 起的子进程失败只能靠 WS 上的 turn/error 观察，
 	// 而 e2e/curl 场景根本没人读 WS——于是"它没写盘"就变成一个无解释的现象。

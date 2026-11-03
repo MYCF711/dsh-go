@@ -1,81 +1,101 @@
-# H13：审批走 Transport（契约先行）
+# H13：审批走 Transport
 
-> 状态：**契约设计完成，实现未开始**。这条是 §12 里唯一**完全没有**的能力，
-> 也是"界面上的允许/拒绝是不是真的"的关键——现在界面点 Allow 只是清掉本地气泡，工具照跑。
+> 当前状态（2026-11-03 复核）：**Transport 端点与子进程标记通道已有实现和测试；父进程 serve 桥接、H14 统一序号/重放、界面真实回传与整链验收未闭环。** 详细跨线状态以 `docs/transport-contract.md` 为快照，开工仍须重读最新源码和提交。
 
-## 现在有什么
+## 已有证据与不能外推的结论
 
-| 层 | 现状 |
-|---|---|
-| 工具侧 | `spi.Caps.NeedsApproval()`：只读不问，其余要问 |
-| ACP（stdio） | ✅ 完整：`session/request_permission` + `CallClient`，带 title/kind/content/options |
-| `dshd run` | `--policy ask` 时会在终端问人 |
-| **Transport（HTTP/WS）** | ❌ 一条都没有 |
+| 层 | 当前证据 | 不能据此宣称 |
+|---|---|---|
+| 工具侧 | `spi.Caps.NeedsApproval()`；ACP 已有 `session/request_permission`；`dshd run --policy ask` 可终端询问 | ACP/终端可用不等于原生 UI 可用 |
+| Transport HTTP | M249：`session.approve`、handler、原样转发/未知 requestId=404/未知 option=400 测试 | handler 单测不证明工具实际执行或拒绝 |
+| 子进程 | M250：`@@APPROVAL@@` 标记通道与 5 条测试，无应答按拒绝处理 | 子进程有标记不等于 serve 父进程已正确转发 |
+| 父进程 | M252 只读核对记录 stderr 是字节缓冲，不是天然消息流 | 尚需验证分帧、requestId 对应、超时/取消、真实 WS/界面链路 |
 
-所以 ACP 客户端（Martty）能审批，**界面不能**。
+## 契约：与 ACP 同形，HTTP 控制 + WS 事件
 
-## 契约：与 ACP 同形，不另造一套
-
-**服务端 → 客户端（WS 帧）**
+**服务端 → 客户端（WS）**
 
 ```json
 {"seq":101,"type":"approval/request","time":1793683941007,
  "data":{
-   "requestId":"perm-8f3c…",
-   "sessionId":"…",
-   "toolCall":{
-     "toolCallId":"perm-8f3c…",
-     "title":"bash: go test ./...",
-     "kind":"execute",
-     "status":"pending",
-     "content":[{"type":"content","content":{"type":"text","text":"…完整说明…"}}],
-     "rawInput":{"command":"go test ./..."}
-   },
-   "options":[
-     {"optionId":"allow_once","name":"允许这一次","kind":"allow_once"},
-     {"optionId":"allow_always","name":"这个会话里以后都允许","kind":"allow_always"},
-     {"optionId":"reject_once","name":"拒绝","kind":"reject_once"}]}}
+  "requestId":"perm-8f3c…","sessionId":"…",
+  "toolCall":{"toolCallId":"perm-8f3c…","title":"bash: go test ./…","kind":"execute","status":"pending","rawInput":{"command":"go test ./…"}},
+  "options":[
+   {"optionId":"allow_once","name":"允许这一次","kind":"allow_once"},
+   {"optionId":"allow_always","name":"这个会话里以后都允许","kind":"allow_always"},
+   {"optionId":"reject_once","name":"拒绝","kind":"reject_once"}]}}
 ```
 
-**客户端 → 服务端（HTTP）**
+**客户端 → 服务端（HTTP 裸参数 body，不包 `params`）**
 
+```http
+POST /api/session.approve
+{"requestId":"perm-8f3c…","optionId":"allow_once"}
+
+200 {"result":{"accepted":true,"optionId":"allow_once"}}
 ```
-POST /api/session.approve   {"requestId":"perm-8f3c…","optionId":"allow_once"}
-→ 200 {"result":{"accepted":true,"optionId":"allow_once"}}
-```
 
-- `requestId` 不认识 → 404 `no_such_request`
-- `optionId` 不在 options 里 → 400 `bad_request`
-- 超时（默认 **120s**）→ 服务端自动按 `reject_once` 处理，并推一帧
-  `{"type":"approval/timeout","data":{"requestId":…}}`
+- 未知 requestId → 404 `no_such_request`。
+- 未知 optionId → 400 **`bad_option`**。
+- 默认 120s 不应答 → 按 `reject_once` 处理，并推 `approval/timeout{requestId}`。
+- `session.cancel` 取消挂起审批时 → 按拒绝处理、工具不得执行，并推 `approval/cancel{requestId}`；同一轮后续可重新 prompt，不残留 busy。
+- 审批事件与 turn/done、turn/error 都进入 H14 的**每会话 Transport journal**，使用同一 seq 域；断线由原始 history frames 重放，pending 请求由 serve 恢复，UI 不自行编造。
 
-**为什么用 HTTP 回而不是 WS 回**：WS 是我们的广播通道，客户端到服务端的控制面一直走 HTTP
-（`session.prompt`、`session.cancel` 都是），审批不该破例。
+## 宿主内部桥接
 
-## 宿主内部怎么接（不用改子进程协议）
+1. `dshd run` 在 ask 且非终端时，向 stderr 写一行：`@@APPROVAL@@ {"requestId":…,"tool":…,"args":…}`。
+2. serve 按字节缓冲正确分帧，解析后把 `approval/request` 追加到该会话 journal 并推 WS，等待 `session.approve`/超时/取消。
+3. serve 向对应子进程 stdin 写一行：`@@APPROVAL-RESP@@ {"requestId":…,"allow":true}`。
+4. 子进程仅在 allow 后执行；reject/timeout/cancel 都不得执行，并返回明确拒绝结果。
 
-`serve` 起子进程时带 `--policy ask`，但子进程没有终端。做法：
+stderr 是字节流，必须处理半行、粘包、多条标记和普通诊断混行；不能假设一次 Read 恰好一条 JSON。标记通道不影响 stdout 的 ready 契约（H11）。
 
-1. `dshd run` 在 `ask` 且非终端时，**把审批请求写到 stderr 的一行**：
-   `@@APPROVAL@@ {"requestId":…,"tool":…,"args":…}`
-2. 父进程（serve）解析这一行 → 推 WS `approval/request` → 等 `session.approve`（或超时）
-3. 父进程把结果写回**子进程 stdin** 的一行：`@@APPROVAL-RESP@@ {"requestId":…,"allow":true}`
-4. 子进程读到应答后继续或返回 `策略拒绝了 <tool>`
-
-**为什么走 stderr/stdin 而不是新造 fd**：Windows 上继承额外 fd 麻烦；stderr 已经是"给人看的"通道，
-加一个行首标记就能解析，且**不影响 stdout 的 ready 契约**（H11）。
-
-## 验收（写进 §12 的那几条）
+## 验收
 
 | 场景 | 判据 |
 |---|---|
-| 允许 | `session.approve allow_once` → 工具真的执行，结果出现在会话里 |
-| 拒绝 | `reject_once` → 工具**不执行**，返回 `策略拒绝了 …`，会话里有据可查 |
-| 超时 | 不应答 120s → 自动拒绝 + `approval/timeout` 帧 |
-| 乱回 | 未知 requestId → 404；未知 optionId → 400 |
-| 不冒充 | 界面只收到 `approval/request` 才算"在问人"；气泡消失**不等于**已批准 |
+| 允许 | allow_once → 工具真的执行，结果出现在会话与 UI |
+| 拒绝 | reject_once → 工具不执行，拒绝结果可查 |
+| 超时 | 120s 不应答 → 自动拒绝 + approval/timeout，工具不执行 |
+| 取消 | session.cancel → approval/cancel + 工具不执行；同会话第二轮可发送 |
+| 乱回 | 未知 requestId=404 no_such_request；未知 optionId=400 bad_option |
+| 重连 | 同 journal/epoch 可补 approval 帧；epoch 变化走 session/reset/stale_epoch，不错误恢复旧审批 |
+| 不冒充 | UI 只收到真实 approval/request 才显示待审批；气泡消失或 handler 单测不等于批准 |
 
 ## 下一步
 
-先写**会红的测试**（`internal/transport` 层：approve 未知 id 返回 404；serve 层：allow 后工具执行、reject 后不执行），
-再实现。**不要先写实现再补测试**——这条涉及"是否真的执行了"，测试写晚了就只剩口头保证。
+H14 契约冻结后，由明确的 owner 串行完成 serve 父进程桥接与 UI 回传；先写能在旧实现失败的集成测试，再实现。真实允许/拒绝/超时/取消属于 H13，不提前塞进 H14 的合成契约测试。
+
+## 实现与真机验收（2026-11-03，M258）
+
+链路三段都接上了：
+
+| 段 | 位置 | 说明 |
+|---|---|---|
+| 子进程问 | `cmd/dshd/approval_stdio.go` | `DSHD_APPROVAL_STDIO=1` 时 stderr 打 `@@APPROVAL@@`、stdin 读 `@@APPROVAL-RESP@@`；读不到 = 拒绝 |
+| 父进程转 | `cmd/dshd/serve_approval.go` | `approvalBroker`：逐行扫 stderr → `approval/request` 帧（进 journal，可重放）；`Resolve` 写回 stdin；120s 超时按**拒绝**并推 `approval/timeout` |
+| Transport 收 | `session.approve` | 未知 requestId → 404，未知 optionId → 400 |
+
+### 踩到的一个真 bug
+
+`cmd.Stderr` 先设成 `bytes.Buffer` 之后再调 `cmd.StderrPipe()`，后者直接返回错误
+（`exec: Stderr already set`）；那个错误被我吞了，结果**子进程卡在等审批、父进程一无所知**——
+真机上表现为"工具调用了但这一轮永远不结束"。修法：先 `StderrPipe` 再决定 `cmd.Stderr`，
+拿不到管道时**明确打一行日志并退回缓冲**，不假装有审批。
+
+### 真机判据（`scripts/h13-approval-e2e.py`）
+
+```
+OK    决策=allow_once   文件存在=True  工具被拒=False 应答=已回
+OK    决策=reject_once  文件存在=False 工具被拒=True  应答=已回
+合计 OK=2 FAIL=0
+```
+
+第一条看**磁盘上那个文件在不在**；第二条除了"不在"，还要看到 `tool/result` 里
+`isError:true` 且正文是"用户拒绝了 …"——否则"文件不存在"可能只是模型压根没试。
+
+### 仍未验
+
+- 120s 超时只在单测里用 30ms 验证过，未在真机上真等两分钟。
+- 挂起审批在**断线重连**后能否由 serve 重放（契约要求，本仓未实现）。
+- 界面实际消费：本仓没有界面。

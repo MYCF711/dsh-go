@@ -115,6 +115,12 @@ func cmdServe(args []string) error {
 	journals := transport.NewJournals(func() int64 { epochSeq++; return epochSeq })
 	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps, journals: journals}
 	mr := &modelRunner{home: *home, journals: journals}
+
+	// 审批的父进程半边（H13）：整进程一个 broker，每轮换 stdin。
+	// emit 用 lr 的方法，所以帧一样进 journal、一样可重放。
+	broker := newApprovalBroker(nil, nil)
+	broker.setEmit(func(sid, typ string, data json.RawMessage) { lr.emit(sid, typ, data) })
+	lr.broker = broker
 	if useModelRunner {
 		runner = mr
 	} else {
@@ -134,6 +140,8 @@ func cmdServe(args []string) error {
 		// H14：把序号域交给 server——WS 推送与 session.history 必须读同一份，
 		// 否则客户端补洞时补到的是另一个 seq 域的数据。
 		Journals: journals,
+		// H13：界面的允许/拒绝落到这里，由 broker 写回子进程 stdin。
+		Approve: broker.Resolve,
 		// H5：把这一进程真正的审批策略报给界面。**不是 mode**。
 		Policy:       *servePolicy,
 		ContentWidth: *serveWidth,
