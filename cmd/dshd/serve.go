@@ -87,6 +87,9 @@ func cmdServe(args []string) error {
 	// 这条帮助文字以前写着"ask 等于永远挂起"，那是 H13 之前的事实，
 	// 留着它会让人以为审批不能用——**过期的帮助文本比没有帮助更糟**。
 	servePolicy := fs.String("policy", "deny", "子进程用哪个审批策略：deny/allow/ask（ask 会把审批转给界面）")
+	// 模型必须能选：serve 起子进程跑真模型，用户换模型却只能去改环境变量，
+	// 那是"藏起来的开关"。默认值和 run 保持一致。
+	serveModel := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "模型 id（透传给子进程）")
 	// 推理强度透传给子进程；空 = 不要。界面线要能看到 reasoning 就得从这里打开。
 	serveReasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
 		"推理强度：空=不要（默认）| xhigh | max")
@@ -120,7 +123,7 @@ func cmdServe(args []string) error {
 	var epochSeq int64
 	journals := transport.NewJournals(func() int64 { epochSeq++; return epochSeq })
 	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps,
-		journals: journals, reasoning: *serveReasoning}
+		journals: journals, reasoning: *serveReasoning, model: *serveModel}
 	mr := &modelRunner{home: *home, journals: journals}
 
 	// 审批的父进程半边（H13）：整进程一个 broker，每轮换 stdin。

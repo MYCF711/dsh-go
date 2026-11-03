@@ -18,6 +18,7 @@ import time
 
 # (脚本, 它证明哪几条 H, 是否需要真模型, 超时秒)
 PROBES = [
+    ("help-guard", "CLI 帮助：三入口同一开关、无过期说法、都有说明", False, 180),
     ("h11-stdout", "H11 stdout 恰好一行 ready", False, 90),
     ("h10-chain", "H10 create→list→每个 id 两种入参名 load→prompt", False, 240),
     ("h14-isolation", "H14 两会话各自 seq、互不串流", True, 300),

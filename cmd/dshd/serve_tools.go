@@ -30,6 +30,8 @@ type loopRunner struct {
 	// 它把子进程 stderr 上的 @@APPROVAL@@ 转成 approval/request 帧，
 	// 并把界面 session.approve 的决定写回子进程 stdin。
 	broker *approvalBroker
+	// model 是透传给子进程的模型 id（空 = 用 run 的默认值）。
+	model string
 	// reasoning 是透传给子进程的推理强度（空 = 不要）。
 	// 界面要能显示 reasoning，宿主就得先把"要不要推理"传下去。
 	reasoning string
@@ -51,6 +53,9 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 		"--prompt", text,
 		"--policy", r.policy,
 		"--max-steps", fmt.Sprint(r.maxSteps),
+	}
+	if r.model != "" {
+		args = append(args, "--model", r.model)
 	}
 	if r.reasoning != "" {
 		args = append(args, "--reasoning", r.reasoning)

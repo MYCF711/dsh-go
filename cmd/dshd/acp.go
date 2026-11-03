@@ -39,6 +39,8 @@ type acpRunner struct {
 	model     string
 	home      string
 	steps     int
+	// reasoning 是推理强度（空 = 不要），和 run/serve 用同一个开关。
+	reasoning string
 
 	// ask 是审批闸门：返回 false 表示用户拒绝这次工具调用。
 	ask func(ctx context.Context, sessionID, tool string, args string) (bool, error)
@@ -205,6 +207,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		Runner:    runner,
 		Project:   session.ProjectResult,
 		Model:     r.model,
+		Reasoning: r.reasoning,
 		System:    r.system,
 		SessionID: sessionID,
 		MaxSteps:  r.steps,
@@ -392,6 +395,10 @@ func cmdACP(argv []string) error {
 	fs := flag.NewFlagSet("acp", flag.ContinueOnError)
 	manifest := fs.String("manifest", "dsh.toml", "manifest 路径")
 	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "模型 id")
+	// 三个入口（run/serve/acp）要有同一个开关：ACP 是 Martty 那条路，
+	// 这里缺了就意味着"同一个模型，换个客户端就没有 reasoning"——那种差异最难解释。
+	reasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
+		"推理强度：空=不要（默认）| xhigh | max")
 	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
 	maxChars := fs.Int("max-chars", 4000, "工具输出外置阈值（字符）")
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
@@ -438,6 +445,7 @@ func cmdACP(argv []string) error {
 
 	assembled := buildSystemPrompt(reg, *model, mustGetwd(), *workspaceBytes)
 	acpRunner := newACPRunner(reg, runner, *base, *model, *home, *steps)
+	acpRunner.reasoning = *reasoning
 	acpRunner.system = assembled
 	acpRunner.autoCompact = *autoCompact
 	if *ctxWindow > 0 {
