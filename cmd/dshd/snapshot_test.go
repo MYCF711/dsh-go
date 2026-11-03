@@ -107,6 +107,10 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"working_directory": {},
 		// 只记清单在内存里，不写盘、不起进程、不联网。
 		"todo_write": {},
+		// 计划模式的两个工具：只改进程内的模式位，不写盘、不起进程、不联网。
+		// 它们必须自己是"干净"的——否则在最严的模式里连退出都退不出来。
+		"enter_plan_mode": {},
+		"exit_plan_mode":  {},
 		// 只 stat 文件、登记路径，不写不跑不联。
 		"present": {},
 		// 只把问题返回给模型并结束本轮，不碰文件系统。

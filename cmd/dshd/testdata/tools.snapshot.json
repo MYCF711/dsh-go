@@ -161,6 +161,21 @@
     }
   },
   {
+    "name": "enter_plan_mode",
+    "description": "进入计划模式：此后只能读和想，不能改盘、不能跑命令。把方案想清楚再用 exit_plan_mode 提交给人批。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "一句话说明要规划什么（可选）"
+        }
+      },
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "exec_literal",
     "description": "直接运行 .exe，参数逐个原样传入、不被 Git-Bash 转换。适合 ipconfig /all。",
     "parameters": {
@@ -191,6 +206,24 @@
       "writes": true,
       "executes": true
     }
+  },
+  {
+    "name": "exit_plan_mode",
+    "description": "提交方案并退出计划模式。把 markdown 方案正文放进 plan；提交后本轮结束、控制权交回人。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "type": "string",
+          "description": "方案正文（markdown）"
+        }
+      },
+      "required": [
+        "plan"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
   },
   {
     "name": "get_goal",
