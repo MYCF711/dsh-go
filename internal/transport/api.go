@@ -42,6 +42,21 @@ type Message struct {
 	Tool    string `json:"tool,omitempty"`
 	Args    string `json:"args,omitempty"`
 	Summary string `json:"summary,omitempty"`
+	// Time 是这条消息对应事件的墙钟时间（epoch 毫秒）。
+	// 界面要算 tok/s：输出 token ÷ 相邻两条助手消息的时间差。
+	// 没有它就算不出速率——这是 H2，2026-11-03 界面线提的。
+	Time int64 `json:"time,omitempty"`
+	// Usage 是助手消息带的用量（H1）。键与 v4 的 usage 一致，界面直接读。
+	// nil 表示这次没有用量信息——**不许编 0**，那样界面会显示"0 tok/s"。
+	Usage *UsageMsg `json:"usage,omitempty"`
+}
+
+// UsageMsg 是一条助手消息的用量。字段名照 v4 的 usage 原样搬，不另起一套。
+type UsageMsg struct {
+	InputTokens     int `json:"inputTokens,omitempty"`
+	OutputTokens    int `json:"outputTokens,omitempty"`
+	TotalTokens     int `json:"totalTokens,omitempty"`
+	CacheReadTokens int `json:"cacheReadTokens,omitempty"`
 }
 
 // SessionSummary 是 session.list 的一行。Title 要能看懂（一句话摘要）。

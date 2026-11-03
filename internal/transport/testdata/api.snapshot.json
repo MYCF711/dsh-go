@@ -21,7 +21,9 @@
       "text",
       "tool",
       "args",
-      "summary"
+      "summary",
+      "time",
+      "usage"
     ],
     "SessionSummary": [
       "id",
