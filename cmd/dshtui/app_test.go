@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -470,7 +471,10 @@ func TestTrimKeepsMetaAligned(t *testing.T) {
 // 对多字节字符成立，但 ASCII 永远等不到续字节——于是字母、Ctrl+T、
 // Ctrl+F、y/a/n（审批）、Ctrl+C（退出）在真机上按了全都没反应，
 // 而单测直接调 handleRune，看不出这个问题。
-// 同时验证方向键（ESC [ A）被整段吞掉，不会往输入行塞 "[A"。
+//
+// 方向键的期望在加滚动时**变了**：现在 ESC[A 认成 up，而不是让 Esc 兜底
+// （旧行为是"按一次方向键等于清空输入行"）。ESC 本身仍然要在没有后续字节时
+// 发出去，见 TestBareEscStaysEsc / TestEscTimeoutMeansBareEsc。
 func TestReadKeysDecodesASCIIAndControlKeys(t *testing.T) {
 	rch := make(chan rune, 64)
 	sch := make(chan string, 8)
@@ -487,12 +491,12 @@ func TestReadKeysDecodesASCIIAndControlKeys(t *testing.T) {
 		t.Fatalf("解码结果 %q（%v），期望 %q（%v）", string(got), got, string(want), want)
 	}
 
-	esc := 0
-	for range sch {
-		esc++
+	var specials []string
+	for s := range sch {
+		specials = append(specials, s)
 	}
-	if esc != 1 {
-		t.Fatalf("ESC 应当只发一次 esc 事件，实际 %d 次", esc)
+	if strings.Join(specials, ",") != "up" {
+		t.Fatalf("方向键应当只解出 up，实际 %v（Esc 也被顺带发了？）", specials)
 	}
 }
 
@@ -512,5 +516,396 @@ func TestCtxPercent(t *testing.T) {
 		if got := ctxPercent(c.used, c.window); got != c.want {
 			t.Fatalf("ctxPercent(%d,%d) = %q，期望 %q", c.used, c.window, got, c.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------- 滚动
+
+// fillLines 往里塞 n 行**带编号**的正文。编号是为了能断言"屏幕上第 k 行是第几条"——
+// 只断言"有内容"的话，窗口错一行这种 bug 是看不出来的。
+func fillLines(a *app, n int) []string {
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		ln := fmt.Sprintf("行 %03d", i)
+		a.push(ln)
+		out = append(out, ln)
+	}
+	return out
+}
+
+// 1. 默认贴底：显示的是最后几行，状态行不出现"回看中"。
+func TestViewFollowsTailByDefault(t *testing.T) {
+	a := newTestApp(80, 12)
+	body := a.bodyHeight()
+	all := fillLines(a, 100)
+
+	got := a.view()
+	for i := 0; i < body; i++ {
+		want := all[len(all)-body+i]
+		if got[i] != want {
+			t.Fatalf("贴底时第 %d 行应为 %q，实际 %q", i, want, got[i])
+		}
+	}
+	if a.scroll != 0 {
+		t.Fatalf("没按过翻页，scroll 应为 0，实际 %d", a.scroll)
+	}
+	if status := got[len(got)-2]; strings.Contains(status, "回看中") {
+		t.Fatalf("贴底时状态行不该说在回看：%q", status)
+	}
+}
+
+//  2. PgUp 一屏：窗口整体往前挪**正好一屏**（新的一屏紧挨着旧的一屏：
+//     新末行的下一行就是旧首行，既不重叠也不留缝），
+//     状态行同时报出还剩多少行才回到底部。
+func TestPageUpMovesBackOneScreen(t *testing.T) {
+	a := newTestApp(80, 12)
+	body := a.bodyHeight()
+	all := fillLines(a, 100)
+
+	before := a.view()
+	a.handleSpecial("pgup")
+	after := a.view()
+
+	if after[0] == before[0] {
+		t.Fatalf("PgUp 之后首行没变：%q", after[0])
+	}
+	if want := all[len(all)-body-1]; after[body-1] != want {
+		t.Fatalf("新一屏的末行应为 %q，实际 %q", want, after[body-1])
+	}
+	if want := all[len(all)-body]; before[0] != want {
+		t.Fatalf("旧一屏的首行应为 %q，实际 %q", want, before[0])
+	}
+	// 新末行（len-body-1）与旧首行（len-body）是两个相邻的行号：
+	// 一屏正好接上，中间既不重也不漏。
+	if want := all[len(all)-2*body]; after[0] != want {
+		t.Fatalf("PgUp 之后首行应为 %q，实际 %q", want, after[0])
+	}
+	if a.scroll != body {
+		t.Fatalf("PgUp 之后 scroll 应为 %d，实际 %d", body, a.scroll)
+	}
+
+	status := after[len(after)-2]
+	if !strings.Contains(status, "↑ 回看中（还有 9 行）· PgDn/Ctrl+End 回到底部") {
+		t.Fatalf("状态行没报回看与剩余行数：%q", status)
+	}
+}
+
+// 3. 既有契约不能破：任何滚动位置上 view() 都**恰好**是终端高度（宽度也不超）。
+func TestViewHeightStableAtAnyScroll(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {120, 30}, {40, 10}} {
+		w, h := size[0], size[1]
+		a := newTestApp(w, h)
+		fillLines(a, 200)
+		// 塞一行会被折叠的工具结果：过滤发生在取窗口**之前**，
+		// 位置算错的话行数或宽度先崩。
+		a.handleFrame(ServerFrame{Type: "tool/result", Data: json.RawMessage(`{"summary":"ok"}`)})
+
+		check := func(stage string) {
+			got := a.view()
+			if len(got) != h {
+				t.Fatalf("%dx%d/%s：view 给了 %d 行，应为 %d", w, h, stage, len(got), h)
+			}
+			for i, ln := range got {
+				if n := len([]rune(ln)); n > w {
+					t.Fatalf("%dx%d/%s：第 %d 行宽 %d 超过 %d", w, h, stage, i, n, w)
+				}
+			}
+		}
+		check("贴底")
+		for i := 0; i < 12; i++ { // 12 屏足够越过顶部
+			a.handleSpecial("pgup")
+			check(fmt.Sprintf("PgUp #%d", i+1))
+		}
+		for i := 0; i < 12; i++ {
+			a.handleSpecial("pgdn")
+			check(fmt.Sprintf("PgDn #%d", i+1))
+		}
+		check("回到贴底")
+	}
+}
+
+// 4. 回看中收到新帧：屏幕上那几行**不动**（不是自动跳到底）。
+func TestNewFrameDoesNotDisturbScrollPosition(t *testing.T) {
+	a := newTestApp(80, 16)
+	body := a.bodyHeight()
+	fillLines(a, 60)
+
+	a.handleSpecial("pgup")
+	before := a.view()
+	scrollBefore := a.scroll
+
+	// 一帧三行（正文两行 + 段末空行），全部可见 → 位置要跟着锚住
+	a.handleFrame(ServerFrame{Type: "assistant/message",
+		Data: json.RawMessage(`{"text":"新来的第一行\n新来的第二行"}`)})
+	after := a.view()
+
+	for i := 0; i < body; i++ {
+		if before[i] != after[i] {
+			t.Fatalf("回看位置被新帧打乱了：第 %d 行 %q → %q", i, before[i], after[i])
+		}
+	}
+	if a.scroll != scrollBefore+3 {
+		t.Fatalf("锚定后 scroll 应为 %d，实际 %d", scrollBefore+3, a.scroll)
+	}
+	if strings.Contains(strings.Join(after[:body], "\n"), "新来的") {
+		t.Fatalf("回看中不该自动跳到底部：\n%s", strings.Join(after[:body], "\n"))
+	}
+}
+
+// 4b. 回看中撞上 maxLines 裁头：窗口里那段内容仍然不动
+// （scroll 是相对底部的距离，裁头不该换算成位移——算错的话内容会整体跳一行）。
+func TestTrimDoesNotShiftScrolledView(t *testing.T) {
+	a := newTestApp(80, 12)
+	body := a.bodyHeight()
+	for i := 0; i < maxLines; i++ {
+		a.push(fmt.Sprintf("行 %04d", i))
+	}
+	a.handleSpecial("pgup")
+	before := a.view()[:body]
+
+	for i := 0; i < 10; i++ { // 每条都会裁掉最前面一行
+		a.push(fmt.Sprintf("新 %04d", i))
+	}
+	after := a.view()[:body]
+	for i := 0; i < body; i++ {
+		if before[i] != after[i] {
+			t.Fatalf("裁头之后回看位置偏移了：第 %d 行 %q → %q", i, before[i], after[i])
+		}
+	}
+}
+
+// 5. Ctrl+End 回到底部 = 恢复跟随：再来新帧就要显示最新的。
+func TestCtrlEndResumesFollowing(t *testing.T) {
+	a := newTestApp(80, 16)
+	body := a.bodyHeight()
+	all := fillLines(a, 60)
+
+	a.handleSpecial("pgup")
+	a.handleSpecial("pgup")
+	a.handleSpecial("end")
+	if a.scroll != 0 {
+		t.Fatalf("Ctrl+End 之后 scroll 应为 0，实际 %d", a.scroll)
+	}
+	got := a.view()
+	if got[0] != all[len(all)-body] {
+		t.Fatalf("Ctrl+End 之后应贴底，首行 %q 期望 %q", got[0], all[len(all)-body])
+	}
+	if strings.Contains(got[len(got)-2], "回看中") {
+		t.Fatalf("贴底后状态行不该还说回看：%q", got[len(got)-2])
+	}
+
+	a.handleFrame(ServerFrame{Type: "assistant/message", Data: json.RawMessage(`{"text":"这是最新的"}`)})
+	if !strings.Contains(strings.Join(a.view()[:body], "\n"), "这是最新的") {
+		t.Fatalf("恢复跟随后新帧应当出现在屏幕上：\n%s", strings.Join(a.view()[:body], "\n"))
+	}
+
+	// Ctrl+Home 到最上面：首行就是第一行
+	a.handleSpecial("home")
+	if a.view()[0] != all[0] {
+		t.Fatalf("Ctrl+Home 之后首行应为 %q，实际 %q", all[0], a.view()[0])
+	}
+	if a.scroll != a.maxScroll() {
+		t.Fatalf("Ctrl+Home 之后 scroll 应为上限 %d，实际 %d", a.maxScroll(), a.scroll)
+	}
+}
+
+// 6. 内容比屏幕短：PgUp/↑ 都不改变显示，也没有"回看中"提示。
+func TestScrollNoopWhenContentShorterThanScreen(t *testing.T) {
+	a := newTestApp(80, 12)
+	fillLines(a, 3)
+	before := strings.Join(a.view(), "\n")
+
+	a.handleSpecial("pgup")
+	if a.scroll != 0 {
+		t.Fatalf("内容不到一屏时不该滚得动，scroll=%d", a.scroll)
+	}
+	if strings.Join(a.view(), "\n") != before {
+		t.Fatal("内容是同一批，屏幕不该有任何变化")
+	}
+	if strings.Contains(before, "回看中") {
+		t.Fatal("内容不到一屏时不该显示回看提示")
+	}
+
+	a.handleSpecial("up") // 方向键同理
+	if a.scroll != 0 || strings.Join(a.view(), "\n") != before {
+		t.Fatalf("方向键在短内容上也不该动：scroll=%d", a.scroll)
+	}
+}
+
+// 边界：滚到顶/底不越界——顶到第一行、底回跟随，按多少次都一样。
+func TestScrollStopsAtTopAndBottom(t *testing.T) {
+	a := newTestApp(80, 12)
+	body := a.bodyHeight()
+	all := fillLines(a, 40)
+
+	for i := 0; i < 20; i++ {
+		a.handleSpecial("pgup")
+	}
+	if a.scroll != a.maxScroll() {
+		t.Fatalf("应当停在顶部 scroll=%d，实际 %d", a.maxScroll(), a.scroll)
+	}
+	if got := a.view(); got[0] != all[0] {
+		t.Fatalf("到顶后首行应为 %q，实际 %q", all[0], got[0])
+	}
+
+	for i := 0; i < 20; i++ {
+		a.handleSpecial("pgdn")
+	}
+	if a.scroll != 0 {
+		t.Fatalf("应当停在底部 scroll=0，实际 %d", a.scroll)
+	}
+	if got := a.view(); got[0] != all[len(all)-body] {
+		t.Fatalf("到底后首行应为 %q，实际 %q", all[len(all)-body], got[0])
+	}
+}
+
+// 方向键（↑↓）单行滚动：一次一行，往下按回来必须回到原处。
+func TestArrowKeysScrollOneLine(t *testing.T) {
+	a := newTestApp(80, 12)
+	body := a.bodyHeight()
+	all := fillLines(a, 50)
+
+	a.handleSpecial("up")
+	if a.scroll != 1 {
+		t.Fatalf("↑ 应当是单行滚动，scroll=%d", a.scroll)
+	}
+	if got := a.view(); got[0] != all[len(all)-body-1] {
+		t.Fatalf("↑ 之后首行应为 %q，实际 %q", all[len(all)-body-1], got[0])
+	}
+
+	a.handleSpecial("down")
+	if a.scroll != 0 {
+		t.Fatalf("↓ 应当回到贴底，scroll=%d", a.scroll)
+	}
+	if got := a.view(); got[0] != all[len(all)-body] {
+		t.Fatalf("↓ 之后首行应为 %q，实际 %q", all[len(all)-body], got[0])
+	}
+}
+
+// 翻页键走的是 ESC 序列：**不许**顺带触发 Esc 把输入行清掉
+// （"翻页把打了一半的话删了"比"翻页没反应"更难接受）。
+func TestScrollKeysDoNotClearInput(t *testing.T) {
+	a := newTestApp(80, 12)
+	fillLines(a, 100)
+	for _, r := range "打了一半" {
+		a.handleRune(r)
+	}
+
+	rch := make(chan rune, 8)
+	sch := make(chan string, 8)
+	readKeysFrom(strings.NewReader("\x1b[5~\x1b[6~\x1b[1;5H\x1b[1;5F"), rch, sch)
+	close(rch)
+	close(sch)
+	for s := range sch {
+		a.handleSpecial(s)
+	}
+	if string(a.input) != "打了一半" {
+		t.Fatalf("翻页把输入行清了：%q", string(a.input))
+	}
+	if a.scroll != 0 { // PgUp PgDn Ctrl+Home Ctrl+End 走完回到贴底
+		t.Fatalf("四个键走完应当回到贴底，scroll=%d", a.scroll)
+	}
+}
+
+// 解码：PgUp/PgDn/Ctrl+Home/Ctrl+End/↑/↓ 各认成名，一个都不许落进输入行。
+func TestReadKeysMapsScrollKeys(t *testing.T) {
+	rch := make(chan rune, 64)
+	sch := make(chan string, 32)
+	// 末尾那个孤立 ESC：输入结束前也要交代掉
+	readKeysFrom(strings.NewReader("\x1b[5~\x1b[6~\x1b[1;5H\x1b[1;5F\x1b[B\x1b[A\x1b"), rch, sch)
+	close(rch)
+	close(sch)
+
+	var specials []string
+	for s := range sch {
+		specials = append(specials, s)
+	}
+	want := "pgup,pgdn,home,end,down,up,esc"
+	if got := strings.Join(specials, ","); got != want {
+		t.Fatalf("按键解码 = %v，期望 %s", specials, want)
+	}
+	var runes []rune
+	for r := range rch {
+		runes = append(runes, r)
+	}
+	if len(runes) != 0 {
+		t.Fatalf("转义序列漏进了输入行：%q", string(runes))
+	}
+}
+
+// 孤立 ESC 必须还是 Esc：后面跟普通按键时，Esc 先发、那个键照常当输入。
+func TestBareEscStaysEsc(t *testing.T) {
+	rch := make(chan rune, 8)
+	sch := make(chan string, 8)
+	readKeysFrom(strings.NewReader("x\x1bQ"), rch, sch)
+	close(rch)
+	close(sch)
+
+	var specials []string
+	for s := range sch {
+		specials = append(specials, s)
+	}
+	if strings.Join(specials, ",") != "esc" {
+		t.Fatalf("ESC+普通键 应当只发一次 esc，实际 %v", specials)
+	}
+	var runes []rune
+	for r := range rch {
+		runes = append(runes, r)
+	}
+	if string(runes) != "xQ" {
+		t.Fatalf("ESC 后面的普通键不该被吞：%q", string(runes))
+	}
+}
+
+// scriptedSource 是"可控的超时"源：真机上的孤立 ESC 靠它复现
+// （strings.Reader 永远读到 EOF，测不出这条路径）。
+type scriptedSource struct {
+	steps []byteStep
+	i     int
+}
+
+type byteStep struct {
+	c       byte
+	timeout bool
+	ok      bool
+}
+
+func (s *scriptedSource) next(bool) (byte, bool, bool) {
+	if s.i >= len(s.steps) {
+		return 0, false, false
+	}
+	st := s.steps[s.i]
+	s.i++
+	return st.c, st.timeout, st.ok
+}
+
+// ESC 之后等不到后续字节 = 人按的就是 Esc。这条钉的是**生产路径**：
+// 没有超时的话，要么 Esc 永远不生效，要么 PgUp 被当成 Esc。
+func TestEscTimeoutMeansBareEsc(t *testing.T) {
+	src := &scriptedSource{steps: []byteStep{
+		{c: 0x1b, ok: true},
+		{timeout: true},
+		{c: 'a', ok: true},
+		{}, // 输入结束
+	}}
+	rch := make(chan rune, 8)
+	sch := make(chan string, 8)
+	decodeKeys(src, rch, sch)
+	close(rch)
+	close(sch)
+
+	var specials []string
+	for s := range sch {
+		specials = append(specials, s)
+	}
+	if strings.Join(specials, ",") != "esc" {
+		t.Fatalf("超时后应当发一次 esc，实际 %v", specials)
+	}
+	var runes []rune
+	for r := range rch {
+		runes = append(runes, r)
+	}
+	if string(runes) != "a" {
+		t.Fatalf("超时之后的正常按键不该被吞：%q", string(runes))
 	}
 }

@@ -43,6 +43,14 @@ type app struct {
 	searching   bool
 	searchQuery string
 
+	// scroll 是"离底部多少行"：0 = 贴底跟随新输出，>0 = 正在往回看。
+	//
+	// 为什么用**尾部锚定**而不是记住首行的绝对下标：正文超过 maxLines 时
+	// 从头部裁掉的是**开头**，而"离底部多远"这个量不受裁头影响——同一个
+	// scroll 在裁剪前后指着同一段字。记绝对下标就得在每次裁剪时修一次，
+	// 少修一次的症状是"回看时内容莫名往前跳一行"。
+	scroll int
+
 	// 用量与速率：都来自 session.load，**不自己估**。
 	ctxTokens  int
 	ctxWindow  int
@@ -166,6 +174,7 @@ func (a *app) switchTo(row sessionRow) error {
 	a.frames = ch
 	a.lines = nil
 	a.meta = nil
+	a.scroll = 0 // 换了会话就没有可回看的旧内容了
 	a.tools = 0
 	a.ctxTokens, a.outTokens, a.tps = 0, 0, 0
 	title := row.Title
@@ -345,15 +354,78 @@ func (a *app) toggleToolResults() {
 // isHidden 判断第 i 行在当前折叠状态下要不要显示。
 // **错误行永远显示**：折叠是省地方，不是把失败藏起来。
 func (a *app) isHidden(i int) bool {
-	if a.showToolResults {
-		return false
-	}
 	if i < 0 || i >= len(a.meta) {
 		return false
 	}
-	m := a.meta[i]
+	return a.hiddenMeta(a.meta[i])
+}
+
+// hiddenMeta 是折叠规则的**唯一**实现：isHidden 和"新行到达要不要挪窗口"
+// 都走它。两处各写一遍的话，迟早会出现"折叠的行被算进了可见行"这种错，
+// 而它的症状只是回看时少/多一行，很难归因。
+func (a *app) hiddenMeta(m lineMeta) bool {
+	if a.showToolResults {
+		return false
+	}
 	return m.toolResult && !m.isError
 }
+
+// bodyHeight 是正文区能放的行数（整屏去掉分隔线、状态行、输入行）。
+func (a *app) bodyHeight() int {
+	body := a.scr.height - 3
+	if body < 1 {
+		body = 1
+	}
+	return body
+}
+
+// maxScroll 是能往回看的上限。内容装得下一屏时是 0——**滚不动**。
+//
+// 用 visibleCount 而不是 visibleLines：这个函数在**每压一行**的时候都会被
+// 调到（回看中要夹紧），流式输出时一帧几十行，不能每行都复制一份切片。
+func (a *app) maxScroll() int {
+	n := a.visibleCount()
+	body := a.bodyHeight()
+	if n <= body {
+		return 0
+	}
+	return n - body
+}
+
+// visibleCount 是 visibleLines 的**条数**，不复制、不分配。
+// 判断仍然只走 isHidden，两个口径不会分叉。
+func (a *app) visibleCount() int {
+	if a.showToolResults {
+		return len(a.lines)
+	}
+	n := 0
+	for i := range a.lines {
+		if !a.isHidden(i) {
+			n++
+		}
+	}
+	return n
+}
+
+// setScroll 是改滚动位置的**唯一**入口：一律夹在 [0, maxScroll]。
+//
+// 夹在写入侧而不是只在 view 里夹，是为了让按键有确定的反馈：
+// 若是只在显示时夹，在顶部再按几次 PgUp 会把 scroll 越推越高，
+// 之后按 PgDn 前几下看起来"没反应"。
+func (a *app) setScroll(n int) {
+	if n < 0 {
+		n = 0
+	}
+	if max := a.maxScroll(); n > max {
+		n = max
+	}
+	a.scroll = n
+}
+
+// scrollBack 往回看 n 行（n>0 = 更新的内容），scrollForward 往新内容方向 n 行。
+// 两者都落在 setScroll 上，所以越界不会留后遗症。
+func (a *app) scrollBack(n int)    { a.setScroll(a.scroll + n) }
+func (a *app) scrollForward(n int) { a.setScroll(a.scroll - n) }
 
 // visibleLines 返回"现在屏幕上该显示的行"。
 //
@@ -388,6 +460,16 @@ func matchCount(lines []string, query string) int {
 	return n
 }
 
+// handleSpecial 处理方向上的一类按键（都由 readKeys 解码成名字）。
+//
+//	PgUp / PgDn       翻一屏（正好是一屏的行数，接得上、也不留缝）
+//	↑ / ↓             单行
+//	Home / Ctrl+Home  到最上面
+//	End / Ctrl+End    回到最底部（scroll=0 就恢复"跟随新输出"）
+//
+// Ctrl+End 与 End 在这里是同一件事：这个界面没有行内光标，"到行尾"没有意义，
+// 而"回到底部继续跟随"是回看之后最常用的那一下。两种终端的 Ctrl+Home/End
+// 编码还不一样（`\x1b[1;5H` 与 `\x1b[1;5~`），索性合并。
 func (a *app) handleSpecial(k string) {
 	switch k {
 	case "esc":
@@ -397,6 +479,18 @@ func (a *app) handleSpecial(k string) {
 			return
 		}
 		a.input = nil
+	case "pgup":
+		a.scrollBack(a.bodyHeight())
+	case "pgdn":
+		a.scrollForward(a.bodyHeight())
+	case "up":
+		a.scrollBack(1)
+	case "down":
+		a.scrollForward(1)
+	case "home":
+		a.setScroll(a.maxScroll())
+	case "end":
+		a.setScroll(0)
 	}
 }
 
@@ -430,6 +524,7 @@ func (a *app) command(text string) {
 	case "/help":
 		a.push("命令：/help 帮助 · /new 新会话 · /clear 清屏 · /quit 退出 · /tools 折叠/展开工具结果")
 		a.push("按键：Ctrl+T 折叠/展开工具结果 · Ctrl+F 搜索会话（Esc 退出） · Esc 清输入")
+		a.push("滚动：PgUp/PgDn 翻一屏 · ↑/↓ 一行 · Ctrl+Home 到最上面 · Ctrl+End 回到底部（继续跟随）")
 	case "/new":
 		if err := a.newSession(); err != nil {
 			a.err = err.Error()
@@ -437,6 +532,9 @@ func (a *app) command(text string) {
 	case "/clear":
 		a.lines = nil
 		a.meta = nil
+		// 内容没了就没有"回看"可言：scroll 留在高位会让新内容一出现就
+		// 处于回看状态（屏幕上看着像"没显示最新几行"）。
+		a.scroll = 0
 	case "/quit", "/exit":
 		a.quit = true
 	case "/tools":
@@ -583,6 +681,15 @@ func (a *app) push(s string) {
 func (a *app) pushMeta(s string, m lineMeta) {
 	a.lines = append(a.lines, s)
 	a.meta = append(a.meta, m)
+	// 正在回看时又来了新行：把"离底部多远"跟着 +1，屏幕上那几行才**不动**。
+	// 不做这一步，新输出会把整个窗口往下挤——人正在读的那段就滑走了，
+	// 而且越流式越明显（每 100ms 一帧）。
+	//
+	// 折叠掉的行不占显示格子，所以不加。裁头（超过 maxLines）也不用补偿：
+	// scroll 是相对**底部**的距离，从头部裁掉多少都不改变它指的那段内容。
+	if a.scroll > 0 && !a.hiddenMeta(m) {
+		a.scroll++
+	}
 	// 只留最近 maxLines 行：内存不随会话膨胀；真正的虚拟化是下一步
 	if n := len(a.lines); n > maxLines {
 		excess := n - maxLines // 丢掉最前面这么多行
@@ -595,6 +702,11 @@ func (a *app) pushMeta(s string, m lineMeta) {
 		} else {
 			a.meta = nil // 防御：万一有人绕过 push 直接改 lines
 		}
+	}
+	if a.scroll > 0 {
+		// 回看位置可能已经贴到新的顶部（内容被裁掉一截），趁机夹回去，
+		// 免得 scroll 越积越大、之后按 PgDn 前几下没反应。
+		a.setScroll(a.scroll)
 	}
 }
 
@@ -617,20 +729,34 @@ func (a *app) render() {
 // 折叠与搜索都只影响"取哪几行"和状态行文字，不改变条数：
 // 每屏仍**恰好** height 行（上面 body 行 + 分隔线 + 状态行 + 输入行）。
 func (a *app) view() []string {
-	body := a.scr.height - 3
-	if body < 1 {
-		body = 1
-	}
+	body := a.bodyHeight()
 	lines := make([]string, 0, a.scr.height)
 
-	// 正文：先按折叠状态过滤，再只取尾部能放下的部分。
-	// 过滤在尾部截取**之前**做：否则 folded 的行会占掉本该给其它内容的格子。
+	// 正文：先按折叠状态过滤，再按滚动位置取一屏。
+	// 过滤在取窗口**之前**做：否则折叠的行会占掉本该给其它内容的格子，
+	// 也会让"离底部多远"按看不见的行来算。
 	visible := a.visibleLines()
-	start := 0
+
+	// max 是能往回看的上限：内容比屏幕短就是 0（滚不动）。
+	max := 0
 	if len(visible) > body {
-		start = len(visible) - body
+		max = len(visible) - body
 	}
-	lines = append(lines, visible[start:]...)
+	// 这里按 max 夹一次而不是直接信任 a.scroll：view 不假设状态干净
+	// （测试、以及 maxLines 裁剪都可能让 scroll 暂时越界）。
+	scroll := a.scroll
+	if scroll < 0 {
+		scroll = 0
+	}
+	if scroll > max {
+		scroll = max
+	}
+	end := len(visible) - scroll
+	start := end - body
+	if start < 0 {
+		start = 0
+	}
+	lines = append(lines, visible[start:end]...)
 	for len(lines) < body {
 		lines = append(lines, "")
 	}
@@ -667,6 +793,16 @@ func (a *app) view() []string {
 	} else if a.err != "" {
 		left = " ! " + a.err
 	}
+	if scroll > 0 {
+		// 回看时最要紧的三件事是"你在回看 / 还差多少回到最新 / 怎么回去"，
+		// 所以放在**最前面**：窄终端按列截断，先牺牲的应该是后面那些常驻指标。
+		//
+		// N 是**回到底部还要过的行数**（就是 scroll），和同一行里推荐的
+		// PgDn/Ctrl+End 是同一件事——要是按"上面还有多少行"报数，
+		// 人按提示按 PgDn 会发现次数对不上。
+		left = " " + fmt.Sprintf("↑ 回看中（还有 %d 行）· PgDn/Ctrl+End 回到底部", scroll) +
+			" · " + strings.TrimLeft(left, " ")
+	}
 	lines = append(lines, strings.Repeat("─", a.scr.width))
 	lines = append(lines, fitWidth(left, a.scr.width))
 
@@ -681,54 +817,165 @@ func (a *app) view() []string {
 
 // ---------------------------------------------------------------- 输入
 
-// readKeys 把字节流转成 rune，并把几个控制序列归一成特殊键。
+// readKeys 把字节流转成 rune / 按键名。
 //
 // 不做完整行编辑（历史/光标移动）：那是下一步。这里只保证
-// "能打字、能删、能回车、能退"——足够验证整条链路。
+// "能打字、能删、能回车、能退、能翻页"——足够验证整条链路。
 func readKeys(runes chan<- rune, specials chan<- string) {
-	readKeysFrom(os.Stdin, runes, specials)
+	decodeKeys(newStdinSource(os.Stdin), runes, specials)
 }
 
-// readKeysFrom 是 readKeys 的解码部分，单独拆出来是为了能喂字节流做测试：
-// 键盘解码错了，屏幕上是"按键没反应"，那是最难查的一类现象。
+// escTimeout 是"ESC 之后还给不给后续字节留时间"。
 //
-// 这里修掉两个会让按键**完全失效**的问题：
+// 孤立 ESC（人按 Esc）和转义序列前缀（PgUp = ESC [ 5 ~）在字节上完全一样，
+// 唯一能区分的是"后面还来不来字节"。50ms 够：真按键的后续字节是同一批
+// 进内核缓冲的（微秒级就到），而人对 50ms 的延迟没有感觉。
+//
+// 只对 ESC 后面的**第一个**字节计时；一旦看到 '[' / 'O'（确认是序列），
+// 后面就阻塞等到底——否则机器一卡，序列会在中途被拆开，往输入行里塞 "[5~"。
+//
+// 为什么非要有这个等待：旧代码一见 ESC 就立刻当 esc 发出去。加了翻页之后
+// 这个问题会变严重——PgUp 会顺带触发 esc，把输入行里打了一半的字清掉。
+// "翻页把话删了"比"翻页没反应"更难接受。
+const escTimeout = 50 * time.Millisecond
+
+// byteSource 是解码器的输入。抽出来有两个目的：
+// 测试能直接喂字节（strings.Reader，没有真时钟），
+// 生产路径能在 ESC 之后**超时**而不是死等。
+//
+// afterEsc 为 true 表示上一个字节是 ESC：这时源可以只等一小会儿就报 timeout。
+// timeout 只在这个位置出现，孤立 ESC 就靠它认出来。
+type byteSource interface {
+	next(afterEsc bool) (c byte, timeout bool, ok bool)
+}
+
+// readerSource 是测试用的源：读到哪算哪，没有超时（EOF 即结束）。
+type readerSource struct {
+	in  io.Reader
+	buf [1]byte
+}
+
+func (r *readerSource) next(bool) (byte, bool, bool) {
+	n, err := r.in.Read(r.buf[:])
+	if err != nil || n == 0 {
+		return 0, false, false // ok=false：输入结束
+	}
+	return r.buf[0], false, true
+}
+
+// chanSource 是生产用的源：一个 goroutine 把 stdin 的字节泵进来，
+// 解码器在 ESC 之后最多等 escTimeout。
+//
+// 为什么要泵：os.Stdin 在 Windows 控制台上不支持 SetReadDeadline
+// （不是可 poll 的文件），等不到超时；只能把"读"挪进 goroutine。
+type chanSource struct {
+	ch  <-chan byte
+	gap time.Duration
+}
+
+func (s *chanSource) next(afterEsc bool) (byte, bool, bool) {
+	if !afterEsc {
+		c, ok := <-s.ch
+		return c, false, ok
+	}
+	t := time.NewTimer(s.gap)
+	defer t.Stop()
+	select {
+	case c, ok := <-s.ch:
+		return c, false, ok
+	case <-t.C:
+		return 0, true, false
+	}
+}
+
+// newStdinSource 起一个泵 goroutine 并返回对应的源。
+func newStdinSource(in *os.File) byteSource {
+	ch := make(chan byte, 64)
+	go func() {
+		defer close(ch)
+		buf := make([]byte, 1)
+		for {
+			n, err := in.Read(buf)
+			if n > 0 {
+				ch <- buf[0]
+			}
+			if err != nil || n == 0 {
+				return
+			}
+		}
+	}()
+	return &chanSource{ch: ch, gap: escTimeout}
+}
+
+// readKeysFrom 是解码部分，单独拆出来是为了能喂字节流做测试：
+// 键盘解码错了，屏幕上是"按键没反应"，那是最难查的一类现象。
+func readKeysFrom(in io.Reader, runes chan<- rune, specials chan<- string) {
+	decodeKeys(&readerSource{in: in}, runes, specials)
+}
+
+// decodeKeys 是完整的状态机：字节流 → rune / 按键名。
+//
+// 这里修掉三个会让按键**失效或误伤**的问题：
 //
 //  1. 旧写法"等到续字节才解码"（`c&0xC0 != 0x80 → continue`）对多字节字符成立，
 //     但对 ASCII 永远等不到续字节——字母、Ctrl+T、Ctrl+F、y/a/n、Ctrl+C
 //     一个都发不出来。改成"凑满一个完整字符就发"（utf8.FullRune）。
 //  2. ESC 之后必须把整个转义序列吞掉（ESC [ A 之类），否则按一次方向键
 //     会往输入行里塞 "[A"。
-func readKeysFrom(in io.Reader, runes chan<- rune, specials chan<- string) {
-	buf := make([]byte, 1)
+//  3. ESC 不能一见就发：PgUp/PgDn/Ctrl+Home/Ctrl+End 也都是 ESC 开头的序列。
+//     所以要先把 ESC 扣住，确认不是序列（超时 / 后面跟的不是 [ 或 O）再发。
+func decodeKeys(src byteSource, runes chan<- rune, specials chan<- string) {
 	var pend []byte
-	// 上一个字节是 ESC/CSI 前缀时，后续字节属于同一条转义序列，整段吞掉。
-	escTail, csiTail := false, false
+	pendingEsc := false
+	csi := false
+	var seq []byte // CSI/SS3 的参数与终结字节（"5~"、"1;5H"、"A"）
 	for {
-		n, err := in.Read(buf)
-		if err != nil || n == 0 {
-			return
-		}
-		c := buf[0]
-		switch {
-		case csiTail:
-			// CSI/SS3 的终止字节在 0x40–0x7E（"[A"、"[1;5C"、"OP" 都是）
-			if c >= 0x40 && c <= 0x7e {
-				csiTail = false
+		c, timeout, ok := src.next(pendingEsc)
+		if timeout {
+			// ESC 之后等不到后续字节 = 人按的就是 Esc
+			if pendingEsc {
+				specials <- "esc"
+				pendingEsc = false
 			}
 			continue
-		case escTail:
-			escTail = false
+		}
+		if !ok {
+			// 输入结束：挂着的 ESC 也要交代掉，再收工
+			if pendingEsc {
+				specials <- "esc"
+			}
+			return
+		}
+		switch {
+		case pendingEsc:
+			pendingEsc = false
 			if c == '[' || c == 'O' {
-				csiTail = true
+				// CSI（ESC [ …）与 SS3（ESC O …）走同一条路：
+				// 方向键在真终端上两种都有
+				csi = true
+				seq = seq[:0]
 				continue
 			}
-			// 孤立的 ESC 后面跟的是普通按键：这个按键照常处理，不吞
-		case c == 0x1b:
-			// 单独一个 ESC 与转义序列前缀没法"等一等"再区分（按键没有超时），
-			// 所以立刻当成 esc 发出去：清输入 / 退出搜索。
+			// 孤立 ESC 后面跟的是普通按键：ESC 照发，这个字节照常处理
 			specials <- "esc"
-			escTail = true
+		case csi:
+			// 终结字节也要进 seq（"A"、"5~"、"1;5H" 的末字节都是）
+			seq = append(seq, c)
+			// 终结字节在 0x40–0x7E
+			if c >= 0x40 && c <= 0x7e {
+				csi = false
+				if name := keyName(seq); name != "" {
+					specials <- name
+				}
+				continue
+			}
+			// 参数收太长说明根本不是序列：放弃这段，别越攒越多
+			if len(seq) > 16 {
+				csi = false
+			}
+			continue
+		case c == 0x1b:
+			pendingEsc = true
 			continue
 		}
 		pend = append(pend, c)
@@ -743,6 +990,54 @@ func readKeysFrom(in io.Reader, runes chan<- rune, specials chan<- string) {
 		}
 		pend = pend[:0]
 	}
+}
+
+// keyName 把 CSI/SS3 的参数+终结字节认成按键名。
+//
+// 只认**确定知道**的几个，认不出来返回空串（静默吞掉）：
+// 往输入行里塞 "[1;2C" 比没反应糟得多。修饰键（"1;5H" 里的 5）直接不看——
+// 这个界面里 Ctrl+Home 和 Home 是同一件事（见 handleSpecial）。
+func keyName(seq []byte) string {
+	if len(seq) == 0 {
+		return ""
+	}
+	numPart := seq[:len(seq)-1]
+	if i := indexByte(numPart, ';'); i >= 0 {
+		numPart = numPart[:i]
+	}
+	num, _ := atoiSmall(string(numPart)) // SS3 的 "OA" 没有数字，得到 0
+	switch seq[len(seq)-1] {
+	case 'A':
+		return "up"
+	case 'B':
+		return "down"
+	case 'H':
+		return "home"
+	case 'F':
+		return "end"
+	case '~':
+		switch num {
+		case 1, 7:
+			return "home" // ESC[1~ / ESC[7~
+		case 4, 8:
+			return "end" // ESC[4~ / ESC[8~
+		case 5:
+			return "pgup"
+		case 6:
+			return "pgdn"
+		}
+	}
+	return ""
+}
+
+// indexByte 是 bytes.IndexByte 的最小替代：这里只处理几个字节，不值得再引一个包。
+func indexByte(b []byte, c byte) int {
+	for i := range b {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // ---------------------------------------------------------------- 小工具
