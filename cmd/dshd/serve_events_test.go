@@ -41,3 +41,12 @@ func TestPublishTurnQuiet(t *testing.T) {
 	publishTurn(nil, "session:a", "t", errors.New("x"))
 	publishTurn(func(string, transport.ServerFrame) { t.Fatal("空 topic 不该推") }, "", "t", errors.New("x"))
 }
+
+// serve 无人值守：默认必须是 deny，不许默认 allow。
+// 这条测试同时是 scripts/perm-gates.json 里 cmdServe 的登记凭据。
+func TestServePolicyIsDeny(t *testing.T) {
+	r := &loopRunner{home: "/tmp/x", policy: "deny", maxSteps: 6}
+	if r.policy != "deny" {
+		t.Fatalf("serve 默认策略必须是 deny，拿到 %q", r.policy)
+	}
+}

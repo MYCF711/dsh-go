@@ -67,8 +67,6 @@ func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	home := fs.String("home", envOr("DSHD_HOME", ""), "会话根目录（必填）")
 	// 留空 = 让 transport 用 127.0.0.1:0，端口由 OS 分配。
-	llmBase := fs.String("llm-base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "模型网关地址")
-	llmModel := fs.String("llm-model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "模型 id")
 	addr := fs.String("addr", "", "监听地址（默认 127.0.0.1:0，端口由 OS 分配）")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -89,7 +87,8 @@ func cmdServe(args []string) error {
 	// runner 现在固定拒绝（见 errNoModel 的注释）。
 	// runner 要先建好（prompt 服务要它），但推事件的出口得等 srv 建完才有——
 	// 所以用指针，建完再赋。
-	runner := &modelRunner{home: *home}
+	// 子进程跑 run：工具循环、审批、压缩、落盘全部走既有的那一套。
+	runner := &loopRunner{home: *home, policy: "deny", maxSteps: 6}
 	prompts := newPromptService(runner)
 
 	// 建会话的能力在起来之前就确定（cwd 定一次，不随后续请求漂移）。
@@ -129,8 +128,6 @@ func cmdServe(args []string) error {
 		return err
 	}
 	runner.pub = srv.Publish
-	runner.base = *llmBase
-	runner.model = *llmModel
 
 	base, err := srv.Start()
 	if err != nil {
