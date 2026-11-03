@@ -53,6 +53,13 @@ type turnErrorData struct {
 //
 // 必须和事件流同一条线：以前它从 1 开始，跑第二轮时 turn/done 的 seq
 // 比客户端水位小，被 sinceSeq 过滤掉——界面永远等不到"这一轮结束了"。
+// followProgress 把 follow 走到了哪里交回来。只在 fw.Wait() 之后读，所以不需要锁。
+type followProgress struct {
+	offset  int64
+	lastSeq int64
+	path    string
+}
+
 var serveTurnSeq atomic.Int64
 
 func publishTurn(pub func(topic string, f transport.ServerFrame), topic, turnID string, err error, seq int) {

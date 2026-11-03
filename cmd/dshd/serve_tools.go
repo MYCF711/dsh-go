@@ -60,6 +60,7 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	// 边跑边推：日志是 append 的，按条数差量推就够。
 	// 必须**等 follow 真的退出**再发终局帧：否则它可能在我们发出 turn/done 之后
 	// 又推一帧（子进程刚写完、我们刚读完的那个窗口），界面就会看到"结束后还有消息"。
+	var prog followProgress
 	var fw sync.WaitGroup
 	done := make(chan struct{})
 	// DSHD_SERVE_NO_FOLLOW=1 时不起 follow goroutine。
@@ -68,7 +69,7 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 		fw.Add(1)
 		go func() {
 			defer fw.Done()
-			r.follow(ctx, sessionID, done)
+			r.follow(ctx, sessionID, done, &prog)
 		}()
 	}
 
@@ -82,7 +83,20 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 		publishTurn(r.pub, topic, turnID, e, int(serveTurnSeq.Add(1)))
 		return e
 	}
-	publishTurn(r.pub, topic, turnID, nil, int(serveTurnSeq.Add(1)))
+	// 结局帧的 seq 必须真接在事件之后。**不依赖 follow 跑过**：
+	// 直接把日志补读到末尾，取最后一个事件的 seq——日志是事实，计数器只是影子。
+	seq := int(serveTurnSeq.Add(1))
+	if prog.path != "" {
+		if evs, _, rerr := v4.ReadSince(prog.path, prog.offset); rerr == nil {
+			for _, ev := range evs {
+				if ev.Seq > serveTurnSeq.Load() {
+					serveTurnSeq.Store(ev.Seq)
+				}
+			}
+			seq = int(serveTurnSeq.Add(1))
+		}
+	}
+	publishTurn(r.pub, topic, turnID, nil, seq)
 	return nil
 }
 
@@ -91,7 +105,7 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 // 为什么不是只推消息：界面要显示"它调了什么工具"。
 // 只推 assistant/message 的话，用户看到答案却看不到过程——
 // 而"看不到过程"正是这类 agent 界面最不能接受的事。
-func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan struct{}) {
+func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan struct{}, prog *followProgress) {
 	src := newSessionSource(r.home, "")
 	// 全程复用一个解码器：这个循环每 200ms 跑一次，建一次解码器就够。
 	//
@@ -112,6 +126,9 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 		lastSeq int64
 		path    string
 	)
+	defer func() {
+		prog.offset, prog.lastSeq, prog.path = offset, lastSeq, path
+	}()
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 	for {
