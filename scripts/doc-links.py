@@ -31,13 +31,13 @@ REF_RE = re.compile(
 MANUAL = "AGENTS.md"
 
 
-def find_root() -> Path | None:
+def find_root(manual: str = MANUAL) -> Path | None:
     """脚本在 <root>/scripts/ 下，先按这个推；失败再退回 CWD。"""
     script_root = Path(__file__).resolve().parent.parent
-    if (script_root / MANUAL).is_file():
+    if (script_root / manual).is_file():
         return script_root
     cwd = Path.cwd()
-    if (cwd / MANUAL).is_file():
+    if (cwd / manual).is_file():
         return cwd
     return None
 
@@ -55,12 +55,17 @@ def syntax_error_name(path: Path) -> str | None:
 
 
 def main() -> int:
-    root = find_root()
+    # 可选参数：换一份「手册」来查。**只给自测用**——
+    # 正式跑（scripts/check.sh）不带参数，查的是 AGENTS.md。
+    # 需要这个开关是为了反证「弄坏必红」：得造一份坏手册，
+    # 而不能去改仓库里真实的 AGENTS.md（那会把别人的文档搞坏）。
+    manual = sys.argv[1] if len(sys.argv) > 1 else MANUAL
+    root = find_root(manual)
     if root is None:
-        print(f"\u627e\u4e0d\u5230 {MANUAL}")
+        print(f"找不到 {manual}")
         return 2
 
-    text = (root / MANUAL).read_text(encoding="utf-8", errors="replace")
+    text = (root / manual).read_text(encoding="utf-8", errors="replace")
     refs = sorted(set(REF_RE.findall(text)))
 
     missing = 0

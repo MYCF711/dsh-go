@@ -80,6 +80,21 @@ def main():
     code, out = run(["scripts/flag-wired.py", empty])
     chk("flag-wired 对空目录不报绿", code == 0 and "0 个开关" in out, out.strip()[-120:])
 
+    # ---- 5) doc-links：本仓缺失必红，跨仓引用必跳过 ----
+    #
+    # 这条守的是两个方向，缺一个都不算数：
+    #   - 本仓真缺了文件 → 必须 MISS 且非零（否则门禁形同虚设）
+    #   - 跨仓引用（../dsh-ui/...）→ 必须 SKIP 且不报红（否则永远误报）
+    # 造一份坏手册而不是改真的 AGENTS.md：那会把别人的文档搞坏。
+    dl = os.path.join(TMP, "doclinks")
+    os.makedirs(dl, exist_ok=True)
+    bad_manual = os.path.join(dl, "BAD.md")
+    with open(bad_manual, "w", encoding="utf-8") as fh:
+        fh.write("见 docs/missing-file.md 与 ../dsh-ui/docs/progress.md\n")
+    code, out = run(["scripts/doc-links.py", bad_manual])
+    chk("doc-links 对本仓缺失会红", code != 0 and "MISS docs/missing-file.md" in out, out.strip()[-200:])
+    chk("doc-links 对跨仓引用跳过", "SKIP ../dsh-ui/docs/progress.md" in out, out.strip()[-200:])
+
     shutil.rmtree(TMP, ignore_errors=True)
     print("合计 OK=%d FAIL=%d" % (ok, fail))
     return 0 if fail == 0 else 1
