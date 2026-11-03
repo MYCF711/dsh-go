@@ -1,13 +1,13 @@
 {
   "goroutines": [
     {
-      "site": "internal/acp/server.go:157",
+      "site": "internal/acp/server.go:156",
       "what": "等 WG 收尾的观察者",
       "sync": "读过：只等 s.wg，不碰共享可写状态；ch 只 close 一次",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/acp/server.go:422",
+      "site": "internal/acp/server.go:421",
       "what": "等 WG 收尾的观察者",
       "sync": "读过：只等 s.wg，不碰共享可写状态；ch 只 close 一次",
       "verified_at": "2026-11-03"

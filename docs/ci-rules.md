@@ -104,3 +104,31 @@ internal/acp/server_test.go  mu
 ```
 
 删之前要逐条确认"真没用"——**U1000 也会误报反射/接口实现**，不能批量删。
+
+### 续（第 119 轮）：清理死代码时差点删错
+
+按 U1000 清单动手，**第一刀就删错了一个**：
+
+我删了 `loopRunner.turnSeq` 这个字段，编译立刻报 `r.turnSeq undefined` —— 它在 173 行是**被用的**。
+staticcheck 报的 U1000 是**包级的 `var turnSeq atomic.Int64`**（另一处），不是这个字段。
+两个同名符号，我按名字搜到就删，没看作用域。
+
+还原之后只留一处真删：`internal/acp/server.go` 的 `msgSeq`（全仓 1 处出现，确属死字段）。
+
+### 剩下的 7 处（未删，逐条列着）
+
+```
+cmd/dshd/meter_calib_test.go   stubChat（测试夹具）
+cmd/dshd/serve.go              errNoModel / noModelRunner / noModelRunner.Run
+internal/acp/server_test.go    mu（测试夹具）
+internal/agent/loop.go         (*Loop).runTool
+internal/session/list.go       summarize / isCompactCheckpoint
+```
+
+这些要么是测试夹具、要么可能是将来要接回来的实现（`noModelRunner` 就是二分时长跑用的）。
+**删之前得先知道它为什么在那儿**，不然下次又要写一遍。
+
+### 记一笔
+
+"未使用"这个判断本身就容易出错：**同名不同作用域**、**反射/接口隐式使用**、**留作调试开关**。
+这一轮用一次编译失败换来的教训是：**U1000 的输出只是线索，不是判决。**

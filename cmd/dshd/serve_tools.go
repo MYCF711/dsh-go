@@ -23,8 +23,8 @@ import (
 //
 // 写锁：子进程按既有规矩拿会话写锁；这里**只读**日志，不抢锁。
 type loopRunner struct {
-	// turnSeq 是结局帧用的序号，必须跟事件流的 seq 同一条线：
-	// 以前它从 1 开始，于是跑第二轮时 turn/done 的 seq 比客户端水位小，被过滤掉。
+	// turnSeq 是结局帧用的序号。它是 loopRunner 的字段而不是包级变量：
+	// 两个 loopRunner 并存时各自计数，不会互相把水位推到对方那边。
 	turnSeq  atomic.Int64
 	pub      func(topic string, f transport.ServerFrame)
 	home     string

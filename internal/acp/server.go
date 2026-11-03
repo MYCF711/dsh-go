@@ -65,7 +65,6 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[string]*sess
 	order    []string
-	msgSeq   int
 	callSeq  int
 	pending  map[string]chan json.RawMessage
 }

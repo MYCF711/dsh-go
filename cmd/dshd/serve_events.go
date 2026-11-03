@@ -16,13 +16,11 @@ const (
 	TurnError = "turn/error"
 )
 
-// turnSeq 是推给界面的送达序号，进程内自增，从 1 开始。
 //
 // 为什么不复用会话日志的 seq：日志 seq 是**持久事实**（落进 v4 文件、
 // 参与 surface 与遮蔽的排序），而这里的 seq 只是这条连接上的送达顺序，
 // 一次 serve 重启就该从 1 重来。两者一旦混用，界面就会拿不连续的日志
 // seq 去补历史，补出来的是别的东西。
-var turnSeq atomic.Int64
 
 // turnDoneData 是 turn/done 的负载。字段名是界面契约，别改。
 type turnDoneData struct {
