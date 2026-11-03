@@ -163,6 +163,9 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"subagent_fork": {},
 		// 只读自己的技能目录，不写盘、不起进程、不联网。
 		"skill": {},
+		// 写本机记忆目录（<home>/memory），不联网、不起进程。
+		"hindsight_ingest_document":      {Writes: true},
+		"hindsight_list_knowledge_pages": {},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {

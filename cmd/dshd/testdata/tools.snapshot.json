@@ -301,6 +301,48 @@
     "caps": {}
   },
   {
+    "name": "hindsight_ingest_document",
+    "description": "把一段结论/踩坑/约定存进本机记忆，下次能按 id 捞回来；趁还记得时用。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "这段记忆叫什么，会参与生成 id"
+        },
+        "content": {
+          "type": "string",
+          "description": "要记住的正文"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "可选标签"
+        }
+      },
+      "required": [
+        "title",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
+    "name": "hindsight_list_knowledge_pages",
+    "description": "列出本机存过的记忆（id、标题、字数，新→旧）；不确定有哪些记忆时先用它。",
+    "parameters": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "history_search",
     "description": "在原始日志里按关键词回查（含已被压缩遮蔽的内容）；想找回「之前那段细节」时用。",
     "parameters": {

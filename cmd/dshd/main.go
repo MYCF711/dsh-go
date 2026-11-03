@@ -33,6 +33,7 @@ import (
 	"dshgo/modules/tool/glob"
 	goalmod "dshgo/modules/tool/goal"
 	"dshgo/modules/tool/grep"
+	"dshgo/modules/tool/hindsight"
 	"dshgo/modules/tool/history"
 	"dshgo/modules/tool/nowline"
 	"dshgo/modules/tool/present"
@@ -115,6 +116,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		subagenttool.Module(),
 		subagentfork.Module(inheritFromCtx(home)),
 		skill.Module(filepath.Join(home, "skills")),
+		hindsight.Module(home),
 	}
 }
 

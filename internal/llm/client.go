@@ -17,6 +17,12 @@ type Client struct {
 	BaseURL string // 例如 http://127.0.0.1:3425/v1
 	APIKey  string
 	HTTP    *http.Client
+	// UserAgent 是发给网关的 UA。
+	//
+	// 不设的话 Go 默认发 `Go-http-client/1.1`，网关的客户端列表里就会出现一个
+	// 不知名的 "Go-http-client"——用户看到的第一反应是"这是谁在偷偷调模型"。
+	// 这是我们的请求，就该署我们的名（2026-11-03 用户截图反馈）。
+	UserAgent string
 }
 
 // New 造一个客户端。HTTP 超时故意设长：流式响应的空闲由 ctx 控制，不由 Transport 控制。
@@ -52,6 +58,11 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	hr.Header.Set("Accept", "text/event-stream")
+	ua := c.UserAgent
+	if ua == "" {
+		ua = "dshd (dsh-go)"
+	}
+	hr.Header.Set("User-Agent", ua)
 	if c.APIKey != "" {
 		hr.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}

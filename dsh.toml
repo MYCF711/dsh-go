@@ -134,3 +134,6 @@ id      = "tool-subagentfork"
 
 [[module]]
 id      = "tool-skill"
+
+[[module]]
+id      = "tool-hindsight"
