@@ -483,8 +483,14 @@
   （真机实测：2675 字节里五个类型全在：tool/call、tool/result、assistant/message、turn/done）
 - ✅ 为什么必须推全部：只推 assistant/message 的话，用户看得到答案、看不到它调了什么。
   **"看不到过程"是这类 agent 界面最不能接受的事**
-- 下一步 **M126**：`serve` 的 `--policy` 目前硬编码 deny；给它一个 flag 并在 ready 行之后打印实际策略
-  （现在打的是固定字符串，**说的和做的不一定是一回事**）
+- ✅ **`serve --policy` flag 落地**：默认 `deny`，`--policy allow` 可放开；
+  ready 之后打一行 `policy <实际值>（无人值守；写操作会被拒绝）`
+- ✅ 关键点：播报的必须是 **runner 实际用的那个值**，不是一句写死的话——
+  `TestAnnouncedPolicyMatchesRunner` 钉住这一点。**说的和做的不一致，等于没有播报**
+- ✅ 真机：默认打 `policy deny`，`--policy allow` 时打 `policy allow`
+- ⚠️ 又踩一次"python 往 Go 里写 `
+` 变成真换行"（第 6 次）。修法一律 `chr(92)+'n'`
+- 下一步 **M127**：`serve` 的 WS 没有心跳与断线重连；界面长时间挂着会静默失联
 
 ### 界面线现状（2026-11-03）
 

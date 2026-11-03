@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -42,6 +43,14 @@ func (r noModelRunner) Run(_ context.Context, sessionID, turnID, _ string) error
 	return err
 }
 
+// announcePolicy 把子进程实际使用的审批策略打到屏幕上。
+//
+// 为什么必须打：serve 无人值守，写操作会被拒绝；用户看不见这条，
+// 就会把"工具被拒"当成"模型不会用工具"。**看不见的放宽与失误没有区别。**
+func announcePolicy(w io.Writer, policy string) {
+	fmt.Fprintf(w, "policy %s（无人值守；写操作会被拒绝）\n", policy)
+}
+
 // readyLine 是打到 stdout 的那一行，壳按它解析。
 //
 // 字段顺序由结构体顺序决定（encoding/json 的保证），壳可以按字面解析；
@@ -67,6 +76,7 @@ func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	home := fs.String("home", envOr("DSHD_HOME", ""), "会话根目录（必填）")
 	// 留空 = 让 transport 用 127.0.0.1:0，端口由 OS 分配。
+	servePolicy := fs.String("policy", "deny", "子进程用哪个审批策略：deny/allow（serve 没有终端，ask 等于永远挂起）")
 	addr := fs.String("addr", "", "监听地址（默认 127.0.0.1:0，端口由 OS 分配）")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -88,7 +98,7 @@ func cmdServe(args []string) error {
 	// runner 要先建好（prompt 服务要它），但推事件的出口得等 srv 建完才有——
 	// 所以用指针，建完再赋。
 	// 子进程跑 run：工具循环、审批、压缩、落盘全部走既有的那一套。
-	runner := &loopRunner{home: *home, policy: "deny", maxSteps: 6}
+	runner := &loopRunner{home: *home, policy: *servePolicy, maxSteps: 6}
 	prompts := newPromptService(runner)
 
 	// 建会话的能力在起来之前就确定（cwd 定一次，不随后续请求漂移）。
@@ -141,6 +151,7 @@ func cmdServe(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "ready %s\n", line)
+	announcePolicy(os.Stdout, runner.policy)
 
 	// 阻塞到 Ctrl-C / SIGTERM。用信号而不是 stdin EOF：
 	// serve 可能由壳拉起，stdin 会立刻是 EOF，那不代表"该关了"。

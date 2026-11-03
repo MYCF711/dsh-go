@@ -50,3 +50,16 @@ func TestServePolicyIsDeny(t *testing.T) {
 		t.Fatalf("serve 默认策略必须是 deny，拿到 %q", r.policy)
 	}
 }
+
+// 打到屏幕上的策略必须**等于**实际用的那个值。
+// 打一句写死的话，和实际参数漂移之后，用户看到的就是假话。
+func TestAnnouncedPolicyMatchesRunner(t *testing.T) {
+	for _, p := range []string{"deny", "allow"} {
+		r := &loopRunner{home: "/tmp/x", policy: p, maxSteps: 6}
+		var buf strings.Builder
+		announcePolicy(&buf, r.policy)
+		if !strings.Contains(buf.String(), p) {
+			t.Fatalf("播报里没有实际策略 %q：%s", p, buf.String())
+		}
+	}
+}
