@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -122,39 +123,100 @@ func (c *client) prompt(sid, text string) error {
 	return err
 }
 
-// Subscribe 订阅一个会话的流。返回的 channel 在连接断开时关闭。
+// Subscribe 订阅一个会话的流，**断线会自动重连**。
 //
-// sinceSeq=0 表示要全量；恢复用上次看到的 seq+1。
+// 重连为什么能是"续"而不是"重来"：宿主那边已经有两件东西（H14）——
+//
+//	① `sinceSeq`：订阅时带上"我收到第几条了"，服务端只补之后的；
+//	② `session/reset`：世代对不上时它明说"基线作废"，客户端据此重建。
+//
+// 所以客户端要做的只是：记住 lastSeq、断开就重订阅、看到 reset 就把基线清零。
+//
+// 不做重连的后果不是"少几条消息"，是**界面从此不动了**，而人不知道是网断了还是模型卡了。
 func (c *client) Subscribe(sid string, sinceSeq int) (<-chan ServerFrame, func(), error) {
+	ch := make(chan ServerFrame, 64)
+	done := make(chan struct{})
+	var once sync.Once
+	stop := func() { once.Do(func() { close(done) }) }
+
+	// 先同步连一次：连不上要立刻报错，而不是启动一个永远连不上的后台循环。
+	conn, err := c.dialSub(sid, sinceSeq)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	go func() {
+		defer close(ch)
+		lastSeq := sinceSeq
+		for {
+			for {
+				txt, err := conn.ReadText()
+				if err != nil {
+					break // 断了或坏了，去重连
+				}
+				var f ServerFrame
+				if json.Unmarshal([]byte(txt), &f) != nil {
+					continue // 噪声帧：宁可少一条也不炸整条流
+				}
+				if f.Type == "session/reset" {
+					// 服务端说基线作废：本地水位清零，后面的帧重新算。
+					lastSeq = 0
+				}
+				if f.Seq > 0 {
+					lastSeq = f.Seq
+				}
+				select {
+				case ch <- f:
+				case <-done:
+					conn.Close()
+					return
+				}
+			}
+			conn.Close()
+
+			// 重连：退避 0.5s→1s→2s…上限 5s；每轮都带 lastSeq+1，接着上次往下收。
+			for attempt := 0; ; attempt++ {
+				select {
+				case <-done:
+					return
+				case <-time.After(backoff(attempt)):
+				}
+				nc, derr := c.dialSub(sid, lastSeq+1)
+				if derr != nil {
+					continue // 宿主可能还没起来：继续等，不放弃
+				}
+				conn = nc
+				break
+			}
+		}
+	}()
+	return ch, stop, nil
+}
+
+// dialSub 建一条 WS 并发出订阅帧。
+func (c *client) dialSub(sid string, sinceSeq int) (*wsConn, error) {
 	wsURL := strings.Replace(c.base, "http://", "ws://", 1)
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
 	conn, err := dialWS(wsURL+"/ws", http.Header{"Cookie": []string{c.cookie}})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	sub := map[string]any{"t": "sub", "topic": "session:" + sid, "sinceSeq": sinceSeq}
 	raw, _ := json.Marshal(sub)
 	if err := conn.WriteText(string(raw)); err != nil {
 		conn.Close()
-		return nil, nil, fmt.Errorf("订阅写失败: %w", err)
+		return nil, fmt.Errorf("订阅写失败: %w", err)
 	}
+	return conn, nil
+}
 
-	ch := make(chan ServerFrame, 64)
-	go func() {
-		defer close(ch)
-		for {
-			txt, err := conn.ReadText()
-			if err != nil {
-				return
-			}
-			var f ServerFrame
-			if json.Unmarshal([]byte(txt), &f) != nil {
-				continue // 不是帧就当噪声跳过；宁可少一条也不要炸整条流
-			}
-			ch <- f
-		}
-	}()
-	return ch, func() { conn.Close() }, nil
+// backoff 是重连间隔：0.5s 起，翻倍，封顶 5s。
+func backoff(attempt int) time.Duration {
+	d := 500 * time.Millisecond << attempt
+	if d > 5*time.Second || d <= 0 {
+		d = 5 * time.Second
+	}
+	return d
 }
 
 // ServerFrame 是推给客户端的一帧事件。

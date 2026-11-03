@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // summarize 只为一件事服务：把一帧压成**人能看懂的一行**。
@@ -38,5 +39,23 @@ func TestSummarizeTruncates(t *testing.T) {
 func TestNewClientRejectsDeadHost(t *testing.T) {
 	if _, err := newClient("http://127.0.0.1:1", "x"); err == nil {
 		t.Fatal("连不上时应当报错")
+	}
+}
+
+// 重连退避：必须单调增长并封顶，否则断线时会把 CPU 打满。
+func TestBackoffGrowsAndCaps(t *testing.T) {
+	prev := time.Duration(0)
+	for i := 0; i < 12; i++ {
+		d := backoff(i)
+		if d > 5*time.Second {
+			t.Fatalf("第 %d 次退避 %s，超过 5s 上限", i, d)
+		}
+		if i > 0 && d < prev {
+			t.Fatalf("退避变小了：%s → %s", prev, d)
+		}
+		prev = d
+	}
+	if backoff(0) < 100*time.Millisecond {
+		t.Fatal("首次重连别太急")
 	}
 }
