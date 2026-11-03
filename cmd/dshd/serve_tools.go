@@ -58,11 +58,15 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	// 又推一帧（子进程刚写完、我们刚读完的那个窗口），界面就会看到"结束后还有消息"。
 	var fw sync.WaitGroup
 	done := make(chan struct{})
-	fw.Add(1)
-	go func() {
-		defer fw.Done()
-		r.follow(ctx, sessionID, done)
-	}()
+	// DSHD_SERVE_NO_FOLLOW=1 时不起 follow goroutine。
+	// 只为二分：增长到底来自"spawn 子进程"还是"follow 读日志"。
+	if os.Getenv("DSHD_SERVE_NO_FOLLOW") != "1" {
+		fw.Add(1)
+		go func() {
+			defer fw.Done()
+			r.follow(ctx, sessionID, done)
+		}()
+	}
 
 	werr := cmd.Wait()
 	close(done)
