@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // view 是纯函数，所以布局可以被断言——TUI 最难查的 bug 就是布局，
@@ -907,5 +909,59 @@ func TestEscTimeoutMeansBareEsc(t *testing.T) {
 	}
 	if string(runes) != "a" {
 		t.Fatalf("超时之后的正常按键不该被吞：%q", string(runes))
+	}
+}
+
+// 生产路径整条：stdin 的字节由 goroutine 泵进来，ESC 之后靠超时区分
+// "孤立 ESC"与"转义序列前缀"。用真管道跑一遍——strings.Reader 走不到定时器。
+func TestChanSourceOverPipe(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("建管道失败：%v", err)
+	}
+	defer r.Close()
+
+	rch := make(chan rune, 8)
+	sch := make(chan string, 8)
+	done := make(chan struct{})
+	// 等待窗口取得比 escTimeout 宽得多：这条验的是"到点要发 esc"，
+	// 不是"50ms 这个数准不准"（机器一卡，紧的超时会让测试误红）。
+	go func() {
+		decodeKeys(&chanSource{ch: pumpBytes(r), gap: 300 * time.Millisecond}, rch, sch)
+		close(done)
+	}()
+
+	// 1) 序列：ESC [ 5 ~ 在同一个窗口内到齐 → pgup，且不额外发 esc
+	if _, err := w.WriteString("\x1b[5~"); err != nil {
+		t.Fatalf("写管道失败：%v", err)
+	}
+	select {
+	case s := <-sch:
+		if s != "pgup" {
+			t.Fatalf("管道里的 PgUp 解成了 %q", s)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("PgUp 没有被认出来")
+	}
+
+	// 2) 孤立 ESC：后面没有字节 → 超时 → esc
+	if _, err := w.WriteString("\x1b"); err != nil {
+		t.Fatalf("写管道失败：%v", err)
+	}
+	select {
+	case s := <-sch:
+		if s != "esc" {
+			t.Fatalf("孤立 ESC 解成了 %q", s)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("孤立 ESC 没被超时认出来——真机上 Esc 会是死的")
+	}
+
+	// 3) 输入关掉：解码器必须退出，不能把 goroutine 和主循环一直挂着
+	w.Close()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("输入关闭后解码器没有退出")
 	}
 }

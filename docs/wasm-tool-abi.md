@@ -49,7 +49,8 @@ GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o ../out/guest-cshared.was
 ```
 -buildmode=c-shared
 	Build the listed main package, plus all packages it imports,
-	into a C shared library. ...
+	into a C shared library. The only callable symbols will
+	be those functions exported using a cgo //export comment.
 	On wasip1, this mode builds it to a WASI reactor/library,
 	of which the callable symbols are those functions exported
 	using a //go:wasmexport directive. Requires exactly one
@@ -104,7 +105,7 @@ $ ./out/host.exe -wasm ./out/guest-exe.wasm -mode manual-start -fn add # 自己�
 **(c) wazero 对 Go 产物的已知约束**
 
 - `api.Module.ExportedFunction` 的文档就点名了这件事（wazero v1.12.0 `api/wasm.go:155`）：
-  > `The default wazero.ModuleConfig attempts to invoke `_start`, which in rare cases can close the module.`
+  > The default wazero.ModuleConfig attempts to invoke `_start`, which in rare cases can close the module.
 - wazero 自己的例子（`examples/basic/add.go:45`、`examples/allocation/tinygo/greet.go:47`）对 wasi 目标一律是
   `wazero.NewModuleConfig().WithStartFunctions("_initialize")`。**这是 wazero 官方对 reactor 形态的标准写法**，不是我们发明的。
 - 关键坑：**`WithStartFunctions("_initialize")` 在模块没有这个导出时不会报错，静默跳过**。拿 exe 构建配 `_initialize`，得到的是同一个 `unreachable`：
@@ -152,7 +153,7 @@ func notInitialized1() {
 }
 ```
 
-而 `_initialize` 由 `_rt0_wasm_wasip1_lib` 提供（`src/runtime/rt0_wasip1_wasm.s:16-19`），**只有 c-shared/archive 构建才链接它**。
+而 `_initialize` 由 `_rt0_wasm_wasip1_lib` 提供（`src/runtime/rt0_wasip1_wasm.s:18-20`），**只有 c-shared/archive 构建才链接它**。
 
 所以那次的完整因果链是：
 
@@ -160,6 +161,13 @@ func notInitialized1() {
 2. `wasmhost.Load` 用默认 `ModuleConfig`（默认 startFunctions = `["_start"]`，见 `wasmhost.go:79-81`）—— 要么跑了 `_start` 把模块关掉，要么根本没跑；
 3. 调 `add` 时 SP 还是 0 → `notInitialized` → `unreachable`；
 4. Go 已经把原因写到 stderr 了，但 `wasmhost.go:81` 的 `WithStdout(nil).WithStderr(nil)` **把它扔了**，于是只剩一句 `wasm error: unreachable`。
+
+**这里还有一件事比 bug 本身更值得记：两处注释的前提是错的。**
+
+- `internal/wasmhost/wasmhost.go:77-78`：「不设 start 函数……设了反而会因"找不到入口"装载失败」
+- `cmd/dshd/wasm.go:27-28`：「设了 `_start` 反而会让这类模块装不上」
+
+实测（§1.2(c)）恰好相反：**wazero 对缺失的 start 函数是静默跳过，不报错**。c-shared 模块配默认配置（去找 `_start`）的输出是「实例化成功 closed=false」，然后在第一次调用时炸成 `unreachable`。后果是：那句注释让所有人**不去设 `_initialize`**，于是故障从「装载期一句明确报错」被推迟成「调用期一句 unreachable」；而它描述的失败模式在 wazero v1.12 上根本不存在。
 
 另外顺带验到：`wasmhost.Load` 现在**没有装 WASI 导入**，所以真正的 Go 产物连实例化都过不去（用仓库里现成的 `dshd.exe` 跑，没改任何代码）：
 
@@ -245,10 +253,10 @@ spin: 超时 300ms，实际 315ms，err="module closed with context deadline exc
 |---|---|---|
 | 产物大小（带 `encoding/json`） | 4,464,916 B（4.3 MiB） | 2,400,429 B（2.3 MiB；`-opt=z -no-debug` 后 **1,009,731 B**） |
 | 产物大小（只有 `add`，无 json） | 4.4 MiB 起步（运行时全量链接） | **26,565 B** |
-| 编译耗时 | 0.74–1.55 s | 0.34–0.48 s |
-| 实例化 + `_initialize` | 2.3–3.7 ms | 0.5–1.5 ms |
+| 编译耗时 | 0.74–1.55 s | 0.34–0.67 s |
+| 实例化 + `_initialize` | 1.5–3.8 ms | 0.5–1.5 ms |
 | 每实例线性内存 | 3,670,016 B（3.5 MiB） | 393,216 B（384 KiB） |
-| 一次成功调用 | 微秒级 | 微秒级 |
+| 一次成功调用 | 微秒级 | 微秒级（首次偶见 ~0.5 ms） |
 | 额外工具链 | 无 | TinyGo 180 MB + Binaryen 111 MB |
 | 标准库 | 全量 | 子集（`encoding/json` 可用，但会把体积从 26 KB 拉到 1 MB） |
 | 装/用中的坑 | 必须 `-buildmode=c-shared` | 必须 `-buildmode=c-shared` **且**要有 `wasm-opt` |
@@ -272,8 +280,10 @@ call(ptr: i32, len: i32) -> (ptr<<32)|len    ; 客人吃 args JSON、吐结果 J
 
 - **输入**：宿主把一段 JSON 写进 `[ptr, ptr+len)`，然后 `call(ptr, len)`。
 - **输出**：客人正常 return 一个 `uint64`，高 32 位是结果缓冲区偏移，低 32 位是长度；宿主按这个区间读回 JSON。
-- **`_initialize` 不属于 ABI**：它是 Go/TinyGo 的运行时常量。别把它算成「第三个导出」——它是宿主 `WithStartFunctions` 的配置项。
-- 输入输出都是**客人分配**的（`alloc`），宿主只写进客人给的区间。宿主自己的 `Memory` 句柄**不要缓存底层 `[]byte`**：客人一 `memory.grow` 就搬（实测见 §3.7）。
+- **`_initialize` 不属于 ABI**：它是 Go/TinyGo 运行时的初始化入口，属于**构建形态**，不是我们的调用约定。别把它算成「第三个导出」——它由宿主的 `WithStartFunctions` 显式跑。
+- 输入输出都是**客人分配**的（`alloc`），宿主只写进客人给的区间。
+- **`len == 0` 是协议错**：客人必须永远回一个信封（哪怕是 `isError:true`）。空返回按宿主错误处理，别当成「空结果」——两者在排障时天差地别。
+- 宿主自己的 `Memory` 句柄**不要缓存底层 `[]byte`**：客人一 `memory.grow` 就搬（实测见 §3.7）。
 
 实际跑通的那一次（Go 产物，`text` 是中文，验证了 UTF-8 跨边界）：
 
@@ -349,8 +359,8 @@ spin: 打断后再调 add(2,3)：
 | 策略 | 每次调用代价 | 风险 |
 |---|---|---|
 | 常驻一个实例 | ~0 | 客人状态跨调用泄漏；超时/崩溃后必须重建 |
-| **每次调用新实例** | 2.3–3.7 ms + 3.5 MiB | 无状态泄漏；内存瞬时翻倍（并发时） |
-| 常驻 + 死亡重建（**推荐**） | 平时 ~0，死了付一次 2–3.7 ms | 需要「实例已死」的状态机 |
+| **每次调用新实例** | 1.5–3.8 ms + 3.5 MiB | 无状态泄漏；内存瞬时翻倍（并发时） |
+| 常驻 + 死亡重建（**推荐**） | 平时 ~0，死了付一次 1.5–3.8 ms | 需要「实例已死」的状态机 |
 
 编译只做一次（`rt.CompileModule`），这一步很贵，必须常驻：
 
@@ -413,7 +423,7 @@ mem: 往 ptr 写 "tail" -> true；读回 = "tail" (true)
 |---|---|---|
 | **A. 进程插件**（子进程 + stdio JSON，`BackendProcess` 已经留了常量） | 每工具一个进程：启动 10–50 ms、常驻内存 MB 级、要写握手/心跳/回收；好处是崩溃隔离彻底、任何语言都能写、不受 wasm 内存/指令限制 | 工具要跑重依赖（浏览器、Python 栈）、或需要真文件系统/网络 |
 | **B. 只做 static（编译进二进制）** | 零装载、零隔离；每加一个工具都要重编宿主、走全量回归；第三方无法自带 | 工具是官方长期内置的（现在 30 个工具全是这样） |
-| **C. 换运行时**（wasmtime-go / wasmer-go 走 cgo，或干脆用 `//go:plugin` 之外的方案） | 引入 cgo → 交叉编译和静态链接全废（本仓 `AGENTS.md` §5 要 `-race` 与单文件 exe）；换运行时解决不了「Go 运行时初始化」这一类**客人侧**问题，而这次的问题正是客人侧的 | 只有当 wazero 的指令覆盖/性能真的不够时才考虑；本轮没发现这种迹象 |
+| **C. 换运行时**（wasmtime-go / wasmer-go 都走 cgo；wazero 之外没有不引 cgo 的选择） | 引入 cgo → 交叉编译和静态链接全废（本仓 `AGENTS.md` §5 要 `-race` 与单文件 exe）；换运行时解决不了「Go 运行时初始化」这一类**客人侧**问题，而这次的问题正是客人侧的 | 只有当 wazero 的指令覆盖/性能真的不够时才考虑；本轮没发现这种迹象 |
 
 > 注意：本轮**不是**「wasm 不行」，而是「wasm 行，但宿主少做了两件事（WASI 导入、跑 `_initialize`）」。所以备选 A/B/C 现在是**降级选项**，不是替代品。
 
@@ -425,7 +435,7 @@ mem: 往 ptr 写 "tail" -> true；读回 = "tail" (true)
 
 | # | 文件 | 改什么 | 为什么必须改（对应哪条实测） |
 |---|---|---|---|
-| 1 | `internal/wasmhost/wasmhost.go` | `Load` 里：① 先 `wasi_snapshot_preview1.Instantiate(ctx, rt)`；② 按导出表判形态：有 `_initialize` → `WithStartFunctions("_initialize")`，只有 `_start` → **明确报错**「这是 command 构建，用 `-buildmode=c-shared` 重编」；③ 别再无脑 `WithStdout(nil).WithStderr(nil)`，把客人 stderr 收进一个 4 KiB 环形 buffer，trap 时拼进错误；④ 暴露 `Memory()` | §1.2(d) `module[wasi_snapshot_preview1] not instantiated`；§1.3 那句被吃掉的 `call _initialize first`；§1.2(c)「配错 start 名 wazero 不报错」 |
+| 1 | `internal/wasmhost/wasmhost.go` | `Load` 里：① 先 `wasi_snapshot_preview1.Instantiate(ctx, rt)`；② 按导出表判形态：有 `_initialize` → `WithStartFunctions("_initialize")`，只有 `_start` → **明确报错**「这是 command 构建，用 `-buildmode=c-shared` 重编」；③ 别再无脑 `WithStdout(nil).WithStderr(nil)`，把客人 stderr 收进一个 4 KiB 环形 buffer，trap 时拼进错误；④ 暴露 `Memory()` | §1.3 末尾的 `module[wasi_snapshot_preview1] not instantiated`；§1.3 那句被吃掉的 `call _initialize first`；§1.2(c)「配错 start 名 wazero 不报错」 |
 | 2 | `internal/wasmhost/abi.go`（新） | `Envelope{v,tool,summary,text,isError,hint}`；`(*Module).Invoke(ctx, args)`：`alloc` → `mem.Write` → `call` → 读回 → 解析；三个上限常量；把 §3.3 四层错误各给一个可 `errors.Is` 的错误类型 | §3.1/§3.3/§3.7 全节 |
 | 3 | `cmd/dshd/wasmload.go` | 删掉「provides 非空就报错」（现 133–139 行）；把现在 `Register: nil` 的壳（184–189 行）换成真的 `Register: func(s *kernel.Scope){ reg,_ := kernel.Inject(s, spi.ToolsKey); reg.Register(&wasmTool{...}) }`，并给模块加 `Requires: []string{"tools"}`；工具名/schema/caps 从 manifest `config` 读（`kernel.ModuleEntry.Config` 已存在，**kernel 不用改**） | 现状是「装载了但不提供任何能力」；`modules/tool/glob/glob.go:183-193` 是标准形状 |
 | 4 | `internal/wasmhost/tool.go`（新，或并入 2） | `wasmTool` 实现 `spi.Tool`：`Name/Description/Schema/Caps` 取 manifest，`Exec` 调 `Invoke`，`isError` → `(Result{Hint}, err)`；**按 R2 只拿 `*kernel.Scope`，不碰 App/单例** | §3.6 |
@@ -446,7 +456,7 @@ mem: 往 ptr 写 "tail" -> true；读回 = "tail" (true)
 3. **并发**：同一 runtime 同时实例化多个模块、多个实例并行调用，没做压力测试；§3.4 的「每实例加锁」是设计推断，不是实测。
 4. **`-buildmode=c-archive`**（另一条 reactor 路）没试；`go help buildmode` 说 wasip1 上 archive 也能导，但没跑。
 5. **长期运行的泄漏**：只做了 3–5 次实例化循环，没做千次级，也没量 RSS。Go 的 module 每实例 3.5 MiB，如果 close 不干净会很难看——**没验证**。
-6. **penetration 面**：没做恶意客人测试（读越界、无限增长内存、`memory.grow` 到上限）。wazero 应该挡住，但没打。
+6. **攻击面**：没做恶意客人测试（读越界、无限增长内存、`memory.grow` 到上限）。wazero 应该挡住，但没打。
 7. **信封换成非 JSON 的最小解析**没做（§2.3 提到的 TinyGo 体积优化）。
 8. **TinyGo 的 `-target=wasm`（非 wasi）**没试；本轮只验 wasi。
 9. `wasmhost.Load` 里 `WithCloseOnContextDone(true)` 对**实例化阶段**的影响没单独测；只在调用阶段验过。

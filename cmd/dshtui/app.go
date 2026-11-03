@@ -890,6 +890,12 @@ func (s *chanSource) next(afterEsc bool) (byte, bool, bool) {
 
 // newStdinSource 起一个泵 goroutine 并返回对应的源。
 func newStdinSource(in *os.File) byteSource {
+	return &chanSource{ch: pumpBytes(in), gap: escTimeout}
+}
+
+// pumpBytes 把 in 的字节一个一个送进 channel；读失败或 EOF 就关掉它
+// （解码器看到关闭 = 输入结束）。
+func pumpBytes(in *os.File) <-chan byte {
 	ch := make(chan byte, 64)
 	go func() {
 		defer close(ch)
@@ -904,7 +910,7 @@ func newStdinSource(in *os.File) byteSource {
 			}
 		}
 	}()
-	return &chanSource{ch: ch, gap: escTimeout}
+	return ch
 }
 
 // readKeysFrom 是解码部分，单独拆出来是为了能喂字节流做测试：
