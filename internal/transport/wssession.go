@@ -125,6 +125,15 @@ func ServeConn(conn Conn, hub *Hub) error {
 					}
 				}
 			}
+			// 重放还挂着的请求（H13）：断线期间冒出来的审批问题，客户端不重放就永远
+			// 看不到——而子进程还在那边等着，用户眼里就是"卡住了"。
+			if hub.pendingReplay != nil {
+				for _, pf := range hub.pendingReplay(topicSession(frame.Topic)) {
+					if err := sub.write(pf); err != nil {
+						return err
+					}
+				}
+			}
 			// 重复 sub 由 Hub 处理：以最后一次 sinceSeq 为准，不会重复收帧。
 			hub.Subscribe(frame.Topic, frame.SinceSeq, sub)
 

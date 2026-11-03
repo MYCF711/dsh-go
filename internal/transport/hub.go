@@ -38,7 +38,14 @@ type Hub struct {
 	// journals 是序号域（H14），只用于订阅时判断世代是否过期。
 	// 为 nil 时不发 session/reset——老测试不必构造它。
 	journals *Journals
+
+	// pendingReplay 给出"这个会话上还挂着、需要重放给新连接"的帧（H13）。
+	// 典型场景：审批问题问出去了，客户端断线重连——气泡没了，但请求还挂着。
+	pendingReplay func(sessionID string) []ServerFrame
 }
+
+// SetPendingReplay 挂上"挂起请求重放"的回调。
+func (h *Hub) SetPendingReplay(f func(sessionID string) []ServerFrame) { h.pendingReplay = f }
 
 // SetJournals 挂上序号域：订阅时会核对 journalEpoch，过期就发 session/reset。
 func (h *Hub) SetJournals(j *Journals) { h.journals = j }

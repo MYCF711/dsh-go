@@ -139,3 +139,41 @@ func TestBrokerTimeoutDenies(t *testing.T) {
 }
 
 var _ = io.EOF
+
+// H13：断线重连时要把**还挂着**的审批重放出来。
+//
+// 不重放的话，客户端重连后界面上什么都没有，而子进程还在那边等——
+// 看起来就是"卡住了"，且没有任何线索说明它在等一个从没显示过的问题。
+func TestBrokerReplaysPendingApproval(t *testing.T) {
+	b := newApprovalBroker(&fakeStdin{}, func(string, string, json.RawMessage) {})
+	line := approvalRequestTag + `{"requestId":"perm-9","sessionId":"s9","tool":"write"}`
+	b.Watch(strings.NewReader(line+"\n"), nil)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(b.Pending("s9")) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	pending := b.Pending("s9")
+	if len(pending) != 1 {
+		t.Fatalf("该有 1 条挂起，实际 %d", len(pending))
+	}
+	if !strings.Contains(string(pending[0]), "perm-9") {
+		t.Fatalf("重放的负载里要有 requestId：%s", pending[0])
+	}
+
+	// 别的会话不该看到它。
+	if got := b.Pending("other"); len(got) != 0 {
+		t.Fatalf("会话之间串了：%d", len(got))
+	}
+
+	// 答过之后就不再重放。
+	if err := b.Resolve("perm-9", "allow_once"); err != nil {
+		t.Fatalf("Resolve 失败：%v", err)
+	}
+	if got := b.Pending("s9"); len(got) != 0 {
+		t.Fatalf("答过之后不该再重放，实际 %d 条", len(got))
+	}
+}

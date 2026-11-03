@@ -142,6 +142,8 @@ func cmdServe(args []string) error {
 		Journals: journals,
 		// H13：界面的允许/拒绝落到这里，由 broker 写回子进程 stdin。
 		Approve: broker.Resolve,
+		// 断线重连时把还挂着的审批重放给新连接：请求没被回答，子进程就一直等。
+		PendingApprovals: broker.PendingFrames,
 		// H5：把这一进程真正的审批策略报给界面。**不是 mode**。
 		Policy:       *servePolicy,
 		ContentWidth: *serveWidth,

@@ -79,6 +79,8 @@ type Options struct {
 	// Journals 是每会话的序号域（H14）。非 nil 时 session.history 直接读它，
 	// 保证与 WS 推送同一个 seq 域；nil 时退回宿主注入的 History（老行为）。
 	Journals *Journals
+	// PendingApprovals 给出某会话上仍挂着的审批帧，供新连接订阅时重放（H13）。
+	PendingApprovals func(sessionID string) []ServerFrame
 	// Approve 回一次审批（H13）：requestID 是服务端推给客户端的那个，optionID 是客户端选的。
 	Approve func(requestID, optionID string) error
 	// SetMode 换模式；宿主注入。
@@ -108,6 +110,7 @@ func NewServer(opt Options) (*Server, error) {
 	h := NewHub()
 	// 订阅时要核对世代（H14），所以哈希表和序号域必须成对存在。
 	h.SetJournals(opt.Journals)
+	h.SetPendingReplay(opt.PendingApprovals)
 	return &Server{
 		hub:     h,
 		opt:     opt,

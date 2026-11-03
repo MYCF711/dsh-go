@@ -25,19 +25,28 @@ import (
 type approvalBroker struct {
 	mu      sync.Mutex
 	pending map[string]chan bool
-	stdin   io.WriteCloser
-	emit    func(sessionID, typ string, data json.RawMessage)
+	// payloads 留着原始负载，供重连时重放（requestId → 负载 + 属于哪个会话）。
+	payloads map[string]pendingPayload
+	stdin    io.WriteCloser
+	emit     func(sessionID, typ string, data json.RawMessage)
 
 	// timeout 到了没人答 → 按**拒绝**结算。没人回答时"默认同意"是最坏的选择。
 	timeout time.Duration
 }
 
+// pendingPayload 是一条挂起审批的原始请求。
+type pendingPayload struct {
+	sessionID string
+	data      json.RawMessage
+}
+
 func newApprovalBroker(stdin io.WriteCloser, emit func(sessionID, typ string, data json.RawMessage)) *approvalBroker {
 	return &approvalBroker{
-		pending: map[string]chan bool{},
-		stdin:   stdin,
-		emit:    emit,
-		timeout: 120 * time.Second,
+		pending:  map[string]chan bool{},
+		payloads: map[string]pendingPayload{},
+		stdin:    stdin,
+		emit:     emit,
+		timeout:  120 * time.Second,
 	}
 }
 
@@ -125,6 +134,10 @@ func (b *approvalBroker) handle(req approvalReq) {
 	if b.emit != nil {
 		b.emit(req.SessionID, "approval/request", payload)
 	}
+	// 留着原始负载：客户端断开重连后要把这个"还在等"的问题再摆到它面前。
+	b.mu.Lock()
+	b.payloads[req.RequestID] = pendingPayload{sessionID: req.SessionID, data: payload}
+	b.mu.Unlock()
 
 	// 超时按拒绝结算，并让界面知道"是超时，不是有人点了拒绝"。
 	go func() {
@@ -141,6 +154,36 @@ func (b *approvalBroker) handle(req approvalReq) {
 	}()
 }
 
+// Pending 返回这个会话上**还没被回答**的审批请求（原始负载）。
+//
+// 为什么需要重放：客户端可能断开重连、甚至整进程重启，那些气泡就没了；
+// 而请求在宿主这边仍然挂着——子进程还在等。不重放的话，用户永远看不到那个问题，
+// 子进程就一直等到超时被拒，看起来像"卡住了"。
+func (b *approvalBroker) Pending(sessionID string) []json.RawMessage {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]json.RawMessage, 0, len(b.payloads))
+	for _, p := range b.payloads {
+		if p.sessionID == sessionID {
+			out = append(out, p.data)
+		}
+	}
+	return out
+}
+
+// PendingFrames 是 Pending 的帧形状版本，直接给 transport 用。
+//
+// 重放的帧**不带 seq**：它不是事件流里新的一帧（历史里已经有那条 approval/request），
+// 只是把"仍然有效"的状态再摆一次；带号会让客户端以为又多了一条事件。
+func (b *approvalBroker) PendingFrames(sessionID string) []transport.ServerFrame {
+	raw := b.Pending(sessionID)
+	out := make([]transport.ServerFrame, 0, len(raw))
+	for _, d := range raw {
+		out = append(out, transport.ServerFrame{Type: "approval/request", Data: d})
+	}
+	return out
+}
+
 // Resolve 是 session.approve 的落点：把界面的决定交给等待中的那一轮。
 func (b *approvalBroker) Resolve(requestID, optionID string) error {
 	allow, ok := decisionOf(optionID)
@@ -151,6 +194,7 @@ func (b *approvalBroker) Resolve(requestID, optionID string) error {
 	ch, found := b.pending[requestID]
 	if found {
 		delete(b.pending, requestID)
+		delete(b.payloads, requestID) // 答过了就不再重放
 	}
 	b.mu.Unlock()
 	if !found {
@@ -164,6 +208,7 @@ func (b *approvalBroker) Resolve(requestID, optionID string) error {
 func (b *approvalBroker) forget(id string) {
 	b.mu.Lock()
 	delete(b.pending, id)
+	delete(b.payloads, id)
 	b.mu.Unlock()
 }
 
