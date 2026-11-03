@@ -37,7 +37,7 @@
 | **H9 load 入参** | ✅ 宿主单测，UI 待验 | id/sessionId、limit/tailMessages 均收；sessionId 优先 id，limit 优先 tailMessages。仅 id/tailMessages 时 limit=2 已测；UI 只发契约名复验。 |
 | **H10 list→load** | 🟡 宿主 5/5，跨仓待验 | 同新二进制/临时 home：create→list→每个 id 两种名字 load→prompt→再 load 已验。脚本绕开 UI apiclient，不能证明跨仓；真实 home 副本遍历与 UI 消费待做。 |
 | **H11 ready stdout** | ✅ 进程级 4/4 | 完整 stdout 恰好一行 ready，后续为合法 JSON 且含 url/token；policy 诊断只去 stderr。 |
-| **H12 contentWidth** | 🟡 提供端有，联合待验 | 0=未知且省略；传 748 得 748；原生壳提供真实列宽并消费，未知不编默认值。 |
+| **H12 contentWidth** | ✅ 宿主侧闭环（2026-11-03 M263） | 只有**正数**才算"知道宽度"：0 与负数都按未知处理、字段直接不出现（负数放过去会让界面画出负宽度容器：怪但没崩，没人会去查宿主）。值以裸数字传输 | 真机：`--content-width 748` → `contentWidth=748`；不传 → 字段不存在。单测三条（0/748/负数）+ 一条"必须是数字不是字符串"。仍未验：原生壳提供真实列宽并消费 |
 | **H13 真审批** | 🟡 端点与子进程通道有证据，父进程/整链待验；依赖 H14 | 设计见 `docs/h13-approval.md`。M249 有 approve 端点与 3 单测；M250 有子进程标记通道与 5 测试；M252 记录父进程分帧缺口。仍需 serve 正确桥接、允许执行、拒绝不执行、120s 超时、session.cancel 及 UI 回传；handler/子进程单测不算整链。 |
 | **H14 契约门** | 🟡 核心迁移已落地，接线/验收中 | M253 已有每会话 journal/世代号核心与 6 测试；UI 已有 `/ws`+裸参数迁移及真模型/工具到界面的提交。仍需按 §1–§2 冻结完整契约，核对接线、history 原始 frames、真实 apiclient 对契约夹具的合成 reasoning/tool/approval 重放、两会话与 stale_epoch。**真实生成归 H6，真实审批执行归 H13，UI 产品消费归 G2。** |
 
