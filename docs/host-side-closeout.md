@@ -5,8 +5,7 @@
 
 ## 1. 一句话
 
-`docs/transport-contract.md` §12 里，**本仓能独自验的条目已全部验过并改 ✅**；
-剩下的每一条都要 `../dsh-ui` 一起参与，不在本仓范围内。
+`docs/transport-contract.md` 的 H 表中，宿主 journal/H6/H8 等已有本仓证据；**H13 仍有 pending cancel 缺口，不能称本仓事项全部完成**。其余多数条目需要 `../dsh-ui` 一起参与，不能用宿主侧证据替代跨仓验收。
 
 ## 2. 证据在哪
 
@@ -44,14 +43,16 @@ python scripts/h-suite.py --fast    # 不需要模型的 7 条（约 1 分钟）
 `scripts/guard-selftest.py` 会把每个守卫弄坏一次，**它第一次跑就抓出 `flag-wired` 的假阴性**
 （变量名和 flag 名同名时，定义里的字符串被当成了一次"引用"）。
 
-## 5. 剩什么（都不在本仓）
+## 5. 剩什么（按仓分责，18:21 复核）
 
 | 条目 | 缺什么 | 在哪个仓 |
 |---|---|---|
-| H1 usage / H2 time | 界面消费这两个数、未知时不补零 | `../dsh-ui` |
-| H9 / H10 | 界面只用契约名调一次；真实 home 全量遍历 | `../dsh-ui` + 一次只读遍历 |
-| H14 | 界面换 `/ws` + 裸参数 + 消费 `frames` | `../dsh-ui` |
-| H6 | 界面实际渲染 reasoning | `../dsh-ui` |
+| H13 pending cancel | cancel→拒绝、工具不执行、`approval/cancel`、第二轮 prompt | **本仓**；补失败测试与实现后再验 |
+| H14/H6 serve 接线 | follow 零水位重复、debug runner 绕过 journal；特殊 replay/reset/pong 形状补测试 | **本仓**；不能用核心 journal 单测代替 |
+| H8 stale_epoch | 特殊错误体缺 `retryable` | **本仓**；统一 errorBody 并补四字段测试 |
+| H14 UI | 快照旧路径/帧/messages、History 带 epoch、共享 golden、reset 与宿主重启 cookie | `../dsh-ui` + 跨仓 |
+| H1 / H2 / H9 / H10 | 当前同版本 UI 消费、未知值与真实 home 副本遍历 | `../dsh-ui` + 跨仓 |
+| H6 UI 恢复 | reasoning 已有显示证据；仍需断线恢复、去重与同版本复验 | 两仓 |
 
 ## 6. 两条已知未验证（写清楚，不让它悄悄变成"应该没问题"）
 
@@ -66,3 +67,22 @@ python scripts/h-suite.py --fast    # 不需要模型的 7 条（约 1 分钟）
 1. 界面仓按 `ws-golden.jsonl` 写解析器，跑它对同一份夹具的折叠测试——**两边都过才叫契约对齐**
 2. 用同一份新二进制 + 临时 home 跑完整工作日，做 A/B 与进程树性能
 3. 门禁：把 `h-suite.py` 接进 CI 的 fast 档（真机档太慢，放夜间）
+
+## 8. 未收口的回归（2026-11-03 晚间发现，未修）
+
+`scripts/h10-chain.py` 的「prompt 之后能 load 到 assistant 消息」**从绿变红**，
+把等待从 60 秒加到 240 秒仍然红——**所以这次不是探针耐心的问题**。
+
+直接复现（临时 home、`--policy allow`、一个新会话）：
+
+- `session.prompt` 之后 `session.history` 里**有** `turn/start … assistant/message … turn/done`（20 帧）
+- 但 `session.load` 里 assistant 消息仍然是 0
+- serve 的 stderr 打出 `会话：…\session-e19bce7d…`，而 `session.create` 返回的是**另一个** id
+
+初步判断：`serve` 起子进程时 `--session <id>` 没让子进程落回那个会话，
+于是"新会话写在别处、load 原会话什么都没"。
+**尚未定位到具体那一段代码，也未修**，下一轮从这里开始：
+
+1. 读 `cmd/dshd/serve_tools.go` 的 args 组装与 `cmd/dshd/main.go` 的 `--session` 处理
+2. 判据：`session.create` 拿到的 id 必须与子进程 stderr 里那行「会话：」的 id 相同
+3. 修好后 `h10-chain.py` 回到 5/5

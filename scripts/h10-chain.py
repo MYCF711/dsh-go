@@ -66,8 +66,10 @@ def main():
 
         # prompt → 等回答落盘 → 再 load 必须看得到
         post("session.prompt", {"id": new_id, "text": "回答：H10 通过", "mode": "default"})
+        # 60 秒在网关忙的时候不够：那红的是**探针的耐心**，不是宿主。
+        # （和 h14 同一条教训：先看是哪一条红，再决定改探针还是改宿主。）
         got = 0
-        for _ in range(60):
+        for _ in range(240):
             time.sleep(1)
             d, _ = post("session.load", {"id": new_id, "tailMessages": 20})
             got = sum(1 for m in (d.get("messages") or []) if m.get("role") == "assistant")

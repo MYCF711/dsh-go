@@ -45,9 +45,9 @@ def run(name, timeout):
         out = (p.stdout or "") + (p.stderr or "")
         code = p.returncode
     except subprocess.TimeoutExpired:
-        return None, None, timeout, "超时（%ds）" % timeout
+        return None, None, timeout, "超时（%ds）" % timeout, ""
     except FileNotFoundError:
-        return None, None, 0, "脚本不存在"
+        return None, None, 0, "脚本不存在", ""
     took = int(time.time() - started)
 
     m = SUM.findall(out)
@@ -62,10 +62,12 @@ def run(name, timeout):
     if not m:
         # 没有汇总行 = 探针没跑到底（崩了/被跳过）。**不能当成功**。
         tail = "\n".join(out.strip().splitlines()[-3:])
-        return None, None, took, "没有汇总行，退出码 %d：%s" % (code, tail)
+        return None, None, took, "没有汇总行，退出码 %d：%s" % (code, tail), ""
     oks = sum(int(a) for a, _ in m)
     fails = sum(int(b) for _, b in m)
-    return oks, fails, took, ""
+    # 把红的那几条带出去：调用方要能说出"哪一条"，光一个 4/5 等于没说。
+    red = "；".join(ln.strip() for ln in out.splitlines() if "FAIL" in ln)[:200]
+    return oks, fails, took, "", red
 
 
 def main():
@@ -86,7 +88,7 @@ def main():
             rows.append((name, label, "跳过", "", ""))
             continue
         print("跑 %-18s %s …" % (name, label), flush=True)
-        oks, fails, took, err = run(name, timeout)
+        oks, fails, took, err, red = run(name, timeout)
         if err:
             bad += 1
             rows.append((name, label, "FAIL", "", err))
@@ -95,11 +97,18 @@ def main():
         if fails:
             bad += 1
         # 只报 "4/5" 等于没说：要说出**哪一条**红了，否则下次还得手动重跑。
-        detail = ""
-        if fails:
-            detail = "；".join(ln.strip() for ln in out.splitlines() if "FAIL" in ln)[:200]
+        # 红行由 run() 带回来——它才持有探针的完整输出。
+        # （第一版在这里引用了一个不存在的局部变量 out，于是**只有探针失败时**才炸；
+        #  那意味着所有跑绿的日子都发现不了它。红路径上的代码最容易烂，因为它最少被执行。）
+        detail = red if fails else ""
         rows.append((name, label, "OK" if fails == 0 else "FAIL",
                      "%d/%d" % (oks, oks + fails), detail))
+
+    if not rows:
+        # --only 打错字／探针改名后最容易落到这里：
+        # 一条都没跑却报"全部通过"，是**最坏的一种绿**。
+        print("一个探针都没跑（检查 --only 的匹配）")
+        return 2
 
     print()
     print("%-18s %-44s %-6s %-6s" % ("探针", "证明什么", "结果", "通过"))
