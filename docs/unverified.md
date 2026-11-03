@@ -68,7 +68,13 @@ AGENTS.md 里有 **44 条 ⚠️**。多数是已经消化掉的教训，但有 
 
 ---
 
-## 6. `serve` 的长跑没有 soak
+## 6. ✅ 已验（2026-11-03）：`serve` 长跑
+
+50 轮轻载 + 20 轮重载（每轮 3 次工具执行）：goroutine 5↔9 无累积，
+HeapAlloc 锯齿无斜坡，Sys 在重负载下 12 轮只涨 16 KB。见 `docs/serve-soak.md`。
+**仍未验**：连续跑一天（没跑过）。
+
+## 6b. （原）`serve` 的长跑没有 soak
 
 **现状**：`dshd run` 有 120 轮 soak（`docs/soak.md`），
 `serve` **一次都没长跑过**——它比 `run` 多了 WS、Hub、follow goroutine、子进程。
