@@ -629,10 +629,11 @@ func alreadyEnveloped(v any) bool {
 func errorBody(msg string) map[string]any {
 	code := errorCode(msg)
 	return map[string]any{"error": map[string]any{
-		"code":      code,
-		"message":   msg,
-		"hint":      errorHint(code),
-		"retryable": code == "internal",
+		"code":    code,
+		"message": msg,
+		"hint":    errorHint(code),
+		// busy 也可重试：等这一轮结束再发就行（跟着 hint 走）。
+		"retryable": code == "internal" || code == "busy",
 	}}
 }
 
@@ -647,6 +648,8 @@ func errorHint(code string) string {
 		return "先 session.list 拿 id；确认 --home 指向的目录里有这个会话"
 	case "no_such_request":
 		return "这个审批请求已经不在了（已应答或已超时）；等下一次 approval/request"
+	case "busy":
+		return "上一轮还没结束：等 turn/done（或先 session.cancel），再发下一条"
 	case "bad_option":
 		return "optionId 必须是 allow_once / allow_always / reject_once 之一"
 	case "bad_request":
@@ -670,6 +673,11 @@ func errorCode(msg string) string {
 		return "not_implemented"
 	case "没有这个会话":
 		return "no_such_session"
+	case "上一轮还没结束":
+		// 这条以前落到兜底 code="error" + hint 空 + retryable=false——
+		// 三样都错：code 没意义、hint 违反契约（每个错误都要有下一步）、
+		// 而这一轮结束后**确实可以重试**。界面拿不到这些信息只能猜。
+		return "busy"
 	}
 	// 这两个是审批（H13）的稳定错误码，调用方按码判断，不按中文猜。
 	if strings.Contains(msg, "序列化失败") {
