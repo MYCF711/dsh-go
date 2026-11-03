@@ -57,9 +57,18 @@ func TestAnnouncedPolicyMatchesRunner(t *testing.T) {
 	for _, p := range []string{"deny", "allow"} {
 		r := &loopRunner{home: "/tmp/x", policy: p, maxSteps: 6}
 		var buf strings.Builder
-		announcePolicy(&buf, r.policy)
+		announcePolicy(&buf, r.policy, r.maxSteps)
 		if !strings.Contains(buf.String(), p) {
 			t.Fatalf("播报里没有实际策略 %q：%s", p, buf.String())
 		}
+	}
+}
+
+// 步数也必须播报：不然"跑到一半停了"看起来像失败，其实是用满了上限。
+func TestAnnouncedMaxSteps(t *testing.T) {
+	var buf strings.Builder
+	announcePolicy(&buf, "deny", 9)
+	if !strings.Contains(buf.String(), "9") {
+		t.Fatalf("播报里要有实际步数 9：%s", buf.String())
 	}
 }
