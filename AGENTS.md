@@ -245,7 +245,7 @@ export PATH="/c/Program Files/Go/bin:$PATH"
 | **H8** | 🟡 **优先修复** | `writeJSON` 当前只自动包装 `map[string]any`；LoadResult/PromptResult/list/page 等 struct 可裸返回；`errorBody` 缺 hint，编码失败也未统一形状 | HTTP 契约测试覆盖 map/struct/list/page 成功与全部错误出口，统一 result 和 `{code,message,hint,retryable}` |
 | **H9** | 🟡 **优先修复** | load 的 id/sessionId 已接；`tailMessages` 未识别，只读 limit；prompt 的 id/text 已接。快照本身未覆盖入参 | 只发 id/tailMessages 即可；tail=1/2 改变条数；别名冲突优先级明确并有测试 |
 | **H10** | 🟡 宿主侧同版本已验（5/5），跨仓待联调 | `session.load` 要能加载 `session.list` 返回的任何 id；此前只验过「首个 id 一次成功」 | **2026-11-03 `scripts/h10-chain.py`（同一新二进制 + 全新临时 home + 只回收自己启动的 PID）**：`create` 给 id ✅、`list` 含新会话 ✅、**list 里每个 id 用两种入参名（`sessionId` / `id`+`tailMessages`）都能 load** ✅、`prompt` 后能 load 到 assistant 消息 ✅、响应是 `{result:…}` 信封 ✅ —— 合计 **OK=5 FAIL=0**。**仍未验**：真实 home 全量 id 遍历（home 只读，改法是把项目目录**复制**到临时 home 再验）与界面实际消费 |
-| **H11** | ✅ 代码已分流，进程级本轮未复验 | policy 诊断应只去 stderr；旧 `head -1` 检不出第二行，且 `ready {…}` 不是整行纯 JSON | 捕获完整 stdout，断言恰好一行且 ready 前缀后为合法 JSON；stderr 可有诊断 |
+| **H11** | ✅ 2026-11-03（进程级已验） | policy 诊断只去 stderr；stdout 恰好一行 ready 握手 | **`scripts/h11-stdout.py` 捕获完整 stdout（不是 `head -1`——那看不到第二行）**：`stdout 恰好一行` ✅、`以 ready 开头` ✅、`之后是合法 JSON` ✅、`含 url 与 token` ✅ —— **OK=4 FAIL=0**。脚本只 `p.kill()` 自己启动的 PID，临时 home，不按镜像名杀 |
 | **H12** | 🟡 提供端有，联合待验 | `contentWidth` 0=未知且省略；传值可透传，壳实际供宽度及界面消费未完成 | 不传时字段不出现，传 748 得 748；原生壳提供真实列宽，未知不编默认值 |
 
 界面侧从 mockd 切真宿主需要改多少代码，以 H1–H12 和 `../dsh-ui/AGENTS.md` 的实际联调为准，**不再承诺“渲染一行不用改”**。
