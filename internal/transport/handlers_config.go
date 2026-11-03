@@ -38,7 +38,10 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		values = map[string]string{}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"values": values})
+	// 两个键都给：`values` 是契约里的规范形状，`config` 是早先界面读的那个名字。
+	// 只给一个的后果是**静默**的——界面拿到空配置，界面上什么都是默认值，
+	// 而两边都不报错（界面审计实测：宿主回 values、界面读 config）。
+	writeJSON(w, http.StatusOK, map[string]any{"values": values, "config": values})
 }
 
 // handleConfigSet 是 /api/config.set：只覆盖请求里给出的 key。
@@ -59,18 +62,35 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Values map[string]string `json:"values"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// 两种形状都收：`{"values":{…}}`（契约里的规范形状）与扁平 kv（早先界面的发法）。
+	// 只认一种的后果是 400 而 hint 为空——界面那边的表现是"保存按钮没反应"。
+	var raw map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
 		return
 	}
+	values := map[string]string{}
+	if inner, ok := raw["values"]; ok {
+		if err := json.Unmarshal(inner, &values); err != nil {
+			writeJSON(w, http.StatusBadRequest, errorBody("values 必须是字符串到字符串的对象"))
+			return
+		}
+	} else {
+		// 扁平形状：整份 body 就是 kv。只收字符串值。
+		for k, v := range raw {
+			var sv string
+			if err := json.Unmarshal(v, &sv); err != nil {
+				continue // 非字符串的键不是配置项，忽略
+			}
+			values[k] = sv
+		}
+	}
 	// nil 与空区分不够：两者都是"这一趟什么都没说要改"，一起拦下。
-	if len(req.Values) == 0 {
+	if len(values) == 0 {
 		writeJSON(w, http.StatusBadRequest, errorBody("缺 values：要给至少一项"))
 		return
 	}
+	req := struct{ Values map[string]string }{Values: values}
 
 	if err := s.opt.ConfigSet(req.Values); err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorBody("写配置失败："+err.Error()))
