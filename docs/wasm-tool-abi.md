@@ -1109,11 +1109,12 @@ return writeReply(echoReply(args.Text))   // echo 是默认分支
 | `cmd/dshd/wasmload.go` | `wasmEntry.Tool []wasmToolDecl`（`[[module.tool]]`）；`newWasmToolSpecs`（两种写法二选一、混写报错、重名报错、逐项超时默认）；`hasLegacyToolFields`；`splitWasmProvides` 改为返回**多个**能力键；`checkWasmTools`（键集合 ↔ 工具集合逐个对齐，含 bare `tool` 规则与"同一个键写两次"）；`noWasmToolCapErr` / `capKeysOf` / `quoteJoin`；`wasmToolRegister(specs, router)` 一个 Register 注册全部工具；`wasmToolRouter` + `invokeTool`（写名字 + 调用原子化、per-tool ctx deadline）；`maxWasmToolTimeout`；`wasmTool` 改持 `router` 与自己的 `timeout`；`wasmLoaded.tool` → `tools []string`；`writeWasmSection` 的 TOOL 列改成逗号分隔 |
 | `cmd/dshd/wasmload_test.go` | 新增 7 条（§10.6 第 2 组）；两处老断言跟着字段改名（`x.tool` → `x.tools`），**其余老用例一行没改** |
 | `internal/wasmhost/testdata/toolplugin/main.go` | 新增 `upper` 工具（`upperReply` / `upperASCII`）与 `echoReply`，按 `req.Tool` 分流；`boom` / 空输入的语义不变 |
-| `internal/wasmhost/testdata/toolplugin.wasm` | 重新生成：**4,459,916 字节**（旧 4,458,584，+1,332），sha256 `ec3391fa…`，脚本连跑两次同值 |
-| `docs/wasm-tool-abi.md` | 这一节 |
-| `docs/wasm-plugin-author-guide.md` | §2 的 `tool` 字段说明、§4 manifest 两种写法、新增 §5「一个模块写多个工具」、§6 排查里的 graph 样子 |
+| `internal/wasmhost/testdata/toolplugin.wasm` | 重新生成：**4,459,731 字节**（旧 4,458,584，+1,147），sha256 `a3b5e583…`，连跑两次同值 |
+| `scripts/build-wasm-fixture.py` | 编译命令加 `-buildvcs=false`（**必要**：不加的话产物里带 `vcs.revision`/`vcs.modified`，同一个源文件换个 commit 就编出不同字节；现场与证据见 §10.9） |
+| `docs/wasm-tool-abi.md` | 这一节（含 §10.9 那处夹具可复现性修复） |
+| `docs/wasm-plugin-author-guide.md` | §2 的 `tool` 字段说明、§4 manifest 两种写法、新增 §5「一个模块写多个工具」、§6 排查里的 graph 样子、构建命令加 `-buildvcs=false` |
 
-**没动**（本轮边界）：`internal/kernel/`、`internal/wasmhost/`（**ABI 与宿主内核件一个字节没改**）、`internal/transport/`、`modules/`、`dsh.toml`、`cmd/dshd/serve*.go`、`cmd/dshtui/`、`cmd/dshd/doctor.go`、`PLAN.md`、`AGENTS.md`、`scripts/build-wasm-fixture.py`（脚本本身这轮不需要改，只是重跑）。
+**没动**（本轮边界）：`internal/kernel/`、`internal/wasmhost/`（**ABI 与宿主内核件一个字节没改**）、`internal/transport/`、`modules/`、`dsh.toml`、`cmd/dshd/serve*.go`、`cmd/dshtui/`、`cmd/dshd/doctor.go`、`PLAN.md`、`AGENTS.md`。
 
 ### 10.6 验收（逐条，真实输出）
 
@@ -1125,18 +1126,18 @@ $ go build ./... && go vet ./...
 BUILD+VET OK（无输出）
 
 $ go test ./internal/wasmhost ./cmd/dshd -count=1
-ok  	dshgo/internal/wasmhost	11.041s
-ok  	dshgo/cmd/dshd	12.219s
+ok  	dshgo/internal/wasmhost	10.643s
+ok  	dshgo/cmd/dshd	13.573s
 
 $ go test ./... -count=1
-go test exit=0；ok 行数 47；FAIL 行 0（grep 'FAIL\|panic:' 为空）
+go test exit=0；ok 包数 47；FAIL 行 0（grep 'FAIL\|panic:' 为空）
 
 $ python scripts/build-wasm-fixture.py
 生成 internal\wasmhost\testdata\fixture.wasm 60 字节（手写纯 wasm：add / spin）
-+ (cd internal\wasmhost\testdata\toolplugin && build -buildmode=c-shared -trimpath -o …\toolplugin.wasm .)
-生成 internal\wasmhost\testdata\toolplugin.wasm 4459916 字节（Go reactor：_initialize / alloc / call）
++ (cd internal\wasmhost\testdata\toolplugin && build -buildmode=c-shared -trimpath -buildvcs=false -o …\toolplugin.wasm .)
+生成 internal\wasmhost\testdata\toolplugin.wasm 4459731 字节（Go reactor：_initialize / alloc / call）
 $ sha256sum internal/wasmhost/testdata/toolplugin.wasm        # 连跑两次同值
-ec3391fa4cea70ae44ec9e18b1a6b64682e5864dd602fb02923b685e6101e36a
+a3b5e58326ce9fcd98d744a6d619ced177aa4f0f43acb2cf153bb9e72f8ee4be
 
 $ go build -o tmp/dshd.exe ./cmd/dshd
 OK（18,869,760 字节）
@@ -1145,7 +1146,7 @@ OK（18,869,760 字节）
 **第 1 组：`internal/wasmhost` 全部老用例（ABI 没改，夹具改了）**
 
 ```
-ok  	dshgo/internal/wasmhost	9.106s   # 13 条全绿，一行没改
+ok  	dshgo/internal/wasmhost	10.643s   # 13 条全绿，一行没改
 ```
 
 （夹具对"不是 upper"的一切仍走 echo，所以 `TestInvokeToolRoundTrip` / `TestInvokeToolBusinessErrorIsNotTrap` / `TestInvokeToolTrapIsError` / 重建那 5 条都不受影响。）
@@ -1158,24 +1159,24 @@ ok  	dshgo/internal/wasmhost	9.106s   # 13 条全绿，一行没改
 --- PASS: TestWasmMissingFileFails (0.01s)
 --- PASS: TestWasmNonWasmFileFails (0.01s)
 --- PASS: TestWasmProvidesRejected (0.01s)
---- PASS: TestWasmToolProvidesOneTool (1.03s)
---- PASS: TestWasmToolBusinessErrorGivesHint (0.87s)
---- PASS: TestWasmToolTrapGivesHint (0.90s)
---- PASS: TestWasmWithoutProvidesKeepsToolTable (0.86s)
+--- PASS: TestWasmToolProvidesOneTool (0.99s)
+--- PASS: TestWasmToolBusinessErrorGivesHint (0.91s)
+--- PASS: TestWasmToolTrapGivesHint (0.89s)
+--- PASS: TestWasmWithoutProvidesKeepsToolTable (0.95s)
 --- PASS: TestWasmDisabledSkipped (0.01s)
 --- PASS: TestWasmToolManifestValidation (0.03s)
---- PASS: TestWasmTwoToolModulesCoexist (1.82s)
---- PASS: TestWasmTwoToolsWithPlainToolKeyFails (0.02s)
---- PASS: TestWasmToolCapKeyMustMatchToolName (0.02s)
---- PASS: TestWasmToolRebuildsAfterTrapThroughExec (0.82s)
---- PASS: TestWasmModuleServesTwoTools (0.84s)              ← 新：一个模块两个工具 → 表里两个名字
---- PASS: TestWasmTwoToolsRouteByToolField (0.80s)          ← 新：两个工具逻辑各自不同（tool 字段真被路由）
---- PASS: TestWasmLegacySingleToolFormStillWorks (0.80s)    ← 新：旧写法仍能用
+--- PASS: TestWasmTwoToolModulesCoexist (1.69s)
+--- PASS: TestWasmTwoToolsWithPlainToolKeyFails (0.00s)
+--- PASS: TestWasmToolCapKeyMustMatchToolName (0.00s)
+--- PASS: TestWasmToolRebuildsAfterTrapThroughExec (1.11s)
+--- PASS: TestWasmModuleServesTwoTools (0.97s)              ← 新：一个模块两个工具 → 表里两个名字
+--- PASS: TestWasmTwoToolsRouteByToolField (0.98s)          ← 新：两个工具逻辑各自不同（tool 字段真被路由）
+--- PASS: TestWasmLegacySingleToolFormStillWorks (1.02s)    ← 新：旧写法仍能用
 --- PASS: TestWasmMixedToolFormsRejected (0.01s)            ← 新：混写 → 启动报错
---- PASS: TestWasmToolCapKeysMustMatchDeclaredTools (0.04s) ← 新：6 个子用例，能力键必须逐个对齐
---- PASS: TestWasmMultiToolDeclValidation (0.03s)           ← 新：5 个子用例，逐项必填 / 重名
---- PASS: TestWasmSingleItemArrayWithBareToolKey (0.84s)    ← 新：数组只写一项时 provides=["tool"] 仍成立
-ok  	dshgo/cmd/dshd	9.862s
+--- PASS: TestWasmToolCapKeysMustMatchDeclaredTools (0.03s) ← 新：6 个子用例，能力键必须逐个对齐
+--- PASS: TestWasmMultiToolDeclValidation (0.07s)           ← 新：5 个子用例，逐项必填 / 重名
+--- PASS: TestWasmSingleItemArrayWithBareToolKey (2.11s)    ← 新：数组只写一项时 provides=["tool"] 仍成立
+ok  	dshgo/cmd/dshd	11.890s
 ```
 
 核心的四条各自钉的是什么（另外三条是校验表的用例：能力键对齐 6 例、逐项必填 5 例、数组单写成缩写 1 例；缺核心任一条，"一个模块多个工具"就不成立）：
@@ -1200,7 +1201,7 @@ wasm-text              wasm      tool:echo,tool:upper       tools
 
 # wasm 后端（已装载 / 已校验；TOOL 列 = 注册进工具表的工具名（多个用逗号分隔），…）
 MODULE                 BACKEND   DIGEST       EXPORTS            TOOL                   PATH
-wasm-text              wasm      ec3391fa4cea _initialize,alloc,call echo,upper             D:\…\internal\wasmhost\testdata\toolplugin.wasm
+wasm-text              wasm      a3b5e58326ce _initialize,alloc,call echo,upper             D:\…\internal\wasmhost\testdata\toolplugin.wasm
 ```
 
 ```
@@ -1230,7 +1231,7 @@ $ ./tmp/dshd.exe exec --tool upper --args '{"text":"Hi 你好"}' --manifest tmp/
 ```
 $ ./tmp/dshd.exe modules graph --manifest tmp/wasm-legacy-tool.toml
 wasm-echo              wasm      tool                       tools
-wasm-echo              wasm      ec3391fa4cea _initialize,alloc,call echo
+wasm-echo              wasm      a3b5e58326ce _initialize,alloc,call echo
 
 $ ./tmp/dshd.exe exec --tool echo --args '{"text":"旧写法"}' --manifest tmp/wasm-legacy-tool.toml
   "Summary": "收到 旧写法",
@@ -1264,3 +1265,52 @@ exit=1
 5. **`-race` 没跑**（同 §9.5 第 1 条）：`wasmToolRouter` 的并发正确性靠"同一把锁里写名字 + 调用"的设计与单测，不是 race 检测器；也没做压测。
 6. **`cmd/dshd/doctor.go` 的 wasm 文案仍偏旧**（不在本轮边界）：它读 `Register != nil` 判"已注册工具"，对多工具模块是正确的；但文案里"多工具的模块用 `provides=["tool:<工具名>"]` 各占一个能力键"只说了跨模块的场景，没提 `[[module.tool]]`。
 7. §8.7 / §9.5 里没验的那些（interpreter 引擎、c-archive、千次实例化泄漏、恶意客人、体积 4.4 MB）**不变**。
+
+### 10.9 顺带修掉：夹具字节会随 git commit 漂移
+
+这一条是本轮验收时**撞上**的，不是计划内的。
+
+现场（同一份 `main.go`，一个字节都没改）：
+
+```
+06:18  python scripts/build-wasm-fixture.py  → 4,459,916 字节  sha256 ec3391fa…（连跑两次同值）
+06:25  别的会话提交了一笔（HEAD 553e148 → b55853a，本仓是共享树）
+06:26  python scripts/build-wasm-fixture.py  → 4,459,916 字节  sha256 f62023ad…  ← 大小一样，字节不同
+```
+
+原因：go 把仓库的 VCS 身份写进了 main 包的 build info，产物里直接看得到：
+
+```
+build	vcs=git
+build	vcs.revision=b55853a31f9326012b945446abfa169daab2b31a
+build	vcs.time=2026-11-03T22:25:10Z
+build	vcs.modified=true
+```
+
+**`-trimpath` 并没有关掉它**（本机 go1.27.3 实测；`go help build` 里"Specifying this flag implies -buildvcs=false"那句话在这条路上不成立，产物里 VCS 段还在）。于是同一份源码在不同 commit 上编出来的 `.wasm` 字节不同——而 `.wasm` 是**入库夹具**、manifest 里的 `digest` 又按内容钉死（§8.4）：每有人提交一次，重新生成的夹具摘要就变，pin 了 digest 的 manifest 下次重建就炸在"摘要不匹配"上，而错的是产物、不是 manifest。
+
+修法：`scripts/build-wasm-fixture.py` 的编译命令加 `-buildvcs=false`。
+
+```
+$ python scripts/build-wasm-fixture.py
++ (cd internal\wasmhost\testdata\toolplugin && build -buildmode=c-shared -trimpath -buildvcs=false -o …\toolplugin.wasm .)
+生成 internal\wasmhost\testdata\toolplugin.wasm 4459731 字节（Go reactor：_initialize / alloc / call）
+$ sha256sum internal/wasmhost/testdata/toolplugin.wasm     # 连跑两次同值
+a3b5e58326ce9fcd98d744a6d619ced177aa4f0f43acb2cf153bb9e72f8ee4be
+$ grep -a -c 'vcs.revision' internal/wasmhost/testdata/toolplugin.wasm
+0
+```
+
+同一份源码加不加这个开关的对照（各编一次，源码完全相同）：
+
+```
+sha256 9548652a…  4,459,917 字节   不带 -buildvcs=false（含 VCS 段）
+sha256 a3b5e583…  4,459,731 字节   带 -buildvcs=false
+                  ↑ 差 186 字节：就是 build info 里的 VCS 段
+```
+
+再换一个全新的 `GOCACHE=/tmp/gocache-fresh1` 重编，摘要仍是 `a3b5e583…`——产物现在只取决于源码与工具链。
+
+代价：`go version -m` 之类想从 `.wasm` 反查提交的能力没有了。这本来也不该由产物承担：模块的身份是 manifest 里那个 sha256 digest，不是仓库指针。
+
+**插件作者请照抄这条命令**（`docs/wasm-plugin-author-guide.md` §1 已同步）：`-buildvcs=false` 不是洁癖，是"同一份源码必须产出同一份产物"。§8.5 里的构建命令少了这个开关，以这里为准。

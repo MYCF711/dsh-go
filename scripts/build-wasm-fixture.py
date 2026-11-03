@@ -90,14 +90,24 @@ def write_plain_fixture():
 
 
 def build_tool_plugin():
-    """把 Go 源码夹具编成 reactor（-buildmode=c-shared）。"""
+    """把 Go 源码夹具编成 reactor（-buildmode=c-shared）。
+
+    为什么显式 `-buildvcs=false`（`-trimpath` 在 go1.27.3 上**并没有**关掉它）：
+    go 会把仓库的 VCS 身份写进 main 包的 build info —— 实测产物里有
+    `build vcs=git` / `vcs.revision=<HEAD>` / `vcs.modified=true`。
+    后果是同一个源文件在不同 commit 上编出来的 .wasm **字节不同**：
+    本仓真机踩过——同一份源码在 HEAD=553e148 时是 ec3391fa…，别人提交后
+    HEAD=b55853a 再编同一份源码就变成 f62023ad…（大小一样、只差 build info）。
+    .wasm 是入库夹具，manifest 里的 digest 又按内容钉死，那就不能让它随
+    仓库指针漂：关掉 VCS 之后产物只取决于源码 + 工具链。
+    """
     go = shutil.which("go")
     if go is None:
         sys.exit("找不到 go：这个夹具必须用 Go 工具链编（PATH 里要有 go，或先 export PATH=\"/c/Program Files/Go/bin:$PATH\"）")
 
     src = os.path.join(TESTDATA, "toolplugin")
     out = os.path.join(TESTDATA, "toolplugin.wasm")
-    cmd = [go, "build", "-buildmode=c-shared", "-trimpath", "-o", out, "."]
+    cmd = [go, "build", "-buildmode=c-shared", "-trimpath", "-buildvcs=false", "-o", out, "."]
     env = dict(os.environ)
     env.update({"GOOS": "wasip1", "GOARCH": "wasm", "CGO_ENABLED": "0"})
     print("+ (cd %s && %s)" % (os.path.relpath(src, ROOT), " ".join(cmd[1:])))

@@ -40,11 +40,15 @@ func main() {} // reactor 不跑它，但 c-shared 要求有 main
 构建：
 
 ```bash
-GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath -o echo.wasm .
+GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath -buildvcs=false -o echo.wasm .
 ```
 
 **必须 `-buildmode=c-shared`。** 默认 `go build` 出来的是 command 形态（只有 `_start`），
 跑完 `main` 就 `proc_exit`，宿主调不到你的导出函数——装载时会明确报这个错。
+
+**建议 `-buildvcs=false`。** 不加的话 go 会把仓库的 `vcs.revision` / `vcs.modified`
+写进产物：同一份源码换个 commit 就编出不同字节。插件包一般按内容摘要发布/校验
+（宿主 manifest 里的 `digest` 就是 sha256），产物会随仓库指针漂是纯粹的麻烦。
 
 > **这段样例是验过的**（2026-11-04）：照抄上面的代码 + `-buildmode=c-shared` 编出来
 > 1,908,996 字节的 `guide.wasm`，写进 manifest 后 `dshd exec --tool guide_echo --args '{"text":"hi"}'`
