@@ -80,17 +80,28 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 			BorrowedApprovals: res.BorrowedApprovals,
 		},
 		Summary: fmt.Sprintf("%s「%s」（%d 步，%d 字%s）",
-			inheritedWord(req.Inherit != ""), desc, res.Steps, len([]rune(res.Text)),
+			inheritNote(req.Inherit), desc, res.Steps, len([]rune(res.Text)),
 			borrowNote(res.BorrowedApprovals)),
 		Text: res.Text,
 	}, nil
 }
 
-func inheritedWord(inherited bool) string {
-	if inherited {
-		return "带上下文子代理完成"
+// inheritNote 说清这一次到底带了多少历史。
+//
+// 为什么必须说：keep 是宿主定的上限（现在 20 条 ≈ 最近 10 轮）。
+// 不说的话，模型会以为"派个 fork 它就知道全部"，然后在长会话里问一个
+// 子代理根本看不到的东西，拿到"不知道"还以为是子代理能力不行。
+func inheritNote(inherit string) string {
+	if strings.TrimSpace(inherit) == "" {
+		return "子代理完成（这次没带上历史：会话太短或读不到）"
 	}
-	return "子代理完成"
+	n := 0
+	for _, line := range strings.Split(inherit, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return fmt.Sprintf("带上下文子代理完成（继承 %d 条历史，更早的看不到）", n)
 }
 
 func borrowNote(b bool) string {
