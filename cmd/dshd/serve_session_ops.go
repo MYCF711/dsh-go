@@ -57,3 +57,27 @@ func serveFork(home, sessionID, title string) (string, error) {
 	}
 	return newID, nil
 }
+
+// serveWorkspaceList 列出当前工作区的顶层条目。
+//
+// 为什么只列顶层：界面左栏要的是"这个工作区里有什么项目/目录"，
+// 递归会让一次调用扫几万个文件——那是 grep 工具的事，不是这个 method 的事。
+func serveWorkspaceList() ([]transport.WorkspaceEntry, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("取当前目录失败: %w", err)
+	}
+	ents, err := os.ReadDir(wd)
+	if err != nil {
+		return nil, fmt.Errorf("读目录失败: %w", err)
+	}
+	out := make([]transport.WorkspaceEntry, 0, len(ents))
+	for _, e := range ents {
+		ent := transport.WorkspaceEntry{Name: e.Name(), IsDir: e.IsDir()}
+		if info, ierr := e.Info(); ierr == nil && !e.IsDir() {
+			ent.Size = info.Size()
+		}
+		out = append(out, ent)
+	}
+	return out, nil
+}

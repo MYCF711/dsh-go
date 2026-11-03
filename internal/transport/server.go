@@ -53,6 +53,8 @@ type Options struct {
 	Delete func(sessionID string) error
 	// Fork 从一个会话开分支；宿主注入。
 	Fork func(sessionID, title string) (string, error)
+	// WorkspaceList 列当前工作区的顶层条目；宿主注入。
+	WorkspaceList func() ([]WorkspaceEntry, error)
 	// Cancel 取消在飞的一轮；没有在飞的返回 ErrNoSuchTurn。
 	Cancel func(sessionID string) error
 	// SetMode 换模式；宿主注入。
@@ -272,6 +274,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionDelete(w, r)
 	case MethodSessionFork:
 		s.handleSessionFork(w, r)
+	case MethodWorkspaceList:
+		s.handleWorkspaceList(w, r)
 	default:
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 	}

@@ -16,6 +16,7 @@ const (
 	MethodSessionCreate  Method = "session.create"
 	MethodSessionDelete  Method = "session.delete"
 	MethodSessionFork    Method = "session.fork"
+	MethodWorkspaceList  Method = "workspace.list"
 )
 
 // SessionMethods 是 U0 第一版要兑现的全部方法（顺序固定，快照按它排）。
@@ -23,7 +24,7 @@ func SessionMethods() []Method {
 	return []Method{
 		MethodSessionList, MethodSessionLoad, MethodSessionHistory,
 		MethodSessionPrompt, MethodSessionCancel, MethodSessionCreate,
-		MethodSessionDelete, MethodSessionFork,
+		MethodSessionDelete, MethodSessionFork, MethodWorkspaceList,
 	}
 }
 
@@ -57,4 +58,14 @@ type LoadResult struct {
 type PromptResult struct {
 	Accepted bool   `json:"accepted"`
 	TurnID   string `json:"turnId"`
+}
+
+// WorkspaceEntry 是 workspace.list 返回的一条。
+//
+// 只有三个字段：多一个都得由界面负责渲染，而界面现在只用得上这三个。
+// 以后要加（比如修改时间）再显式改快照，不要"顺手多带点"。
+type WorkspaceEntry struct {
+	Name  string `json:"name"`
+	IsDir bool   `json:"isDir"`
+	Size  int64  `json:"size"`
 }

@@ -7,7 +7,8 @@
     "session.cancel",
     "session.create",
     "session.delete",
-    "session.fork"
+    "session.fork",
+    "workspace.list"
   ],
   "types": {
     "Message": [

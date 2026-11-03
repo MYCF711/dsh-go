@@ -132,6 +132,9 @@ func cmdServe(args []string) error {
 		History: func(sessionID string, sinceSeq, limit int) (transport.Page, error) {
 			return transport.HistorySession(src, sessionID, sinceSeq, limit)
 		},
+		WorkspaceList: func() ([]transport.WorkspaceEntry, error) {
+			return serveWorkspaceList()
+		},
 		Delete: func(sessionID string) error {
 			return serveDelete(*home, sessionID)
 		},
