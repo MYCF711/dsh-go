@@ -379,6 +379,14 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 // 为什么必须有：界面按快照发 `{"id":...}`，宿主只读 `sessionId` → 一律 404，
 // 而那个 404 长得像"会话不存在"（2026-11-03 H10 就是这么来的）。
 // **同一个字段两个名字，等于两套真相；收下两个名字至少不会静默失败。**
+// firstNonZero 取第一个非零值：别名冲突时以第一个为准，不允许"两个都不认"。
+func firstNonZero(a, b int) int {
+	if a != 0 {
+		return a
+	}
+	return b
+}
+
 func fillID(sessionID, id string) string {
 	if sessionID != "" {
 		return sessionID
@@ -393,13 +401,15 @@ func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
 		// ID 是契约快照里的名字（H9）。两个都收：只认一个就是静默 404。
 		ID    string `json:"id"`
 		Limit int    `json:"limit"`
+		// TailMessages 是契约快照里的名字（H9）。两个都收；冲突时以 limit 为准。
+		TailMessages int `json:"tailMessages"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	if s.opt.Load == nil {
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 		return
 	}
-	res, err := s.opt.Load(fillID(in.SessionID, in.ID), in.Limit)
+	res, err := s.opt.Load(fillID(in.SessionID, in.ID), firstNonZero(in.Limit, in.TailMessages))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorBody(err.Error()))
 		return
@@ -500,12 +510,49 @@ func baseURL(addr net.Addr) string {
 //
 // 为什么不是字符串：字符串错误让照快照写的客户端**连 JSON 都解不动**，
 // 真正的原因（401 / 404）被吞成"响应不是合法 JSON"（H8，2026-11-03）。
+// alreadyEnveloped 判断这个值是不是已经带了信封（防止二次包装）。
+func alreadyEnveloped(v any) bool {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, has := m["error"]; has {
+		return true
+	}
+	_, has := m["result"]
+	return has
+}
+
+// errorBody 造一个契约里的错误信封：
+//
+//	{"error":{"code":…,"message":…,"hint":…,"retryable":…}}
+//
+// hint 是必需的：客户端要知道**下一步怎么办**，而这正是 DSH 错误契约的意义。
 func errorBody(msg string) map[string]any {
+	code := errorCode(msg)
 	return map[string]any{"error": map[string]any{
-		"code":      errorCode(msg),
+		"code":      code,
 		"message":   msg,
-		"retryable": false,
+		"hint":      errorHint(code),
+		"retryable": code == "internal",
 	}}
+}
+
+// errorHint 给每类错误一句"下一步"。没有就别编，返回空串即可。
+func errorHint(code string) string {
+	switch code {
+	case "unauthorized":
+		return "先 GET /connect?token=… 换 cookie，再调这个接口"
+	case "not_implemented":
+		return "宿主这一侧还没接线，换一个 method 或等它实现"
+	case "no_such_session":
+		return "先 session.list 拿 id；确认 --home 指向的目录里有这个会话"
+	case "bad_request":
+		return "检查入参名字（id/sessionId 都认）与类型"
+	case "internal":
+		return "可以直接重试；反复失败就看 dshd 的 stderr"
+	}
+	return ""
 }
 
 // errorCode 把旧的中文错误串映射成稳定的机器码。
@@ -520,6 +567,9 @@ func errorCode(msg string) string {
 	case "没有这个会话":
 		return "no_such_session"
 	}
+	if strings.Contains(msg, "未接线") {
+		return "not_implemented"
+	}
 	if strings.Contains(msg, "参数") {
 		return "bad_request"
 	}
@@ -531,19 +581,20 @@ func errorCode(msg string) string {
 // 只在 /api 的 handler 里用，所以可以在这里一把收口——
 // 逐个 handler 改的话，总有一个会漏，而漏掉的那个就是"界面看到 0 条"。
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	if m, ok := v.(map[string]any); ok {
-		if _, hasErr := m["error"]; !hasErr {
-			if _, hasRes := m["result"]; !hasRes {
-				v = map[string]any{"result": m}
-			}
-		}
+	// **任何类型**都要套信封，不只 map。
+	//
+	// 原来只包 map[string]any，于是 LoadResult / PromptResult / []SessionSummary
+	// 这些 struct/切片一律裸返回——照契约读 `result` 的客户端拿到空。
+	// （2026-11-03 复核把 H8 打回 🟡，就是这一条。）
+	if !alreadyEnveloped(v) {
+		v = map[string]any{"result": v}
 	}
 	body, err := json.Marshal(v)
 	if err != nil {
 		// 这里的 payload 全是自家结构，真出错也只剩一个兜底正文。
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"encode failure"}`))
+		_, _ = w.Write([]byte(`{"error":{"code":"encode_failure","message":"响应序列化失败","retryable":false}}`))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
