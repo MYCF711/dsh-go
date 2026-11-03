@@ -23,6 +23,11 @@ import (
 type sessionSource struct {
 	home string // <home>/sessions 的上一级
 	cwd  string // 用来定位 projectKey；空则按 id 全盘找
+	// perms 是会话级审批策略覆盖（`<home>/state/session-permission.json`）。
+	//
+	// **可以 nil**：不带权限覆盖的场景（老测试、别的入口）照样能 work，
+	// 只是 `session.load` 回空串——那正是"不知道"的表示。
+	perms *permissionOverrideStore
 }
 
 func newSessionSource(home, cwd string) *sessionSource {
@@ -170,6 +175,17 @@ func (s *sessionSource) Model(sessionID string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// Permission 报这条会话的审批策略覆盖（没设过就回空串 = 不知道）。
+//
+// **不是从 v4 读**：审批策略是界面状态（用户选的），不是会话内容。
+// 从日志里读会得出"上一次实际用的是什么"，那是历史不是意图。
+func (s *sessionSource) Permission(sessionID string) (string, error) {
+	if s.perms == nil {
+		return "", nil
+	}
+	return s.perms.Get(sessionID), nil
 }
 
 // Cwd 报这条会话的工作目录（v4 日志头部的 cwd）。

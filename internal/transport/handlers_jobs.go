@@ -134,3 +134,39 @@ func (s *Server) handleSessionSetModel(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"ok": true}})
 }
+
+// handleSessionSetPermission 是 /api/session.setPermission。
+//
+// 参数：`id`（必填）+ `permission`（deny/ask/allow/auto；空串 = 清除覆盖）。
+// **值要白名单校验**：写进 store 之后会被 serve 拿去当审批策略用，
+// 收一个 `"block"` 这种没定义的词，后果是那一轮的行为没人说得清。
+func (s *Server) handleSessionSetPermission(w http.ResponseWriter, r *http.Request) {
+	if s.opt.SetSessionPermission == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("session.setPermission 未接线"))
+		return
+	}
+	var params struct {
+		ID         string `json:"id"`
+		Permission string `json:"permission"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		return
+	}
+	if params.ID == "" {
+		writeJSON(w, http.StatusBadRequest, errorBody("缺 id：要改哪个会话"))
+		return
+	}
+	switch params.Permission {
+	case "", "deny", "ask", "allow", "auto":
+	default:
+		writeJSON(w, http.StatusBadRequest, errorBody(
+			"permission 只能是 deny/ask/allow/auto（或空串清除），收到 "+params.Permission))
+		return
+	}
+	if err := s.opt.SetSessionPermission(params.ID, params.Permission); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"ok": true}})
+}

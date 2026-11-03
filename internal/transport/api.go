@@ -38,10 +38,15 @@ const (
 	// 而界面上的模型选择器要能改。没有这个方法，那个下拉就只能画死。
 	// 覆盖存在 `<home>/state/session-model.json`（**不碰 v4**：R5 说读路径不写盘）。
 	MethodSessionSetModel Method = "session.setModel"
-	MethodFSRead          Method = "fs.read"
-	MethodFSWrite         Method = "fs.write"
-	MethodConfigGet       Method = "config.get"
-	MethodConfigSet       Method = "config.set"
+	// MethodSessionSetPermission 给会话设一个"下一轮用什么审批策略"的覆盖。
+	//
+	// 和 setModel 同构：`load` 里的 permission 是只读投影，界面要能改就得有这个方法。
+	// 覆盖存 `<home>/state/session-permission.json`（**不碰 v4**）。
+	MethodSessionSetPermission Method = "session.setPermission"
+	MethodFSRead               Method = "fs.read"
+	MethodFSWrite              Method = "fs.write"
+	MethodConfigGet            Method = "config.get"
+	MethodConfigSet            Method = "config.set"
 )
 
 // SessionMethods 是 U0 第一版要兑现的全部方法（顺序固定，快照按它排）。
@@ -50,7 +55,8 @@ func SessionMethods() []Method {
 		MethodSessionList, MethodSessionLoad, MethodSessionHistory,
 		MethodSessionPrompt, MethodSessionCancel, MethodSessionApprove, MethodSessionCreate,
 		MethodSessionDelete, MethodSessionFork, MethodSessionCompact, MethodWorkspaceList,
-		MethodJobsList, MethodJobsOutput, MethodScheduleList, MethodSessionSetModel,
+		MethodJobsList, MethodJobsOutput, MethodScheduleList,
+		MethodSessionSetModel, MethodSessionSetPermission,
 		MethodFSRead, MethodFSWrite, MethodConfigGet, MethodConfigSet,
 	}
 }

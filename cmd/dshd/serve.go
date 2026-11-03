@@ -133,9 +133,16 @@ func cmdServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "会话模型覆盖读盘失败（%v），本轮全部按默认模型跑\n", err)
 	}
 
+	// 会话级审批策略覆盖（同款；读盘失败就全按 --policy 走）。
+	permissionOverrides := newPermissionOverrideStore(*home)
+	if err := permissionOverrides.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "会话权限覆盖读盘失败（%v），本轮全部按 --policy 走\n", err)
+	}
+
 	// 会话数据的来源：宿主这一侧才被允许读 v4 日志（红线 R7）。
 	// cwd 传空 = 按 id 全盘找，与 `session.resume` 的兜底一致。
 	src := newSessionSource(*home, "")
+	src.perms = permissionOverrides
 
 	// Prompt / Cancel 走同一个服务，busy 的唯一结束点由它保证。
 	// runner 现在固定拒绝（见 errNoModel 的注释）。
@@ -205,6 +212,10 @@ func cmdServe(args []string) error {
 		// **不写 v4**（R5 读路径不写盘）；这是界面状态，进了日志会污染重放。
 		SetSessionModel: func(sessionID, model string) error {
 			return modelOverrides.Set(sessionID, model)
+		},
+		// 审批策略覆盖：写 <home>/state/session-permission.json（白名单在 handler 里校）。
+		SetSessionPermission: func(sessionID, perm string) error {
+			return permissionOverrides.Set(sessionID, perm)
 		},
 		Addr: *addr,
 		// H14：把序号域交给 server——WS 推送与 session.history 必须读同一份，

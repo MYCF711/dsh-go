@@ -80,6 +80,8 @@ type Options struct {
 	ScheduleList func() []ScheduleItem
 	// SetSessionModel 改一个会话的模型覆盖。nil = 这个宿主不支持（回 501）。
 	SetSessionModel func(sessionID, model string) error
+	// SetSessionPermission 改一个会话的审批策略覆盖。nil = 不支持（回 501）。
+	SetSessionPermission func(sessionID, perm string) error
 	// FSRead 读一个文件；路径解析、大小上限、越界检查都在宿主那边。
 	FSRead func(path string) (FSContent, error)
 	// FSWrite 写一个文件；宿主注入。
@@ -338,6 +340,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleScheduleList(w, r)
 	case MethodSessionSetModel:
 		s.handleSessionSetModel(w, r)
+	case MethodSessionSetPermission:
+		s.handleSessionSetPermission(w, r)
 	case MethodFSRead:
 		s.handleFSRead(w, r)
 	case MethodFSWrite:
@@ -453,7 +457,16 @@ func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// H5：权限状态是进程级事实，在这里补上（宿主注入的 Load 只关心会话内容）。
-	res.Permission = s.opt.Policy
+	//
+	// **只在 source 没给的时候才用进程级 --policy 顶上**。
+	// 原来这里无条件 `res.Permission = s.opt.Policy`，于是：
+	//   - source.go 里 PermissionSourcer 填的会话级覆盖被当场盖掉
+	//   - 界面设了 `ask`、`session.load` 回来还是 `allow`
+	//   - 而且**没有任何报错**：两个地方都"尽职地"写了同一个字段，
+	//     后写的那个赢——这种冲突不会以 bug 出现，只会以"设了没用"出现
+	if res.Permission == "" {
+		res.Permission = s.opt.Policy
+	}
 	// H12：只有**正数**才算"知道宽度"。0 和负数都当未知、字段直接不出现。
 	//
 	// 负数放过去不是报错，而是让界面画出一个宽度为负的容器——看起来"怪但没崩"，

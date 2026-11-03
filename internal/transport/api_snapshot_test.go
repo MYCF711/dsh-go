@@ -97,7 +97,10 @@ func TestSessionAPISnapshot(t *testing.T) {
 	// 一直在用，缺的只是 Transport 方法——界面一直看不到"这个工作区有哪些定时任务"。
 	// 第 19 个 session.setModel：session.load 的 model 是只读投影（上一轮实际用的），
 	// 界面上的模型选择器要能改就得有这个方法。覆盖存 state/session-model.json，不碰 v4。
-	const done, target = 19, 19
+	// 第 20 个 session.setPermission：LoadResult.Permission 的注释写着「当前审批策略」，
+	// 但 res.Permission 从来没被填过——死字段。现在补 PermissionSourcer + 覆盖存储，
+	// 界面上的权限预设才有东西可显示、可修改。
+	const done, target = 20, 20
 	if got := len(SessionMethods()); got != done {
 		t.Fatalf("SessionMethods() 有 %d 个方法，当前进度应当是 %d 个（U0 目标 %d 个）", got, done, target)
 	}

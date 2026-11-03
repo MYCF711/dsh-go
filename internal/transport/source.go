@@ -11,6 +11,15 @@ type Source interface {
 	Messages(sessionID string) ([]Message, error)
 }
 
+// PermissionSourcer 是**可选**能力：告诉协议层某个会话的审批策略。
+//
+// **这个字段原来是死的**：`LoadResult.Permission` 的注释写着「当前审批策略
+// （deny/ask/allow/auto）」，但协议层从来没填过它（`res.Permission` 零命中），
+// 所以界面上读到的永远是空串。注释说得越好听，越容易被当成"已经支持了"。
+type PermissionSourcer interface {
+	Permission(sessionID string) (string, error)
+}
+
 // CwdSourcer 是**可选**能力：告诉协议层某个会话的工作目录。
 // 不实现就不填，界面按"不知道"处理（不猜）。
 type CwdSourcer interface {
@@ -120,6 +129,11 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 		if ms, ok := src.(ModelSourcer); ok {
 			if m, merr := ms.Model(sessionID); merr == nil {
 				res.Model = m
+			}
+		}
+		if ps, ok := src.(PermissionSourcer); ok {
+			if perm, perr := ps.Permission(sessionID); perr == nil && perm != "" {
+				res.Permission = perm
 			}
 		}
 		if cs, ok := src.(CwdSourcer); ok {

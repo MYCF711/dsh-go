@@ -15,6 +15,7 @@
     "jobs.output",
     "schedule.list",
     "session.setModel",
+    "session.setPermission",
     "fs.read",
     "fs.write",
     "config.get",
