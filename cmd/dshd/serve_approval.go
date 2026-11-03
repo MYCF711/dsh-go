@@ -30,7 +30,13 @@ type approvalBroker struct {
 	// payloads 留着原始负载，供重连时重放（requestId → 负载 + 属于哪个会话）。
 	payloads map[string]pendingPayload
 	stdin    io.WriteCloser
-	emit     func(sessionID, typ string, data json.RawMessage)
+	// writeMu 串行化对子进程 stdin 的写。
+	//
+	// 为什么必须有：审批可以有**两个**来源同时结算——客户端点了允许、
+	// 或超时那条 goroutine 到期。两边都会调 reply 往同一根 stdin 写一行 JSON，
+	// 不串行就会写出交错的半行，子进程解析失败，而现象是"审批偶尔没生效"。
+	writeMu sync.Mutex
+	emit    func(sessionID, typ string, data json.RawMessage)
 
 	// timeout 到了没人答 → 按**拒绝**结算。没人回答时"默认同意"是最坏的选择。
 	timeout time.Duration
@@ -284,6 +290,8 @@ func (b *approvalBroker) reply(requestID string, allow bool) {
 	if b.stdin == nil {
 		return
 	}
+	b.writeMu.Lock()
+	defer b.writeMu.Unlock()
 	line, _ := json.Marshal(map[string]any{"requestId": requestID, "allow": allow})
 	fmt.Fprintf(b.stdin, "%s%s\n", approvalResponseTag, line)
 }

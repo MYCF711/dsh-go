@@ -14,6 +14,7 @@
   "exempt": {
     "cmd/dshd/acp.go::Prompt": "ACP 的 prompt 处理器：它只是把 modeApproval 传下去，判定本身在 approvalDecision 与 Run",
     "cmd/dshd/schedule.go::cmdSchedule": "循环体：判定已抽到 schedulePolicy，这里只调用",
-    "internal/prompt/prompt.go::Build": "只决定提示词里把工具怎么分组，不影响是否放行"
+    "internal/prompt/prompt.go::Build": "只决定提示词里把工具怎么分组，不影响是否放行",
+    "cmd/dshd/serve_approval.go::reply": "只把已经定好的 allow 写回子进程 stdin，**不做判定**；判定在 decisionOf（选项→布尔）与 acp.Run（谁该被问）里"
   }
 }

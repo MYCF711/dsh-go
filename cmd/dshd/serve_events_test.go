@@ -50,10 +50,10 @@ func TestTurnSeqContinuesFromEvents(t *testing.T) {
 	var got []int
 	pub := func(_ string, f transport.ServerFrame) { got = append(got, f.Seq) }
 
-	emitFrame(js, pub, "a", "user/message", nil)       // 1
-	emitFrame(js, pub, "a", "assistant/message", nil)  // 2
-	emitTurnFrame(js, pub, "a", "t1", nil)             // 3
-	emitTurnFrame(js, pub, "a", "t2", nil)             // 4
+	emitFrame(js, pub, "a", "user/message", nil)      // 1
+	emitFrame(js, pub, "a", "assistant/message", nil) // 2
+	emitTurnFrame(js, pub, "a", "t1", nil)            // 3
+	emitTurnFrame(js, pub, "a", "t2", nil)            // 4
 
 	want := []int{1, 2, 3, 4}
 	if len(got) != len(want) {
