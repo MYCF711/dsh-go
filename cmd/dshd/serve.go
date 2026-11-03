@@ -10,6 +10,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"crypto/rand"
+	"encoding/binary"
 
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
@@ -76,6 +80,23 @@ type readyLine struct {
 //   - 端口默认交给 OS（--addr 留空 → transport 用 127.0.0.1:0），不许写死；
 //   - URL 只用 Start() 的返回值，绝不自己拼（壳与宿主必须看到同一个地址）；
 //   - stdout 只放那一行 ready。日志/提示一律走 stderr，免得壳把诊断当协议解析。
+//
+// newEpochFunc 造一个"跨进程唯一且单调"的 epoch 发生器。
+//
+// 单独成函数是为了可测：两次调用必须给出不相交的区间——这正是
+// "宿主重启后 epoch 撞号、客户端静默丢帧"那个 bug 的判据。
+func newEpochFunc() func() int64 {
+	// 基准用**随机 63 位**，不用时间：时间是"两次启动可能落在同一毫秒"的，
+	// 而这里要的是"绝不可能撞"（撞了客户端会静默丢帧）。同一进程内再自增。
+	var b [8]byte
+	base := time.Now().UnixNano() // 随机源不可用时的兜底，绝不会走到
+	if _, err := rand.Read(b[:]); err == nil {
+		base = int64(binary.LittleEndian.Uint64(b[:]) & 0x7FFF_FFFF_FFFF_FFFF)
+	}
+	var n int64
+	return func() int64 { n++; return base + n }
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	home := fs.String("home", envOr("DSHD_HOME", ""), "会话根目录（必填）")
@@ -121,8 +142,16 @@ func cmdServe(args []string) error {
 	useModelRunner := os.Getenv("DSHD_SERVE_MODEL_RUNNER") == "1"
 	// 一个 serve 进程内所有会话共用一张 journal 表：里面按 sessionID 分域，
 	// 所以"共用表"不等于"共用序号"（H14）。
-	var epochSeq int64
-	journals := transport.NewJournals(func() int64 { epochSeq++; return epochSeq })
+	// epoch 必须是**跨进程唯一**的。
+	//
+	// 踩过（界面审计实测复现）：原来是进程内自增（1,2,3…），宿主重启后
+	// 同一会话又拿到 epoch=1。客户端带着旧水位 {sinceSeq:1, journalEpoch:1} 重订，
+	// 世代"匹配"所以不发 session/reset，而 hub 按 seq > sinceSeq 过滤，
+	// 把新 journal 的 seq=1 丢掉 —— 8 秒 0 帧，history 里明明有那条事件。
+	// 客户端无报错、无 gap，界面表现就是"发出去没反应"。
+	//
+	// 改成拿启动时刻做基准：两次启动撞上同一纳秒不可能，而它仍然是单调递增的整数。
+	journals := transport.NewJournals(newEpochFunc())
 	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps,
 		journals: journals, reasoning: *serveReasoning, model: *serveModel}
 	mr := &modelRunner{home: *home, journals: journals}
