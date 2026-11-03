@@ -18,11 +18,84 @@ type dshTool struct {
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
-// loadDSHTools 从真实会话里抽出「DSH 发给模型的那张工具表」。
+// dshToolsFixture 是与真实会话解耦的固定夹具（内容就是 tools 数组本身）。
+//
+// 为什么必须有它：会话目录每天都在新增，而 `request/header` 只在会话开头出现，
+// 所以「扫前 60 个会话」抽出来的工具表会随时间的推移而变——同一条测试在不同时刻
+// 给出不同答案，曾经造成「check.sh 绿、手动 go test 红」。夹具落盘后输入就是确定的，
+// 只有显式 PARITY_REFRESH=1 才会重新采样。
+const dshToolsFixture = "testdata/dsh-tools.json"
+
+// loadDSHTools 返回「DSH 发给模型的那张工具表」。
+//
+// 默认读夹具；PARITY_REFRESH=1 时改为扫真实会话并覆盖写回夹具。
+func loadDSHTools(t *testing.T) map[string]dshTool {
+	t.Helper()
+
+	if os.Getenv("PARITY_REFRESH") == "1" {
+		tools := scanDSHTools(t)
+		writeDSHToolsFixture(t, tools)
+		t.Logf("PARITY_REFRESH=1：已用真实会话覆盖 %s，共 %d 个工具", dshToolsFixture, len(tools))
+		return indexTools(tools)
+	}
+
+	raw, err := os.ReadFile(dshToolsFixture)
+	if err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("没有 dsh-tools.json；设 PARITY_REFRESH=1 生成一次")
+		}
+		t.Fatalf("读夹具 %s 失败：%v", dshToolsFixture, err)
+	}
+	var tools []dshTool
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		t.Fatalf("夹具 %s 不是合法的工具数组：%v", dshToolsFixture, err)
+	}
+	if len(tools) == 0 {
+		t.Fatalf("夹具 %s 是空的；设 PARITY_REFRESH=1 重新生成", dshToolsFixture)
+	}
+	return indexTools(tools)
+}
+
+// indexTools 按名字建索引；同名取第一个，空名忽略。
+func indexTools(tools []dshTool) map[string]dshTool {
+	out := make(map[string]dshTool, len(tools))
+	for _, tl := range tools {
+		if tl.Name == "" {
+			continue
+		}
+		if _, ok := out[tl.Name]; !ok {
+			out[tl.Name] = tl
+		}
+	}
+	return out
+}
+
+// writeDSHToolsFixture 把采样结果覆盖写到夹具。
+func writeDSHToolsFixture(t *testing.T, tools []dshTool) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(dshToolsFixture), 0o755); err != nil {
+		t.Fatalf("建 testdata 目录失败：%v", err)
+	}
+	for i := range tools {
+		if len(tools[i].Parameters) == 0 {
+			tools[i].Parameters = json.RawMessage("null")
+		}
+	}
+	buf, err := json.MarshalIndent(tools, "", "  ")
+	if err != nil {
+		t.Fatalf("序列化夹具失败：%v", err)
+	}
+	buf = append(buf, '\n')
+	if err := os.WriteFile(dshToolsFixture, buf, 0o644); err != nil {
+		t.Fatalf("写夹具失败：%v", err)
+	}
+}
+
+// scanDSHTools 从真实会话里抽出工具表并去重排序。
 //
 // 这是对拍的地基：`request/header.header.tools` 就是模型看到的东西，
-// 不是我们从文档猜的。
-func loadDSHTools(t *testing.T) map[string]dshTool {
+// 不是我们从文档猜的。只在 PARITY_REFRESH=1 时被调用。
+func scanDSHTools(t *testing.T) []dshTool {
 	t.Helper()
 	root := os.Getenv("DSH_HOME")
 	if root == "" {
@@ -70,7 +143,16 @@ func loadDSHTools(t *testing.T) map[string]dshTool {
 	if len(out) == 0 {
 		t.Skip("没有找到带 request/header 的会话")
 	}
-	return out
+	names := make([]string, 0, len(out))
+	for name := range out {
+		names = append(names, name)
+	}
+	sort.Strings(names) // 夹具必须稳定：字典序，否则每次 diff 都在抖
+	tools := make([]dshTool, 0, len(names))
+	for _, name := range names {
+		tools = append(tools, out[name])
+	}
+	return tools
 }
 
 type schema struct {
