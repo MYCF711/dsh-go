@@ -196,7 +196,7 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 					continue
 				}
 				r.pub("session:"+sessionID, transport.ServerFrame{
-					Seq: int(ev.Seq), Type: ev.Type, Data: ev.Data,
+					Seq: int(ev.Seq), Type: ev.Type, Data: ev.Data, Time: ev.Time,
 				})
 			}
 		}
@@ -227,7 +227,7 @@ func (r *loopRunner) drain(rd *v4.Reader, noReuse bool, path string, offset *int
 			}
 			*lastSeq = ev.Seq
 			if r.pub != nil {
-				r.pub("session:"+sessionID, transport.ServerFrame{Seq: int(ev.Seq), Type: ev.Type, Data: ev.Data})
+				r.pub("session:"+sessionID, transport.ServerFrame{Seq: int(ev.Seq), Type: ev.Type, Data: ev.Data, Time: ev.Time})
 			}
 		}
 	}

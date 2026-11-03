@@ -1,6 +1,10 @@
 package transport
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 // 交接文档里给的三种客户端帧，一个都不能被拒。
 func TestParseClientFrameAcceptsContract(t *testing.T) {
@@ -59,5 +63,17 @@ func TestNewServerFrameRejectsZeroSeq(t *testing.T) {
 	}
 	if f.Seq != 7 || f.Type != "user/message" {
 		t.Fatalf("%+v", f)
+	}
+}
+
+// H2：流帧必须带墙钟时间，否则界面流式期间算不出 tok/s。
+func TestServerFrameCarriesTime(t *testing.T) {
+	f := ServerFrame{Seq: 3, Type: "assistant/message", Time: 1793683941007}
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"time":1793683941007`) {
+		t.Fatalf("帧里没有 time：%s", b)
 	}
 }

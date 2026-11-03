@@ -8,7 +8,7 @@
 **最终目标不是工具数量、门禁全绿或截图相似，而是低占用、高性能、还原 DSH 使用体验、能力可替换的原生产品，能接管真实工作。** 宿主用 Go；界面在独立 `dsh-ui` 仓用 Viva 原生；先根本依赖，再逐部件插件化。Web 仅是可以关闭的兼容过渡件，不得反向绑住原生主干。
 
 1. 开工先读本节、`MAINTENANCE.md`、`docs/execution-review.md`，再读任务对应的 PLAN 与源码。历史报告、✅、注释都不是当前通过证据。
-2. 宿主优先闭环 §12 的 **H8 → H9 → H10**；H1 与 H6 可由不同执行者并行。界面不再等 H1–H7 全齐，按已存在契约接真宿主，未知值不显示、不编数据。
+2. 宿主按 §12 最新证据继续：H1/H9/H10/H11 已有同版本测试或链式证据，H8 主路径已修但编码失败出口仍需闭环；下一步优先 **H6、H13 与跨仓消费**。界面不再等 H1–H7 全齐，按已存在契约接真宿主，未知值不显示、不编数据。
 3. 修缺陷先写能在旧实现上失败的测试，再实现并复验。状态回填必须附对应版本、命令、退出码、真实断言和未验证项；不允许把「代码存在」写成「端到端完成」。
 4. 产品级验收必须是**同一真宿主 + 原生界面**链路：认证、list/load、发送、流式 text/reasoning/tool、真实审批、取消、续历史、断线恢复；之后才是完整工作日、同任务 A/B、整进程树性能。mockd、ACP、静态插件样例各自只证明自身一层。
 5. **共享仓安全**：改前重读，只改认领文件；不得用 `git checkout --`/reset 覆盖他人改动，不原地移动 `modules/` 或兄弟仓，不按镜像名杀 `dshd.exe`/`app.exe`。当前 `scripts/regress.sh` 有全局 taskkill，`scripts/check.sh` 有原地移动，隔离修复前不得在并行工作树运行。移除模块/变异只在自己拥有的隔离副本做，只回收自己启动且核对归属的 PID。
@@ -21,7 +21,7 @@
 | 计划 | `PLAN.md` | `UIPLAN.md` + `../dsh-ui/PLAN.md` |
 | 代码 | `internal/` `modules/` `codecs/` `cmd/dshd/` | `../dsh-ui/`；本仓仅 `internal/transport/` 是宿主侧接口 |
 | 技术 | Go | Go + Viva；`CGO_ENABLED=0` 必须可构建 |
-| 当前 | 13 个 Transport method 已存在，但 H1/H8/H9 等尚未闭环 | 原生插件与真宿主对接已存在，不是“尚未开工”；完整产品链路未验收 |
+| 当前 | 13 个 Transport method 已存在；H1/H9/H10/H11 有宿主侧新证据，H8 边角、H6/H13 与跨仓联调未闭环 | 原生插件与真宿主对接已存在，不是“尚未开工”；完整产品链路未验收 |
 | 验收 | PLAN §0/§14；当前版本 build/vet/test、真实分词、资源与真实任务 | `../dsh-ui/AGENTS.md` 的真链路、插件替换和完整工作日验收 |
 
 两线只经 **Transport** 握手：HTTP `/api`、WS 流和 `ViewSpec`。宿主不 import 界面实现，界面插件不直读会话日志。跨线字段/形状变更先更新两边契约与快照，再各改各的实现。
@@ -236,16 +236,17 @@ export PATH="/c/Program Files/Go/bin:$PATH"
 | # | 状态（2026-11-03 复核） | 需求与当前证据 | 完成判据 |
 |---|---|---|---|
 | **H1** | 🟡 提供端已补齐（顶层合计），界面消费待验 | `LoadResult` 新增 `usageTotal{input,output,total,cacheRead}`（**全会话累计**）与 `contextTokens`（**最近一条**的 totalTokens，即当前上下文占用）。两者是两件事：累计一直涨，上下文会随压缩回落 | **2026-11-03 真机**：同一会话 `tailMessages=1` 与 `=50` 两次 load，`usageTotal` **完全一致**（`input 7409 / output 211 / total 7620`），`contextTokens=7620`；单测 `TestLoadSessionUsageTotalIndependentOfTail` 钉住「切页不改变合计」。**仍未验**：界面实际消费这两个数，以及未知时不补零的显示 |
-| **H2** | 🟡 投影存在，语义待验 | 消息 `time` 已有，缺失省略；未证明所有流事件都带时间或墙钟单调。相邻 assistant 差值含等待/工具时间，只能称区间估算 | 缺时/非正间隔显示未知；事件覆盖与客户端速率计算各有测试 |
+| **H2** | 🟡 宿主侧两项已验，界面消费待验 | 消息与**流帧**都要带墙钟 `time`；缺时/非正间隔时界面显示未知 | **① 真实语料**（20 个文件 / 40,231 条事件）：`time<=0` **0 条**、时间回退 **0 处**。**② WS 流**：修前 `帧都带 time` **4/5**——`turn/done` 终局帧没有 time（`publishTurn` 直接构造 `ServerFrame` 漏了它）；补上后 **5/5**，且 `time 单调不减` ✅。单测 `TestServerFrameCarriesTime` 钉住帧里有 time。**仍未验**：界面拿到「缺时/非正间隔」时确实显示未知；且相邻 assistant 的差值**含等待与工具耗时**，只能当区间估算，不能当纯生成速率 |
 | **H3** | ✅ 提供端实现有历史证据 | `messages[].view` 透传 ViewSpec；nil 时省略。界面按 kind 渲染，缺 view 回退工具名+摘要 | 本轮未重跑端到端；联调时核 card/table/plain 与无 view 分支 |
 | **H4** | ✅ 提供端实现有历史证据 | 取最近一条含非空 model 的 `request/context`；不知道就省略，不拿默认值冒充 | 界面 LoadResult/顶栏实际接入，空值不画 |
 | **H5** | ✅ 提供端字段存在 | 返回当前进程 `permission` policy（deny/ask/allow/auto），不是 mode/preset | 界面显示同一进程真实 policy，空值不画 |
 | **H6** | 🟡 未闭环 | 子进程 done 后 follow 补读不等于 reasoning 已验证；需要含 reasoning 的真实流和界面消费证据 | text/reasoning/tool 块按序到达，结束帧不丢，界面实际显示 reasoning |
 | **H7** | ✅ 两种 content 落法有单测 | 对固定、已完成且原始日志确含 assistant 的样本验证 `data.content` 与 `data.message.content`；失败/取消/在途可合法无 assistant | 不再使用“有 user 就必须有 assistant”的恒强判据；真实样本投影正确 |
-| **H8** | 🟡 **优先修复** | `writeJSON` 当前只自动包装 `map[string]any`；LoadResult/PromptResult/list/page 等 struct 可裸返回；`errorBody` 缺 hint，编码失败也未统一形状 | HTTP 契约测试覆盖 map/struct/list/page 成功与全部错误出口，统一 result 和 `{code,message,hint,retryable}` |
-| **H9** | 🟡 **优先修复** | load 的 id/sessionId 已接；`tailMessages` 未识别，只读 limit；prompt 的 id/text 已接。快照本身未覆盖入参 | 只发 id/tailMessages 即可；tail=1/2 改变条数；别名冲突优先级明确并有测试 |
+| **H8** | 🟡 主路径已修，边角待闭环 | M243 已让任意成功类型包 result，errorBody 带 code/message/hint/retryable，并有 envelope 测试；`writeJSON` 的 encode_failure 字面量仍需补 hint 并加失败分支 | 覆盖 map/struct/list/page 与**包括序列化失败在内的全部错误出口**，统一四字段；跨仓客户端复验 |
+| **H9** | ✅ 宿主侧契约测试通过；跨仓待验 | M243 已接 tailMessages；`envelope_test.go` 验证仅 id/tailMessages 时 limit=2，limit 与 tailMessages 冲突时 limit 优先 | 界面只发契约名复验；快照/文档明确别名优先级 |
 | **H10** | 🟡 宿主侧同版本已验（5/5），跨仓待联调 | `session.load` 要能加载 `session.list` 返回的任何 id；此前只验过「首个 id 一次成功」 | **2026-11-03 `scripts/h10-chain.py`（同一新二进制 + 全新临时 home + 只回收自己启动的 PID）**：`create` 给 id ✅、`list` 含新会话 ✅、**list 里每个 id 用两种入参名（`sessionId` / `id`+`tailMessages`）都能 load** ✅、`prompt` 后能 load 到 assistant 消息 ✅、响应是 `{result:…}` 信封 ✅ —— 合计 **OK=5 FAIL=0**。**仍未验**：真实 home 全量 id 遍历（home 只读，改法是把项目目录**复制**到临时 home 再验）与界面实际消费 |
 | **H11** | ✅ 2026-11-03（进程级已验） | policy 诊断只去 stderr；stdout 恰好一行 ready 握手 | **`scripts/h11-stdout.py` 捕获完整 stdout（不是 `head -1`——那看不到第二行）**：`stdout 恰好一行` ✅、`以 ready 开头` ✅、`之后是合法 JSON` ✅、`含 url 与 token` ✅ —— **OK=4 FAIL=0**。脚本只 `p.kill()` 自己启动的 PID，临时 home，不按镜像名杀 |
 | **H12** | 🟡 提供端有，联合待验 | `contentWidth` 0=未知且省略；传值可透传，壳实际供宽度及界面消费未完成 | 不传时字段不出现，传 748 得 748；原生壳提供真实列宽，未知不编默认值 |
+| **H13** | ⏳ 新增：真实审批契约 | 现有 13 method 未覆盖审批回传；界面审读时 Allow/Deny 仅清本地气泡 | Transport 定义审批请求/响应与 request id 原样回传；允许后工具执行、拒绝后不执行；取消/超时明确；界面不以气泡消失冒充完成 |
 
-界面侧从 mockd 切真宿主需要改多少代码，以 H1–H12 和 `../dsh-ui/AGENTS.md` 的实际联调为准，**不再承诺“渲染一行不用改”**。
+界面侧从 mockd 切真宿主需要改多少代码，以 H1–H13 和 `../dsh-ui/AGENTS.md` 的实际联调为准，**不再承诺“渲染一行不用改”**。

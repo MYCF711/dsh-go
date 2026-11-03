@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"sync/atomic"
+	"time"
 
 	"dshgo/internal/transport"
 )
@@ -85,5 +86,8 @@ func publishTurn(pub func(topic string, f transport.ServerFrame), topic, turnID 
 		Seq:  seq,
 		Type: typ,
 		Data: data,
+		// 终局帧也要带时间（H2）：界面算 tok/s 时会读相邻两帧的时间差，
+		// 中间夹一条没有 time 的帧就得跳过它——那会让速率算错或算不出。
+		Time: time.Now().UnixMilli(),
 	})
 }

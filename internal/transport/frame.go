@@ -74,6 +74,11 @@ type ServerFrame struct {
 	Seq  int             `json:"seq"`
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data,omitempty"`
+	// Time 是这条事件的墙钟时间（epoch 毫秒，H2）。
+	//
+	// 界面要用它算 tok/s：输出 token ÷ 相邻两条 assistant 的时间差。
+	// **没有 time 就算不出速率**——消息里有 time 但流里没有，等于流式期间算不了。
+	Time int64 `json:"time,omitempty"`
 }
 
 // ParseClientFrame 校验并解析一帧。
