@@ -637,6 +637,8 @@ func errorHint(code string) string {
 		return "optionId 必须是 allow_once / allow_always / reject_once 之一"
 	case "bad_request":
 		return "检查入参名字（id/sessionId 都认）与类型"
+	case "encode_failure":
+		return "这是宿主内部序列化出错，不是你参数写错了；把这一步操作和 dshd 的 stderr 报告出来"
 	case "internal":
 		return "可以直接重试；反复失败就看 dshd 的 stderr"
 	}
@@ -656,6 +658,9 @@ func errorCode(msg string) string {
 		return "no_such_session"
 	}
 	// 这两个是审批（H13）的稳定错误码，调用方按码判断，不按中文猜。
+	if strings.Contains(msg, "序列化失败") {
+		return "encode_failure"
+	}
 	if msg == "no_such_request" || msg == "bad_option" {
 		return msg
 	}
@@ -684,9 +689,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	body, err := json.Marshal(v)
 	if err != nil {
 		// 这里的 payload 全是自家结构，真出错也只剩一个兜底正文。
+		//
+		// 但它仍然是**一个错误出口**，必须和别的出口同形状（四字段）。
+		// 客户端只有一个解析器：少一个字段就要特判，而特判分支没人会为它写测试。
+		fallback, _ := json.Marshal(errorBody("响应序列化失败"))
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":{"code":"encode_failure","message":"响应序列化失败","retryable":false}}`))
+		_, _ = w.Write(append(fallback, '\n'))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
