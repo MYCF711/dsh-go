@@ -2,6 +2,10 @@
 # scripts/check.sh —— 唯一门禁入口。CI 与本地都跑这一个。
 set -uo pipefail
 export PATH="/c/Program Files/Go/bin:$PATH"
+# 守卫脚本全是中文输出，而 Windows 的 CI runner 控制台是 cp1252 不是 UTF-8：
+# 不设这个，python 会在 print 时 UnicodeEncodeError 退出——输出长得和"检查失败"一模一样，
+# 实际上检查一条都没跑完。这是编码问题，不是门禁问题，所以在这里统一兜住。
+export PYTHONIOENCODING=utf-8
 cd "$(dirname "$0")/.."
 
 fail=0
