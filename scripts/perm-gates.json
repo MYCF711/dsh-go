@@ -9,7 +9,8 @@
     "internal/spi/tool.go::NeedsApproval": "TestNeedsApproval",
     "internal/modes/modes.go::Builtins": "TestReadOnlyModeDeniesApprovals",
     "cmd/dshd/serve.go::cmdServe": "TestServePolicyIsDeny",
-    "cmd/dshd/approval_stdio.go::markerAsk": "TestMarkerAskReadsResponse"
+    "cmd/dshd/approval_stdio.go::markerAsk": "TestMarkerAskReadsResponse",
+    "internal/transport/handlers_jobs.go::handleSessionSetPermission": "TestHandleSessionSetPermission"
   },
   "exempt": {
     "cmd/dshd/acp.go::Prompt": "ACP 的 prompt 处理器：它只是把 modeApproval 传下去，判定本身在 approvalDecision 与 Run",
