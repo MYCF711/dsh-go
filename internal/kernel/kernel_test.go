@@ -294,7 +294,31 @@ func TestEmptyManifestDisablesAll(t *testing.T) {
 //
 // 为什么值得一条测试：静默降级的后果是"我改了配置，却什么都没发生"——
 // 这类故障没有任何错误信息可查，而它的成本全部落在下一个人身上。
+// 用的后端是 process：wasm 已经在 2026-11-04 落地（装载与校验在 cmd/dshd/wasmload.go），
+// 不能再拿它当"未实现"的例子。
 func TestUnimplementedBackendFailsLoud(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dsh.toml")
+	body := "[profile]\nname = \"x\"\n\n[[module]]\nid = \"a\"\nbackend = \"process\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Apply([]Module{{ID: "a"}}); err == nil {
+		t.Fatal("声明的 process 后端还没实现，Apply 必须报错，而不是静默按 static 跑")
+	} else if !strings.Contains(err.Error(), "process") {
+		t.Fatalf("错误信息要指出是哪个后端：%v", err)
+	}
+}
+
+// TestWasmBackendAccepted：wasm 已经是**真的能装载**的后端，Apply 不能再用它报错。
+//
+// 这里只钉 kernel 这一侧：Apply 放行、backend 落到模块上、能力仍为空。
+// "真的装起来"由 cmd/dshd 的 wasmload 测试证明（kernel 不许 import wasmhost）。
+func TestWasmBackendAccepted(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dsh.toml")
 	body := "[profile]\nname = \"x\"\n\n[[module]]\nid = \"a\"\nbackend = \"wasm\"\n"
@@ -305,10 +329,18 @@ func TestUnimplementedBackendFailsLoud(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Apply([]Module{{ID: "a"}}); err == nil {
-		t.Fatal("声明的 wasm 后端还没实现，Apply 必须报错，而不是静默按 static 跑")
-	} else if !strings.Contains(err.Error(), "wasm") {
-		t.Fatalf("错误信息要指出是哪个后端：%v", err)
+	got, err := m.Apply([]Module{{ID: "a"}})
+	if err != nil {
+		t.Fatalf("wasm 已经落地，Apply 不该再报错：%v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("应当装配 1 个模块，得到 %d", len(got))
+	}
+	if got[0].Backend != BackendWasm {
+		t.Fatalf("backend 应落到模块上，得到 %q", got[0].Backend)
+	}
+	if len(got[0].Provides) != 0 {
+		t.Fatalf("wasm 模块不该凭空多出能力：%v", got[0].Provides)
 	}
 }
 

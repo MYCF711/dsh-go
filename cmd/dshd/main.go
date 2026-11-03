@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -220,11 +221,53 @@ func cwdOrDot() string {
 
 func loadMods(manifestPath, home string, maxChars int, sub *subProvider) ([]kernel.Module, error) {
 	mods := builtinModules(cwdOrDot(), home, maxChars, sub)
-	m, err := kernel.LoadManifest(manifestPath)
+
+	// wasm 模块在 Apply **之前**装：装不起来（缺文件/魔数不对/digest 不符）
+	// 就该在启动时炸，而不是等到第一次调用——那正是 digest 校验存在的意义。
+	// 注意 kernel 不认识 wasmhost：装载这一步留在宿主这一层（kernel 红线）。
+	wasmMods, err := loadWasmModules(manifestPath)
 	if err != nil {
 		return nil, err
 	}
-	return m.Apply(mods)
+	mods = append(mods, wasmMods...)
+
+	m, err := kernel.LoadManifest(manifestPath)
+	if err != nil {
+		closeLoadedWasm(context.Background())
+		return nil, err
+	}
+	applied, err := m.Apply(mods)
+	if err != nil {
+		// Apply 失败也要回收已经装起来的 wasm 句柄，否则进程会攥着它们。
+		closeLoadedWasm(context.Background())
+		return nil, err
+	}
+	return applied, nil
+}
+
+// writeModules 把装配结果写出去：先把激活顺序/清单写给人看，再单列 wasm 小节。
+//
+// 为什么单独一段：wasm 模块**不提供任何能力**，混在普通模块表里会让人以为
+// 它已经在给工具了。单开一节并写明"只能 dshd wasm call 手动调"才不会误会。
+func writeModules(w io.Writer, kind string, mods []kernel.Module) error {
+	switch kind {
+	case "list":
+		fmt.Fprintf(w, "%-22s %-9s %-26s %s\n", "MODULE", "BACKEND", "PROVIDES", "REQUIRES")
+		for _, m := range mods {
+			fmt.Fprintf(w, "%-22s %-9s %-26s %s\n", m.ID, backendOf(m), join(m.Provides), join(m.Requires))
+		}
+	case "graph":
+		order, err := kernel.TopoSort(mods)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "# 激活顺序（由能力依赖决定，不是 manifest 行顺序）\n")
+		(&kernel.Plan{Order: order}).Write(w)
+	default:
+		return fmt.Errorf("未知子命令 modules %s", kind)
+	}
+	writeWasmSection(w)
+	return nil
 }
 
 func cmdModules(argv []string) error {
@@ -240,25 +283,7 @@ func cmdModules(argv []string) error {
 	if err != nil {
 		return err
 	}
-	switch argv[0] {
-	case "list":
-		fmt.Printf("%-22s %-9s %-26s %s\n", "MODULE", "BACKEND", "PROVIDES", "REQUIRES")
-		for _, m := range mods {
-			fmt.Printf("%-22s %-9s %-26s %s\n", m.ID, backendOf(m), join(m.Provides), join(m.Requires))
-		}
-		return nil
-	case "graph":
-		order, err := kernel.TopoSort(mods)
-		if err != nil {
-			return err
-		}
-		plan := &kernel.Plan{Order: order}
-		fmt.Printf("# 激活顺序（由能力依赖决定，不是 manifest 行顺序）\n")
-		plan.Write(os.Stdout)
-		return nil
-	default:
-		return fmt.Errorf("未知子命令 modules %s", argv[0])
-	}
+	return writeModules(os.Stdout, argv[0], mods)
 }
 
 // ToolEntry 是模型看到的工具表里的一行（R4：这张表属于稳定性契约）。
@@ -352,6 +377,31 @@ const (
 	defaultRunPolicy      = "auto"
 	defaultWorkspaceBytes = 8000
 )
+
+// emitJobs 把后台任务清单写一行到 stderr，标记 `@@JOBS@@`。
+//
+// 为什么走 stderr 而不新开通道：和审批同一个理由（见 approval_stdio.go）——
+// Windows 上继承额外 fd 麻烦、stderr 本来就通着、**不能碰 stdout**
+// （那里只有一行 ready 握手，是 H11 进程级验过的契约）。
+//
+// 为什么由子进程推、而不是父进程问：子进程的工具在**它自己的 kernel Scope** 里跑
+// （`spi.Job` 是那里提供的），父进程没有那个实例。推一次比"问-答"少一套状态机，
+// 而界面本来就是轮询 `jobs.list`。
+func emitJobs(root *kernel.Scope) {
+	job, err := kernel.Inject(root, spi.JobKey)
+	if err != nil || job == nil {
+		return
+	}
+	list := job.List()
+	if len(list) == 0 {
+		return // 没有后台任务就不发，省得每轮都写一行
+	}
+	b, err := json.Marshal(list)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "@@JOBS@@ %s\n", b)
+}
 
 // cmdRun 跑一个真实 turn：装配 → 模型 → 工具 → 回灌 → 收尾。
 //
@@ -626,6 +676,9 @@ func cmdRun(argv []string) error {
 	if err != nil {
 		return err
 	}
+	// 把后台任务清单推给父进程（serve 的 jobs.list 读它）。
+	// **失败不影响主流程**：这只是给界面看的信息，不是本轮结果。
+	emitJobs(root)
 	if err := logw.Close(); err != nil {
 		return err
 	}
