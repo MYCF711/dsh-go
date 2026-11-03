@@ -118,5 +118,13 @@
     "new": "if false && !s.authorized(r) {",
     "pkg": "./internal/transport",
     "test": "TestAPIRequiresCookie"
+  },
+  {
+    "name": "hub-ignores-sinceSeq",
+    "file": "internal/transport/hub.go",
+    "old": "if frame.Seq > s.sinceSeq {",
+    "new": "if frame.Seq > -1 {",
+    "pkg": "./internal/transport",
+    "test": "TestHubRespectsSinceSeq"
   }
 ]
