@@ -29,10 +29,17 @@ var errNoModel = errors.New("serve 还没接模型；prompt 用来看链路，�
 //
 // promptService 会把这个错误丢掉（它只负责清 busy），但接口语义是对的：
 // 这一轮**失败了**，不是"还在跑"。
-type noModelRunner struct{}
+type noModelRunner struct {
+	// pub 是推事件的出口。为 nil 时只记错误，不推。
+	pub func(topic string, f transport.ServerFrame)
+}
 
-func (noModelRunner) Run(context.Context, string, string, string) error {
-	return errNoModel
+func (r noModelRunner) Run(_ context.Context, sessionID, turnID, _ string) error {
+	err := errNoModel
+	// prompt 已经回过 200 了，界面唯一的消息来源就是这里。
+	// 不推这一帧，界面会永远停在"正在思考"。
+	publishTurn(r.pub, "session:"+sessionID, turnID, err)
+	return err
 }
 
 // readyLine 是打到 stdout 的那一行，壳按它解析。
@@ -78,7 +85,10 @@ func cmdServe(args []string) error {
 
 	// Prompt / Cancel 走同一个服务，busy 的唯一结束点由它保证。
 	// runner 现在固定拒绝（见 errNoModel 的注释）。
-	prompts := newPromptService(noModelRunner{})
+	// runner 要先建好（prompt 服务要它），但推事件的出口得等 srv 建完才有——
+	// 所以用指针，建完再赋。
+	runner := &noModelRunner{}
+	prompts := newPromptService(runner)
 
 	// 建会话的能力在起来之前就确定（cwd 定一次，不随后续请求漂移）。
 	create, err := serveCreate(*home, "")
@@ -116,6 +126,7 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	runner.pub = srv.Publish
 
 	base, err := srv.Start()
 	if err != nil {
