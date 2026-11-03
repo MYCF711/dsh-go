@@ -35,15 +35,15 @@ func (f *fakeTool) Exec(context.Context, json.RawMessage) (spi.Result, error) {
 // 所以这里验的是真实执行链，不是手搓的替身。
 func newHost(t *testing.T, fake ...spi.Tool) (spi.Runner, *kernel.Kernel) {
 	t.Helper()
-	reset()
+	resetForTest()
 	k := kernel.New("plan-test")
 	t.Cleanup(func() {
 		k.Root().Dispose()
-		reset()
+		resetForTest()
 	})
 	mods := []kernel.Module{
 		tools.Module(tools.Options{SpillDir: t.TempDir()}),
-		Module(),
+		Module(""), // 空目录 = 内存态，测试不碰真 home
 		{
 			ID:       "test-fakes",
 			Backend:  kernel.BackendStatic,
@@ -79,15 +79,15 @@ func TestWriteToolBlockedInPlanMode(t *testing.T) {
 	writeFake := &fakeTool{name: "fake_write", caps: spi.Caps{Writes: true}}
 	run, _ := newHost(t, writeFake)
 
-	res, err := run.Run(context.Background(), "enter_plan_mode", json.RawMessage(`{"reason":"先看看怎么改"}`))
+	res, err := run.Run(testCtx(), "enter_plan_mode", json.RawMessage(`{"reason":"先看看怎么改"}`))
 	if err != nil {
 		t.Fatalf("进计划模式不该失败: %v（Hint %q）", err, res.Hint)
 	}
-	if !Active() {
+	if !Active(testSession) {
 		t.Fatal("enter_plan_mode 之后状态必须是 active")
 	}
 
-	res, err = run.Run(context.Background(), "fake_write", json.RawMessage(`{}`))
+	res, err = run.Run(testCtx(), "fake_write", json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("计划模式下写类工具必须被拒")
 	}
@@ -109,10 +109,10 @@ func TestReadOnlyToolStillRuns(t *testing.T) {
 	readFake := &fakeTool{name: "fake_read", caps: spi.Caps{}}
 	run, _ := newHost(t, readFake)
 
-	if _, err := run.Run(context.Background(), "enter_plan_mode", nil); err != nil {
+	if _, err := run.Run(testCtx(), "enter_plan_mode", nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := run.Run(context.Background(), "fake_read", json.RawMessage(`{}`))
+	res, err := run.Run(testCtx(), "fake_read", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("只读工具在计划模式下必须放行: %v（Hint %q）", err, res.Hint)
 	}
@@ -138,10 +138,10 @@ func TestExecutesAndDestructiveAlsoBlocked(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := &fakeTool{name: c.name, caps: c.caps}
 			run, _ := newHost(t, f)
-			if _, err := run.Run(context.Background(), "enter_plan_mode", nil); err != nil {
+			if _, err := run.Run(testCtx(), "enter_plan_mode", nil); err != nil {
 				t.Fatal(err)
 			}
-			_, err := run.Run(context.Background(), c.name, json.RawMessage(`{}`))
+			_, err := run.Run(testCtx(), c.name, json.RawMessage(`{}`))
 			if blocked := err != nil; blocked != c.want {
 				t.Fatalf("%s（caps %+v）被拒 = %v，期望 %v", c.name, c.caps, blocked, c.want)
 			}
@@ -157,20 +157,20 @@ func TestExitRestoresWriteTools(t *testing.T) {
 	writeFake := &fakeTool{name: "fake_write", caps: spi.Caps{Writes: true}}
 	run, _ := newHost(t, writeFake)
 
-	if _, err := run.Run(context.Background(), "enter_plan_mode", nil); err != nil {
+	if _, err := run.Run(testCtx(), "enter_plan_mode", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run.Run(context.Background(), "fake_write", nil); err == nil {
+	if _, err := run.Run(testCtx(), "fake_write", nil); err == nil {
 		t.Fatal("先确认被拦住了")
 	}
-	if _, err := run.Run(context.Background(), "exit_plan_mode",
+	if _, err := run.Run(testCtx(), "exit_plan_mode",
 		json.RawMessage(`{"plan":"# 方案\n1. 改 registry\n2. 补测试"}`)); err != nil {
 		t.Fatalf("exit_plan_mode 不该失败: %v", err)
 	}
-	if Active() {
+	if Active(testSession) {
 		t.Fatal("exit 之后状态必须是 inactive")
 	}
-	res, err := run.Run(context.Background(), "fake_write", json.RawMessage(`{}`))
+	res, err := run.Run(testCtx(), "fake_write", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("退出计划模式后写类工具必须恢复: %v（Hint %q）", err, res.Hint)
 	}
@@ -185,10 +185,10 @@ func TestExitRestoresWriteTools(t *testing.T) {
 // Stop 为假，循环就会拿方案当"已完成"继续跑。
 func TestExitPlanModeStops(t *testing.T) {
 	run, _ := newHost(t)
-	if _, err := run.Run(context.Background(), "enter_plan_mode", nil); err != nil {
+	if _, err := run.Run(testCtx(), "enter_plan_mode", nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := run.Run(context.Background(), "exit_plan_mode",
+	res, err := run.Run(testCtx(), "exit_plan_mode",
 		json.RawMessage(`{"plan":"# 方案\n- 第一步"}`))
 	if err != nil {
 		t.Fatalf("提交方案不该失败: %v（Hint %q）", err, res.Hint)
@@ -207,7 +207,7 @@ func TestExitPlanModeStops(t *testing.T) {
 // TestEnterSummaryAndHint：进模式这一步要把"下一步做什么"说清楚。
 func TestEnterSummaryAndHint(t *testing.T) {
 	run, _ := newHost(t)
-	res, err := run.Run(context.Background(), "enter_plan_mode", json.RawMessage(`{"reason":"调研"}`))
+	res, err := run.Run(testCtx(), "enter_plan_mode", json.RawMessage(`{"reason":"调研"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestEnterSummaryAndHint(t *testing.T) {
 	if !strings.Contains(res.Hint, "exit_plan_mode") {
 		t.Fatalf("Hint 要指路 exit_plan_mode，实际 %q", res.Hint)
 	}
-	if got := state.reason; got != "调研" {
+	if got := loadState(testSession).Reason; got != "调研" {
 		t.Fatalf("reason 要留住，实际 %q", got)
 	}
 }
@@ -225,11 +225,11 @@ func TestEnterSummaryAndHint(t *testing.T) {
 // TestExitWithoutPlanIsError：空方案不许提交——人批的是内容，不是标题。
 func TestExitWithoutPlanIsError(t *testing.T) {
 	run, _ := newHost(t)
-	if _, err := run.Run(context.Background(), "enter_plan_mode", nil); err != nil {
+	if _, err := run.Run(testCtx(), "enter_plan_mode", nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, raw := range []string{`{}`, `{"plan":"   "}`} {
-		res, err := run.Run(context.Background(), "exit_plan_mode", json.RawMessage(raw))
+		res, err := run.Run(testCtx(), "exit_plan_mode", json.RawMessage(raw))
 		if err == nil {
 			t.Fatalf("%s 应该报错", raw)
 		}
@@ -237,19 +237,49 @@ func TestExitWithoutPlanIsError(t *testing.T) {
 			t.Fatalf("Hint 要说清 plan 怎么给，实际 %q", res.Hint)
 		}
 	}
-	if !Active() {
+	if !Active(testSession) {
 		t.Fatal("方案没交成，不能悄悄退出计划模式")
 	}
 }
 
-// TestDisposeResetsState：模块撤销后状态归零（A5「卸载即撤销」）。
-func TestDisposeResetsState(t *testing.T) {
+// 契约变了，这里说清楚为什么：
+//
+// 最早 plan 的状态是**进程内单例**，模块撤销即归零（A5「卸载即撤销」）。
+// 但 `serve` 每轮起一个新的 `dshd run` 子进程，进程内状态活不过一轮——
+// 真机验过：第一轮进的计划模式，第二轮 write 照样执行。
+// 所以改成**按会话落盘**，而落盘就意味着"撤销也不该清"：
+// 清了等于回到一轮就失效。
+//
+// 现在的契约是两条：
+//  1. 状态按会话隔离：A 会话进计划模式，B 会话不受影响
+//  2. 撤销/重启后仍在（这正是它想解决的问题）
+func TestPlanStateIsPerSessionNotGlobal(t *testing.T) {
 	run, k := newHost(t)
-	if _, err := run.Run(context.Background(), "enter_plan_mode", nil); err != nil {
+	if _, err := run.Run(testCtx(), "enter_plan_mode", nil); err != nil {
 		t.Fatal(err)
 	}
+	if !Active(testSession) {
+		t.Fatal("进入后本会话应当是计划模式")
+	}
+	if Active("another-session") {
+		t.Fatal("另一个会话不该被牵连——那是进程级开关，不是计划模式")
+	}
+	// 撤销之后本会话仍然是计划模式：这是**有意的**，否则每轮都失效
 	k.Root().Dispose()
-	if Active() {
-		t.Fatal("模块撤销后计划模式必须归零，否则下一个会话开局就是只读")
+	if !Active(testSession) {
+		t.Fatal("撤销后状态不该清空：清了就等于每轮重新进（serve 每轮是新子进程）")
 	}
 }
+
+// resetForTest 把状态清干净（内存态 + 临时目录，绝不碰真 home）。
+func resetForTest() {
+	state.mu.Lock()
+	state.dir = ""
+	state.mem = map[string]planState{}
+	state.mu.Unlock()
+}
+
+// testCtx 带上会话 id：闸门按会话判，没会话就等于另一个会话。
+func testCtx() context.Context { return spi.WithSession(context.Background(), testSession) }
+
+const testSession = "s1"

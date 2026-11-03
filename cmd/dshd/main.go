@@ -101,7 +101,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		todo.Module(),
 		// 计划模式：先出方案、人批了再动手。闸门挂在总线的 tools/pre-execute 上，
 		// 装配顺序由 Requires("tools") 保证；这里只是挨着 todo 放，好找。
-		planmod.Module(),
+		planmod.Module(filepath.Join(home, "state", "plan")),
 		present.Module(),
 		ask.Module(),
 		webfetch.Module(),

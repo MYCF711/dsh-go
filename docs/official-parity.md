@@ -24,11 +24,14 @@
 
 ## 二、**真缺**的（官方有原生插件，我们没有）
 
+> **2026-11-04 更新**：下面两项已补齐 —— 计划模式（`modules/tool/plan`，M306）
+> 与工具结果裁剪（`internal/prune`，M307）。表格保留原始对账，状态以本节为准。
+
 | 缺的 | 官方插件 | 影响 |
 |---|---|---|
-| **计划模式** | `planning` + `plan-mode` | 没有"先出方案、人批了再动手"这一步。所有改动都是直接执行 |
+| ~~**计划模式**~~ ✅ 已补 | `planning` + `plan-mode` | M306 落地：状态按会话落盘，跨轮生效（serve 每轮是新子进程） |
 | **程序化工具调用** | `workflow-ptc` + `tool-workflow` | 不能把"调用编排"写成脚本一次跑完；只能一轮一轮让模型自己调 |
-| **工具结果裁剪** | `tool-result-pruner` | 我们有 `Truncation`/`Artifacts`（事后截断外置），但没有**主动裁剪策略层**：什么该留、什么该压、按什么预算 |
+| ~~**工具结果裁剪**~~ ✅ 已补 | `tool-result-pruner` | M307/M308：`internal/prune` 按字节/行预算裁，接在 `session.ProjectResult`，默认 16KB 高于 spill 最坏产出 |
 | **斜杠命令** | `command-goal` / `command-compact` 等 | 宿主没有 `/compact`、`/resume`、`/new` 这类入口，只能靠自然语言 |
 | **插件管理 / 市场** | `tool-plugin-manager` / `tool-plugin-market` | 装/停/看插件没有工具面；只能改 `dsh.toml` 重启 |
 | **棋谱压缩** | `gokifu-compact`（第三方，顶替了官方 compaction） | 那是你自己那套上下文系统。dsh-go 的压缩是通用摘要，不懂"棋谱/节点/死路" |

@@ -133,10 +133,16 @@ type Runner interface {
 
 // Call 是穿过工具流水线的可变载荷（waterfall 可就地改写）。
 type Call struct {
-	Name   string
-	Args   json.RawMessage
-	Result Result
-	Err    error
+	Name string
+	Args json.RawMessage
+	// Session 是发起这次调用所属的会话 id。
+	//
+	// 为什么 Call 上要带它：pre-execute 上的拦截器（比如计划模式闸门）
+	// 需要知道"这是哪个会话在调"，而 Call 原本没有 ctx——拿不到会话就只能
+	// 做一个进程级开关，那会让 A 会话进计划模式把 B 会话也锁住。
+	Session string
+	Result  Result
+	Err     error
 }
 
 // 工具流水线的四个槽。顺序固定，监听器按注册顺序执行。

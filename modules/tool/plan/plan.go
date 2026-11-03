@@ -13,7 +13,9 @@
 //   - 这里不许 import modules/tools：模块之间只经 spi 相遇，闸门只依赖
 //     spi.Call + spi.ToolRegistry 两个接口。
 //
-// 状态是**进程内单例**，不落盘：计划模式是会话内的临时状态，进程没了就该没。
+// 状态**按会话落盘**（`<home>/state/plan/<会话 id>.json`）：`serve` 每轮起一个
+// 新的 `dshd run` 子进程，进程内状态活不过一轮——真机验过：第一轮进的计划模式，
+// 第二轮 write 照样执行。退出即删文件，不留 active=false 的残骸。
 package plan
 
 import (
@@ -21,8 +23,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
@@ -37,48 +42,95 @@ const blockedHint = "现在在计划模式：先出方案、调 exit_plan_mode �
 // errBlocked 是拒绝这一次工具调用的错误。文案即 Hint，见上面。
 var errBlocked = errors.New(blockedHint)
 
-// state 是计划模式的进程内单例。
+// state 是计划模式状态**按会话**存在磁盘上的那份。
 //
-// 用锁而不是 atomic：进出计划模式要同时改 active 与 reason，两个字段必须一起变。
+// 为什么必须落盘：`serve` 每轮起一个新的 `dshd run` 子进程（serve_tools.go:44-60），
+// 进程内的状态活不过一轮——第一轮进的计划模式，第二轮就没了，
+// 而人就以为"我明明让它先出方案"。这是 2026-11-04 真机验出来的。
+//
+// 位置：`<home>/state/plan/<会话 id>.json`。人出事时能直接打开看懂并删掉。
 var state struct {
-	mu     sync.Mutex
-	active bool
-	reason string
+	mu sync.Mutex
+	// dir 为空表示不落盘（测试用内存态）
+	dir string
+	// mem 只在 dir 为空时使用
+	mem map[string]planState
 }
 
-func enter(reason string) {
+// planState 是一个会话的计划模式状态。
+type planState struct {
+	Active bool   `json:"active"`
+	Reason string `json:"reason,omitempty"`
+	At     string `json:"at,omitempty"`
+}
+
+func setState(sid string, st planState) error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	state.active = true
-	state.reason = reason
+	if state.dir == "" {
+		if state.mem == nil {
+			state.mem = map[string]planState{}
+		}
+		state.mem[sid] = st
+		return nil
+	}
+	if err := os.MkdirAll(state.dir, 0o755); err != nil {
+		return err
+	}
+	p := statePath(sid)
+	if !st.Active {
+		// 退出就是删文件：**不落一个"active=false"的残骸**，
+		// 否则将来读到它的人分不清"没进过"和"进过又退了"。
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	raw, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p, append(raw, '\n'), 0o644)
 }
 
-func leave() {
+func statePath(sid string) string {
+	if sid == "" {
+		sid = "_unknown"
+	}
+	return filepath.Join(state.dir, sid+".json")
+}
+
+func loadState(sid string) planState {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	state.active = false
-	state.reason = ""
+	if state.dir == "" {
+		return state.mem[sid]
+	}
+	raw, err := os.ReadFile(statePath(sid))
+	if err != nil {
+		return planState{}
+	}
+	var st planState
+	if json.Unmarshal(raw, &st) != nil {
+		return planState{}
+	}
+	return st
 }
 
-// Active 报告现在是否处于计划模式。
+func isActive(sid string) bool { return loadState(sid).Active }
+
+// Active 报告**某个会话**现在是否处于计划模式。
 //
 // 导出的理由：宿主的审批层（cmd/dshd 的 guardedRunner）在调用流水线**之前**
 // 就问人要批准；它先看一眼这里，才能避免"问完再被闸门拒"的废话。
-func Active() bool {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	return state.active
-}
-
-// reset 把状态清回初始值。模块撤销（以及测试）用它，保证「卸载即撤销」。
-func reset() { leave() }
+func Active(sid string) bool { return isActive(sid) }
 
 // gate 是计划模式的闸门：返回非 nil 即拒绝这次调用。
 //
 // 判据只看 Caps，不看工具名——审批与沙箱也是这么判的（R3.6：不按名字猜）。
 // 注意不含 Network：联网读资料正是「想」的一部分，拦它会把计划模式变成瞎子。
 func gate(reg spi.ToolRegistry, c *spi.Call) error {
-	if c == nil || !Active() {
+	if c == nil || !isActive(c.Session) {
 		return nil
 	}
 	t, ok := reg.Get(c.Name)
@@ -123,7 +175,16 @@ func (t *enterTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 			return spi.Result{Hint: `参数不合法：期望 {"reason": "一句话说明要规划什么"}（reason 可以不给）`}, err
 		}
 	}
-	enter(strings.TrimSpace(a.Reason))
+	sid := spi.SessionFrom(ctx)
+	if err := setState(sid, planState{
+		Active: true,
+		Reason: strings.TrimSpace(a.Reason),
+		At:     time.Now().Format(time.RFC3339),
+	}); err != nil {
+		return spi.Result{
+			Hint: "计划模式状态写不下去（看 <home>/state/plan 是否可写）；别当作已经进了计划模式",
+		}, err
+	}
 	return spi.Result{
 		Summary: "已进入计划模式",
 		Hint:    "出完方案调 exit_plan_mode 交给人批",
@@ -163,7 +224,9 @@ func (t *exitTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, e
 	if body == "" {
 		return spi.Result{Hint: "plan 不能为空：把方案正文（markdown）整段放进去，人要看的是内容"}, fmt.Errorf("缺 plan")
 	}
-	leave()
+	if err := setState(spi.SessionFrom(ctx), planState{}); err != nil {
+		return spi.Result{Hint: "状态清不掉（看 <home>/state/plan 是否可写）；方案已经给出，但闸门可能还拦着"}, err
+	}
 	// Stop: true 是本工具的意义所在——人还没批，模型不能自己接着动手。
 	return spi.Result{
 		Summary: "方案已提交，等待批准",
@@ -173,7 +236,8 @@ func (t *exitTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, e
 }
 
 // Module 返回装配用的模块描述。
-func Module() kernel.Module {
+func Module(dir string) kernel.Module {
+	state.dir = dir
 	return kernel.Module{
 		ID:       "tool-plan",
 		Backend:  kernel.BackendStatic,
@@ -194,8 +258,8 @@ func Module() kernel.Module {
 			kernel.OnTyped[*spi.Call](s.Bus(), s, spi.EventToolPreExecute, func(c *spi.Call) error {
 				return gate(reg, c)
 			})
-			// 计划模式是临时状态：模块撤销即归零，不落盘。
-			s.Effect(reset)
+			// 计划模式按会话落在 <dir>/<会话 id>.json：serve 每轮是新子进程，
+			// 内存态活不过一轮（真机验过）。退出即删文件，不留 active=false 的残骸。
 			return nil
 		},
 	}
