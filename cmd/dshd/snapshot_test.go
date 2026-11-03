@@ -161,6 +161,8 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		// 带上下文的子代理：和 subagent 一样本身不写盘/不联网，
 		// 真正干什么由它调用的工具各自声明。
 		"subagent_fork": {},
+		// 只读自己的技能目录，不写盘、不起进程、不联网。
+		"skill": {},
 	}
 	seen := map[string]bool{}
 	for _, e := range buildToolTableMust(t) {

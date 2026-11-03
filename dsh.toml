@@ -131,3 +131,6 @@ id      = "tool-unlag"
 
 [[module]]
 id      = "tool-subagentfork"
+
+[[module]]
+id      = "tool-skill"

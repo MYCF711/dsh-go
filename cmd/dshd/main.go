@@ -41,6 +41,7 @@ import (
 	"dshgo/modules/tool/readimage"
 	"dshgo/modules/tool/repohere"
 	schedule "dshgo/modules/tool/schedule"
+	"dshgo/modules/tool/skill"
 	subagenttool "dshgo/modules/tool/subagent"
 	subagentfork "dshgo/modules/tool/subagentfork"
 	team "dshgo/modules/tool/team"
@@ -113,6 +114,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		subagentModule(sub),
 		subagenttool.Module(),
 		subagentfork.Module(inheritFromCtx(home)),
+		skill.Module(filepath.Join(home, "skills")),
 	}
 }
 

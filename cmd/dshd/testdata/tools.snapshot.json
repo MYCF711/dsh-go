@@ -686,6 +686,24 @@
     }
   },
   {
+    "name": "skill",
+    "description": "按名字加载本机已安装的 skill 正文（\u003cdir\u003e/\u003cname\u003e/SKILL.md）。当某类任务的做法写在 skill 说明里、你需要那份步骤再动手时，先用它取全文。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "skill 名，即 \u003cdir\u003e/\u003cname\u003e/SKILL.md 里的 \u003cname\u003e"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "spawn_teammate",
     "description": "在团队名单里登记一个具名队友，之后可以反复给它派任务而不用重述背景。",
     "parameters": {
