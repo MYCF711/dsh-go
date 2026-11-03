@@ -50,7 +50,8 @@ var shellSchema = json.RawMessage(`{
   "properties": {
     "command": {"type": "string", "description": "要执行的 bash 命令；cwd 跨命令保留"},
     "description": {"type": "string", "description": "这段命令干什么，5-10 个字，给用户看的（例如「列出当前目录」）"},
-    "idle_seconds": {"type": "integer", "minimum": 1, "maximum": 900, "description": "多久无输出转后台，默认 600"}
+    "idle_seconds": {"type": "integer", "minimum": 1, "maximum": 900, "description": "多久无输出转后台，默认 600"},
+    "run_in_background": {"type": "boolean", "description": "立刻转后台并返回 job_id，不等命令结束（长任务用这个，别去调小 idle_seconds）"}
   },
   "required": ["command", "description"],
   "additionalProperties": false
@@ -69,9 +70,10 @@ func (t *shellTool) Description() string {
 func (t *shellTool) Schema() json.RawMessage { return shellSchema }
 
 type shellArgs struct {
-	Command     string `json:"command"`
-	Description string `json:"description"`
-	IdleSeconds int    `json:"idle_seconds"`
+	Command         string `json:"command"`
+	Description     string `json:"description"`
+	IdleSeconds     int    `json:"idle_seconds"`
+	RunInBackground bool   `json:"run_in_background"`
 }
 
 type shellData struct {
@@ -89,6 +91,30 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 	}
 	if strings.TrimSpace(a.Command) == "" {
 		return spi.Result{Hint: "command 不能为空"}, fmt.Errorf("command 为空")
+	}
+
+	// 立刻转后台：不走"等 idle 超时"那条路。
+	// 语义与官方一致——调用方马上拿到 job_id，用 job_output 去取。
+	if a.RunInBackground {
+		res, err := t.svc.RunBackground(a.Command)
+		if err != nil {
+			return spi.Result{
+				Hint: "后台启动失败：看 job_list 有没有残留，或去掉 run_in_background 在前台跑一次看真实报错",
+			}, err
+		}
+		if res.JobID == "" {
+			// 1ms 内就跑完的命令（echo/true 这类）：这不是错误，如实说它在后台跑完了。
+			return spi.Result{
+				Summary: "命令瞬间结束（没进后台队列）",
+				Text:    res.Output,
+				Data:    shellData{Output: res.Output, ExitCode: res.ExitCode, Cwd: res.Cwd},
+			}, nil
+		}
+		return spi.Result{
+			Summary: "已在后台启动 " + res.JobID,
+			Text:    "已转后台：" + res.JobID + "（用 job_output 取输出，job_kill 终止）",
+			Data:    shellData{JobID: res.JobID, MovedToBg: true, Cwd: res.Cwd},
+		}, nil
 	}
 
 	budget := t.budget

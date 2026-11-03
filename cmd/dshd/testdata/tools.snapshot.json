@@ -83,6 +83,10 @@
           "minimum": 1,
           "maximum": 900,
           "description": "多久无输出转后台，默认 600"
+        },
+        "run_in_background": {
+          "type": "boolean",
+          "description": "立刻转后台并返回 job_id，不等命令结束（长任务用这个，别去调小 idle_seconds）"
         }
       },
       "required": [

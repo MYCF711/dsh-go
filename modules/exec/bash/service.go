@@ -100,6 +100,57 @@ func (s *Service) register(cmd string, sess *session, t *task) string {
 	return id
 }
 
+// RunBackground 起一条命令**立刻转后台**，不等它结束。
+//
+// 对齐官方 tool-bash 的 `run_in_background: true`。在此之前我们只有一条路：
+// 等 `idle` 超时被动转后台——想"起个长任务马上继续干活"就做不到，
+// 只能把 idle 调得很小，而那会让所有短命令也被误判成超时。
+//
+// 实现上复用了 idle 那条路径：给一个极小的 idle（1ms），
+// 循环第一轮就会走到"空闲超时 → MovedToBg"，于是和真超时共用同一套移交逻辑，
+// 不另造一套（两套移交 = 两份 bug）。
+func (s *Service) RunBackground(cmd string) (spi.ExecResult, error) {
+	if strings.TrimSpace(cmd) == "" {
+		return spi.ExecResult{}, fmt.Errorf("命令为空")
+	}
+
+	s.mu.Lock()
+	sess := s.sess
+	if sess == nil || sess.busy() || sess.isDead() {
+		next, err := startSession(s.cwd)
+		if err != nil {
+			s.mu.Unlock()
+			return spi.ExecResult{}, err
+		}
+		sess = next
+		s.sess = sess
+	}
+	s.mu.Unlock()
+
+	res, t, err := sess.run(cmd, time.Millisecond)
+	if err != nil {
+		return res, err
+	}
+	if !res.MovedToBg {
+		// 1ms 内就结束了（`echo hi` 这种）：不用建任务，直接把结果还回去。
+		s.mu.Lock()
+		if res.Cwd != "" {
+			s.cwd = res.Cwd
+		}
+		s.mu.Unlock()
+		return res, nil
+	}
+
+	id := s.register(cmd, sess, t)
+	s.mu.Lock()
+	if s.sess == sess {
+		s.sess = nil
+	}
+	s.mu.Unlock()
+	res.JobID = id
+	return res, nil
+}
+
 // Output 实现 spi.Job.Output。
 func (s *Service) Output(id string, wait time.Duration) (spi.JobOutput, error) {
 	j, err := s.job(id)
