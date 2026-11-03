@@ -9,7 +9,10 @@ def chk(name, cond, detail=""):
     if cond: ok+=1; print(f"  OK   {name}", file=out)
     else: fail+=1; print(f"  FAIL {name} {detail}", file=out)
     out.flush()
-LIC=subprocess.Popen(["tmp/serve-dir/dshd.exe","serve","--home","tmp/e2e13"],stdout=subprocess.PIPE,text=True)
+# 为什么必须给 allow：serve 默认 deny，bash 会被拒 → 模型根本调不出工具 →
+# "WS 有 tool/call" 必然是红的，而那条红看起来像宿主不推 tool/call。
+# 2026-11-03 就是这么红的：**探针的环境不对，结论却记在宿主头上**。
+LIC=subprocess.Popen(["tmp/serve-dir/dshd.exe","serve","--home","tmp/e2e13","--policy","allow"],stdout=subprocess.PIPE,text=True)
 info=json.loads(re.match(r'ready (\{.*\})',LIC.stdout.readline().strip()).group(1))
 class NR(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*a,**k): return None
