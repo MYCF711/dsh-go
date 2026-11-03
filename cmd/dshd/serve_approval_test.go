@@ -177,3 +177,73 @@ func TestBrokerReplaysPendingApproval(t *testing.T) {
 		t.Fatalf("答过之后不该再重放，实际 %d 条", len(got))
 	}
 }
+
+// H13：allow_always 必须真的记住——否则界面给了这个选项、用户点了，
+// 下次同一个工具还被问一遍，**选项在、语义空**比没这个选项更糟。
+func TestBrokerAllowAlwaysSkipsNextAsk(t *testing.T) {
+	stdin := &fakeStdin{}
+	var asked int
+	b := newApprovalBroker(stdin, func(string, string, json.RawMessage) { asked++ })
+
+	first := approvalRequestTag + `{"requestId":"p1","sessionId":"s1","tool":"write"}`
+	b.Watch(strings.NewReader(first+"\n"), nil)
+	deadline := time.Now().Add(2 * time.Second)
+	for asked == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := b.Resolve("p1", "allow_always"); err != nil {
+		t.Fatalf("Resolve 失败：%v", err)
+	}
+
+	// 同一会话、同一工具：不该再问
+	second := approvalRequestTag + `{"requestId":"p2","sessionId":"s1","tool":"write"}`
+	b.Watch(strings.NewReader(second+"\n"), nil)
+	time.Sleep(50 * time.Millisecond)
+	if asked != 1 {
+		t.Fatalf("第二次不该再问界面，问的次数=%d", asked)
+	}
+
+	// 但换个工具还得问
+	third := approvalRequestTag + `{"requestId":"p3","sessionId":"s1","tool":"bash"}`
+	b.Watch(strings.NewReader(third+"\n"), nil)
+	deadline = time.Now().Add(2 * time.Second)
+	for asked < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if asked != 2 {
+		t.Fatalf("换工具必须重新问，问的次数=%d", asked)
+	}
+
+	// 换个会话也还得问（不跨会话放行）
+	fourth := approvalRequestTag + `{"requestId":"p4","sessionId":"s2","tool":"write"}`
+	b.Watch(strings.NewReader(fourth+"\n"), nil)
+	deadline = time.Now().Add(2 * time.Second)
+	for asked < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if asked != 3 {
+		t.Fatalf("换会话必须重新问，问的次数=%d", asked)
+	}
+}
+
+// allow_once 不许留下记忆：点一次就该只放行那一次。
+func TestBrokerAllowOnceDoesNotStick(t *testing.T) {
+	var asked int
+	b := newApprovalBroker(&fakeStdin{}, func(string, string, json.RawMessage) { asked++ })
+	b.Watch(strings.NewReader(approvalRequestTag+`{"requestId":"q1","sessionId":"s1","tool":"write"}`+"\n"), nil)
+	deadline := time.Now().Add(2 * time.Second)
+	for asked == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := b.Resolve("q1", "allow_once"); err != nil {
+		t.Fatalf("Resolve 失败：%v", err)
+	}
+	b.Watch(strings.NewReader(approvalRequestTag+`{"requestId":"q2","sessionId":"s1","tool":"write"}`+"\n"), nil)
+	deadline = time.Now().Add(2 * time.Second)
+	for asked < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if asked != 2 {
+		t.Fatalf("allow_once 之后下一次仍必须问，问的次数=%d", asked)
+	}
+}

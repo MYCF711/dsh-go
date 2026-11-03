@@ -110,6 +110,10 @@ scripts/h13-timeout.py  →  OK=4 FAIL=0
   OK  超时后文件不存在（按拒绝执行）
   OK  工具执行被判为拒绝
 
+scripts/h13-allow-always.py → OK=2 FAIL=0
+  OK   两个文件都写出来了
+  OK   只问了一次审批（allow_always 生效）
+
 scripts/h13-replay.py   →  OK=3 FAIL=0
   OK  第一个连接收到 approval/request
   OK  重连后被重放 approval/request
@@ -119,5 +123,6 @@ scripts/h13-replay.py   →  OK=3 FAIL=0
 ### 仍未验
 
 - 界面实际消费：本仓没有界面。
-- `allow_always`（"这个会话里以后都允许"）目前只是**当成 allow_once**：
-  broker 认得这个 optionId，但没有做"记住这一轮之后不再问"的会话级记忆。
+- `allow_always` 的**边界**：只在内存、只在这个 serve 进程内、粒度是「会话 + 工具名」。
+  换会话/换工具/重启进程都会重新问。这是刻意的——跨进程生效的"以后都允许"
+  会让用户在不相关的会话里被静默放行，那不是他能预期的。

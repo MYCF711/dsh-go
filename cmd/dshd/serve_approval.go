@@ -34,11 +34,19 @@ type approvalBroker struct {
 
 	// timeout 到了没人答 → 按**拒绝**结算。没人回答时"默认同意"是最坏的选择。
 	timeout time.Duration
+
+	// allowed 记「这个会话里这个工具以后都允许」。
+	//
+	// 边界说清楚：**只在内存里、只在这个 serve 进程内有效**，进程退出即失效——
+	// 和 --policy 的生命周期一致。不落盘是刻意的：一次"以后都允许"若跨进程生效，
+	// 用户换了会话、换了项目还会被静默放行，那不是他能预期的。
+	allowed map[string]map[string]bool
 }
 
 // pendingPayload 是一条挂起审批的原始请求。
 type pendingPayload struct {
 	sessionID string
+	tool      string
 	data      json.RawMessage
 }
 
@@ -46,6 +54,7 @@ func newApprovalBroker(stdin io.WriteCloser, emit func(sessionID, typ string, da
 	return &approvalBroker{
 		pending:  map[string]chan bool{},
 		payloads: map[string]pendingPayload{},
+		allowed:  map[string]map[string]bool{},
 		stdin:    stdin,
 		emit:     emit,
 		timeout:  approvalTimeout(),
@@ -124,6 +133,18 @@ func parseApprovalLine(line string) (approvalReq, bool) {
 }
 
 func (b *approvalBroker) handle(req approvalReq) {
+	// 用户之前在这个会话里对**同一个工具**点过"以后都允许"：不再问，直接放行。
+	//
+	// 不问就不发 approval/request——界面不会闪出一个已经不需要回答的气泡。
+	// 但要在 stderr 留一行：自动化放行必须能在日志里查得到，否则事后没人能解释
+	// "这次为什么没问我"。
+	if b.alwaysAllowed(req.SessionID, req.Tool) {
+		fmt.Fprintf(os.Stderr, "审批：会话 %s 的 %s 早先已选择「以后都允许」，本轮自动放行\n",
+			req.SessionID, req.Tool)
+		b.reply(req.RequestID, true)
+		return
+	}
+
 	ch := make(chan bool, 1)
 	b.mu.Lock()
 	b.pending[req.RequestID] = ch
@@ -152,7 +173,7 @@ func (b *approvalBroker) handle(req approvalReq) {
 	}
 	// 留着原始负载：客户端断开重连后要把这个"还在等"的问题再摆到它面前。
 	b.mu.Lock()
-	b.payloads[req.RequestID] = pendingPayload{sessionID: req.SessionID, data: payload}
+	b.payloads[req.RequestID] = pendingPayload{sessionID: req.SessionID, tool: req.Tool, data: payload}
 	b.mu.Unlock()
 
 	// 超时按拒绝结算，并让界面知道"是超时，不是有人点了拒绝"。
@@ -208,7 +229,9 @@ func (b *approvalBroker) Resolve(requestID, optionID string) error {
 	}
 	b.mu.Lock()
 	ch, found := b.pending[requestID]
+	var pend pendingPayload
 	if found {
+		pend = b.payloads[requestID]
 		delete(b.pending, requestID)
 		delete(b.payloads, requestID) // 答过了就不再重放
 	}
@@ -217,8 +240,36 @@ func (b *approvalBroker) Resolve(requestID, optionID string) error {
 		// 已经答过、已经超时、或者是编的——三种都当作"这个请求不在了"。
 		return transport.ErrNoSuchRequest
 	}
+	// "以后都允许"要真的记住：否则界面给了这个选项、用户点了，
+	// 下次同一个工具还被问一遍——**选项在、语义空**比没这个选项更糟。
+	if optionID == "allow_always" {
+		b.markAlways(pend.sessionID, pend.tool)
+	}
 	ch <- allow
 	return nil
+}
+
+// alwaysAllowed 查「这个会话里这个工具已经选了以后都允许」。
+func (b *approvalBroker) alwaysAllowed(sessionID, tool string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	m, ok := b.allowed[sessionID]
+	return ok && m[tool]
+}
+
+// markAlways 记下「以后都允许」。粒度是**会话 + 工具名**，不是工具 + 参数：
+// 一次"以后都允许 bash"就代表用户接受这个会话里所有 bash，
+// 细化到参数会变成"每次都问一个新的"，那正是用户点这个选项想避免的。
+func (b *approvalBroker) markAlways(sessionID, tool string) {
+	if sessionID == "" || tool == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.allowed[sessionID] == nil {
+		b.allowed[sessionID] = map[string]bool{}
+	}
+	b.allowed[sessionID][tool] = true
 }
 
 func (b *approvalBroker) forget(id string) {
