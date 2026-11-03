@@ -16,6 +16,11 @@ type SubagentRequest struct {
 	Prompt      string // 完整、自包含的任务描述
 	Description string // 3-5 个词的短描述，给人看
 	Cwd         string // 子代理的初始工作目录；空表示继承
+	// InheritSession 非空时，子代理的初始历史从 <这个会话> 读最近 N 条。
+	// 空 = 不带历史（现有行为，一个字节都不多传）。
+	InheritSession string
+	// Inherit 是已读好的父会话片段（由宿主填入）。有它就不必再给 InheritSession。
+	Inherit string
 }
 
 // SubagentResult 是子代理交回来的东西：**只要结果，不要中间步骤**。

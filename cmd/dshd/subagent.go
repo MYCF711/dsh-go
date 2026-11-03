@@ -97,6 +97,13 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 		MaxSteps: s.maxSteps,
 	}
 
+	// 继承父会话的最近若干条：子代理要的是"刚才在聊什么"，
+	// 不是"从头再来一遍"——所以有上限，不做全量。
+	if inh := strings.TrimSpace(req.Inherit); inh != "" {
+		prompt = "以下是父会话最近说过的话（供参考，不要照抄）：\n" + inh + "\n\n当前任务：" + prompt
+
+	}
+
 	hist, err := loop.Run(ctx, 1, []llm.Message{{Role: "user", Content: prompt}})
 	if err != nil {
 		return spi.SubagentResult{}, err
