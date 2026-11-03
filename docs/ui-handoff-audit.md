@@ -540,3 +540,39 @@ python ws_probe.py "ws://127.0.0.1:PORT/ws" "<dshd_session 值>" "session:probe"
 | 首屏/补洞 | `internal/transport/history.go`、`source.go`、`journal.go` | `internal/apiclient/history.go` |
 | 事件类型 | `cmd/dshd/serve_events.go`、`serve_journal.go`、`serve_approval.go` | `internal/apiclient/approval.go` |
 | 契约文本 | `docs/transport-contract.md`（§2 是关键，§3 是 H 表） | `../dsh-ui/testdata/api.snapshot.json`（已过时） |
+
+---
+
+## 附录 C：界面真机跑通了（2026-11-04，本轮实测，推翻"未核实"）
+
+审计里"界面真机运行"一项当时没能验。现在验了，用的是**界面仓自己的二进制**：
+
+```bash
+# 宿主
+dshd serve --home tmp/uismoke --policy allow     # ready {"url":"http://127.0.0.1:64558","token":"…"}
+# 界面（dsh-ui 仓，headless 冒烟模式）
+cd ../dsh-ui && ./app.exe -addr http://127.0.0.1:64558 -token <token> -smoke -prompt "就回答两个字：收到"
+```
+
+界面输出（节选）：
+
+```
+插件 [ds-core ds-shell ds-commands ds-composer … ds-rightbar]，主题 ds-dark
+mux 已订阅 session:d7ae3bd8-e2fd-3b65-63bb-083d00e9bb31 since=0 epoch=1652759093579083598
+```
+
+宿主侧的会话文件里，同一个会话：
+
+```
+turn/start      {"turn": 1}
+user/message    {"content":[{"type":"text","text":"就回答两个字：收到"}], …}
+assistant/message {"message":{"content":[{"type":"text","text":"收到"}],…}}
+turn/end        {"reason":{"kind":"completed"},"turn":1}
+```
+
+**结论**：
+- 界面能连、能订阅（`/ws` + cookie）、能发、能收到回答——**整条链路通**。
+- `epoch=1652759093579083598` 是随机基准那个值，正好印证 M323 的 journalEpoch 修正确实作用到真客户端上（旧实现会是 `1`）。
+- 界面仓 `go build ./...` 也是干净的。
+
+仍未验的（不在这一跑的范围）：图形界面肉眼交互、审批在界面上的真实点选、`session.compact` 由界面触发。
