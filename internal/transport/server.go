@@ -178,8 +178,12 @@ func (s *Server) handleDebugStats(w http.ResponseWriter, r *http.Request) {
 	runtime.ReadMemStats(&m)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"goroutines": runtime.NumGoroutine(),
-		"heap_bytes": m.HeapAlloc,
-		"sys_bytes":  m.Sys,
+		// 三个数放一起才能分清"漏"和"分配器保留"：
+		// Sys 涨、HeapAlloc 平、HeapIdle 跟着涨 = 保留；三个都涨才是真漏。
+		"heap_bytes":    m.HeapAlloc,
+		"heap_idle":     m.HeapIdle,
+		"heap_released": m.HeapReleased,
+		"sys_bytes":     m.Sys,
 	})
 }
 
