@@ -22,10 +22,17 @@ from pathlib import Path
 # 写成可选前缀 `(?:\.\./)?docs/...` 时，正则引擎会优先尝试"不带前缀"那条，
 # 于是 `../dsh-ui/docs/progress.md` 仍然被截成 `docs/progress.md`
 # ——加了前缀等于没加（实测过）。
+#
+# **字符类必须含中文**（`\u4e00-\u9fff`）：仓库里的文档名有中文的
+# （`docs/h13-approval.md` 不是，但 `docs/中文名.md` 会），
+# 而原来的 `[A-Za-z0-9_.\-/]` 根本匹配不到它们 —— 于是
+# 「手册引用了一个不存在的中文文件名」这类腐烂，这个守卫**完全看不见**。
+# 那比误报更糟：误报会有人去查，漏报是静默的。
+NAME_CHARS = r"A-Za-z0-9_.\-\u4e00-\u9fff"
 REF_RE = re.compile(
-    r"(\.\./[A-Za-z0-9_.\-/]+\.md"
-    r"|docs/[A-Za-z0-9_.\-/]+\.md"
-    r"|scripts/[A-Za-z0-9_.\-/]+\.(?:py|sh))"
+    rf"(\.\./[{NAME_CHARS}/]+\.md"
+    rf"|docs/[{NAME_CHARS}/]+\.md"
+    rf"|scripts/[{NAME_CHARS}/]+\.(?:py|sh))"
 )
 
 MANUAL = "AGENTS.md"
