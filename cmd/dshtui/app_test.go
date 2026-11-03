@@ -206,3 +206,54 @@ func TestRenderMarkdownKeepsRolesAndSeq(t *testing.T) {
 		}
 	}
 }
+
+// 收到审批请求：必须把问题摆到屏幕上，并把状态行切成"等你批准"。
+// 不处理它 = 这一轮永远卡住，而屏幕看起来毫无变化。
+func TestApprovalRequestIsShown(t *testing.T) {
+	a := newTestApp(120, 16)
+	a.handleFrame(ServerFrame{Type: "approval/request", Data: json.RawMessage(
+		`{"requestId":"req-1","toolCall":{"title":"bash · rm -rf build/"}}`)})
+
+	if a.pending.id != "req-1" {
+		t.Fatalf("没记住 requestId：%q", a.pending.id)
+	}
+	joined := strings.Join(a.lines, "\n")
+	if !strings.Contains(joined, "需要你批准") || !strings.Contains(joined, "rm -rf") {
+		t.Fatalf("审批内容没显示：%s", joined)
+	}
+	status := a.view()[len(a.view())-2]
+	if !strings.Contains(status, "等你批准") {
+		t.Fatalf("状态行没切成等待态：%s", status)
+	}
+}
+
+// 有审批在等时，y/a/n 是给审批的，不许被当成普通输入吃掉。
+func TestApprovalKeysAreNotSwallowed(t *testing.T) {
+	a := newTestApp(120, 16)
+	var got []string
+	a.approve = func(reqID, opt string) error {
+		got = append(got, reqID+":"+opt)
+		return nil
+	}
+	for _, k := range []rune{'y', 'a', 'n'} {
+		a.input = nil
+		a.pending.id = "req-1"
+		a.handleRune(k)
+		if len(a.input) != 0 {
+			t.Fatalf("%q 被当成输入塞进了输入行", k)
+		}
+	}
+	want := []string{"req-1:allow_once", "req-1:allow_always", "req-1:reject_once"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("按键→选项映射不对：%v", got)
+	}
+}
+
+// 没有审批在等时，y/a/n 就是普通字符。
+func TestNormalKeysStillTypeWhenNoApproval(t *testing.T) {
+	a := newTestApp(120, 16)
+	a.handleRune('y')
+	if string(a.input) != "y" {
+		t.Fatalf("没有审批时 y 应当正常输入，实际 %q", string(a.input))
+	}
+}

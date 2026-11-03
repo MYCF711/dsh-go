@@ -39,6 +39,17 @@ type app struct {
 	frames <-chan ServerFrame
 	// pickFrom 非空时，下一次输入被当作"选第 N 个会话"。
 	pickFrom []sessionRow
+
+	// pending 是正在等回答的审批（requestId + 给人看的一行标题）。
+	//
+	// 为什么界面必须处理它：宿主在 ask 策略下会一直等，客户端不回答这一轮就卡死，
+	// 而屏幕上什么都没变——人只会以为"模型卡住了"。
+	pending struct {
+		id    string
+		title string
+	}
+	// approve 是发审批应答的那个动作；测试里替换它，生产里走 client。
+	approve func(requestID, option string) error
 }
 
 func newApp(addr, token string) (*app, error) {
@@ -160,7 +171,44 @@ func (a *app) newSession() error {
 }
 
 // handleRune 处理普通字符（含中文：rune 级）。
+// answerApproval 回一次审批。y=这一次 · a=以后都允许 · n=拒绝。
+func (a *app) answerApproval(option string) {
+	id := a.pending.id
+	if id == "" {
+		return
+	}
+	a.pending.id = ""
+	approve := a.approve
+	if approve == nil {
+		approve = func(reqID, opt string) error {
+			_, err := a.cl.post("session.approve", map[string]any{
+				"requestId": reqID, "optionId": opt,
+			})
+			return err
+		}
+	}
+	if err := approve(id, option); err != nil {
+		a.err = "回答审批失败：" + err.Error()
+		return
+	}
+	a.push("  → " + option)
+}
+
 func (a *app) handleRune(r rune) {
+	// 有审批在等时，y/a/n 先给审批用——这时候打字没有意义。
+	if a.pending.id != "" {
+		switch r {
+		case 'y', 'Y':
+			a.answerApproval("allow_once")
+			return
+		case 'a', 'A':
+			a.answerApproval("allow_always")
+			return
+		case 'n', 'N':
+			a.answerApproval("reject_once")
+			return
+		}
+	}
 	switch r {
 	case 3: // Ctrl+C
 		a.quit = true
@@ -310,6 +358,21 @@ func (a *app) handleFrame(f ServerFrame) {
 		if brief := extractBrief(f.Data); brief != "" {
 			a.push("  ← " + brief)
 		}
+	case "approval/request":
+		var req struct {
+			RequestID string `json:"requestId"`
+			ToolCall  struct {
+				Title string `json:"title"`
+			} `json:"toolCall"`
+		}
+		if json.Unmarshal(f.Data, &req) == nil && req.RequestID != "" {
+			a.pending.id = req.RequestID
+			a.pending.title = req.ToolCall.Title
+			a.push("！需要你批准：" + req.ToolCall.Title)
+			a.push("  按 y 允许这一次 · a 以后都允许 · n 拒绝")
+		}
+	case "approval/answered":
+		a.pending.id = ""
 	case "turn/error":
 		a.push("！错误：" + string(f.Data))
 		a.busy = false
@@ -383,7 +446,9 @@ func (a *app) view() []string {
 	} else if a.status != "" {
 		left += " · " + a.status
 	}
-	if a.err != "" {
+	if a.pending.id != "" {
+		left = " ? 等你批准：" + trunc(a.pending.title, 40) + "  [y]允许 [a]以后都允许 [n]拒绝"
+	} else if a.err != "" {
 		left = " ! " + a.err
 	}
 	lines = append(lines, strings.Repeat("─", a.scr.width))
