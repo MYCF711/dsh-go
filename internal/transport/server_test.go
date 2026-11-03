@@ -130,3 +130,44 @@ func TestWSRequiresCookie(t *testing.T) {
 		t.Fatalf("没 cookie 升级要 401，拿到 %d", resp.StatusCode)
 	}
 }
+
+// sinceSeq 必须原样传给宿主侧的实现——传 0 会让每次重连都从头重放。
+// 这条测试不依赖真实语料：用回调把入参记下来就行。
+func TestHistoryPassesSinceSeqThrough(t *testing.T) {
+	var got struct {
+		id       string
+		sinceSeq int
+		limit    int
+	}
+	s, err := NewServer(Options{History: func(id string, sinceSeq, limit int) (Page, error) {
+		got.id, got.sinceSeq, got.limit = id, sinceSeq, limit
+		return Page{}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := s.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	jar, _ := cookiejar.New(nil)
+	c := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	if r, err := c.Get(base + "/connect?token=" + s.Token()); err != nil {
+		t.Fatal(err)
+	} else {
+		r.Body.Close()
+	}
+	body := strings.NewReader(`{"sessionId":"abc","sinceSeq":42,"limit":7}`)
+	resp, err := c.Post(base+"/api/session.history", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got.id != "abc" || got.sinceSeq != 42 || got.limit != 7 {
+		t.Fatalf("入参没原样透传：%+v", got)
+	}
+}

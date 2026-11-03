@@ -161,3 +161,103 @@ func TestU0EndToEnd(t *testing.T) {
 		t.Fatalf("推的帧没收到: %s", buf)
 	}
 }
+
+// TestU0LoadAndHistory 钉住另外两个 method：首屏与断流补洞。
+//
+// 界面点开一个会话要立刻看到最后几条；断流重连要按 sinceSeq 补，
+// 而且**补洞不能重复投递**（重复比丢帧更难查）。
+func TestU0LoadAndHistory(t *testing.T) {
+	home := os.Getenv("DSH_TEST_HOME")
+	sid := os.Getenv("DSH_TEST_SESSION_ID")
+	if home == "" || sid == "" {
+		t.Skip("需要 DSH_TEST_HOME 与 DSH_TEST_SESSION_ID")
+	}
+	home = strings.ReplaceAll(home, "\\", "/")
+
+	src := newSessionSource(home, "")
+	srv, err := transport.NewServer(transport.Options{
+		Load: func(id string, limit int) (transport.LoadResult, error) {
+			return transport.LoadSession(src, id, limit)
+		},
+		History: func(id string, sinceSeq, limit int) (transport.Page, error) {
+			return transport.HistorySession(src, id, sinceSeq, limit)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := srv.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	jar, _ := cookiejar.New(nil)
+	c := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	if r, err := c.Get(base + "/connect?token=" + srv.Token()); err != nil {
+		t.Fatal(err)
+	} else {
+		r.Body.Close()
+	}
+
+	post := func(method string, body any) (int, []byte) {
+		b, _ := json.Marshal(body)
+		resp, err := c.Post(base+"/api/"+method, "application/json", strings.NewReader(string(b)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		out, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, out
+	}
+
+	// ① 首屏
+	code, body := post("session.load", map[string]any{"sessionId": sid, "limit": 5})
+	if code != 200 {
+		t.Fatalf("session.load 要 200，拿到 %d：%s", code, body)
+	}
+	var lr transport.LoadResult
+	if err := json.Unmarshal(body, &lr); err != nil {
+		t.Fatalf("正文不是 JSON: %v", err)
+	}
+	if len(lr.Messages) == 0 || len(lr.Messages) > 5 {
+		t.Fatalf("首屏该给 1..5 条，拿到 %d", len(lr.Messages))
+	}
+	t.Logf("① session.load → %d 条（total=%d, truncated=%v）最后一条: %s",
+		len(lr.Messages), lr.Total, lr.Truncated, lr.Messages[len(lr.Messages)-1].Role)
+
+	lastSeq := lr.Messages[len(lr.Messages)-1].Seq
+	// ② 从最后一条之后补洞 → 必须空
+	code, body = post("session.history", map[string]any{"sessionId": sid, "sinceSeq": lastSeq, "limit": 50})
+	if code != 200 {
+		t.Fatalf("session.history 要 200，拿到 %d：%s", code, body)
+	}
+	var pg transport.Page
+	var raw map[string]json.RawMessage
+	json.Unmarshal(body, &raw)
+	if err := json.Unmarshal(body, &pg); err != nil {
+		t.Fatalf("正文不是 JSON: %v", err)
+	}
+	if len(pg.Messages) != 0 {
+		t.Fatalf("从最后一条之后补洞应当为空，拿到 %d 条", len(pg.Messages))
+	}
+	t.Logf("② session.history(sinceSeq=%d) → 0 条（没有重复投递）", lastSeq)
+
+	// ③ 从 0 补洞 → 必须拿到东西，且 seq 严格递增
+	code, body = post("session.history", map[string]any{"sessionId": sid, "sinceSeq": 0, "limit": 50})
+	if code != 200 {
+		t.Fatalf("session.history 要 200，拿到 %d", code)
+	}
+	json.Unmarshal(body, &pg)
+	if len(pg.Messages) == 0 {
+		t.Fatal("从 0 补洞应当有内容")
+	}
+	for i := 1; i < len(pg.Messages); i++ {
+		if pg.Messages[i].Seq <= pg.Messages[i-1].Seq {
+			t.Fatalf("seq 不是严格递增：%d → %d", pg.Messages[i-1].Seq, pg.Messages[i].Seq)
+		}
+	}
+	t.Logf("③ session.history(sinceSeq=0) → %d 条，seq 严格递增", len(pg.Messages))
+}

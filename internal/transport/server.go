@@ -42,6 +42,10 @@ type Options struct {
 	// List 列会话的摘要；真正实现由宿主注入，这里不直接读盘。
 	// 返回 nil 时按空数组处理。
 	List func() ([]SessionSummary, error)
+	// Load 取首屏（最新 limit 条）；宿主注入。
+	Load func(sessionID string, limit int) (LoadResult, error)
+	// History 取断流之后补洞的那些（seq > sinceSeq）；宿主注入。
+	History func(sessionID string, sinceSeq, limit int) (Page, error)
 }
 
 // Server 是界面线的宿主入口。
@@ -218,9 +222,52 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	switch name := strings.TrimPrefix(r.URL.Path, "/api/"); Method(name) {
 	case MethodSessionList:
 		s.handleSessionList(w)
+	case MethodSessionLoad:
+		s.handleSessionLoad(w, r)
+	case MethodSessionHistory:
+		s.handleSessionHistory(w, r)
 	default:
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 	}
+}
+
+// handleSessionLoad 是 /api/session.load：首屏。
+func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		SessionID string `json:"sessionId"`
+		Limit     int    `json:"limit"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	if s.opt.Load == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
+		return
+	}
+	res, err := s.opt.Load(in.SessionID, in.Limit)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// handleSessionHistory 是 /api/session.history：断流后按 seq 补洞。
+func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		SessionID string `json:"sessionId"`
+		SinceSeq  int    `json:"sinceSeq"`
+		Limit     int    `json:"limit"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	if s.opt.History == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
+		return
+	}
+	pg, err := s.opt.History(in.SessionID, in.SinceSeq, in.Limit)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorBody(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, pg)
 }
 
 // handleSessionList 是 /api/session.list：宿主注入的 List 决定内容。

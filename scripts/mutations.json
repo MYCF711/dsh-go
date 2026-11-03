@@ -142,5 +142,13 @@
     "new": "\tconn, err := Upgrade(w, r)",
     "pkg": "./internal/transport",
     "test": "TestWSRequiresCookie"
+  },
+  {
+    "name": "history-ignores-sinceSeq",
+    "file": "internal/transport/server.go",
+    "old": "pg, err := s.opt.History(in.SessionID, in.SinceSeq, in.Limit)",
+    "new": "pg, err := s.opt.History(in.SessionID, 0, in.Limit)",
+    "pkg": "./internal/transport",
+    "test": "TestHistoryPassesSinceSeqThrough"
   }
 ]
