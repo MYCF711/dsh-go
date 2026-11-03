@@ -59,8 +59,12 @@ chk("WS 有 tool/call", "tool/call" in txt)
 s1.close()
 last=max(seqs) if seqs else 0
 hist=post("session.history",{"sessionId":sid,"sinceSeq":0})
-msgs=hist.get("messages") or hist.get("items") or []
-chk("session.history 有消息", len(msgs)>0, str(list(hist.keys())))
+# H14 起 history 返回**原始帧**（frames），不是投影后的 messages：
+# 投影只留 text，用它补洞会丢掉 reasoning/tool/approval。
+frames=hist.get("frames") or []
+chk("session.history 返回原始 frames", len(frames)>0, str(list(hist.keys())))
+chk("history 带 journalEpoch/lastSeq", "journalEpoch" in hist and "lastSeq" in hist, str(list(hist.keys())))
+chk("history 帧带 seq 与 type", all("seq" in f and "type" in f for f in frames) if frames else False)
 s2=wsconn(); sub(s2,last); time.sleep(0.3)
 chk("重连成功（带水位）", True)
 s2.close()

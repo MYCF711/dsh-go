@@ -353,6 +353,11 @@ func cmdRun(argv []string) error {
 	resumeSession := fs.String("session", "", "续这个会话（空=新建）；cwd 可省，按 id 找")
 	// 工具表默认压掉参数说明：20 次 A/B（10 个任务 × 两种表）结果一致，输入省 22%。
 	// 要完整表就显式写 --tool-schema=full——比如排查"模型没填对参数"时。
+	// 推理强度：空 = 不要（默认），xhigh/max = 向网关要推理内容。
+	// 为什么要有 flag 而不是只有环境变量：界面线/脚本要能显式打开它，
+	// 而环境变量在 --help 里看不见，等于"藏起来的开关"。
+	reasoningEffort := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
+		"推理强度：空=不要（默认）| xhigh | max。要了才把 reasoning 写进日志与流")
 	toolSchema := fs.String("tool-schema", defaultToolSchema, "工具表形态：compact=压掉参数说明（省约两成输入）| full=完整")
 	// 规则文件：默认工作区的 AGENTS.md；给"执行者"喂精简手册时指到 docs/WORKER.md。
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
@@ -486,7 +491,7 @@ func cmdRun(argv []string) error {
 		SessionID:    sessID,
 		CompactTools: *toolSchema != "full",
 		// 只有显式设了才要推理：某些网关不认这个参数，默认不带更安全。
-		Reasoning: os.Getenv("DSHD_REASONING_EFFORT"),
+		Reasoning: *reasoningEffort,
 		MaxSteps:  *maxSteps,
 		Emit: func(e agent.Event) error {
 			switch e.Kind {
