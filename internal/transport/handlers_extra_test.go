@@ -72,8 +72,7 @@ func TestForkReturnsNewSessionID(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("要 200，拿到 %d", rec.Code)
 	}
-	var got map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	got := unwrapResult(t, rec.Body.Bytes())
 	if got["sessionId"] != "session-new" {
 		t.Fatalf("没回新会话 id：%v", got)
 	}
@@ -110,4 +109,14 @@ type fakeTailSrc struct {
 func (f *fakeTailSrc) Messages(string) ([]Message, error) { return f.msgs, nil }
 func (f *fakeTailSrc) MessagesTail(string, int) ([]Message, int, error) {
 	return f.msgs, f.total, nil
+}
+
+// unwrapResult 剥掉 H8 的响应信封（成功 {"result":…}）。
+// 断言应当贴着**业务载荷**写，信封只在这里剥一次，别在每个测试里各写一遍。
+func unwrapResult(t interface{ Helper() }, raw []byte) map[string]any {
+	var env struct {
+		Result map[string]any `json:"result"`
+	}
+	_ = json.Unmarshal(raw, &env)
+	return env.Result
 }

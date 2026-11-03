@@ -483,11 +483,50 @@ func baseURL(addr net.Addr) string {
 	return "http://" + net.JoinHostPort(host, port)
 }
 
-func errorBody(msg string) map[string]string {
-	return map[string]string{"error": msg}
+// errorBody 造一个契约快照里的错误信封：
+//
+//	{"error":{"code":..,"message":..,"hint":..,"retryable":..}}
+//
+// 为什么不是字符串：字符串错误让照快照写的客户端**连 JSON 都解不动**，
+// 真正的原因（401 / 404）被吞成"响应不是合法 JSON"（H8，2026-11-03）。
+func errorBody(msg string) map[string]any {
+	return map[string]any{"error": map[string]any{
+		"code":      errorCode(msg),
+		"message":   msg,
+		"retryable": false,
+	}}
 }
 
+// errorCode 把旧的中文错误串映射成稳定的机器码。
+//
+// 映射表就是契约：加新错误时**先加码再加消息**，否则客户端只能靠猜中文。
+func errorCode(msg string) string {
+	switch msg {
+	case "unauthorized":
+		return "unauthorized"
+	case "not implemented":
+		return "not_implemented"
+	case "没有这个会话":
+		return "no_such_session"
+	}
+	if strings.Contains(msg, "参数") {
+		return "bad_request"
+	}
+	return "error"
+}
+
+// writeJSON 统一套信封：成功 {"result":…}、失败 {"error":{…}}。
+//
+// 只在 /api 的 handler 里用，所以可以在这里一把收口——
+// 逐个 handler 改的话，总有一个会漏，而漏掉的那个就是"界面看到 0 条"。
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	if m, ok := v.(map[string]any); ok {
+		if _, hasErr := m["error"]; !hasErr {
+			if _, hasRes := m["result"]; !hasRes {
+				v = map[string]any{"result": m}
+			}
+		}
+	}
 	body, err := json.Marshal(v)
 	if err != nil {
 		// 这里的 payload 全是自家结构，真出错也只剩一个兜底正文。

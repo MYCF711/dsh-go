@@ -19,7 +19,8 @@ def post(m,b,expect=200):
     rq=urllib.request.Request(info["url"]+"/api/"+m, data=json.dumps(b).encode(),
         headers={"Content-Type":"application/json"}, method="POST")
     try:
-        r=op.open(rq); return r.code, json.loads(r.read().decode())
+        r=op.open(rq); body=json.loads(r.read().decode())
+        return r.code, (body.get("result", body) if isinstance(body, dict) else body)
     except urllib.error.HTTPError as e:
         return e.code, {}
 c,v=post("workspace.list",{}); chk("workspace.list", c==200 and len(v.get("entries",[]))>0, f"{c} {len(v.get('entries',[]))}")

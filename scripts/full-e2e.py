@@ -56,7 +56,9 @@ def _json(raw):
     if not raw or not raw.strip():
         return {}
     try:
-        return json.loads(raw)
+        body = json.loads(raw)
+        # H8：宿主现在统一套信封 {"result":…}；老版本是裸 payload。两个都认。
+        return body.get("result", body) if isinstance(body, dict) else body
     except ValueError:
         return {"_raw": raw}
 

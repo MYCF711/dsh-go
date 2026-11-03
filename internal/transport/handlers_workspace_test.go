@@ -2,7 +2,6 @@ package transport
 
 import (
 	"net/http"
-	"strings"
 	"testing"
 )
 
@@ -13,8 +12,10 @@ func TestWorkspaceListEmptyIsArrayNotNull(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("要 200，拿到 %d", rec.Code)
 	}
-	if got := strings.TrimSpace(rec.Body.String()); got != `{"entries":[]}` {
-		t.Fatalf("空工作区应当是空数组，实际 %s", got)
+	got := unwrapResult(t, rec.Body.Bytes())
+	entries, ok := got["entries"].([]any)
+	if !ok || len(entries) != 0 {
+		t.Fatalf("空工作区应当是空数组（不是 null、不是缺键），实际 %v", got)
 	}
 }
 

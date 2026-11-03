@@ -21,7 +21,9 @@ chk("connect 303→cookie", len(jar)>0)
 def post(m,b):
     rq=urllib.request.Request(info["url"]+"/api/"+m, data=json.dumps(b,ensure_ascii=False).encode(),
         headers={"Content-Type":"application/json"}, method="POST")
-    return json.loads(op.open(rq).read().decode())
+    body = json.loads(op.open(rq).read().decode())
+    # H8：信封 {"result":…}；老版本是裸 payload。
+    return body.get("result", body) if isinstance(body, dict) else body
 ws=post("workspace.list",{})["entries"]
 chk("workspace.list 非空", len(ws)>0, str(len(ws)))
 cfg=post("config.set",{"values":{"theme":"dark"}}); chk("config.set updated=1", cfg.get("updated")==1, str(cfg))
