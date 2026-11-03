@@ -94,5 +94,13 @@
     "new": "\tif err != nil {\n\t\treturn LoadResult{}, nil\n\t}",
     "pkg": "./internal/transport",
     "test": "TestSourceErrorsPropagate"
+  },
+  {
+    "name": "prompt-submit-blocks",
+    "file": "cmd/dshd/transport_prompt.go",
+    "old": "\tgo func() {",
+    "new": "\tfunc() {",
+    "pkg": "./cmd/dshd",
+    "test": "TestSubmitReturnsImmediately"
   }
 ]
