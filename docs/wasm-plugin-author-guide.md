@@ -45,6 +45,10 @@ GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -trimpath -o echo.wasm .
 **必须 `-buildmode=c-shared`。** 默认 `go build` 出来的是 command 形态（只有 `_start`），
 跑完 `main` 就 `proc_exit`，宿主调不到你的导出函数——装载时会明确报这个错。
 
+> **这段样例是验过的**（2026-11-04）：照抄上面的代码 + `-buildmode=c-shared` 编出来
+> 1,908,996 字节的 `guide.wasm`，写进 manifest 后 `dshd exec --tool guide_echo --args '{"text":"hi"}'`
+> 真的返回 `Summary: 收到 / Text: echo:你好`。手册里的代码不是"看着应该行"。
+
 ## 2. 信封的两个方向
 
 **宿主 → 你（写进 `alloc` 那块内存）：**
