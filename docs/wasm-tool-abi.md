@@ -565,6 +565,9 @@ call(ptr: i32, n: i32) -> (ptr<<32)|len   吃 args JSON，吐结果 JSON
 
 ### 8.4 manifest 怎么写（这就是开关）
 
+> **更新（§10）**：这一节写的是**单工具时代**的规则。§10 起，一个模块可以声明多个工具（`[[module.tool]]` 数组），
+> `provides` 里也可以出现多个 `tool:<工具名>`。**旧写法仍然有效、一个字不用改**，两种写法不许混写。
+
 ```toml
 [[module]]
 id      = "wasm-echo"
@@ -843,6 +846,9 @@ trap 之后第二次调用: out={"v":1,"summary":"收到 hi",…} err=<nil> IsCl
 | `provides = ["tool"]` | 全署只有一个 wasm 工具模块（**既有 manifest 一个字都不用改**） | `tool` |
 | `provides = ["tool:<tool_name>"]` | 有两个以上 wasm 工具模块时，每个模块写自己的 | `tool:echo` / `tool:hello` |
 
+> **更新（§10）**：同一行 `provides` 里现在可以写**多个** `tool:<工具名>`——那对应"一个模块挂多个工具"，
+> 一个工具一个键。单数缩写 `"tool"` 仍然只允许配一个工具。见 §10.2。
+
 为什么这条是对的、不是将就：
 
 - 能力键是**部署级身份**（`internal/kernel/registry.go:30` 那句"一个能力全部署只有一个提供者"）。两个 wasm 工具模块贡献的本来就是两件不同的东西，"谁贡献了哪个工具"写进能力名之后，kernel 的判重**自然成立**——不需要内核认识 wasm，也不需要给它开特例。
@@ -976,3 +982,285 @@ provides = ["tool:<tool_name>"]（例：provides = ["tool:echo"]，冒号后必�
 3. **`cmd/dshd/doctor.go` 的 wasm 文案仍然过期**（不在本轮边界内）：它无条件说"wasm 模块不提供工具，只能 `dshd wasm call` 手动调"，现在不仅对 `provides=["tool"]` 的模块是错的，还多了 `tool:<tool_name>` 这种写法没提。
 4. **ABI 没变**：仍是一模块一工具（`request.tool` 字段早就留好了，一个模块挂多工具那天不用改信封）。客人侧源码与产物一个字节没动。
 5. §8.7 第 3 / 6 / 7 条（schema 仍 manifest-pinned、体积 4.4 MB、interpreter 引擎等）**不变**。
+
+> §9.5 第 4 条在这里被兑现：`request.tool` 字段一直在，多工具那天确实**没有改信封**。见 §10。
+
+---
+
+## 10. 一个模块挂多个工具（2026-11-04 三轮）
+
+> 起因：§8.7 第 2 条与 §9.2 解决的是**多个模块**共存，但一个模块仍然只提供一个工具。而请求信封里的 `tool` 字段从 §3.2 起就留着了（"将来「一个模块挂多个工具」不需要改 ABI"）。这一节就是那一天：**把它用起来**。
+> 环境同上：`go1.27.3 windows/amd64`、`wazero v1.12.0`、`GOCACHE=/tmp/gocache-wtool2`。
+
+### 10.1 一句话结论
+
+manifest 的一个 `[[module]]` 现在可以声明**多个**工具（`[[module.tool]]` 数组）：每个工具注册成**独立**的 `spi.Tool`（各自的名字/描述/schema/caps/超时），调用时宿主把**当前**工具名写进请求信封的 `tool` 字段，客人按它分流。
+
+- **ABI 一个字节没改**：`internal/wasmhost/` 这轮没有改动（`abi.go` / `wasmhost.go` 的 `git status` 是干净的）。
+- **旧写法一个字不用改**：`tool_name` / `tool_description` / `tool_schema` / `tool_caps` 继续有效，仍是"一个模块一个工具"。
+- **两种写法混用 = 启动即炸**，宿主不猜优先级。
+- 能力键仍沿用 §9 的 `tool:<工具名>`：**一个工具一个键**，与声明逐个对不上就启动即炸。
+
+### 10.2 manifest 新写法
+
+```toml
+[[module]]
+id       = "wasm-text"
+backend  = "wasm"
+path     = "text.wasm"                       # 一个模块，一个 .wasm
+provides = ["tool:echo", "tool:upper"]       # 一个工具一个键（§9.2 的写法，只是可以写多个）
+
+[[module.tool]]
+name        = "echo"                          # 必填：模型看到的工具名
+description = "把 text 原样回显"                # 必填：模型看到的「什么时候用它」
+schema      = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''
+caps        = []                              # 可选：writes / executes / network / destructive
+timeout_ms  = 2000                            # 可选：这一项自己的 deadline（没写用模块级，再没写 10000）
+
+[[module.tool]]
+name        = "upper"
+description = "把 text 里的 ASCII 字母转成大写"
+schema      = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''
+timeout_ms  = 5000
+```
+
+同一个模块也可以只挂一个 `[[module.tool]]`（等价于旧写法，此时 `provides = ["tool"]` 也允许）。
+
+| 写法 | 什么时候用 | `modules graph` 的 PROVIDES |
+|---|---|---|
+| 旧：`tool_name` / `tool_description` / `tool_schema` / `tool_caps` | 一个模块一个工具（**既有 manifest 全部属于这一类**） | `tool` 或 `tool:<工具名>`，一个键 |
+| 新：`[[module.tool]]` × N | 一个模块 N 个工具 | `tool:<名1>,tool:<名2>,…`，N 个键 |
+
+**能力键的三条硬规则**（都来自 §9.2 那条"kernel 按字符串判重、Apply 原样复制 provides"）：
+
+1. 每个工具一个 `tool:<工具名>`；`provides` 里的键集合必须与声明的工具集合**逐个对齐**（少一个、多一个、写错一个都炸）。
+2. `provides = ["tool"]` 是**单工具缩写**：配多个工具就炸，也不能与 `tool:<名>` 混写。
+3. 声明了 `[[module.tool]]` 却没写任何工具键 → 炸（能力的唯一来源是 manifest，装载层不替它补键，§8.4）。
+
+报错文案都是"能照着改"的，例如：
+
+```
+dshd: 模块 "wasm-text" 的 provides 与声明的工具对不上（这一行声明了 2 个工具：echo、upper）；
+能力键 "tool:ghost" 没有对应的工具声明。正确写法：provides = ["tool:echo", "tool:upper"]
+（冒号后与 [[module.tool]].name 逐个对齐）
+```
+
+混写（模块级旧字段 + `[[module.tool]]`）的报错：
+
+```
+dshd: 模块 "wasm-text" 同时写了单工具字段（tool_name / tool_description / tool_schema / tool_caps）
+和 [[module.tool]] 数组：两种写法不能混用，宿主不会替你猜哪个优先。只有一个工具就删掉
+[[module.tool]] 只留 tool_name 那几行；有多个工具就删掉 tool_* 那一组，每个工具写一节 [[module.tool]]   [exit=1]
+```
+
+> **TOML 位置语义的坑**：模块级字段必须写在第一节 `[[module.tool]]` **之前**，写在后面就属于那个子表了（go-toml 静默接受未知键，不会报错）。所以"混写"的现实形态是"模块级字段在前、数组在后"——这一形态由 `TestWasmMixedToolFormsRejected` 钉住。
+
+### 10.3 路由怎么落的：一把锁，不是第二个模块
+
+`call` 只有一个入口，客人怎么知道"这次我是谁"？答案就是信封里的 `tool` 字段。但 `abi.go` 里它是**模块级状态**：
+
+```go
+func (m *Module) SetToolName(name string)   // 写 m.tool
+func (m *Module) InvokeTool(ctx, args)      // 把 m.tool 编进 Request{Tool: m.tool, …}
+```
+
+`InvokeTool` **没有 per-call 工具名参数**（协议本来就没有，这轮也不改协议）。所以装载层做了一个 `wasmToolRouter`：
+
+| 决定 | 做法 | 理由 |
+|---|---|---|
+| 谁来写工具名 | 每次 `Exec` 都调 `SetToolName(t.name)`，且与 `InvokeTool` 在**同一把互斥锁**里 | 只设一次不行（下一个工具会串台）；设了不锁更不行（A 设完名、B 又设一遍，A 就会以 B 的身份跑起来——**结果对、身份错**，最难查的一种） |
+| 这把锁会不会拖慢 | 不会：一个实例本来就只能跑一个 `call`（§3.4，同步导出不能重入），同一模块上的两个工具本来就得串行 | 锁只是把"串行"从"实例"扩到"写名字 + 调用"，二者本来同域 |
+| 超时 | 模块级 `SetTimeout` 取**全部工具里最大的**那个当安全上限；每个工具在 `Exec` 里用自己的 `timeout_ms` 再收一次 `ctx` | 取最小会冤枉超时长的工具；`context.WithTimeout` 天然取更早的那个，于是**每个工具拿到的正是自己声明的 deadline** |
+| 实例重建 | 不变（§9.1）：`compiled` 常驻、死了重建；重建后 router 里的模块句柄还是同一个 | 工具名/超时是宿主侧状态，不在客人里 |
+
+**否决的备选：同一个 `.wasm` 文件 Load N 次**（每个工具一个 `wasmhost.Module`）。
+
+- 那等于把"一个模块两个工具"退回成"两个模块"：N 份编译产物（4.4 MB 的 Go 产物每份 ~0.9 s 编译，§3.5）、N 个常驻实例（每实例 3.5 MiB）、N 次 `_initialize`；
+- 而且**信封里的 `tool` 字段依然没用上**——每个模块各有一个名字，客人还是不需要看它。这一轮要证明的恰恰是"客人按 `tool` 分流，所以一个实例就够"。
+
+### 10.4 客人侧：按 `tool` 分流
+
+夹具（`internal/wasmhost/testdata/toolplugin/main.go`）现在有两个工具，**同一个 `.wasm`、同一份实例**：
+
+```go
+if req.Tool == "upper" {
+    return writeReply(upperReply(args.Text))
+}
+return writeReply(echoReply(args.Text))   // echo 是默认分支
+```
+
+为什么 `echo` 要做默认分支：`internal/wasmhost` 里有些用例是**直接调 `Module.InvokeTool`** 而不设工具名的（这时 `m.tool` 是模块名 `toolplugin`），它们不该因为这一轮多了一个工具就换行为。所以夹具对"不是 upper"的一切（含空串、模块名）都走 echo——**这是夹具的兼容选择，不是 ABI 的规定**。
+
+于是"路由有没有生效"这个问题的判据非常干净（直接把 ABI 调四次，不经过装配层）：
+
+```
+请求信封 tool="toolplugin" → Text="echo:Hi 你好"    ← 模块默认名，落回 echo
+请求信封 tool="wasm-text"  → Text="echo:Hi 你好"
+请求信封 tool="echo"       → Text="echo:Hi 你好"
+请求信封 tool="upper"      → Text="upper:HI 你好"   ← 只有它换分支
+```
+
+**没有 `tool` 字段 / 字段填错，upper 会安静地返回 echo 的结果。** 所以工具层的用例不能只断言 `err == nil`（那会全绿），必须断言**输出不同**——见 §10.6 的 `TestWasmTwoToolsRouteByToolField`。
+
+### 10.5 改了哪些文件
+
+| 文件 | 改了什么 |
+|---|---|
+| `cmd/dshd/wasmload.go` | `wasmEntry.Tool []wasmToolDecl`（`[[module.tool]]`）；`newWasmToolSpecs`（两种写法二选一、混写报错、重名报错、逐项超时默认）；`hasLegacyToolFields`；`splitWasmProvides` 改为返回**多个**能力键；`checkWasmTools`（键集合 ↔ 工具集合逐个对齐，含 bare `tool` 规则与"同一个键写两次"）；`noWasmToolCapErr` / `capKeysOf` / `quoteJoin`；`wasmToolRegister(specs, router)` 一个 Register 注册全部工具；`wasmToolRouter` + `invokeTool`（写名字 + 调用原子化、per-tool ctx deadline）；`maxWasmToolTimeout`；`wasmTool` 改持 `router` 与自己的 `timeout`；`wasmLoaded.tool` → `tools []string`；`writeWasmSection` 的 TOOL 列改成逗号分隔 |
+| `cmd/dshd/wasmload_test.go` | 新增 7 条（§10.6 第 2 组）；两处老断言跟着字段改名（`x.tool` → `x.tools`），**其余老用例一行没改** |
+| `internal/wasmhost/testdata/toolplugin/main.go` | 新增 `upper` 工具（`upperReply` / `upperASCII`）与 `echoReply`，按 `req.Tool` 分流；`boom` / 空输入的语义不变 |
+| `internal/wasmhost/testdata/toolplugin.wasm` | 重新生成：**4,459,916 字节**（旧 4,458,584，+1,332），sha256 `ec3391fa…`，脚本连跑两次同值 |
+| `docs/wasm-tool-abi.md` | 这一节 |
+| `docs/wasm-plugin-author-guide.md` | §2 的 `tool` 字段说明、§4 manifest 两种写法、新增 §5「一个模块写多个工具」、§6 排查里的 graph 样子 |
+
+**没动**（本轮边界）：`internal/kernel/`、`internal/wasmhost/`（**ABI 与宿主内核件一个字节没改**）、`internal/transport/`、`modules/`、`dsh.toml`、`cmd/dshd/serve*.go`、`cmd/dshtui/`、`cmd/dshd/doctor.go`、`PLAN.md`、`AGENTS.md`、`scripts/build-wasm-fixture.py`（脚本本身这轮不需要改，只是重跑）。
+
+### 10.6 验收（逐条，真实输出）
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+export GOCACHE=/tmp/gocache-wtool2
+
+$ go build ./... && go vet ./...
+BUILD+VET OK（无输出）
+
+$ go test ./internal/wasmhost ./cmd/dshd -count=1
+ok  	dshgo/internal/wasmhost	11.041s
+ok  	dshgo/cmd/dshd	12.219s
+
+$ go test ./... -count=1
+go test exit=0；ok 行数 47；FAIL 行 0（grep 'FAIL\|panic:' 为空）
+
+$ python scripts/build-wasm-fixture.py
+生成 internal\wasmhost\testdata\fixture.wasm 60 字节（手写纯 wasm：add / spin）
++ (cd internal\wasmhost\testdata\toolplugin && build -buildmode=c-shared -trimpath -o …\toolplugin.wasm .)
+生成 internal\wasmhost\testdata\toolplugin.wasm 4459916 字节（Go reactor：_initialize / alloc / call）
+$ sha256sum internal/wasmhost/testdata/toolplugin.wasm        # 连跑两次同值
+ec3391fa4cea70ae44ec9e18b1a6b64682e5864dd602fb02923b685e6101e36a
+
+$ go build -o tmp/dshd.exe ./cmd/dshd
+OK（18,869,760 字节）
+```
+
+**第 1 组：`internal/wasmhost` 全部老用例（ABI 没改，夹具改了）**
+
+```
+ok  	dshgo/internal/wasmhost	9.106s   # 13 条全绿，一行没改
+```
+
+（夹具对"不是 upper"的一切仍走 echo，所以 `TestInvokeToolRoundTrip` / `TestInvokeToolBusinessErrorIsNotTrap` / `TestInvokeToolTrapIsError` / 重建那 5 条都不受影响。）
+
+**第 2 组：`cmd/dshd` 的全部 wasm 用例（22 条）**
+
+```
+--- PASS: TestWasmModuleAssemblesAndShowsInGraph (0.03s)
+--- PASS: TestWasmDigestMismatchFails (0.01s)
+--- PASS: TestWasmMissingFileFails (0.01s)
+--- PASS: TestWasmNonWasmFileFails (0.01s)
+--- PASS: TestWasmProvidesRejected (0.01s)
+--- PASS: TestWasmToolProvidesOneTool (1.03s)
+--- PASS: TestWasmToolBusinessErrorGivesHint (0.87s)
+--- PASS: TestWasmToolTrapGivesHint (0.90s)
+--- PASS: TestWasmWithoutProvidesKeepsToolTable (0.86s)
+--- PASS: TestWasmDisabledSkipped (0.01s)
+--- PASS: TestWasmToolManifestValidation (0.03s)
+--- PASS: TestWasmTwoToolModulesCoexist (1.82s)
+--- PASS: TestWasmTwoToolsWithPlainToolKeyFails (0.02s)
+--- PASS: TestWasmToolCapKeyMustMatchToolName (0.02s)
+--- PASS: TestWasmToolRebuildsAfterTrapThroughExec (0.82s)
+--- PASS: TestWasmModuleServesTwoTools (0.84s)              ← 新：一个模块两个工具 → 表里两个名字
+--- PASS: TestWasmTwoToolsRouteByToolField (0.80s)          ← 新：两个工具逻辑各自不同（tool 字段真被路由）
+--- PASS: TestWasmLegacySingleToolFormStillWorks (0.80s)    ← 新：旧写法仍能用
+--- PASS: TestWasmMixedToolFormsRejected (0.01s)            ← 新：混写 → 启动报错
+--- PASS: TestWasmToolCapKeysMustMatchDeclaredTools (0.04s) ← 新：6 个子用例，能力键必须逐个对齐
+--- PASS: TestWasmMultiToolDeclValidation (0.03s)           ← 新：5 个子用例，逐项必填 / 重名
+--- PASS: TestWasmSingleItemArrayWithBareToolKey (0.84s)    ← 新：数组只写一项时 provides=["tool"] 仍成立
+ok  	dshgo/cmd/dshd	9.862s
+```
+
+核心的四条各自钉的是什么（另外三条是校验表的用例：能力键对齐 6 例、逐项必填 5 例、数组单写成缩写 1 例；缺核心任一条，"一个模块多个工具"就不成立）：
+
+| 用例 | 钉住的事实 |
+|---|---|
+| `TestWasmModuleServesTwoTools` | 装配结果里**只有 1 个** wasm 模块（不是把文件挂了两遍）却有 **2 个**能力键、**2 个**工具名；两个工具的描述没串台；两个都调得通（各自 `timeout_ms` 也不同）；`modules graph` 的 TOOL 列是 `echo,upper` |
+| `TestWasmTwoToolsRouteByToolField` | **同一个模块**上 echo 返回 `echo:Hi 你好`、upper 返回 `upper:HI 你好`，且按 echo→upper→echo→upper 交叉调用。路由没生效的话 upper 会安静地返回 echo 的结果——所以断言的是**输出值**，不是"没报错" |
+| `TestWasmLegacySingleToolFormStillWorks` | 旧 manifest 从解析一路走到 `Exec`：能力键仍是 `tool`、`tool_caps=["writes"]` 仍生效、模块级工具名仍是 `echo`（`dshd wasm call` 用） |
+| `TestWasmMixedToolFormsRejected` | 模块级 `tool_name` + `[[module.tool]]` 同时出现 → 启动即炸；错误同时点出两种写法、模块 id 和"不能混用"；失败后不留已装载句柄 |
+
+**第 3 组：真机（一个模块两个工具）**
+
+`tmp/wasm-multi-tool.toml`：**一个** `[[module]]`、一个 `.wasm`、两个 `[[module.tool]]`。
+
+```
+$ ./tmp/dshd.exe modules graph --manifest tmp/wasm-multi-tool.toml
+# 激活顺序（由能力依赖决定，不是 manifest 行顺序）
+MODULE                 BACKEND   PROVIDES                   REQUIRES
+tools                  static    tools,toolrunner
+wasm-text              wasm      tool:echo,tool:upper       tools
+
+# wasm 后端（已装载 / 已校验；TOOL 列 = 注册进工具表的工具名（多个用逗号分隔），…）
+MODULE                 BACKEND   DIGEST       EXPORTS            TOOL                   PATH
+wasm-text              wasm      ec3391fa4cea _initialize,alloc,call echo,upper             D:\…\internal\wasmhost\testdata\toolplugin.wasm
+```
+
+```
+$ ./tmp/dshd.exe tools --manifest tmp/wasm-multi-tool.toml
+[
+  { "name": "echo",  "description": "把 text 原样回显（wasm 夹具工具 · echo）",             … },
+  { "name": "upper", "description": "把 text 里的 ASCII 字母转成大写（wasm 夹具工具 · upper）", … }
+]
+```
+
+```
+$ ./tmp/dshd.exe exec --tool echo  --args '{"text":"Hi 你好"}' --manifest tmp/wasm-multi-tool.toml
+  "Summary": "收到 Hi 你好",
+  "Text": "echo:Hi 你好",
+
+$ ./tmp/dshd.exe exec --tool upper --args '{"text":"Hi 你好"}' --manifest tmp/wasm-multi-tool.toml
+  "Summary": "大写 HI 你好",
+  "Text": "upper:HI 你好",
+```
+
+同一个 manifest 上跑 `dshd doctor` 也不再说它不提供工具（`wasm-text（已注册工具，模型可见；…）`）——`doctor.go` 本轮没改，它读的是 `Register != nil`。
+
+**第 4 组：真机（旧写法一个字没改）**
+
+`tmp/wasm-legacy-tool.toml`（只有 `tool_name` 那一组）：
+
+```
+$ ./tmp/dshd.exe modules graph --manifest tmp/wasm-legacy-tool.toml
+wasm-echo              wasm      tool                       tools
+wasm-echo              wasm      ec3391fa4cea _initialize,alloc,call echo
+
+$ ./tmp/dshd.exe exec --tool echo --args '{"text":"旧写法"}' --manifest tmp/wasm-legacy-tool.toml
+  "Summary": "收到 旧写法",
+  "Text": "echo:旧写法",
+```
+
+**第 5 组：真机（混写 → 启动报错，exit=1）**
+
+```
+$ ./tmp/dshd.exe tools --manifest tmp/wasm-mixed-tool.toml ; echo exit=$?
+dshd: 模块 "wasm-text" 同时写了单工具字段（tool_name / tool_description / tool_schema / tool_caps）
+和 [[module.tool]] 数组：两种写法不能混用，宿主不会替你猜哪个优先。…
+exit=1
+```
+
+### 10.7 旧写法为什么还安全
+
+四条，从解析到运行期各一条：
+
+1. **解析层结构没动**：`wasmEntry` 只**新增** `Tool` 字段，`tool_name` / `tool_description` / `tool_schema` / `tool_caps` / `timeout_ms` 原样保留。`newWasmToolSpecs` 在 `len(e.Tool)==0` 时把老字段打包成"唯一一项"，走的是**同一个** `newWasmToolSpec`（校验逻辑只有一份，不是两套实现各自漂移）。
+2. **老报错文案还在**：缺名 / 缺描述 / 缺 schema / JSON 对象 / caps 拼错这几条错误里仍然带 `tool_name` / `tool_description` / `tool_schema` / `tool_caps` 字样——`TestWasmToolManifestValidation` 六个子用例**一行没改**仍然通过，它们钉的就是老写法的形状。
+3. **能力键语义没变**：老写法仍然写 `provides = ["tool"]`（全署唯一，§9.2）或 `["tool:echo"]`。单工具模块 `checkWasmTools` 两种都放行，所以 §9 那批老 manifest 与 `TestWasmTwoToolModulesCoexist` 全部照旧。
+4. **运行期是幂等的**：单工具模块装载时仍 `SetToolName(specs[0].name)`，`dshd wasm call` 这类不经过 `spi.Tool` 的入口拿到的默认工具名与以前一样；`Exec` 里的路由只是在同一把锁里**再写一遍同样的名字**。而"没写 provides 的 wasm 模块不改变工具表"这条硬要求仍由 `TestWasmWithoutProvidesKeepsToolTable` 的**逐字节比对**守着。
+
+### 10.8 本轮没做 / 已知限制
+
+1. **工具名跨模块的唯一性没在装载层提前查**：两个不同模块声明同一个工具名时，报错来自工具表的 `Register`（"wasm 工具 X 注册失败"），而不是 manifest 校验那一遍。仍是启动期失败，只是文案不如 provides 那几条具体。要提前查就得在 `loadWasmModules` 里维护全局工具名表——本轮没做（收益是一条更早的错，风险是多一处要跟注册表语义同步的状态）。
+2. **`dshd wasm call` 仍用模块级默认工具名**（它是"手动调试单个模块"的入口，不经过 `spi.Tool`）。多工具模块里这个默认值是模块 id，不是某个工具名；要指定工具仍得走 `dshd exec --tool`。
+3. **模块级 `timeout_ms` 取的是最大值**：`Exec` 会用自己的 `ctx` 收紧，所以走 `spi.Tool` 的每个工具都拿到自己声明的 deadline；不经过 `Exec` 的入口（上面第 2 条）拿到的是最大那个。
+4. **宿主无法验证客人真的按 `tool` 分了流**：客人完全可以无视这个字段。判据只能是测试与夹具（`TestWasmTwoToolsRouteByToolField` 断言两个工具**输出不同**）。这一点写进作者手册了。
+5. **`-race` 没跑**（同 §9.5 第 1 条）：`wasmToolRouter` 的并发正确性靠"同一把锁里写名字 + 调用"的设计与单测，不是 race 检测器；也没做压测。
+6. **`cmd/dshd/doctor.go` 的 wasm 文案仍偏旧**（不在本轮边界）：它读 `Register != nil` 判"已注册工具"，对多工具模块是正确的；但文案里"多工具的模块用 `provides=["tool:<工具名>"]` 各占一个能力键"只说了跨模块的场景，没提 `[[module.tool]]`。
+7. §8.7 / §9.5 里没验的那些（interpreter 引擎、c-archive、千次实例化泄漏、恶意客人、体积 4.4 MB）**不变**。

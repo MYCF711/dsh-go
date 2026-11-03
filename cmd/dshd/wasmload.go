@@ -29,11 +29,13 @@ import (
 //     内容被换掉要在**启动时**炸，而不是等第一次调用才发现；
 //   - 通过校验的模块登记进装配结果。
 //
-// 写不写工具能力键（`provides = ["tool"]` 或 `["tool:<tool_name>"]`），决定它到底提不提供能力：
-//   - **写了** → 生成一个 kernel.Module，其 Register 往工具表里注册**一个** spi.Tool
-//     （名字/描述/schema/caps/超时全部来自 manifest，不从客人取）。模型能看见它、
-//     能调它，这就是"wasm 插件真的提供了一个工具"的落点。
-//     多个 wasm 工具模块共存时，每个模块必须写 `["tool:<tool_name>"]`（理由见 wasmToolCap）。
+// 写不写工具能力键（`provides = ["tool"]` 或 `["tool:<工具名>"]`，多个就多个键），
+// 决定它到底提不提供能力：
+//   - **写了** → 生成一个 kernel.Module，其 Register 往工具表里注册这一行声明的
+//     **全部** spi.Tool（一个模块可以挂多个工具：`[[module.tool]]` 数组）。
+//     名字/描述/schema/caps/超时全部来自 manifest，不从客人取。模型能看见它们、
+//     能调它们，这就是"wasm 插件真的提供了工具"的落点。
+//     多个 wasm 工具共存时，每个工具一个能力键（理由见 wasmToolCap）。
 //   - **没写** → 行为与这一层落地之前完全一致：Provides 为空、Register 为 nil、
 //     不进工具表，只能 `dshd wasm call` 手动调。这条"不变"是硬要求：
 //     没声明要提供工具的人，不该因为升级宿主就多出一个模型可见的工具。
@@ -48,13 +50,14 @@ import (
 // "tool" 是**本模块要贡献的东西**。混成一个名字会让模块看起来像在提供工具目录，
 // 而它其实只是往里加一行。
 //
-// 为什么还要有 `"tool:<tool_name>"` 这种写法：kernel 的"一个能力只允许一个提供者"
+// 为什么还要有 `"tool:<工具名>"` 这种写法：kernel 的"一个能力只允许一个提供者"
 // 是按**字符串**判的（internal/kernel/assemble.go:64），而 Apply 会把 manifest 里
 // 的 provides 原样复制到每个模块上（internal/kernel/module.go:167）——
-// 装载层没有任何钩子能在 Apply 之后改写它。所以两个 wasm 工具模块想同时存在，
-// 能力键就必须本来就是两个不同的字符串。"tool" 是单数场景的缩写（只允许出现一次），
-// "tool:<tool_name>" 是多个工具时的写法：它把"哪个模块贡献了哪个工具"直接写进能力名，
-// kernel 的判重于是自然成立，不需要内核认识 wasm、也不需要给它开特例。
+// 装载层没有任何钩子能在 Apply 之后改写它。所以两个 wasm 工具（不管是两个模块，
+// 还是同一个模块里的两个工具）想同时存在，能力键就必须本来就是两个不同的字符串。
+// "tool" 是单数场景的缩写（全署只允许出现一次）；"tool:<工具名>" 是多个工具时的写法：
+// 它把"哪个模块贡献了哪个工具"直接写进能力名，kernel 的判重于是自然成立，
+// 不需要内核认识 wasm、也不需要给它开特例。
 const wasmToolCap = "tool"
 
 // wasmToolCapPrefix 是"能力键带上工具名"的前缀，拼出来的键必须与同一行的 tool_name 一致。
@@ -70,8 +73,11 @@ type wasmLoaded struct {
 	digest  string
 	exports []string
 	module  *wasmhost.Module
-	// tool 是它注册进工具表的名字；空表示不提供能力。
-	tool string
+	// tools 是它注册进工具表的工具名（按 manifest 顺序）；空表示不提供能力。
+	//
+	// 一个模块可以有多个工具：wasm 侧的"一个工具"不是一个模块，而是
+	// 模块里的一个**分支**（客人按请求信封的 tool 字段分流）。
+	tools []string
 }
 
 var (
@@ -95,7 +101,7 @@ type wasmEntry struct {
 	Enabled  *bool    `toml:"enabled"`
 	Provides []string `toml:"provides"`
 
-	// 以下五个只在 provides 含 "tool" 时有意义。
+	// 以下五个是**旧的单工具写法**（一个模块一个工具），只在 provides 含工具键时有意义。
 	//
 	// 为什么不从客人那里问：spi.Tool 的 Name/Description/Schema/Caps 是
 	// **稳定性契约**（R4），审批与沙箱也靠 Caps 判定（AGENTS §2）。
@@ -106,6 +112,24 @@ type wasmEntry struct {
 	ToolSchema      string   `toml:"tool_schema"`
 	ToolCaps        []string `toml:"tool_caps"`
 	TimeoutMS       int      `toml:"timeout_ms"`
+
+	// Tool 是**多工具写法**：`[[module.tool]]` 数组，一项一个工具。
+	//
+	// 与上面那五个字段二选一：两处都写就启动即炸（见 newWasmToolSpecs），
+	// 宿主不会替你猜哪个优先。旧写法一个字都不用改，继续有效。
+	Tool []wasmToolDecl `toml:"tool"`
+}
+
+// wasmToolDecl 是 `[[module.tool]]` 的一项。
+//
+// 字段名与 spill 的写法一致（name/description/schema/caps），唯一的例外是
+// timeout_ms 可以逐项写：同一个模块里两个工具的超时未必一样。
+type wasmToolDecl struct {
+	Name        string   `toml:"name"`
+	Description string   `toml:"description"`
+	Schema      string   `toml:"schema"`
+	Caps        []string `toml:"caps"`
+	TimeoutMS   int      `toml:"timeout_ms"`
 }
 
 type wasmManifest struct {
@@ -165,8 +189,8 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 	// 以前这两件事挤在一个循环里，于是第二行的错要等第一行编译完才报——
 	// 而且多工具场景下这条错**必然**会发生（见 wasmToolCap 的注释）。
 	type decl struct {
-		spec   *wasmToolSpec
-		capKey string
+		specs   []*wasmToolSpec
+		capKeys []string
 	}
 	decls := make(map[int]decl, len(entries))
 	capOwner := make(map[string]string, len(entries)) // 能力键 → 模块 id
@@ -177,31 +201,45 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 		if e.Enabled != nil && !*e.Enabled {
 			continue
 		}
-		capKey, unknown := splitWasmProvides(e.Provides)
+		capKeys, unknown := splitWasmProvides(e.Provides)
 		if len(unknown) > 0 {
 			return fail(fmt.Errorf(
 				"模块 %q 声明了 backend = \"wasm\" 和 provides = %v，但 wasm 后端只认 "+
-					"provides = [\"tool\"]（一个工具模块）或 provides = [\"tool:<tool_name>\"]（多个工具模块）："+
-					"这一层做的是「一个 wasm 模块 = 一个工具」，%v 这些能力还没有对应实现。"+
+					"provides = [\"tool\"]（一个工具）或 provides = [\"tool:<工具名>\", …] "+
+					"（一个模块一个键，多工具就多个键）："+
+					"%v 这些能力还没有对应实现。"+
 					"在它们落地之前写进 manifest，就是在骗下一个读 manifest 的人",
 				e.ID, e.Provides, unknown))
 		}
-		if capKey == "" {
+		if len(capKeys) == 0 {
+			// 声明了 `[[module.tool]]` 却没写 provides：配置说谎，必须炸。
+			//
+			// 为什么不"顺手帮你补一个 tool:<名字>"：能力的唯一来源是 manifest
+			// （§8.4），装载层替它编一个，`modules graph` 上就会出现一行
+			// manifest 里根本没写的键——省几行 TOML，弄丢一条判据。
+			//
+			// 老写法（只写 tool_name、不写 provides）保持历史行为不变：
+			// 装载、但不提供能力（§8.6 第 4 条要求工具表逐字节不变）。
+			if len(e.Tool) > 0 {
+				return fail(noWasmToolCapErr(e))
+			}
 			continue
 		}
 		// 先校验工具声明，再装载 4 MiB 的 wasm：manifest 写错了没必要先编译一遍。
-		spec, serr := newWasmToolSpec(e)
+		specs, serr := newWasmToolSpecs(e)
 		if serr != nil {
 			return fail(serr)
 		}
-		if cerr := checkWasmToolCapKey(e.ID, capKey, spec.name); cerr != nil {
+		if cerr := checkWasmTools(e.ID, capKeys, specs, e.Provides); cerr != nil {
 			return fail(cerr)
 		}
-		if prev, dup := capOwner[capKey]; dup {
-			return fail(dupWasmToolCapErr(prev, e.ID, capKey))
+		for _, key := range capKeys {
+			if prev, dup := capOwner[key]; dup {
+				return fail(dupWasmToolCapErr(prev, e.ID, key))
+			}
+			capOwner[key] = e.ID
 		}
-		capOwner[capKey] = e.ID
-		decls[i] = decl{spec: spec, capKey: capKey}
+		decls[i] = decl{specs: specs, capKeys: capKeys}
 	}
 
 	for i, e := range entries {
@@ -221,7 +259,7 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 			mods = append(mods, kernel.Module{ID: e.ID, Backend: kernel.BackendWasm})
 			continue
 		}
-		spec := decls[i].spec
+		specs := decls[i].specs
 
 		p := strings.TrimSpace(e.Path)
 		if p == "" {
@@ -246,13 +284,24 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 		actual := m.Digest()
 		exports := m.Exports()
 		entry := wasmLoaded{id: e.ID, path: p, digest: actual, exports: exports, module: m}
-		if spec != nil {
-			// 工具名与超时是**执行期**参数，直接记在模块上：
-			// 请求信封里的 tool 字段与单次调用的 deadline 都从这里取。
-			// 实例重建之后这两个参数继续生效（它们是宿主侧状态，不在客人里）。
-			m.SetToolName(spec.name)
-			m.SetTimeout(spec.timeout)
-			entry.tool = spec.name
+		// router 是"一个模块上的多个工具共用同一个实例"时的那个句柄：
+		// 它拿着模块，也拿着那把"设工具名 + 调用"必须原子的锁。
+		router := &wasmToolRouter{mod: m}
+		if len(specs) > 0 {
+			// 超时是**执行期**参数。多工具模块里每个工具可以有自己的 timeout_ms，
+			// 所以模块级超时取其中最大的那个当安全上限，真正的 per-tool deadline
+			// 由 Exec 用 ctx 收得更紧（见 wasmTool.Exec）。实例重建之后这两个参数
+			// 继续生效（它们是宿主侧状态，不在客人里）。
+			m.SetTimeout(maxWasmToolTimeout(specs))
+			// 单工具模块顺手把模块级工具名设成它：`dshd wasm call` 这类不经过
+			// spi.Tool 的入口仍然需要"这个模块默认是谁"。多工具模块不设——
+			// 每次 Exec 都会在路由锁里把名字写对，模块级那个默认值没有意义。
+			if len(specs) == 1 {
+				m.SetToolName(specs[0].name)
+			}
+			for _, sp := range specs {
+				entry.tools = append(entry.tools, sp.name)
+			}
 		}
 		// 先登记再校验：任何一处校验失败，fail 都会把它一起关掉。
 		loaded = append(loaded, entry)
@@ -275,7 +324,7 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 			}
 		}
 
-		if spec != nil {
+		if len(specs) > 0 {
 			mods = append(mods, kernel.Module{
 				ID:      e.ID,
 				Backend: kernel.BackendWasm,
@@ -283,18 +332,22 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 				// 没有它，Register 里的 Inject 会失败；拓扑排序也靠它保证顺序。
 				//
 				// Provides 这里不写：能力的唯一来源是 manifest，Apply 会把
-				// e.Provides（"tool" 或 "tool:<tool_name>"）原样复制上来——
+				// e.Provides（"tool" 或 "tool:<工具名>" 一个或多个）原样复制上来——
 				// `modules graph` 的 PROVIDES 列因此能看到这一行，而 kernel 的
-				// "一个能力一个提供者"也按这个字符串自然成立（多个工具 = 多个不同的键）。
-				// 注意这两种键都不是服务键：真正的注册靠下面这个 Register，
+				// "一个能力一个提供者"也按这些字符串自然成立（多个工具 = 多个不同的键）。
+				// 注意这些键都不是服务键：真正的注册靠下面这个 Register，
 				// 它 Inject 的是 spi 的 "tools" 服务。两件事别混。
 				Requires: []string{spi.ToolsKey.String()},
-				Register: wasmToolRegister(spec, m),
+				// 一个 Register 注册**这个模块声明的全部工具**：
+				// kernel 的一个模块只有一个 Register 钩子，而 wasm 的一个模块
+				// 现在可以有多个工具。工具表里看到的是多个独立的 spi.Tool。
+				Register: wasmToolRegister(specs, router),
 			})
 			slog.Info("wasm 模块已装载，并注册工具（模型可见）",
-				"module", e.ID, "tool", spec.name, "provides", decls[i].capKey, "path", p,
+				"module", e.ID, "tools", strings.Join(entry.tools, ","),
+				"provides", strings.Join(decls[i].capKeys, ","), "path", p,
 				"digest", shortDigest(actual), "exports", strings.Join(exports, ","),
-				"timeout", spec.timeout)
+				"timeout", maxWasmToolTimeout(specs))
 			continue
 		}
 
@@ -306,7 +359,8 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 		})
 
 		slog.Warn("wasm 模块已装载并通过校验，但**不提供任何能力**：不进工具表、模型调不到，只能 `dshd wasm call` 手动调"+
-			"（要让它提供工具，在 manifest 里写 provides = [\"tool\"] 并给出 tool_name / tool_description / tool_schema）",
+			"（要让它提供工具：单工具在 manifest 里写 provides = [\"tool\"] 并给出 tool_name / tool_description / tool_schema；"+
+			"多工具写 provides = [\"tool:<工具名>\", …] 并为每个工具写一节 [[module.tool]]）",
 			"module", e.ID, "path", p, "digest", shortDigest(actual),
 			"exports", strings.Join(exports, ","))
 	}
@@ -318,51 +372,152 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 // splitWasmProvides 把 manifest 的 provides 拆成「工具能力键」与「不认识的能力」两半。
 //
 // 认两种写法（理由见 wasmToolCap 的注释）：
-//   - "tool"            —— 缩写：这个模块贡献它那一个工具。全部署只允许出现一次；
-//   - "tool:<tool_name>" —— 多个工具模块时每个模块各写一个，键因此天然不同。
+//   - "tool"            —— 缩写：这个模块贡献它那**一个**工具。全部署只允许出现一次；
+//   - "tool:<工具名>" —— 一个工具一个键；单工具模块也可以用它，
+//     一个模块挂多个工具时必须每个工具各写一个。
 //
-// 同一行 provides 里出现两个工具键（比如 ["tool","tool:echo"]）是写法自相矛盾，
-// 直接报错而不是取第一个：manifest 说的必须正好是它做的。
-func splitWasmProvides(provides []string) (capKey string, unknown []string) {
+// 返回值保持 manifest 顺序（去重留给 checkWasmTools 报错，不在这里悄悄吃掉）：
+// 同一行里写两次同一个键是笔误，报出来比替用户合并更有用。
+func splitWasmProvides(provides []string) (capKeys []string, unknown []string) {
 	for _, raw := range provides {
 		c := strings.TrimSpace(raw)
 		switch {
 		case c == wasmToolCap, strings.HasPrefix(c, wasmToolCapPrefix):
-			if capKey != "" && capKey != c {
-				unknown = append(unknown, c) // 第二个工具键：交给上层报"只认一个"
-				continue
-			}
-			capKey = c
+			capKeys = append(capKeys, c)
 		default:
 			unknown = append(unknown, c)
 		}
 	}
-	return capKey, unknown
+	return capKeys, unknown
 }
 
-// checkWasmToolCapKey 校验能力键与工具名对得上。
+// noWasmToolCapErr 是"声明了 [[module.tool]] 但 provides 里一个工具键都没有"的报法。
+//
+// 为什么必须炸而不是"顺手帮你补一个键"：能力的唯一来源是 manifest（§8.4）。
+// 装载层替它编一个，`modules graph` 的 PROVIDES 列就会出现一行 manifest 里
+// 根本没写的键；省下的只是几行 TOML，弄丢的是一条判据。
+func noWasmToolCapErr(e wasmEntry) error {
+	names := make([]string, 0, len(e.Tool))
+	keys := make([]string, 0, len(e.Tool))
+	for _, d := range e.Tool {
+		names = append(names, strings.TrimSpace(d.Name))
+		keys = append(keys, wasmToolCapPrefix+strings.TrimSpace(d.Name))
+	}
+	return fmt.Errorf(
+		"模块 %q 声明了 %d 个工具（[[module.tool]]：%s），但 provides 里没有任何工具能力键："+
+			"能力键就是\"哪个模块提供了哪个工具\"，必须显式写出来，宿主不会替你补。"+
+			"请加一行：provides = [%s]",
+		e.ID, len(e.Tool), strings.Join(names, "、"), quoteJoin(keys))
+}
+
+// quoteJoin 把能力键拼成能直接粘回 TOML 的模样：["tool:echo", "tool:upper"]。
+func quoteJoin(keys []string) string {
+	q := make([]string, len(keys))
+	for i, k := range keys {
+		q[i] = `"` + k + `"`
+	}
+	return strings.Join(q, ", ")
+}
+
+// checkWasmTools 校验「provides 里的工具键」与「声明的工具」是不是同一批东西。
 //
 // 为什么必须校验：能力键会进 `modules graph`，而工具名会进模型看到的工具表。
-// 两个写得不一样时，图和表就各说各话——而这种错在 manifest 里只是少打几个字符，
-// 到运行期完全看不出来。
-func checkWasmToolCapKey(id, capKey, toolName string) error {
-	if capKey == wasmToolCap {
-		return nil
+// 两处不一致时，图和表就各说各话——而这种错在 manifest 里只是几个字符，
+// 到运行期完全看不出来。所以：**对不上就启动即炸**，并把两边都列出来。
+//
+// 语义（三种写法的边界）：
+//   - provides = ["tool"]：这个模块只有**一个**工具，它就是这个键；
+//   - provides = ["tool:echo","tool:upper"]：每个键对应 [[module.tool]] 里的一项；
+//   - 两种混写（"tool" 与 "tool:x" 同时出现）：自相矛盾，报错而不是取其一。
+func checkWasmTools(id string, capKeys []string, specs []*wasmToolSpec, provides []string) error {
+	seen := make(map[string]bool, len(capKeys))
+	for _, k := range capKeys {
+		if seen[k] {
+			return fmt.Errorf(
+				"模块 %q 的 provides 里 %q 写了两次：能力键必须独一无二（它标识\"哪个模块提供了哪个工具\"）",
+				id, k)
+		}
+		seen[k] = true
 	}
-	name := strings.TrimSpace(strings.TrimPrefix(capKey, wasmToolCapPrefix))
-	if name == "" {
-		return fmt.Errorf(
-			"模块 %q 的 provides 里写了 %q：冒号后面必须写出工具名（例：provides = [\"tool:echo\"]，"+
-				"与同一行的 tool_name 一致）；"+
-				"只写工具名一类的东西等于让读者自己去猜哪个模块提供了什么", id, capKey)
+
+	// 声明的工具名（按顺序，便于报错时照抄）。
+	names := make([]string, 0, len(specs))
+	declared := make(map[string]bool, len(specs))
+	for _, s := range specs {
+		names = append(names, s.name)
+		declared[s.name] = true
 	}
-	if name != toolName {
+
+	bare := seen[wasmToolCap]
+	named := make(map[string]bool, len(capKeys))
+	for _, k := range capKeys {
+		if k == wasmToolCap {
+			continue
+		}
+		named[strings.TrimSpace(strings.TrimPrefix(k, wasmToolCapPrefix))] = true
+	}
+
+	// "tool" 是单工具缩写：配多个工具、或与 "tool:x" 同时出现，都是自相矛盾。
+	if bare && len(named) > 0 {
 		return fmt.Errorf(
-			"模块 %q 的能力键 %q 与 tool_name = %q 对不上：能力键冒号后面必须是同一行的工具名。"+
-				"两处不一致时 `modules graph`（能力键）和模型看到的工具表（工具名）会各说各话",
-			id, capKey, toolName)
+			"模块 %q 的 provides = %v 同时写了缩写 %q 与 %q：一个能力键要么是单工具的缩写，"+
+				"要么写出工具名，不许两种混着来。多工具请一个工具一个键：provides = [%s]",
+			id, provides, wasmToolCap, wasmToolCapPrefix+"…", quoteJoin(capKeysOf(names)))
+	}
+	if bare && len(specs) != 1 {
+		return fmt.Errorf(
+			"模块 %q 写了 provides = [\"tool\"]，但声明了 %d 个工具（%s）：%q 是"+
+				"「这个模块只有一个工具」的缩写，多工具必须一个工具一个键。请改成 provides = [%s]",
+			id, len(specs), strings.Join(names, "、"), wasmToolCap, quoteJoin(capKeysOf(names)))
+	}
+
+	// 两边的差集都要报：只报一边，另一边就要人自己反推。
+	var noTool, noKey []string
+	for _, k := range capKeys {
+		if k == wasmToolCap {
+			continue
+		}
+		n := strings.TrimSpace(strings.TrimPrefix(k, wasmToolCapPrefix))
+		if n == "" {
+			return fmt.Errorf(
+				"模块 %q 的 provides 里写了 %q：冒号后面必须写出工具名（例：provides = [\"tool:echo\"]，"+
+					"与 [[module.tool]].name 一致）；只写个前缀等于让读者自己去猜哪个模块提供了什么", id, k)
+		}
+		if !declared[n] {
+			noTool = append(noTool, k)
+		}
+	}
+	if !bare {
+		for _, s := range specs {
+			if !named[s.name] {
+				noKey = append(noKey, s.name)
+			}
+		}
+	}
+	if len(noTool) > 0 || len(noKey) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "模块 %q 的 provides 与声明的工具对不上（这一行声明了 %d 个工具：%s）",
+			id, len(specs), strings.Join(names, "、"))
+		if len(noTool) > 0 {
+			fmt.Fprintf(&b, "；能力键 %s 没有对应的工具声明", quoteJoin(noTool))
+		}
+		if len(noKey) > 0 {
+			fmt.Fprintf(&b, "；工具 %s 在 provides 里没有对应的能力键", quoteJoin(noKey))
+		}
+		fmt.Fprintf(&b, "。正确写法：provides = [%s]（冒号后与 [[module.tool]].name 逐个对齐）",
+			quoteJoin(capKeysOf(names)))
+		return errors.New(b.String())
 	}
 	return nil
+}
+
+// capKeysOf 把工具名翻成它们**应该**有的能力键，用于报错时给出可照抄的一行。
+func capKeysOf(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		out = append(out, wasmToolCapPrefix+n)
+	}
+	return out
 }
 
 // dupWasmToolCapErr 是"两个 wasm 模块争同一个能力键"的报法。
@@ -385,25 +540,36 @@ func dupWasmToolCapErr(prevID, id, capKey string) error {
 		prevID, id, capKey)
 }
 
-// wasmToolRegister 返回把工具注册进工具表的 Register。
+// wasmToolRegister 返回把**这个模块声明的全部工具**注册进工具表的 Register。
 //
-// 为什么 Register 要闭包握着 *wasmhost.Module：装配层只能给 *kernel.Scope（R2），
-// 模块句柄不能放进 kernel；闭包是唯一既守住 R2 又能拿到句柄的形状。
-func wasmToolRegister(spec *wasmToolSpec, m *wasmhost.Module) func(*kernel.Scope) error {
-	tool := &wasmTool{
-		mod:    m,
-		name:   spec.name,
-		desc:   spec.desc,
-		schema: spec.schema,
-		caps:   spec.caps,
+// 为什么 Register 要闭包握着模块句柄：装配层只能给 *kernel.Scope（R2），
+// 句柄不能放进 kernel；闭包是唯一既守住 R2 又能拿到句柄的形状。
+//
+// 为什么一个 Register 注册多个工具：kernel 的一个模块只有一个 Register 钩子，
+// 而 wasm 的一个模块现在可以有多个工具（manifest 的 `[[module.tool]]` 数组）。
+// 工具表里看到的是多个**独立**的 spi.Tool：各自的名字/描述/schema/caps/超时，
+// 各自出现在模型面前、各自独立审批；共用的只有那个 wasm 实例（见 wasmToolRouter）。
+func wasmToolRegister(specs []*wasmToolSpec, r *wasmToolRouter) func(*kernel.Scope) error {
+	tools := make([]*wasmTool, 0, len(specs))
+	for _, spec := range specs {
+		tools = append(tools, &wasmTool{
+			router:  r,
+			name:    spec.name,
+			desc:    spec.desc,
+			schema:  spec.schema,
+			caps:    spec.caps,
+			timeout: spec.timeout,
+		})
 	}
 	return func(s *kernel.Scope) error {
 		reg, err := kernel.Inject(s, spi.ToolsKey)
 		if err != nil {
 			return err
 		}
-		if err := reg.Register(tool); err != nil {
-			return fmt.Errorf("wasm 工具 %q 注册失败: %w", tool.Name(), err)
+		for _, t := range tools {
+			if err := reg.Register(t); err != nil {
+				return fmt.Errorf("wasm 工具 %q 注册失败: %w", t.Name(), err)
+			}
 		}
 		return nil
 	}
@@ -422,54 +588,133 @@ type wasmToolSpec struct {
 	timeout time.Duration
 }
 
-// newWasmToolSpec 校验并组装工具声明。任何一处不对都在**装配时**炸。
+// newWasmToolSpecs 把 manifest 里这一行的工具声明校验并组装成一组 spec。
 //
-// 为什么全都必填：漏了 tool_name 就是模型看到一个空名字的工具；
-// 漏了 tool_description 就是模型不知道什么时候该用它；
-// 漏了 tool_schema 就是参数没法校验。这些错误在运行时表现为"模型不会用这个工具"，
-// 极难归因，所以放在启动路径上失败。
-func newWasmToolSpec(e wasmEntry) (*wasmToolSpec, error) {
-	name := strings.TrimSpace(e.ToolName)
+// 两种写法（二选一，混写报错）：
+//   - 旧写法：tool_name / tool_description / tool_schema / tool_caps / timeout_ms，一个工具；
+//   - 新写法：`[[module.tool]]` 数组，一项一个工具（每项 name/description/schema/caps[/timeout_ms]）。
+//
+// 为什么混写要**启动即炸**而不是猜优先级：两种写法都在回答"这个模块有哪些工具"，
+// 同时出现时谁赢都是猜；猜错的表现是"模型少了一个工具"或"某个工具带着别人的
+// description 出现在模型面前"，运行期完全查不出来。manifest 是唯一事实来源，
+// 那就让它自己说清楚，而不是让宿主替它选一个。
+func newWasmToolSpecs(e wasmEntry) ([]*wasmToolSpec, error) {
+	if hasLegacyToolFields(e) && len(e.Tool) > 0 {
+		return nil, fmt.Errorf(
+			"模块 %q 同时写了单工具字段（tool_name / tool_description / tool_schema / tool_caps）"+
+				"和 [[module.tool]] 数组：两种写法不能混用，宿主不会替你猜哪个优先。"+
+				"只有一个工具就删掉 [[module.tool]] 只留 tool_name 那几行；"+
+				"有多个工具就删掉 tool_* 那一组，每个工具写一节 [[module.tool]]", e.ID)
+	}
+
+	if len(e.Tool) == 0 {
+		// 旧写法：逐字段等价于 [[module.tool]] 里的唯一一项。
+		// 这条路径必须与改造前**完全一致**——既有 manifest 一个字都不用改。
+		spec, err := newWasmToolSpec(e.ID,
+			wasmToolDecl{
+				Name:        e.ToolName,
+				Description: e.ToolDescription,
+				Schema:      e.ToolSchema,
+				Caps:        e.ToolCaps,
+			},
+			e.TimeoutMS,
+			"tool_name / tool_description / tool_schema 这一组")
+		if err != nil {
+			return nil, err
+		}
+		return []*wasmToolSpec{spec}, nil
+	}
+
+	specs := make([]*wasmToolSpec, 0, len(e.Tool))
+	seen := make(map[string]int, len(e.Tool))
+	for i, d := range e.Tool {
+		where := fmt.Sprintf("[[module.tool]] 第 %d 项", i+1)
+		timeoutMS := d.TimeoutMS
+		if timeoutMS == 0 {
+			// 模块级 timeout_ms 是多工具写法的**默认值**：一项一个写法太啰嗦，
+			// 而"这一行所有工具共用一个超时"是常见情况。0 = 没写。
+			timeoutMS = e.TimeoutMS
+		}
+		spec, err := newWasmToolSpec(e.ID, d, timeoutMS, where)
+		if err != nil {
+			return nil, err
+		}
+		if prev, dup := seen[spec.name]; dup {
+			return nil, fmt.Errorf(
+				"模块 %q 的 %s 与第 %d 项都叫 %q：同一个模块里工具名必须唯一"+
+					"（工具名是模型看到的身份，重名的话注册表和模型的 tool_calls 都说不清是谁）",
+				e.ID, where, prev, spec.name)
+		}
+		seen[spec.name] = i + 1
+		specs = append(specs, spec)
+	}
+	return specs, nil
+}
+
+// hasLegacyToolFields 判断这一行是不是用了旧的单工具写法。
+//
+// 只看 tool_* 那几个字段，**不看** timeout_ms：timeout_ms 在多工具写法里
+// 仍然合法（当默认值用），它不构成"两种写法混用"。
+func hasLegacyToolFields(e wasmEntry) bool {
+	return strings.TrimSpace(e.ToolName) != "" ||
+		strings.TrimSpace(e.ToolDescription) != "" ||
+		strings.TrimSpace(e.ToolSchema) != "" ||
+		len(e.ToolCaps) > 0
+}
+
+// newWasmToolSpec 校验并组装**一个**工具声明。任何一处不对都在装配时炸。
+//
+// where 说明它写在 manifest 的哪一处（"tool_name …" 还是 "[[module.tool]] 第 2 项"）：
+// 报错时点名，用户不用猜是哪一项写错了；两种写法也因此共用同一份校验。
+//
+// 为什么全都必填：漏了工具名就是模型看到一个空名字的工具；
+// 漏了描述就是模型不知道什么时候该用它；漏了 schema 就是参数没法校验。
+// 这些错误在运行时表现为"模型不会用这个工具"，极难归因，所以放在启动路径上失败。
+func newWasmToolSpec(id string, d wasmToolDecl, timeoutMS int, where string) (*wasmToolSpec, error) {
+	name := strings.TrimSpace(d.Name)
 	if name == "" {
 		return nil, fmt.Errorf(
-			`模块 %q 写了 provides = ["tool"]，但没有 tool_name：工具名是模型看到的名字，必须显式给出（例：tool_name = "echo"）`, e.ID)
+			`模块 %q 的 %s 没有工具名（tool_name / name）：工具名是模型看到的名字，必须显式给出`+
+				`（旧写法例：tool_name = "echo"；多工具例：[[module.tool]] 里 name = "echo"）`, id, where)
 	}
 	if strings.ContainsAny(name, " \t\r\n") {
 		return nil, fmt.Errorf(
-			"模块 %q 的 tool_name = %q 里有空白字符：工具名要能被模型原样写进 tool_calls，不能带空格", e.ID, name)
+			"模块 %q 的工具名 %q 里有空白字符（%s）：工具名要能被模型原样写进 tool_calls，不能带空格",
+			id, name, where)
 	}
 
-	desc := strings.TrimSpace(e.ToolDescription)
+	desc := strings.TrimSpace(d.Description)
 	if desc == "" {
 		return nil, fmt.Errorf(
-			"模块 %q 的工具 %q 没有 tool_description：Description 是模型看到的「什么时候用它」，"+
-				"缺了它模型只能靠猜，几乎不会正确调用", e.ID, name)
+			"模块 %q 的工具 %q 没有描述（tool_description / description）：Description 是"+
+				"模型看到的「什么时候用它」，缺了它模型只能靠猜，几乎不会正确调用", id, name)
 	}
 
-	raw := strings.TrimSpace(e.ToolSchema)
+	raw := strings.TrimSpace(d.Schema)
 	if raw == "" {
 		return nil, fmt.Errorf(
-			`模块 %q 的工具 %q 没有 tool_schema：参数 schema 必须写在 manifest 里（例：`+
-				`tool_schema = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''）`, e.ID, name)
+			`模块 %q 的工具 %q 没有参数 schema（tool_schema / schema）：schema 必须写在 manifest 里`+
+				`（例：tool_schema = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'''）`,
+			id, name)
 	}
 	// 必须是**对象**：工具参数永远是一个 JSON 对象，顶层不能是数组或标量。
 	var probe map[string]any
 	if err := json.Unmarshal([]byte(raw), &probe); err != nil || probe == nil {
 		return nil, fmt.Errorf(
-			"模块 %q 的工具 %q 的 tool_schema 不是合法的 JSON 对象：%v（原文 %q）", e.ID, name, err, raw)
+			"模块 %q 的工具 %q 的 schema 不是合法的 JSON 对象：%v（原文 %q）", id, name, err, raw)
 	}
 
-	caps, err := parseWasmCaps(e.ToolCaps)
+	caps, err := parseWasmCaps(d.Caps)
 	if err != nil {
-		return nil, fmt.Errorf("模块 %q 的工具 %q: %w", e.ID, name, err)
+		return nil, fmt.Errorf("模块 %q 的工具 %q: %w", id, name, err)
 	}
 
 	timeout := wasmhost.DefaultTimeout
-	if e.TimeoutMS < 0 {
-		return nil, fmt.Errorf("模块 %q 的 timeout_ms = %d，不能是负数", e.ID, e.TimeoutMS)
+	if timeoutMS < 0 {
+		return nil, fmt.Errorf("模块 %q 的 %s 的 timeout_ms = %d，不能是负数", id, where, timeoutMS)
 	}
-	if e.TimeoutMS > 0 {
-		timeout = time.Duration(e.TimeoutMS) * time.Millisecond
+	if timeoutMS > 0 {
+		timeout = time.Duration(timeoutMS) * time.Millisecond
 	}
 
 	return &wasmToolSpec{
@@ -478,6 +723,56 @@ func newWasmToolSpec(e wasmEntry) (*wasmToolSpec, error) {
 		caps:    caps,
 		timeout: timeout,
 	}, nil
+}
+
+// maxWasmToolTimeout 是给模块级 SetTimeout 的那一个值：取全部工具里最大的超时。
+//
+// 为什么取最大：模块级 timeout 是"这次调用最长能跑多久"的安全上限，
+// 而每个工具真正的 deadline 由 Exec 用自己的 ctx 收得更紧（见 wasmTool.Exec）。
+// 取最小会把超时长的工具冤枉掉，只有取最大才只是兜底。
+func maxWasmToolTimeout(specs []*wasmToolSpec) time.Duration {
+	var max time.Duration
+	for _, s := range specs {
+		if s.timeout > max {
+			max = s.timeout
+		}
+	}
+	if max <= 0 {
+		return wasmhost.DefaultTimeout
+	}
+	return max
+}
+
+// wasmToolRouter 是"一个模块上有多个工具"时的那把路由锁。
+//
+// 请求信封里的 tool 字段是宿主**唯一**告诉客人"你现在是哪个工具"的方式
+// （docs/wasm-tool-abi.md §3.2；协议早就为这一天留好了这个字段，本轮一个字节没改）。
+// 但它在 abi 层是**模块级状态**（Module.SetToolName），没有 per-call 参数——
+// 所以"写名字 + 调用"必须原子：两个工具并发时，A 写完名字、B 又写一遍，
+// A 就会以 B 的身份跑起来（输出看起来正常，只是答非所问，最难查）。
+//
+// 这把锁的代价是零：一个实例本来就只能跑一个 call（§3.4，同步导出不能重入），
+// 同一个模块上的两个工具本来也得串行；锁只是把"串行"从实例扩到"写名字 + 调用"。
+type wasmToolRouter struct {
+	mod *wasmhost.Module
+	mu  sync.Mutex
+}
+
+// invokeTool 在锁里写工具名，并按**这个工具**自己的超时调一次客人。
+//
+// 为什么超时要在这里再收一次：模块级 SetTimeout 取的是全部工具里最大的那个
+// （见 maxWasmToolTimeout），所以超时短的工具必须自己把 ctx 卡紧，
+// 否则它会拿到别人的长超时——manifest 写的 timeout_ms 就成了摆设。
+func (r *wasmToolRouter) invokeTool(ctx context.Context, name string, timeout time.Duration, args []byte) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mod.SetToolName(name)
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	return r.mod.InvokeTool(ctx, args)
 }
 
 // parseWasmCaps 把 manifest 的 tool_caps 翻成 spi.Caps。
@@ -512,12 +807,16 @@ func parseWasmCaps(names []string) (spi.Caps, error) {
 // wasmTool 是 spi.Tool 在 wasm 上的实现。
 //
 // 身份全部来自 manifest，只有 Exec 真的跨到客人那边。
+//
+// 多个工具共用一个 wasm 实例（一个模块一条 4.4 MB 的编译产物、一个常驻实例），
+// 所以"我是谁"必须每次调用跟着请求走：router 负责把工具名写进信封的 tool 字段。
 type wasmTool struct {
-	mod    *wasmhost.Module
-	name   string
-	desc   string
-	schema json.RawMessage
-	caps   spi.Caps
+	router  *wasmToolRouter
+	name    string
+	desc    string
+	schema  json.RawMessage
+	caps    spi.Caps
+	timeout time.Duration
 }
 
 func (t *wasmTool) Name() string            { return t.name }
@@ -535,7 +834,9 @@ func (t *wasmTool) Caps() spi.Caps          { return t.caps }
 // R3：失败必须 `Result{Hint:…}, err`，不许返回空 Result 把 Hint 丢掉——
 // 模型拿不到 Hint 就只能瞎猜，一次失败会变成三四次无效重试。
 func (t *wasmTool) Exec(ctx context.Context, args json.RawMessage) (spi.Result, error) {
-	out, err := t.mod.InvokeTool(ctx, args)
+	// 工具名与超时都在这一次调用里当场交给客人：
+	// 同一个模块上的另一个工具可能就是刚被调完的那个（见 wasmToolRouter）。
+	out, err := t.router.invokeTool(ctx, t.name, t.timeout, args)
 	if err != nil {
 		return spi.Result{
 				Summary: fmt.Sprintf("wasm 插件 %s 执行失败", t.name),
@@ -653,12 +954,15 @@ func loadedWasm() []wasmLoaded {
 // 混进主表，读的人会以为它提供了 "tools" 这个服务（那才是别人提供的服务）。
 // TOOL 列就是这条区分：提供了工具的模块在这里显示工具名，
 // 其余显示"（不提供）"，一眼能分出这两类。
+//
+// 一个模块可以挂多个工具（`[[module.tool]]`），所以这一列是**逗号分隔的一串**：
+// 只显示第一个会让读的人以为另外几个没注册上。
 func writeWasmSection(w io.Writer) {
 	list := loadedWasm()
 	if len(list) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "\n# wasm 后端（已装载 / 已校验；TOOL 列 = 注册进工具表的工具名，"+
+	fmt.Fprintf(w, "\n# wasm 后端（已装载 / 已校验；TOOL 列 = 注册进工具表的工具名（多个用逗号分隔），"+
 		"空表示不提供能力、只能 `dshd wasm call` 手动调）\n")
 	fmt.Fprintf(w, "%-22s %-9s %-12s %-18s %-22s %s\n", "MODULE", "BACKEND", "DIGEST", "EXPORTS", "TOOL", "PATH")
 	for _, x := range list {
@@ -666,7 +970,7 @@ func writeWasmSection(w io.Writer) {
 		if exports == "" {
 			exports = "（无导出函数）"
 		}
-		tool := x.tool
+		tool := strings.Join(x.tools, ",")
 		if tool == "" {
 			tool = "（不提供）"
 		}
