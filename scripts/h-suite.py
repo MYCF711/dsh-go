@@ -21,6 +21,7 @@ PROBES = [
     ("help-guard", "CLI 帮助：三入口同一开关、无过期说法、都有说明", False, 180),
     ("contract-evidence", "契约表：每个 ✅ 都点名真实存在的证据", False, 120),
     ("flag-wired", "开关：定义了就一定接到调用链上，同函数内不撞名", False, 120),
+    ("method-wired", "Transport 方法：声明了就一定在分发里，快照不越界", False, 120),
     ("h11-stdout", "H11 stdout 恰好一行 ready", False, 90),
     ("h10-chain", "H10 create→list→每个 id 两种入参名 load→prompt", False, 240),
     ("h14-isolation", "H14 两会话各自 seq、互不串流", True, 300),
