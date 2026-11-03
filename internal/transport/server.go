@@ -40,6 +40,12 @@ const (
 type Options struct {
 	// Source 提供会话数据；nil 时 /api/session.list 返回空数组（测试用）。
 	Source Source
+	// Policy 是宿主这一进程实际用的审批策略（deny/ask/allow/auto）。
+	//
+	// 它是**进程级事实**，不是会话级"预设"——H5 要的是"当前权限状态"，
+	// 而本仓根本没有 preset 这个概念（preset 在我们的代码里指 mode，那是工具可见性）。
+	// 所以这里如实返回 policy 名字；没有就留空，界面整段不画。
+	Policy string
 	// Addr 是监听地址，留空则 "127.0.0.1:0"（端口由 OS 分配）。
 	Addr string
 	// List 列会话的摘要；真正实现由宿主注入，这里不直接读盘。
@@ -396,6 +402,8 @@ func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorBody(err.Error()))
 		return
 	}
+	// H5：权限状态是进程级事实，在这里补上（宿主注入的 Load 只关心会话内容）。
+	res.Permission = s.opt.Policy
 	writeJSON(w, http.StatusOK, res)
 }
 

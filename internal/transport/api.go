@@ -81,6 +81,9 @@ type LoadResult struct {
 	// **空字符串表示不知道**，界面就该整段不画——不许拿我们的默认值冒充，
 	// 那样用户会以为"这个会话是用默认模型跑的"，而它可能不是。
 	Model string `json:"model,omitempty"`
+	// Permission 是当前审批策略（deny/ask/allow/auto，H5）。
+	// **不是 mode**：mode 决定模型能看见哪些工具，权限决定写操作要不要问人。
+	Permission string `json:"permission,omitempty"`
 }
 
 // PromptResult 是 session.prompt 的返回值：**立刻返回**，回答走 WS。

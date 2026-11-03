@@ -121,6 +121,8 @@ func cmdServe(args []string) error {
 	srv, err := transport.NewServer(transport.Options{
 		Source: src,
 		Addr:   *addr,
+		// H5：把这一进程真正的审批策略报给界面。**不是 mode**。
+		Policy: *servePolicy,
 		// List 复用 transport_list.go 的转换：列表只有一份真相，
 		// 不要在这里写第二套"读磁盘 → SessionSummary"。
 		List: func() ([]transport.SessionSummary, error) {

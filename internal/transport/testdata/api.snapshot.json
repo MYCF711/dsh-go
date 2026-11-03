@@ -36,7 +36,8 @@
       "messages",
       "total",
       "truncated",
-      "model"
+      "model",
+      "permission"
     ],
     "PromptResult": [
       "accepted",
