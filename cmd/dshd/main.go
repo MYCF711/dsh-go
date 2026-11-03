@@ -270,6 +270,9 @@ func buildToolTable(reg spi.ToolRegistry) ([]ToolEntry, error) {
 func cmdTools(argv []string) error {
 	fs := flag.NewFlagSet("tools", flag.ContinueOnError)
 	manifest := fs.String("manifest", "dsh.toml", "manifest 路径")
+	// 表形态：真正发给模型的是 compact。打印 full 会让人以为成本是 32 KB，
+	// 而实际发出去的是压缩后的——门禁按"发出去的那个"算才有意义。
+	schema := fs.String("schema", defaultToolSchema, "打印哪种形态：compact（默认，实际发出的）| full")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -291,6 +294,11 @@ func cmdTools(argv []string) error {
 	table, err := buildToolTable(reg)
 	if err != nil {
 		return err
+	}
+	if *schema != "full" {
+		for i := range table {
+			table[i].Parameters = agent.CompactSchema(table[i].Parameters)
+		}
 	}
 	out, err := json.MarshalIndent(table, "", "  ")
 	if err != nil {
