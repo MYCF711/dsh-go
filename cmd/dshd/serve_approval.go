@@ -37,6 +37,9 @@ type approvalBroker struct {
 	// 不串行就会写出交错的半行，子进程解析失败，而现象是"审批偶尔没生效"。
 	writeMu sync.Mutex
 	emit    func(sessionID, typ string, data json.RawMessage)
+	// onJobs 收到子进程推上来的后台任务清单（`@@JOBS@@` 行）。
+	// nil = 这个宿主不关心（老测试）。
+	onJobs func(jobs []transport.JobInfo)
 
 	// timeout 到了没人答 → 按**拒绝**结算。没人回答时"默认同意"是最坏的选择。
 	timeout time.Duration
@@ -109,6 +112,17 @@ func (b *approvalBroker) Watch(r io.Reader, alsoTo io.Writer) {
 		if alsoTo != nil {
 			fmt.Fprintln(alsoTo, line)
 		}
+		// 后台任务清单也走这条 stderr 通道（见 main.go 的 emitJobs）。
+		// **先认它再认审批**：两个标记前缀不同，顺序不影响正确性，
+		// 但把新的放前面，读代码的人一眼看到"这条通道不止审批一件事"。
+		if jobs, ok := parseJobsLine(line); ok {
+			// onJobs 没接就当没有这件事：这条通道主要是审批，
+			// 后台任务清单是顺路带过来的（原先这里是个空 else 分支，静态检查抓到了）。
+			if b.onJobs != nil {
+				b.onJobs(jobs)
+			}
+			continue
+		}
 		req, ok := parseApprovalLine(line)
 		if !ok {
 			continue
@@ -122,6 +136,19 @@ type approvalReq struct {
 	SessionID string          `json:"sessionId"`
 	Tool      string          `json:"tool"`
 	Args      json.RawMessage `json:"args"`
+}
+
+// parseJobsLine 解析 `@@JOBS@@ [{...}]`。
+func parseJobsLine(line string) ([]transport.JobInfo, bool) {
+	const tag = "@@JOBS@@ "
+	if !strings.HasPrefix(line, tag) {
+		return nil, false
+	}
+	var jobs []transport.JobInfo
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, tag)), &jobs); err != nil {
+		return nil, false // 坏行当没看见：拒绝比"半个清单"好
+	}
+	return jobs, true
 }
 
 func parseApprovalLine(line string) (approvalReq, bool) {

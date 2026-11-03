@@ -1,6 +1,9 @@
 package transport
 
-import "net/http"
+import (
+	"encoding/json"
+	"net/http"
+)
 
 // handleWorkspaceList 是 /api/workspace.list。
 //
@@ -18,7 +21,13 @@ func (s *Server) handleWorkspaceList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := s.opt.WorkspaceList()
+	// path 可选：不传就列进程工作目录（旧行为）。
+	var params struct {
+		Path string `json:"path"`
+	}
+	// 空 body 也算合法：旧调用方不发参数，那 path 就是空串。
+	_ = json.NewDecoder(r.Body).Decode(&params)
+	entries, err := s.opt.WorkspaceList(params.Path)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorBody("列工作区失败："+err.Error()))
 		return

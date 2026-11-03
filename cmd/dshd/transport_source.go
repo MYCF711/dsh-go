@@ -172,6 +172,24 @@ func (s *sessionSource) Model(sessionID string) (string, error) {
 	return "", nil
 }
 
+// Cwd 报这条会话的工作目录（v4 日志头部的 cwd）。
+//
+// 为什么界面非要这个数：`workspace.list` 只回 `{name,isDir,size}`（没有 path），
+// 界面要读一个文件就得拼「工作区根 + name」，而它不知道根在哪——
+// `fs.read` 于是永远调不出来（sidebar-files 卡死在这里）。
+// 读日志头而不是进程 cwd：多会话可能属于不同工作区，进程 cwd 只是"当前这个"。
+func (s *sessionSource) Cwd(sessionID string) (string, error) {
+	path, err := s.resolve(sessionID)
+	if err != nil {
+		return "", err
+	}
+	lg, err := v4.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return lg.Header.Cwd, nil
+}
+
 // ContextWindow 报这条会话模型的上限（token）。
 //
 // 从哪来：环境变量 DSHD_CONTEXT_WINDOW。**没有就返回 0**——界面据此不画进度条。

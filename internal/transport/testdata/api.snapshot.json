@@ -11,6 +11,10 @@
     "session.fork",
     "session.compact",
     "workspace.list",
+    "jobs.list",
+    "jobs.output",
+    "schedule.list",
+    "session.setModel",
     "fs.read",
     "fs.write",
     "config.get",
@@ -45,7 +49,8 @@
       "contextTokens",
       "contextWindow",
       "journalEpoch",
-      "lastSeq"
+      "lastSeq",
+      "cwd"
     ],
     "PromptResult": [
       "accepted",

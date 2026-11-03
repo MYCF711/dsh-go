@@ -7,7 +7,7 @@ import (
 
 // 空工作区必须是空数组，不能是 null：界面只该处理一种形状。
 func TestWorkspaceListEmptyIsArrayNotNull(t *testing.T) {
-	s := newTestServer(t, Options{WorkspaceList: func() ([]WorkspaceEntry, error) { return nil, nil }})
+	s := newTestServer(t, Options{WorkspaceList: func(path string) ([]WorkspaceEntry, error) { return nil, nil }})
 	rec := postJSON(t, s, "/api/workspace.list", `{}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("要 200，拿到 %d", rec.Code)
@@ -29,7 +29,7 @@ func TestWorkspaceListUnwiredIs501(t *testing.T) {
 
 // 宿主报错要 500 并带原文——"列不动"和"是空的"混起来，用户会以为工作区是空的。
 func TestWorkspaceListErrorIs500WithDetail(t *testing.T) {
-	s := newTestServer(t, Options{WorkspaceList: func() ([]WorkspaceEntry, error) { return nil, errBoom }})
+	s := newTestServer(t, Options{WorkspaceList: func(path string) ([]WorkspaceEntry, error) { return nil, errBoom }})
 	rec := postJSON(t, s, "/api/workspace.list", `{}`)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("要 500，拿到 %d", rec.Code)
