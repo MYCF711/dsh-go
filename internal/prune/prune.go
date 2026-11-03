@@ -22,8 +22,14 @@ import (
 )
 
 const (
-	// DefaultMaxBytes 是正文的默认字节上限（8KB）。
-	DefaultMaxBytes = 8 << 10
+	// DefaultMaxBytes 是正文的默认字节上限（16KB）。
+	//
+	// 为什么是 16KB 而不是 8KB：上游 `modules/tools` 的 spill 已经先把
+	// 超过 4000 **字符**的结果外置成 artifact 并留指针。同样是 4000 字符，
+	// ASCII 约 4KB，而纯中文约 12KB——默认定 8KB 的话，中文结果会被
+	// spill 压一次、再被 prune 压第二次，**在已经截断过的内容上再截一刀**，
+	// 那是净损失。定在 16KB，prune 就只在 spill 够不着的地方兜底。
+	DefaultMaxBytes = 16 << 10
 	// DefaultMaxLines 是正文的默认行数上限。
 	DefaultMaxLines = 200
 	// NoPointer 是"原文没有外置"时的指针文案。

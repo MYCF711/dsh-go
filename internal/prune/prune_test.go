@@ -298,3 +298,17 @@ func tailOf(s string, n int) string {
 	}
 	return s[len(s)-n:]
 }
+
+// 默认预算必须**大于 spill 能产生的最大正文**，否则会对已截断的内容再截一刀。
+//
+// spill 的阈值是 4000 **字符**；同样是 4000 字符串，纯中文约 12KB。
+// 默认定在 8KB 时，中文结果会被 spill 压一次、prune 再压一次——
+// 第二次是在"已经截断过的内容"上动手，纯属净损失。
+func TestDefaultBudgetExceedsSpillReach(t *testing.T) {
+	const spillMaxChars = 4000
+	worstCJK := spillMaxChars * 3 // 一个汉字 UTF-8 占 3 字节
+	if prune.DefaultMaxBytes <= worstCJK {
+		t.Fatalf("默认字节预算 %d 小于 spill 的最坏产出 %d——中文结果会被二次裁剪",
+			prune.DefaultMaxBytes, worstCJK)
+	}
+}
