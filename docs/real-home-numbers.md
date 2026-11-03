@@ -193,3 +193,42 @@ m.status = fmt.Sprintf("%s · %d 条（总 %d）· 温缓存", cs.title, len(cs.
 4. 通知 `dsh-ui` 那边改状态栏的展示
 
 **四步，一步都不能省——省了就是留一个"这边能跑、那边看不懂"的接口。**
+
+---
+
+## WS 流疑似跳帧：seq 2 → 5，中间的 3/4 没推（2026-11-03）
+
+用 `ui-e2e.py` 那套**已经跑通**的 WS 骨架去验 H6（reasoning 块），抓到的帧是：
+
+```
+{"seq":1,"type":"turn/start"}
+{"seq":2,"type":"user/message"}
+{"seq":5,"type":"turn/done"}      ← 3 和 4 不见了
+```
+
+`assistant/message` 也没有——**很可能它就是 seq 3 或 4，被过滤掉了**。
+
+### 可疑点
+
+`cmd/dshd/serve_tools.go:181` 的 follow 循环里：
+
+```go
+if ev.Seq <= lastSeq { continue }
+...
+if ev.Seq > r.turnSeq.Load() { r.turnSeq.Store(ev.Seq) }
+```
+
+如果 `r.turnSeq` 在 prompt 路径上已经被推到 4，那么写盘时 seq 3/4 的事件
+就会被 `<= lastSeq` 或后续判断吃掉。**没验证，只是代码读出来的怀疑。**
+
+### 为什么这条重要
+
+它同时解释两件事：
+- H6 说"实时流里没有 reasoning"——可能根本不是没推，是**整条 assistant 事件被跳了**
+- 之前 `ui-e2e` 的 `tool/call` 检查也漏过：那次是探针没给 allow，**但这次抓到的帧说明流本身也可能丢**
+
+### 下一轮
+
+把 follow 的 `lastSeq` 初始化与 `r.turnSeq` 的写入点都打出来（一行日志），
+再重跑同一个 prompt，看 3/4 是在"写盘"还是在"推送"这一步丢的。
+**先定位丢在哪一侧，再谈修。**
