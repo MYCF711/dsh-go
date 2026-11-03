@@ -497,8 +497,16 @@
   否则测试会"看起来验过了心跳"而其实什么也没发生
 - ✅ 变异第 20 条 `heartbeat-never-times-out` → **CAUGHT**（第一版 `if false` 编译不过被判 BAD——
   **编译不过的变异什么都没证明**，这条教训第 5 次踩）
-- 下一步 **M128**：`serve` 没有断线重连语义文档；界面重连时应该按 `sinceSeq` 补洞——
-  协议支持了，但没有一处写明"重连就带 lastSeq"
+- ✅ **重连契约写成界面侧义务**（`docs/transport-obligations.md`）：重连第一帧必须带 `sinceSeq`；
+  两种坏法差别很大——不带=重复+跳到顶，记错=**少一段且无声**。宿主侧新增
+  `TestReconnectWithSinceSeqGetsOnlyNewer`（sub{sinceSeq:5} 后只收到 6/7/8）
+- ✅ **`serve --max-steps` 落地**（默认 6），并和策略一起播报：
+  `policy deny（…）；每轮最多 9 步`——跑到一半停了，用户要能分清是"模型放弃"还是"用满上限"
+- ✅ **终局帧必须是最后一帧**：`follow` 现在用 WaitGroup 等它真的退出再发 `turn/done`，
+  否则子进程刚写完、我们刚读完那个窗口里会再推一帧，界面看到"结束后还有消息"
+- ✅ 真机验过帧顺序：`turn/start → user/message → text → turn/done`，终局确实是最后一个
+- 下一步 **M131**：`serve` 的 `follow` 每 200ms 全量重读日志，会话很大时是 O(n²)；
+  应当按 seq 增量读（只读新帧）
 
 ### 界面线现状（2026-11-03）
 

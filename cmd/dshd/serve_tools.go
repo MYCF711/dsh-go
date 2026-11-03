@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"dshgo/codecs/v4"
@@ -50,11 +51,19 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	}
 
 	// 边跑边推：日志是 append 的，按条数差量推就够。
+	// 必须**等 follow 真的退出**再发终局帧：否则它可能在我们发出 turn/done 之后
+	// 又推一帧（子进程刚写完、我们刚读完的那个窗口），界面就会看到"结束后还有消息"。
+	var fw sync.WaitGroup
 	done := make(chan struct{})
-	go r.follow(ctx, sessionID, done)
+	fw.Add(1)
+	go func() {
+		defer fw.Done()
+		r.follow(ctx, sessionID, done)
+	}()
 
 	werr := cmd.Wait()
 	close(done)
+	fw.Wait()
 
 	topic := "session:" + sessionID
 	if werr != nil {
