@@ -455,7 +455,21 @@
 - ✅ **`ReadSummary` 的真 bug 找到了**：`firstText(raw)` 传的是**整帧**（一帧装很多行 JSON），
   `json.Unmarshal` 必然失败 → 永远返回空。改成 `firstText(e.Data)` 就对了
 - ✅ 重新接上后：**183 条会话 0.23 秒，标题都是真的**（占位符断言通过）
-- 下一步 **M112**：把 `session.load` / `history` 也接到 `/api` 路由上（现在只有 `list` 是真的）
+- ✅ **U0 端到端可用**：`dshd serve` 起真进程，六条 method + WS 全通；
+  `session.create` 真建 v4 会话（crypto/rand uuid、mode 进 agentPreset、Close 刷盘后立刻可读）
+- ✅ **带前缀与裸 uuid 两种会话 id 都认**（`session.NormalizeID` / `CandidateIDs`）——
+  界面把列表里的 id 原样传回来曾经 404，那个 404 看起来像"会话不存在"
+- ✅ **prompt 真的调模型**（`modelRunner`）并**落盘**：真机 create → sub → prompt → 收到
+  `assistant/message` + `turn/done`，磁盘帧 `['session','user/message','assistant/message']`，
+  重启后历史还在
+- ✅ **失败的一轮不再沉默**：runner 失败推 `turn/error`（错误原文照抄）；
+  落盘失败分四种措辞（找不到文件 / 打不开写入 / 写用户消息 / 写回答）
+- ⚠️ 我自己踩的两个坑：① 第一版用 `_ = logw.Append(...)` 吞错误——回答看见了但没存，
+  比没回答更难查；② 用 python 只解**第一帧**就断言"没落盘"，其实数据在第 2、3 帧——
+  **查证工具自己错的时候，给的是一个很干净的错答案**
+- ⚠️ dshd 在"跨文件 + 要调外部 API + 要真跑起来验证"这三类任务上稳定失败：
+  `serve.go`（漏接线两行）、`serve_turn.go`（25 次调用 0 产出）。这两块我接手的
+- 下一步 **M121**：`serve` 的 runner 接**工具循环**（现在只调一次模型，不跑工具）
 
 ### 界面线现状（2026-11-03）
 
