@@ -301,6 +301,31 @@
     "caps": {}
   },
   {
+    "name": "hindsight_capture_initiative",
+    "description": "把一个倡议记成一页记忆（标题 + 两三句在做什么、为什么）；先记下来，以后再搜。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "倡议名词，短"
+        },
+        "summary": {
+          "type": "string",
+          "description": "两三句：在做什么、为什么"
+        }
+      },
+      "required": [
+        "title",
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "writes": true
+    }
+  },
+  {
     "name": "hindsight_ingest_document",
     "description": "把一段结论/踩坑/约定存进本机记忆，下次能按 id 捞回来；趁还记得时用。",
     "parameters": {

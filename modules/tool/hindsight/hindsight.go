@@ -54,6 +54,16 @@ var ingestSchema = json.RawMessage(`{
 
 var listSchema = json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
 
+var captureSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "title": {"type": "string", "description": "倡议名词，短"},
+    "summary": {"type": "string", "description": "两三句：在做什么、为什么"}
+  },
+  "required": ["title", "summary"],
+  "additionalProperties": false
+}`)
+
 // document 是磁盘上一份文档的形状。键名就是文件里的键名，不加别的。
 type document struct {
 	ID      string   `json:"id"`
@@ -138,8 +148,13 @@ func (t *ingestTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result,
 	}, nil
 }
 
-// writeNew 生成不撞车的 id 并原子落盘（同目录 temp + rename）。
+// writeNew 是 ingest 的方法壳，转发到包级 writeNew（两边落同一套盘逻辑）。
 func (t *ingestTool) writeNew(doc *document) (string, error) {
+	return writeNew(t.dir, doc)
+}
+
+// writeNew 生成不撞车的 id 并原子落盘（同目录 temp + rename）。
+func writeNew(dir string, doc *document) (string, error) {
 	slug := slugify(doc.Title)
 	var lastErr error
 	for i := 0; i < idAttempts; i++ {
@@ -149,7 +164,7 @@ func (t *ingestTool) writeNew(doc *document) (string, error) {
 		}
 		id := slug + "-" + suffixHex
 		doc.ID = id
-		p := filepath.Join(t.dir, id+suffix)
+		p := filepath.Join(dir, id+suffix)
 
 		// 文件已存在就换一个随机段，绝不覆盖别人的记忆。
 		if _, err := os.Stat(p); err == nil {
@@ -165,6 +180,69 @@ func (t *ingestTool) writeNew(doc *document) (string, error) {
 		return p, nil
 	}
 	return "", fmt.Errorf("连续 %d 次没拿到可用 id: %w", idAttempts, lastErr)
+}
+
+// ---------------------------------------------------------------------------
+// capture initiative
+// ---------------------------------------------------------------------------
+
+// captureTool 把"一个倡议"记成一页：标题 + 两三句说明，标签固定 initiative。
+type captureTool struct{ dir string }
+
+func (t *captureTool) Name() string { return "hindsight_capture_initiative" }
+
+func (t *captureTool) Description() string {
+	return "把一个倡议记成一页记忆（标题 + 两三句在做什么、为什么）；先记下来，以后再搜。"
+}
+
+func (t *captureTool) Schema() json.RawMessage { return captureSchema }
+
+// Caps: 与 ingest 一样会建目录、写文件。
+func (t *captureTool) Caps() spi.Caps { return spi.Caps{Writes: true} }
+
+type captureArgs struct {
+	Title   string `json:"title"`
+	Summary string `json:"summary"`
+}
+
+func (t *captureTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
+	var a captureArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return spi.Result{Hint: `参数不合法：期望 {"title": "…", "summary": "…"}`},
+			fmt.Errorf("参数解析失败: %w", err)
+	}
+	title := strings.TrimSpace(a.Title)
+	if title == "" {
+		return spi.Result{Hint: "缺 title：这个倡议叫什么？"}, fmt.Errorf("title 为空")
+	}
+	summary := strings.TrimSpace(a.Summary)
+	if summary == "" {
+		return spi.Result{Hint: "缺 summary：这个倡议在做什么、为什么？"}, fmt.Errorf("summary 为空")
+	}
+	if err := ctx.Err(); err != nil {
+		return spi.Result{Hint: "这次调用被取消了；原参数重发一次即可"}, err
+	}
+
+	if err := os.MkdirAll(t.dir, dirMode); err != nil {
+		return spi.Result{Hint: "写入 " + slash(t.dir) + " 失败：先确认这个目录可写"},
+			fmt.Errorf("创建记忆目录失败: %w", err)
+	}
+
+	doc := document{
+		Title:   title,
+		Tags:    []string{"initiative"},
+		Body:    summary,
+		Created: time.Now().Unix(),
+	}
+	if _, err := writeNew(t.dir, &doc); err != nil {
+		return spi.Result{Hint: "写入 " + slash(t.dir) + " 失败：先确认这个目录可写"}, err
+	}
+
+	return spi.Result{
+		Text:    fmt.Sprintf("已建倡议页「%s」（%s）", doc.Title, doc.ID),
+		Summary: "已建倡议页 " + doc.ID,
+		Data:    map[string]any{"id": doc.ID, "title": doc.Title},
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -677,6 +755,7 @@ func Module(home string) kernel.Module {
 				&listTool{dir: dir},
 				&searchTool{dir: dir},
 				&readTool{dir: dir},
+				&captureTool{dir: dir},
 			} {
 				if err := reg.Register(t); err != nil {
 					return err

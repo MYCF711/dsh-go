@@ -170,7 +170,9 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		// 不写盘、不联网（子进程只读版本号）。
 		"load_workspace_dependencies": {Executes: true},
 		// 写本机记忆目录（<home>/memory），不联网、不起进程。
-		"hindsight_ingest_document":        {Writes: true},
+		"hindsight_ingest_document": {Writes: true},
+		// 记一个倡议：和 ingest 一样建目录写文件，不联网、不起进程。
+		"hindsight_capture_initiative":     {Writes: true},
 		"hindsight_list_knowledge_pages":   {},
 		"hindsight_search_knowledge_pages": {},
 		"hindsight_read_knowledge_page":    {},
