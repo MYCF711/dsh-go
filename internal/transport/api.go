@@ -72,6 +72,10 @@ type LoadResult struct {
 	Messages  []Message `json:"messages"`
 	Total     int       `json:"total"`
 	Truncated bool      `json:"truncated"`
+	// Model 是这条会话最近一次请求用的模型 id（H4）。
+	// **空字符串表示不知道**，界面就该整段不画——不许拿我们的默认值冒充，
+	// 那样用户会以为"这个会话是用默认模型跑的"，而它可能不是。
+	Model string `json:"model,omitempty"`
 }
 
 // PromptResult 是 session.prompt 的返回值：**立刻返回**，回答走 WS。

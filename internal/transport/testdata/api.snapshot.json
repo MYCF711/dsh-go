@@ -34,7 +34,8 @@
     "LoadResult": [
       "messages",
       "total",
-      "truncated"
+      "truncated",
+      "model"
     ],
     "PromptResult": [
       "accepted",

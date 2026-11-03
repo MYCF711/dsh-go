@@ -102,6 +102,33 @@ func min(a, b int) int {
 	return b
 }
 
+// Model 从最近一条 request/context 事件取模型 id（H4）。
+//
+// 为什么是 request/context：真实语料里 model 只出现在这种事件上（实测 3 个会话命中，
+// 其它事件类型都没有）。从后往前找，取第一条有的——那次才是"现在在用什么模型"。
+func (s *sessionSource) Model(sessionID string) (string, error) {
+	path, err := s.resolve(sessionID)
+	if err != nil {
+		return "", err
+	}
+	lg, err := v4.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for i := len(lg.Events) - 1; i >= 0; i-- {
+		if lg.Events[i].Type != "request/context" {
+			continue
+		}
+		var d struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(lg.Events[i].Data, &d) == nil && d.Model != "" {
+			return d.Model, nil
+		}
+	}
+	return "", nil
+}
+
 func (s *sessionSource) Messages(sessionID string) ([]transport.Message, error) {
 	path, err := s.resolve(sessionID)
 	if err != nil {

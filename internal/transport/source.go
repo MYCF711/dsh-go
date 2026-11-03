@@ -26,6 +26,11 @@ type TailSourcer interface {
 	MessagesTail(sessionID string, limit int) ([]Message, int, error)
 }
 
+// ModelSourcer 是 Source 的可选增强：给出这条会话用的模型 id。
+type ModelSourcer interface {
+	Model(sessionID string) (string, error)
+}
+
 func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 	if src == nil {
 		return LoadResult{}, errors.New("transport: LoadSession 需要 Source，传了 nil")
@@ -44,7 +49,13 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 		if total >= 0 {
 			trunc = total > len(msgs)
 		}
-		return LoadResult{Messages: msgs, Total: total, Truncated: trunc}, nil
+		res := LoadResult{Messages: msgs, Total: total, Truncated: trunc}
+		if ms, ok := src.(ModelSourcer); ok {
+			if m, merr := ms.Model(sessionID); merr == nil {
+				res.Model = m
+			}
+		}
+		return res, nil
 	}
 
 	all, err := src.Messages(sessionID)
@@ -52,11 +63,17 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 		return LoadResult{}, err
 	}
 	page := SelectPage(all, PageTail, 0, limit)
-	return LoadResult{
+	res := LoadResult{
 		Messages:  page.Messages,
 		Total:     page.Total,
 		Truncated: page.Truncated,
-	}, nil
+	}
+	if ms, ok := src.(ModelSourcer); ok {
+		if m, merr := ms.Model(sessionID); merr == nil {
+			res.Model = m
+		}
+	}
+	return res, nil
 }
 
 // HistorySession 是 session.history 的实现：按 seq 增量补洞。
