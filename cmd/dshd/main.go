@@ -485,7 +485,9 @@ func cmdRun(argv []string) error {
 		System:       sys,
 		SessionID:    sessID,
 		CompactTools: *toolSchema != "full",
-		MaxSteps:     *maxSteps,
+		// 只有显式设了才要推理：某些网关不认这个参数，默认不带更安全。
+		Reasoning: os.Getenv("DSHD_REASONING_EFFORT"),
+		MaxSteps:  *maxSteps,
 		Emit: func(e agent.Event) error {
 			switch e.Kind {
 			case agent.EventReasoning:

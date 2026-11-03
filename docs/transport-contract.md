@@ -31,7 +31,7 @@
 | **H3 ViewSpec** | ✅ 提供端历史证据 | `messages[].view` 透传 card/table/plain，nil 省略；联调仍需核三种 view 与无 view 回退。 |
 | **H4 model** | ✅ 提供端历史证据 | 取最近一条非空 `request/context.model`；UI LoadResult/顶栏实际消费，空值不画。 |
 | **H5 permission** | ✅ 提供端字段存在 | 是当前进程 policy（deny/ask/allow/auto），不是 mode；UI 显示真实 policy，空值不画。 |
-| **H6 原始流** | 🟡 宿主管道已接（M264），**模型不给 reasoning** | 2026-11-03 查明：`dshd run` **从不把思考写进日志**——`agent.EventReasoning` 在 `Emit` 里没有分支，所以 27983 条 assistant 里 0 条带思考块不是"模型没想"，而是"宿主没存"。已修：新增 `session.ReasoningBlock`，`run` 累积每步 reasoning 并作为 content 首块写入同一条 `assistant/message`（`TestReasoningBlockSurvivesEvent` 钉住往返与顺序）。**实测仍无 reasoning**：本机网关这次调用没返回 reasoning_content，所以链路上还是看不到它 | 判据不变：含 reasoning 的真实流按序到达。缺的是**一个会思考的模型/参数**，不是宿主代码。 |
+| **H6 原始流** | ✅ 宿主侧闭环（2026-11-03 M265） | 两处修复：① `dshd run` 原来在 `Emit` 里**没有 reasoning 分支**，思考被当场丢弃（这就是"27,983 条 assistant 里 0 条带思考块"的真正原因，与模型无关）；② 网关支持 `reasoning` 参数但宿主从不发。现在 `Loop.Reasoning` ← `DSHD_REASONING_EFFORT`，思考作为 content **首块**写入同一条 `assistant/message` | 真机（`DSHD_REASONING_EFFORT=max`）：盘上 `assistant/message 含 reasoning 块: true`；经 serve 的帧里 `流里有 reasoning: True`，顺序为 reasoning → text。仍未验：界面实际渲染 reasoning |
 | **H7 content** | ✅ 两种落法有单测 | 固定已完成且原日志确有 assistant 的样本验 `data.content` 与 `data.message.content`；失败/取消/在途可合法无 assistant。 |
 | **H8 HTTP 响应** | ✅ 宿主侧闭环（2026-11-03 M262） | 任意成功类型包 `result`；**所有错误出口四字段**——含序列化失败：`writeJSON` 的兜底正文改走 `errorBody`，`encode_failure` 有可照做的 hint。测试 `TestWriteJSONEncodeFailureHasFourFields`（用 chan 触发真失败）、`TestWriteJSONEnvelopesAnyType`（map/struct/slice/pointer）、`TestEncodeFailureHintIsActionable` | 仍未验：真实 apiclient 对契约夹具复验（跨仓）。 |
 | **H9 load 入参** | ✅ 宿主单测，UI 待验 | id/sessionId、limit/tailMessages 均收；sessionId 优先 id，limit 优先 tailMessages。仅 id/tailMessages 时 limit=2 已测；UI 只发契约名复验。 |

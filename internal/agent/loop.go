@@ -73,8 +73,11 @@ type Loop struct {
 	// Project 把工具结果压成模型可见的文本块（默认用 session.ProjectResult 的同类语义）。
 	Project func(spi.Result) []spi.Block
 	// Model 与系统提示由调用方给；Loop 不猜。
-	Model  string
-	System string
+	Model string
+	// Reasoning 是推理强度（网关的 reasoning_effort）。空 = 不带这个参数。
+	// 不是所有模型都认它，所以只能由调用方显式开。
+	Reasoning string
+	System    string
 	// CompactTools 为真时，工具表压掉参数里的 description。
 	// 实测能省四成字节——但参数说明也帮模型填对参数，所以默认关，
 	// 用 --tool-schema=compact 显式打开，并靠 A/B 数据决定要不要改默认。
@@ -146,6 +149,8 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 			Model:    l.Model,
 			Messages: msgs,
 			Tools:    l.toolDefs(),
+			// 只有显式要了才带：默认不带，避免把不支持该参数的网关打挂。
+			Reasoning: l.Reasoning,
 		}
 		resp, err := l.Chat.Stream(ctx, req, func(e llm.Event) error {
 			switch e.Kind {
