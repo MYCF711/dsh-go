@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 
 	"github.com/tetratelabs/wazero"
@@ -90,6 +91,31 @@ func Load(ctx context.Context, name, path string) (m *Module, err error) {
 func (m *Module) Name() string   { return m.name }
 func (m *Module) Path() string   { return m.path }
 func (m *Module) Digest() string { return m.digest }
+
+// Exports 返回模块导出的**函数**名，按字典序排序。
+//
+// 只列函数、不列内存/全局/表：这一层能做的事就是 Call，
+// 列出来的应当正好是能调的。排序是为了输出稳定——
+// 它会被 `dshd wasm inspect` 直接打到屏幕上，也会进将来的清单快照，
+// 而 map 的遍历顺序每次都不一样。
+//
+// 已卸载的模块返回 nil（没有导出可说了），不报错：
+// 这个方法描述的是"模块里有什么"，不是一次可能失败的操作。
+func (m *Module) Exports() []string {
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed || m.mod == nil {
+		return nil
+	}
+	defs := m.mod.ExportedFunctionDefinitions()
+	out := make([]string, 0, len(defs))
+	for name := range defs {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // Call 调用一个导出函数。
 //

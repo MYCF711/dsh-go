@@ -146,6 +146,8 @@ func main() {
 		err = cmdExec(os.Args[2:])
 	case "tools":
 		err = cmdTools(os.Args[2:])
+	case "wasm":
+		err = cmdWasm(os.Args[2:])
 	case "session":
 		err = cmdSession(os.Args[2:])
 	case "run":
@@ -189,6 +191,8 @@ func usage() {
   dshd run --prompt "<话>" [--max-steps N]    跑一个真实 turn（模型 + 工具 + 结果回灌）
   dshd acp                                    在 stdin/stdout 上跑 ACP 服务端（stdout 只放协议）
   dshd doctor [--home X] [--base URL]        自检：home/会话/写锁/网关/模块，每项给下一步
+  dshd wasm inspect --module <path>          魔数/sha256/导出函数名（按名字排序）
+  dshd wasm call --module <path> --fn <f>    调用导出函数；--args 2,3 --timeout 2s 可选，返回值打成一行（如 = 5）
   dshd version                               版本
 `)
 }
