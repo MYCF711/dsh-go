@@ -368,6 +368,10 @@ go list -deps ./internal/transport | grep -E 'ui/|cmd/dshui'   # 必须无输出
 | H5 | ⏳ | 当前权限状态（permission preset 名，例如 `default` / `readonly`） | 顶栏要一个权限徽标。**不许拿 `mode` 冒充权限**：那是两件事 | 返回一个非空 preset 名；界面按名字显示，未知名字显示原文不猜含义 |
 | H6 | ⏳ | WS `/api/mux` 的助手增量里**保留 `reasoning` 块**（别只发 text） | 真实日志里 reasoning 块 **9960 条** vs text **1140 条**——思考比正文多八倍，界面已经把它做成可折叠的「▸ 思考 · N 字」。实时流不带就只能等落盘后再解，流式期间看不到 | 流式期间能收到 `reasoning` 增量；总字数与落盘日志一致 |
 | H7 | ⏳ | `assistant/message` 的 content **落法统一**（统一 `data.content`，或两种都兼容） | 界面上踩过真事故：有的日志放 `data.content`、有的放 `data.message.content`，只读一处会让**整个会话的助手消息一条都不显示** | 抽 20 个真实会话，`session.load` 后每条会话的 `assistant` 消息数 > 0 |
+| H8 | 🟡 界面侧已兼容 | 统一响应信封：成功 `{result:{…}}`、失败 `{error:{code,message,hint,retryable}}`（见 `dsh-ui/testdata/api.snapshot.json`）。**现状**：真宿主返回裸 payload（`{"sessions":[…]}`）且错误是字符串（`{"error":"unauthorized"}`） | 照约定写的第三方客户端会两个都读不到：裸 payload 让 `result` 为空（界面看到 0 个会话），字符串错误让 JSON 解不动（真正原因 401 被吞成"响应不是合法 JSON"） | 抽 `session.list`/`session.load`/`session.create` 三个 method，成功与失败各一次，信封形状与快照一致 |
+| H9 | 🟡 界面侧已兼容 | 入参名统一：`session.load` 的 `id` / `tailMessages`、`session.prompt` 的 `id` / `text`。**现状**：宿主读 `sessionId` / `limit` | 名字对不上就是静默 400/空结果。界面已经两个名字都发，但这意味着**契约有两份真相**，早晚出事 | `curl` 用快照里的名字调 `session.load`，参数生效（不再缺参） |
+| H10 | ⏳ **阻塞真机联调** | `session.load` 要能加载 `session.list` 返回的 id，以及**刚 `session.create` 出来的会话**。**现状**：两者都返回 `{"error":"没有这个会话"}` | 这是界面接真宿主的最后一公里：现在 `session.list` 能拿到会话、点进去就报错，界面只能继续用 mockd | 复现：`session.create {}` → 拿 `sessionId` → `session.load {"sessionId":"<id>","limit":3}`，应 200 且带 messages |
+| H11 | ⏳ | `dshd serve` 的 **stdout 只放那一行 `ready {...}`**。**现状**：紧接着还打了一行 `policy deny（无人值守…）` | 壳（或任何客户端）按行解析握手时，第二行会被当成协议内容。`serve.go` 自己的注释就写着"stdout 只放那一行 ready"，实现和注释不一致 | `dshd serve … 2>/dev/null | head -1` 必须是纯 JSON 的 `ready {...}` |
 
 > H1–H7 的界面侧代码都已经写好并跑通（数据来源暂时是 `dsh-ui` 自己的 `cmd/mockd` 解真实日志）。
 > 宿主侧一旦提供，界面侧只需把数据源从 mockd 换到 `internal/transport`，**渲染代码一行不用改**。
