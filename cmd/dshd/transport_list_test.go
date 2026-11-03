@@ -36,12 +36,16 @@ func TestListSessionsGolden(t *testing.T) {
 	// 排序必须由 listSessions 保证，不能让测试"碰巧"过：
 	// 这里自己解析回 time.Time 比，而不是比字符串（RFC3339 带时区偏移，字典序不可靠）。
 	prev := time.Time{}
+	placeholders := 0
 	for i, s := range got {
 		if s.ID == "" {
 			t.Fatalf("第 %d 条会话 ID 是空串", i)
 		}
 		if s.Title == "" {
 			t.Fatalf("会话 %s 的 Title 是空串——界面会渲染成一行看不见的条目", s.ID)
+		}
+		if s.Title == "(无标题)" {
+			placeholders++
 		}
 		// 长度按**字符**数算：摘要里有中文，按字节算会把 40 个汉字的标题判成超长。
 		if n := len([]rune(s.Title)); n > 120 {
@@ -60,4 +64,11 @@ func TestListSessionsGolden(t *testing.T) {
 	}
 
 	t.Logf("最新一条: %s | %s", got[0].Title, got[0].UpdatedAt)
+	// 占位符不算"能看懂"。原来的断言只要求非空串，而 "(无标题)" 恰好能骗过它——
+	// 界面左栏会整整一屏都是这四个字，测试却是绿的。
+	if placeholders*2 > len(got) {
+		t.Fatalf("%d/%d 条会话的标题是占位符——摘要生成坏了，不是「这些会话没内容」",
+			placeholders, len(got))
+	}
+
 }

@@ -1,8 +1,10 @@
 package v4
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -25,21 +27,16 @@ func ReadSummary(path string, maxBytes, maxRunes int) (string, error) {
 		return "", fmt.Errorf("%s: %w", path, err)
 	}
 
-	dec, err := zstd.NewReader(nil)
-	if err != nil {
-		return "", fmt.Errorf("建解码器失败: %w", err)
-	}
-	defer dec.Close()
-
 	budget := maxBytes
 	var assistant, user string
 	for i := len(frames) - 1; i >= 0 && budget > 0; i-- {
 		f := frames[i]
-		budget -= f.length
-		raw, derr := decodeFrame(dec, b[f.offset:f.offset+f.length])
+		budget -= f.length // 先按压缩长度扣，解完再按真实长度扣一次
+		raw, derr := decodeOneFrame(b[f.offset : f.offset+f.length])
 		if derr != nil {
 			continue
 		}
+		budget -= len(raw) // 真实开销是解压后的长度，不是压缩长度
 		for _, line := range strings.Split(string(raw), "\n") {
 			if strings.TrimSpace(line) == "" {
 				continue
@@ -134,4 +131,21 @@ func walkText(v any) string {
 		}
 	}
 	return ""
+}
+
+// decodeOneFrame 解一个 zstd 帧。
+//
+// 这里不用 decodeFrame：它的切片假设只对第一帧成立（ReadHeader 只解第一帧所以一直没事）。
+// 一帧一个流式解码器虽然多一点开销，但**只解最后一两帧**，代价可以接受。
+func decodeOneFrame(b []byte) ([]byte, error) {
+	r, err := zstd.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
