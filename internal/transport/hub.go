@@ -34,7 +34,14 @@ type Hub struct {
 	// topics 存 topic → 该 topic 上的订阅者（保持订阅先后，推送顺序稳定）。
 	// 用切片而不是 map[Subscriber]，是为了不必要求 Subscriber 可比较（见 sameSubscriber）。
 	topics map[string][]*subscription
+
+	// journals 是序号域（H14），只用于订阅时判断世代是否过期。
+	// 为 nil 时不发 session/reset——老测试不必构造它。
+	journals *Journals
 }
+
+// SetJournals 挂上序号域：订阅时会核对 journalEpoch，过期就发 session/reset。
+func (h *Hub) SetJournals(j *Journals) { h.journals = j }
 
 // NewHub 造一个空表。
 func NewHub() *Hub {

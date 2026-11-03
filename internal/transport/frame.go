@@ -67,6 +67,9 @@ type ClientFrame struct {
 	T        string `json:"t"`
 	Topic    string `json:"topic,omitempty"`
 	SinceSeq int    `json:"sinceSeq,omitempty"`
+	// JournalEpoch 是客户端以为自己在这条 journal 的哪个世代（H14）。
+	// 不带（0）时按"首次订阅"处理；带上且对不上 → 服务端发 session/reset。
+	JournalEpoch int64 `json:"journalEpoch,omitempty"`
 }
 
 // ServerFrame 是推给客户端的一帧事件。type/data 用 v4 的原始词汇，不另造名字。

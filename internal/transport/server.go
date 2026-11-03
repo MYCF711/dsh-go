@@ -105,8 +105,11 @@ func NewServer(opt Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	h := NewHub()
+	// 订阅时要核对世代（H14），所以哈希表和序号域必须成对存在。
+	h.SetJournals(opt.Journals)
 	return &Server{
-		hub:     NewHub(),
+		hub:     h,
 		opt:     opt,
 		token:   token,
 		cookies: make(map[string]struct{}),

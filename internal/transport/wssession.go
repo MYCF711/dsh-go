@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -108,6 +109,22 @@ func ServeConn(conn Conn, hub *Hub) error {
 
 		switch frame.T {
 		case FrameSub:
+			// H14：先核世代。客户端带着一个不认识的世代来订阅，说明中间的 journal
+			// 已经换代（宿主重启 / 主动重建基线）。这时按 seq 继续推只会推错位的数据，
+			// 所以先发一条 session/reset 让它丢弃水位——**它不能自己发现这件事**。
+			if hub.journals != nil && frame.JournalEpoch != 0 {
+				if j := hub.journals.Get(topicSession(frame.Topic)); j.Epoch() != frame.JournalEpoch {
+					reset, _ := json.Marshal(map[string]any{
+						"journalEpoch": j.Epoch(),
+						"lastSeq":      j.LastSeq(),
+					})
+					// reset 不带 seq：它不是事件流里的一帧（与 pong 同理），
+					// 给它编号反而会污染客户端的连续性判断。
+					if err := sub.write(ServerFrame{Type: "session/reset", Data: reset}); err != nil {
+						return err
+					}
+				}
+			}
 			// 重复 sub 由 Hub 处理：以最后一次 sinceSeq 为准，不会重复收帧。
 			hub.Subscribe(frame.Topic, frame.SinceSeq, sub)
 
@@ -130,6 +147,16 @@ func ServeConn(conn Conn, hub *Hub) error {
 			return fmt.Errorf("%w: t=%q", ErrUnknownFrameType, frame.T)
 		}
 	}
+}
+
+// topicSession 从 "session:<id>" 里取会话 id；不是这个形状时原样返回，
+// 反正 Get 只是拿一个 key（拿不到就是新建域，不影响正确性）。
+func topicSession(topic string) string {
+	const p = "session:"
+	if len(topic) > len(p) && topic[:len(p)] == p {
+		return topic[len(p):]
+	}
+	return topic
 }
 
 // checkClientFrame 拦下不该进状态机的帧。
