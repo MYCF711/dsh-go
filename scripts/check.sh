@@ -181,6 +181,18 @@ else
     bad "staticcheck 没装：go install honnef.co/go/tools/cmd/staticcheck@latest"
   fi
 
+  # 手册里的引用必须真的存在（改名/删文件后手册还在指，是最容易漏的一类腐烂）
+  if [ -f scripts/doc-links.py ]; then
+    if dl_out=$(python scripts/doc-links.py 2>&1); then
+      pass "$(printf '%s' "$dl_out" | tail -1)"
+    else
+      bad "手册引用失效：$(printf '%s' "$dl_out" | grep MISS | head -2 | tr '
+' ' ')"
+    fi
+  else
+    bad "找不到 scripts/doc-links.py"
+  fi
+
   # R1 内核零业务
   if [ -d internal/kernel ]; then
     deps=$(go list -deps ./internal/kernel 2>/dev/null \

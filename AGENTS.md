@@ -205,7 +205,7 @@ mv modules /tmp/modules.check && go build ./internal/... ; mv /tmp/modules.check
 - **版本**：`<上游版本>-go.<上游 rc 序号>`。当前 `0.2.1-go.26`。发布前更新 `CHANGELOG.md` 的映射表（移植了什么 / 跳过什么 / 为什么）。
 - **提交**：`M<里程碑>: <一句话>`，例如 `M1: tools/read 与观测策略`。一个提交只做一件事。
 - **决策**：任何改变 §1 决策的实现，**先改 `PLAN.md` 并写理由**，再动代码。禁止"代码先行、文档追认"。
-- **文档**：`docs/cordis-alignment.md` 是 cordis 概念 → Go 概念的逐条对照，是设计约束，不是宣传材料。
+- **文档**：`docs/` 下的设计文档要能被人名指出来——**引用一个不存在的文件比没有引用更糟**（`scripts/doc-links.py` 每次都会查）。
 
 ---
 
