@@ -94,8 +94,30 @@ OK    决策=reject_once  文件存在=False 工具被拒=True  应答=已回
 第一条看**磁盘上那个文件在不在**；第二条除了"不在"，还要看到 `tool/result` 里
 `isError:true` 且正文是"用户拒绝了 …"——否则"文件不存在"可能只是模型压根没试。
 
+### 超时与重放（M259/M260）
+
+超时做成了可配（`DSHD_APPROVAL_TIMEOUT_SEC`，默认 120s）。可配不只是方便测试：
+**默认两分钟没人答才触发，意味着这条路径平时永远跑不到**——不给它一个调小的开关，
+它就只是"看起来实现了"。而它是安全边界：实现错了（比如到期默认放行），
+写操作会在没人看着的时候自己执行。
+
+真机两条：
+
+```
+scripts/h13-timeout.py  →  OK=4 FAIL=0
+  OK  出现 approval/request
+  OK  出现 approval/timeout
+  OK  超时后文件不存在（按拒绝执行）
+  OK  工具执行被判为拒绝
+
+scripts/h13-replay.py   →  OK=3 FAIL=0
+  OK  第一个连接收到 approval/request
+  OK  重连后被重放 approval/request
+  OK  重放里带 requestId
+```
+
 ### 仍未验
 
-- 120s 超时只在单测里用 30ms 验证过，未在真机上真等两分钟。
-- 挂起审批在**断线重连**后能否由 serve 重放（契约要求，本仓未实现）。
 - 界面实际消费：本仓没有界面。
+- `allow_always`（"这个会话里以后都允许"）目前只是**当成 allow_once**：
+  broker 认得这个 optionId，但没有做"记住这一轮之后不再问"的会话级记忆。

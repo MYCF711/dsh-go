@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,8 +48,22 @@ func newApprovalBroker(stdin io.WriteCloser, emit func(sessionID, typ string, da
 		payloads: map[string]pendingPayload{},
 		stdin:    stdin,
 		emit:     emit,
-		timeout:  120 * time.Second,
+		timeout:  approvalTimeout(),
 	}
+}
+
+// approvalTimeout 是"没人回答就按拒绝算"的等待时长。
+//
+// 默认 120s；`DSHD_APPROVAL_TIMEOUT_SEC` 可以覆盖。
+// 为什么要可配：**超时这条路径默认永远跑不到**（两分钟没人答才算数），
+// 如果没有调小的办法，它就只能是"看起来实现了"。
+func approvalTimeout() time.Duration {
+	if v := os.Getenv("DSHD_APPROVAL_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 120 * time.Second
 }
 
 // useStdin 换成本轮子进程的 stdin（每轮一个子进程，管道是新的）。
