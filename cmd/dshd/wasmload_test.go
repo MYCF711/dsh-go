@@ -1183,6 +1183,255 @@ func TestWasmSingleItemArrayWithBareToolKey(t *testing.T) {
 	}
 }
 
+// --- 工具名在装配范围内必须唯一（跨模块判重，§10.8 第 1 条） ---
+
+// dupNameSentinel 是判重用例里故意写的**不存在**的 .wasm 文件名。
+//
+// 它的用处只有一个：证明这条校验发生在**读 wasm 文件之前**。如果先碰磁盘，
+// 报错就会变成"读不到这个文件"——那既不是根因（名字撞了），也修不掉重名。
+const dupNameSentinel = "never-read-by-dup-check.wasm"
+
+// TestWasmDuplicateToolNameAcrossModulesFails：两个**不同模块**声明同一个工具名，
+// 必须由装载期的 manifest 校验报出来，而不是等工具表 Register 时才失败。
+//
+// 改前这条错来自 spi.ToolsKey 的 Register（"wasm 工具 X 注册失败"）：它不说哪两个
+// 模块撞了，也不说改哪一行——而会改这个的只有读 manifest 的人。所以判据按三条钉：
+//   - 哪两处撞了：两个模块 id + 工具名；
+//   - 改哪个文件/哪一行：manifest 路径 + 第几个 [[module]] + 那一行的写法；
+//   - 在读 wasm 之前：两条 path 都不存在，错误里不该出现它们。
+func TestWasmDuplicateToolNameAcrossModulesFails(t *testing.T) {
+	resetWasm(t)
+	mp := writeManifest(t, `[profile]
+name = "wasm-dup-name"
+
+[[module]]
+id      = "tools"
+backend = "static"
+
+[[module]]
+id       = "wasm-a"
+backend  = "wasm"
+path     = "`+dupNameSentinel+`"
+provides = ["tool:echo"]
+tool_name        = "echo"
+tool_description = "第一个模块的 echo"
+tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}}}'''
+
+[[module]]
+id       = "wasm-b"
+backend  = "wasm"
+path     = "`+dupNameSentinel+`"
+provides = ["tool"]
+tool_name        = "echo"
+tool_description = "第二个模块也想要 echo"
+tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}}}'''
+`)
+	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err == nil {
+		t.Fatal("两个模块声明同一个工具名必须让装配失败：工具表里只容得下一个 echo")
+	}
+	msg := err.Error()
+	// 1) 谁跟谁撞了。
+	for _, want := range []string{"wasm-a", "wasm-b", `"echo"`, "唯一"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误里要有 %q（要能看出是谁跟谁撞了）：\n%s", want, msg)
+		}
+	}
+	// 2) 改哪个文件/哪一行（两条 path 都不同，所以这里只认 manifest 里的位置）。
+	for _, want := range []string{mp, "第 2 个 [[module]]", "第 3 个 [[module]]", `tool_name = "echo"`} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误里要有 %q（要能照着找到那一行）：\n%s", want, msg)
+		}
+	}
+	// 3) 必须停在 manifest 上：那两个 .wasm 根本不存在，先读文件就会报成读不到。
+	if strings.Contains(msg, dupNameSentinel) {
+		t.Fatalf("判重必须发生在读 .wasm 之前（否则根因会被\"读不到文件\"盖掉）：\n%s", msg)
+	}
+	if got := loadedWasm(); len(got) != 0 {
+		t.Fatalf("校验失败不能留下已装载的句柄：%+v", got)
+	}
+}
+
+// TestWasmDuplicateToolNameOtherFormsFails：新写法（[[module.tool]]）与新旧混用
+// 撞名，也要走**同一条**判重——判的是名字，不是写法。
+//
+// 为什么要专门测新旧混用：那是真实的迁移形态（把老模块改成数组写法时，
+// name 常常是照着 tool_name 抄的），而这恰恰是最容易被"两种写法各查各的"漏掉的一种。
+func TestWasmDuplicateToolNameOtherFormsFails(t *testing.T) {
+	head := `[profile]
+name = "wasm-dup-name"
+
+[[module]]
+id      = "tools"
+backend = "static"
+`
+	cases := []struct {
+		name string
+		body string
+		// want 是"这条错的文案必须说清的事"：两处位置 + 工具名。
+		want []string
+	}{
+		{
+			name: "两处都写 [[module.tool]]",
+			body: `
+[[module]]
+id       = "wasm-a"
+backend  = "wasm"
+path     = "` + dupNameSentinel + `"
+provides = ["tool:echo"]
+` + toolItem("echo", "模块 a 的 echo", "") + `
+[[module]]
+id       = "wasm-b"
+backend  = "wasm"
+path     = "` + dupNameSentinel + `"
+provides = ["tool:echo"]
+` + toolItem("echo", "模块 b 的 echo", ""),
+			want: []string{"wasm-a", "wasm-b", `"echo"`, "第 2 个 [[module]]", "第 3 个 [[module]]",
+				"[[module.tool]] 第 1 项"},
+		},
+		{
+			name: "一处 tool_name、一处 [[module.tool]]",
+			body: `
+[[module]]
+id       = "wasm-a"
+backend  = "wasm"
+path     = "` + dupNameSentinel + `"
+provides = ["tool:echo"]
+tool_name        = "echo"
+tool_description = "旧写法的 echo"
+tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}}}'''
+
+[[module]]
+id       = "wasm-b"
+backend  = "wasm"
+path     = "` + dupNameSentinel + `"
+provides = ["tool"]
+` + toolItem("echo", "新写法的 echo", ""),
+			want: []string{"wasm-a", "wasm-b", `"echo"`, `tool_name = "echo"`,
+				"[[module.tool]] 第 1 项"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resetWasm(t)
+			mp := writeManifest(t, head+c.body)
+			_, err := loadMods(mp, t.TempDir(), 0, nil)
+			if err == nil {
+				t.Fatalf("%s：同名工具必须让装配失败", c.name)
+			}
+			msg := err.Error()
+			for _, want := range append(c.want, mp) {
+				if !strings.Contains(msg, want) {
+					t.Fatalf("错误里要有 %q：\n%s", want, msg)
+				}
+			}
+			if strings.Contains(msg, dupNameSentinel) {
+				t.Fatalf("判重必须发生在读 .wasm 之前：\n%s", msg)
+			}
+			if got := loadedWasm(); len(got) != 0 {
+				t.Fatalf("校验失败不能留下已装载的句柄：%+v", got)
+			}
+		})
+	}
+}
+
+// TestWasmDuplicateToolNameInsideModuleFails：**同一个模块**里 [[module.tool]]
+// 写了两遍同名 → 同一条判重（不是另一套文案）。
+//
+// 为什么这条要单独立：它是唯一一种"模块 id 相同"的撞名，报错若照抄跨模块的句式，
+// 会写出"模块 wasm-text 与 wasm-text 撞了"这种废话。位置信息必须落到"第几项"。
+func TestWasmDuplicateToolNameInsideModuleFails(t *testing.T) {
+	resetWasm(t)
+	mp := writeManifest(t, multiToolHead(t, `"tool:echo"`)+
+		toolItem("echo", "一号", "")+toolItem("echo", "二号", ""))
+
+	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err == nil {
+		t.Fatal("同一个模块里两个工具同名必须让装配失败（工具表按名字存，第二行存不进去）")
+	}
+	msg := err.Error()
+	for _, want := range []string{"wasm-text", `"echo"`, "[[module.tool]] 第 1 项", "[[module.tool]] 第 2 项",
+		"唯一", mp} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误里要有 %q（要能指到第几项）：\n%s", want, msg)
+		}
+	}
+	// 同一个模块撞名时不许退化成"A 与 A"的句式。
+	if strings.Contains(msg, `"wasm-text" 与 "wasm-text"`) {
+		t.Fatalf("同一个模块里的重复不该说成两个模块撞了：\n%s", msg)
+	}
+	if got := loadedWasm(); len(got) != 0 {
+		t.Fatalf("校验失败不能留下已装载的句柄：%+v", got)
+	}
+}
+
+// TestWasmDistinctToolNamesAcrossFormsAssemble 是这条校验的**不误伤**用例：
+// 两个模块各一个工具、名字不同（一个旧写法、一个 [[module.tool]]）→ 正常装配，
+// 两个工具都在表里、都调得通。
+//
+// 为什么必须钉住：判重加在装载期，最怕的就是"顺手多拦一层"——
+// 名字不同却被判成重复，等于把本来能跑的两个插件变成一个都用不了。
+func TestWasmDistinctToolNamesAcrossFormsAssemble(t *testing.T) {
+	resetWasm(t)
+	fixture := filepath.ToSlash(toolFixturePath(t))
+
+	mp := writeManifest(t, `[profile]
+name = "wasm-two-names"
+
+[[module]]
+id      = "tools"
+backend = "static"
+
+[[module]]
+id       = "wasm-echo"
+backend  = "wasm"
+path     = "`+fixture+`"
+provides = ["tool:echo"]
+tool_name        = "echo"
+tool_description = "旧写法的 echo"
+tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}}}'''
+
+[[module]]
+id       = "wasm-upper"
+backend  = "wasm"
+path     = "`+fixture+`"
+provides = ["tool:upper"]
+`+toolItem("upper", "新写法的 upper", ""))
+
+	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	if err != nil {
+		t.Fatalf("两个模块的工具名不同就该照常装配，实际报错：%v", err)
+	}
+	if got := loadedWasm(); len(got) != 2 {
+		t.Fatalf("两个模块都该装载，实际 %+v", got)
+	}
+
+	reg := assembleForTest(t, mods)
+	for _, name := range []string{"echo", "upper"} {
+		if _, ok := reg.Get(name); !ok {
+			var names []string
+			for _, x := range reg.Tools() {
+				names = append(names, x.Name())
+			}
+			t.Fatalf("工具表里没有 %q，实际有 %v", name, names)
+		}
+	}
+	// 两个都要真的调得通：判重不该改变任何一条执行路径。
+	for _, c := range []struct{ name, want string }{
+		{"echo", "echo:Hi 你好"},
+		{"upper", "upper:HI 你好"},
+	} {
+		tool, _ := reg.Get(c.name)
+		res, err := tool.Exec(context.Background(), json.RawMessage(`{"text":"Hi 你好"}`))
+		if err != nil {
+			t.Fatalf("工具 %q 执行失败：%v", c.name, err)
+		}
+		if res.Text != c.want {
+			t.Fatalf("工具 %q 的正文应当是 %q，实际 %q", c.name, c.want, res.Text)
+		}
+	}
+}
+
 // --- 测试辅助 ---
 
 func fixturePath(t *testing.T) string {

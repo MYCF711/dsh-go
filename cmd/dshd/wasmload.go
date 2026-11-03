@@ -185,15 +185,22 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 	// 第一遍：只校验 manifest，一个字节的 wasm 都不读。
 	//
 	// 为什么拆成两遍：一个 wasm 工具模块要编译 4.4 MB 的 Go 产物（~0.9 s），
-	// 而"两个模块的能力键撞了""tool_name 写错了"都是几微秒就能查出来的事。
+	// 而"两个模块的能力键撞了""tool_name 写错了""两个模块用了同一个工具名"
+	// 都是几微秒就能查出来的事。
 	// 以前这两件事挤在一个循环里，于是第二行的错要等第一行编译完才报——
 	// 而且多工具场景下这条错**必然**会发生（见 wasmToolCap 的注释）。
+	//
+	// 这一遍里有两张表，各管一件事，范围都是"本次装载"：
+	//   - capOwner：能力键（"tool" / "tool:<名>"）的唯一性——kernel 按字符串判重；
+	//   - toolOwner：**工具名**的唯一性——工具表按名字存、模型按名字调，
+	//     这一条以前要等 spi.ToolsKey 的 Register 才炸（见 claimWasmToolNames）。
 	type decl struct {
 		specs   []*wasmToolSpec
 		capKeys []string
 	}
 	decls := make(map[int]decl, len(entries))
-	capOwner := make(map[string]string, len(entries)) // 能力键 → 模块 id
+	capOwner := make(map[string]string, len(entries))         // 能力键 → 模块 id
+	toolOwner := make(map[string]wasmToolClaim, len(entries)) // 工具名 → 第一次声明它的那一处
 	for i, e := range entries {
 		if kernel.Backend(e.Backend) != kernel.BackendWasm || e.ID == "" {
 			continue
@@ -232,6 +239,12 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 		}
 		if cerr := checkWasmTools(e.ID, capKeys, specs, e.Provides); cerr != nil {
 			return fail(cerr)
+		}
+		// 工具名判重排在能力键判重**之前**：能力键是工具名的投影（"tool:<名>"），
+		// 名字撞了才是根因。两个模块直接抄了同一段 [[module]] 时，两条错都会成立，
+		// 先报"同名工具"这一条，用户改一处（改名字）就能同时解决两条。
+		if derr := claimWasmToolNames(manifestPath, e, i+1, specs, toolOwner); derr != nil {
+			return fail(derr)
 		}
 		for _, key := range capKeys {
 			if prev, dup := capOwner[key]; dup {
@@ -520,6 +533,100 @@ func capKeysOf(names []string) []string {
 	return out
 }
 
+// wasmToolClaim 是全局工具名表里的一条：**谁**在 manifest 的**哪里**声明了这个名字。
+//
+// 为什么记 module / item 而不只记模块 id：报错要能指到"改哪一行"。
+// 跨模块撞名时，人要找的是 `[[module]] id = "x"` 那一段里的 tool_name / [[module.tool]]；
+// 同一个模块里撞名时，要找的是第几项 [[module.tool]]——只写一句模块 id 等于什么也没说，
+// 而"改哪一行"恰恰是这条错误唯一比 Register 多出来的东西。
+type wasmToolClaim struct {
+	id     string
+	module int    // 1 起的 [[module]] 序号（manifest 文件里的顺序，与装载顺序一致）
+	item   int    // 1 起的 [[module.tool]] 项号；0 = 旧写法（tool_name 那几行）
+	name   string // 声明的工具名
+}
+
+// section 是"在 manifest 的哪一节"，可照着找。
+func (c wasmToolClaim) section() string {
+	return fmt.Sprintf("第 %d 个 [[module]]（id = %q）", c.module, c.id)
+}
+
+// decl 是"用哪种写法声明的"，直接给出那一行长什么样。
+func (c wasmToolClaim) decl() string {
+	if c.item == 0 {
+		// 旧写法：一个模块一个工具，写成模块级的 tool_name。
+		return fmt.Sprintf("tool_name = %q", c.name)
+	}
+	// 新写法：这一名字写在 [[module.tool]] 的第几项里。
+	return fmt.Sprintf("[[module.tool]] 第 %d 项（name = %q）", c.item, c.name)
+}
+
+// claimWasmToolNames 把这一行声明的工具名登记进**本次装载范围**的工具名表。
+//
+// 为什么必须在这一层查（而不是等 spi.ToolsKey 的 Register）：工具名进的是**同一张**
+// 工具表——模型按名字调、注册表按名字存，所以两个模块声明同名工具时，第二处 Register
+// 必然失败。但那条错误的原话是"wasm 工具 X 注册失败"，既不说是哪两个模块撞的，
+// 也不说 manifest 里该改哪一行；而用户手上只有 manifest。在这里查，代价是几微秒，
+// 换来的是"两个模块 id + 工具名 + 改哪一处 + 怎么改"一句说得全。
+//
+// 为什么同一个模块里的重复也走这一条：本来是 `[[module.tool]]` 写了两遍的笔误，
+// 但撞的就是名字，报法没理由分叉；而"第几项"这种位置信息只该在一处维护。
+// 也正因为这样，newWasmToolSpecs 不再自己查重名（原来那一份报错已并入这里）：
+// 同一个笔误出现两种文案，用户还得自己判断哪条更权威。
+//
+// 范围是"本次装载"：调用方每次装载都新建表。这与工具表的语义一致——
+// 一次装配一张表，跨装配的同名（比如换了 manifest 的两次启动）互不相干。
+func claimWasmToolNames(manifestPath string, e wasmEntry, module int, specs []*wasmToolSpec, owner map[string]wasmToolClaim) error {
+	for i, sp := range specs {
+		item := 0
+		if len(e.Tool) > 0 {
+			// 只有新写法才有"第几项"：旧写法一行就是一个工具。
+			item = i + 1
+		}
+		cur := wasmToolClaim{id: e.ID, module: module, item: item, name: sp.name}
+		if prev, dup := owner[sp.name]; dup {
+			return dupWasmToolNameErr(manifestPath, prev, cur)
+		}
+		owner[sp.name] = cur
+	}
+	return nil
+}
+
+// dupWasmToolNameErr 是"同一个工具名被声明了两次"的报法。
+//
+// 三件事必须说清，缺一条用户就得自己去猜：
+//   - **哪两处撞了**（模块 id，以及同一模块时是第几项）；
+//   - **改哪个文件/哪一行**（manifest 路径 + 第几个 [[module]] + 哪种写法）；
+//   - **怎么改**（改名，并让 provides 里的能力键跟着改——那两处必须逐个对齐）。
+//
+// 为什么不说"注册失败"就完事：工具名是模型看到的身份，重名时模型分不清该调谁，
+// 这不是"能不能跑"，是装配该不该继续；而能被这个名字影响的只有读 manifest 的人。
+func dupWasmToolNameErr(manifestPath string, prev, cur wasmToolClaim) error {
+	file := strings.TrimSpace(manifestPath)
+	if file == "" {
+		// 没有 manifest 文件就没有 wasm 模块，走不到这里；留着是为了不让路径为空。
+		file = "dsh.toml"
+	}
+	// 同一个模块里的两项撞了：说"模块 A 与 A 都声明了"是废话，直接给"第几项"。
+	if prev.id == cur.id {
+		return fmt.Errorf(
+			"模块 %q 里工具 %q 出现了两次：%s 与 %s（位置：%s 的 %s）。"+
+				"同一个模块里的工具名也必须唯一（模型按名字调、工具表按名字存，第二处登记必然失败）。"+
+				"改其中一项的 name，并把 provides 里重复的那个 %q 跟着改",
+			cur.id, cur.name, prev.decl(), cur.decl(), file, cur.section(),
+			wasmToolCapPrefix+cur.name)
+	}
+	return fmt.Errorf(
+		"模块 %q 与 %q 都声明了工具 %q：工具名在装配范围内必须唯一"+
+			"（模型按名字调、工具表按名字存，第二处登记必然失败）。"+
+			"改其中一个的名字，并把两者的能力键改成两个不同的值——"+
+			"例如 provides = [%q] 与 [%q]，并同步 tool_name / [[module.tool]].name。"+
+			"位置：%s 的 %s 的 %s，与 %s 的 %s",
+		prev.id, cur.id, cur.name,
+		wasmToolCapPrefix+cur.name, wasmToolCapPrefix+cur.name+"2",
+		file, prev.section(), prev.decl(), cur.section(), cur.decl())
+}
+
 // dupWasmToolCapErr 是"两个 wasm 模块争同一个能力键"的报法。
 //
 // 为什么这条错误值得单独写一段：kernel 的原话是"能力 %q 被两个模块同时提供"，
@@ -625,8 +732,10 @@ func newWasmToolSpecs(e wasmEntry) ([]*wasmToolSpec, error) {
 		return []*wasmToolSpec{spec}, nil
 	}
 
+	// 这里**不查重名**：同一个模块里两项同名与两个模块撞名是同一件事（工具名撞了），
+	// 报法也共用一条——见 claimWasmToolNames。两处各写一份的话，同一个笔误会得到
+	// 两种文案，而"第几项""哪个文件"这类位置信息也会分散在两个地方维护。
 	specs := make([]*wasmToolSpec, 0, len(e.Tool))
-	seen := make(map[string]int, len(e.Tool))
 	for i, d := range e.Tool {
 		where := fmt.Sprintf("[[module.tool]] 第 %d 项", i+1)
 		timeoutMS := d.TimeoutMS
@@ -639,13 +748,6 @@ func newWasmToolSpecs(e wasmEntry) ([]*wasmToolSpec, error) {
 		if err != nil {
 			return nil, err
 		}
-		if prev, dup := seen[spec.name]; dup {
-			return nil, fmt.Errorf(
-				"模块 %q 的 %s 与第 %d 项都叫 %q：同一个模块里工具名必须唯一"+
-					"（工具名是模型看到的身份，重名的话注册表和模型的 tool_calls 都说不清是谁）",
-				e.ID, where, prev, spec.name)
-		}
-		seen[spec.name] = i + 1
 		specs = append(specs, spec)
 	}
 	return specs, nil
