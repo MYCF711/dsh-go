@@ -99,7 +99,17 @@ func cmdServe(args []string) error {
 	// runner 要先建好（prompt 服务要它），但推事件的出口得等 srv 建完才有——
 	// 所以用指针，建完再赋。
 	// 子进程跑 run：工具循环、审批、压缩、落盘全部走既有的那一套。
-	runner := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps}
+	// DSHD_SERVE_MODEL_RUNNER=1 时走"不起子进程"的 runner。
+	// 只为二分长跑时的内存增长：增长到底来自"跑一轮"，还是"子进程 + follow"。
+	var runner turnRunner
+	useModelRunner := os.Getenv("DSHD_SERVE_MODEL_RUNNER") == "1"
+	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps}
+	mr := &modelRunner{home: *home}
+	if useModelRunner {
+		runner = mr
+	} else {
+		runner = lr
+	}
 	prompts := newPromptService(runner)
 
 	// 建会话的能力在起来之前就确定（cwd 定一次，不随后续请求漂移）。
@@ -138,7 +148,11 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	runner.pub = srv.Publish
+	if useModelRunner {
+		mr.pub = srv.Publish
+	} else {
+		lr.pub = srv.Publish
+	}
 
 	base, err := srv.Start()
 	if err != nil {
@@ -152,7 +166,7 @@ func cmdServe(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "ready %s\n", line)
-	announcePolicy(os.Stdout, runner.policy, runner.maxSteps)
+	announcePolicy(os.Stdout, lr.policy, lr.maxSteps)
 
 	// 阻塞到 Ctrl-C / SIGTERM。用信号而不是 stdin EOF：
 	// serve 可能由壳拉起，stdin 会立刻是 EOF，那不代表"该关了"。
