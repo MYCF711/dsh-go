@@ -36,6 +36,7 @@ PROBES = [
     ("ui-e2e", "U0/H8/H14 界面调用序列（16 项）", True, 400),
     # 并发验（-race）。**默认关闭**：它要 C 工具链，而工具链不属于成品的一部分
     # （只在 C:/toolchains 下，脚本自己找）。开启方式：加 --race。
+    ("wasm-tool-e2e", "wasm 插件：装得上、进工具表、exec 调得通、不写 provides 表不变", False, 200),
     ("tool-live", "工具活性：每个工具在这台机器上真的有东西可做吗", True, 1800),
     ("race.sh", "并发：-race 全仓（需要 C 工具链，默认关闭）", False, 1800),
 ]
