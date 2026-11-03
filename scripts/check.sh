@@ -153,6 +153,20 @@ else
     bad "找不到 scripts/race-guard.py —— -race 跑不了时这是唯一的并发检查"
   fi
 
+  # CI 七条第 7 条：二进制体积 ≤ 25 MB（PLAN.md §15）
+  if bin_bytes=$(go build -o /tmp/dshd-size-check.exe ./cmd/dshd 2>/dev/null && stat -c %s /tmp/dshd-size-check.exe 2>/dev/null || wc -c < /tmp/dshd-size-check.exe 2>/dev/null); then
+    if [ -n "$bin_bytes" ] && [ "$bin_bytes" -le $((25*1024*1024)) ]; then
+      pass "二进制体积 $((bin_bytes/1024/1024)) MB（上限 25 MB）"
+    elif [ -n "$bin_bytes" ]; then
+      bad "二进制体积 $((bin_bytes/1024/1024)) MB，超过 PLAN §15 的 25 MB"
+    else
+      bad "量不出二进制体积"
+    fi
+    rm -f /tmp/dshd-size-check.exe
+  else
+    bad "构建不出二进制，量不了体积"
+  fi
+
   # R1 内核零业务
   if [ -d internal/kernel ]; then
     deps=$(go list -deps ./internal/kernel 2>/dev/null \
