@@ -165,7 +165,13 @@ else
   fi
 
   # CI 七条第 7 条：二进制体积 ≤ 25 MB（PLAN.md §15）
-  if bin_bytes=$(go build -o /tmp/dshd-size-check.exe ./cmd/dshd 2>/dev/null && stat -c %s /tmp/dshd-size-check.exe 2>/dev/null || wc -c < /tmp/dshd-size-check.exe 2>/dev/null); then
+  #
+  # 临时文件名带 PID：共享工作树里可能同时有两个 check.sh 在跑（Lead 与派出去的
+  # 子代理各自收尾），固定路径会让两个进程同时写同一个 .exe —— Windows 上后一个
+  # 直接 Access denied，然后这条检查报"构建不出二进制"。实测踩过一次：
+  # 手动跑同一条命令成功，门禁里却红，红的原因是别人的进程在写同一个文件。
+  size_tmp="/tmp/dshd-size-check.$$.exe"
+  if bin_bytes=$(go build -o "$size_tmp" ./cmd/dshd 2>/dev/null && stat -c %s "$size_tmp" 2>/dev/null || wc -c < "$size_tmp" 2>/dev/null); then
     if [ -n "$bin_bytes" ] && [ "$bin_bytes" -le $((25*1024*1024)) ]; then
       pass "二进制体积 $((bin_bytes/1024/1024)) MB（上限 25 MB）"
     elif [ -n "$bin_bytes" ]; then
@@ -173,7 +179,7 @@ else
     else
       bad "量不出二进制体积"
     fi
-    rm -f /tmp/dshd-size-check.exe
+    rm -f "$size_tmp"
   else
     bad "构建不出二进制，量不了体积"
   fi

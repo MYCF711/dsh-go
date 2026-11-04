@@ -12,8 +12,8 @@
 
 | 结论 | 条数 |
 |---|---|
-| 真缺陷（已修，附红→绿） | 14 |
-| 真缺陷（越界，已登记移交；`cmd/dshd/serve*.go` 不许动） | 1 |
+| 真缺陷（已修，附红→绿） | 14 + 2（原「越界移交」的两条，见 §5.1） |
+| 真缺陷（越界，已登记移交；`cmd/dshd/serve*.go` 当时不许动）→ 已由后续会话修复 | 1 → 0 |
 | 可接受（说清为什么不伤人） | 18 |
 | 需要设计决定（两个方向的代价都写清，交给用户） | 3 |
 
@@ -117,7 +117,7 @@
 | 写进去 0 字节 | `v4.Writer.Append` 至少写一行 JSON + `\n`；`writeFrame` 还有"帧 < 8 字节即报错" | 0 字节帧在编解码层就不成立 | 可接受（结构上不可能） |
 | `append` 了但 `seq` 没动 | `Log.Append` 在写盘**成功后**才自增；失败直接返回 | 拒绝时 seq 不动，已有测试断言 | 可接受（结构上不可能） |
 | 回合失败时没有 `turn/end`（悬挂回合） | `agent.Run` 出错后调用方直接返回，不补结局事件 | 进程退出码非 0 / ACP 回 error，**不静默**；但日志里 turn 没有闭合 | **设计决定 D1**（见 §4） |
-| `modelRunner` 用 `m.Text == ""` 过滤历史 | assistant 只有 tool_calls 时 `Text` 为空 ⇒ 整条消息被丢掉，后续 tool 结果找不到对应调用 | 模型会看到"孤立的工具结果"；历史语义被悄悄改掉 | **真缺陷（越界，移交）**：在 `cmd/dshd/serve_turn.go`，按边界不许改；建议改为按 role/内容块判断 |
+| `modelRunner` 用 `m.Text == ""` 过滤历史 | assistant 只有 tool_calls 时 `Text` 为空 ⇒ 整条消息被丢掉，后续 tool 结果找不到对应调用 | 模型会看到"孤立的工具结果"；历史语义被悄悄改掉 | **真缺陷（已修，见 §5.1）**：原在 `cmd/dshd/serve_turn.go`，当时按边界不许改；后来放开，判据换成 `assistantHasPayload`（正文/思考块/tool_calls 任一） |
 | `modelRunner` 空响应 | 旧：只写 user 消息 + `turn/done` | 与 LLM 层第 1 条同形 | **真缺陷（已修，间接）**：§3.2 的 llm 守卫让 `Stream` 直接报错 ⇒ `turn/error`；未改 `serve_turn.go` |
 
 ### 2.4 Transport 层
@@ -340,7 +340,7 @@
 |---|---|---|
 | `IsAnnotationKey(k string, inPropertyMap bool) bool` | 唯一判断：这个 `description` 是注解还是参数名 | `cmd/dshd.tightenObject` |
 | `IsPropertyMapKey(k string) bool` | 「名字 → schema」词汇表（properties/patternProperties/$defs/definitions） | `internal/schema` 内部 |
-| `Compact(raw)` / `StripAnnotations(v)` | 「只删注解」这一档变换的**唯一**实现 | `internal/agent.CompactSchema`（转调）、`cmd/dshd.shapeless` |
+| `Compact(raw)` | 「只删注解」这一档变换的**唯一**实现（内部递归函数不导出） | `internal/agent.CompactSchema`（转调）、`cmd/dshd.shapeless` |
 
 依赖方向：`internal/agent → internal/schema`、`cmd/dshd → internal/schema`，
 `internal/schema → 只有标准库`。没有 `internal/* → cmd/*` 的边。`go list -deps` 核过。
@@ -430,12 +430,91 @@ $ go test ./cmd/dshd -run TestDescriptionRuleIsOneJudge -v -count=1
 
 ## 5. 未改但已登记（越界 / 后续）
 
+> **2026-11-04 更新**：前两条（`serve_turn.go` 的历史过滤、`ServerFrame{Seq: 1}`）
+> 当时因为 `cmd/dshd/serve*.go` 被别人占着而移交，**现已修复**——原条目保留不动，
+> 证据见 §5.1。后两条仍然登记着。
+
 | 项 | 为什么没改 | 建议 |
 |---|---|---|
-| `cmd/dshd/serve_turn.go`：`modelRunner` 用 `m.Text == ""` 过滤历史，丢掉只有 tool_calls 的 assistant 消息 | 边界明确不许动 `cmd/dshd/serve*.go`（别人在改） | 改成按 role + `ToolCalls` 判断；补一条"历史里 tool 结果必须能找到对应调用"的测试 |
-| `cmd/dshd/serve_turn.go`：`ServerFrame{Seq: 1}` 硬编码，绕过 journal | 同上 | 走 `emitFrame`；否则客户端会看到重复 seq=1、也没有 time |
+| `cmd/dshd/serve_turn.go`：`modelRunner` 用 `m.Text == ""` 过滤历史，丢掉只有 tool_calls 的 assistant 消息 | 边界明确不许动 `cmd/dshd/serve*.go`（别人在改） | 改成按 role + `ToolCalls` 判断；补一条"历史里 tool 结果必须能找到对应调用"的测试 → **已解决（§5.1）** |
+| `cmd/dshd/serve_turn.go`：`ServerFrame{Seq: 1}` 硬编码，绕过 journal | 同上 | 走 `emitFrame`；否则客户端会看到重复 seq=1、也没有 time → **已解决（§5.1）** |
 | `cmd/dshd/serve.go`：`session.compact` 与正在跑的回合会争 `.lock`，报"正被另一个进程写入" | 同上；而且错误措辞把同进程说成"另一个进程" | 由宿主侧串行化压缩与回合，或把措辞改成"这个会话正在被写入" |
 | 模块装配的"`Register` 一个都没注册"通用守卫 | 要改 `internal/kernel` 的裁决逻辑（红线 R1/边界） | 若要做，在 `Assemble` 后按模块统计"新增工具数/提供能力数"，为 0 且非纯拦截器模块时 Warn |
+
+### 5.1 移交的两条：已解决（2026-11-04）
+
+改动只有 `cmd/dshd/serve_turn.go` 一个文件（外加新测试 `cmd/dshd/serve_turn_history_test.go`）；
+`internal/` 一行没动，`transport.Message` 也没动。
+
+**缺陷比"少一条消息"更深**：`modelRunner` 的历史原来是从 `sessionSource.Messages`
+（`transport.Message`）来的，而那个投影**只有 `Text`，没有 `tool_calls`、也没有 `tool_call_id`**。
+所以就算保住那条 assistant 消息，工具结果照样是孤立的——`role:tool` 没有 `tool_call_id`，
+上游换个严格的实现直接 400。修法是从 `session.Surface` 派生（`run` / `acp` 用的同一份投影：
+tool-call 块 → `Message.ToolCalls`，`tool/result` → `Message.ToolCallID`），
+压缩遮蔽也按 Surface 折叠（旧路径根本无视压缩）。
+
+**判据只有一份**：`assistantHasPayload(text, reasoning, toolCalls)`，三处调它——
+历史过滤、这一轮要不要推帧、要不要落盘。分开写两份的下场是两边迟早漂。
+思考块要单独带出来：`llm.Message` 没有 `Reasoning` 字段，`type=reasoning` 的块在投影时被丢弃，
+所以把"哪条 assistant 事件带思考块"射成 `seq → 文本`（`reasoningBySeq`）。
+
+**反方向的孤立也补上了**：`assistant` 有 `tool_calls`、却没有对应的 `tool/result`
+（`maxSteps` 用满停在工具调用上、半截日志）——带着它发请求，上游要么 400，
+要么把下一条用户消息当成工具结果。所以摘掉没结果的调用；摘空了就整条不发。
+
+**红（HEAD `8470b98` 的 `serve_turn.go`，隔离副本里跑同一份测试）**：
+
+```
+--- FAIL: TestModelRunnerHistoryKeepsToolCallOnlyAssistant
+    历史组装不对：
+        得到 user:"看看目录里有几个文件" → tool():"68 个文件" → user:"接着干"
+        要   user:"看看目录里有几个文件" → assistant[call_1:bash] → tool(call_1):"68 个文件" → user:"接着干"
+--- FAIL: TestModelRunnerHistoryKeepsReasoningOnlyAssistant
+    只有思考块的消息被丢了：
+        得到 user:"先想想" → user:"想好了吗"
+        要   user:"先想想" → assistant<空> → user:"想好了吗"
+--- FAIL: TestModelRunnerAssistantFrameUsesJournalSeq
+    assistant/message 帧的 seq = 1，要 2（journal 垫了一帧；写死 1 就是绕过了 journal）
+--- FAIL: TestModelRunnerPersistsReasoningOnlyResponse
+    只有 reasoning 的回答没落盘（事件 1 条，没有 assistant/message）
+```
+
+红里那个 `tool()` 值得看：旧的 `tool` 消息连 `tool_call_id` 都是空的。
+同一份测试在修复后全绿（`go test ./cmd/dshd -count=1` 整包 ok）。
+
+**绿**：7 条新测试。除上面四条，还有两条"不许误伤"——真正空的消息
+（无正文、无思考块、无 tool_calls）仍然被过滤，有正文的照旧；外加一条
+"没有结果的工具调用要被摘掉"。
+
+**真机（同一条会话、同一个网关、同一个取证代理，只换二进制）**：
+
+```json
+// HEAD 的二进制：第二轮请求
+"messages": [
+ {"role":"user","content":"用 bash 执行 ls | wc -l，把结果告诉我"},
+ {"role":"tool","content":"[exit 0] ...\n3"},   // ← 没有 tool_call_id，前面也没有 assistant tool_calls
+ {"role":"assistant","content":"结果为 **3**。..."},
+ {"role":"user","content":"刚才 ls | wc -l 的结果是多少？..."}
+]
+// 修复后的二进制：第二轮请求
+"messages": [
+ {"role":"user","content":"用 bash 执行 ls | wc -l，把结果告诉我"},
+ {"role":"assistant","tool_calls":[{"id":"call_00_egcqA5rgUJwFz2KFyrRp6124",
+   "type":"function","function":{"name":"bash","arguments":"{\"command\": \"ls | wc -l\", ...}"}}]},
+ {"role":"tool","tool_call_id":"call_00_egcqA5rgUJwFz2KFyrRp6124","content":"[exit 0] ...\n3"},
+ {"role":"assistant","content":"结果为 **3**。..."},
+ {"role":"user","content":"刚才 ls | wc -l 的结果是多少？..."}
+]
+```
+
+`seq` 那条也在同一台机器上核过：`session.history` 回的是
+`1 assistant/message time=1793762732610` 与 `2 turn/done`——帧带 `time`、补洞读得到，
+说明它真的进了 journal（硬编码那版 `time` 是 0，journal 里根本没有它）。
+单元测试用的是"先垫一帧"的会话，所以能把"写死 1"和"journal 发号"分开。
+
+**真机没有复现出"行为怪"**：模型两轮都答了 `3`。原因是孤立结果的内容里就写着 `3`，
+模型猜得出来。所以这条缺陷的可见症状不是每次都会错，而是**请求本身不合法**——
+把它当成"这次没炸"来判绿，正是本报告 §1.1 说的那种错。
 
 ## 6. 复跑与验收
 
