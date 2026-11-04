@@ -82,7 +82,9 @@ func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home str
 	}
 }
 
-func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emit func(agent.Event) error) (string, map[string]any, error) {
+// Prompt 的返回值是**命名**的，因为出口兜底要看见最终的错误：
+// turn 开了没闭合是这一层必须自己负责的事（D1），defer 里只能读命名返回值。
+func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emit func(agent.Event) error) (stopReason string, usage map[string]any, err error) {
 	r.mu.Lock()
 	logw := r.logs[sessionID]
 	if logw == nil {
@@ -115,6 +117,20 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	if err := logw.Append("turn/start", session.TurnStartData(turn)); err != nil {
 		return "", nil, err
 	}
+	// 同 run：turn 一开，结局就有唯一责任人。ACP 这边尤其要补——进程不会为此退出，
+	// 下一个 prompt 还要接着用同一个会话；日志是唯一留下"这一轮怎么了"的地方。
+	tc := newTurnCloser(logw, turn)
+	defer func() {
+		if p := recover(); p != nil {
+			if cerr := tc.ExitOnPanic(p); cerr != nil {
+				fmt.Fprintf(os.Stderr, "panic 时补 turn/end 失败（日志里这一轮仍是悬挂）：%v\n", cerr)
+			}
+			panic(p)
+		}
+		if cerr := tc.Exit(ctx, err); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
 	if err := logw.Append("user/message", session.UserMessage(user)); err != nil {
 		return "", nil, err
 	}
@@ -185,8 +201,11 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 				return err
 			}
 		case agent.EventTurnEnd:
-			// 同 run：结局按 finish 写，截断不许记成「完成」。
-			if err := logw.Append("turn/end", session.TurnEndData(turn, session.TurnEndKind(e.Finish), "")); err != nil {
+			// 同 run：结局按 finish 写，截断不许记成「完成」；走 closer 才幂等。
+			// 这里仍然要往下走到 emit：ACP 客户端那边的 turn 结束是靠
+			// session/prompt 的 stopReason 回应的，但 emit 是这一层的统一观测口，
+			// 少发一个事件等于偷偷改掉了另一条链路的行为。
+			if err := tc.End(e.Finish); err != nil {
 				return err
 			}
 		}

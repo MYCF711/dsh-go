@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/session"
 	"dshgo/internal/transport"
 )
 
@@ -163,6 +165,24 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	if s := strings.TrimSpace(stderr.String()); s != "" {
 		fmt.Fprintf(os.Stderr, "child(stderr): %s\n", tail(s, 800))
 	}
+
+	// 子进程已经退出、写锁该释放了：它没能自己闭合的那一轮，这里补上。
+	//
+	// 只读日志的人没有退出码、也没有 WS 上的 turn/error 可看。日志里留一个
+	// 开了没结局的 turn，他们只能猜"这一轮到底跑完没有"（D1）。
+	//
+	// 成功路径不读日志：`dshd run` 的退出码 0 只有一种可能——循环正常收工，
+	// 而收工前它一定写过 turn/end（cmdRun 的 Emit）。失败/取消才需要回看。
+	//
+	// 位置在 close(done) **之前**：follow 收尾时会再 drain 一次，补写的这一帧
+	// 于是也进了 journal——session.history 与 session.load 看到的是同一个结局。
+	if werr != nil || ctx.Err() != nil {
+		if turn, serr := r.settleTurn(ctx, sessionID, cmd.Process.Pid, werr); serr != nil {
+			fmt.Fprintf(os.Stderr, "补 turn/end 失败（日志里这一轮仍是悬挂）：%v\n", serr)
+		} else if turn > 0 {
+			fmt.Fprintf(os.Stderr, "子进程没写 turn/end，宿主补了一条：turn=%d\n", turn)
+		}
+	}
 	close(done)
 	fw.Wait()
 
@@ -296,6 +316,113 @@ func (r *loopRunner) drain(rd *v4.Reader, noReuse bool, path string, offset *int
 			r.emit(sessionID, ev.Type, ev.Data)
 		}
 	}
+}
+
+// openTurn 找出日志里**最后一个开了但没闭合**的 turn（0 = 全部闭合）。
+//
+// 用顺序状态机而不是"数 turn/start 与 turn/end 的条数"：`dshd run` 每轮都写
+// turn=1（同一会话续跑时编号会重复），按编号配对会把新轮配到旧轮的结局上。
+func openTurn(back *v4.Log) int {
+	open := 0
+	for _, ev := range back.Events {
+		switch ev.Type {
+		case "turn/start":
+			var d struct {
+				Turn int `json:"turn"`
+			}
+			if err := json.Unmarshal(ev.Data, &d); err == nil {
+				open = d.Turn
+			}
+		case "turn/end":
+			open = 0
+		}
+	}
+	return open
+}
+
+// settleTurn 给"子进程没能自己收口"的那一轮补一条 turn/end。
+//
+// 子进程就是 `dshd run`，它自己有一条统一出口（cmdRun 的 turnCloser）。
+// 这里兜的是它**根本没机会跑那条出口**的情形：ctx 取消时 exec.CommandContext
+// 直接 TerminateProcess、进程崩溃、被外部工具掐掉。这些情况下日志里会留下
+// 悬挂 turn，而只读日志的消费者无从知道这一轮结束没有。
+//
+// 幂等：只补"最后一个 turn/start 之后没有 turn/end"的那一轮；已经闭合时
+// 这里一个字节都不写。
+func (r *loopRunner) settleTurn(ctx context.Context, sessionID string, childPID int, cause error) (int, error) {
+	src := newSessionSource(r.home, "")
+	path, err := src.resolve(sessionID)
+	if err != nil {
+		// 没有这份会话 = 子进程连会话都没建起来，没有"开了的 turn"可补。
+		return 0, nil
+	}
+	back, err := v4.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("读不出会话日志，无法判断要不要补 turn/end：%w", err)
+	}
+	turn := openTurn(back)
+	if turn <= 0 {
+		return 0, nil
+	}
+	logw, err := openForSettle(path, childPID)
+	if err != nil {
+		return 0, err
+	}
+	defer logw.Close()
+	kind, detail := turnEndForSettle(ctx, cause)
+	if err := logw.Append("turn/end", session.TurnEndData(turn, kind, detail)); err != nil {
+		return 0, fmt.Errorf("写 turn/end 失败：%w", err)
+	}
+	return turn, nil
+}
+
+// turnEndForSettle 给"子进程没写结局"挑 kind。
+//
+// 被取消 → aborted（宿主主动中止，v4 的 aborted 带原因）；
+// 崩溃/非零退出 → error，把子进程的失败原因原样带上。
+func turnEndForSettle(ctx context.Context, cause error) (kind, detail string) {
+	switch {
+	case ctx != nil && ctx.Err() != nil:
+		return "aborted", "这一轮被宿主中止：子进程被取消，没来得及写 turn/end"
+	case cause != nil:
+		return "error", "子进程退出但这一轮没有 turn/end：" + cause.Error()
+	default:
+		return "error", "子进程正常退出，但这一轮没有 turn/end（宿主缺陷，不是这一轮跑完了）"
+	}
+}
+
+// openForSettle 打开会话写入端；被**刚退出的那个子进程**留下的写锁挡道时，
+// 只清理那一把锁，然后重试一次。
+//
+// 为什么可以清：锁文件里记着 pid，而 cmd.Wait 已经证明这个 pid 退出了；
+// 别的 pid 的锁一概不碰——删错锁等于把"同一份会话只有一个写入者"的约束拆了。
+func openForSettle(path string, childPID int) (*session.Log, error) {
+	logw, err := session.OpenSessionAt(path)
+	if err == nil {
+		return logw, nil
+	}
+	if childPID <= 0 || !lockBelongsTo(path+".lock", childPID) {
+		return nil, err
+	}
+	if rerr := os.Remove(path + ".lock"); rerr != nil {
+		return nil, err
+	}
+	return session.OpenSessionAt(path)
+}
+
+// lockBelongsTo 判断锁文件是不是 childPID 留下的（只认 pid 精确匹配）。
+func lockBelongsTo(lockPath string, pid int) bool {
+	b, err := os.ReadFile(lockPath)
+	if err != nil {
+		return false
+	}
+	want := fmt.Sprintf("pid=%d", pid)
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // tail 取字符串末尾 n 个字节（错误正文可能很长，界面只要看得懂最后一句）。

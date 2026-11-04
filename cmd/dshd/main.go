@@ -6,6 +6,7 @@ import (
 	"context"
 	"dshgo/internal/approval"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -428,7 +429,7 @@ func emitJobs(root *kernel.Scope) {
 // cmdRun 跑一个真实 turn：装配 → 模型 → 工具 → 回灌 → 收尾。
 //
 // 这是 M2 的验收动作：它同时踩到装配、工具流水线、LLM 流式、agent 双循环四条线。
-func cmdRun(argv []string) error {
+func cmdRun(argv []string) (retErr error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	manifest := fs.String("manifest", "dsh.toml", "manifest 路径")
 	prompt := fs.String("prompt", "", "用户输入")
@@ -608,6 +609,27 @@ func cmdRun(argv []string) error {
 	if err := logw.Append("turn/start", session.TurnStartData(1)); err != nil {
 		return err
 	}
+	// turn 一开，结局就有**唯一**责任人：从这里到函数返回之间的每一种走法
+	// （正常收工、模型报错、步数用满、取消、panic）都必须留下一条 turn/end。
+	//
+	// 注册在这个位置是有意的：defer 是后进先出，所以它比上面那个
+	// `defer logw.Close()` 先跑——补写结局时文件还开着。
+	tc := newTurnCloser(logw, 1)
+	defer func() {
+		if r := recover(); r != nil {
+			// panic 也是"这一轮没跑完"的一种。先补结局，再把 panic 原样抛回去：
+			// 吞掉它会让一个真 bug 变成一次"看起来很正常的失败"。
+			if cerr := tc.ExitOnPanic(r); cerr != nil {
+				fmt.Fprintf(os.Stderr, "panic 时补 turn/end 失败（日志里这一轮仍是悬挂）：%v\n", cerr)
+			}
+			panic(r)
+		}
+		// 出口兜底：已经写过就什么都不做（幂等）；没写过就按实际情况补一条。
+		// 写结局失败**不许盖住原始错误**——原始错误才是这一轮为什么死的那个原因。
+		if cerr := tc.Exit(context.Background(), retErr); cerr != nil && retErr == nil {
+			retErr = cerr
+		}
+	}()
 	if err := logw.Append("user/message", session.UserMessage([]spi.Block{{Type: "text", Text: *prompt}})); err != nil {
 		return err
 	}
@@ -746,7 +768,10 @@ func cmdRun(argv []string) error {
 			case agent.EventTurnEnd:
 				// 结局写 finish 对应的 kind，不是恒写 completed：
 				// 被 max_tokens 截断的回合要留成 max-tokens，否则客户端会把它当完整回答。
-				return logw.Append("turn/end", session.TurnEndData(e.Turn, session.TurnEndKind(e.Finish), ""))
+				//
+				// 走 closer 而不是直接 Append：出口兜底靠它的 closed 标志判"写过没有"，
+				// 两条路各自直接写就会给同一轮写出两条 turn/end。
+				return tc.End(e.Finish)
 			}
 			return nil
 		},
@@ -779,6 +804,101 @@ func cmdRun(argv []string) error {
 	fmt.Println(last.Content)
 	fmt.Fprintf(os.Stderr, "会话：%s（%d 事件）\n", logw.Path, logw.Seq())
 	return nil
+}
+
+// turnCloser 是"开了的 turn 一定闭合"的唯一出口（D1）。
+//
+// 为什么需要它：`turn/end` 原来只在模型自己收工时由 Emit 写一条。任何**别的**
+// 结束方式——步数用满、模型报错、空响应、取消、panic——都直接 return，日志里
+// 于是留下一个开了没结局的 turn。只读日志的消费者（回放、UI、history_search、
+// 事后取证）拿不到退出码、也拿不到 ACP 的错误帧，只能看见"悬挂"，却无从判断
+// 这一轮到底跑完没有。进程侧不静默 ≠ 日志侧不静默。
+//
+// 用法只有三步：
+//
+//	tc := newTurnCloser(logw, turn)          // turn/start 之后
+//	return tc.End(e.Finish)                  // Emit 的 EventTurnEnd
+//	defer tc.Exit(ctx, err)                  // 函数出口（panic 时 ExitOnPanic）
+//
+// 三条路都走 write，靠 closed 保证**一条 turn 只有一条 turn/end**：重复写会让
+// 只读日志的消费者数错轮次（"这一轮结束两次"）。
+type turnCloser struct {
+	logw   *session.Log
+	turn   int
+	closed bool
+}
+
+func newTurnCloser(logw *session.Log, turn int) *turnCloser {
+	return &turnCloser{logw: logw, turn: turn}
+}
+
+// End 写"跑完了"的结局：kind 由模型的 finish 映射（截断仍是 max-tokens）。
+func (c *turnCloser) End(finish string) error {
+	return c.write(session.TurnEndKind(finish), "")
+}
+
+// Exit 是统一出口：已经写过就什么都不做，否则按**实际**情况补一条。
+//
+// err 为 nil 且 ctx 没结束、却走到这里，说明宿主自己漏写了结局——那不是
+// "这一轮跑完了"，所以记成 error 而不是 completed：宁可让日志显眼地不对，
+// 也不让一个真缺陷被伪装成正常收工。
+func (c *turnCloser) Exit(ctx context.Context, err error) error {
+	if c == nil || c.closed {
+		return nil
+	}
+	kind, detail := turnEndForExit(ctx, err)
+	return c.write(kind, detail)
+}
+
+// ExitOnPanic 在 panic 展开时补一条 error；调用方负责把 panic 原样抛回去。
+func (c *turnCloser) ExitOnPanic(v any) error {
+	if c == nil || c.closed {
+		return nil
+	}
+	return c.write("error", fmt.Sprintf("宿主 panic，这一轮没有跑完：%v", v))
+}
+
+func (c *turnCloser) write(kind, detail string) error {
+	if c == nil || c.closed {
+		return nil
+	}
+	if err := c.logw.Append("turn/end", session.TurnEndData(c.turn, kind, detail)); err != nil {
+		return err
+	}
+	c.closed = true
+	return nil
+}
+
+// turnEndForExit 给出口错误挑 kind。
+//
+// 只用 v4 词汇表里已有的值（completed / aborted / blocked / error / max-tokens /
+// interrupted / forked），**不新造 kind**：
+//   - 取消/超时 → aborted + reason（v4 的 aborted 本来带一句原因；TurnEndData
+//     把 detail 放进 reason，形状不变）；
+//   - 其余失败 → error + error.message（失败原因原文，不做归纳）；
+//   - 不写 completed、也不写 max-tokens：那两种是"这一轮按预期结束"的信号，
+//     把失败记成它们等于把错误藏进一个看起来正常的值里。
+//
+// 步数用满**也走 error**，不是新造一个 max-steps：v4 没有这个词汇，
+// 而"没收敛"这件事由 error.message 原文（"turn 用满了 N 步仍未收敛"）说清。
+func turnEndForExit(ctx context.Context, err error) (kind, detail string) {
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "aborted", turnAbortReason(err)
+		}
+		return "error", err.Error()
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return "aborted", turnAbortReason(ctx.Err())
+	}
+	return "error", "宿主没有写出结局：turn 开了，但没有任何结局事件（宿主缺陷，不是这一轮跑完了）"
+}
+
+func turnAbortReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "这一轮超时被中止（上下文到期），结果不完整"
+	}
+	return "这一轮被取消（上下文已结束），结果不完整"
 }
 
 func envOr(k, def string) string {
