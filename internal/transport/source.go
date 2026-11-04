@@ -16,6 +16,14 @@ type Source interface {
 // **这个字段原来是死的**：`LoadResult.Permission` 的注释写着「当前审批策略
 // （deny/ask/allow/auto）」，但协议层从来没填过它（`res.Permission` 零命中），
 // 所以界面上读到的永远是空串。注释说得越好听，越容易被当成"已经支持了"。
+// GoalSourcer 是**可选**能力：告诉协议层某个会话当前在做什么。
+//
+// 和 Permission/Cwd 同款：`LoadResult` 有这个字段但可以没人填——
+// 空串表示"这条会话没有设目标"，界面据此不画 GoalBar。
+type GoalSourcer interface {
+	Goal(sessionID string) (string, error)
+}
+
 type PermissionSourcer interface {
 	Permission(sessionID string) (string, error)
 }
@@ -129,6 +137,11 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 		if ms, ok := src.(ModelSourcer); ok {
 			if m, merr := ms.Model(sessionID); merr == nil {
 				res.Model = m
+			}
+		}
+		if gs, ok := src.(GoalSourcer); ok {
+			if goal, gerr := gs.Goal(sessionID); gerr == nil && goal != "" {
+				res.Goal = goal
 			}
 		}
 		if ps, ok := src.(PermissionSourcer); ok {

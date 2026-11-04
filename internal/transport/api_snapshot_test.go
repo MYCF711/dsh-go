@@ -105,7 +105,9 @@ func TestSessionAPISnapshot(t *testing.T) {
 	// 界面不能自己发请求——也不能硬编码模型名（会过期、且会骗人）。
 	// 第 22-24 个 terminal.open/input/output：长连接 shell。
 	// 底层 modules/exec/bash 的 session 本来就是持久 PTY，缺的只是开一个留住它。
-	const done, target = 24, 24
+	// 第 25 个 session.setGoal：界面 GoalBar 停靠在 composer 上方。
+	// 它在回答"我在干嘛"，而这个问题每时每刻都在被问。
+	const done, target = 25, 25
 	if got := len(SessionMethods()); got != done {
 		t.Fatalf("SessionMethods() 有 %d 个方法，当前进度应当是 %d 个（U0 目标 %d 个）", got, done, target)
 	}

@@ -28,6 +28,8 @@ type sessionSource struct {
 	// **可以 nil**：不带权限覆盖的场景（老测试、别的入口）照样能 work，
 	// 只是 `session.load` 回空串——那正是"不知道"的表示。
 	perms *permissionOverrideStore
+	// goals 是会话级目标（`<home>/state/session-goal.json`）。同样可以 nil。
+	goals *goalOverrideStore
 }
 
 func newSessionSource(home, cwd string) *sessionSource {
@@ -175,6 +177,17 @@ func (s *sessionSource) Model(sessionID string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// Goal 报这条会话当前在做的事（没设过就回空串 = 没有目标）。
+//
+// **不是从 v4 读**：goal 是界面状态（用户/agent 当场设的），
+// 不是会话内容。从日志里读会得出"上一次设过什么"，那是历史不是意图。
+func (s *sessionSource) Goal(sessionID string) (string, error) {
+	if s.goals == nil {
+		return "", nil
+	}
+	return s.goals.Get(sessionID), nil
 }
 
 // Permission 报这条会话的审批策略覆盖（没设过就回空串 = 不知道）。

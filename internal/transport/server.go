@@ -85,6 +85,8 @@ type Options struct {
 	SetSessionPermission func(sessionID, perm string) error
 	// ModelsList 列网关上的模型。nil = 这个宿主没接模型出口（回 501）。
 	ModelsList func(ctx context.Context) ([]ModelEntry, error)
+	// SetSessionGoal 设/清一个会话的 goal。nil = 不支持（回 501）。
+	SetSessionGoal func(sessionID, goal string) error
 	// 长连接终端。nil = 这个宿主不给终端（回 501）。
 	TerminalOpen   func(cwd string) (string, error)
 	TerminalInput  func(id, data string) error
@@ -351,6 +353,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionSetPermission(w, r)
 	case MethodModelsList:
 		s.handleModelsList(w, r)
+	case MethodSessionSetGoal:
+		s.handleSessionSetGoal(w, r)
 	case MethodTerminalOpen:
 		s.handleTerminalOpen(w, r)
 	case MethodTerminalInput:

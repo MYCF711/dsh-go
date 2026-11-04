@@ -53,6 +53,12 @@ const (
 	// 和 `jobs.*` 的区别：job 是"跑一条命令、有结束"；terminal 是"一直开着、
 	// 用户随时敲"。底层 `modules/exec/bash` 的 `session` 本来就是持久 PTY，
 	// 只是一直没有"开一个留住它"的入口。
+	// MethodSessionSetGoal 设/清这条会话的 goal（一句话：现在在做什么）。
+	//
+	// 和 setModel/setPermission 同构，只是值是一段自由文本。
+	// 界面上的 GoalBar 就停靠在 composer 上方——它在回答"我在干嘛"，
+	// 而这个问题每时每刻都在被问。
+	MethodSessionSetGoal Method = "session.setGoal"
 	MethodTerminalOpen   Method = "terminal.open"
 	MethodTerminalInput  Method = "terminal.input"
 	MethodTerminalOutput Method = "terminal.output"
@@ -70,6 +76,7 @@ func SessionMethods() []Method {
 		MethodSessionDelete, MethodSessionFork, MethodSessionCompact, MethodWorkspaceList,
 		MethodJobsList, MethodJobsOutput, MethodScheduleList,
 		MethodSessionSetModel, MethodSessionSetPermission, MethodModelsList,
+		MethodSessionSetGoal,
 		MethodTerminalOpen, MethodTerminalInput, MethodTerminalOutput,
 		MethodFSRead, MethodFSWrite, MethodConfigGet, MethodConfigSet,
 	}
@@ -133,6 +140,8 @@ type LoadResult struct {
 	// **空字符串表示不知道**，界面就该整段不画——不许拿我们的默认值冒充，
 	// 那样用户会以为"这个会话是用默认模型跑的"，而它可能不是。
 	Model string `json:"model,omitempty"`
+	// Goal 是这条会话当前在做的事（一句话）。空 = 没设过，界面不画 GoalBar。
+	Goal string `json:"goal,omitempty"`
 	// Permission 是当前审批策略（deny/ask/allow/auto，H5）。
 	// **不是 mode**：mode 决定模型能看见哪些工具，权限决定写操作要不要问人。
 	Permission string `json:"permission,omitempty"`
