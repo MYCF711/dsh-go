@@ -1411,12 +1411,166 @@ dump 工具（`TestZZReasoningDump`）**不进主线**：它只是对跑用的�
 用 425 个真实会话的离线对跑代替）。
 
 
+### 5.7 同一条规则的第二份实现：判据从"行为"换成"结构"（2026-11-04，守卫上线）
+
+§5.1–§5.6 修的全是**具体的**投影，一共四类事故，每一类都有提交号：
+
+| # | 事故 | 提交 | 收敛到 |
+|---|---|---|---|
+| 1 | 两份压表实现（`agent.CompactSchema` / `cmd/dshd.stripDescriptions`）都"见 `description` 键就删"，各删错一次，一共删掉 8 个名叫 `description` 的参数（5 个还在 `required` 里），全链路不报错 | 409879e / a882d5b | `internal/schema` |
+| 2 | 三份铺块逻辑（`run` / `serve` / `acp`），ACP 那份不写思考块——那轮想过什么从 v4 里整轮消失，而 history / fork / load 三处读路径全是对的 | 941460c / 3c9e457 | `assistantBlocksFrom` |
+| 3 | 两份思考块识别（serve 取第一条 / fork 全带），同一形状各解一遍 JSON，一处认顶层 `content` 另一处不认 | b4809d1 | `internal/session/reasoning.go` |
+| 4 | 七处"只认 text"的投影 → 129 条回答整条消失 | 926ff4e 等 | `scripts/text-only-guard.py` |
+
+第四类已经有守卫（§5.6），**本守卫不重复实现它**——重复实现一条守卫，正是本守卫要抓的病。
+
+#### 为什么行为测试挡不住它
+
+§5.6 末尾那张红→绿表里有一行要单独看：
+
+| 变异 | 改后 |
+|---|---|
+| 变异 A：serve 取 `texts[len(texts)-1]` | **FAIL**（seq 1 首条 = "第二块：再数文件"） |
+| 变异 B：`ReasoningBlocks` 收完第一块就 `break` | **FAIL**（seq 1 全带 = 只有第一块） |
+| 变异 C：serve 里再写一份 `b.Type == "reasoning"` | **FAIL**（唯一实现的结构判据） |
+
+A、B 改的是**口径**，行为用例抓得住。C 改的是**"又多了一份实现"**——它行为完全正确，
+因为两份此刻一致。要等它们漂开才发作，而漂开的那一刻没有任何人知道，
+症状是"有时候思考块在、有时候不在"这种谁也复现不了的样子。
+
+所以判据只能是结构，两种，都不是行为：
+
+- 同一个**判据字面量**出现在登记位置之外（`b.Type == "reasoning"`、`k == "description"`）；
+- 同一种**组装形状**出现在登记位置之外（一个函数里同时铺两种以上的内容块）。
+
+#### 四条规则（`scripts/single-source.txt`）
+
+| 概念 | 唯一实现 | 形状ID | 抓的判据 |
+|---|---|---|---|
+| 思考块识别 | `internal/session/reasoning.go:ReasoningText` | `reasoning-type-discriminator` | `.Type == "reasoning"` / `!= "reasoning"` / `b["type"] == "reasoning"` / `case "reasoning":`（switch 操作数是块类型时） |
+| 思考块构造 | `internal/session/log.go:ReasoningBlock` | `reasoning-block-write` | 手写 `{"type": "reasoning", …}` 或 `spi.Block{Type: "reasoning"}` |
+| 铺块顺序 | `cmd/dshd/serve_turn.go:assistantBlocksFrom` | `assistant-block-layout` | **同一个函数里**同时构造两种以上的内容块 |
+| schema 注解判据 | `internal/schema/`（整包） | `schema-annotation-key` | `k == "description"` / `case "description":` / 自己造 `const … = "description"` |
+
+铺块那条为什么要判"两种以上"而不是判"思考→正文→调用"三段：三段匹配只能抓住**照抄**的
+那一份，而出事故的 ACP 那份恰恰**少了一段**（没有思考块），反而不会红。
+
+#### 不吵的三条设计（这是硬约束，不是附带好处）
+
+守卫太吵的结局是"后来人加白名单而不是改代码"，那比没有守卫更糟。三条：
+
+1. **委派逃逸**：命中所处的**同一个函数**里调了唯一实现的入口，就不算第二份。
+   `history.go:135` 的 `case "reasoning":` 正是这个形状——它必须按块顺序自己走块列表，
+   但"什么算思考块"调了 `session.ReasoningText`。实测它是绿的，**不需要白名单**。
+   于是每条 FAIL 的修法都是"改成调用唯一实现"，不是"加一行白名单"。
+2. **字面量必须是真的 Go 字面量**：词法器复用 `text-only-guard.py` 的 `strip_source`
+   （不是复制一份——复制一份正是本守卫要抓的病）。字符串内容在 `blank` 里是下划线、
+   引号只在代码态保留，所以 `modules/` 下工具 schema 里那几百个 `"description":`
+   和 `json:"description"` 结构体标签**一个都不会误报**（实测 0 处）。
+3. **白名单当前 0 条**。真有第二处且这轮收不了口的，写进登记表的 `second=` 列：
+   只打 WARN、每次门禁都打出来、第三处照样 FAIL——不是挠一次就消失的橡皮图章。
+
+#### 造红：三条事故逐条改回去，逐条红
+
+隔离副本（`--root` 指向系统临时目录下的整树拷贝，仓库里的 `.go` 一个都没动），
+旧代码逐字取自 git，不是想象的形状：
+
+| 改回旧写法 | 守卫输出 |
+|---|---|
+| ACP 写盘重新自己铺块（941460c 之前） | `FAIL 铺块顺序 @ cmd/dshd/acp.go:87 [assistant-block-layout] Prompt` |
+| `reasoningBySeq` 重新自己解析（b4809d1 之前） | `FAIL 思考块识别 @ cmd/dshd/serve_turn.go:218 [reasoning-type-discriminator] reasoningBySeq` |
+| `tightenSchema` 重新 `k == "description"`（a882d5b 之前） | `FAIL schema 注解判据 @ cmd/dshd/tool_merged.go:731 [schema-annotation-key] tightenObject` |
+| `CompactSchema` 重新自己删键（409879e 之前） | `FAIL schema 注解判据 @ internal/agent/loop.go:373 [schema-annotation-key] CompactSchema` |
+
+两条完整输出：
+
+```
+$ # 隔离副本：ACP 写盘重新自己铺块
+$ python scripts/single-source.py --root <隔离副本>
+== 单点实现守卫 ==
+登记 4 条规则 / 0 条白名单，扫描 157 个 Go 文件（cmd, internal, modules, codecs 起）
+  FAIL 铺块顺序 @ cmd/dshd/acp.go:87 [assistant-block-layout] Prompt
+       func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, …)
+       这条只有一份实现在 cmd/dshd/serve_turn.go:assistantBlocksFrom —— 改调 assistantBlocksFrom(text, reasoning, toolCalls)
+       为什么：「一次回答铺成哪些块、什么顺序、什么条件才铺」只有一处：思考 → 正文 → 调用。第二个写盘路径自己铺一份时，它漏的那一种块不会报错，只会静默不落盘
+  WARN 铺块顺序：第二处仍在 internal/session/fork.go:copyNode（登记表 second=，见 single-source.txt 第 39 行）
+FAIL 单点实现守卫：1 处未登记（规则 4 条，白名单 0 条，WARN 1）
+[exit code: 1]
+
+$ # 隔离副本：serve 的 reasoningBySeq 重新自己解析
+$ python scripts/single-source.py --root <隔离副本>
+== 单点实现守卫 ==
+登记 4 条规则 / 0 条白名单，扫描 157 个 Go 文件（cmd, internal, modules, codecs 起）
+  FAIL 思考块识别 @ cmd/dshd/serve_turn.go:218 [reasoning-type-discriminator] reasoningBySeq
+       if b.Type == "reasoning" && strings.TrimSpace(b.Text) != "" {
+       这条只有一份实现在 internal/session/reasoning.go:ReasoningText —— 改调 session.ReasoningText(kind, text)
+       为什么：「一个内容块算不算思考」只有一条：类型是 reasoning 且正文 TrimSpace 非空。别处再写一遍 b.Type == "reasoning" 就是第二份判据，而两份必然漂（旧的两份：一份取第一条、一份全带，还都不认顶层 content）
+FAIL 单点实现守卫：1 处未登记（规则 4 条，白名单 0 条，WARN 1）
+[exit code: 1]
+```
+
+#### 已知的第二处：`fork` 重建 assistant 时也铺一次块
+
+`internal/session/fork.go` 的 `copyNode` 里，assistant 分支自己铺
+`ReasoningBlock → TextBlock → ToolCallBlock`，注释也写着"块顺序与
+`cmd/dshd/serve_turn.go` 的 assistantBlocks 一致"。它就是这条规则的第二份实现，
+而且**已经漂了一点**：`assistantBlocksFrom` 用 `TrimSpace(text) != ""` 判正文，
+`copyNode` 用 `m.Content != ""`——只有空白的回答在两处落盘形状不同。
+
+之所以没有当场 FAIL：`internal/session` 不能 import `cmd/dshd`，跨不了包；收口方向是把
+铺块下沉到 `internal/session` 让两边都调它，而那要改 `.go`。所以它登记在
+`second=internal/session/fork.go:copyNode`，**每次门禁都打一条 WARN**，
+第三处照样 FAIL。
+
+#### 评估：正常写一个新投影会不会红？
+
+**会红的情形只有一种：它自己重写判据。** 实测两个方向（都在 `guard-selftest.py` 里）：
+
+| 新写的东西 | 结果 |
+|---|---|
+| `func selftestProbeIsThinking(kind string) bool { return kind == "reasoning" }` | **FAIL**，指向 `reasoning-type-discriminator` |
+| 一个 `switch b.Type { case "reasoning": … session.ReasoningText(b.Type, b.Text) … }` 的新投影 | **绿**（`[已委派]`） |
+| 往 schema 里写说明文字 `m["description"] = doc` | **绿**（这不是在判断"它是不是注解"） |
+
+也就是说：写一条新投影、按块顺序渲染思考，正常写法是分块 `switch` + 调 `ReasoningText`，
+**不需要白名单**；只有把判据抄一遍才会红，而那时的修法是改调那个函数（一行）。
+
+会误伤的真实场景只有一个，写在这里而不是留给下一个人踩：`case "reasoning":` 如果出现在
+**不是**块类型的 switch 上（比如某个开关名分发），也会红。守卫已经收窄了一层
+（switch 操作数必须提到 `type` / `kind` / `block`），再被误伤就说明这个字面量确实需要
+一个理由——那时应该改的是这段代码的结构（把开关名和块类型分开），不是加白名单。
+
+#### 故意没抓的：`message.content` 优先、顶层 `content` 兜底
+
+同一段兜底（3 行）今天还在四处各写一遍：
+
+| 位置 | 用途 |
+|---|---|
+| `internal/session/reasoning.go:59` | 找思考块 |
+| `internal/session/history.go:62` | 拼 surface 的正文 |
+| `cmd/dshd/history.go:120` | `history_search` 的 `eventText` |
+| `cmd/dshd/transport_source.go:461` | `session.load` 的 `messagesOf`（这里多一个 `nested` 分支） |
+
+这是一个真实的第二份实现候选，但**这轮不收**：收口要往 `internal/session` 导出一个
+"从事件取块"的函数并改四个调用点，那要动 `.go`；而这轮只做守卫。现在把它做成规则，
+会立刻产生 3 条**修不掉**的 WARN——那正是"守卫太吵"的起点。
+下一刀：先导出取块函数、四个调用点改成调它，再把 `content-fallback` 这条形状登记进来。
+
+#### 没有验证的
+
+守卫是**形状**检查（词法器 + 语句块/函数边界解析），不是数据流分析：判据经变量中转
+（`k := b.Type; if k == "reasoning"` 这种写法能抓到比较那一步，因为 `"reasoning"`
+仍然出现在比较里；但把它藏进一个返回字符串的辅助函数就抓不到）。词法器的能力边界
+与 §5.6 相同（同样来自 `strip_source`）。
+
+
 ## 6. 复跑与验收
 
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"
 export GOCACHE=/tmp/gocache-silent
-python scripts/silent-success-audit.py     # 15 条守卫全在，exit 0
+python scripts/silent-success-audit.py     # 守卫/数据检查全在，0 FAIL，exit 0
+python scripts/single-source.py            # 单点实现：4 条规则 0 处未登记（白名单 0），exit 0
 go build ./... && go vet ./...
 go test ./... -count=1
 git archive HEAD | tar -x -C /tmp/hc-ss && (cd /tmp/hc-ss && go build ./...)
@@ -1507,3 +1661,50 @@ git archive HEAD | tar -x -C /tmp/hc-acpw && (cd /tmp/hc-acpw && go build ./...)
   以及 fork/转写里"它当时为什么这么干"的线索丢了。
 
 这条数字是本轮"逐处修投影"这件事值不值得做的判据——答案是值得：**它不是理论缺陷，它在真实语料里每天发生**。
+
+**D7 复跑（2026-11-04，§5.7 单点实现守卫）**：
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+python scripts/single-source.py            # 4 条规则 / 157 个文件 / 0 处未登记（白名单 0，WARN 1），exit 0
+python scripts/guard-selftest.py           # 32 条自测全 OK（含单点实现 13 条），exit 0
+python scripts/silent-success-audit.py     # 守卫/数据检查 22 项通过 0 失败，exit 0
+```
+
+`bash scripts/check.sh` 在 `git archive HEAD` 的隔离副本里跑（把本轮改的 6 个文件 overlay
+过去；check.sh 会原地 `mv modules`，禁止在共享工作树运行），结果 `ALL GREEN`：
+
+```
+  PASS  text-only 守卫：157 个文件 0 处未登记（白名单 13 条命中 13，漂移 0）
+  PASS  单点实现守卫：4 条规则 / 157 个文件 / 0 处未登记（白名单 0，WARN 1，漂移 0）
+  PASS  守卫清单齐全（8 项）
+ALL GREEN
+```
+
+本轮只动脚本与文档（`scripts/single-source.py`、`scripts/single-source.txt`、
+`scripts/check.sh`、`scripts/guard-selftest.py`、`scripts/silent-success-audit.py`、
+本文件），**没有改任何 `.go`**——所以上表的 `go test` 读数与 §5.6 那轮同源，
+不是本轮的改动能影响的。
+
+**没有验证的**（D7）：`scripts/gate-manifest.txt` 没有登记这条新门禁（本轮的可改范围
+不含它）。后果是：把 check.sh 里那段删掉时，`守卫清单齐全` 不会红（新门禁自己没被守）。
+补法是往 `scripts/gate-manifest.txt` 加一行 `单点实现守卫`——一行的事，留给下一轮。
+
+### 真机：ACP 一条带思考的轮次（2026-11-04 补验）
+
+之前这条只有单测（真 `cmdRun` + 假网关）。真机补验：
+
+```
+$ python scripts/bin-check.py            → OK=2 FAIL=0（先验二进制，见 AGENTS §5 第 0 位）
+$ DSHD_REASONING_EFFORT=xhigh python scripts/acp-smoke.py "鸡兔同笼：35 个头 94 只脚，各几只？先推理。"
+  prompt: stopReason=end_turn updates=14 usage={'inputTokens': 9816, 'outputTokens': 504}
+  落盘块类型: ['reasoning', 'text']
+```
+
+**这次排查本身踩了一个坑，值得记**：第一次用的是**陈旧** `tmp/dshd.exe`，看到
+"思考块没落盘"，于是依次查了网关（直接打 `/v1/chat/completions` 有 `reasoning_content`）、
+客户端解析（`internal/llm` 有 `ReasoningContent`）、请求体（`reasoning_effort` 确实发出去了）——
+**全是正常的**。换新编的二进制，第一次就落出来了。
+
+结论不是"多点耐心"，而是 **`bin-check` 必须排真机步骤第 0 位**：跳过它，后面的观察全部不可信，
+而且它会把"过期二进制"伪装成"产品缺陷"，让人去改对的东西。
