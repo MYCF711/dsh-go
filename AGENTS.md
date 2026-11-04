@@ -45,7 +45,7 @@ v4、提示装配与架构理由读 `PLAN.md`；P0 旧工具/“不做”清单�
 
 ## 4. 共享仓与进程安全
 
-- 改前重读；`FS_STALE_VERSION` 先合并。禁止 checkout/reset 覆盖他人、原地移动 `modules/` 或兄弟仓、按镜像名杀 `dshd.exe/app.exe`。
+- 改前重读；`FS_STALE_VERSION` 先合并。禁止 checkout/reset 覆盖他人、原地移动 `modules/` 或兄弟仓、按镜像名杀 `DSH GO.exe/app.exe`。
 - `scripts/regress.sh` 有全局 taskkill，`check.sh` 原地移动 modules：隔离修复前禁在共享树运行；造红/变异只在独占副本。
 - 测试用临时 home、`--port 0`、ready 地址/token、无头窗口；只回收自己启动且核对归属的 PID。不得重启/关闭 DSH 或 magpie，不写 profiles/asar/原始会话，不抢现有 GUI 地址。
 - commit/PR/push 由任务书显式授权；提交只 add 认领路径并检查 cached diff，不夹带他人改动。**两仓 push 都需用户当次确认。**
@@ -59,17 +59,19 @@ git stash -u --keep-index -q && go build ./... ; git stash pop -q
 # 或 git archive HEAD | tar -x -C /tmp 后 build
 ```
 
-2026-11-04 自纠：`check.sh` 会 `mv modules`，并行会话 build 会看不到 modules/。**门禁一律在 `git archive HEAD | tar -x -C /tmp/gate-iso` 副本跑**；共享树只跑定向 test/build/vet，不动别人。
+自纠：`check.sh` 会 `mv modules`；**门禁一律在 `git archive` 副本跑**，共享树只跑定向 test/build/vet。
 
-2026-11-04 自纠：真机验 ACP 时用了陈旧 `tmp/dshd.exe`，没先跑 `bin-check`，误判“思考块没落盘”，白查网关/解析/参数。**真机第 0 步必须 `python scripts/bin-check.py`**；陈旧二进制会把自身问题伪装成产品缺陷。
+自纠：真机用过陈旧 `tmp/DSH GO.exe`，未先 `bin-check`，误判思考块未落盘。**真机第0步必须 `python scripts/bin-check.py`**。
 
-2026-11-04 新增一条（这条差点混过去）：**Windows 资源段里目录树必须排在数据前面**。
-`.syso` 里把版本正文排最前、目录树跟后面时，`go build`/链接/运行**全都正常**，
-只有 Windows 读 exe 的 VersionInfo 才表现为**全空**——于是"任务管理器的描述列不再是空白"
-这件事静默失效，而它正是那一项功能的唯一目的。判据只有一条：`(Get-Item x.exe).VersionInfo`
-里 FileDescription 非空。**已用 `cmd/dshtui/internal/vsinfo` 的两条布局测试钉住。**
+**写了不跑的探针等于没有。** 2026-11-04：一个代理写好 `scripts/tui-session-e2e.py`（34 项断言、真宿主四轮），
+写完没跑过就交付了；隔了几轮真正跑第一次，当场抓到"一次 prompt 在界面上变成 2~3 轮"
+（日志 4 条 user/message、界面收到 10 条）——而那个 bug 在单测里**每一条都看起来对**。
+规矩：新探针交付时必须贴出**这一次运行**的汇总行（`OK=n FAIL=m`），没有运行输出的探针不算交付；
+能被自动跑的就接进门禁（opt-in 也行），接不进去的要在文档里写清"谁会跑、什么时候跑"，否则它下个月就不存在了。
 
-2026-11-04 三事故：① `main.go` 已提交而 untracked 的 `tool_merged.go` 漏 add；② `git add main.go` 带上别人半成品；③ 实现已提交、测试留在工作树。规则：按目录 add 前看 `git diff --cached --stat`，只认自己路径；实现与测试同提交；收尾 `git status` 查未跟踪文件。
+**Windows `.syso` 目录树必须排在数据前**：顺序反了 build/run 全正常，只有 VersionInfo 全空。唯一判据：`(Get-Item x.exe).VersionInfo.FileDescription` 非空；已由 vsinfo 两条布局测试钉住。
+
+三事故：漏 add untracked 实现；`git add` 带入别人半成品；测试留工作树。规则：按目录 add、先看 cached diff、只认自己路径；实现与测试同提交；收尾看 `git status`。
 
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"
@@ -78,10 +80,10 @@ go test ./...
 go list -deps ./internal/kernel   # 不含 modules/ 与业务包
 ```
 
-1. 真机前 `python scripts/bin-check.py`；陈旧/分叉立即中止，案例见 `docs/verify-rules.md`。
-2. 无机器汇总=`FAIL`，0匹配不报绿；红先分代码/过期判据/等待窗。
-3. 新守卫在 `scripts/guard-selftest.py` 加“弄坏必红”；各层不外推整链。
-4. `-race` 未成功=未验证；有C工具链跑 `scripts/race.sh`；工具表真分词，二进制≤25MiB，ALL GREEN仍记SKIP/WARN。
+1. 真机前 `bin-check`；陈旧/分叉立即中止（案例见 `docs/verify-rules.md`）。
+2. 无机器汇总=`FAIL`，0匹配不报绿；红先分代码/判据/等待窗。
+3. 新守卫在 `guard-selftest.py` 加“弄坏必红”；各层不外推整链。
+4. `-race` 未成功=未验证；有C工具链跑 `race.sh`；工具表真分词，二进制≤25MiB，ALL GREEN记SKIP/WARN。
 5. 缺陷先红后修，只隔离旧实现造红；不破坏共享源码、不盲改golden/放宽断言。
 
 ## 6. 文档与维护

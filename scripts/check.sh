@@ -280,6 +280,46 @@ for f in PLAN.md AGENTS.md MAINTENANCE.md CHECKLIST.md UPDATING.md CHANGELOG.md 
   [ -f "$f" ] && pass "文档 $f" || bad "缺文档 $f"
 done
 
+# ---------- TUI 长场景（opt-in） ----------
+# 为什么默认不跑：它要真宿主 + 真模型，一次 1~2 分钟，而且依赖网关可用。
+# 为什么还是要有：这条探针写好之后**放了几轮没人跑**，第一次真跑就抓到
+# "一次 prompt 在界面上变成 2~3 轮"（日志 4 条 user/message、界面收到 10 条）——
+# 那种错单测里每一条都看起来对，只有连跑几轮才露头。
+# 触发：DSHGO_TUI_E2E=1 bash scripts/check.sh
+#
+# 名字与 gate-manifest.txt 里那一行**逐字相同**：清单靠 grep 日志核对，
+# PASS/SKIP 两边名字不一样时，"检查被删掉"和"检查改名了"长得一样。
+tui_name="TUI 长场景（opt-in：DSHGO_TUI_E2E=1）"
+if [ "${DSHGO_TUI_E2E:-0}" = "1" ]; then
+  if [ ! -f scripts/tui-session-e2e.py ]; then
+    bad "$tui_name: 找不到 scripts/tui-session-e2e.py"
+  else
+    # 隔离副本里没有 tmp/ 产物：先按需构建，否则探针会因为"二进制不存在"红，
+    # 而那和"链路坏了"是完全不同的两件事。
+    if [ ! -f "tmp/DSH GO.exe" ]; then
+      go build -o "tmp/DSH GO.exe" ./cmd/dshd 2>/dev/null || bad "$tui_name: 构建宿主失败"
+    fi
+    if [ ! -f "tmp/DSH TUI GO.exe" ]; then
+      go build -o "tmp/DSH TUI GO.exe" ./cmd/dshtui 2>/dev/null || bad "$tui_name: 构建 TUI 失败"
+    fi
+    # 探针要 tmp/serve-dir/ 里那份**副本**（它检验"发布件没被就地篡改"这件事）。
+    # 隔离副本里没有 tmp/，不建这一步探针会在第一项就红，而那和"链路坏了"无关。
+    if [ ! -f "tmp/serve-dir/DSH GO.exe" ]; then
+      mkdir -p tmp/serve-dir && cp "tmp/DSH GO.exe" "tmp/serve-dir/DSH GO.exe" 2>/dev/null
+    fi
+    te_out="$(timeout 900 python scripts/tui-session-e2e.py 2>&1)"
+    te_rc=$?
+    te_sum="$(printf '%s' "$te_out" | grep -E '^合计 ' | tail -1)"
+    if [ "$te_rc" -eq 0 ] && printf '%s' "$te_sum" | grep -q 'FAIL=0'; then
+      pass "$tui_name：${te_sum:-（无汇总行）}"
+    else
+      bad "$tui_name：${te_sum:-exit $te_rc，无汇总行} —— 无结论不算通过"
+    fi
+  fi
+else
+  skip "$tui_name"
+fi
+
 # ---------- 卫生门禁 ----------
 hits=$(grep -rIl --exclude-dir=.git --exclude-dir=tmp --exclude-dir=refs --exclude-dir=probe \
   -E 'D:\\\\MyKey|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}' . 2>/dev/null || true)

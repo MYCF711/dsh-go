@@ -364,7 +364,8 @@ def check_turns(rep, target, nonce, started):
     # 屏幕上的表现就是前几轮的消息与工具卡片重复出现（t4 那一屏能直接数出来）。
     # 文档里记着这件事（docs/host-side-closeout.md:51「follow 零水位重复」），
     # 但一直没有多轮真机证据 —— 这条补的就是那个证据。
-    # 修法是 follow 起跑时把 offset 定位到文件末尾（本任务不许动 cmd/dshd/serve*.go）。
+    # 修法是 follow 起跑时把 offset 定位到文件末尾（M396 已修：followBaseline 在
+    # cmd.Start() 之前取水位；这条断言现在应当是 [1,1,1,1] 而不是累计值）。
     per_turn_users = [len(frames_of(rep, n, "user/message")) for n in (1, 2, 3, 4)]
     # 先钉住"只有这一种重复"：第 k 轮最多把前 k-1 轮的再推一遍（= k 条）。
     # 比这更多就是**另一个**错（推两遍、或把别的会话混进来），那必须红。

@@ -17,3 +17,4 @@ text-only 守卫
 R1 
 凭据泄露
 工具表体积
+TUI 长场景（opt-in：DSHGO_TUI_E2E=1）
