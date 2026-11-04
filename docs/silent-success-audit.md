@@ -861,12 +861,88 @@ $ go test ./internal/session -run 'TestFork' -count=1 -v
 
 **同类还剩的 fork 缺口（登记，本轮不改）**：
 - `copyNode` 把 finish reason 一律写成 `"stop"`：源事件的 `max-tokens` / `tool_calls`
-  不跟着走，fork 后的最后一条回答即使是截断的也显示"完成"；
+  不跟着走，fork 后的最后一条回答即使是截断的也显示"完成"； → **已解决（见下面的「5.4 续」）**
 - `tool/result` 的 `isError`、`meta.cwd`、`sourceEventSeqs`、H3 的 `view` 一律重置
-  （`false` / `""` / 空 / 不带）；
-- `system/message` 的 `turn/step` 固定成 `1,1`，`developer/message` 整类跳过；
+  （`false` / `""` / 空 / 不带）； → **已解决（`isError` / `meta.cwd` / `view`；`sourceEventSeqs` 仍留空，理由见下）**
+- `system/message` 的 `turn/step` 固定成 `1,1`，`developer/message` 整类跳过； → **已解决**
 - `compaction/summary` 替身仍是 `source.kind = compact-checkpoint` 的 user 消息
-  （刻意：`shadowedSeqs` 在新文件里不存在，照搬会指向不存在的 seq）。
+  （刻意：`shadowedSeqs` 在新文件里不存在，照搬会指向不存在的 seq）。 → **仍按原样登记（刻意，未改）**
+
+#### 5.4 续：fork 把事实改写成默认值（finish / isError / cwd / turn-step / developer / view，2026-11-04，已解决）
+
+上一轮修的是"思考块"（模型看得见的内容），这一轮修的是**结论**：这条回答是怎么收工的、
+这个工具体成没成、在哪跑的、属于哪一轮哪一步、界面该画什么、工具增删声明长什么样。
+这些东西 `SurfaceMsg` 都装不下（`llm.Message` 只有 role/content/tool_calls），
+旧 `copyNode` 于是给它们**填了默认值**。默认值看起来永远"正常"：
+
+| 事实 | 旧 fork 写的 | 后果 |
+|---|---|---|
+| `assistant/message` 的 finish | 恒 `"stop"`（落盘 `completed`） | 被 `max-tokens` 截断的回合 fork 后变成"正常收工" |
+| `tool/result` 的 `isError` | 恒 `false` | 失败的工具体 fork 后变成成功 |
+| `tool/result` 的 `meta.cwd` | 恒 `""` | 分叉后不知道工具在哪跑的 |
+| `tool/result` 的 H3 `view` | 不带 | 客户端卡片声明丢了，只能退化渲染 |
+| `system/message` 的 `turn/step` | 恒 `1,1` | 审计上"系统提示是在第 1 轮第 1 步渲染的"，假 |
+| `developer/message` | 整类跳过 | 工具增删声明（tool-addition/tool-removal 块）在 fork 里消失 |
+
+**修法与上一轮同形：不回 Surface 加字段，按 seq 回原始事件取**。`Fork` 先建一张
+`forkFactsBySeq(src)`（seq → `srcFact`），`copyNode` 按 seq 取用；`SurfaceMsg` 的公开形状
+**一个字段没加**，`codecs/v4` 的落盘格式**一个字节没动**。
+
+落到事件里的写法：
+
+- `assistant/message`：源里 `stream` 有 `type:"finish"` 记录就**整段原样搬**（`max-tokens` /
+  `tool-calls` / `aborted` 都跟着走，流里别的记录也不丢）；只有顶层 `finish`/`finishReason`
+  的老语料才走兜底；两者都没有才退到旧的 `"stop"`。`usage`、`interrupted` 也一起搬——
+  同一个事实边界，源里记了的数不许在 fork 里变成"没记"。
+- `tool/result`：`isError` 取源值；`meta` 整段原样搬（`cwd` 就在里面，将来 `meta` 加键也不会被抹掉）；
+  `error` 源里有才写；`view` 原样搬（它是工具产出的一部分，不是渲染缓存）。
+- `system/message` / `developer/message`：`turn/step` 源里有就沿用，没有才退到 `1,1`；
+  `developer/message` 的 `message` **原样搬**（tool-addition/tool-removal 的形状只在原始事件里）。
+- `turn/step` 对 assistant / tool result 也一并沿用：同一类审计事实，没有理由只修一处。
+
+**红（修之前，共享树，新测试 `internal/session/fork_facts_test.go`）**：
+
+```
+$ go test ./internal/session -run 'TestForkKeeps|TestForkWithoutFactsKeepsEventSequence' -count=1
+--- FAIL: TestForkKeepsAssistantFinishReason
+    fork_facts_test.go:129: fork 后的 finish = "completed"，期望 "max-tokens"（源里是 length）：被 max-tokens 截断的回合不许变成正常收工
+--- FAIL: TestForkKeepsToolResultIsError
+    fork_facts_test.go:170: fork 后的 isError = false，期望 true：失败的工具体不许在分叉后变成成功
+--- FAIL: TestForkKeepsToolResultCwd
+    fork_facts_test.go:201: fork 后的 meta.cwd = ""，期望 "/work/real"：工具结果在哪跑的，分叉后不许变成空
+--- FAIL: TestForkKeepsSystemTurnStep
+    fork_facts_test.go:226: fork 后的 system turn/step = 1,1，期望 4,2（源里写的就是这个）
+--- FAIL: TestForkKeepsDeveloperMessage
+    fork_facts_test.go:256: fork 产物里有 0 条 developer/message，期望 1：工具增删声明整类丢了
+--- FAIL: TestForkKeepsToolResultView
+    fork_facts_test.go:309: fork 后的 view = null，期望 {"kind":"card","title":"68 个文件"}
+FAIL
+```
+
+**绿（修之后）**：
+
+```
+$ go test ./internal/session -run 'TestFork' -count=1
+ok  	dshgo/internal/session	0.641s
+```
+
+"不许误伤"的判据沿用上一轮的 `eventFingerprint`（事件类型 + 角色 + 内容块 + `toolCallId`，
+忽略随机 id、`turn/step`、`time`、`meta.cwd`），另加一条：源里本来就是默认值
+（`stop` / `false` / `""` / `1,1`）时，fork 后的事实字段**逐条相同**——
+证明新代码不会凭空发明别的值。`TestForkWithoutFactsKeepsEventSequence` 在修前修后都绿。
+
+**仍然不搬的（有理由，不是漏）**：
+
+- `sourceEventSeqs`（`tool/result` 等）：它指的是**源日志**里的 seq，而新日志的 seq 是
+  按 surface 重排的 0..N。照搬会指向一条不相关的事件——比缺失更糟（与 `compaction/summary`
+  的 `shadowedSeqs` 同一个理由）。同理不搬 `developer/message` 的 `headerSeq`
+  （它指向 fork 根本不复制的 `request/header`）。
+- `compaction/summary` 替身仍是 `source.kind = compact-checkpoint` 的 user 消息（上表最后一条）。
+- 这一轮没动、但仍存在的 fork 损失：`user/message` 的 `source.kind` 被统一成 `"user"`
+  （只保留 `compact-checkpoint` 的替身身份）、`id` 重新生成；`tool/result` 的非 text 内容块
+  （如图片）在 Surface 投影那一步就没了，fork 侧无从恢复；`assistant/message` 里
+  非 text / reasoning / tool-call 的块同理。要修这三条得先动 Surface 或事件内容模型，
+  不在本轮判据里。
 
 ### 5.5 `session.Surface` 漏思考的下游两条：ACP `session/load` 重放丢整条回答、`Meter.Estimate` 少算思考（2026-11-04，已解决）
 

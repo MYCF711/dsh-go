@@ -34,8 +34,11 @@ func Fork(src *v4.Log, home, cwd, newID string) (*Log, error) {
 	if len(surface) == 0 {
 		return nil, fmt.Errorf("源会话没有可继承的 surface")
 	}
-	// 思考块得回原始事件取：Surface 只装 text + tool_calls（见 reasoningBlocksBySeq）。
+	// Surface 只装 text + tool_calls；"这条回答是怎么收工的、这个工具体成没成、
+	// 在哪跑的、属于哪一轮哪一步"都不在里面。两张表都按 seq 回原始事件取，
+	// 不往 SurfaceMsg 上加字段（见 reasoningBlocksBySeq / forkFactsBySeq）。
 	reasoning := reasoningBlocksBySeq(src)
+	facts := forkFactsBySeq(src)
 
 	seg, err := v4.EncodeSegment(newID)
 	if err != nil {
@@ -60,7 +63,7 @@ func Fork(src *v4.Log, home, cwd, newID string) (*Log, error) {
 	}()
 
 	for _, node := range surface {
-		if err = copyNode(l, node, reasoning[node.Seq]); err != nil {
+		if err = copyNode(l, node, facts[node.Seq], reasoning[node.Seq]); err != nil {
 			return nil, err
 		}
 	}
@@ -120,11 +123,189 @@ func reasoningBlocksBySeq(log *v4.Log) map[int64][]string {
 // 这处修复多改一批调用点；包一层既不加第二份逻辑，也不动既有形状。
 func ReasoningBlocksBySeq(log *v4.Log) map[int64][]string { return reasoningBlocksBySeq(log) }
 
+// srcFact 是一条源事件里"Surface 装不下、fork 又必须原样搬走"的事实。
+//
+// 为什么不给 SurfaceMsg 加字段：History / compact.Select / Meter 这些读路径一个都不
+// 需要它们，fork 是唯一消费者；回原始事件按 seq 取，反而不动公开形状。
+//
+// 更重要的原因：这些字段**不能填默认值**。以前 copyNode 把 finish 写成 "stop"、
+// isError 写成 false、cwd 写成 ""、turn/step 写成 1,1、developer/message 整类跳过——
+// 于是一个被 max-tokens 截断的回合在 fork 之后显示"正常收工"，失败的工具体变成成功。
+// 那不是"少一个字段"，是把事实改写成了结论，而且全链路不报错。
+type srcFact struct {
+	turn, step *int // nil = 源里没写（只好沿用旧默认）
+
+	// assistant/message
+	stream      json.RawMessage // 原样的 stream（含 finish 记录）；有才整段搬
+	usage       json.RawMessage
+	finish      string // 顶层 finish / finishReason 兜底（stream 缺失的老语料）
+	interrupted bool
+
+	// tool/result
+	isError bool
+	meta    json.RawMessage // meta 原样（cwd 与将来加的键都跟着走）
+	errData json.RawMessage // error 原样（只在 isError 时才有意义）
+	view    json.RawMessage // H3：客户端渲染声明
+
+	// developer/message：message 原样（tool-addition / tool-removal 块只在原始事件里）
+	developer json.RawMessage
+}
+
+// forkFactsBySeq 按 seq 建"源事件事实表"。
+//
+// 与 reasoningBlocksBySeq 同一个做法（Surface 一个字段不加），但这里管的是**结论类**
+// 字段：finish / isError / cwd / turn-step / view / developer 形状。
+// 单条事件解不开就当作"源里没写这些字段"（与旧行为一致），不让一条坏事件打断整个 fork。
+func forkFactsBySeq(log *v4.Log) map[int64]srcFact {
+	out := make(map[int64]srcFact, len(log.Events))
+	for _, ev := range log.Events {
+		var f srcFact
+		switch ev.Type {
+		case "assistant/message":
+			var d struct {
+				Turn         *int            `json:"turn"`
+				Step         *int            `json:"step"`
+				Stream       json.RawMessage `json:"stream"`
+				Usage        json.RawMessage `json:"usage"`
+				Interrupted  bool            `json:"interrupted"`
+				Finish       json.RawMessage `json:"finish"`
+				FinishReason json.RawMessage `json:"finishReason"`
+			}
+			if err := json.Unmarshal(ev.Data, &d); err == nil {
+				f.turn, f.step = d.Turn, d.Step
+				f.interrupted = d.Interrupted
+				f.finish = finishName(d.Finish, d.FinishReason)
+				f.usage = d.Usage
+				// 只在 stream 里**真的有** finish 记录时才整段搬：没有 finish 的流
+				// 搬过去会让新事件看起来"没有收工凭据"，不如按 finish 兜底重写。
+				if _, ok := streamFinishKind(d.Stream); ok {
+					f.stream = d.Stream
+				}
+			}
+
+		case "tool/result":
+			var d struct {
+				Turn    *int `json:"turn"`
+				Step    *int `json:"step"`
+				Message struct {
+					IsError *bool `json:"isError"`
+				} `json:"message"`
+				Meta  json.RawMessage `json:"meta"`
+				Error json.RawMessage `json:"error"`
+				View  json.RawMessage `json:"view"`
+			}
+			if err := json.Unmarshal(ev.Data, &d); err == nil {
+				f.turn, f.step = d.Turn, d.Step
+				if d.Message.IsError != nil {
+					f.isError = *d.Message.IsError
+				}
+				f.meta, f.errData, f.view = d.Meta, d.Error, d.View
+			}
+
+		case "system/message", "developer/message":
+			var d struct {
+				Turn    *int            `json:"turn"`
+				Step    *int            `json:"step"`
+				Message json.RawMessage `json:"message"`
+			}
+			if err := json.Unmarshal(ev.Data, &d); err == nil {
+				f.turn, f.step = d.Turn, d.Step
+				if ev.Type == "developer/message" {
+					f.developer = d.Message
+				}
+			}
+		}
+		out[ev.Seq] = f
+	}
+	return out
+}
+
+// turnOr / stepOr：源里有就沿用，没有才退到旧默认。
+func (f srcFact) turnOr(def int) int {
+	if f.turn != nil {
+		return *f.turn
+	}
+	return def
+}
+
+func (f srcFact) stepOr(def int) int {
+	if f.step != nil {
+		return *f.step
+	}
+	return def
+}
+
+// cwdOf 取 meta.cwd——工具结果"在哪跑的"就记在这儿。
+func (f srcFact) cwdOf() string {
+	var d struct {
+		Cwd string `json:"cwd"`
+	}
+	if rawJSON(f.meta) && json.Unmarshal(f.meta, &d) == nil {
+		return d.Cwd
+	}
+	return ""
+}
+
+// rawJSON 报告这段 RawMessage 是不是一个真正的值（nil 与 "null" 都不算）。
+func rawJSON(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s != "" && s != "null"
+}
+
+// streamFinishKind 从 assistant/message 的 stream 里取 finish 记录。
+//
+// 认的是 v4 的形状：`[{"type":"finish","reason":{"kind":"max-tokens"}}]`。
+// 找到就整段搬（流里还可能有别的记录，全保留）；找不到返回 ok=false。
+func streamFinishKind(raw json.RawMessage) (string, bool) {
+	if !rawJSON(raw) {
+		return "", false
+	}
+	var recs []struct {
+		Type   string `json:"type"`
+		Reason struct {
+			Kind string `json:"kind"`
+		} `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &recs); err != nil {
+		return "", false
+	}
+	for _, r := range recs {
+		if r.Type == "finish" && r.Reason.Kind != "" {
+			return r.Reason.Kind, true
+		}
+	}
+	return "", false
+}
+
+// finishName 取顶层 finish / finishReason 里的收工原因，作为 stream 缺失时的兜底。
+//
+// 三种形状都认：`"finish":"stop"`、`"finish":{"kind":"max-tokens"}`、
+// `"finishReason":"max-tokens"`。返回值直接喂给 AssistantMessageEvent 的映射——
+// 简化词（stop / length）与 v4 词（completed / max-tokens）它两种都收。
+func finishName(raws ...json.RawMessage) string {
+	for _, raw := range raws {
+		if !rawJSON(raw) {
+			continue
+		}
+		var s string
+		if json.Unmarshal(raw, &s) == nil && s != "" {
+			return s
+		}
+		var o struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal(raw, &o) == nil && o.Kind != "" {
+			return o.Kind
+		}
+	}
+	return ""
+}
+
 // copyNode 把 surface 上的一个节点写成新会话里的一条事件。
 //
-// reasoning 是源事件里的思考正文（surface 装不下，见 reasoningBlocksBySeq），
-// 只有 assistant/message 会用到。
-func copyNode(l *Log, node SurfaceMsg, reasoning []string) error {
+// f 是这条事件在源日志里的事实（finish / isError / cwd / turn-step / view / developer 形状），
+// reasoning 是源事件里的思考正文（surface 装不下，见 reasoningBlocksBySeq）。
+func copyNode(l *Log, node SurfaceMsg, f srcFact, reasoning []string) error {
 	m := node.Message
 	switch {
 	case node.Summary:
@@ -139,7 +320,28 @@ func copyNode(l *Log, node SurfaceMsg, reasoning []string) error {
 		})
 
 	case node.Type == "system/message":
-		return l.Append("system/message", SystemMessageData(1, 1, m.Content))
+		// turn/step 沿用源里的：系统提示是在第几轮第几步渲染的，也是审计事实。
+		return l.Append("system/message", SystemMessageData(f.turnOr(1), f.stepOr(1), m.Content))
+
+	case node.Type == "developer/message":
+		// developer/message 装的是工具增删声明（tool-addition / tool-removal 块）。
+		// Surface 只留 joinText 之后的正文，形状在那一步就丢了，所以**原样搬 message**。
+		//
+		// 不搬 headerSeq：它指向源日志里的 request/header，而 fork 不复制 request/*，
+		// 新日志的 seq 又整体重排——照搬会指向一条**不相关**的事件，比缺失更糟。
+		var payload any = f.developer
+		if !rawJSON(f.developer) {
+			payload = map[string]any{
+				"role":    "developer",
+				"content": []map[string]any{TextBlock(m.Content)},
+			}
+		}
+		return l.Append("developer/message", map[string]any{
+			"turn":      f.turnOr(1),
+			"step":      f.stepOr(1),
+			"message":   payload,
+			"surfaceOp": "append",
+		})
 
 	case node.Type == "user/message":
 		return l.Append("user/message", UserMessage([]spi.Block{{Type: "text", Text: m.Content}}))
@@ -161,13 +363,42 @@ func copyNode(l *Log, node SurfaceMsg, reasoning []string) error {
 		for _, tc := range m.ToolCalls {
 			blocks = append(blocks, ToolCallBlock(tc.ID, tc.Function.Name, tc.Function.Arguments))
 		}
-		return l.Append("assistant/message", AssistantMessageEvent(1, 1, blocks, "stop", nil))
+		// finish 不再恒写 "stop"：源里 stream 有 finish 记录就整段搬（max-tokens /
+		// tool-calls / aborted 都跟着走）；没有才用顶层 finish 兜底，再没有才退到 "stop"。
+		finish := f.finish
+		if finish == "" {
+			finish = "stop"
+		}
+		data := AssistantMessageEvent(f.turnOr(1), f.stepOr(1), blocks, finish, nil)
+		if f.stream != nil {
+			data["stream"] = f.stream
+		}
+		if rawJSON(f.usage) {
+			data["usage"] = f.usage
+		}
+		if f.interrupted {
+			data["interrupted"] = true
+		}
+		return l.Append("assistant/message", data)
 
 	case node.Type == "tool/result":
 		blocks := []spi.Block{{Type: "text", Text: m.Content}}
-		return l.Append("tool/result", ToolResultEvent(1, 1, m.ToolCallID, blocks, false, "", nil))
+		data := ToolResultEvent(f.turnOr(1), f.stepOr(1), m.ToolCallID, blocks, f.isError, f.cwdOf(), nil)
+		// meta 原样搬：cwd 就在里面，将来 meta 加键也不会在 fork 时被抹掉。
+		if rawJSON(f.meta) {
+			data["meta"] = f.meta
+		}
+		// error 只在源里有时才写（v4：isError=true 才允许有 error）。
+		if rawJSON(f.errData) {
+			data["error"] = f.errData
+		}
+		// H3：view 是工具产出的一部分（客户端按它画卡片），不是渲染缓存。
+		if rawJSON(f.view) {
+			data["view"] = f.view
+		}
+		return l.Append("tool/result", data)
 	}
-	return nil // 其它类型（developer 等）先跳过，Fork 只保证 surface 语义
+	return nil // 其它类型不进 surface，Fork 只保证 surface 语义
 }
 
 // dirOf 拼出会话文件路径（与 CreateSession 同规则）。
