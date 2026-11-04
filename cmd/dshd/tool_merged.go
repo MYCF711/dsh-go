@@ -28,6 +28,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	// 别名：cmd/dshd 的测试包里有个同名类型 schema（parity_test.go 的夹具）。
+	schemarule "dshgo/internal/schema"
 	"dshgo/internal/spi"
 )
 
@@ -242,7 +244,7 @@ func newMergedTable(reg spi.ToolRegistry) (*mergedTable, []string, error) {
 			warn = append(warn, fmt.Sprintf("合并 %s 跳过：%s", fam.Name, badReq))
 			continue
 		}
-		schema, err := buildMergedSchema(fam, have)
+		params, err := buildMergedSchema(fam, have)
 		if err != nil {
 			// 合不进来的族**不硬合**：一条结构冲突就够让模型看不懂 schema。
 			warn = append(warn, fmt.Sprintf("合并 %s 跳过：%v", fam.Name, err))
@@ -262,7 +264,7 @@ func newMergedTable(reg spi.ToolRegistry) (*mergedTable, []string, error) {
 		mt := &mergedTool{
 			name:   fam.Name,
 			desc:   mergedDescription(fam, have),
-			schema: schema,
+			schema: params,
 			caps:   caps,
 		}
 		t.byName[fam.Name] = mt
@@ -587,64 +589,13 @@ func sameShape(a, b json.RawMessage) bool {
 }
 
 func shapeless(raw json.RawMessage) string {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	// 形状比对要忽略的只有注解 description。这条语义与 agent.CompactSchema
+	// 是同一个东西，所以直接用它的实现（internal/schema.Compact），不另写一份。
+	// 坏输入仍由这里判空：sameShape 要求两边都非空，不拿两个空串当同构。
+	if !json.Valid(raw) {
 		return ""
 	}
-	b, err := json.Marshal(stripDescriptions(v))
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
-
-// stripDescriptions 去掉 schema 上的**注解** description，保留参数名。
-//
-// 它被 sameShape 用来判断"两个工具对同一个参数的定义是否同构"，所以
-// "删多删少"直接决定合并层会不会把两个不一样的工具并成一族。
-//
-// 曾经的写法是"见到 description 键就删"，与 agent.CompactSchema 同款 bug：
-// `properties` 这一层的键是**参数名**，本仓真有工具把参数叫 description。
-// 删掉之后「多一个 description 参数」与「没有这个参数」会判成同构，
-// 合并"成功"、模型看到的契约却少了一条，而且没有任何一处报错。
-func stripDescriptions(v any) any { return stripDescNode(v, false) }
-
-func stripDescNode(v any, inPropertyMap bool) any {
-	switch t := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		if inPropertyMap {
-			// 这一层是「参数名 → schema」：键全部保留，值按 schema 走。
-			for k, val := range t {
-				out[k] = stripDescNode(val, false)
-			}
-			return out
-		}
-		for k, val := range t {
-			if k == "description" {
-				continue // 这个才是注解
-			}
-			out[k] = stripDescNode(val, schemaPropertyMapKey(k))
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i, val := range t {
-			out[i] = stripDescNode(val, false)
-		}
-		return out
-	}
-	return v
-}
-
-// schemaPropertyMapKey 判断某个 schema 关键字下面挂的是不是「名字 → schema」。
-// 与 internal/agent.CompactSchema 的同名判断保持同一份词汇表。
-func schemaPropertyMapKey(k string) bool {
-	switch k {
-	case "properties", "patternProperties", "$defs", "definitions":
-		return true
-	}
-	return false
+	return string(schemarule.Compact(raw))
 }
 
 // ---- compact 的后半段：把 schema 骨架里"不用写"的那几条去掉 ----
@@ -664,15 +615,24 @@ func schemaPropertyMapKey(k string) bool {
 // 判据不是"看起来等价"，是 cmd/dshd/tool_schema_test.go 里逐工具比对
 // **归一化后的结构**：少一个 required、enum 变短，那条测试就红。
 //
-// 为什么自己删说明文字、不用 internal/agent.CompactSchema：那边是"见到
-// description 键就删"的粗暴做法，会把**名叫 description 的参数**一起删掉。
-// 本仓有 8 个工具真有这个参数（ask_user_question 的 options[]、bash、present、
-// spawn_teammate、subagent、subagent_fork、team_task_create、team_task_update）。
-// 删掉之后 required 里点名了它、properties 里却没有——模型只看到一个
-// "必填但没类型"的名字，等于凭空少了一条契约。压表不许改信息，所以这里按
-// "注解还是参数名"分开：
-//   - 注解（某个 schema 对象上的 description）→ 删；
-//   - 参数名（properties 映射里的键）→ 原样保留，哪怕它就叫 description。
+// 说明文字怎么删：与 internal/agent.CompactSchema 共用 internal/schema。
+// 那个包只负责一件事——判断某个 description 是**注解**（schema 对象上，
+// 删）还是**参数名**（properties 映射里的键，原样保留，哪怕它就叫
+// description）。本仓有 8 个工具真有这个参数，删掉之后 required 里点名了它、
+// properties 里却没有，模型只看到一个"必填但没类型"的名字。
+// 2026-11-04 这条规则在 CompactSchema 与这里的 stripDescriptions 里各写了
+// 一遍、各错一次，所以现在只有一处判断函数（internal/schema.IsAnnotationKey），
+// 两处都调它。
+//
+// 为什么整段收紧不直接复用 CompactSchema、而要保留这一份：两者是两种变换，
+// 不是同一件事的两种写法。
+//   - 这里还要删冗余骨架（上面那四条），CompactSchema 不删；
+//   - 这里用 json.RawMessage 承载子节点，type/enum/数字**逐字节**不变
+//     （9007199254740993 不会过 float64 变成 ...992，1e+04 不会重排）；
+//   - 这里只递归 properties/items；CompactSchema 递归一切对象，连 default
+//     里的同名键也会删——那是它不该动的地方。
+// 完整差异与实测见 docs/silent-success-audit.md §4 D3，判据是
+// cmd/dshd/tool_merged_rule_test.go 的两处实现互相对照。
 //
 // 为什么不做 $ref 去重：OpenAI 兼容接口的每个 function 各带一份 parameters，
 // 没有跨工具的 definitions 可引用；同一个工具内部重复的片段实测只有
@@ -758,12 +718,20 @@ func tightenSchema(raw json.RawMessage) json.RawMessage {
 //
 // 注意 properties 是**单独一段循环**、不交给通用的对象遍历：那一层的键是
 // 参数名（模型要填的东西），通用遍历会把名叫 description 的参数当注解删掉。
+// 这也是这个函数要调 schemarule.IsAnnotationKey 的原因：到了这里，obj 一定是
+// **schema 对象**（properties 的值、items 的值），所以位置参数是 false；
+// 参数名那一层永远不走这段遍历。
 func tightenObject(obj map[string]json.RawMessage, root bool) (json.RawMessage, error) {
 	if root && isRawString(obj["type"], "object") {
 		delete(obj, "type")
 	}
 	// 这一层是 schema 对象：description 是给模型看的说明，compact 本来就不发。
-	delete(obj, "description")
+	// 删哪个键由唯一那份判断决定，不在这里写 `k == "description"`。
+	for k := range obj {
+		if schemarule.IsAnnotationKey(k, false) {
+			delete(obj, k)
+		}
+	}
 	if raw, ok := obj["properties"]; ok {
 		var props map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &props); err != nil {

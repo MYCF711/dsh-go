@@ -267,19 +267,29 @@ def scan_writejson_nil(a: Audit) -> None:
 
 
 def scan_desc_deletion(a: Audit) -> None:
-    """谁在按「键名」删 description？必须区分注解与参数名。
+    """谁在按「键名」删 description？D3 之后只许有一处判断函数。
 
-    这是 advisory：命中不等于错，但不区分 properties 的删法一定有 bug。
+    允许的唯一落点是 internal/schema.IsAnnotationKey（它同时看位置：这一层
+    是不是 properties 映射）。其它 non-test Go 文件再出现
+    `k == "description"` / `case "description":` 都按 FAIL 算——那说明又长出
+    了第二份「见键就删」。旧版这里是 advisory，于是"修好了"之后第三份照样
+    可以悄悄长出来；现在它是一条守卫。
     """
+    judge = "internal/schema/schema.go"
     pat = re.compile(r"(?:if\s+k\s*==\s*\"description\"|case\s+\"description\"\s*:)")
-    for p in go_files(a.root):
+    for p in go_files(a.root, "internal") + go_files(a.root, "cmd"):
         src = open(p, encoding="utf-8", errors="replace").read()
         for m in pat.finditer(src):
             line = src[:m.start()].count("\n") + 1
-            ctx = src[max(0, m.start() - 400):m.start() + 400]
-            aware = ("properties" in ctx) or ("inProperties" in ctx) or ("参数名" in ctx)
-            tag = "已区分参数名" if aware else "**没看到 properties 上下文，可能删掉参数名**"
-            a.note(f"description 删除点 {rel(a.root, p)}:{line} — {tag}")
+            where = rel(a.root, p)
+            if where == judge:
+                a.note(f"description 删除点 {where}:{line} — 唯一判断函数")
+                continue
+            a.bad(
+                "description-deleted-without-position", f"{where}:{line}",
+                "按 key 名删 description：properties 里的同名参数会被一起删掉且不报错；"
+                "规则只能走 internal/schema.IsAnnotationKey",
+            )
 
 
 def scan_stream_callers(a: Audit) -> None:
@@ -301,8 +311,23 @@ def scan_guards(a: Audit) -> None:
         "空响应必须判成失败（200 + 空流不是「模型没说话」）",
     )
     a.need(
-        "compact-schema-keeps-property-names", "internal/agent/loop.go", r"inPropertyMap",
+        "compact-schema-keeps-property-names", "internal/schema/schema.go", r"inPropertyMap",
         "压表必须区分「注解 description」与「名叫 description 的参数」",
+    )
+    # D3（2026-11-04）：规则只能有一份。判断函数在 internal/schema，
+    # 两处调用方必须真的调它；谁退回自己按键名删，上面那条或这条就红。
+    a.need(
+        "agent-uses-shared-schema-rule", "internal/agent/loop.go", r"schema\.Compact\(",
+        "CompactSchema 只是入口，实现必须在 internal/schema（不许再留第二份压表）",
+    )
+    a.need(
+        "tighten-uses-shared-schema-rule", "cmd/dshd/tool_merged.go",
+        r"schemarule\.IsAnnotationKey\(",
+        "tightenSchema 删说明文字必须走同一判断函数，不许另写 `k == \"description\"`",
+    )
+    a.need(
+        "sameshape-uses-shared-schema-rule", "cmd/dshd/tool_merged.go", r"schemarule\.Compact\(",
+        "sameShape 的 shapeless 必须复用「只删注解」那一份实现",
     )
     a.need(
         "llm-stream-needs-finish", "internal/llm/client.go", r"sawDone",

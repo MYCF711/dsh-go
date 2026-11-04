@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"dshgo/internal/llm"
+	"dshgo/internal/schema"
 	"dshgo/internal/spi"
 )
 
@@ -335,16 +336,16 @@ func (l *Loop) toolDefs() []llm.ToolDef {
 	tools := l.Tools.Tools()
 	defs := make([]llm.ToolDef, 0, len(tools))
 	for _, t := range tools {
-		schema := t.Schema()
+		params := t.Schema()
 		if l.CompactTools {
-			schema = CompactSchema(schema)
+			params = CompactSchema(params)
 		}
 		defs = append(defs, llm.ToolDef{
 			Type: "function",
 			Function: llm.ToolFuncDef{
 				Name:        t.Name(),
 				Description: t.Description(),
-				Parameters:  schema,
+				Parameters:  params,
 			},
 		})
 	}
@@ -357,68 +358,13 @@ func (l *Loop) toolDefs() []llm.ToolDef {
 // 保留结构（类型、enum、required）就够模型填对参数的情形很常见——
 // 但"常见"不等于"总是"，所以这只是个开关，默认仍是完整表。
 //
-// 关键区别（真机踩过，2026-11-04）：`properties` 这一层的键是**参数名**，不是注解。
-// 本仓有 8 个工具真有一个叫 `description` 的参数。早先这里只认键名，见
-// `description` 就删，于是参数被删掉、required 里却还点着它——模型看到
-// "必填但没类型"，凭空少一条契约，而且整条链路没有任何一处报错。
-// 现在按位置判断：只有**schema 对象上的** description 是注解；
-// properties/patternProperties/$defs 映射里的键，一个都不许动。
+// 实现只有一份：internal/schema。这里留一个入口，只是为了让循环不 import
+// 业务包之外的细节。规则本身（哪个 description 是注解、哪个是参数名）也
+// 只有那一处判断——2026-11-04 那天，这个函数与 cmd/dshd 的 stripDescriptions
+// 各自按「见 description 键就删」写了一遍，于是同一个 bug 在两处各犯一次：
+// properties 里的参数名被当注解删掉，required 里却还点着它。
 func CompactSchema(raw json.RawMessage) json.RawMessage {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return raw
-	}
-	b, err := json.Marshal(compactNode(v, false))
-	if err != nil {
-		return raw
-	}
-	return b
-}
-
-// compactNode 递归压一个 schema 节点。
-//
-// inPropertyMap 为真表示 x 是 `properties` 这类映射的**值**：
-// 它的键是参数名（可能就叫 description），它的值是参数自己的 schema。
-func compactNode(x any, inPropertyMap bool) any {
-	switch t := x.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		if inPropertyMap {
-			// 这一层是「参数名 → schema」：键全部保留，值按 schema 走。
-			for k, val := range t {
-				out[k] = compactNode(val, false)
-			}
-			return out
-		}
-		for k, val := range t {
-			if k == "description" {
-				continue // 这个才是注解
-			}
-			// properties/patternProperties/$defs 的值是「名字 → schema」的映射。
-			out[k] = compactNode(val, isPropertyMapKey(k))
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i, val := range t {
-			out[i] = compactNode(val, false)
-		}
-		return out
-	}
-	return x
-}
-
-// isPropertyMapKey 判断某个 schema 关键字下面挂的是不是「名字 → schema」。
-//
-// 只有这四个：properties / patternProperties / $defs / definitions。
-// 其余（items / anyOf / additionalProperties…）挂的是 schema 本身，
-// 哪怕参数正好叫 items，也不能把它的名字当关键字处理。
-func isPropertyMapKey(k string) bool {
-	switch k {
-	case "properties", "patternProperties", "$defs", "definitions":
-		return true
-	}
-	return false
+	return schema.Compact(raw)
 }
 
 // emptyResponseErr 把"看起来成功、其实什么都没拿到"的响应判成错误。

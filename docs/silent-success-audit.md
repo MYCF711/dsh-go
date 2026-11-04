@@ -63,14 +63,17 @@
 - **数据检查**（会 FAIL）：解析全部 57 份 `json.RawMessage` schema，逐层校验
   `required ⊆ properties`；扫 `return Result{}, nil`、`Append(…, nil)`、`writeJSON(…, nil)`；
   模拟**旧的** `CompactSchema`（见 `description` 就删）并统计它会打断多少条 `required`——这是"为什么不能这么写"的永久反证。
-- **守卫检查**（会 FAIL）：12 条已知静默成功路径，源码里必须存在对应校验/报错。
-  守卫被删掉时这里立刻红，不靠记忆。
+- **守卫检查**（会 FAIL）：15 条已知静默成功路径，源码里必须存在对应校验/报错。
+  守卫被删掉时这里立刻红，不靠记忆。（D3 之后新增 3 条：`CompactSchema` 与
+  `tightenSchema`/`shapeless` 必须调用 `internal/schema` 那一份判断；另一个方向
+  也收紧了——除 `internal/schema` 外任何非测试 Go 文件再出现按 key 名删
+  `description`，直接 FAIL，不再是 advisory。）
 
 **它的边界**：静态检查只能证明"守卫在"，不能证明"守卫在运行时真的挡住"。
 真正的运行时证据在 `internal/*` 的红测里（见 §3），本报告不把扫描器绿当成运行时绿。
 
 当前输出：57 份 schema 解析成功、0 份解析失败；旧算法会打断 5 条 `required`（对应 8 个名叫 `description` 的参数）；
-12 条守卫全在；`exit 0`。
+15 条守卫全在；唯一的 `description` 删除点 `internal/schema/schema.go`；`exit 0`。
 
 ## 2. 清单全表
 
@@ -100,7 +103,7 @@
 | `sameShape` 比较把「多一个 `description` 参数」判成同构 | 旧 `stripDescriptions` 也是"见键就删"；合并层据此把不同工具并族 | 判据是"两张 schema 的结构是否真的一样"；少一个参数就不是 | **真缺陷**（潜在，当前合并族里没有触发实例）：同一套按位置判断（红→绿 §3.8） |
 | 工具 `Name()` 为空 | `tools.Registry.Register` 返回「工具没有名字」；三个投影表也拒绝注册 | 空名字进表 ⇒ 模型看不到、调不到，且注册调用方若吞错就静默 | 可接受（守卫已在，扫描器盯住） |
 | 工具 Schema 为 `nil` / 空对象 | 57 份全部可解析且有 `properties`；零参工具的空对象是合法契约 | 非零参工具若 schema 为空，模型只能瞎猜——但当前无实例 | 可接受（当前无实例；新增工具时由 `tool_schema_test.go` 的结构比对兜住） |
-| 压表规则有两份实现（`agent.CompactSchema` / `cmd/dshd.tightenSchema`） | 两套独立代码，各自"按位置删 description" | 同一规则两处实现必然漂移；今天两条 bug 恰好是同一形状在两处各犯一次（修了主路、留了岔路） | **设计决定 D3**（见 §4） |
+| 压表规则有两份实现（`agent.CompactSchema` / `cmd/dshd.tightenSchema`） | 两套变换、三份「见键就删」的写法；`sameShape` 的 `stripDescriptions` 与 `CompactSchema` 语义重复 | 同一规则两处实现必然漂移；今天两条 bug 恰好是同一形状在两处各犯一次（修了主路、留了岔路） | **已解决（D3）**：判断收进 `internal/schema`，重复实现删除（见 §4 D3） |
 
 ### 2.3 会话 / 日志层
 
@@ -317,7 +320,10 @@
   代价：契约要加一个字段或状态，客户端也要改；某些网关把空列表写成 `null` 会被误判。
 - **方向 B（不区分）**：保持现状。代价：用户看到"没有可用模型"，分不清是网关没配还是接口坏了。
 
-### D3 压表逻辑现在有两份
+### D3 压表逻辑现在有两份 —— **已解决（2026-11-04）**
+
+> 原文保留，后面接结论。原文写的是"要不要合并"，答案是**部分合并**：
+> 变换不合并，规则合并。
 
 `internal/agent.CompactSchema` 与 `cmd/dshd` 的 `tightenSchema` 是两套独立实现，都各自"按位置删 description"。
 今天两条 bug 恰恰是同一形状在两处各犯一次。
@@ -325,6 +331,102 @@
 - **方向 A（合并）**：把"哪些键是参数名"的判断收敛到一个共享函数（`internal/spi` 或新的小包），两处都调它。
   代价：`cmd/dshd` 会依赖 agent 包（或新包），需要确认依赖方向不违反 R1/R2；要重跑工具表面积/字节快照。
 - **方向 B（保持两份）**：各自带测试 + 扫描器盯住。代价：下次改 schema 规则仍可能只改一处。
+
+#### D3 结论：选 A 的**规则**那一半，不合并**变换**
+
+新增低层包 `internal/schema`（只依赖 `encoding/json`），内容就三件事：
+
+| 导出 | 作用 | 谁调 |
+|---|---|---|
+| `IsAnnotationKey(k string, inPropertyMap bool) bool` | 唯一判断：这个 `description` 是注解还是参数名 | `cmd/dshd.tightenObject` |
+| `IsPropertyMapKey(k string) bool` | 「名字 → schema」词汇表（properties/patternProperties/$defs/definitions） | `internal/schema` 内部 |
+| `Compact(raw)` / `StripAnnotations(v)` | 「只删注解」这一档变换的**唯一**实现 | `internal/agent.CompactSchema`（转调）、`cmd/dshd.shapeless` |
+
+依赖方向：`internal/agent → internal/schema`、`cmd/dshd → internal/schema`，
+`internal/schema → 只有标准库`。没有 `internal/* → cmd/*` 的边。`go list -deps` 核过。
+
+**为什么变换不整体合并（这是 (c) 那一半）**：它们是两种变换，不是同一个东西的两种写法。
+差异是实测的（一次性探针，逐条跑两份实现对照），收敛前后一个字都没变：
+
+| 输入形状 | `agent.CompactSchema` | `cmd/dshd.tightenSchema` | 是不是同一个东西 |
+|---|---|---|---|
+| 顶层 `"type":"object"` | 保留 | 删 | 否 |
+| 空 `properties:{}` / `required:[]` / `additionalProperties:true` | 保留 | 删 | 否 |
+| `additionalProperties:false` | 保留 | 保留 | 是 |
+| 名叫 `description` 的**参数** | 保留（修好后） | 保留（修好后） | 是（这就是 D3 要收敛的） |
+| 参数上的 `description` **注解** | 删 | 删 | 是 |
+| `properties` → 参数 → `items` 里的注解 | 删 | 删 | 是 |
+| `$defs` / `patternProperties` / `anyOf` / 元组 `items` 里的注解 | 删 | **留**（只递归 properties/items） | **否** |
+| `default` 里的同名键（是数据，不是注解） | **删** | 留 | **否**（前者是既有的过度删除，这次不改） |
+| 数字字面量 | 过 `float64`：`9007199254740993` → `…992`，`1e+04` → `10000` | 逐字节不变（`json.RawMessage` 承载子节点） | **否** |
+| 非对象根 / 非法 JSON | 递归/原样返回 | 原样返回 | 否 |
+
+一句话：`CompactSchema` 是"一个任何地方都能用的通用压表"，`tightenSchema` 是
+"工具表专档、逐字节保守"，两者都不能退让到对方那一侧（让 `tightenSchema` 走 `any`
+会动数字；让 `CompactSchema` 删骨架就改变它的对外语义）。所以只收敛**规则**。
+
+#### 删掉的重复实现（收敛后改动的行数）
+
+- `cmd/dshd/tool_merged.go`：+36 / −68（净 −32 行）—— 删 `stripDescriptions`、`stripDescNode`、
+  `schemaPropertyMapKey`（3 个函数、约 45 行含注释）；`shapeless` 改成转调 `schemarule.Compact`；
+  `tightenObject` 的 `delete(obj, "description")` 改成走 `IsAnnotationKey`。
+  顺带把 `newMergedTable` 里的局部变量 `schema` 改名 `params`：测试包里有同名类型 `schema`，
+  包名与它冲突，所以导入用别名 `schemarule`。
+- `internal/agent/loop.go`：+10 / −64（净 −54 行）—— 删 `compactNode`、`isPropertyMapKey`，
+  `CompactSchema` 变成一行转调（签名不动，外部调用方零改动）；`toolDefs` 里的
+  `schema :=` 局部变量顺势改名 `params`（与包名同名会遮蔽）。
+- 新增 `internal/schema/schema.go`（约 115 行含注释）、`internal/schema/schema_test.go`。
+- 新增 `cmd/dshd/tool_merged_rule_test.go`（反漂移测试）；`scripts/silent-success-audit.py`
+  守卫从 12 条到 15 条、`scan_desc_deletion` 从 advisory 升级为 FAIL 级守卫。
+
+#### 红 → 绿证据
+
+反漂移测试 `TestDescriptionRuleIsOneJudge`（`cmd/dshd/tool_merged_rule_test.go`）
+把同一张 schema 喂给两处实现，断言四件事：名叫 `description` 的参数（顶层与数组元素里）
+必须还在、`required ⊆ properties`、注解必须删、压完是固定点；外加 `sameShape` 的三个方向。
+
+旧实现（`git archive 62ac2ca` 的隔离副本 `/tmp/hc-d3-old`，把那天的代码原样 checkout）上红：
+
+```
+$ go test ./cmd/dshd -run TestDescriptionRuleIsOneJudge -v -count=1
+=== RUN   TestDescriptionRuleIsOneJudge
+=== RUN   TestDescriptionRuleIsOneJudge/agent.CompactSchema
+    zz_d3_rule_test.go:77: 名叫 description 的参数被删了：模型只看到 required 里一个没类型的名字
+        {"properties":{"command":{"type":"string"},"options":{"items":{"properties":{},"required":["description"],"type":"object"},"type":"array"}},"required":["command","description"],"type":"object"}
+=== RUN   TestDescriptionRuleIsOneJudge/tightenSchema
+=== NAME  TestDescriptionRuleIsOneJudge
+    zz_d3_rule_test.go:121: 嵌套元素里多一个 description 参数也不是同构
+--- FAIL: TestDescriptionRuleIsOneJudge (0.00s)
+    --- FAIL: TestDescriptionRuleIsOneJudge/agent.CompactSchema (0.00s)
+    --- PASS: TestDescriptionRuleIsOneJudge/tightenSchema (0.00s)
+FAIL
+FAIL	dshgo/cmd/dshd	0.053s
+exit=1
+```
+
+注意红的是两个不同的子测试：`CompactSchema` 那条是"参数被删、required 悬空"，
+`sameShape` 那条是"多一个 description 参数判成同构"——正是 D3 里说的
+"同一形状在两处各犯一次"。`tightenSchema` 子测试在那份副本上已经是绿的：
+它在 8470b98 里被单独修过，这也正是 D3 存在的理由——**修了一处，另一处靠自觉**。
+
+收敛后同一份测试在共享树上绿：
+
+```
+$ go test ./cmd/dshd -run TestDescriptionRuleIsOneJudge -v -count=1
+--- PASS: TestDescriptionRuleIsOneJudge (0.00s)
+    --- PASS: TestDescriptionRuleIsOneJudge/agent.CompactSchema (0.00s)
+    --- PASS: TestDescriptionRuleIsOneJudge/tightenSchema (0.00s)
+```
+
+行为不变由三条既有结构比对守住（全绿，未改一行断言）：
+`TestCompactTableKeepsContract`（归一化后逐工具相等 + 投影必须是不动点）、
+`TestTightSchemaKeepsDescriptionParam`、`TestRequiredParamsAreDeclared`、
+`ToolTableSnapshot` 快照（`cmd/dshd/testdata/tools.snapshot.json` 无 diff：两份变换对
+**本仓真实 schema** 的产物一个字节都没变）。
+
+**没验证的**：`-race`；真机工具表 A/B（`scripts/tool-table-ab.py`）。这次收敛不改任何
+被送出去的字节，所以没有理由重跑 A/B——但如果哪天要动 `tightenObject` 的删除规则，
+必须重跑。
 
 ## 5. 未改但已登记（越界 / 后续）
 
@@ -340,7 +442,7 @@
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"
 export GOCACHE=/tmp/gocache-silent
-python scripts/silent-success-audit.py     # 12 条守卫全在，exit 0
+python scripts/silent-success-audit.py     # 15 条守卫全在，exit 0
 go build ./... && go vet ./...
 go test ./... -count=1
 git archive HEAD | tar -x -C /tmp/hc-ss && (cd /tmp/hc-ss && go build ./...)
@@ -348,6 +450,10 @@ git archive HEAD | tar -x -C /tmp/hc-ss && (cd /tmp/hc-ss && go build ./...)
 
 本次结果：扫描器 0 FAIL；`go build` / `go vet` 通过；`go test ./... -count=1` 全部 `ok`（含 `cmd/dshd`、
 `internal/{agent,llm,session,transport}`、`modules/tools`）；HEAD 隔离副本 `go build ./...` 退出码 0。
+
+**D3 复跑（2026-11-04，`GOCACHE=/tmp/gocache-d3`）**：扫描器 15 条守卫 0 FAIL；`go build ./...` /
+`go vet ./...` 通过；`go test ./... -count=1` 全部 `ok`；`git archive HEAD` 隔离副本 `go build ./...`
+退出码 0。工具表快照 `cmd/dshd/testdata/tools.snapshot.json` 无 diff。
 
 **没有验证的**：真机（需要新 `dshd` + 网关）；`-race`；界面线消费这些新错误码/`session/reset` 的行为。
 单测只证明"守卫在对应的函数里生效"，不证明"真实网关/真实 UI 会按预期处理"。
