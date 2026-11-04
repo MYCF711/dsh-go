@@ -5,12 +5,12 @@
 
 ## 0. 每次开工按此顺序
 
-1. **先核源码再领任务**：读对应 PLAN、`MAINTENANCE.md`，再看 `git status`、近期提交、相关实现/测试。`docs/transport-contract.md` 的 H 表是带日期证据，不是派工单；发现更新代码先验证再回填，不回滚、不重复实现。
-2. **当前入口**：宿主顺序只读 `PLAN.md` §14.1；界面读 `UIPLAN.md` §3–§4 与 `../dsh-ui/PLAN.md`。先过 **H14 Transport 契约门**，再做 H6 真实流、H13 真实审批执行和跨仓产品验收；H8 可独立并行。
-3. **Lead 只拆包/派单/验收**：≥2 个独立 READY 必须同轮派给子代理或有上下文成员；派后不 wait/poll，完成方主动通知。Lead 验收后更新 PLAN 任务表并派下一项，表空先补项。任务书写 owner/paths/rev/依赖/失败测试/验收/证据；同文件单写者，共享契约/壳串行。
-4. **契约先行**：唯一契约 owner 先串行改 `docs/transport-contract.md`、两边快照和 golden 并冻结，再让宿主/UI 实现并行。跨仓调用必须经真实 UI apiclient；mockd、手写 JSON、ACP 各自只证明自身一层。
-5. **分层验收**：代码存在 ≠ 单测 ≠ 宿主执行链 ≠ 跨仓联调 ≠ 产品完成。回填写 rev、配置、命令、退出码、真实断言、证据路径和未验证项；不得用历史 ✅ 代替本轮证据。
-6. **真实终验**：同一新 dshd + `../dsh-ui` + 临时 home，跑认证、list/load、发送、text/reasoning/tool、审批、取消、续历史、断线恢复；再做完整工作日、同任务 A/B 和整进程树性能。
+1. **先核源码再领任务**：读 PLAN/MAINTENANCE、git status/log 与相关源码/测试；H 表是证据非派工单，先验证再回填，不回滚/重做。
+2. **入口**：宿主 `PLAN.md` §14.1；界面 `UIPLAN.md` §3–§4 + `../dsh-ui/PLAN.md`。先 H14，再 H6/H13/跨仓验收；H8 可并行。
+3. **Lead 只拆包/派单/验收**：≥2 个独立 READY 同轮外派，派后不 wait/poll，完成方通知；验收后更新任务表并派下一项。任务书写 owner/paths/rev/依赖/红测/验收/证据，同文件单写者，契约/壳串行。
+4. **契约先行**：唯一 owner 先冻结 `docs/transport-contract.md`、双仓快照/golden，再并行实现；跨仓必经真实 UI apiclient，mockd/手写 JSON/ACP 各只证明自身层。
+5. **分层验收**：代码 ≠ 单测 ≠ 宿主执行链 ≠ 跨仓联调 ≠ 产品完成；回填写 rev/配置/命令/退出码/断言/证据/未验项，不以历史 ✅ 替代。
+6. **真实终验**：同一新 dshd + `../dsh-ui` + 临时 home，跑认证/list/load/发送/text/reasoning/tool/审批/取消/续历史/断线恢复，再做完整工作日、A/B 和整树性能。
 
 ## 1. 不可越过的边界
 
@@ -53,18 +53,14 @@ v4、提示装配与架构理由读 `PLAN.md`；P0 旧工具/“不做”清单�
 
 ## 5. 验证与交付（硬规则）
 
-**提交前必须自证"HEAD 单独能编译"**，不是"我的工作树能编译"。
+**提交前必须自证 HEAD 单独能编译**，工作树绿不算：
 
 ```bash
-git stash -u --keep-index -q && go build ./... ; git stash pop -q   # 工作树里的东西不算
-# 或者直接：git show --stat HEAD 里出现的每个新文件都 check 过在树上
+git stash -u --keep-index -q && go build ./... ; git stash pop -q
+# 或 git archive HEAD | tar -x -C /tmp 后 build
 ```
 
-2026-11-04 真事故：一次提交把 `main.go`（引用了新函数）提上去了，却漏掉实现它的
-`tool_merged.go`（当时还是 untracked，`git add` 只列出了我以为改过的路径）。
-**工作树 build 通过、`main` 上编译不过**——CI 会红，但在此之前已经推出去过一次。
-教训：并行改动时，`git add` **按目录**而不是按记忆里的文件名；提交后立刻
-`git stash -u`（或 `git archive HEAD | tar -x -C /tmp` + build）验一次干净检出。
+2026-11-04 事故：`main.go` 已提交，untracked 的 `tool_merged.go` 实现却漏 add，导致 main 不编译。并行提交按目录 add，提交后必须干净检出复验，不得漏实现文件。
 
 
 共享树只跑审查过的定向测试、build/vet；完整门禁在隔离副本执行：

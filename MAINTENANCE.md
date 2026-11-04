@@ -1,83 +1,33 @@
-## 当前状态（2026-11-03）
+# MAINTENANCE · 当前执行台账
 
-- 宿主 44 工具 / 覆盖真实语料 99.7%；U0 13 个 method 全实现
-- 门禁 `bash scripts/check.sh` 13 项全绿（含 staticcheck、体积、token 预算、doc-links、race-guard）
-- **一条命令跑完回归**：`bash scripts/regress.sh`（先清残留进程 → 三套 e2e → 门禁）
-- 验证脚本三件套：`ui-e2e.py`（空 home 14/14）、`real-home-e2e.py`（真语料只读 10/10）、
-  `full-e2e.py`（13 method 15/15）
-- 跨界对账：`ui-contract-usage.py` → 界面引用的 13 个 method 与我们实现的**完全一致**
-- 派活模板（`docs/WORKER.md`）三条硬规矩：①没贴输出=没完成 ②造失败分支 ③失败分支不许碰仓外路径
-- 未完成：接口接 `dsh-ui` 实跑（那边 `cmd/app` 启动 panic，已出报告；等它修完再测）
+> 本页只解释当前怎么接手，不复制一份会漂移的派工单。宿主顺序与 Lead 派单表以 `PLAN.md` §14.1 为唯一来源；界面派单表以 `UIPLAN.md` §4.1 为唯一来源；跨线契约与证据以 `docs/transport-contract.md` 为唯一通道。每小时复核必须同步更新两张表并补足 READY。
 
-# MAINTENANCE.md —— 维护台账（给接手的 agent 看）
+## 原目标与现状
 
-> 接手前先读这一页，读完再按 `AGENTS.md` §5 的流程开工。
-> **每次干完活必须回来更新「当前状态」与「下一步」。**
+- 宿主：`PLAN.md` §0/§1，Go、内核零业务、能力可替换、工具为模型设计、接管真实任务。
+- 界面：`UIPLAN.md` 用户原话/§2.10 与 `../dsh-ui/PLAN.md` §8，Viva 原生、根本依赖先行、逐部件插件化；Web 仅可关闭过渡件。
+- 两仓已有大量实现，不是尚未开工，也不是整产品已验收。历史 ✅、截图、ACP/mockd、handler 单测各自只证明一层。
+- 并行会话正在推进 H13 审批与 H14 契约迁移；开工先看两仓最新提交、工作树和测试，不回滚他人成果，不按本页旧描述重复实现。
 
----
+## 当前依赖顺序
 
-## 一、身份
+1. **G0 / H14 契约门**：唯一 owner 冻结 `docs/transport-contract.md`、两边快照与 golden；统一 HTTP 裸参数、`/ws`、帧词表、每会话 journal/epoch 和原始 history frames。真实 apiclient 只对契约夹具做合成重放；不在此阶段提前实现真实 H6/H13。
+2. **G1 宿主执行链**：H6 真实 text/reasoning/tool 流；H13 serve 推送、子进程应答、允许执行/拒绝不执行/超时/取消；H8 所有 HTTP 错误出口可独立并行。
+3. **G2 跨仓消费**：`../dsh-ui` 用真实 apiclient 接真宿主，完成认证、list/load、发送、取消、续历史、断线恢复和 H1–H13 字段/动作；保留两仓 revision 与真实断言。
+4. **U2–U4**：插件授权/禁用/替换/卸载、逐部件体验、完整工作日、同任务 A/B 和整进程树性能。判据见 `UIPLAN.md` §4。
 
-| 项 | 值 |
-|---|---|
-| 仓库 | `MYCF711/dsh-go`（**私有**） |
-| 形态 | Go 单体二进制 + 插件目录（static / wasm / process 三层） |
-| 上游基线 | DSH `0.2.1-rc.5` |
-| 当前版本 | `0.2.1-go.27` |
-| 分发 | GitHub Release 二进制；**不发 npm**（用户明确要求） |
+## 并行与安全
 
-## 二、当前状态（2026-11-02）
+- 任务书写明 owner、owned paths、两仓 base revision、依赖、失败测试、验收命令与证据路径；同一文件只给一个写入者。契约 owner 冻结后，宿主/UI 实现才可并行。
+- 改前重读，发现并发变化先合并；不得 checkout/reset 覆盖他人，不原地移动 `modules/` 或兄弟仓，不按镜像名杀进程。
+- `scripts/regress.sh` 有全局 taskkill，`scripts/check.sh` 原地移动 modules，隔离修复前不得在共享树运行。抽模块、旧代码造红、变异只在独占隔离副本。
+- 测试使用临时 home、随机端口、无头窗口和自有 PID；不重启/关闭 DSH 或 magpie，不写 profiles/asar/原始会话。
+- commit/PR/push 由任务书授权；两仓 push 均需用户当次确认。
 
-```
-分支        main
-里程碑      **M0–M5 完成并发布**（0.2.1-go.6）；M6 压缩全自动已接进 ACP 循环
-                    https://github.com/MYCF711/dsh-go/releases/tag/v0.2.1-go.6
-版本        0.2.1-go.5（未打 tag）
-已有资产    方案 / 手册 / 调研 6 份 / 审计 3 份 / Go 骨架 13 个文件
-```
+## 验收口径
 
-| 资产 | 数量 |
-|---|---|
-| 调研文档 | 6 份（1,424 行，全部带 `文件:行号`） |
-| 工具 schema | 61 个，54,936 字符 / 12,209 token（`research/20-dsh-tool-schemas.json`） |
-| 参考源码 | `refs/dsc`（**不进 git**，`scripts/fetch-refs.sh` 拉取） |
-| 依赖验证 | `probe/`（go-plugin、wazero 已端到端跑通） |
+- 分层记录代码存在、单测、宿主执行链、跨仓联调、产品完成；每次写命令、退出码、真实断言和未验证项，不只写 ALL GREEN。
+- `-race` 未成功即未验证；token 估算不是同模型真实分词；宿主资源数字不替代 UI+dshd 整树产品验收。
+- 跨仓记录必须含 `dshd_rev`、`ui_rev`、配置、启动/清理命令、真实断言、证据路径和未验项。
 
-## 三、下一步
-
-1. **`shell`**：**真实 bash 进程 + 持久会话 + 自动转后台；不用 mvdan 执行（R6）。
-2. ：真实 bash 进程 + 持久会话 + 自动转后台；**不用 mvdan 执行**（R6）。
-3. **M1 收口**：工具一致性套件 + `testdata/tools.snapshot.json` 快照 + 工具表 token 实测。
-
-### M0 的验收证据（已跑）
-
-| 判据 | 结果 |
-|---|---|
-| `dshd modules graph` 打印激活顺序 | `tools` → `tool-read`（由能力依赖决定，与 manifest 行顺序无关） |
-| 删 `modules/` 后 `go build ./internal/...` | 通过 |
-| 禁用提供者模块 | `模块 "tool-read" 需要能力 "tools"，但没有模块提供它` |
-| manifest 写不存在的 id | `模块 "ghost" 没有编译进二进制；可用模块: [tool-read tools]` |
-| `dshd exec --tool read` | 返回结构化 `Data` + `Hint` + `View` |
-| `scripts/check.sh` | ALL GREEN（9 项 PASS） |
-| `-race` | **未验证**：本机 `CGO_ENABLED=0` 且无 gcc |
-
-## 四、硬约束（违反即返工）
-
-1. **内核零业务**（R1）：`internal/kernel` 不认识 agent/tool/session/llm。
-2. **SPI 之外无通路**（R2）：模块只拿 `*Scope`，不拿 `*App`、不写包级变量。
-3. **工具结构化 + 有界 + 错误带 Hint**（R3）。
-4. **会话日志 append-only**（R5）：视图永远是投影。
-5. **不引 JS 运行时、不 fork/vendor dsc、不用 mvdan 执行命令**（R6）。**R6 对 WebView 里的 JS 是否适用还没拍板**（`UIPLAN.md` Q3）。
-6. **界面线不越界**（R7）：界面不直读日志、宿主不 import 界面，跨线只经 `Transport` + `ViewSpec`。
-7. **没跑过的写成「未验证」，不写「通过」。**
-8. **不动真机**：不重启 DSH、不写 `D:/DeepSeek Harness/home/profiles/`、asar 只读。
-
-## 五、最短接手路径
-
-**两条线，先认清在哪条**：
-
-- 通用：`README.md`（是什么）→ **本文件**（现状与约束）→ `AGENTS.md`（怎么写，含两条线的分工）→ `CHECKLIST.md`（交付门）→ `UPDATING.md`（怎么发版）
-- **宿主线**：`PLAN.md` §1（十项决策，别重新讨论）→ §14（里程碑）
-- **界面线**：`UIPLAN.md`（Q1–Q12，**未拍板不许开工**）→ `research/40-official-shell.md`（官方壳实测解剖）→ `research/42-frontend-inventory.md`（前端到底有多少行）
-
-> 界面线的代码**一行都还没有**。要开工，先让用户把 `UIPLAN.md` §7 的 Q 拍下来。
+版本读源码与 CHANGELOG，发布流程遵循 `UPDATING.md`；只 ack 实际处理完毕的 issue/PR。

@@ -124,8 +124,8 @@ H14 通过后才能做 H6/H13 的线上联调。H8 可与 H14 并行；其余独
 | Trajectory 计时/统计 | start/end/token timestamps、TTFT/decode、requestNumber、usage routes 与错误详情 | 用墙钟虚构耗时、把消息数当 Turn 数、编 0 tok/s |
 | 面板导航（FRAME-GAP C-PANEL） | `panel.open` 路由与已注册 panel registry | 把当前 profile/第三方扩展硬编码成官方固定入口 |
 | 团队/子智能体（C-TEAM） | `agentPreset` 与 mode/模型真值；每个会话稳定关联 | 把单一进程 `serveTurnSeq` 或静态“3 个子智能体”当团队真值 |
-| 模型选择（MODEL-WIRE） | `session.setModel{id,model}` 后下一轮 request/context 必须使用覆盖，空值回默认，重启持久；catalog 另列。**`648bdea` 目前只有 Set/store，未见 Get 消费** | 只写 `state/session-model.json` 或只加快照就画可点下拉；把上一轮 model 当选择目录 |
-| Dock 指标（C-STATS） | turn/assistant-step 真值、cache 命中分子/分母、contextWindow/百分比容量。**`111e250` 已提供 contextWindow（0=未知）；turn/step/cache 分母与 UI 归约仍未闭环** | 用 assistant 消息数当轮、tool 消息数当步、缺分母仍显示缓存率或上下文百分比 |
+| 模型选择（MODEL-WIRE） | **DONE scoped `ff844228`/`61ab70a0`**：默认 loopRunner/modelRunner 下一轮使用覆盖，空值回默认，重启持久；`25b374b` models.list 提供真目录，UI `0747a0a` 有选择入口 | 只写 store/列目录不算切换；真实 magpie/UI 真机与完整工作日另验，不把 scoped DONE 外推为全产品完成 |
+| Dock 指标（C-STATS） | contextWindow 已由 `111e250` 提供，STATS-WIRE 已贯通 UI 并显示真实文本百分比（无圆环）。**turn/step/cache/decode 真值仍未提供** | 用 assistant/tool 数冒充轮/步、缺分母显示缓存率、used>capacity钳100%或伪圆弧 |
 | 工作区（C-WORKSPACE） | OS 目录选择、workspace add/remove、归档/pin/rename、跨会话搜索 | 把标题包含过滤称为语义搜索，或不改目录却显示已切换 |
 | 扩展视图（C-EXTENSION-VIEWS） | 第三方 view descriptor 与实际 painter/数据、按会话选择持久化 | 注册前显示主题鱼/压缩，卸载后残留入口 |
 

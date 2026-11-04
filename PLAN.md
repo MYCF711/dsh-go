@@ -1,9 +1,13 @@
 # PLAN · dsh-go：用 Go 重写 DSH
 
 > **版本** v1.0（2026-11-02）· 十项方向已与用户逐条拍板
-> **上游基线** DSH `0.2.1-rc.5` · **本仓版本** `0.2.1-go.5`（见 §13）
+> **上游基线** DSH `0.2.1-rc.5` · 当前本仓版本以源码与 `CHANGELOG.md` 为准（§13 是版本规则，不重复硬编码旧值）
 > **证据层**：`HANDOFF.md`（实测账）、`evidence/`（三份审计）、`research/`（本轮六份调研）、`refs/dsc`（只读参考）
 > **执行规则**：见 `AGENTS.md` —— 本文件只讲**为什么**，AGENTS 讲**怎么做**
+>
+> **现行读法（2026-11-03）**：§0–§13 是已拍板架构与质量目标，§14 是最初 M0–M5 范围，§14.1 才是当前执行顺序。P0 的 18 工具、HTTP/WS/桌面对接“不做”等是最初阶段边界，**不是删除后来已实现能力或阻止后续 Transport/UI 工作的理由**。`docs/transport-contract.md` 的 H 表是带日期的证据快照，领任务前必须重读源码、测试和工作树；稳定决策不因旧状态描述改变。
+>
+> **当前第一门 H14**：先统一 HTTP 裸参数 body、WS `/ws`、服务端 `{seq,type,data,time}` 与两份快照；每会话 Transport journal 统一分配 seq，WS/history 同源，history 返回原始 frames。未经真实 UI apiclient 验证，不得进入 H6/H13 跨仓联调。完整定义见 `docs/transport-contract.md` 与本文件 §14.1。
 
 ---
 
@@ -15,7 +19,7 @@
 |---|---:|---:|---|
 | 常驻私有工作集 | 870 MB | **< 150 MB** | `tasklist` 私有工作集 |
 | 冷启动 | 数秒 | **< 100 ms** | 进程起止计时（Go 空进程实测 median 18 ms） |
-| 空二进制体积 | — | **< 25 MB** | `go build -ldflags "-s -w"` |
+| 空二进制体积 | — | **≤ 25 MiB**（25×1024×1024 字节） | `go build -ldflags "-s -w"` |
 | 2,500 次 shell 调用 | — | **无线程/句柄泄漏** | 压测 + `pprof` 前后对比 |
 | 工具表 token | **12,209**（61 个工具，实测分词） | **≤ 6,000** | 同一模型对 schema 分词 |
 | 一次会话的 shell 回显占比 | **85.5%** | **< 50%** | 会话日志统计 |
@@ -37,7 +41,7 @@
 | 7 | 插件移植 | **后续任务**。P0 只做本体，架构上只留 SPI 插口 | 本体先跑通 |
 | 8 | 本体边界 | **干活闭环**：内核 + 18 工具 + agent loop + 会话 v4 + 压缩 + ACP + TUI；不含 team/workflow/schedule/goal | 约 2.5–3 万行 |
 | 9 | 自举程度 | **模式（preset）机制必须复刻**；工具按模式可见；**内置模式只读**（用户层 patch 命中即报错），用户只能自建模式；装卸类工具只在用户自建模式下可见 | 官方是「可编辑」的（`dsh-agent-preset-registry`），我们加这层保险 |
-| 10 | 追更 | **分支追更**：版本号对齐上游——`0.2.1-rc.5` → **`0.2.1-go.5`** | 每次跟进 = 一个明确的上游基线 |
+| 10 | 追更 | **分支追更**：版本号规则对齐上游——`0.2.1-rc.5` → **`0.2.1-go.N`**，当前 N 看源码与 CHANGELOG | 每次跟进 = 一个明确的上游基线 |
 
 ---
 
@@ -75,7 +79,7 @@ cordis 里没有"宿主"，只有一堆 fiber；`dsh` 本体只是 bootstrap。�
 
 ### 2.4 三条自动验收判据
 
-1. **抽掉实现仍能编译**：删 `modules/` 后 `go build ./internal/...` 通过。
+1. **抽掉实现仍能编译**：在执行者独占的隔离副本中移出 `modules/` 后 `go build ./internal/...` 通过；不得在共享工作树原地删除、移动或改名。
 2. **禁用任意模块仍能启动**：给出「缺 X 能力，需要 Y 模块」的 fail-loud 错误，不 panic、不静默降级。
 3. **替换任意模块不改宿主**：换 `compaction/basic` → `compaction/gokifu` 只改 manifest 一行。
 
@@ -92,6 +96,18 @@ cordis 里没有"宿主"，只有一堆 fiber；`dsh` 本体只是 bootstrap。�
 **判定规则**：能 static 就 static；能 wasm 就 wasm；process 只给「语言不同 / 依赖重 / 需崩溃隔离 / 需运行时装卸」。
 
 > go-plugin 的 14.8 MB 几乎全是 grpc+protobuf。可接受（`-s -w` 后整包 14.0 MiB），但**不要**为了让所有插件"可热插拔"而把默认实现做成进程插件。
+
+### 3.1 process / wasm 运行时约束（参考 magpie 机制，不引入 JS 引擎）
+
+| 约束 | 落地规则 | 必须交的验收 |
+|---|---|---|
+| **背压 credit** | 每个请求先拿有限窗口；chunk 只有在读者处理后才归还对应 credit。慢读者让上游等待，禁止宿主无界缓冲；cancel/timeout 必须归还并解锁 | 小窗口+慢读者：内存有界、顺序不乱；取消后无死等/泄漏 |
+| **请求隔离** | wasm 可编译缓存，但每请求独立实例或经完整 reset 的池化实例；process 的请求状态随 ctx 生命周期，禁止全局可变会话。panic/崩溃不得污染下一请求 | 同插件两请求并发/串行，全局状态不串；第一次故意 panic，第二次仍正确 |
+| **依赖自包含** | manifest 指向的 wasm/二进制及其依赖必须随插件包交付；禁止跨插件目录 import、隐式 node_modules/全局安装依赖。记录 hash、大小和入口 | 缺依赖/越界引用/ hash 不符在装载前 fail-loud；移到干净目录仍可运行 |
+| **账号作用域（启用多账号时）** | provider/account/session id 必须随请求 ctx 显式传递，不使用进程级“当前账号”；缓存键包含账号作用域 | 同 provider 两账号并发，请求、配额、token、日志互不串号 |
+| **进程协议选择** | Go 强类型插件默认 go-plugin；简单跨语言插件若另立 JSON-over-stdio 适配器，消息只用 `{id,method,params}` 与 `{id,result|error}`，逐行 JSON、stderr 持续排空且有界。**同一插件不得同时维护两套协议** | 任务书先选一种；stdio 另测半包/粘包、 stderr 洪峰、超时、进程退出和请求 id 对应 |
+
+这些是后续 process/wasm 实现与审查的门槛，**不表示 wasmhost/pluginhost 已完成**。能 static/wasm 就不上 process；stdio 只用于确需低门槛跨语言的独立适配器，不重写 go-plugin 已有的握手、版本协商和健康检查。
 
 ---
 
@@ -186,22 +202,7 @@ prompt_sections = ["core","tools-catalog","env"]
 
 ### 7.1 接口
 
-```go
-type Tool interface {
-    Name() string
-    Schema() json.RawMessage                       // 必须稳定：无时间戳/绝对路径/随机 id
-    Exec(ctx context.Context, args json.RawMessage) (Result, error)
-}
-
-type Result struct {
-    Summary   string        // 一行，给人
-    Data      any           // 结构化，给模型（JSON）
-    Artifacts []Artifact    // 大结果外置引用
-    Truncated *Truncation   // {Kept, Total, Pointer}
-    Hint      string        // 失败/为空时的下一步
-    View      *ViewSpec     // card / table / plain，客户端渲染
-}
-```
+唯一 canonical 接口与 Result 定义是 `internal/spi/tool.go`；执行摘要见 `AGENTS.md` §2。实现必须包含 `Name / Description / Schema / Caps / Exec`，失败返回带 Hint 的 Result 与 error，不得从本计划复制缺少 Description/Caps 的骨架。
 
 **与 DSH 的差异（必须显式处理）**：DSH 的工具结果只有 `{isError, content[], meta?}`（`research/23` §3），会话 v4 只认这个形状。所以 `Result` 在**会话边界**要投影成 `content[]`（`Data` → 紧凑 JSON 块，`Summary` → 首块）。**结构化是宿主内的契约，v4 是边界上的编码**——这条投影函数是 M1 的验收项。
 
@@ -224,7 +225,7 @@ type Result struct {
 | 7 | 少而稳的 schema 优于军刀 | 每加一个工具都有固定 token 成本 |
 | 8 | 模型不该看见用不上的东西 | `restrict(filter)` 让隐藏工具连同 schema 一起消失 |
 
-### 7.4 P0 工具集：18 个，目标 ≤ 6k token
+### 7.4 最初 P0 工具基线：18 个，目标 ≤ 6k token（历史范围，不是当前上限）
 
 | 组 | 工具 |
 |---|---|
@@ -236,7 +237,7 @@ type Result struct {
 | 派生 | `subagent` |
 | 考古 | `history_search`（读旧会话/旧记忆，软着陆的关键工具） |
 
-**不做（P0）**：`workflow`、`team_*`、`schedule_*`、`goal`、`skill`、`github`、`repo_here`、`gitbash_*`、`hindsight_*`（后者走 MCP）。
+**最初 P0 不做（历史范围）**：`workflow`、`team_*`、`schedule_*`、`goal`、`skill`、`github`、`repo_here`、`gitbash_*`、`hindsight_*`（后者走 MCP）。后续已实现的工具不得按这份旧清单删除；新增工具仍须证明真实任务价值、能力声明、schema 稳定性和当前工具表 token 预算。
 
 **shell 的执行模型（重要）**：**用真实 shell 进程**（本机 Git Bash），**不要**用 `mvdan.cc/sh` 在进程内解释。实测 Windows 上 mvdan 的进程替换是静默桩（`cat <(echo x)` 输出字面量 `TODO: support process substitution on Windows`）、POSIX 路径不映射（`cd /tmp` 失败）、外部命令全是 `exit status 127`。mvdan 只用于**静态分析**（判定命令是否写盘，喂给沙箱），不用于执行。
 
@@ -250,7 +251,7 @@ type Result struct {
 | 工具目录 | 自动流入；`toolOrder` 必须恰好含一个 `<unlisted-tools>` 占位；列了不存在的工具名 → 每次装配都拒 |
 | AGENTS.md | 注入顺序 **由宽到窄**：`$DSH_HOME/AGENTS.md` → `~/.agents/AGENTS.md` → 项目根 → cwd；每层可有 `.local` 覆盖层 |
 | 注入形态 | **一条耐久基线消息**（不是每轮重发）；trim 后内容相同的文件只渲染一次 |
-| 预算 | `maxBytes` 65536；降级顺序「先丢更宽的，最后才截断最具体的」 |
+| 预算 | 设计目标为装配总预算 `maxBytes` 65536，降级先丢更宽层；**当前 Go 默认单文件截断 8000 字节**（以 `internal/prompt` 为准），因此项目 AGENTS ≤7000 字节，链接文档由任务显式阅读 |
 
 ---
 
@@ -307,9 +308,9 @@ step: LLM 流式 → 工具调用 → 工具结果 → 再进 LLM（直到无工
 |---|---|---|
 | **M3** | ACP 服务端（stdio JSON-RPC） | **Martty 能连上并对话，流式收到 reasoning** |
 | **M4** | TUI（bubbletea） | 日常任务能完成；`ViewSpec` 单一渲染器画 card/table/plain |
-| **P2** | Go 桌面端 | 选型 spike（Wails v3 / Fyne / Gio）后再定；**不使用 Electron** |
+| **原生界面** | 独立 `dsh-ui` 仓，Go + Viva | 已拍板，见 `UIPLAN.md` §2.10；不得退回 Wails/Fyne/Gio 选型 spike，不使用 Electron/WebView 主壳 |
 
-客户端只能经 `Transport` + `ViewSpec` 接触内核，所以桌面端选型不阻塞内核。
+客户端只能经 `Transport` + `ViewSpec` 接触内核，所以界面仓与宿主独立构建；跨仓先过 H14 的 HTTP/WS/快照契约门，再谈真实体验。
 
 ---
 
@@ -339,8 +340,8 @@ requires = ["session"]
 
 ## 13. 版本与追更
 
-- 版本号 = 上游版本 + `-go.N`：`0.2.1-rc.5` → **`0.2.1-go.5`**。
-- `CHANGELOG.md` 维护映射表：`go/0.2.1-go.5 ← rc.5`，列**移植了什么、跳过什么、为什么**。
+- 版本号规则 = 上游版本 + `-go.N`（例如基线 `0.2.1-rc.5` 对应 `0.2.1-go.N`）；当前 N 以源码与 CHANGELOG 为准。
+- `CHANGELOG.md` 维护映射表：`go/<当前版本> ← rc.5`，列**移植了什么、跳过什么、为什么**。
 - 跟进方式：新上游版本 → 新分支 → 只搬「契约变化」（会话格式、工具语义、ACP 方法）+ 我们要的功能；**不搬**客户端 UI 与 provider 生态。
 - 先例（`HANDOFF.md` §1.8）：`rc.1 → rc.5` 抽样 20 包 18 个字节级零变更；`0.1.7 → 0.2.0` 只有 `dsh-session` 变了。**追更成本主要在 minor 边界。**
 
@@ -348,16 +349,49 @@ requires = ["session"]
 
 ## 14. 里程碑
 
+> **当前执行提示（2026-11-03）**：下表是最初 M0–M5 的范围与验收定义，不是让接手者重做 M1/shell 的工作单。当前宿主顺序**只以 §14.1 为准**；跨线证据看 `docs/transport-contract.md`，界面路线看 `UIPLAN.md` §2.10。历史 ✅ 仍须对当前版本复验。
+
 | # | 交付 | 验收（跑得出来） | 规模 |
 |---|---|---|---:|
-| **M0** | 内核 + 装配器 + manifest + 模块图 | `dshd modules graph` 打出依赖树；删 `modules/` 仍能 `go build ./internal/...`；禁用任意模块报「缺 X」 | 2–3k |
+| **M0** | 内核 + 装配器 + manifest + 模块图 | `dshd modules graph` 打出依赖树；在隔离副本抽掉 `modules/` 仍能 `go build ./internal/...`；禁用任意模块报「缺 X」 | 2–3k |
 | **M1** | 工具 SPI + 18 工具 + 三条中间件 | 一致性套件全绿；越界写被拒；spill 后能取回；`Result → content[]` 投影有 golden test | 6–8k |
 | **M2** | LLM(SSE) + agent loop + 会话 v4 codec | `dshd run "…"` 跑通；**Node 版能读 Go 写的会话**；两边派生的 messages 逐条相同 | 6–8k |
 | **M3** | ACP 服务端 | **Martty 连上并对话** | 4–5k |
 | **M4** | TUI + 持久 shell + 后台任务 | 用 TUI 完成一次真实任务；内存 < 150 MB | 4–5k |
 | **M5** | 压缩协议 + token meter + 模式系统 + `history_search` | gokifu 以 wasm 接入，fold 语义不变；内置模式不可改 | 4–6k |
 
-**顺序不可换**：M0 → M1 → M2 → M3。先 `spi/tool.go`，不要先写 loop（`HANDOFF.md` §12）。
+**最初顺序不可换**：M0 → M1 → M2 → M3。先 `spi/tool.go`，不要先写 loop（`HANDOFF.md` §12）。这是历史依赖记录；当前不得据此重做这些阶段。
+
+### 14.1 当前宿主执行顺序（2026-11-03）
+
+| 门 | 先做 | 通过后才进入 | 证据 |
+|---|---|---|---|
+| **G0 契约可连接** | **H14**：统一 HTTP 裸参数 body、`/ws`、控制帧、服务端 `{seq,type,data,time}`、14 method 与两份快照/golden；每会话 Transport journal 统一 seq，WS/history 同源且 history 返回原始 frames，journalEpoch/reset 处理重启 | H6/H13 跨仓联调 | 同一 fixture 驱动宿主、UI、mockd；真实 UI apiclient 对**契约夹具**验 create/load/prompt/approve、合成 reasoning/tool/approval 重放、两会话不串流及 stale_epoch 重置；真实生成归 H6，真实审批执行归 H13，不在 G0 循环前置 |
+| **G1 宿主执行链** | H6 原始 text/reasoning/tool 流；H13 `approval/request` → `session.approve` → 子进程继续/拒绝；H8 所有错误出口 | 跨仓整链 | 宿主宰临时 home 中端到端测试，允许执行、拒绝不执行、超时、取消均有真实结果 |
+| **G2 跨仓消费** | UI 按 H14 适配路径/帧/cookie/每会话连接；接 H1–H13 字段与动作 | 原生产品验收 | 同一新 dshd + 同一 UI + 临时 home；不得用 mockd/ACP 代替 |
+| **G3 产品接管** | 真实任务、同任务 A/B、资源与长会话 | 发布候选 | 完整工作日、整进程树内存、冷启动、当前工具表真实分词；所有未验项明示 |
+
+#### Lead 派单表（每次开工、完成通知、定时复核时更新）
+
+状态只用 **READY / IN_PROGRESS / BLOCKED / DONE**；DONE 必须附 rev、命令、真实断言和证据路径。**Lead 只拆包、派单、集成、验收，不自行串行实现。** 所有依赖已满足且 owned paths 不重叠的 READY 必须同轮派给子代理或有上下文成员；派后不 wait/poll/空等，完成方主动通知。Lead 收通知后验收、更新本表并立即派下一 READY；表空先按 G0–G3 未验缺口补表，禁止自行扩范围。
+
+| ID | 状态 | 执行者与依赖 | owned paths | 交付与验收 |
+|---|---|---|---|---|
+| W0 | IN_PROGRESS · 唯一契约 owner（跨仓会话） | 核心已落地；serve 重复/旁路与 UI 快照/重置未闭环 | `docs/transport-contract.md`、两仓 API 快照、`internal/transport/testdata/ws-golden.jsonl` 与契约测试 | 已有 journal/epoch/reset/golden；剩余 serve 去重/统一入 journal、UI 快照与同 golden、stale_epoch/reset、宿主重启凭据与真实 apiclient 联合证据；**MSGID P0：冻结 data 内 v4Seq/messageId/turnId/callId 内容身份字段及 load↔WS 去重 golden，UI 正在先做 scoped fallback，未冻结前不得签精确去重** |
+| W1 | IN_PROGRESS · journal+serve owner | 核心测试已有；**serve follow 重放与 debug 旁路未闭环** | `internal/transport/`、`cmd/dshd/` journal/serve 文件与测试 | `TestJournalSeqIsPerSession` 等已有；`wssession.go` 重放修复仅工作树，未提交不计完成；剩余 `serve_tools.go` 零水位去重、`serve_turn.go` debug Seq=1/time/journal 统一；重放→订阅非原子与 pendingReplay+journal replay 可能重/丢需定向测试，再做不重复真机断言。**PERF0 已证实当前 +30 行 wssession 重放 patch 会让 turn 进 WS 重连风暴（137,246 次/120s；干净 4f7c885 14s 正常）——提交前必须先修，禁止用脏树构建跑 h-suite/性能** |
+| W2 | IN_PROGRESS · 与 UIPLAN **U0 同一 UI 契约 owner** | `6e4e90f` 已关闭 reset/History epoch/409 基线重连；快照/golden/重启凭据未闭环 | `../dsh-ui/internal/apiclient/`、`cmd/mockd/`、对应测试与快照 | `80a5754` 首启水位、`6e4e90f` reset/epoch 重连已有单测；真机换代未验。剩余 UI `testdata/api.snapshot.json` 仍是 v1 `/api/mux`+`kind`+messages，`cmd/mockd` historyParams 无 journalEpoch，共享 ws-golden 与宿主重启 cookie；`036aab7` 已修宿主 epoch 跨进程唯一，UI 同版本重启待验；U0 的 scoped DONE 不等于 W2 全部完成 |
+| W3 | IN_PROGRESS · H6+serve owner | reasoning 生产路径已验；**serve 重复与 debug 旁路未闭环** | `cmd/dshd/serve_events.go`、`serve_turn.go`、`serve_tools.go` 及授权测试 | `TestReasoningBlockSurvivesEvent` 与 reasoning→text 已有；剩余 follow 不重读重复、debug 同样进 journal/带 time、真机无重复后签 DONE |
+| W4 | IN_PROGRESS · H13 宿主 owner | allow/deny/timeout/replay/allow_always 已验；**pending cancel 未闭环** | `cmd/dshd/serve_approval*.go`、`scripts/h13-*.py` 及授权 serve 测试 | 已有 M258–M261 共 11 项记录；剩余 cancel→拒绝+工具不执行+`approval/cancel`+第二轮 prompt，先补失败测试再实现，未过不签 DONE |
+| W5 | IN_PROGRESS · H8 owner | 常规/encode_failure 已验；**stale_epoch 特构造错误体缺 retryable** | `internal/transport/server.go`、授权 envelope/error 测试 | 已有 M262 三项测试；剩余 `server.go` stale_epoch 分支统一 `errorBody` 四字段并加失败测试，真实 apiclient 复验后签 DONE |
+| W6 | DONE · 09:08 复核 | Lead 复核在途子代理与两仓证据；宿主 `b906a8e` / UI `7483501` | 无源码写入；只读两仓最新代码/测试 | `git log/status` 与现有证据复核；两仓 test/build/vet 均 exit 0；报告 `docs/scheduled-review-2026-11-04-0908.md`；未重跑真机 |
+| W7 | IN_PROGRESS · 与 UIPLAN **U1-H6 同一跨仓集成 owner** | `2aea9f3` 已有 e2e **22 PASS**、13 处假阳性修复与 31 用例自测失配 0；宿主重启/FrameSub 与完整工作日仍未闭环 | 任务书指定的 scripts/evidence，不改共享实现 | `2aea9f3` 记录 13 处假阳性反证、e2e 22 PASS；剩余宿主重启 cookie 自愈、`80a5754` 已关闭首启 epoch/lastSeq 与实时 tool 自动开右栏；`6e4e90f` 已关闭 reset/History epoch/409 基线重连（真机换代未验）、FrameSub 修复提交后复验；`eb7306d` 已验进程内 A→B→A 对账 8=8（progress 22:10）、MSGID 适配层已清 tools、按 callId/作用域配对并有 12 条新测试；缺宿主 v4/messageId 时仍不签 load↔WS 持久精确去重；G7FIX 已关闭首载空白（首开色数 226、完整中栏 diff=0，证据 `../dsh-ui/docs/blank-center.md`）；`86991b2` 记录 dsh-ui headless 连本宿主订阅+发送+回答全通，仍需同版本独立复核；实时 WS/真 dshd 整链仍验 |
+| W8 | DONE · 复用 UI U4P 设计（base `bf7e888`，owner `f29400bd`，文档已提交 `bc79784`） | 不再另写宿主重复方案；A/B 尚未执行 | 唯一计划 `../dsh-ui/docs/ab-acceptance-plan.md` | 验收命令 `test -f ../dsh-ui/docs/ab-acceptance-plan.md && grep -q T01 ../dsh-ui/docs/ab-acceptance-plan.md` **exit 0**；`wc -l`=735，10 任务/控制变量/最多 3 次/成功率/返工/token/日志模板齐全。**只设计未执行**；官方 Electron 需真人启动，后续执行另列 U4，不在本仓复制计划 |
+| W9 | DONE · 复用 UI PERF 设计（base `bf7e888`，owner `04e622a3`，文档已提交 `bc79784`） | 不再另写宿主重复方案；10 项尚未实测 | 唯一计划 `../dsh-ui/docs/perf-gap-plan.md` | 验收命令 `test -f ../dsh-ui/docs/perf-gap-plan.md && grep -q G8 ../dsh-ui/docs/perf-gap-plan.md` **exit 0**；`wc -l`=308，10 缺口/整进程树/计时边界/证据路径齐全，零改动可测 G1/G6/G7/G8。后续实测由 PERF0 承担，不冒充实测完成 |
+| W11 | DONE · 原 owner `9dff3286` 失败，Lead 接管 · base `4f7c885` 两态 | A=committed、B=+wssession patch；隔离执行，不写共享实现 | `docs/h-suite-validation-2026-11-03.md` | 两态 `bin-check`/`build`/`vet`/`test`/`h-suite --fast`/`race` 均 **exit 0**；h-suite fast 非模型探针 **40/40**，6 条真实模型探针按设计 SKIP；race 合计 OK=1 FAIL=0。当前 HEAD `83eaa92` 另跑 test/build/vet exit 0，但未重跑 race/h-suite；不能外推。原 owner 未完成原因未查明 |
+| W12 | DONE · 原包 `ff844228`、final `61ab70a0`，Lead 集成验收 | 默认 loopRunner/modelRunner 下一轮覆盖已接入并集成宿主共享树 | `cmd/dshd/serve_model_override.go`、`serve.go`、`serve_turn.go`、`serve_loop*.go` 及测试、`docs/model-wire.md` | integrated patch SHA256 `6e5b3cad…`；Lead 五项关键测试逐项 PASS，最终及共享树 test/vet/build 全绿。A/B、清空、重启、损坏store、v4不变闭环；真实 magpie/UI 真机、-race/h-suite 与完整工作日另验 |
+| W10 | DONE · rev `24272b5`+`5bba1ab` | 陈旧二进制导致假回归；无需改宿主实现 | `scripts/bin-check.py`、`scripts/h10-chain.py`、`scripts/guard-selftest.py` | 命令 `python scripts/h10-chain.py`（M289记录）→ **OK=6 FAIL=0**，含 prompt accepted+原会话 load assistant>0；`python scripts/bin-check.py` 为套件首门且有摸旧必红反证。证据 `docs/host-side-closeout.md` §8、`docs/verify-rules.md` §1。原 id 判据由该行为链替代，**不声称 id 相等已验**；跨仓/真实 home 遍历另验 |
+
+执行代理先按 `AGENTS.md` §0 核对最新源码和其他会话改动，再把现有工作标成 IN_PROGRESS+owner；不得重复派发或实现。H8 只在写路径不冲突时并行；H6/H13 的线上联调不得在 H14 前靠私有帧格式“先跑起来”。**下一批代码子代理默认各自隔离 worktree/导出副本并交付 patch，共享工作树只由 Lead 串行集成与验收；当前在途任务不迁移、不清理，避免实现前红测互相阻塞完整包门。**
 
 ---
 
@@ -383,12 +417,12 @@ docs/              设计文档（cordis-alignment、tool-spi 等）
 **CI 七条**
 
 1. `go list -deps ./internal/kernel` 不得含 `modules/`、`internal/{agent,tools,session,llm}`。
-2. 删 `modules/` 后 `go build ./internal/...` 通过。
+2. 在执行者独占的隔离副本中移出 `modules/` 后 `go build ./internal/...` 通过；共享工作树禁止删除、移动或改名。
 3. 每个 `Tool.Exec` 的 error 路径必须给 `Hint`（AST 扫描）。
-4. `go vet` + `staticcheck` + `-race` 全绿。
-5. 工具 schema 快照：变更必须显式更新 `testdata/tools.snapshot.json`（防缓存击穿）。
+4. 完整 CI 目标为 `go vet` + `staticcheck` + `-race` 全绿；共享树未实际跑成的项必须标未验证，不得用 race-guard 或普通 test 冒充。
+5. 工具 schema 快照：变更必须显式更新 `cmd/dshd/testdata/tools.snapshot.json`（防缓存击穿）。
 6. 工具表 token 总量 ≤ 6000（分词实测，不估算）。
-7. `dshd` 二进制体积 ≤ 25 MB（`-s -w`）。
+7. `dshd` 二进制体积 ≤ 25 MiB（25×1024×1024 字节，`-s -w`）。
 
 **依赖白名单**（实测版本，`research/30`）：`hashicorp/go-plugin v1.8.0`、`tetratelabs/wazero v1.12.0`、`klauspost/compress v1.20.3`、`BurntSushi/toml v1.6.0`、`mvdan.cc/sh/v3 v3.14.1`（仅解析）、`charmbracelet/bubbletea v1.3.10`、`charmbracelet/lipgloss v1.1.0`、`modelcontextprotocol/go-sdk v1.8.0`、`golang.org/x/sync v0.24.0`、`coder/websocket v1.8.15`。新增依赖要写「为什么标准库不够」。
 
@@ -404,7 +438,7 @@ docs/              设计文档（cordis-alignment、tool-spi 等）
 | 生态反转 | 拿不到 JS 插件 | MCP 继承；不自建 JS 桥 |
 | manifest 膨胀 | 装配图失控 | 一模块 = 一可独立替换的职责；默认实现收敛到 23 个 SPI |
 
-**P0 明确不做**：HTTP/WS 兼容层、桌面端对接、多 provider、team/workflow/schedule/goal/skill、`!!js`、cordis 式热重载、JS 兼容桥。
+**最初 P0 明确不做（历史范围）**：HTTP/WS 兼容层、桌面端对接、多 provider、team/workflow/schedule/goal/skill、`!!js`、cordis 式热重载、JS 兼容桥。后续 Transport 与 Viva 原生界面已成为现行路线；不得据此删除或阻止后续实现。长期仍不做多 provider、`!!js`、cordis 式热重载和宿主内 JS 桥。
 
 ---
 
