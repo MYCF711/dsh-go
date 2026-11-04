@@ -50,7 +50,7 @@ v4、提示装配与架构理由读 `PLAN.md`；P0 旧工具/“不做”清单�
 - 测试用临时 home、`--port 0`、ready 地址/token、无头窗口；只回收自己启动且核对归属的 PID。不得重启/关闭 DSH 或 magpie，不写 profiles/asar/原始会话，不抢现有 GUI 地址。
 - commit/PR/push 由任务书显式授权；提交只 add 认领路径并检查 cached diff，不夹带他人改动。**两仓 push 都需用户当次确认。**
 
-## 5. 验证与交付（硬规则）
+## 5. 验证与交付
 
 **提交前必须自证 HEAD 单独能编译**（工作树绿不算）：
 
@@ -61,14 +61,15 @@ git stash -u --keep-index -q && go build ./... ; git stash pop -q
 
 2026-11-04 自纠：`check.sh` 会 `mv modules`，并行会话 build 会看不到 modules/。**门禁一律在 `git archive HEAD | tar -x -C /tmp/gate-iso` 副本跑**；共享树只跑定向 test/build/vet，不动别人。
 
-2026-11-04 自纠（代价最大的一次）：真机验 ACP 是否落思考块时，我用的是 `tmp/dshd.exe`，
-**没先跑 `python scripts/bin-check.py`**——那是个陈旧二进制，于是看到"思考块没落盘"，
-接着花了很久去查网关、查客户端解析、查 `reasoning_effort` 有没有发出去（全都正常）。
-换成新编的二进制，第一次就落出 `['reasoning','text']`。
-规矩不是多写一句"记得验二进制"，而是**把它排在真机步骤第 0 位**：不加这一步，后面的结论全部不可信，
-而且它会把"陈旧二进制"伪装成"产品缺陷"，让人去改对的东西。
+2026-11-04 自纠：真机验 ACP 时用了陈旧 `tmp/dshd.exe`，没先跑 `bin-check`，误判“思考块没落盘”，白查网关/解析/参数。**真机第 0 步必须 `python scripts/bin-check.py`**；陈旧二进制会把自身问题伪装成产品缺陷。
 
-2026-11-04 三事故：① `main.go` 已提交，untracked 的 `tool_merged.go` 漏 add；② `git add main.go` 带上别人未提交的半成品 `prepareLazy`；③ 实现已提交、钉它的测试还留在工作树。规则：并行提交按目录 add 并先 `git diff --cached --stat`，只认领自己真改的路径；实现与测试同一次提交；收尾 `git status` 检查未跟踪文件。
+2026-11-04 新增一条（这条差点混过去）：**Windows 资源段里目录树必须排在数据前面**。
+`.syso` 里把版本正文排最前、目录树跟后面时，`go build`/链接/运行**全都正常**，
+只有 Windows 读 exe 的 VersionInfo 才表现为**全空**——于是"任务管理器的描述列不再是空白"
+这件事静默失效，而它正是那一项功能的唯一目的。判据只有一条：`(Get-Item x.exe).VersionInfo`
+里 FileDescription 非空。**已用 `cmd/dshtui/internal/vsinfo` 的两条布局测试钉住。**
+
+2026-11-04 三事故：① `main.go` 已提交而 untracked 的 `tool_merged.go` 漏 add；② `git add main.go` 带上别人半成品；③ 实现已提交、测试留在工作树。规则：按目录 add 前看 `git diff --cached --stat`，只认自己路径；实现与测试同提交；收尾 `git status` 查未跟踪文件。
 
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"
