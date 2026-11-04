@@ -1068,6 +1068,8 @@ ASCII 4 字节 ≈ 1 token。所以 10k 字思考 ≈ 10k token。校准路径�
   `reasoning` 块）：**ACP 会话的思考从不落盘**。于是 A 的重放、B 的估算都只在"别的入口
   （`dshd run` / `serve`）写的会话"上生效；从零开始的 ACP 会话仍然没有思考可读。修法与
   `serve_turn.assistantBlocks` 同款（一行 `session.ReasoningBlock`），本轮按任务书只动了 `Load`。
+  **已解决（2026-11-04）**：实际做法是把铺块抽成共用的 `assistantBlocksFrom`，ACP 的写盘 sink
+  与 serve 调同一份；红→绿与"不许误伤"的口径见 §5.6 末尾「残留清零：ACP 写侧也铺思考块」。
 - `session.HistoryToSurface`（ACP `usage_update` 的 `used` 用它估算）装不下思考：`r.hist` 是
   `[]llm.Message`。那是显示路径，且 `contextUsed` 优先用服务端实测的 prompt+completion，影响小。
 - `compact.keepFrom` 的尾巴预算用 `session.EstimateRunes(Content)`，也不含思考：它决定"留多长的
@@ -1188,12 +1190,64 @@ PASS text-only 守卫：156 个文件 0 处未登记（白名单 13 条命中 13
 
 - `cmd/dshtui/app.go` 仍不消费帧里的 `reasoning` 键：**数据不丢**（`serve_turn` 会带上），
   丢的是显示。TUI 是过渡件（界面归 `../dsh-ui`），白名单里这条写的就是这个边界。
-- `cmd/dshd/acp.go` 的 `Prompt` 写盘时仍只铺 text + tool_calls（§5.5 末尾已登记）：
-  从零开始的 ACP 会话没有思考块可读——那要动写侧，不在本轮"只做守卫"的范围。
+- ~~`cmd/dshd/acp.go` 的 `Prompt` 写盘时仍只铺 text + tool_calls（§5.5 末尾已登记）：
+  从零开始的 ACP 会话没有思考块可读——那要动写侧，不在本轮"只做守卫"的范围。~~
+  **已解决（2026-11-04，写侧补齐）**：见下方「残留清零：ACP 写侧也铺思考块」。
 - `internal/session/list.go` 的 `summarize`（会话列表一句话摘要）只取 `textOf`：标题只该是
   可见回答，且这轮的形状规则不把它算作"投影丢消息"，未登记为白名单，也没有造红用例。
 - 守卫是**形状**检查，不是数据流分析：跨函数传递的"只认 text"（例如某函数返回 text 空串、
   调用方据此丢消息）不会被抓。它拦的是七次事故共同的那个界面：块类型/空判据。
+
+#### 残留清零：ACP 写侧也铺思考块（2026-11-04）
+
+上面那条 ACP 残留已修。它和 §5.1–§5.5 那七个**不是**同一层：那七处都是**读**侧
+（读日志时把思考丢掉），这一处是**源**侧（压根没写进日志）。读侧全修好之后，一条从零开始
+的 ACP 会话仍然在 `history` / `fork` / `session.load` 三处都看不到模型想过什么——
+每一环都正确，只是源头没有数据。这种形状没有任何一层会报错。
+
+**改法：一份铺块逻辑，两条路共用**
+
+- `serve_turn.assistantBlocksFrom(text, reasoning, toolCalls)` 是"一次回答 → v4 content 块"
+  的唯一一份实现（思考 → 正文 → 调用）；`assistantBlocks(resp *llm.Response)` 退化成它的
+  一行包装，serve 的行为一字未动。
+- ACP 的写盘 sink（`acp.go` 里 `agent.EventAssistantMsg` 那个分支）改成调同一个函数，
+  删掉它自己那份铺块——仓库里不再有第二份。
+- 思考正文取自 `agent.AssistantTurn.Reasoning`（即 `llm.Response.Reasoning`，也即事件流里
+  `agent.EventReasoning` 增量拼起来的那段）。**不另攒一份**：同一次快照的两面各攒一份，
+  正是这轮审计要消灭的"两处各自维护、迟早漂"。测试拿事件流拼出来的文本和落盘块直接比对，
+  两者一旦分开就红。
+
+**红→绿**（`cmd/dshd/acp_prompt_reasoning_test.go`，同一份测试文件在两边跑）：
+
+| 用例 | HEAD（`git archive` 隔离副本） | 改后 |
+|---|---|---|
+| 思考+正文 | `落盘块顺序 = "text"` | `reasoning→text` |
+| 只有思考 | `落盘块 = ""`（空的 `content`） | `reasoning` |
+| 思考+正文+调用 | `text→tool-call` | `reasoning→text→tool-call` |
+| 没有思考的一轮（字节基线） | PASS | PASS（逐字节一样） |
+
+**"不许误伤"的口径**：比的是 `assistant/message` 的 **`data` 原始字节**。不整行比，因为行信封
+带墙钟 `time`，两次跑不可能相等；也不比解出来的结构，因为那会把键序、空数组、多余字段一起放过。
+基线用例是一条没有思考、没有调用、带 usage 的回答，期望值是**改前**代码跑出来的字面量——
+所以它在 HEAD 副本上绿、改完之后仍然绿，两边都绿才叫"没动它"。
+
+**唯一的行为差（已知且刻意）**：正文只有空白字符时，ACP 以前会写一个 `text:" "` 的空块，
+现在按 serve 的 `TrimSpace` 判据不写（这一轮仍落一条 `assistant/message`，只是正文块为空）。
+这类回答在 `assistantHasPayload` 那里本来就是"没有内容"，写进去也没有任何投影读得出来；
+顺着共用函数把判据统一，没有为它保留一处特例。
+
+**ACP sink 有没有动**：没有。`agent.EventReasoning` 本来就经 `emit(e)` 原样推给客户端
+（`internal/acp/server.go` 映射成 `agent_thought_chunk`），缺的只有**落盘**这一半。
+`docs/transport-contract.md` 因此不动：它是 HTTP/WS 跨线契约，ACP 的 update 词汇不在其中，
+本轮也没有新增或改动任何 update 类型。
+
+**顺带**：`scripts/text-only-allow.txt` 里 `acp.go` 那条的登记行号从 `762` 更到 `764`
+（sink 里加了注释，把下面 `Load` 的那一行往下推了 2 行；守卫自己打的就是"请更新行号"）。
+理由原文一字未动，13 条仍是 13 条，漂移回到 0。
+
+**没有验证的**：真机 ACP 客户端（需要新 `dshd` + 客户端重连/重开走一遍 `session/load`）；
+`-race` 未跑。单测证明的是"写侧落盘的块与顺序"，不证明"真实客户端会把
+`agent_thought_chunk` 画出来"——那是客户端那边的事。
 
 ## 6. 复跑与验收
 
@@ -1252,3 +1306,24 @@ ALL GREEN
 **没有验证的**（这一节）：守卫是**形状**检查（正则 + 语句块解析），不是数据流分析——
 跨函数传递的"只认 text"抓不到；TUI/`list.summarize` 那两处只做显示投影的取舍已在 §5.6
 末尾登记；`-race` 未跑。
+
+**D6 复跑（2026-11-04，§5.6「残留清零」：ACP 写侧铺思考块，`GOCACHE=/tmp/gocache-acpw`）**：
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+export GOCACHE=/tmp/gocache-acpw        # 共享缓存会被并发进程清空
+go build ./... && go vet ./...          # 通过，exit 0
+go test ./... -count=1                  # exit 0，48 个包 ok，无 FAIL
+python scripts/text-only-guard.py       # 156 个文件 0 处未登记（白名单 13 条命中 13，漂移 0），exit 0
+python scripts/silent-success-audit.py  # 17 项 0 失败，exit 0
+git archive HEAD | tar -x -C /tmp/hc-acpw && (cd /tmp/hc-acpw && go build ./...)   # exit 0
+```
+
+红→绿是在**同一份测试文件**上跑的：把它拷进 `git archive HEAD` 的隔离副本，
+`TestACPPromptPersistsReasoningBlocks` 三条子用例全红（`落盘块顺序 = "text"` /
+`落盘块 = ""` / `text→tool-call`），`TestACPPromptNoReasoningPayloadBytesUnchanged` 绿
+（基线本来就是改前行为）；改完之后三条全绿、字节基线仍然绿。
+
+**没有验证的**（D6）：真机 ACP 客户端（需要新 `dshd` + 客户端重连/重开走一遍 `session/load`）；
+`-race` 未跑。基线用例证明的是**这一类**回答（无思考、无调用、带 usage）的字节不动，
+不是"所有没有思考的回答"——后者要靠 `assistantBlocksFrom` 只有一份这件事来保证。
