@@ -237,8 +237,28 @@ def main():
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--out", default="tmp/tool-table-lazy-ab.json")
     ap.add_argument("--md", default="", help="把结果写成 markdown 表（贴进文档用）")
+    ap.add_argument("--md-from", default="", help="不跑模型：把已有 --out json 重新渲染成 markdown")
     ap.add_argument("--only", default="", help="只跑这些任务名（逗号分隔）")
     a = ap.parse_args()
+
+    if a.md_from:
+        with open(os.path.join(ROOT, a.md_from), encoding="utf-8") as f:
+            rows = json.load(f)["rows"]
+
+        def agg(mode, hidden=None, _rows=rows):
+            sel = [r for r in _rows if r["mode"] == mode and (hidden is None or r["hidden"] == hidden)]
+            if not sel:
+                return None
+            firsts = [r["prompt_tokens"][0] for r in sel if r.get("prompt_tokens")]
+            return {"n": len(sel), "good": sum(1 for r in sel if r.get("good")),
+                    "first_tokens_mean": round(sum(firsts) / len(firsts), 1) if firsts else None,
+                    "steps_mean": round(sum(r.get("steps", 0) for r in sel) / len(sel), 2),
+                    "loads": sum(r.get("loads", 0) for r in sel),
+                    "load_correct": sum(1 for r in sel if r.get("load_correct"))}
+
+        write_md(os.path.join(ROOT, a.md), rows, agg, a.runs, a.max_steps)
+        print(f"表格：{a.md}")
+        return
 
     if not os.path.exists(EXE):
         sys.exit("先 go build -o tmp/dshd.exe ./cmd/dshd")
@@ -330,8 +350,8 @@ def write_md(path, rows, agg, runs, max_steps):
     lines.append(f"<!-- 由 scripts/tool-table-lazy-ab.py --md 生成；每组合 {runs} 次，"
                  f"max-steps={max_steps} -->\n")
     lines.append("| 任务 | 用哪类工具 | 目标工具 | 形态 | 知道去拉？ | 拉对？ | 跑通？ | "
-                 "步数 | 首步 prompt_tokens | 总 input | 实际调用序列 |")
-    lines.append("|---|---|---|---|---|---|---|---:|---:|---:|---|")
+                 "步数 | 每步 prompt_tokens | 总 input | 实际调用序列 |")
+    lines.append("|---|---|---|---|---|---|---|---:|---|---:|---|")
     for name, d in by_task.items():
         for mode in MODES:
             rs = d[mode]
@@ -340,14 +360,14 @@ def write_md(path, rows, agg, runs, max_steps):
             loads = sum(r.get("loads", 0) for r in rs)
             correct = sum(1 for r in rs if r.get("load_correct"))
             good = sum(1 for r in rs if r.get("good"))
-            firsts = [r["prompt_tokens"][0] for r in rs if r.get("prompt_tokens")]
-            first = round(sum(firsts) / len(firsts)) if firsts else "-"
+            steps = ["/".join(str(x) for x in (r.get("prompt_tokens") or [])) or "-" for r in rs]
             inputs = [r.get("input") for r in rs if r.get("input")]
             lines.append(
                 f"| {name} | {'表外' if d['hidden'] else '常驻'} | `{d['want']}` | {mode} | "
                 f"{('是（%d/%d）' % (loads, len(rs))) if loads else '—'} | "
                 f"{('%d/%d' % (correct, len(rs))) if loads else '—'} | "
-                f"{good}/{len(rs)} | {cell(rs, 'steps')} | {first} | "
+                f"{good}/{len(rs)} | {cell(rs, 'steps')} | "
+                f"{'; '.join(steps)} | "
                 f"{round(sum(inputs)/len(inputs)) if inputs else '-'} | "
                 f"{'; '.join(','.join(r.get('called') or []) or '-' for r in rs)} |")
     lines.append("\n汇总：\n")
