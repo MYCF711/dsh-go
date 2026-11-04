@@ -284,6 +284,20 @@ func (m *Module) invokeLocked(ctx context.Context, payload []byte) ([]byte, erro
 		}
 	}
 	ptr := uint32(res[0])
+	// 0 是「分配失败」的哨兵，不是地址。
+	//
+	// wasm 不像 C：线性内存的 0 号单元是**合法可写**的，所以少了这一条，
+	// `mem.Write(0, payload)` 会真的成功——args 被盖在客人自己的数据段上，
+	// 而紧接着的 call(0,len) 还能从 0 读到刚写进去的合法请求，
+	// 看起来像一次成功调用。宿主要么报错、要么把客人的内存改坏，这里选报错。
+	if ptr == 0 {
+		return nil, &ProtocolError{
+			Step: "alloc",
+			Reason: "alloc 返回 0（NULL）：wasm 里 0 是合法地址，但 ABI 把 0 当「分配失败」——" +
+				"宿主拒绝往 0 地址写 args（那里是客人自己的数据段，写进去就是在改客人的内存）。" +
+				"分配失败请让 alloc trap，或者返回一个真实可写的区间",
+		}
+	}
 	if !mem.Write(ptr, payload) {
 		return nil, &ProtocolError{
 			Step: "alloc",
@@ -316,9 +330,13 @@ func (m *Module) invokeLocked(ctx context.Context, payload []byte) ([]byte, erro
 		}
 	}
 	if outLen > MaxResultBytes {
+		// 先比长度、**再**读内存：2 MiB 的结果一个字节都不该被读进来，
+		// 更不该被拿去 json 解析（那是攻击者最省事的一条路）。
 		return nil, &ProtocolError{
-			Step:   "读回",
-			Reason: fmt.Sprintf("结果 %d 字节，超过上限 %d", outLen, MaxResultBytes),
+			Step: "读回",
+			Reason: fmt.Sprintf("结果 %d 字节（%.1f MiB）超过上限 %d 字节（%.1f MiB）；"+
+				"宿主按长度拒绝，不把它读进内存再解析",
+				outLen, float64(outLen)/(1<<20), MaxResultBytes, float64(MaxResultBytes)/(1<<20)),
 		}
 	}
 	buf, ok := mem.Read(outPtr, outLen)

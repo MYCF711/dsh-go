@@ -2,10 +2,12 @@
   "_说明": "权限分支登记表：每个决定『放不放行』的函数都必须写明钉住它的测试函数名。scripts/perm-guard.py 会检查这张表与代码一致。",
   "gates": {
     "cmd/dshd/acp.go::approvalDecision": "TestApprovalDecision",
+    "cmd/dshd/acp.go::Prompt": "TestACPPromptPassesModeApproval",
     "cmd/dshd/acp.go::Run": "TestGuardedRunnerRefusalDoesNotExecute",
     "cmd/dshd/main.go::deniesSilently": "TestDeniesSilently",
     "cmd/dshd/main.go::makeAskFuncWith": "TestMakeAskFuncPolicies",
     "cmd/dshd/schedule_policy.go::schedulePolicy": "TestSchedulePolicyDefaultsToReadOnly",
+    "cmd/dshd/schedule.go::cmdSchedule": "TestScheduleRunHandsPolicyToCmdRun",
     "internal/spi/tool.go::NeedsApproval": "TestNeedsApproval",
     "internal/modes/modes.go::Builtins": "TestReadOnlyModeDeniesApprovals",
     "cmd/dshd/serve.go::cmdServe": "TestServePolicyIsDeny",
@@ -14,8 +16,6 @@
     "cmd/dshd/serve_approval.go::reply": "TestApprovalReplyWritesParseableLine"
   },
   "exempt": {
-    "cmd/dshd/acp.go::Prompt": "ACP 的 prompt 处理器：它只是把 modeApproval 传下去，判定本身在 approvalDecision 与 Run",
-    "cmd/dshd/schedule.go::cmdSchedule": "循环体：判定已抽到 schedulePolicy，这里只调用",
-    "internal/prompt/prompt.go::Build": "只决定提示词里把工具怎么分组，不影响是否放行"
+    "internal/prompt/prompt.go::Build": "这个文件里的 Build 只有 ToolGuide.Build 含权限字样（prompt.go:96 的 Caps().NeedsApproval()），它只决定工具名进『只读工具：』还是『会改世界的工具：』这一行文字：整段是往 strings.Builder 里写字符串，不改工具表、不返回放行结果，也没有 allow/deny 分支；Runtime.Build 与 WorkspaceRules.Build 里没有任何权限字样（可 grep 该文件的 \"allow\"/\"deny\"/NeedsApproval/modeApproval 只有这一处）。这行文字本身由 internal/prompt/prompt_test.go 的 TestToolGuideSplitsByCaps 钉着。"
   }
 }

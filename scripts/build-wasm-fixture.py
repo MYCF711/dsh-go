@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""生成 internal/wasmhost 的两个测试夹具 .wasm。
+"""生成 internal/wasmhost 的三个测试夹具 .wasm。
 
-两个产物，用途不同，缺一不可：
+三个产物，用途不同，缺一不可：
 
   1. testdata/fixture.wasm —— 手写的 60 字节**纯 wasm**（不依赖任何工具链）。
      add(i32,i32)->i32：验「装载 + 调用 + 返回值」；
@@ -14,6 +14,19 @@
      它是唯一能同时钉住「_initialize 真跑过」和「ABI 往返」的夹具，
      所以产物必须入库；**测试只读产物，不在 go test 里现场编译**——
      那会把「这台机器有没有 Go 工具链 / wasip1 能不能编」变成测试前提。
+
+  3. testdata/badplugin.wasm —— Go 源码夹具（testdata/badplugin/main.go），
+     同一个 ABI 的**坏客人**：巨量结果、死循环、四种垃圾信封、越界指针、
+     alloc 返回 0 / 越界偏移。五类坏行为都由请求 args 的 mode 字段选择，
+     一条对应 hostile_test.go 的一条用例。别拿它当参考实现。
+
+两条硬要求（三个产物共用）：
+
+  - **`-buildvcs=false` 不是可选项**：go 默认把仓库的 VCS 身份（vcs.revision /
+    vcs.modified）写进 build info，`-trimpath` 关不掉。产物入库、manifest 又按
+    digest 钉内容，那它就不该随仓库指针漂——少这个 flag，同一个源文件在不同
+    commit 上编出来的字节不同，重启一次宿主 digest 就校验失败。
+  - **产物必须可复现**：同一个源文件连跑两次脚本，sha256 必须一样。
 
 为什么不能只留手写那个：它没有 _initialize、没有 Go 运行时，
 测不出「宿主必须先跑 _initialize 才能调导出」这条约定——而那正是上一轮
@@ -89,27 +102,36 @@ def write_plain_fixture():
     return out, len(wasm)
 
 
-def build_tool_plugin():
-    """把 Go 源码夹具编成 reactor（-buildmode=c-shared）。"""
+def build_go_guest(dirname, wasm_name, label):
+    """把一个 Go 源码夹具编成 reactor（-buildmode=c-shared）。
+
+    toolplugin 与 badplugin 走**同一条命令**：两者都是 ABI 客人，
+    构建形态必须一样，否则"坏客人测出来的东西"就不能代表真插件。
+    """
     go = shutil.which("go")
     if go is None:
         sys.exit("找不到 go：这个夹具必须用 Go 工具链编（PATH 里要有 go，或先 export PATH=\"/c/Program Files/Go/bin:$PATH\"）")
 
-    src = os.path.join(TESTDATA, "toolplugin")
-    out = os.path.join(TESTDATA, "toolplugin.wasm")
-    cmd = [go, "build", "-buildmode=c-shared", "-trimpath", "-o", out, "."]
+    src = os.path.join(TESTDATA, dirname)
+    out = os.path.join(TESTDATA, wasm_name)
+    # -buildvcs=false 必须在这里，不能只写在源码注释里：script 才是产物的来源。
+    cmd = [go, "build", "-buildmode=c-shared", "-trimpath", "-buildvcs=false", "-o", out, "."]
     env = dict(os.environ)
     env.update({"GOOS": "wasip1", "GOARCH": "wasm", "CGO_ENABLED": "0"})
     print("+ (cd %s && %s)" % (os.path.relpath(src, ROOT), " ".join(cmd[1:])))
     subprocess.run(cmd, cwd=src, env=env, check=True)
-    return out, os.path.getsize(out)
+    return out, os.path.getsize(out), label
 
 
 def main():
     p1, n1 = write_plain_fixture()
     print("生成 %s %d 字节（手写纯 wasm：add / spin）" % (os.path.relpath(p1, ROOT), n1))
-    p2, n2 = build_tool_plugin()
-    print("生成 %s %d 字节（Go reactor：_initialize / alloc / call）" % (os.path.relpath(p2, ROOT), n2))
+    for dirname, wasm_name, label in [
+        ("toolplugin", "toolplugin.wasm", "Go reactor：_initialize / alloc / call（echo / upper）"),
+        ("badplugin", "badplugin.wasm", "Go 坏客人：巨量结果 / 死循环 / 垃圾信封 / 越界指针 / alloc 使坏"),
+    ]:
+        p, n, lab = build_go_guest(dirname, wasm_name, label)
+        print("生成 %s %d 字节（%s）" % (os.path.relpath(p, ROOT), n, lab))
 
 
 if __name__ == "__main__":

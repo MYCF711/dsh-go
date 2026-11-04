@@ -458,7 +458,7 @@ mem: 往 ptr 写 "tail" -> true；读回 = "tail" (true)
 3. **并发**：同一 runtime 同时实例化多个模块、多个实例并行调用，没做压力测试；§3.4 的「每实例加锁」是设计推断，不是实测。
 4. **`-buildmode=c-archive`**（另一条 reactor 路）没试；`go help buildmode` 说 wasip1 上 archive 也能导，但没跑。
 5. **长期运行的泄漏**：只做了 3–5 次实例化循环，没做千次级，也没量 RSS。Go 的 module 每实例 3.5 MiB，如果 close 不干净会很难看——**没验证**。
-6. **攻击面**：没做恶意客人测试（读越界、无限增长内存、`memory.grow` 到上限）。wazero 应该挡住，但没打。
+6. **攻击面**：没做恶意客人测试（读越界、无限增长内存、`memory.grow` 到上限）。wazero 应该挡住，但没打。→ **后续（M355）：读越界 / 巨量结果 / 死循环 / 垃圾信封 / alloc 使坏这五条已补测试，见 §11；内存增长那两条仍没打。**
 7. **信封换成非 JSON 的最小解析**没做（§2.3 提到的 TinyGo 体积优化）。
 8. **TinyGo 的 `-target=wasm`（非 wasi）**没试；本轮只验 wasi。
 9. `wasmhost.Load` 里 `WithCloseOnContextDone(true)` 对**实例化阶段**的影响没单独测；只在调用阶段验过。
@@ -1272,4 +1272,81 @@ exit=1
    `go test -race ./internal/wasmhost ./cmd/dshtui ./internal/transport ./cmd/dshd` 全部 ok、零 DATA RACE。
    `wasmToolRouter`、重建路径、TUI 的滚动/审批并发都在里面跑过。**压测仍未做**。
 6. ~~**`cmd/dshd/doctor.go` 的 wasm 文案仍偏旧**~~ **已补（M349）**：文案改成"工具多的模块写 `[[module.tool]]`，并让 provides 里的 `tool:<名>` 逐个对齐"，跨模块与单模块两种场景都点到。
-7. §8.7 / §9.5 里没验的那些（interpreter 引擎、c-archive、千次实例化泄漏、恶意客人、体积 4.4 MB）**不变**。
+7. §8.7 / §9.5 里没验的那些（interpreter 引擎、c-archive、千次实例化泄漏、体积 4.4 MB）**不变**。~~恶意客人~~ **已补（M355）**：五条坏行为各有一条用例钉着，见 §11（**只覆盖那五条**，无上限内存增长 / CPU 预算 / WASI 面仍没打）。
+
+---
+
+## 11. 恶意客人：五条坏行为从「没验」到「有测试钉着」（2026-11-04 四轮）
+
+> 起因：§8.7 第 6 条写的是「没做恶意客人测试（读越界、无限增长内存、`memory.grow` 到上限）。wazero 应该挡住，但没打」。这句话被 §9.5 / §10.8 原样继承了两次。这一节把它换成「五条打了，有测试钉着」。
+> 环境同 §10：`go1.27.3 windows/amd64`、`wazero v1.12.0`、`GOCACHE=/tmp/gocache-hostile`。
+
+### 11.1 夹具：一个同 ABI 的坏客人
+
+`internal/wasmhost/testdata/badplugin/main.go` → 入库产物 `badplugin.wasm`（**4,456,930 字节**），与 `toolplugin.wasm` 走**同一条构建命令**（`-buildmode=c-shared -trimpath -buildvcs=false`，见 `scripts/build-wasm-fixture.py`）。所以「坏客人身上测出来的宿主行为」对真插件同样成立——不是给测试单开的一条路。
+
+**没动 toolplugin**：它是参考实现，要能让人照着抄。坏行为混进去，读它的人就分不清哪些是 ABI 要求、哪些是测试用的故意破坏。
+
+行为由请求 `args.mode` 选择。唯一的例外是 `alloc`：它跑在 args 写进线性内存**之前**，读不到 mode，所以「下一次 alloc 怎么坏」由**上一次 call 预先武装**（`mode = arm-alloc-zero` / `arm-alloc-far`）。这个形状正好也是真实攻击的形状——先正常一次，再在随后的分配上使坏。
+
+顺带修回一处**夹具可复现性**的回归：`scripts/build-wasm-fixture.py` 里的 `-buildvcs=false` 丢了（源码注释与 CHANGELOG 都写着有），少它重编出来的 `toolplugin.wasm` 是 `a03e905aad7b5a1176…`，而入库的是 `a3b5e58326ce9fcd…`——一次「重跑脚本」就会把入库夹具换掉。补回后重编与入库产物**逐字节相同**（sha256 见 §11.4）。
+
+### 11.2 五条，各钉在哪
+
+| # | 坏行为 | 宿主现在的处理 | 用例 |
+|---|---|---|---|
+| 1 | 返回 2 MiB 结果 | **先比长度、再读内存、最后才解析**；错误里写「结果 2097152 字节（2.0 MiB）超过上限 1048576 字节（1.0 MiB）」，并说明宿主没把它读进内存 | `TestHostileHugeResultRejected` |
+| 2 | `call` 里死循环 | `SetTimeout(120ms)` → `WithCloseOnContextDone` **真的**切断；错误能 `errors.Is(…, context.DeadlineExceeded)` 且说清是「被中断」而不是 trap；实例判死，**下一次**调用重建一次后正常返回 | `TestHostileSpinLoopIsCutByTimeout` |
+| 3 | 垃圾信封 ×4：长度 0 / 不是 JSON / 不是对象 / `v=2` | 四句**互不相同**的协议错，都标「读回」这一步：`call 返回长度 0` / `不是合法 JSON` / `结果信封解析失败` / `v=2，宿主只认 1` | `TestHostileGarbageRepliesHaveDistinctErrors` |
+| 4 | 结果 `ptr`/`len` 越界（含 `ptr+len` 在 uint32 里溢出） | `mem.Read` 的边界检查 → 协议错，带上当前线性内存大小；**不 panic**，也不「回绕一下接着读」 | `TestHostileOutOfBoundsResultPointer`（子用例 `oob` / `oobwrap`） |
+| 5 | `alloc` 返回 0 / 返回写不进去的偏移 | 0 当「分配失败」直接拒绝（**原本会往 0 地址写**）；越界偏移也拒绝；两种都**一个字节都不写** | `TestHostileAllocReturnsZeroIsRejected` / `TestHostileAllocOutOfRangeIsRejected` |
+
+**第 1 条的判据是「合法但太大」**：夹具回的是**完全合法**的 JSON 信封，只是有 2 MiB。所以「宿主读进来再解析」这种错误实现会让这次调用**成功**——用例立刻红；正确实现必须报超限。断言同时要求 `2097152` / `1048576` / `2.0 MiB` 都在错误里（人能直接看懂超了多大）。
+
+**第 4 条的 `oobwrap` 是最隐蔽的一种**：`ptr=0xFFFFFFF0`、`len=0x20`，在 uint32 里相加得 `0x10`。宿主若用 uint32 算区间，会「读成功」并把垃圾当结果——错误被伪装成成功，是最难查的一类。现在 ptr/len 原样交给 `mem.Read`，wazero 用 `uint64` 判界。
+
+**第 5 条原本是真缺陷。** wasm 的 0 号地址是**合法可写**的（不像 C 里是 NULL），宿主原来的 `mem.Write(0, args)` 会成功：args 被盖在客人自己的数据段上，紧接着 `call(0,len)` 还能从 0 读到刚写进去的合法请求，**看起来像一次成功调用**。修之前的红用例原文：
+
+```
+--- FAIL: TestHostileAllocReturnsZeroIsRejected
+    hostile_test.go:361: 要能被认成宿主协议错（errors.Is(err, ErrProtocol)），实际：wasm 模块 "badplugin" 在 call 里 trap（插件内部崩溃，不是工具失败）: wasm error: unreachable
+        wasm stack trace:
+        	.runtime.abort(i32) i32
+        	…
+        	.main.call(i32) i32
+        	.call(i32,i32) i64
+        客人 stderr: panic: runtime error: unsafe.Slice: ptr is nil and len is not zero
+        main.call(0x0, 0x31)
+```
+
+两件事同时发生：宿主把 49 字节 args 写进了 **0 地址**（`main.call(0x0, 0x31)` 就是证据，0x31=49），而报出来的错是「**插件内部崩溃**」——责任指反了。这里之所以还能看到一句错误而不是静默成功，是因为 Go 运行时自己拒绝 `unsafe.Slice(nil, 49)`；换一个不检查的客人，那就真是一次「成功」的调用。修法在 `abi.go` 的 `invokeLocked`：`ptr == 0` 先报协议错，再谈写入。
+
+五条里**只有第 2 条判死实例**（超时 = 实例没了，wazero 会关它）；其余四条都是协议错，`Rebuilds()` 必须还是 0——协议错是两边对不上，重建一万次也还是对不上（`markDeadLocked` 的注释）。每条用例都断言了这一点。
+
+### 11.3 仍然没打的地方
+
+「恶意客人」这条**只解决上面五条**，别外推：
+
+1. **无上限的内存增长**：客人 `make([]byte, 1<<30)` 或反复 `memory.grow` 到模块上限，宿主现在**不拦**（没有按实例算内存预算）。Go 客人 OOM 会自己 trap，宿主接得住；但「把宿主内存吃光的客人」要的是每实例内存上限，不是断言。
+2. **CPU 预算**：只有 deadline（默认 10 s），没有「总 CPU 时间」。客人每次调用都卡到 9.9 s 是合法的——那条要靠配额，不靠超时。
+3. **WASI 面**：只挂了 `wasi_snapshot_preview1`、不传 args/env、不挂 preopen（§3.6），但 `random_get` / `clock_time_get` / `fd_write` 是可用的；没打「客人拿这些做别的事」。
+4. **`fd_write` 洪泛**：客人可以一直往 stdout/stderr 写。宿主留的是 4 KiB 环形缓冲（只存最后 4 KiB），**写入频率**没有限速。
+5. **`-race` 覆盖**：~~没跑~~ 这五条在 `CGO_ENABLED=1`、`CC=C:/toolchains/mingw64/bin/gcc.exe` 下
+   `go test -race ./internal/wasmhost -run TestHostile -count=1` 跑过，`ok 75.7s`、零 DATA RACE。
+
+### 11.4 一键复现
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+export GOCACHE=/tmp/gocache-hostile
+python scripts/build-wasm-fixture.py            # 连跑两次，sha256 必须相同
+go test ./internal/wasmhost -run TestHostile -count=1 -v
+```
+
+```
+badplugin.wasm   d8a7097cea8a17c1fe094acbf6c881c1186c9455c9286d6f2c623b194f44f50d  4,456,930 字节
+fixture.wasm     610fbd8ee0cad55b3a4cc4c68cde2f2783776ce1929c75bb7b2ae2e1667ded21      60 字节
+toolplugin.wasm  a3b5e58326ce9fcd98d744a6d619ced177aa4f0f43acb2cf153bb9e72f8ee4be  4,459,731 字节（补回 -buildvcs=false 后与入库产物逐字节相同）
+```
+
+边界：本轮改动只落在 `internal/wasmhost/abi.go`（结果超限的文案、`alloc` 返回 0 的拒绝）、`internal/wasmhost/hostile_test.go`（新）、`internal/wasmhost/testdata/badplugin/`（新）、`scripts/build-wasm-fixture.py`、这份文档与 `docs/wasm-plugin-author-guide.md`。`internal/kernel/`、`cmd/`、`modules/`、`dsh.toml`、`testdata/toolplugin*` 一个字节没动。
