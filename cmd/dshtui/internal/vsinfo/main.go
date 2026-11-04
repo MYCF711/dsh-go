@@ -184,22 +184,32 @@ func fixedInfo(ms, ls uint32) []byte {
 
 // --- 资源段 ---
 
-// resourceSection 排 .rsrc 段：数据在最前，目录树跟在后面（偏移都相对段首）。
+// resourceSection 排 .rsrc 段。
+//
+// **顺序是目录树在前、数据在后**，不是反过来。
+//
+// 这一条踩过：早先把数据排在最前、目录树跟在后面，exe 里 VersionInfo 全空
+// （PowerShell 读出来 FileDescription/ProductName/CompanyName 都是 ""）。
+// 原因是 PE 的 data directory[2] 指向**段首**，而资源管理器把段首当成资源目录读——
+// 段首摆的是版本正文时，它就把正文当目录结构解析，自然什么也读不到；
+// 而链接器只会把重定位算成"段首 RVA"，不会帮你把指针挪到目录真正的位置。
+//
 // 只有一个资源：RT_VERSION(16) / 名称 1 / 语言 0x0409。
 //
 // 返回的第二值是"数据项里 OffsetToData 字段在段内的偏移"——那个字段要填的是
-// **运行时的 RVA**，生成时还不知道段会被放在哪，所以必须留成一条重定位
-// （IMAGE_REL_AMD64_ADDR32NB），由链接器填。
+// **运行时的 RVA**，生成时还不知道段会被放在哪，所以留成一条重定位
+// （IMAGE_REL_AMD64_ADDR32NB，addend 就是段内偏移），由链接器填。
 func resourceSection(blob []byte) ([]byte, int) {
-	data := padTo(blob, 4)
-
-	root := len(data)
-	typeDir := root + dirHeaderSize + dirEntrySize
-	nameDir := typeDir + dirHeaderSize + dirEntrySize
-	dataEntry := nameDir + dirHeaderSize + dirEntrySize
+	// 三段目录：根（类型）→ 类型 → 名称 → 数据项，每段 16 字节头 + 1 条 8 字节项。
+	const (
+		rootDir   = 0
+		typeDir   = rootDir + dirHeaderSize + dirEntrySize
+		nameDir   = typeDir + dirHeaderSize + dirEntrySize
+		dataEntry = nameDir + dirHeaderSize + dirEntrySize
+		blobAt    = dataEntry + 16 // 数据项本身 16 字节
+	)
 
 	var b bytes.Buffer
-	b.Write(data)
 
 	// 根目录：0 个命名项，1 个 ID 项；类型 16 → 指向"类型目录"（高位标志=1）
 	writeDirHeader(&b, 0, 1)
@@ -213,11 +223,20 @@ func resourceSection(blob []byte) ([]byte, int) {
 	writeDirHeader(&b, 0, 1)
 	writeDirEntry(&b, 0x0409, uint32(dataEntry))
 
-	// 数据项：RVA（运行时由链接器按重定位填成段首）、大小、代码页、保留
-	binary.Write(&b, binary.LittleEndian, uint32(0)) // ← 重定位落点
+	// 数据项：OffsetToData（段内偏移，运行时由重定位变成 RVA）、大小、代码页、保留
+	binary.Write(&b, binary.LittleEndian, uint32(blobAt)) // ← 重定位落点（addend=段内偏移）
 	binary.Write(&b, binary.LittleEndian, uint32(len(blob)))
 	binary.Write(&b, binary.LittleEndian, uint32(0)) // codePage=0 表示不做代码页转换
 	binary.Write(&b, binary.LittleEndian, uint32(0))
+
+	// 数据正文：按 4 字节对齐接在目录树后面
+	for b.Len() < blobAt {
+		b.WriteByte(0)
+	}
+	b.Write(blob)
+	for b.Len()%4 != 0 {
+		b.WriteByte(0)
+	}
 	return b.Bytes(), dataEntry
 }
 
