@@ -27,11 +27,11 @@ package schema
 
 import "encoding/json"
 
-// Description 是 JSON Schema 的说明注解成员名。
+// description 是 JSON Schema 的说明注解成员名。
 //
-// 单独成常量是为了让"按名字比较"只出现在 IsAnnotationKey 里：其它地方
-// 不需要这个字面量，也就不容易再写出一份「见键就删」。
-const Description = "description"
+// 不导出：按名字比较只允许出现在 IsAnnotationKey 里；外部拿不到这个字面量，
+// 也就不容易再写出一份「见键就删」。
+const description = "description"
 
 // IsPropertyMapKey 判断某个 schema 关键字下面挂的是不是「名字 → schema」映射。
 //
@@ -51,16 +51,16 @@ func IsPropertyMapKey(k string) bool {
 // inPropertyMap 是这个对象的位置：为真表示它是一张「参数名 → schema」映射，
 // 这一层的键就是参数名——哪怕它叫 description，也只是个名字，必须保留。
 // 这是两处压表实现唯一需要共同判断的事；收在这里，是为了让「按位置判断」
-// 只有一份，而不是每个调用方各写一个 `if k == "description"`。
+// 只有一份，而不是每个调用方各自按 key 名写一个删除分支。
 func IsAnnotationKey(k string, inPropertyMap bool) bool {
-	return !inPropertyMap && k == Description
+	return !inPropertyMap && k == description
 }
 
-// StripAnnotations 去掉 v 里所有 schema 对象上的 description 注解，保留参数名。
+// stripAnnotations 去掉 v 里所有 schema 对象上的 description 注解，保留参数名。
 //
 // v 必须是 json.Unmarshal 进 any 的结果（map[string]any / []any / 标量）。
 // 返回新结构，不改入参。
-func StripAnnotations(v any) any {
+func stripAnnotations(v any) any {
 	return stripNode(v, false)
 }
 
@@ -97,7 +97,7 @@ func stripNode(x any, inPropertyMap bool) any {
 	return x
 }
 
-// Compact 是 StripAnnotations 的 raw 版：不是合法 JSON 就原样返回。
+// Compact 是 stripAnnotations 的 raw 版：不是合法 JSON 就原样返回。
 //
 // 这是「只删注解」这一档的全部实现。cmd/dshd 不要另写一份：它的 sameShape
 // 需要同一份语义，直接调这里。
@@ -106,7 +106,7 @@ func Compact(raw json.RawMessage) json.RawMessage {
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return raw
 	}
-	b, err := json.Marshal(StripAnnotations(v))
+	b, err := json.Marshal(stripAnnotations(v))
 	if err != nil {
 		return raw
 	}

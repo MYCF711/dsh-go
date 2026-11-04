@@ -726,7 +726,7 @@ func tightenObject(obj map[string]json.RawMessage, root bool) (json.RawMessage, 
 		delete(obj, "type")
 	}
 	// 这一层是 schema 对象：description 是给模型看的说明，compact 本来就不发。
-	// 删哪个键由唯一那份判断决定，不在这里写 `k == "description"`。
+	// 删哪个键由唯一那份判断决定，不在这里按 key 名写删除分支。
 	for k := range obj {
 		if schemarule.IsAnnotationKey(k, false) {
 			delete(obj, k)

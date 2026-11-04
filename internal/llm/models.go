@@ -49,11 +49,21 @@ func (c *Client) ListModels(ctx context.Context) ([]ModelEntry, error) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("网关回 %d：%s", resp.StatusCode, string(body))
 	}
+	// 用指针接 `data`，是为了把**两种"空"分开**：
+	//   data: []    = 网关好好的，只是它一个模型都没挂（真·空列表）
+	//   data: null / 没有 data = 响应形状不对（网关坏了 / 打到了别的服务）
+	//
+	// 合成一个空列表是最糟的处理：界面上"没有可用模型"和"网关坏了"长得一样，
+	// 但用户该做的事完全不同（去挂模型 vs 去修网关）。
 	var doc struct {
-		Data []ModelEntry `json:"data"`
+		Data *[]ModelEntry `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("模型列表不是合法 JSON: %w", err)
 	}
-	return doc.Data, nil
+	if doc.Data == nil {
+		return nil, fmt.Errorf("网关的响应里没有 data 数组（这不是没有模型，是响应形状不对）："+
+			"确认 %smodels 是 OpenAI 兼容端点，或看网关日志", c.BaseURL)
+	}
+	return *doc.Data, nil
 }

@@ -73,7 +73,8 @@
 真正的运行时证据在 `internal/*` 的红测里（见 §3），本报告不把扫描器绿当成运行时绿。
 
 当前输出：57 份 schema 解析成功、0 份解析失败；旧算法会打断 5 条 `required`（对应 8 个名叫 `description` 的参数）；
-15 条守卫全在；唯一的 `description` 删除点 `internal/schema/schema.go`；`exit 0`。
+15 条守卫全在；扫描器不再发现任何按 key 名删 `description` 的删除点（规则由
+`internal/schema` 的私有常量 + `IsAnnotationKey` 表达）；`exit 0`。
 
 ## 2. 清单全表
 
@@ -164,6 +165,9 @@
 > 补充：今天那条"已修"落在 `cmd/dshd/tightenSchema`（serve 主路），
 > `agent.CompactSchema` 是 Loop 自己的岔路（`CompactTools=true` 时生效，当前显式关着）。
 > 修了主路、留了岔路——扫描器 + 本修复把两条都补齐了。
+>
+> **D3 更新（2026-11-04）**：上面这份 `compactNode` 已移入 `internal/schema.stripNode`，
+> `agent.CompactSchema` 只保留一行转调；判断函数仍是同一份（`IsAnnotationKey`）。
 
 ### 3.2 流在 `finish` 之前断了 / 200 + 空流
 
@@ -280,6 +284,10 @@
 
 **绿**：`ok dshgo/cmd/dshd`（含 `TestCompactTableKeepsContract`）。
 
+> **D3 更新（2026-11-04）**：上面这份 `stripDescriptions` 已在 D3 收敛里整份删除，
+> `sameShape` 的 `shapeless` 直接转调 `internal/schema.Compact`（与
+> `agent.CompactSchema` 同一实现）。本节保留当时的修复记录，最终形态见 §4 D3。
+
 ### 3.9 补洞缺口
 
 **红**（`go test ./internal/transport`）：
@@ -368,7 +376,7 @@
 #### 删掉的重复实现（收敛后改动的行数）
 
 - `cmd/dshd/tool_merged.go`：+36 / −68（净 −32 行）—— 删 `stripDescriptions`、`stripDescNode`、
-  `schemaPropertyMapKey`（3 个函数、约 45 行含注释）；`shapeless` 改成转调 `schemarule.Compact`；
+  `schemaPropertyMapKey`（3 个函数、48 行含注释）；`shapeless` 改成转调 `schemarule.Compact`；
   `tightenObject` 的 `delete(obj, "description")` 改成走 `IsAnnotationKey`。
   顺带把 `newMergedTable` 里的局部变量 `schema` 改名 `params`：测试包里有同名类型 `schema`，
   包名与它冲突，所以导入用别名 `schemarule`。
@@ -378,6 +386,21 @@
 - 新增 `internal/schema/schema.go`（约 115 行含注释）、`internal/schema/schema_test.go`。
 - 新增 `cmd/dshd/tool_merged_rule_test.go`（反漂移测试）；`scripts/silent-success-audit.py`
   守卫从 12 条到 15 条、`scan_desc_deletion` 从 advisory 升级为 FAIL 级守卫。
+
+#### 防再漂（三道）
+
+1. **规则只有一处判断**：`internal/schema.IsAnnotationKey`。扫描器新增 3 条守卫，
+   要求 `CompactSchema`（`schema.Compact`）、`tightenObject`（`schemarule.IsAnnotationKey`）、
+   `shapeless`（`schemarule.Compact`）都真调那一份。
+2. **行为互相对照**：`TestDescriptionRuleIsOneJudge` 把同一张判据表喂给两处实现；
+   任何一处退回"见键就删"就红（证据见下）。
+3. **第三份实现会被抓住**（反证过）：在隔离副本里加一个 `if k == "description"` 的
+   `badStrip`，`python scripts/silent-success-audit.py --root /tmp/hc-d3-guard` 直接
+   `exit 1`：
+   ```
+   FAIL description-deleted-without-position @ internal/agent/zz_bad.go:6
+   ```
+   这条在旧版只是 advisory（只 note、不红），所以"修好了"之后第三份仍可以悄悄长出来。
 
 #### 红 → 绿证据
 
@@ -391,16 +414,16 @@
 $ go test ./cmd/dshd -run TestDescriptionRuleIsOneJudge -v -count=1
 === RUN   TestDescriptionRuleIsOneJudge
 === RUN   TestDescriptionRuleIsOneJudge/agent.CompactSchema
-    zz_d3_rule_test.go:77: 名叫 description 的参数被删了：模型只看到 required 里一个没类型的名字
+    zz_d3_rule_test.go:76: 名叫 description 的参数被删了：模型只看到 required 里一个没类型的名字
         {"properties":{"command":{"type":"string"},"options":{"items":{"properties":{},"required":["description"],"type":"object"},"type":"array"}},"required":["command","description"],"type":"object"}
 === RUN   TestDescriptionRuleIsOneJudge/tightenSchema
 === NAME  TestDescriptionRuleIsOneJudge
-    zz_d3_rule_test.go:121: 嵌套元素里多一个 description 参数也不是同构
+    zz_d3_rule_test.go:120: 嵌套元素里多一个 description 参数也不是同构
 --- FAIL: TestDescriptionRuleIsOneJudge (0.00s)
     --- FAIL: TestDescriptionRuleIsOneJudge/agent.CompactSchema (0.00s)
     --- PASS: TestDescriptionRuleIsOneJudge/tightenSchema (0.00s)
 FAIL
-FAIL	dshgo/cmd/dshd	0.053s
+FAIL	dshgo/cmd/dshd	0.087s
 exit=1
 ```
 
@@ -418,7 +441,7 @@ $ go test ./cmd/dshd -run TestDescriptionRuleIsOneJudge -v -count=1
     --- PASS: TestDescriptionRuleIsOneJudge/tightenSchema (0.00s)
 ```
 
-行为不变由三条既有结构比对守住（全绿，未改一行断言）：
+行为不变由四条既有结构比对守住（全绿，未改一行断言）：
 `TestCompactTableKeepsContract`（归一化后逐工具相等 + 投影必须是不动点）、
 `TestTightSchemaKeepsDescriptionParam`、`TestRequiredParamsAreDeclared`、
 `ToolTableSnapshot` 快照（`cmd/dshd/testdata/tools.snapshot.json` 无 diff：两份变换对

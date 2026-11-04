@@ -666,9 +666,9 @@ func cmdRun(argv []string) error {
 		System:    sys,
 		SessionID: sessID,
 		// 这里显式关掉循环自带的压表：表在 cmdRun 里已经被 tightenTable 投影过一遍。
-		// 循环那个 CompactSchema 是"见 description 键就删"，会把名叫 description 的
-		// **参数**也删掉（ask_user_question/bash/present/team_task_create 等 8 个工具有这个参数），
-		// 而 tightenSchema 分得清"注解"和"参数名"。两条路同时开，后一条会覆盖前一条。
+		// 两条路都调用 internal/schema 里同一条判断（区分"注解"与"名叫 description 的参数"），
+		// 但 tightenSchema 还会额外删冗余骨架；同时开会把后一遍的骨架删除覆盖掉，
+		// 所以只留 cmdRun 这一遍。
 		CompactTools: false,
 		// 只有显式设了才要推理：某些网关不认这个参数，默认不带更安全。
 		Reasoning: *reasoningEffort,

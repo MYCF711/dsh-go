@@ -37,7 +37,7 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/serve_tools.go:92",
+      "site": "cmd/dshd/serve_tools.go:119",
       "what": "每轮一个 follow",
       "sync": "读过：follow 只读日志，向 hub 推送；prog 仅在 fw.Wait() 之后读，无并发窗口",
       "verified_at": "2026-11-03"
@@ -85,7 +85,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/serve_tools.go:123",
+      "site": "cmd/dshd/serve_tools.go:150",
       "what": "follow 子进程日志并把事件推进 journal",
       "sync": "fw 计数收尾；ctx 取消即退出；写 journal 经 hub 自己的锁",
       "verified_at": "2026-11-04"
@@ -115,7 +115,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:746",
+      "site": "cmd/dshd/main.go:774",
       "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
       "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"

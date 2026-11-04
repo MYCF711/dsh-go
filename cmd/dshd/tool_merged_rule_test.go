@@ -19,9 +19,8 @@ import (
 // CompactSchema 只删注解。这里只钉两者**必须一致**的那部分：
 // 参数名留、注解删、required 自洽、压完是固定点。
 //
-// 红→绿证据（2026-11-04，隔离副本）：把两处实现换回旧写法后，
-// `go test ./cmd/dshd -run TestDescriptionRuleIsOneJudge` 在
-// agent.CompactSchema 上失败：
+// 红→绿证据（2026-11-04）：在 62ac2ca（修前）的隔离副本里跑同一条测试，
+// agent.CompactSchema 子测试与下面的 sameShape 断言同时失败：
 //
 //	名叫 description 的参数被删了：模型只看到 required 里一个没类型的名字
 //
