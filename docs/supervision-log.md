@@ -124,7 +124,7 @@ A/B 对照（同一类任务）：
 **派活命令从此固定**：
 
 ```bash
-./tmp/dshd.exe run --home <tmp> --policy allow   --workspace-bytes 41000 \        # 完整 AGENTS.md，别再写 0
+"./tmp/DSH GO.exe" run --home <tmp> --policy allow   --workspace-bytes 41000 \        # 完整 AGENTS.md，别再写 0
   --max-steps 12 --prompt "$(cat <brief 文件>)"
 ```
 

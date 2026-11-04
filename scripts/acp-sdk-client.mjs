@@ -10,7 +10,7 @@ import { Readable, Writable } from 'node:stream';
 const SDK = 'file:///D:/DeepSeek%20Harness/Desktop/resources/app.asar/dsh/node_modules/@agentclientprotocol/sdk/dist/acp.js';
 const { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION } = await import(SDK);
 
-const BIN = process.env.DSHD_BIN || 'tmp/dshd.exe';
+const BIN = process.env.DSHD_BIN || 'tmp/DSH GO.exe';
 const prompt = process.argv[2] || '用一句话说明你能做什么。';
 
 const proc = spawn(BIN, ['acp'], { stdio: ['pipe', 'pipe', 'pipe'] });

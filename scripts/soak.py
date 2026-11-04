@@ -34,7 +34,10 @@ def rss_kb(pid):
     try:
         out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                              capture_output=True, text=True).stdout.strip()
-        if out and "dshd" in out:
+        # 进程名就是产品名（`DSH GO.exe`，带空格）：tasklist 的 CSV 会把它整个引起来，
+        # 所以这里比对的是产品名前缀，**不能再写旧的 `dshd`**——那条会永远不匹配，
+        # 于是 RSS 一列静默全空（看着像"进程不耗内存"，其实是没量到）。
+        if out and "DSH GO" in out:
             import csv
             parts = next(csv.reader([out]))
             return int(parts[4].replace(",", "").replace(" K", ""))
@@ -113,7 +116,7 @@ class Agent:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", default=os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tmp", "dshd.exe"))
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tmp", "DSH GO.exe"))
     ap.add_argument("--turns", type=int, default=30)
     ap.add_argument("--agents", type=int, default=1)
     ap.add_argument("--prompt", default="用 read 读 target.txt 的第一行，然后只说那一行内容。")

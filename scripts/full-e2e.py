@@ -30,7 +30,7 @@ import urllib.parse
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join("tmp", "serve-dir", "dshd.exe")
+EXE = os.path.join("tmp", "serve-dir", "DSH GO.exe")
 HOME = os.path.join("tmp", "full-e2e-home")
 LOG = os.path.join("tmp", "full-e2e-serve.log")
 

@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import sys
 
-BIN = "tmp/serve-dir/dshd.exe"
+BIN = "tmp/serve-dir/DSH GO.exe"
 HOME = "tmp/tool-live"
 
 # 允许"空着就是对的"的工具：没内容时它必须报错并给出怎么补，而不是假装能用。
@@ -80,7 +80,7 @@ def run_batch(names, prompt):
 
 def main():
     if not os.path.exists(BIN):
-        print("  FAIL 找不到 %s（先 go build -o tmp/serve-dir/dshd.exe ./cmd/dshd）" % BIN)
+        print('  FAIL 找不到 %s（先 go build -o "tmp/serve-dir/DSH GO.exe" ./cmd/dshd）' % BIN)
         print("合计 OK=0 FAIL=1")
         return 1
 

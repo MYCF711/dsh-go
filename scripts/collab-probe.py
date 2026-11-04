@@ -2,7 +2,7 @@
 
 只测量，不改代码。每条都给出实测输出，结论以输出为准。
 
-    python scripts/collab-probe.py [--bin tmp/dshd.exe]
+    python scripts/collab-probe.py [--bin tmp/DSH GO.exe]
 """
 
 import argparse
@@ -165,7 +165,7 @@ def probe_approvals(binpath):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bin", default=os.path.join(ROOT, "tmp", "dshd.exe"))
+    ap.add_argument("--bin", default=os.path.join(ROOT, "tmp", "DSH GO.exe"))
     args = ap.parse_args()
     binpath = os.path.abspath(args.bin)
 

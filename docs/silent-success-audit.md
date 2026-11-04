@@ -1806,7 +1806,7 @@ $ DSHD_REASONING_EFFORT=xhigh python scripts/acp-smoke.py "鸡兔同笼：35 个
   落盘块类型: ['reasoning', 'text']
 ```
 
-**这次排查本身踩了一个坑，值得记**：第一次用的是**陈旧** `tmp/dshd.exe`，看到
+**这次排查本身踩了一个坑，值得记**：第一次用的是**陈旧** `tmp/DSH GO.exe`，看到
 "思考块没落盘"，于是依次查了网关（直接打 `/v1/chat/completions` 有 `reasoning_content`）、
 客户端解析（`internal/llm` 有 `ReasoningContent`）、请求体（`reasoning_effort` 确实发出去了）——
 **全是正常的**。换新编的二进制，第一次就落出来了。

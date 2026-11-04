@@ -558,7 +558,14 @@ func main() {
 	exePath := *exe
 	if exePath == "" {
 		self, _ := os.Executable()
-		exePath = filepath.Join(filepath.Dir(self), "dshd.exe")
+		dir := filepath.Dir(self)
+		// 宿主的产品名就是**文件名**：`DSH GO.exe`（scripts/build.sh 的产物）。
+		// 旧的 `dshd.exe` 只作兜底——老构建件还躺在某些目录里，
+		// 桥不该因为改名就突然"找不到宿主"，那会被读成产品坏了。
+		exePath = filepath.Join(dir, "DSH GO.exe")
+		if _, statErr := os.Stat(exePath); statErr != nil {
+			exePath = filepath.Join(dir, "dshd.exe")
+		}
 	}
 	b := &bridge{home: *home, exe: exePath,
 		extra: []string{"acp", "--home", *home}, sessions: map[string]*sess{}}

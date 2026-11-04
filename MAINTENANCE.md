@@ -14,7 +14,7 @@
   起因：任务管理器里 34 个遗留 `dshd*`，每个占一个端口，从 08:04 漏到 16:26。
 - **命名**（2026-11-04）：TUI = **`DSH TUI GO`**（产品名/窗口标题 OSC/`--version`/VERSIONINFO），
   界面仓 = **`DSH GUI GO`**（清单见 `docs/naming-dsh-ui.md`，那边未提交）。
-  硬判据：脚本不再给宿主二进制起临时名，只留 `dshd.exe` + `dsh-gui.exe`，实例用 `--home` 区分。
+  硬判据：脚本不再给宿主二进制起临时名，只留 `DSH GO.exe` + `dsh-gui.exe`，实例用 `--home` 区分。
 
 # MAINTENANCE · 当前执行台账
 

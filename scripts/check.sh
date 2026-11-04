@@ -163,12 +163,15 @@ else
   else
     bad "工具表默认不是 compact（改了默认？先跑 scripts/tool-table-ab.py 拿数据）"
   fi
-  # 安全默认值：改坏了不是多花 token，而是多给权限。
-  # 三条都在断言"默认不许更宽松"，不是断言"必须是某个具体值"。
-  if printf '%s' "$help_out" | grep -A1 -E '^\s+-policy' | grep -q 'default "auth\|default "auto"'; then
-    pass "run --policy 默认不是 allow"
+  # 审批默认值。**这条的断言方向在 2026-11-04 反转过一次**，别照旧记忆改回去：
+  #   早先断言"默认不许是 allow"（安全默认）；
+  #   用户明确要求「把默认审批改成完全权限，不要老是弹权限申请」，于是默认改成 allow。
+  # 现在断言的是"默认就是 allow"——这样哪天有人把它悄悄改回 auto，门禁会红，
+  # 而"要不要改回去"必须是一次有人负责的决定，不是顺手。
+  if printf '%s' "$help_out" | grep -A1 -E '^\s+-policy' | grep -q 'default "allow"'; then
+    pass "run --policy 默认是 allow（完全权限，用户 2026-11-04 定的）"
   else
-    bad "run --policy 默认值可疑（必须是 auto/ask：默认 allow = 静默放行写操作）"
+    bad "run --policy 默认值变了（用户定的是 allow；要改成更严格的先改这条断言并说明理由）"
   fi
   if ! printf '%s' "$help_out" | grep -A1 -E '^[[:space:]]+-workspace-bytes' | grep -q '(default '; then
     bad "run --workspace-bytes 默认是 0（不传 AGENTS.md：模型会凭空猜约定）"

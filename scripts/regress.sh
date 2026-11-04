@@ -5,7 +5,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 echo "== 清理残留进程 =="
-taskkill //F //IM dshd.exe >/dev/null 2>&1 && echo "  杀掉残留 dshd.exe" || echo "  没有残留 dshd.exe"
+taskkill //F //IM "DSH GO.exe" >/dev/null 2>&1 && echo "  杀掉残留 DSH GO.exe" || echo "  没有残留 DSH GO.exe"
 taskkill //F //IM app.exe  >/dev/null 2>&1 && echo "  杀掉残留 app.exe"  || echo "  没有残留 app.exe"
 
 FAILED=0
@@ -20,7 +20,7 @@ run() {
     echo "  ✗ $name 退出码 $rc"
     FAILED=1
   fi
-  taskkill //F //IM dshd.exe >/dev/null 2>&1
+  taskkill //F //IM "DSH GO.exe" >/dev/null 2>&1
 }
 
 run "full-e2e（13 个 method，临时 home）" python -u scripts/full-e2e.py

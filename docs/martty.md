@@ -21,7 +21,7 @@ Martty 用 `--agent` 指定 ACP agent 命令，参数一个个用 `--agent-arg` 
 ```bash
 martty \
   --workspace  "D:/…/DSH-GO" \
-  --agent      "D:/…/tmp/dshd.exe" \
+  --agent      "D:/…/tmp/DSH GO.exe" \
   --agent-arg  acp \
   --agent-arg  --home --agent-arg "D:/…/tmp/martty-home"
 ```
@@ -29,8 +29,8 @@ martty \
 `--check-runtime` 只握手不跑对话，用来快速确认能不能连：
 
 ```
-$ martty --agent …/dshd.exe --agent-arg acp --check-runtime
-agent    D:/…/tmp/dshd.exe acp --home D:/…/tmp/martty-home
+$ martty --agent "…/DSH GO.exe" --agent-arg acp --check-runtime
+agent    "D:/…/tmp/DSH GO.exe" acp --home D:/…/tmp/martty-home
 initialize ok in 0.1s → dsh-go-acp
 ```
 
@@ -94,11 +94,11 @@ Martty 屏幕上出现的（去掉控制字符后）：
 
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"
-go build -o tmp/dshd.exe ./cmd/dshd
+go build -o "tmp/DSH GO.exe" ./cmd/dshd
 rm -rf tmp/martty-home && mkdir -p tmp/martty-home
 
 martty --workspace "D:/DeepSeek Harness/default-workspace/DSH-GO" \
-       --agent "$PWD/tmp/dshd.exe" \
+       --agent "$PWD/tmp/DSH GO.exe" \
        --agent-arg acp --agent-arg --home --agent-arg "$PWD/tmp/martty-home"
 ```
 

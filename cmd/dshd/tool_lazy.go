@@ -45,7 +45,7 @@ import (
 //
 // 生成方式（可复现，别手改）：
 //
-//	go build -o tmp/dshd.exe ./cmd/dshd
+//	go build -o "tmp/DSH GO.exe" ./cmd/dshd
 //	python scripts/tool-table-hot.py              # 打印并核对这张表
 //	python scripts/tool-table-hot.py --go         # 生成下面这段字面量
 //

@@ -21,7 +21,7 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DSHD = os.path.join(ROOT, "tmp", "dshd.exe")
+DSHD = os.path.join(ROOT, "tmp", "DSH GO.exe")
 FIXTURE = os.path.join(ROOT, "internal", "wasmhost", "testdata", "toolplugin.wasm")
 BASE_MANIFEST = os.path.join(ROOT, "dsh.toml")
 
@@ -66,7 +66,7 @@ def tool_names(manifest):
 
 def main():
     if not os.path.exists(DSHD):
-        print("  FAIL 找不到 tmp/dshd.exe（先 go build -o tmp/dshd.exe ./cmd/dshd）")
+        print('  FAIL 找不到 tmp/DSH GO.exe（先 go build -o "tmp/DSH GO.exe" ./cmd/dshd）')
         print("合计 OK=0 FAIL=1")
         return 1
     if not os.path.exists(FIXTURE):

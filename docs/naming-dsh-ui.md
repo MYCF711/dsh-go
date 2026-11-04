@@ -14,7 +14,7 @@
 > | TUI | `DSH TUI GO` | `DSH TUI GO.exe` |
 > | 界面 | `DSH GUI GO` | `DSH GUI GO.exe` |
 >
-> 换句话说：**先把产品名定下来，exe 就逐字照抄它**。`dshgo.exe` / `dshgogui.exe` / `dshtui.exe`
+> 换句话说：**先把产品名定下来，exe 就逐字照抄它**。`dshgo.exe` / `dshgogui.exe` / `DSH TUI GO.exe`
 > 这类缩写名不算"全程"，要改。代码内部的包名、变量名、函数名随意。
 
 
@@ -77,19 +77,19 @@ grep -rn '"dsh-ui"' --include=*.go . | grep -v _test      # 期望：0 行（或
 ./tmp/dsh-gui.exe --version                                # 期望：DSH GUI GO <版本>
 # 真机：起一次 app，看窗口标题
 powershell -NoProfile -Command "Get-Process dsh-gui | Select-Object MainWindowTitle"
-# 进程表：只应该看到 dsh-gui.exe（界面）与 dshd.exe（宿主），不再有 acc/goal/term 这类临时名
+# 进程表：只应该看到 dsh-gui.exe（界面）与 DSH GO.exe（宿主），不再有 acc/goal/term 这类临时名
 ```
 
 **"不再有临时名"是这条的硬判据**：`dshd-acc.exe` / `dshd-goal.exe` / `dshd-term.exe` 这种
-"每个脚本各 `go build -o` 一个名字"的做法要收掉——统一 `dshd.exe`（用 `--home` 区分实例），
+"每个脚本各 `go build -o` 一个名字"的做法要收掉——统一 `DSH GO.exe`（用 `--home` 区分实例），
 或者用 `scripts/_proc.py` 那样的统一管理器，让脚本不再自己命名二进制。
 
 ## 4. 为什么值得做（别把它当纯审美）
 
 - **任务管理器是唯一的现场**。出问题时人第一眼看到的就是那一列名字；`dshd-acc.exe` ×28
-  与 `dshd.exe` 混在一起，人分不清哪个是界面、哪个是宿主、哪个是昨天漏下来的。
+  与 `DSH GO.exe` 混在一起，人分不清哪个是界面、哪个是宿主、哪个是昨天漏下来的。
 - **名字对不上 → 排错对不上**。昨天那次 34 个进程，我先花了一轮才确认它们全来自 `dsh-ui\tmp\`。
-  如果它们都叫 `dshd.exe` 而 `--home` 不同，我一条 `Get-CimInstance CommandLine` 就定位了。
+  如果它们都叫 `DSH GO.exe` 而 `--home` 不同，我一条 `Get-CimInstance CommandLine` 就定位了。
 - **Windows 上"描述"列空白 = 看起来像可疑进程**。同一份二进制加上 VERSIONINFO，
   用户对它的观感完全不同。
 

@@ -1,6 +1,7 @@
 // dshtui：DeepSeek Harness 的终端界面（客户端），经 Transport 与宿主通信。
 //
-// 产品名是 **DSH TUI GO**（可执行文件仍叫 dshtui.exe，见 brand.go）。
+// 产品名是 **DSH TUI GO**，产物文件名逐字相同（`DSH TUI GO.exe`，见 brand.go
+// 与 scripts/build.sh）。下面用法里的 `dshtui` 是命令行 token，脚本与文档照旧。
 //
 // 这一版只做一件能验收的事：**开屏**。
 // 点阵字体不是手抄的——`splash_gen.go` 由 `scripts/import-splash.py` 从

@@ -3,7 +3,7 @@
 ## 做了什么
 
 ```bash
-./dshd.exe serve --home tmp/uiconn --addr 127.0.0.1:7799 --policy allow
+"./DSH GO.exe" serve --home tmp/uiconn --addr 127.0.0.1:7799 --policy allow
 cd ../dsh-ui && go run ./cmd/app -addr http://127.0.0.1:7799 -smoke
 ```
 

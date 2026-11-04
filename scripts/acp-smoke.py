@@ -21,7 +21,7 @@ import time
 
 import _proc
 
-BIN = os.environ.get("DSHD_BIN", "tmp/dshd.exe")
+BIN = os.environ.get("DSHD_BIN", "tmp/DSH GO.exe")
 ARGS = [BIN, "acp"] if os.path.exists(BIN) else ["go", "run", "./cmd/dshd", "acp"]
 
 

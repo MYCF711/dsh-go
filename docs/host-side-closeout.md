@@ -71,7 +71,7 @@ python scripts/h-suite.py --fast    # 不需要模型的 7 条（约 1 分钟）
 ## 8. 【已收口】h10 那次红：不是宿主，是陈旧二进制
 
 结论：**`session.load` 没问题**。红的原因是 `scripts/h10-chain.py` 用的是
-`tmp/serve-dir/dshd.exe`（17:35 编译），而 `tmp/dshd.exe` 是 18:48 的。
+`tmp/serve-dir/DSH GO.exe`（17:35 编译），而 `tmp/DSH GO.exe` 是 18:48 的。
 同一个脚本换成新二进制 → **6/6 全绿**。
 
 顺带改了两处让这类事不再难查：

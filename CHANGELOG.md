@@ -1,3 +1,41 @@
+## 未发布 —— **默认完全权限 + 产物改用产品名**
+
+### 默认审批改成完全权限（用户 2026-11-04 明确要求）
+
+> 「把默认审批改成完全权限，不要老是弹权限申请。」
+
+- `run --policy` 默认 `auto` → **`allow`**；`serve --policy` 默认 `deny` → **`allow`**。
+- 代价写清楚：这两个入口一跑起来就带写盘与执行权限，**没有事前拦截**。
+  要逐次询问写 `--policy ask`，要只读写 `--policy deny`。
+- `serve` 启动时打的那句提示**跟着实际策略变**了。以前写死"写操作会被拒绝"，
+  默认改成 allow 之后那就是假消息——屏幕上说拒绝、实际放行，比不打印更糟。
+- 门禁那条断言也反过来了：以前断言"默认不许是 allow"，现在断言"默认就是 allow"，
+  这样哪天有人悄悄改回去会红，而改回去必须是有人负责的决定。
+
+### 产物 = 产品名（同一条口径的另一半：「exe 面向用户，要全程、分大小写」）
+
+像官方的 `DeepSeek Harness.exe` 那样，产物文件名就是产品名：
+
+```
+dist/DSH GO.exe            宿主
+dist/DSH TUI GO.exe        终端界面
+dist/<os>-<arch>/…         三平台同名不同目录（linux/darwin 不加 .exe）
+dist/SHA256SUMS            在 dist/ 里 sha256sum -c 全 OK
+```
+
+- **平台放目录，版本不进文件名**：`dshd-0.2.1-go.30-windows-amd64.exe` 这种把产品名挤掉的做法不再用。
+- 两个程序都嵌了 Windows 版本资源，`ProductName` / `FileDescription` / `OriginalFilename`
+  与产品名逐字一致——任务管理器里看到的就是 `DSH GO` / `DSH TUI GO`，不是空描述。
+- `build.sh` 每次打包前**重新生成 `.syso`**：资源是编译期嵌进去的、版本号是 `-ldflags -X` 注入的，
+  两边来源不同就会"文件属性里一个版本、`--version` 另一个版本"。
+- 宿主补了 `--version` / `-V`（以前只有 TUI 有）。
+- 全仓 68 处字面引用跟着改，**命令行形态每一处都加了引号**（路径带空格）；
+  `_proc.py` / `regress.sh` / `measure-mem.py` / `soak.py` 里按进程名匹配的地方也改了——
+  其中两处是"改成 `DSH GO` 才匹配得上"的**大小写敏感**判断，不改会静默失配。
+- 顺手清掉 `dist/` 里 78 个改名前的旧产物（736MB → 76MB）。
+
+---
+
 ## 0.2.1-go.30（2026-11-04）—— **静默失败与「只看 text」：36 条路径、22 条真缺陷**
 
 go.29 之后这一段的主题不是新功能，而是**把"不报错的错"逐个揪出来**。
@@ -1847,7 +1885,7 @@ DSH 自己的上限约 **50,000 字符**（几乎等于不设限）。
 `martty@0.3.3` 装好后指向我们的 agent：
 
 ```
-$ martty --agent …/dshd.exe --agent-arg acp --check-runtime
+$ martty --agent "…/DSH GO.exe" --agent-arg acp --check-runtime
 initialize ok in 0.1s → dsh-go-acp
 ```
 
@@ -2279,7 +2317,7 @@ prompt1 stopReason: end_turn | 调用过的工具: []
 
 ```bash
 # 1. 和"什么都不做"的 Go 程序比：14.2 ms vs 60.6 ms → 我们有 46 ms 是自己的
-GODEBUG=inittrace=1 ./dshd.exe version
+GODEBUG=inittrace=1 "./DSH GO.exe" version
 # 2. 按包看 init 耗时
 #    总 init 26.0 ms，其中 BurntSushi/toml/internal 一个人 23.0 ms
 # 3. 决定性实验：把 toml 依赖摘掉再编一版，只测启动

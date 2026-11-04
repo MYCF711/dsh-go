@@ -6,7 +6,7 @@ A 线的最后一条：日志**目录**可写、但当天那个**文件**只读�
 
 做法：先跑一次造出日志文件 → 把它设成只读 → 再跑一轮要求真调工具的对话。
 
-    python scripts/probe-log-failure.py [--bin tmp/dshd.exe]
+    python scripts/probe-log-failure.py [--bin tmp/DSH GO.exe]
 
 期望：退出码 0、有「没有事后可查的记录」警告、输出里出现 `← read`、有 stats 行。
 
@@ -27,7 +27,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bin", default=os.path.join(ROOT, "tmp", "dshd.exe"))
+    ap.add_argument("--bin", default=os.path.join(ROOT, "tmp", "DSH GO.exe"))
     args = ap.parse_args()
     exe = os.path.abspath(args.bin)
 

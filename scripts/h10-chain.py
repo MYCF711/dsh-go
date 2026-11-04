@@ -7,7 +7,7 @@ create → list → load（每个样本 id）→ prompt → 再 load。
 import json, os, re, subprocess, sys, time, http.cookiejar, urllib.request, urllib.error
 
 HOME = "tmp/h10chain"
-BIN = "tmp/serve-dir/dshd.exe"
+BIN = "tmp/serve-dir/DSH GO.exe"
 
 # 空会话上第一次 prompt 可能要等模型先做一轮工具调用才落下 assistant/message。
 # 这个等待窗口必须**明显短于套件的超时**，否则超时后套件拿到的是"没有汇总行"，

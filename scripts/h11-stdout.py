@@ -12,7 +12,7 @@ import json, os, sys, time
 import _proc
 
 HOME = "tmp/h11out"
-BIN = "tmp/serve-dir/dshd.exe"
+BIN = "tmp/serve-dir/DSH GO.exe"
 
 def main():
     os.system("rm -rf " + HOME)

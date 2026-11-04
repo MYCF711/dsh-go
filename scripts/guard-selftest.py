@@ -77,7 +77,7 @@ def main():
 
     # ---- 3.5) bin-check：把二进制摸旧，必须红 ----
     stale = os.path.join(TMP, "stale.exe")
-    shutil.copy("tmp/dshd.exe", stale)
+    shutil.copy("tmp/DSH GO.exe", stale)
     os.utime(stale, (1577836800, 1577836800))  # 2020-01-01
     code, out = run(["scripts/bin-check.py", stale])
     chk("bin-check 对陈旧二进制会红", code != 0 and "旧" in out, out.strip()[-160:])

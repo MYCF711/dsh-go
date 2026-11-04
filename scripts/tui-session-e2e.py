@@ -40,8 +40,8 @@ import uuid
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN = os.path.join(ROOT, "tmp", "tui-session-e2e")
 HOME = os.path.join(RUN, "home")
-DSHD = os.path.join(ROOT, "tmp", "serve-dir", "dshd.exe")
-TUI = os.path.join(RUN, "dshtui.exe")
+DSHD = os.path.join(ROOT, "tmp", "serve-dir", "DSH GO.exe")
+TUI = os.path.join(RUN, "DSH TUI GO.exe")
 PLAN = os.path.join(RUN, "plan.json")
 REPORT = os.path.join(RUN, "report.json")
 PLAN_TXT = os.path.join(RUN, "plan.txt")
@@ -96,7 +96,7 @@ def newest_source():
     """dshd 二进制的新鲜度：扫**会影响它**的源码。
 
     不能照抄 scripts/bin-check.py 的 `cmd`：那会把 `cmd/dshtui` 算进来，
-    而 dshtui 是**另一个二进制**——改了它，dshd.exe 一点也不旧。
+    而 dshtui 是**另一个二进制**——改了它，DSH GO.exe 一点也不旧。
     照抄的后果是这条断言在每次改 TUI 后都假红，而假红会把整条检查废掉。
     """
     newest, path = 0.0, ""
@@ -248,8 +248,8 @@ def main():
     os.makedirs(HOME, exist_ok=True)
 
     if not os.path.exists(DSHD):
-        chk("宿主二进制存在（tmp/serve-dir/dshd.exe）", False,
-            "先 go build -o tmp/dshd.exe ./cmd/dshd && cp tmp/dshd.exe tmp/serve-dir/dshd.exe")
+        chk("宿主二进制存在（tmp/serve-dir/DSH GO.exe）", False,
+            "先 go build -o \"tmp/DSH GO.exe\" ./cmd/dshd && cp \"tmp/DSH GO.exe\" \"tmp/serve-dir/DSH GO.exe\"")
         return finish()
     stale_t, stale_p = newest_source()
     chk("宿主二进制不比源码旧", os.path.getmtime(DSHD) >= stale_t,

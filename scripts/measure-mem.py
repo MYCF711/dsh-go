@@ -2,7 +2,7 @@ import json, os, subprocess, sys, threading, time
 
 import _proc
 
-BIN = os.environ.get("DSHD_BIN", "tmp/dshd.exe")
+BIN = os.environ.get("DSHD_BIN", "tmp/DSH GO.exe")
 # `dshd acp` 由管理器托管：超时 SystemExit、断言失败、Ctrl+C 都会把进程收掉。
 with _proc.managed(_proc.run_acp(bin=BIN)) as proc:
     peak = {"kb": 0, "samples": 0}
@@ -13,8 +13,9 @@ with _proc.managed(_proc.run_acp(bin=BIN)) as proc:
             try:
                 out = subprocess.run(["tasklist", "/FI", f"PID eq {proc.pid}", "/FO", "CSV", "/NH"],
                                      capture_output=True, text=True).stdout.strip()
-                if out and "dshd" in out:
-                    # "dshd.exe","1234","Console","1","12,345 K"
+                if out and "DSH GO" in out:
+                    # 进程名就是产品名且带空格：tasklist 的 CSV 会把它整个引起来
+                    # "DSH GO.exe","1234","Console","1","12,345 K"
                     parts = next(__import__("csv").reader([out]))
                     kb = int(parts[4].replace(",", "").replace(" K", ""))
                     peak["kb"] = max(peak["kb"], kb)

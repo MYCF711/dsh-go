@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 import http.cookiejar
 
-BIN = "tmp/serve-dir/dshd.exe"
+BIN = "tmp/serve-dir/DSH GO.exe"
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

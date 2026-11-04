@@ -6,8 +6,9 @@ package main
 // 导出的 markdown 又写 `dsh-TUI(dsh-go)`，`--help` 连名字都没有。
 // 三处不一样，人在任务管理器 / 终端标题栏 / 导出的文件里看到的就不是同一个应用。
 //
-// 产品名 = **DSH TUI GO**。可执行文件仍叫 `dshtui.exe`（文件名是给脚本用的，
-// 产品名是给人看的）；宿主 `dshd` 是另一个程序，不叫 TUI。
+// 产品名 = **DSH TUI GO**，产物文件名也是它（Windows 上 `DSH TUI GO.exe`，
+// 见 scripts/build.sh）：文件名和产品名是同一个东西，脚本里要引用就整段加引号
+// ——路径中间有空格。宿主是另一个程序「DSH GO」，不叫 TUI。
 
 import (
 	"fmt"

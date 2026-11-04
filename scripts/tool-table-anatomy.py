@@ -31,7 +31,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE_CANDIDATES = [os.path.join(ROOT, "tmp", "dshd.exe"), os.path.join(ROOT, "dshd.exe")]
+EXE_CANDIDATES = [os.path.join(ROOT, "tmp", "DSH GO.exe"), os.path.join(ROOT, "DSH GO.exe")]
 
 # 结构词：JSON Schema 里"不是这个工具的参数名、也不是用户数据"的那些键。
 # 漏一个就会被算进"其它"，所以宁可多列，最后靠账平校验兜住。

@@ -18,7 +18,7 @@ const { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION } = await import(SD
 
 const HOME = 'tmp/e2e-home';
 const CWD = 'D:/DeepSeek Harness/default-workspace/DSH-GO';
-const BIN = 'tmp/dshd.exe';
+const BIN = 'tmp/DSH GO.exe';
 const results = [];
 
 function record(name, ok, detail = '') {

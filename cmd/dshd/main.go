@@ -71,6 +71,13 @@ var (
 	buildTime = "unknown"
 )
 
+// productName 是**面向用户的产品名**，也是产物的文件名（Windows 上是 `DSH GO.exe`）。
+//
+// 它必须与 scripts/build.sh 那张 PRODUCTS 表逐字一致（空格、大小写都算）：
+// 人认识这个程序靠的是任务管理器和文件名，版本行再写另一个称呼就等于同名两物。
+// 子命令用法里的 `dshd` 是命令行里的 token（脚本、文档照旧），不是产品名。
+const productName = "DSH GO"
+
 // builtinModules 是编译进二进制的默认实现列表。
 // 将来这里由 blank import + 注册表生成，形状不变。
 // 历史检索服务是宿主提供的（它需要知道"当前是哪个会话"）。
@@ -164,9 +171,12 @@ func main() {
 		err = cmdDoctor(os.Args[2:])
 	case "serve":
 		err = cmdServe(os.Args[2:])
-	case "version":
+	// `version` 与 `--version` 同一件事：TUI 只认 `--version`（它是旗标式 CLI），
+	// 宿主是子命令式。两边都认同一个探针，scripts/build.sh 才能用一条命令
+	// 核对"产物名 = 版本行首词"，否则那一栏对一个程序是假的。
+	case "version", "--version", "-V":
 		timingf("enter version")
-		fmt.Printf("dshd %s\n", version)
+		fmt.Printf("%s %s\n", productName, version)
 		fmt.Printf("commit: %s\n", commit)
 		fmt.Printf("built:  %s\n", buildTime)
 		fmt.Printf("go:     %s\n", runtime.Version())
@@ -390,14 +400,19 @@ func cmdTools(argv []string) error {
 // 不再依赖说明文字提醒模型该填什么。
 const defaultToolSchema = "compact"
 
-// 两个安全默认值。它们和工具表不一样：改坏了不是多花 token，而是**多给权限**。
+// 两个默认值。工具表改坏了只是多花 token，这两个改坏了是**动权限**，所以单列出来。
 //
-//   - defaultRunPolicy=auto：终端里问，非终端（管道/脚本/CI）直接拒。
-//     绝不能默认 allow——那等于把写文件和跑命令的授权静默发出去。
+//   - defaultRunPolicy=allow：**默认完全权限**。
+//     这条改过：早先默认是 `auto`（终端里问、非终端直接拒），理由是"绝不能把写文件
+//     和跑命令的授权静默发出去"。2026-11-04 用户明确要求改掉——
+//     「把默认审批改成完全权限，不要老是弹权限申请」。
+//     代价说清楚：`run` 一跑起来就带写盘与执行权限，没有事前拦截。
+//     要逐次询问就显式写 `--policy ask`；要只读就 `--policy deny`。
+//     这条改动同时写在 CHANGELOG 里，别把它当成"历史默认值"读。
 //   - defaultWorkspaceBytes=8000：默认把 AGENTS.md 灌进系统提示。
 //     设 0 等于不传手册，模型会凭空猜约定（踩过：它连"描述 ≤120 字"都不知道）。
 const (
-	defaultRunPolicy      = "auto"
+	defaultRunPolicy      = "allow"
 	defaultWorkspaceBytes = 8000
 )
 

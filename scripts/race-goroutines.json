@@ -115,7 +115,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:483",
+      "site": "cmd/dshd/main.go:498",
       "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
       "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"
@@ -127,7 +127,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:807",
+      "site": "cmd/dshd/main.go:822",
       "what": "run 的看门狗协程：父进程没了就取消本轮 ctx",
       "sync": "读过：只调 cancel()，不碰会话/日志；runCtx 与主 goroutine 共享，取消是幂等的",
       "verified_at": "2026-11-04"

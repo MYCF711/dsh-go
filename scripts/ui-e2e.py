@@ -16,7 +16,7 @@ def chk(name, cond, detail=""):
 # 为什么必须给 allow：serve 默认 deny，bash 会被拒 → 模型根本调不出工具 →
 # "WS 有 tool/call" 必然是红的，而那条红看起来像宿主不推 tool/call。
 # 2026-11-03 就是这么红的：**探针的环境不对，结论却记在宿主头上**。
-with _proc.managed(_proc.run_serve(bin="tmp/serve-dir/dshd.exe", home="tmp/e2e13", policy="allow")) as LIC:
+with _proc.managed(_proc.run_serve(bin="tmp/serve-dir/DSH GO.exe", home="tmp/e2e13", policy="allow")) as LIC:
     info=LIC.info
     class NR(urllib.request.HTTPRedirectHandler):
         def redirect_request(self,*a,**k): return None

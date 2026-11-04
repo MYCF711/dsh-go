@@ -11,7 +11,7 @@
 | 宿主仓 rev | `4b6dff1`（工作树脏：29 个未提交改动） | `git rev-parse --short HEAD`；审计针对**工作树**，不是 HEAD |
 | 界面仓 rev | `746520e`（工作树脏） | `../dsh-ui`，本次只读 |
 | Go | `go1.27.3 windows/amd64` | `go version` |
-| 审计用二进制 | `%TEMP%\dsh-audit\dshd.exe`，由源码现建 | 仓内 `dshd.exe` 已被 `cmd/dshtui/app.go`、`internal/wasmhost/wasmhost.go` 超过（`find cmd internal modules codecs -name '*.go' ! -name '*_test.go' -newer dshd.exe` 命中两个文件），按 `scripts/bin-check.py` 的判据算陈旧，不在陈旧二进制上下结论 |
+| 审计用二进制 | `"%TEMP%\dsh-audit\DSH GO.exe"`，由源码现建 | 仓内 `DSH GO.exe` 已被 `cmd/dshtui/app.go`、`internal/wasmhost/wasmhost.go` 超过（`find cmd internal modules codecs -name '*.go' ! -name '*_test.go' -newer "DSH GO.exe"` 命中两个文件），按 `scripts/bin-check.py` 的判据算陈旧，不在陈旧二进制上下结论 |
 | 临时 home | `%TEMP%\dsh-audit\{home,home2}`，另有一个只读指向 `../dsh-ui/tmp/aba-home` | 全部在仓库外；`--addr 127.0.0.1:0` 由 OS 分配端口 |
 | 进程回收 | 只按 WINPID 杀掉 `%TEMP%\dsh-audit\dshd` 三个进程 | 未触碰 `../dsh-ui/tmp/dshd-serve`（PID 1787）等他人进程 |
 
@@ -108,7 +108,7 @@ type readyLine struct {
 打印在 `serve.go:234-240`，**stdout 只有这一行**；policy 诊断走 stderr（`serve.go:241-243`，注释记着 H11 的教训）。实测：
 
 ```
-$ dshd.exe serve --home %TEMP%\dsh-audit\home --addr 127.0.0.1:0
+$ "DSH GO.exe" serve --home %TEMP%\dsh-audit\home --addr 127.0.0.1:0
 --- stdout ---
 ready {"url":"http://127.0.0.1:50361","token":"26e7…97db"}      # 64 位 hex
 --- stderr ---
@@ -139,7 +139,7 @@ token 与 cookie 都是 32 字节随机数的 hex（`server.go:35-37`、`:579-58
 
 ```bash
 # 1) 起宿主（临时 home，端口交给 OS）
-dshd.exe serve --home /tmp/dsh-audit/home --addr 127.0.0.1:0 > out.txt 2> err.txt &
+"DSH GO.exe" serve --home /tmp/dsh-audit/home --addr 127.0.0.1:0 > out.txt 2> err.txt &
 URL=$(sed -n 's/^ready {"url":"\([^"]*\)".*/\1/p' out.txt)
 TOKEN=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' out.txt)
 
@@ -503,10 +503,10 @@ RESULT: 8 秒内收到 0 条帧                      ← 客户端一个字都�
 
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"
-mkdir -p /tmp/dsh-audit && go build -o /tmp/dsh-audit/dshd.exe ./cmd/dshd
+mkdir -p /tmp/dsh-audit && go build -o "/tmp/dsh-audit/DSH GO.exe" ./cmd/dshd
 
 # 起宿主（临时 home；端口 OS 分配）
-cd /tmp/dsh-audit && nohup ./dshd.exe serve --home /tmp/dsh-audit/home --addr 127.0.0.1:0 \
+cd /tmp/dsh-audit && nohup "./DSH GO.exe" serve --home /tmp/dsh-audit/home --addr 127.0.0.1:0 \
     > out.txt 2> err.txt &
 
 URL=$(sed -n 's/^ready {"url":"\([^"]*\)".*/\1/p' out.txt)

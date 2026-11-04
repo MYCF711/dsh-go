@@ -16,7 +16,7 @@
 import argparse, json, os, re, subprocess, sys, tempfile, shutil
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(ROOT, "tmp", "dshd.exe")
+EXE = os.path.join(ROOT, "tmp", "DSH GO.exe")
 
 # 每个任务：(名字, 提示词, 期望被调用的工具)
 TASKS = [
@@ -64,7 +64,7 @@ def main():
     ap.add_argument("--out", default="tmp/tool-table-ab.json")
     a = ap.parse_args()
     if not os.path.exists(EXE):
-        sys.exit("先 go build -o tmp/dshd.exe ./cmd/dshd")
+        sys.exit('先 go build -o "tmp/DSH GO.exe" ./cmd/dshd')
 
     rows = []
     for name, prompt, want in TASKS:

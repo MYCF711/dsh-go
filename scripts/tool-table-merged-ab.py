@@ -32,7 +32,7 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(ROOT, "tmp", "dshd.exe")
+EXE = os.path.join(ROOT, "tmp", "DSH GO.exe")
 BASE = os.environ.get("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1")
 MODEL = os.environ.get("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017")
 
@@ -226,7 +226,7 @@ def main():
     ap.add_argument("--out", default="tmp/tool-table-merged-ab.json")
     a = ap.parse_args()
     if not os.path.exists(EXE):
-        sys.exit("先 go build -o tmp/dshd.exe ./cmd/dshd")
+        sys.exit('先 go build -o "tmp/DSH GO.exe" ./cmd/dshd')
 
     modes = [a.only] if a.only else ["compact", "merged"]
     rows = []

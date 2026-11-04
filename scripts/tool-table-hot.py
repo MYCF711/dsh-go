@@ -115,13 +115,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sessions", type=Path, default=DEFAULT_SESSIONS)
     ap.add_argument("--top", type=int, default=30)
-    ap.add_argument("--exe", type=Path, default=ROOT / "tmp" / "dshd.exe")
+    ap.add_argument("--exe", type=Path, default=ROOT / "tmp" / "DSH GO.exe")
     ap.add_argument("--go", action="store_true", help="只输出 Go 字面量")
     ap.add_argument("--write", type=Path, default=None, help="把结论表写到这个路径")
     a = ap.parse_args()
 
     if not a.exe.is_file():
-        sys.exit("先 go build -o tmp/dshd.exe ./cmd/dshd")
+        sys.exit('先 go build -o "tmp/DSH GO.exe" ./cmd/dshd')
     if not a.sessions.is_dir():
         sys.exit(f"语料目录不存在: {a.sessions}")
 

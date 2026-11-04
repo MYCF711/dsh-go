@@ -23,7 +23,7 @@ const AUTO = process.env.AUTO_COMPACT || '4000';
 const SECRET = 'LONG-SESSION-KEY-42';
 // 每轮读多少行：这个数直接决定历史增长速度，也就决定压缩有没有收益。
 const LINES = Number(process.env.LINES_PER_TURN || 6);
-const BIN = process.env.DSHD_BIN || 'tmp/dshd.exe';
+const BIN = process.env.DSHD_BIN || 'tmp/DSH GO.exe';
 
 rmSync(HOME, { recursive: true, force: true });
 mkdirSync('tmp', { recursive: true });

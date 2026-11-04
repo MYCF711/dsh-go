@@ -55,7 +55,7 @@ go test -race ./...   39 个包全 ok，0 DATA RACE
 
 这条很重要，别搞混：
 
-| | 成品（`dshd.exe`） | 开发脚本 |
+| | 成品（`DSH GO.exe`） | 开发脚本 |
 |---|---|---|
 | C 工具链 | **不需要，也不包含** | `scripts/race.sh` 自己找 |
 | 构建 | `CGO_ENABLED=0`（默认） | `CGO_ENABLED=1`，只在那条命令里 |

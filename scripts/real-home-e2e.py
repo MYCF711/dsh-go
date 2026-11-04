@@ -11,7 +11,7 @@ def chk(n,c,d=""):
     if c: ok+=1; print(f"  OK   {n}",file=out)
     else: fail+=1; print(f"  FAIL {n} {d}",file=out)
     out.flush()
-with _proc.managed(_proc.run_serve(bin="tmp/serve-dir/dshd.exe", home="D:/DeepSeek Harness/home")) as LIC:
+with _proc.managed(_proc.run_serve(bin="tmp/serve-dir/DSH GO.exe", home="D:/DeepSeek Harness/home")) as LIC:
     info=LIC.info
     class NR(urllib.request.HTTPRedirectHandler):
         def redirect_request(self,*a,**k): return None

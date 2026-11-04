@@ -42,6 +42,11 @@
 - FILE-REFS owner `c55e44d7` 已在 `aeadda9` 隔离副本开工：只把 write/edit 已证明的路径变成最终回复可点链接，Cwd缺失/未知路径/代码块不猜，复用真实OpenFile。
 - OPEN-IN-APP 的根因记录按 `98c9645` 纠正为 CWD 未等到，不是 SlotMainHeader 塌陷；仍需重新装配和真实点击验收。
 
+## 10:00 追加：FILE-REFS 集成与 OPEN-IN-APP
+
+- FILE-REFS 经 Lead 复验相关/全仓 test/vet/build与两尺寸三轮真实点击，集成后再次全绿，转 DONE。deliverables 第4项完成；per-file diff/delivery cards仍缺。
+- OPEN-IN-APP 已在 `3f2f2f4` 最新隔离副本实派 `4dcbbab2`：验证 MainHeader 非0高可见、有效绝对CWD与真实点击；目录改用OpenFile/app.OpenPath，不能把裸路径交给OpenExternal。未验收前仍 IN_PROGRESS。
+
 ## 未验证
 
 WP-C3 成品、OPEN-IN-APP 重装与真实点击、真实 dshd/桌面整链、共享 golden、真机 epoch 换代、宿主重启 cookie、FrameSub 原子性/重放、pending cancel、stale_epoch、U2 完整生命周期、OS 原生输入/高 DPI、完整工作日/A/B。

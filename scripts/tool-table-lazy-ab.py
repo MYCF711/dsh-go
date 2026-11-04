@@ -19,7 +19,7 @@ lazy 侧额外记录：调没调 tool_load、拉的名字对不对。
     python scripts/tool-table-lazy-ab.py --only web_search_now_line
     python scripts/tool-table-lazy-ab.py --max-steps 7
 
-前置：go build -o tmp/dshd.exe ./cmd/dshd（脚本会自己检查）
+前置：go build -o "tmp/DSH GO.exe" ./cmd/dshd（脚本会自己检查）
 """
 
 import argparse
@@ -34,7 +34,7 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(ROOT, "tmp", "dshd.exe")
+EXE = os.path.join(ROOT, "tmp", "DSH GO.exe")
 MODEL = ""   # 由 --model 填；空 = 用 dshd 的默认模型
 RULES = os.path.join(ROOT, "tmp", "ab-rules.txt")
 MODES = ("compact", "lazy")
@@ -267,7 +267,7 @@ def main():
     global MODEL
     MODEL = a.model
     if not os.path.exists(EXE):
-        sys.exit("先 go build -o tmp/dshd.exe ./cmd/dshd")
+        sys.exit('先 go build -o "tmp/DSH GO.exe" ./cmd/dshd')
     if not os.path.exists(RULES):
         with open(RULES, "w", encoding="utf-8") as f:
             f.write("A/B 用的最小规则文件：屏蔽工作区 AGENTS.md 对 prompt_tokens 的干扰。\n")

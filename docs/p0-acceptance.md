@@ -20,7 +20,7 @@
 
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"
-go build -o tmp/dshd.exe ./cmd/dshd
+go build -o "tmp/DSH GO.exe" ./cmd/dshd
 
 # 官方 SDK（@agentclientprotocol/sdk@1.4.0）当客户端
 ELECTRON_RUN_AS_NODE=1 "D:/DeepSeek Harness/Desktop/DeepSeek Harness.exe" \
@@ -58,7 +58,7 @@ ELECTRON_RUN_AS_NODE=1 "..." scripts/acp-sdk-resume.mjs
 ## ② 工具：结构化、有界、错误带 Hint
 
 ```bash
-./tmp/dshd.exe tools --manifest dsh.toml   # 打印模型看到的工具表
+"./tmp/DSH GO.exe" tools --manifest dsh.toml   # 打印模型看到的工具表
 go test ./cmd/dshd -run TestWriteToolsDeclareCaps -v
 ```
 
@@ -116,9 +116,9 @@ gh release view v0.2.1-go.6 --json assets --jq '.assets[] | "\(.size) \(.name)"'
 **空目录验证**（v0.2.1-go.5 就是在这里翻的车）：
 
 ```
-$ cd /tmp/empty && ./dshd.exe modules list | wc -l
+$ cd /tmp/empty && "./DSH GO.exe" modules list | wc -l
 9
-$ ./dshd.exe tools
+$ "./DSH GO.exe" tools
 工具 9 个，5832 字节
 ```
 
@@ -152,7 +152,7 @@ export PATH="/c/Program Files/Go/bin:$PATH"
 bash scripts/check.sh                      # 全绿，278 个测试
 python scripts/measure-mem.py              # 15.5 MB
 bash scripts/build.sh                      # 8.4 MB
-go build -o tmp/dshd.exe ./cmd/dshd && ./tmp/dshd.exe tools | wc -l   # 10 个工具
+go build -o "tmp/DSH GO.exe" ./cmd/dshd && "./tmp/DSH GO.exe" tools | wc -l   # 10 个工具
 ```
 
 **数字变了就要在这里改**——B 表要求每次发版逐条更新，这一条从 go.13 起漏了三版。

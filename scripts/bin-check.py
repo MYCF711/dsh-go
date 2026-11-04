@@ -2,7 +2,7 @@
 """二进制体检：探针用的二进制，比源码旧吗？两份副本还是同一份吗？
 
 为什么需要：2026-11-03 有一轮把 h10 的红记成了"宿主丢消息"，实际是
-`scripts/h10-chain.py` 用的 `tmp/serve-dir/dshd.exe`（17:35）比 `tmp/dshd.exe`（18:48）旧。
+`scripts/h10-chain.py` 用的 `tmp/serve-dir/DSH GO.exe`（17:35）比 `tmp/DSH GO.exe`（18:48）旧。
 **探针跑的是一个已经不存在的版本，结论却记在当前代码头上。**
 
 这比大多数 bug 都贵：它让人去改没坏的地方。
@@ -11,13 +11,17 @@
   1. 二进制 mtime 不早于任何 `.go` 源码（`cmd/ internal/ modules/ codecs/`）
   2. 两份副本（如果都在）内容一致——sha256 相同
 
+**文件名就是产品名**（`DSH GO.exe`，带空格），所以下面每处 shell 用法都要加引号：
+`go build -o "tmp/DSH GO.exe" ./cmd/dshd`。不加引号会变成 `-o tmp/DSH` + 多一个参数，
+报错长得像"命令写错了"，实际是引号漏了。
+
 判红的处理方式只有一种：重新 `go build`。看下面的提示照着做即可。
 """
 import hashlib
 import os
 import sys
 
-BINS = ["tmp/dshd.exe", "tmp/serve-dir/dshd.exe"]
+BINS = ["tmp/DSH GO.exe", "tmp/serve-dir/DSH GO.exe"]
 # 允许传若干二进制路径，只为**反证**用（见 scripts/guard-selftest.py）。
 if len(sys.argv) > 1:
     BINS = sys.argv[1:]
@@ -76,7 +80,7 @@ def main():
             print("  --   %s 不存在（这条探针不会用它）" % b)
 
     if not present:
-        print("  FAIL 一个二进制都没有：先 go build -o tmp/dshd.exe ./cmd/dshd")
+        print('  FAIL 一个二进制都没有：先 go build -o "tmp/DSH GO.exe" ./cmd/dshd')
         print("合计 OK=0 FAIL=1")
         return 1
 
@@ -94,7 +98,8 @@ def main():
             {b: h[:8] for b, h in hashes.items()})
 
     if stale:
-        print("  → 修法：go build -o tmp/dshd.exe ./cmd/dshd && cp tmp/dshd.exe tmp/serve-dir/dshd.exe")
+        print('  → 修法：go build -o "tmp/DSH GO.exe" ./cmd/dshd '
+              '&& cp "tmp/DSH GO.exe" "tmp/serve-dir/DSH GO.exe"')
 
     print("合计 OK=%d FAIL=%d" % (ok, fail))
     return 0 if fail == 0 else 1

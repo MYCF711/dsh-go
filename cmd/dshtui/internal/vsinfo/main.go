@@ -138,12 +138,15 @@ func strNode(key, val string) []byte {
 func versionInfo(product, company, ver string, ms, ls uint32) []byte {
 	// StringTable 的键是"语言+代码页"的十六进制：0409 = en-US，04B0 = UTF-16。
 	// 值不本地化，用 en-US 是通行做法（任务管理器不看语言，读 FileDescription）。
+	//
+	// InternalName / OriginalFilename 从产品名派生，和产物文件名逐字一致：
+	// 产物叫 `DSH TUI GO.exe`，资源里写 `dshtui.exe` 就是在资源里留了个旧名字。
 	table := node("040904B0", 1, 0, nil,
 		strNode("CompanyName", company),
 		strNode("FileDescription", product),
 		strNode("FileVersion", ver),
-		strNode("InternalName", "dshtui"),
-		strNode("OriginalFilename", "dshtui.exe"),
+		strNode("InternalName", product),
+		strNode("OriginalFilename", product+".exe"),
 		strNode("ProductName", product),
 		strNode("ProductVersion", ver),
 	)

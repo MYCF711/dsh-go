@@ -3,12 +3,26 @@
 #
 #   bash scripts/build.sh
 #
-# 两个程序，**名字不混**：
-#   - `dshd`      = 宿主（Transport 服务端），产物 `dshd-<ver>-<os>-<arch>`
-#   - `dshtui`    = 终端界面 DSH TUI GO，产物 `dshtui-<ver>-<os>-<arch>`
+# 两个程序，**产品名就是产物文件名**（用户口径：exe 面向用户，名字必须是产品名，
+# 像官方的 `DeepSeek Harness.exe` 那样全名、带空格、分大小写）：
+#
+#   - `DSH GO`      = 宿主（Transport 服务端），包 ./cmd/dshd
+#   - `DSH TUI GO`  = 终端界面，包 ./cmd/dshtui
+#
+# 目录形状：**产品名在文件名里，平台放在目录里**。三个平台的交叉编译产物同名不同目录，
+# 也就不存在"给文件名塞版本号/平台串"这种把产品名挤掉的做法。
+#
+#   dist/DSH GO.exe                本机 windows/amd64，不带版本号：真机、任务管理器、脚本用这一个
+#   dist/DSH TUI GO.exe            同上
+#   dist/<os>-<arch>/DSH GO[.exe]  三个平台的产物（windows 加 .exe，linux/darwin 不加后缀）
+#   dist/<os>-<arch>/DSH TUI GO[.exe]
+#   dist/SHA256SUMS                路径相对 dist/，在 dist/ 里跑 `sha256sum -c SHA256SUMS`
+#
+# **名字里有空格**：本脚本每一处用到产物路径都整段加引号（`"${out}"`、`"dist/${name}.exe"`）。
+# 少一个引号就会被拆成两个词，而报错信息看起来会像"文件不存在"，不像"引号漏了"。
 #
 # 版本号只有一个出处：宿主的 `cmd/dshd/main.go`。这里把它同时注入两边
-# （`-X main.version`），所以 dist 里的 dshd 和 dshtui 永远是同一个版本号。
+# （`-X main.version`），所以 dist 里的两个程序永远是同一个版本号。
 #
 # 不进 npm（用户要求），只出静态二进制。
 set -euo pipefail
@@ -28,57 +42,77 @@ fi
 # 两个程序各自的 main 包，同一个注入串（变量名两边都叫 version/commit/buildTime）。
 LDFLAGS="-s -w -X main.version=${VER} -X main.commit=${COMMIT} -X main.buildTime=${DATE}"
 
+# Windows 版本资源（.syso）在每次打包前重新生成一次。
+#
+# 为什么必须在这里重生成：`.syso` 是**编译期嵌进去的**，而版本号是 `-ldflags -X` 注入的。
+# 两者来源不同就会出现"文件属性里是 0.2.1-go.30、程序 --version 却是别的"这种
+# 对不上的情况——版本资源本来就只服务"人看"，对不上等于没有。
+# 生成器从 main.go / brand.go 读产品名与产物名，这里只显式钉版本号。
+for row in "DSH GO|cmd/dshd" "DSH TUI GO|cmd/dshtui"; do
+  IFS='|' read -r name dir <<<"${row}"
+  go run ./cmd/dshtui/internal/vsinfo -product "${name}" -version "${VER}" -o "${dir}/versioninfo_windows_amd64.syso" >/dev/null || {
+    echo "生成 ${name} 的版本资源失败" >&2
+    exit 1
+  }
+done
+
 mkdir -p dist
 : > dist/SHA256SUMS
 
 # 名字只在这里写一遍：下面两段循环都从这张表取。
-#   <产品名>|<包路径>|<产物前缀>
+#   <产品名>|<包路径>
+# 产品名同时是产物名，与 `--version` 首行逐字一致（宿主 cmd/dshd/main.go 的
+# productName、TUI cmd/dshtui/brand.go 的 productName）。
 PRODUCTS=(
-  "dshd|./cmd/dshd|dshd"
-  "DSH TUI GO|./cmd/dshtui|dshtui"
+  "DSH GO|./cmd/dshd"
+  "DSH TUI GO|./cmd/dshtui"
 )
 
-echo "宿主 dshd ${VER} @ ${COMMIT} (${DATE})"
+TARGETS=("windows/amd64" "linux/amd64" "darwin/arm64")
+
+echo "构建 ${VER} @ ${COMMIT} (${DATE})"
 echo
 
 for row in "${PRODUCTS[@]}"; do
-  IFS='|' read -r name pkg prefix <<<"${row}"
-  # 清单头一行就是「产品名 + 版本」：dshd 那种是产品名，TUI 这种是 DSH TUI GO，
-  # 与 `dshtui --version` 的第一行逐字一致。
+  IFS='|' read -r name pkg <<<"${row}"
   echo "${name} ${VER}"
 
-  for target in windows/amd64 linux/amd64 darwin/arm64; do
+  for target in "${TARGETS[@]}"; do
     os=${target%%/*}
     arch=${target##*/}
     ext=""
     [ "${os}" = "windows" ] && ext=".exe"
-    out="dist/${prefix}-${VER}-${os}-${arch}${ext}"
+    dir="dist/${os}-${arch}"
+    out="${dir}/${name}${ext}"
 
+    mkdir -p "${dir}"
     GOOS=${os} GOARCH=${arch} CGO_ENABLED=0 \
       go build -trimpath -ldflags "${LDFLAGS}" -o "${out}" "${pkg}"
 
     size=$(du -h "${out}" | cut -f1)
-    printf '  %-52s %s\n' "$(basename "${out}")" "${size}"
-    ( cd dist && sha256sum "$(basename "${out}")" >> SHA256SUMS )
+    printf '  %-44s %s\n' "${os}-${arch}/${name}${ext}" "${size}"
+    ( cd dist && sha256sum "${os}-${arch}/${name}${ext}" >> SHA256SUMS )
   done
 
-  # 本机（windows/amd64）再留一份**不带版本号**的 `dist/dshtui.exe`：
+  # 本机（windows/amd64）再留一份**不带平台目录**的 `dist/<产品名>.exe`：
   # 手工跑、任务管理器里看名字、脚本直接调，用的都是这一个文件。
-  if [ "${prefix}" = "dshtui" ] && [ -f "dist/${prefix}-${VER}-windows-amd64.exe" ]; then
-    cp "dist/${prefix}-${VER}-windows-amd64.exe" "dist/${prefix}.exe"
-    got=$("./dist/${prefix}.exe" --version 2>/dev/null | head -1 || true)
+  # 顺手拿它 `--version` 自检：产物名必须等于版本行首词，对不上就是
+  # PRODUCTS 表和代码里的 productName 分叉了（那正是"两个名字"的来源）。
+  if [ -f "dist/windows-amd64/${name}.exe" ]; then
+    cp "dist/windows-amd64/${name}.exe" "dist/${name}.exe"
+    got=$("./dist/${name}.exe" --version 2>/dev/null | head -1 || true)
     case "${got}" in
       "${name} ${VER}"*)
-        printf '  %-52s %s\n' "${prefix}.exe" "${got}"
+        printf '  %-44s %s\n' "${name}.exe" "${got}"
         ;;
       *)
-        echo "  !! ${prefix}.exe --version 输出不对：${got:-（空）}" >&2
+        echo "  !! ${name}.exe --version 输出不对：${got:-（空）}" >&2
         exit 1
         ;;
     esac
-    ( cd dist && sha256sum "${prefix}.exe" >> SHA256SUMS )
+    ( cd dist && sha256sum "${name}.exe" >> SHA256SUMS )
   fi
   echo
 done
 
-echo "产物在 dist/，校验和 dist/SHA256SUMS"
+echo "产物在 dist/（每个平台一个目录，文件名就是产品名），校验和 dist/SHA256SUMS"

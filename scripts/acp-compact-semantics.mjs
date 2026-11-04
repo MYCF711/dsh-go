@@ -18,7 +18,7 @@ const { ClientSideConnection, ndJsonStream, PROTOCOL_VERSION } = await import(SD
 
 const HOME = process.env.COMPACT_HOME || 'tmp/compact-semantics-home';
 const SECRET = 'COMPACT-KEY-7';
-const BIN = process.env.DSHD_BIN || 'tmp/dshd.exe';
+const BIN = process.env.DSHD_BIN || 'tmp/DSH GO.exe';
 
 rmSync(HOME, { recursive: true, force: true });
 

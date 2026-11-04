@@ -6,7 +6,7 @@
 做法：把 `sessions` 做成一个文件（会话必然建不出来），
 网关换成一个**只计数、永远回 500** 的桩，然后看它被打了几次。
 
-    python scripts/probe-no-persist.py [--bin tmp/dshd.exe]
+    python scripts/probe-no-persist.py [--bin tmp/DSH GO.exe]
 
 期望：退出码非 0、错误指向会话目录、**网关 0 次**。
 """
@@ -43,7 +43,7 @@ class CountingGateway(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bin", default=os.path.join(ROOT, "tmp", "dshd.exe"))
+    ap.add_argument("--bin", default=os.path.join(ROOT, "tmp", "DSH GO.exe"))
     args = ap.parse_args()
     binpath = os.path.abspath(args.bin)
 

@@ -163,10 +163,10 @@ def repo_root():
 
 
 def load_our_tools():
-    exe = repo_root() / "tmp" / "dshd.exe"
+    exe = repo_root() / "tmp" / "DSH GO.exe"
     if not exe.is_file():
         eprint("错误: 找不到 %s" % exe)
-        eprint("先 go build -o tmp/dshd.exe ./cmd/dshd")
+        eprint('先 go build -o "tmp/DSH GO.exe" ./cmd/dshd')
         sys.exit(2)
     try:
         proc = subprocess.run(

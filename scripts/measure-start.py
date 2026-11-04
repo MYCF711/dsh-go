@@ -1,7 +1,7 @@
 import json, os, statistics, time
 import _proc
 
-BIN = os.environ.get("DSHD_BIN", "tmp/dshd.exe")
+BIN = os.environ.get("DSHD_BIN", "tmp/DSH GO.exe")
 xs = []
 for _ in range(5):
     t0 = time.time()

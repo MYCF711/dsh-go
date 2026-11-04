@@ -45,7 +45,7 @@
         print(srv.url, srv.token)
 
     # 2) 起 acp（stdio 对话）；脚本自己读 stdout，所以不挂 drain
-    p = _proc.run_acp(bin="tmp/dshd.exe", home="tmp/x")
+    p = _proc.run_acp(bin="tmp/DSH GO.exe", home="tmp/x")
     p.stdin.write(...)          # p.stdin / p.stdout / p.pid / p.popen 都有
 
     # 3) 兜底自测：故意在起完子进程后抛异常，断言 0 残留
@@ -289,8 +289,8 @@ def _creation_time(pid):
 # --------------------------------------------------------------------------
 
 
-def list_dshd(image="dshd.exe"):
-    """当前活着的 `dshd.exe` PID 集合。只读。"""
+def list_dshd(image="DSH GO.exe"):
+    """当前活着的 `DSH GO.exe` PID 集合。只读。"""
     try:
         out = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq %s" % image, "/FO", "CSV", "/NH"],
@@ -307,7 +307,7 @@ def list_dshd(image="dshd.exe"):
     return pids
 
 
-def dshd_cmdlines(image="dshd.exe"):
+def dshd_cmdlines(image="DSH GO.exe"):
     """{pid: 命令行}。只读；拿不到就返回 {}（自测据此认领"自己起的那些"）。"""
     if not _WINDOWS:
         return {}
@@ -677,12 +677,12 @@ def managed(proc):
 
 
 def default_bin():
-    """默认二进制：$DSHD_BIN，否则仓库根的 tmp/dshd.exe。"""
+    """默认二进制：$DSHD_BIN，否则仓库根的 tmp/DSH GO.exe。"""
     env = os.environ.get("DSHD_BIN")
     if env:
         return env
     here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(os.path.dirname(here), "tmp", "dshd.exe")
+    return os.path.join(os.path.dirname(here), "tmp", "DSH GO.exe")
 
 
 def spawn(argv, **kw):
@@ -837,13 +837,13 @@ def _selftest():
 
     here = os.path.dirname(os.path.abspath(__file__))
     binary = os.environ.get("DSHD_BIN") or os.path.join(
-        os.path.dirname(here), "tmp", "dshd.exe")
+        os.path.dirname(here), "tmp", "DSH GO.exe")
     if not os.path.exists(binary):
-        print("找不到 %s —— 先 go build -o tmp/dshd.exe ./cmd/dshd" % binary)
+        print('找不到 %s —— 先 go build -o "tmp/DSH GO.exe" ./cmd/dshd' % binary)
         return 1
 
     baseline = list_dshd()
-    print("基线：%d 个 dshd.exe 活着 %s（这些不是我的，一根手指都不碰）"
+    print("基线：%d 个 DSH GO.exe 活着 %s（这些不是我的，一根手指都不碰）"
           % (len(baseline), sorted(baseline)))
 
     homes = []

@@ -55,10 +55,20 @@ func (r noModelRunner) Run(_ context.Context, sessionID, turnID, _ string) error
 
 // announcePolicy 把子进程实际使用的审批策略打到屏幕上。
 //
-// 为什么必须打：serve 无人值守，写操作会被拒绝；用户看不见这条，
-// 就会把"工具被拒"当成"模型不会用工具"。**看不见的放宽与失误没有区别。**
+// 为什么必须打：serve 无人值守，用户看不见这条，就会把"工具被拒"当成
+// "模型不会用工具"。**看不见的放宽与失误没有区别。**
+//
+// 这句话还必须跟着**实际策略**变：以前写死"写操作会被拒绝"，默认改成 allow
+// 之后它就成了假消息——屏幕上说拒绝、实际放行，比不打印更糟。
 func announcePolicy(w io.Writer, policy string, maxSteps int) {
-	fmt.Fprintf(w, "policy %s（无人值守；写操作会被拒绝）；每轮最多 %d 步\n", policy, maxSteps)
+	switch policy {
+	case "allow":
+		fmt.Fprintf(w, "policy allow（无人值守，完全权限；要逐次询问请写 --policy ask）；每轮最多 %d 步\n", maxSteps)
+	case "ask":
+		fmt.Fprintf(w, "policy ask（无人值守；审批会转给界面，没人应答就按拒绝处理）；每轮最多 %d 步\n", maxSteps)
+	default:
+		fmt.Fprintf(w, "policy %s（无人值守；写操作会被拒绝）；每轮最多 %d 步\n", policy, maxSteps)
+	}
 }
 
 // announceToolsMode 把子进程实际使用的工具表形态打到屏幕上。
@@ -127,7 +137,10 @@ func cmdServe(args []string) error {
 	// ask 现在是**能用**的：子进程走 @@APPROVAL@@ 标记通道，把问题转给界面（H13）。
 	// 这条帮助文字以前写着"ask 等于永远挂起"，那是 H13 之前的事实，
 	// 留着它会让人以为审批不能用——**过期的帮助文本比没有帮助更糟**。
-	servePolicy := fs.String("policy", "deny", "子进程用哪个审批策略：deny/allow/ask（ask 会把审批转给界面）")
+	// 默认 allow：用户 2026-11-04 要求「默认审批改成完全权限，不要老是弹权限申请」。
+	// 以前默认 deny——那会让界面连上来之后所有写工具都失败，而失败的样子很像
+	// "模型不会用工具"。要逐次询问写 --policy ask，要只读写 --policy deny。
+	servePolicy := fs.String("policy", "allow", "子进程用哪个审批策略：allow（默认，完全权限）/ask（转给界面）/deny")
 	// 工具表形态：默认 compact（和 run 一致）。lazy 只显式打开——它改的是**模型
 	// 行为**（表外工具要多一次 tool_load），不是纯字节账，见 docs/tool-table-lazy.md §3。
 	serveToolsMode := fs.String("tools-mode", "",

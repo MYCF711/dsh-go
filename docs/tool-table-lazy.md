@@ -211,11 +211,11 @@ lazy 侧另记：调没调 `tool_load`、拉的名字对不对。
 ```bash
 H=tmp/lazy-raw-after; rm -rf $H
 # 第一轮：新建会话
-tmp/dshd.exe run --tools-mode lazy --home $H --policy allow --max-steps 4 \
+"tmp/DSH GO.exe" run --tools-mode lazy --home $H --policy allow --max-steps 4 \
   --workspace-bytes 1 --agents tmp/ab-rules.txt \
   --prompt "用 now_line 告诉我现在是几点、几号、星期几。"
 # 从 stderr 的「会话：<path>」里取 id（就是那个目录名），第二轮续它
-tmp/dshd.exe run --tools-mode lazy --home $H --session <id> --policy allow --max-steps 4 \
+"tmp/DSH GO.exe" run --tools-mode lazy --home $H --session <id> --policy allow --max-steps 4 \
   --workspace-bytes 1 --agents tmp/ab-rules.txt \
   --prompt "再用 now_line 报一次现在的时间。"
 ```
@@ -224,9 +224,9 @@ tmp/dshd.exe run --tools-mode lazy --home $H --session <id> --policy allow --max
 
 ```bash
 bash tmp/lazy-resume-raw.sh tmp/dshd-before.exe before   # → tmp/lazy-resume-raw-before.txt
-bash tmp/lazy-resume-raw.sh tmp/dshd.exe        after    # → tmp/lazy-resume-raw-after.txt
+bash tmp/lazy-resume-raw.sh "tmp/DSH GO.exe"        after    # → tmp/lazy-resume-raw-after.txt
 python tmp/lazy-resume-check.py --exe tmp/dshd-before.exe
-python tmp/lazy-resume-check.py --exe tmp/dshd.exe
+python tmp/lazy-resume-check.py --exe "tmp/DSH GO.exe"
 ```
 
 （两个脚本都在 `tmp/`，是这一轮的一次性证物，不入库；命令本身可以照上面手跑。）
@@ -299,7 +299,7 @@ stats: tool_calls=1 input=10420 output=76
 go build ./... && go vet ./...                        通过
 go test ./cmd/dshd -count=1                           通过（11.3s，含新增 TestLazy* 6 条）
 go test ./... -count=1                                通过（全部 ok，EXIT=0）
-go build -o tmp/dshd.exe ./cmd/dshd                   通过
+go build -o "tmp/DSH GO.exe" ./cmd/dshd                   通过
 干净检出：git archive HEAD | tar -x -C /tmp/hc-lazy && (cd /tmp/hc-lazy && go build ./...)
                                                       CLEAN-CHECKOUT BUILD OK
 python scripts/tool-table-hot.py                      退出码 0：Go 名单 == 语料前 30 名
@@ -320,12 +320,12 @@ python scripts/tool-table-lazy-ab.py --runs 2         68 次真跑，见 §4
 go build ./... && go vet ./...                        通过（BUILD+VET OK）
 go test ./cmd/dshd -count=1                           通过（11.9s，含新增 2 条）
 go test ./... -count=1                                通过（全部 ok，EXIT=0）
-go build -o tmp/dshd.exe ./cmd/dshd                   通过
+go build -o "tmp/DSH GO.exe" ./cmd/dshd                   通过
 干净检出：git archive HEAD | tar -x -C /tmp/hc-ls && (cd /tmp/hc-ls && go build ./...)
                                                       CLEAN-CHECKOUT(HEAD) BUILD OK
 只带 tracked 文件 + 新测试文件的隔离副本：build/vet/test 全过（不依赖未跟踪文件）
 python tmp/lazy-resume-check.py --exe tmp/dshd-before.exe   第二轮 3 次调用 / 1 次挡回
-python tmp/lazy-resume-check.py --exe tmp/dshd.exe          第二轮 1 次调用 / 0 次挡回
+python tmp/lazy-resume-check.py --exe "tmp/DSH GO.exe"          第二轮 1 次调用 / 0 次挡回
 tmp/lazy-resume-raw3-after.txt                              同一会话第 3 轮：1 次调用 / 0 次挡回
 ```
 
@@ -411,7 +411,7 @@ serve 那条链一行没动——`serve` 也**没有** `--tools-mode` 这个开�
 
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"; export GOCACHE=/tmp/gocache-servelazy
-go build -o tmp/dshd.exe ./cmd/dshd
+go build -o "tmp/DSH GO.exe" ./cmd/dshd
 rm -rf tmp/serve-lazy-home && mkdir -p tmp/serve-lazy-home
 python tmp/serve-lazy-verify.py      # 起 serve / connect / create+prompt / 取会话文件
 ```
@@ -516,7 +516,7 @@ vs B 5900 字，差的就是这一行）。现在拆成两句，并由单测卡�
 go build ./... && go vet ./...                        通过（BUILD+VET OK）
 go test ./cmd/dshd -count=1                           通过（12.1s，含新增 4 条）
 go test ./... -count=1                                通过（47 个包 ok，无 FAIL）
-go build -o tmp/dshd.exe ./cmd/dshd                   通过（BIN OK）
+go build -o "tmp/DSH GO.exe" ./cmd/dshd                   通过（BIN OK）
 python tmp/serve-lazy-verify.py                       合计 OK=30 FAIL=0（真 serve：两轮 + 两会话）
                                                       输出存档 tmp/serve-lazy-verify.out
 干净检出：git archive HEAD | tar -x -C /tmp/hc-sl && (cd /tmp/hc-sl && go build ./...)

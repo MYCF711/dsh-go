@@ -4,7 +4,7 @@
 如果 doctor 指不出来，它就是装饰品。
 
 用法：
-    python scripts/doctor-drills.py [--bin tmp/dshd.exe]
+    python scripts/doctor-drills.py [--bin tmp/DSH GO.exe]
 
 Windows 上的只读目录用 icacls 造，跑完会还原（脚本里 try/finally）。
 """
@@ -121,7 +121,7 @@ def drill_readonly_home(home):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bin", default=os.path.join(ROOT, "tmp", "dshd.exe"))
+    ap.add_argument("--bin", default=os.path.join(ROOT, "tmp", "DSH GO.exe"))
     args = ap.parse_args()
     binpath = os.path.abspath(args.bin)
 

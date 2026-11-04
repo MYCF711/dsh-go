@@ -16,6 +16,8 @@
     "cmd/dshd/serve_approval.go::reply": "TestApprovalReplyWritesParseableLine"
   },
   "exempt": {
-    "internal/prompt/prompt.go::Build": "这个文件里的 Build 只有 ToolGuide.Build 含权限字样（prompt.go:96 的 Caps().NeedsApproval()），它只决定工具名进『只读工具：』还是『会改世界的工具：』这一行文字：整段是往 strings.Builder 里写字符串，不改工具表、不返回放行结果，也没有 allow/deny 分支；Runtime.Build 与 WorkspaceRules.Build 里没有任何权限字样（可 grep 该文件的 \"allow\"/\"deny\"/NeedsApproval/modeApproval 只有这一处）。这行文字本身由 internal/prompt/prompt_test.go 的 TestToolGuideSplitsByCaps 钉着。"
+    "internal/prompt/prompt.go::Build": "这个文件里的 Build 只有 ToolGuide.Build 含权限字样（prompt.go:96 的 Caps().NeedsApproval()），它只决定工具名进『只读工具：』还是『会改世界的工具：』这一行文字：整段是往 strings.Builder 里写字符串，不改工具表、不返回放行结果，也没有 allow/deny 分支；Runtime.Build 与 WorkspaceRules.Build 里没有任何权限字样（可 grep 该文件的 \"allow\"/\"deny\"/NeedsApproval/modeApproval 只有这一处）。这行文字本身由 internal/prompt/prompt_test.go 的 TestToolGuideSplitsByCaps 钉着。",
+    "cmd/dshd/main.go::cmdTools": "命中的字面量不在这个函数里：守卫按 func 边界切块，而 `const defaultRunPolicy = \"allow\"` 这一段常量紧跟在 cmdTools 之后，被算进了它的函数体。cmdTools 只打印工具表（它连 Caps 都不读），没有任何放行/拒绝分支。这个默认值本身由 scripts/check.sh 的『run --policy 默认是 allow』那条断言钉着（2026-11-04 用户要求默认完全权限）。",
+    "cmd/dshd/serve.go::announcePolicy": "纯显示：按实际策略挑一句中文打到 stderr（allow / ask / 其它），一个放行决定都不做，返回值是空的。它存在的理由是『屏幕上说的话必须和实际策略一致』——以前写死『写操作会被拒绝』，默认改 allow 之后那就是假消息。"
   }
 }

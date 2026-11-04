@@ -13,7 +13,7 @@
 | 会话 e2e（临时 home） | `python scripts/full-e2e.py` | **15/15** |
 | 真语料只读 | `python scripts/real-home-e2e.py` | **10/10** |
 | 界面调用序列 | `python scripts/ui-e2e.py` | **14/14** |
-| 工具表 | `./dshd.exe tools` | **47 个 / 25,119 字节** |
+| 工具表 | `"./DSH GO.exe" tools` | **47 个 / 25,119 字节** |
 
 ### §12 契约（宿主侧）
 

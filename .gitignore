@@ -19,5 +19,8 @@ dist/
 
 # 本地临时（A/B 输出、探针二进制）
 .tmp-*\.json
-/dshtui.exe
+# 仓根直接 go build 的产物：文件名就是产品名，带空格（.gitignore 里空格不用转义）。
+# 前缀 / 表示只在仓根匹配，不吞掉 dist/ 或 tmp/ 里的同名文件（那两个目录已整体忽略）。
+/DSH GO.exe
+/DSH TUI GO.exe
 __pycache__/

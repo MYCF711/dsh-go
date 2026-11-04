@@ -171,17 +171,17 @@ func notInitialized1() {
 
 实测（§1.2(c)）恰好相反：**wazero 对缺失的 start 函数是静默跳过，不报错**。c-shared 模块配默认配置（去找 `_start`）的输出是「实例化成功 closed=false」，然后在第一次调用时炸成 `unreachable`。后果是：那句注释让所有人**不去设 `_initialize`**，于是故障从「装载期一句明确报错」被推迟成「调用期一句 unreachable」；而它描述的失败模式在 wazero v1.12 上根本不存在。
 
-另外顺带验到：`wasmhost.Load` 现在**没有装 WASI 导入**，所以真正的 Go 产物连实例化都过不去（用仓库里现成的 `dshd.exe` 跑，没改任何代码）：
+另外顺带验到：`wasmhost.Load` 现在**没有装 WASI 导入**，所以真正的 Go 产物连实例化都过不去（用仓库里现成的 `DSH GO.exe` 跑，没改任何代码）：
 
 ```
-$ ./dshd.exe wasm inspect --module tmp/abispike/out/guest-cshared.wasm
+$ "./DSH GO.exe" wasm inspect --module tmp/abispike/out/guest-cshared.wasm
 模块:   tmp/abispike/out/guest-cshared.wasm（4464916 字节）
 魔数:   ok（\0asm）
 sha256: efbd41ffadcfd7294ffeefe4ddfbc844cf4b57cb525a07754177268b09633967
 dshd: 实例化 wasm 失败（tmp/abispike/out/guest-cshared.wasm）: module[wasi_snapshot_preview1] not instantiated
 [exit=1]
 
-$ ./dshd.exe wasm call --module tmp/abispike/out/guest-cshared.wasm --fn add --args 2,3
+$ "./DSH GO.exe" wasm call --module tmp/abispike/out/guest-cshared.wasm --fn add --args 2,3
 dshd: 实例化 wasm 失败（...）: module[wasi_snapshot_preview1] not instantiated
 [exit=1]
 ```
@@ -673,7 +673,7 @@ $ python scripts/build-wasm-fixture.py
 + (cd internal\wasmhost\testdata\toolplugin && build -buildmode=c-shared -trimpath -o ...\toolplugin.wasm .)
 生成 internal\wasmhost\testdata\toolplugin.wasm 4458584 字节（Go reactor：_initialize / alloc / call）
 
-$ go build -o tmp/dshd.exe ./cmd/dshd
+$ go build -o "tmp/DSH GO.exe" ./cmd/dshd
 OK
 ```
 
@@ -710,7 +710,7 @@ $ diff tmp/tools-a.json tmp/tools-b.json && echo 逐字节相同
 **5. 真机：`modules graph` 能看到它**
 
 ```
-$ ./tmp/dshd.exe modules graph --manifest tmp/wasm-tool-manifest.toml
+$ "./tmp/DSH GO.exe" modules graph --manifest tmp/wasm-tool-manifest.toml
 # 激活顺序（由能力依赖决定，不是 manifest 行顺序）
 MODULE                 BACKEND   PROVIDES                   REQUIRES
 tools                  static    tools,toolrunner
@@ -725,7 +725,7 @@ wasm-echo              wasm      35cde81846d2 _initialize,alloc,call echo       
 **6. 真机：`tools` 里出现那个工具名**
 
 ```
-$ ./tmp/dshd.exe tools --manifest tmp/wasm-tool-manifest.toml
+$ "./tmp/DSH GO.exe" tools --manifest tmp/wasm-tool-manifest.toml
 [
   {
     "name": "echo",
@@ -742,14 +742,14 @@ $ ./tmp/dshd.exe tools --manifest tmp/wasm-tool-manifest.toml
 **7. 真机：真的调得动 / 三种结局**
 
 ```
-$ ./tmp/dshd.exe exec --tool echo --args '{"text":"你好"}' --manifest tmp/wasm-tool-manifest.toml
+$ "./tmp/DSH GO.exe" exec --tool echo --args '{"text":"你好"}' --manifest tmp/wasm-tool-manifest.toml
 { "Summary": "收到 你好", "Data": null, "Text": "echo:你好", … "Hint": "", … }     [exit=0]
 
-$ ./tmp/dshd.exe exec --tool echo --args '{}' --manifest tmp/wasm-tool-manifest.toml
+$ "./tmp/DSH GO.exe" exec --tool echo --args '{}' --manifest tmp/wasm-tool-manifest.toml
 执行失败: 空输入：args.text 是空的
 提示: 传 {"text": "..."}：这个夹具工具只把 text 原样回显        [exit=1]
 
-$ ./tmp/dshd.exe exec --tool echo --args '{"boom":true}' --manifest tmp/wasm-tool-manifest.toml
+$ "./tmp/DSH GO.exe" exec --tool echo --args '{"boom":true}' --manifest tmp/wasm-tool-manifest.toml
 执行失败: wasm 工具 "echo" 执行失败: wasm 模块 "wasm-echo" 在 call 里 trap（插件内部崩溃，不是工具失败）: wasm error: unreachable
 提示: 插件内部崩溃（wasm trap），不是你的参数错了：不要原样重试；换一种做法，或改用别的工具
 ```
@@ -895,7 +895,7 @@ ok  	dshgo/cmd/dshd	8.609s
 $ go test ./... -count=1
 exit=0，47 个包 ok，无 FAIL（最后几行是 tmp/ 下若干历史探针包的 `[no test files]`）
 
-$ go build -o tmp/dshd.exe ./cmd/dshd
+$ go build -o "tmp/DSH GO.exe" ./cmd/dshd
 OK（18,844,160 字节）
 ```
 
@@ -936,7 +936,7 @@ wasm 模块 "toolplugin" 的实例已失效（上一次调用里客人 trap（�
 `tmp/wasm-two-tools.toml`：两个 `[[module]]`，同一个 `toolplugin.wasm`，`provides = ["tool:echo"]` / `["tool:hello"]`。
 
 ```
-$ ./tmp/dshd.exe modules graph --manifest tmp/wasm-two-tools.toml
+$ "./tmp/DSH GO.exe" modules graph --manifest tmp/wasm-two-tools.toml
 # 激活顺序（由能力依赖决定，不是 manifest 行顺序）
 MODULE                 BACKEND   PROVIDES                   REQUIRES
 tools                  static    tools,toolrunner
@@ -950,17 +950,17 @@ wasm-hello             wasm      35cde81846d2 _initialize,alloc,call hello      
 ```
 
 ```
-$ ./tmp/dshd.exe tools --manifest tmp/wasm-two-tools.toml
+$ "./tmp/DSH GO.exe" tools --manifest tmp/wasm-two-tools.toml
 [ { "name": "echo",  "description": "把 text 原样回显（wasm 夹具工具 · 一号）", … },
   { "name": "hello", "description": "把 text 原样回显（wasm 夹具工具 · 二号）", … } ]
 ```
 
 ```
-$ ./tmp/dshd.exe exec --tool echo --args '{"text":"一号工具在跑"}' --manifest tmp/wasm-two-tools.toml
+$ "./tmp/DSH GO.exe" exec --tool echo --args '{"text":"一号工具在跑"}' --manifest tmp/wasm-two-tools.toml
 INFO 工具调用 tool=echo ms=1 ok=true args_bytes=29
 { "Summary": "收到 一号工具在跑", "Text": "echo:一号工具在跑", … }        [exit=0]
 
-$ ./tmp/dshd.exe exec --tool hello --args '{"text":"二号工具在跑"}' --manifest tmp/wasm-two-tools.toml
+$ "./tmp/DSH GO.exe" exec --tool hello --args '{"text":"二号工具在跑"}' --manifest tmp/wasm-two-tools.toml
 INFO 工具调用 tool=hello ms=1 ok=true args_bytes=29
 { "Summary": "收到 二号工具在跑", "Text": "echo:二号工具在跑", … }       [exit=0]
 ```
@@ -968,7 +968,7 @@ INFO 工具调用 tool=hello ms=1 ok=true args_bytes=29
 两个都写 `provides = ["tool"]` 时的真机报错（这就是"多工具部署必然踩到"的那条，必须能照着改）：
 
 ```
-$ ./tmp/dshd.exe tools --manifest <两个都写 ["tool"] 的 manifest>
+$ "./tmp/DSH GO.exe" tools --manifest <两个都写 ["tool"] 的 manifest>
 dshd: 模块 "wasm-echo" 与 "wasm-hello" 都写了 provides = ["tool"]：kernel 只允许一个能力一个提供者，
 所以 "tool" 这种缩写全署只能用一个。要同时挂多个 wasm 工具，请让每个模块写各自的能力键：
 provides = ["tool:<tool_name>"]（例：provides = ["tool:echo"]，冒号后必须与同一行的 tool_name 一致）
@@ -1138,7 +1138,7 @@ $ python scripts/build-wasm-fixture.py
 $ sha256sum internal/wasmhost/testdata/toolplugin.wasm        # 连跑两次同值
 ec3391fa4cea70ae44ec9e18b1a6b64682e5864dd602fb02923b685e6101e36a
 
-$ go build -o tmp/dshd.exe ./cmd/dshd
+$ go build -o "tmp/DSH GO.exe" ./cmd/dshd
 OK（18,869,760 字节）
 ```
 
@@ -1192,7 +1192,7 @@ ok  	dshgo/cmd/dshd	9.862s
 `tmp/wasm-multi-tool.toml`：**一个** `[[module]]`、一个 `.wasm`、两个 `[[module.tool]]`。
 
 ```
-$ ./tmp/dshd.exe modules graph --manifest tmp/wasm-multi-tool.toml
+$ "./tmp/DSH GO.exe" modules graph --manifest tmp/wasm-multi-tool.toml
 # 激活顺序（由能力依赖决定，不是 manifest 行顺序）
 MODULE                 BACKEND   PROVIDES                   REQUIRES
 tools                  static    tools,toolrunner
@@ -1204,7 +1204,7 @@ wasm-text              wasm      ec3391fa4cea _initialize,alloc,call echo,upper 
 ```
 
 ```
-$ ./tmp/dshd.exe tools --manifest tmp/wasm-multi-tool.toml
+$ "./tmp/DSH GO.exe" tools --manifest tmp/wasm-multi-tool.toml
 [
   { "name": "echo",  "description": "把 text 原样回显（wasm 夹具工具 · echo）",             … },
   { "name": "upper", "description": "把 text 里的 ASCII 字母转成大写（wasm 夹具工具 · upper）", … }
@@ -1212,11 +1212,11 @@ $ ./tmp/dshd.exe tools --manifest tmp/wasm-multi-tool.toml
 ```
 
 ```
-$ ./tmp/dshd.exe exec --tool echo  --args '{"text":"Hi 你好"}' --manifest tmp/wasm-multi-tool.toml
+$ "./tmp/DSH GO.exe" exec --tool echo  --args '{"text":"Hi 你好"}' --manifest tmp/wasm-multi-tool.toml
   "Summary": "收到 Hi 你好",
   "Text": "echo:Hi 你好",
 
-$ ./tmp/dshd.exe exec --tool upper --args '{"text":"Hi 你好"}' --manifest tmp/wasm-multi-tool.toml
+$ "./tmp/DSH GO.exe" exec --tool upper --args '{"text":"Hi 你好"}' --manifest tmp/wasm-multi-tool.toml
   "Summary": "大写 HI 你好",
   "Text": "upper:HI 你好",
 ```
@@ -1228,11 +1228,11 @@ $ ./tmp/dshd.exe exec --tool upper --args '{"text":"Hi 你好"}' --manifest tmp/
 `tmp/wasm-legacy-tool.toml`（只有 `tool_name` 那一组）：
 
 ```
-$ ./tmp/dshd.exe modules graph --manifest tmp/wasm-legacy-tool.toml
+$ "./tmp/DSH GO.exe" modules graph --manifest tmp/wasm-legacy-tool.toml
 wasm-echo              wasm      tool                       tools
 wasm-echo              wasm      ec3391fa4cea _initialize,alloc,call echo
 
-$ ./tmp/dshd.exe exec --tool echo --args '{"text":"旧写法"}' --manifest tmp/wasm-legacy-tool.toml
+$ "./tmp/DSH GO.exe" exec --tool echo --args '{"text":"旧写法"}' --manifest tmp/wasm-legacy-tool.toml
   "Summary": "收到 旧写法",
   "Text": "echo:旧写法",
 ```
@@ -1240,7 +1240,7 @@ $ ./tmp/dshd.exe exec --tool echo --args '{"text":"旧写法"}' --manifest tmp/w
 **第 5 组：真机（混写 → 启动报错，exit=1）**
 
 ```
-$ ./tmp/dshd.exe tools --manifest tmp/wasm-mixed-tool.toml ; echo exit=$?
+$ "./tmp/DSH GO.exe" tools --manifest tmp/wasm-mixed-tool.toml ; echo exit=$?
 dshd: 模块 "wasm-text" 同时写了单工具字段（tool_name / tool_description / tool_schema / tool_caps）
 和 [[module.tool]] 数组：两种写法不能混用，宿主不会替你猜哪个优先。…
 exit=1

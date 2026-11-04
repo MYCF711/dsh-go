@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 import http.cookiejar
 
-BIN = "tmp/serve-dir/dshd.exe"
+BIN = "tmp/serve-dir/DSH GO.exe"
 HOME = "tmp/h14iso"
 MARK_A = "ALPHA-ZQ7"
 MARK_B = "BRAVO-K3X"
