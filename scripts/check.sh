@@ -109,6 +109,13 @@ else
   # 体积预算不是硬门槛——加工具当然会变大；但它必须**显式**变大，
   # 而不是悄悄涨到一个没人注意的数。
   help_out="$(go run ./cmd/dshd run --help 2>&1 || true)"
+  # 三条默认值检查**共用同一份 help 输出**。所以它拿不到时必须单独报一句，
+  # 否则会变成三条"默认值可疑"的红——那是在冤枉代码（实测：`go run` 在机器忙时
+  # 构建失败，gate 报"工具表默认不是 compact / policy 可疑 / workspace-bytes 是 0"，
+  # 而实际默认值一个字都没改）。冤枉的红比漏报更贵：它会让人去改对的东西。
+  if [ -z "$help_out" ]; then
+    bad "run --help 没拿到输出（go run 构建失败？）：下面三条默认值检查无法判定，先修构建"
+  fi
   if printf '%s' "$help_out" | grep -q 'default "compact"'; then
     pass "工具表默认 compact"
   else

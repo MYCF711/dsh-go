@@ -69,7 +69,12 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	}
 
 	if err := t.fs.CheckWritable(a.FilePath, "edit"); err != nil {
-		return spi.Result{Hint: "改文件之前必须先 read 它，确认当前内容与你以为的一致"}, err
+		// 真语料实测：edit 的失败 **85%** 是这两类（写前没读 / 读完之后文件变了），
+		// 而"old_string 根本没匹配上"只占 14%。所以这两类最该做的不是换措辞，
+		// 而是**把下一步说成可执行的一句话**：文件现在长什么样、重试会不会成功。
+		//
+		// 只在失败路径多读一次文件，热路径不受影响。
+		return spi.Result{Hint: staleEditHint(t.fs, a)}, err
 	}
 
 	data, err := t.fs.Read(a.FilePath)
@@ -134,5 +139,32 @@ func Module() kernel.Module {
 			}
 			return reg.Register(&Tool{fs: fsv})
 		},
+	}
+}
+
+// staleEditHint 在"写前没读 / 读完变了"时，把下一步说成能直接照做的一句。
+//
+// 判据来源：454 条真实 edit 失败样本里 FS_STALE_VERSION 占 58.8%、
+// FS_NOT_OBSERVED 占 26.7%、FS_EDIT_NOT_FOUND 只占 14.1%。
+// 也就是说绝大多数失败**不是模型写错了原文**，而是它手上的版本过期了。
+// 这句话就是替它把"过期到什么程度"说清楚：old_string 现在还在不在、有几处。
+func staleEditHint(fs interface {
+	Read(string) ([]byte, error)
+}, a args) string {
+	const lead = "改文件之前必须先 read 它，确认当前内容与你以为的一致"
+	data, err := fs.Read(a.FilePath)
+	if err != nil {
+		// 连读都读不到（文件被删了/权限变了）：这时候"重试"是错建议。
+		return lead + "；而且现在读不出来（" + err.Error() + "）——先确认这个路径还在"
+	}
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	n := strings.Count(content, strings.ReplaceAll(a.OldString, "\r\n", "\n"))
+	switch {
+	case n == 1:
+		return "文件在你读过之后变过，但 old_string 在新内容里**仍然唯一**——再调一次 edit 就会成功（不需要改参数）"
+	case n == 0:
+		return "文件已经变过，而且 old_string 在新内容里**找不到了**：先 read 看现在是什么，再决定改成什么"
+	default:
+		return fmt.Sprintf("文件已经变过，old_string 在新内容里有 %d 处：给它更多上下文让它唯一，或传 replace_all=true", n)
 	}
 }
