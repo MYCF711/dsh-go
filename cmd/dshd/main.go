@@ -744,7 +744,9 @@ func cmdRun(argv []string) error {
 				return logw.Append("tool/result",
 					session.ToolResultEventWithView(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}, viewOf(e.Result)))
 			case agent.EventTurnEnd:
-				return logw.Append("turn/end", session.TurnEndData(e.Turn, "completed", ""))
+				// 结局写 finish 对应的 kind，不是恒写 completed：
+				// 被 max_tokens 截断的回合要留成 max-tokens，否则客户端会把它当完整回答。
+				return logw.Append("turn/end", session.TurnEndData(e.Turn, session.TurnEndKind(e.Finish), ""))
 			}
 			return nil
 		},

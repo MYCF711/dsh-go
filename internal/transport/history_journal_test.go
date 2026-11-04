@@ -75,6 +75,39 @@ func TestHistoryRejectsStaleEpoch(t *testing.T) {
 	}
 }
 
+// 水位之前的帧已经滑出内存 journal 时，history 必须报缺口，不能给一个"看着连续"的短数组。
+//
+// capacity 丢最老帧之后，sinceSeq=0 的请求只能从最老保留帧开始回——客户端拿到的是
+// seq 3..N，中间 1..2 永远补不回来，而响应是 200、帧是连续的，客户端不会怀疑。
+// 契约里已经有 stale_epoch 这个出口（重建基线），这里必须用它。
+func TestHistorySignalsGapAfterTrim(t *testing.T) {
+	// 直接造一条容量只有 3 的 journal：等价于长跑会话把最老帧挤出去了。
+	js := &Journals{m: map[string]*Journal{"s1": NewJournal(1, 3)}}
+	j := js.Get("s1")
+	for i := 1; i <= 5; i++ {
+		j.Append("assistant/text", json.RawMessage(`{"text":"x"}`), int64(i))
+	}
+
+	s := newTestServer(t, Options{Journals: js})
+	rec := postJSON(t, s, "/api/session.history", `{"id":"s1","sinceSeq":0}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("水位滑出内存必须 409（stale_epoch），拿到 %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "stale_epoch") {
+		t.Fatalf("错误码要 stale_epoch：%s", body)
+	}
+	if !strings.Contains(body, "lastSeq") || !strings.Contains(body, `"lastSeq":5`) {
+		t.Fatalf("要带上当前水位，客户端才知道重载后从哪接：%s", body)
+	}
+
+	// 还没滑出去的水位仍然正常：sinceSeq=2 正好能从 3 接到。
+	rec = postJSON(t, s, "/api/session.history", `{"id":"s1","sinceSeq":2}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("水位没滑出内存时不该报缺口，拿到 %d：%s", rec.Code, rec.Body.String())
+	}
+}
+
 // 空集必须是 []，不能是 null。
 //
 // 界面审计实测：会话还一条事件都没有时，frames 序列化成 null；

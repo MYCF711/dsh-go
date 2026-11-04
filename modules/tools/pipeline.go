@@ -116,6 +116,21 @@ func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (
 	p.bus.Emit(spi.EventToolExecute, call)
 	call.Result, call.Err = tool.Exec(ctx, call.Args)
 
+	// 2b. 成功、但什么都没返回 —— 静默成功的工具版。
+	//
+	// 模型会看到「（无输出）」：它不知道该不该相信这次调用真的做了什么，
+	// 下一步只能瞎试。而流水线这边一切正常（ok=true、无 error），没人会去查。
+	// 这里补一句人话 + 一条下一步，不改失败语义（err 仍然是 nil）。
+	//
+	// 判据是"模型看得见的字段全空"，不是"看起来短"：Data = [] 是**有效载荷**
+	// （"集合是空的"本身就是答案），Summary 只有一行也算有产出。
+	if call.Err == nil && isEmptySuccess(call.Result) {
+		call.Result.Summary = fmt.Sprintf("工具 %q 执行成功，但没有返回任何模型可见的输出", call.Name)
+		call.Result.Hint = "不要假设它做了什么：需要确认就用只读手段核实（读文件/看状态/查日志）；" +
+			"这通常是该工具实现的问题，不是你的参数写错了"
+		p.log.Warn("工具成功但没有产出（静默成功）", "tool", call.Name)
+	}
+
 	// 3. 提示层：失败必须带下一步。缺失就兜底并记账（CI 应该让这种代码进不来）。
 	if call.Err != nil && call.Result.Hint == "" {
 		call.Result.Hint = fmt.Sprintf("工具 %q 失败了；先确认参数与环境再决定是否重试", call.Name)
@@ -145,6 +160,23 @@ func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (
 	// 6. result：广播，不等待。
 	p.bus.Emit(spi.EventToolResult, call)
 	return call.Result, call.Err
+}
+
+// isEmptySuccess 判断一次**成功**的工具调用是不是什么载荷都没留下。
+//
+// 判据是"**模型**能不能看到东西"：Summary/Text/Data 是给模型的正文，
+// Artifacts/Truncated 里有取回路径，Hint 是下一步，Images 会另起一条 user 消息发过去。
+// 任何一样存在，这次调用就有东西可看。
+//
+// **View 不算**：那是给客户端画卡片的，模型看不到它。一个只返回 View 的工具
+// 在界面上有内容、在模型眼里却是一行「（无输出）」——正是要抓的形状。
+//
+// 特别注意 Data 的 nil / 空数组之别：nil = 没有数据；[] = "集合是空的"，
+// 后者是答案，不能当空结果处理（否则 glob 搜不到文件时会被说成工具坏了）。
+func isEmptySuccess(res spi.Result) bool {
+	return res.Summary == "" && res.Text == "" && res.Data == nil &&
+		len(res.Artifacts) == 0 && res.Truncated == nil && res.Hint == "" &&
+		len(res.Images) == 0
 }
 
 // enforceSerialization 保证 Data 是合法 JSON（键名约定靠 review + 快照测试）。

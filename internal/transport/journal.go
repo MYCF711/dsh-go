@@ -73,11 +73,26 @@ func (j *Journal) Append(typ string, data json.RawMessage, t int64) ServerFrame 
 	return f
 }
 
-// Since 取 seq > sinceSeq 的帧（最多 limit 条），连同当前水位与世代号。
+// Window 是一次补洞窗口的**原子快照**：帧、水位、世代、有没有缺口。
+//
+// 为什么要有它：handler 里分开调 LastSeq/Covers/Since 会拿到三个时刻的状态。
+// 恰好在两次调用之间挤掉一帧时，"检查通过、取帧却少一帧"——又变成看不出缺口的短数组。
+// 一次拿全，判据与数据就来自同一个瞬间。
+type Window struct {
+	Frames  []ServerFrame
+	LastSeq int
+	Epoch   int64
+	// Oldest 是还留在内存里的最早一帧；0 表示空 journal。
+	Oldest int
+	// Covered 为 false 表示 sinceSeq 之后有一段已经被容量挤掉，补不回来。
+	Covered bool
+}
+
+// Window 取 seq > sinceSeq 的帧（最多 limit 条）并给出完整水位快照。
 //
 // **不做投影、不抽 text**：history 要的是原始帧，客户端自己折叠。
 // 抽过 text 的 messages 只适合首屏，用它补洞会丢掉 reasoning/tool/approval。
-func (j *Journal) Since(sinceSeq, limit int) (frames []ServerFrame, lastSeq int, epoch int64) {
+func (j *Journal) Window(sinceSeq, limit int) Window {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if limit <= 0 || limit > j.capacity {
@@ -85,16 +100,33 @@ func (j *Journal) Since(sinceSeq, limit int) (frames []ServerFrame, lastSeq int,
 	}
 	// 空集也要是 []，不能是 null：客户端按数组解，"null" 会变成 nil，
 	// 而 nil 在多数语言里一 for 就炸或直接跳过——界面表现为"什么都没有"。
-	frames = make([]ServerFrame, 0, 8)
+	w := Window{
+		Frames:  make([]ServerFrame, 0, 8),
+		LastSeq: j.seq,
+		Epoch:   j.epoch,
+		Covered: true,
+	}
+	if n := len(j.frames); n > 0 {
+		w.Oldest = j.frames[0].Seq
+		// 保留区间是 [oldest, last]，客户端要 (sinceSeq, last]。
+		// sinceSeq < oldest-1 ⇒ oldest 之前那段已经被挤掉了，补不回来。
+		w.Covered = sinceSeq >= w.Oldest-1
+	}
 	for _, f := range j.frames {
 		if f.Seq > sinceSeq {
-			frames = append(frames, f)
-			if len(frames) >= limit {
+			w.Frames = append(w.Frames, f)
+			if len(w.Frames) >= limit {
 				break
 			}
 		}
 	}
-	return frames, j.seq, j.epoch
+	return w
+}
+
+// Since 是 Window 的简化版（只要帧/水位/世代的老调用方用）。
+func (j *Journal) Since(sinceSeq, limit int) (frames []ServerFrame, lastSeq int, epoch int64) {
+	w := j.Window(sinceSeq, limit)
+	return w.Frames, w.LastSeq, w.Epoch
 }
 
 // Reset 换一个世代号并清空历史帧，返回新的 epoch。

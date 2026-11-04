@@ -87,8 +87,15 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 	}
 
 	acc := newAccumulator(onEvent)
+	// 整条流必须有一个「完结」的凭据：finish_reason 或 `[DONE]`。
+	//
+	// 只看「有没有解析出错」不够：网关/代理在回答中途断掉时，连接是**正常关闭**的，
+	// readSSE 返回 nil。于是半句话会被当成完整回答记进会话，turn 标 completed、
+	// 退出码 0——1 字节错误都没有。真机踩过这种形状（上游 502 后网关直接关流）。
+	sawDone := false
 	if err := readSSE(resp.Body, func(payload []byte) error {
 		if bytes.Equal(payload, []byte("[DONE]")) {
+			sawDone = true
 			return nil
 		}
 		var chunk chunk
@@ -99,8 +106,18 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 	}); err != nil {
 		return acc.snapshot(), err
 	}
+	snap := acc.snapshot()
+	if !sawDone && snap.FinishReason == "" {
+		// 分两种说清，因为下一步完全不同。
+		if snap.Content == "" && snap.Reasoning == "" && len(snap.ToolCalls) == 0 {
+			return snap, fmt.Errorf("模型返回了空响应（HTTP 200，但流里一条内容都没有）：" +
+				"这个模型 id 可能不可用——用 `dshd models` 看有哪些、或在 --model 上换一个；不要在这上面反复重试")
+		}
+		return snap, fmt.Errorf("模型流在 finish 之前断开了（已收到 %d 字正文，但没有 finish_reason 也没有 [DONE]）："+
+			"这次回答不完整，先重试一次；反复出现就查网关/代理的超时", len([]rune(snap.Content)))
+	}
 	acc.emitDone()
-	return acc.snapshot(), nil
+	return snap, nil
 }
 
 // readSSE 解析 text/event-stream：以空行分隔事件，data: 后是负载，':' 开头是注释。

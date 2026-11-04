@@ -598,25 +598,53 @@ func shapeless(raw json.RawMessage) string {
 	return string(b)
 }
 
-func stripDescriptions(v any) any {
+// stripDescriptions 去掉 schema 上的**注解** description，保留参数名。
+//
+// 它被 sameShape 用来判断"两个工具对同一个参数的定义是否同构"，所以
+// "删多删少"直接决定合并层会不会把两个不一样的工具并成一族。
+//
+// 曾经的写法是"见到 description 键就删"，与 agent.CompactSchema 同款 bug：
+// `properties` 这一层的键是**参数名**，本仓真有工具把参数叫 description。
+// 删掉之后「多一个 description 参数」与「没有这个参数」会判成同构，
+// 合并"成功"、模型看到的契约却少了一条，而且没有任何一处报错。
+func stripDescriptions(v any) any { return stripDescNode(v, false) }
+
+func stripDescNode(v any, inPropertyMap bool) any {
 	switch t := v.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(t))
+		if inPropertyMap {
+			// 这一层是「参数名 → schema」：键全部保留，值按 schema 走。
+			for k, val := range t {
+				out[k] = stripDescNode(val, false)
+			}
+			return out
+		}
 		for k, val := range t {
 			if k == "description" {
-				continue
+				continue // 这个才是注解
 			}
-			out[k] = stripDescriptions(val)
+			out[k] = stripDescNode(val, schemaPropertyMapKey(k))
 		}
 		return out
 	case []any:
 		out := make([]any, len(t))
 		for i, val := range t {
-			out[i] = stripDescriptions(val)
+			out[i] = stripDescNode(val, false)
 		}
 		return out
 	}
 	return v
+}
+
+// schemaPropertyMapKey 判断某个 schema 关键字下面挂的是不是「名字 → schema」。
+// 与 internal/agent.CompactSchema 的同名判断保持同一份词汇表。
+func schemaPropertyMapKey(k string) bool {
+	switch k {
+	case "properties", "patternProperties", "$defs", "definitions":
+		return true
+	}
+	return false
 }
 
 // ---- compact 的后半段：把 schema 骨架里"不用写"的那几条去掉 ----

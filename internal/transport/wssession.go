@@ -112,11 +112,21 @@ func ServeConn(conn Conn, hub *Hub) error {
 			// H14：先核世代。客户端带着一个不认识的世代来订阅，说明中间的 journal
 			// 已经换代（宿主重启 / 主动重建基线）。这时按 seq 继续推只会推错位的数据，
 			// 所以先发一条 session/reset 让它丢弃水位——**它不能自己发现这件事**。
-			if hub.journals != nil && frame.JournalEpoch != 0 {
-				if j := hub.journals.Get(topicSession(frame.Topic)); j.Epoch() != frame.JournalEpoch {
+			//
+			// 同一处理也要覆盖"水位之前的历史已经滑出内存"：capacity 丢最老帧之后，
+			// 重放会从最老的保留帧开始，帧连续、seq 也在涨，客户端看不出缺口。
+			var win Window
+			hasJournal := hub.journals != nil
+			rebuild := false
+			if hasJournal {
+				// Window 一次拿全帧/水位/世代/有没有缺口：分开读的话，
+				// 恰好在两次之间挤掉一帧，"判据通过、重放却少一帧"。
+				win = hub.journals.Get(topicSession(frame.Topic)).Window(frame.SinceSeq, 0)
+				rebuild = (frame.JournalEpoch != 0 && win.Epoch != frame.JournalEpoch) || !win.Covered
+				if rebuild {
 					reset, _ := json.Marshal(map[string]any{
-						"journalEpoch": j.Epoch(),
-						"lastSeq":      j.LastSeq(),
+						"journalEpoch": win.Epoch,
+						"lastSeq":      win.LastSeq,
 					})
 					// reset 不带 seq：它不是事件流里的一帧（与 pong 同理），
 					// 给它编号反而会污染客户端的连续性判断。
@@ -146,21 +156,19 @@ func ServeConn(conn Conn, hub *Hub) error {
 			// 正是客户端要的。**只重放 sinceSeq>0 是错的**——实测首次订阅一条帧
 			// 都收不到（既没历史、也没等来新事件），界面像是卡住。
 			//
-			// 世代不符时不重放：那种情况上面已经发过 session/reset，
-			// 拿旧水位补新 journal 只会补出错位的数据。
+			// 已经要求重建基线（rebuild）时**不重放**：那种情况客户端要去
+			// session.load 拿完整首屏，这里只接新帧，免得把半截历史当补洞结果。
 			replayTo := frame.SinceSeq
-			if hub.journals != nil && frame.SinceSeq >= 0 {
-				j := hub.journals.Get(topicSession(frame.Topic))
-				epochOK := frame.JournalEpoch == 0 || frame.JournalEpoch == j.Epoch()
-				if epochOK {
-					if frames, _, _ := j.Since(frame.SinceSeq, 0); len(frames) > 0 {
-						for _, f := range frames {
-							if err := sub.write(f); err != nil {
-								return err
-							}
+			if hasJournal {
+				if rebuild {
+					replayTo = win.LastSeq
+				} else if len(win.Frames) > 0 {
+					for _, f := range win.Frames {
+						if err := sub.write(f); err != nil {
+							return err
 						}
-						replayTo = frames[len(frames)-1].Seq
 					}
+					replayTo = win.Frames[len(win.Frames)-1].Seq
 				}
 			}
 			// 重复 sub 由 Hub 处理：以最后一次 sinceSeq 为准，不会重复收帧。

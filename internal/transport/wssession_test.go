@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"encoding/json"
 	"io"
 	"sync"
 	"testing"
@@ -100,6 +101,42 @@ func TestServeConnUnsubscribesOnClose(t *testing.T) {
 		t.Fatalf("连接都关了还收到 %+v", f)
 	case <-time.After(50 * time.Millisecond):
 	}
+}
+
+// 水位之前的历史已经滑出内存 journal 时，订阅必须明确要求重建基线。
+//
+// 容量丢最老帧之后，客户端带着 sinceSeq=0 来订阅，服务端只能从最老的保留帧开始推。
+// 那一段**看不出缺口**：帧是连续的、seq 也在涨，客户端以为它拿到了完整历史——
+// 这正是"有产出（帧）、但没有有效载荷（缺了中间那段）、而且没人报错"。
+func TestServeConnSignalsGapAfterTrim(t *testing.T) {
+	// 容量只有 3：写 5 帧，最早两帧已经被丢掉。
+	js := &Journals{m: map[string]*Journal{"a": NewJournal(1, 3)}}
+	j := js.Get("a")
+	for i := 1; i <= 5; i++ {
+		j.Append("assistant/text", json.RawMessage(`{"text":"x"}`), int64(i))
+	}
+	if frames, _, _ := j.Since(0, 0); len(frames) != 3 || frames[0].Seq != 3 {
+		t.Fatalf("测试前提不成立：应只留 seq 3..5，实际 %d 帧、首帧 %d", len(frames), frames[0].Seq)
+	}
+
+	hub := NewHub()
+	hub.SetJournals(js)
+	p := newPipe()
+	go ServeConn(p, hub)
+
+	p.in <- ClientFrame{T: "sub", Topic: "session:a", SinceSeq: 0, JournalEpoch: j.Epoch()}
+	f := p.next(t)
+	if f.Type != "session/reset" {
+		t.Fatalf("水位滑出内存时必须先发 session/reset，实际第一帧 %+v", f)
+	}
+
+	// reset 之后只接新帧：不该把保留的 4096 帧一股脑灌给客户端。
+	select {
+	case extra := <-p.out:
+		t.Fatalf("reset 之后不该再重放旧帧，收到 %+v", extra)
+	case <-time.After(50 * time.Millisecond):
+	}
+	p.closeIn()
 }
 
 // 坏帧不许当 ping 放过：第一帧坏了，连接立刻结束。

@@ -171,6 +171,50 @@ func TestPostExecuteCanRewrite(t *testing.T) {
 	}
 }
 
+// 工具成功但什么也没返回：模型不能只看到一行「（无输出）」然后自己猜。
+//
+// 这是「有产出但产出里没有载荷」的工具版：err == nil、日志里是 ok、退出码 0，
+// 但模型拿到的是一句没有任何信息的话——它不知道该不该相信这次调用真的做了什么，
+// 下一步只能瞎试。流水线要补一句可执行的话（R3 的精神：失败要指路，
+// "成功但空"同样要指路）。
+func TestEmptySuccessGetsNoticeAndHint(t *testing.T) {
+	p, k := newPipe(t, Options{},
+		&stubTool{name: "silent"},
+		// 空数组是**有效载荷**（"集合是空的"本身就是答案），不算空结果。
+		&stubTool{name: "empty_list", res: spi.Result{Data: []string{}}},
+		// View 只给客户端画卡片，模型看不到：只返回 View 等于对模型没有产出。
+		&stubTool{name: "view_only", res: spi.Result{View: &spi.ViewSpec{Kind: spi.ViewCard, Title: "卡片"}}},
+	)
+	defer k.Root().Dispose()
+
+	res, err := p.Run(context.Background(), "silent", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Summary == "" || !strings.Contains(res.Summary, "没有返回任何模型可见的输出") {
+		t.Fatalf("空结果必须有一句人话，得到 Summary=%q", res.Summary)
+	}
+	if res.Hint == "" || !strings.Contains(res.Hint, "核实") {
+		t.Fatalf("要告诉模型下一步（别假设它做了事），得到 Hint=%q", res.Hint)
+	}
+
+	res, err = p.Run(context.Background(), "empty_list", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Summary, "模型可见的输出") {
+		t.Fatalf("Data=[] 是有效载荷，不许当成空结果：%q", res.Summary)
+	}
+
+	res, err = p.Run(context.Background(), "view_only", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Summary, "模型可见的输出") {
+		t.Fatalf("只返回 View 的结果对模型是空的，必须补一句：%q", res.Summary)
+	}
+}
+
 // 调用工具表里没有的名字：措辞必须和 DSH 一致（真实语料里这是最常见的失败类，
 // 367 个失败样本里 84 个是 `Error: unknown tool "bash"`）。
 func TestUnknownToolWording(t *testing.T) {

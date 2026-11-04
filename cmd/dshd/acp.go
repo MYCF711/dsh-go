@@ -185,7 +185,8 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 				return err
 			}
 		case agent.EventTurnEnd:
-			if err := logw.Append("turn/end", session.TurnEndData(turn, "completed", "")); err != nil {
+			// 同 run：结局按 finish 写，截断不许记成「完成」。
+			if err := logw.Append("turn/end", session.TurnEndData(turn, session.TurnEndKind(e.Finish), "")); err != nil {
 				return err
 			}
 		}

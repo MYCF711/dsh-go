@@ -351,42 +351,74 @@ func (l *Loop) toolDefs() []llm.ToolDef {
 	return defs
 }
 
-// CompactSchema 去掉 JSON schema 里所有 description 键，只留结构。
+// CompactSchema 去掉 JSON schema 里所有 **annotation** description，只留结构。
 //
 // 为什么值得做：工具表 17 KB 里有 6.6 KB 是参数的说明文字与它们的键名开销。
 // 保留结构（类型、enum、required）就够模型填对参数的情形很常见——
 // 但"常见"不等于"总是"，所以这只是个开关，默认仍是完整表。
+//
+// 关键区别（真机踩过，2026-11-04）：`properties` 这一层的键是**参数名**，不是注解。
+// 本仓有 8 个工具真有一个叫 `description` 的参数。早先这里只认键名，见
+// `description` 就删，于是参数被删掉、required 里却还点着它——模型看到
+// "必填但没类型"，凭空少一条契约，而且整条链路没有任何一处报错。
+// 现在按位置判断：只有**schema 对象上的** description 是注解；
+// properties/patternProperties/$defs 映射里的键，一个都不许动。
 func CompactSchema(raw json.RawMessage) json.RawMessage {
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return raw
 	}
-	var walk func(any) any
-	walk = func(x any) any {
-		switch t := x.(type) {
-		case map[string]any:
-			out := make(map[string]any, len(t))
-			for k, val := range t {
-				if k == "description" {
-					continue
-				}
-				out[k] = walk(val)
-			}
-			return out
-		case []any:
-			out := make([]any, len(t))
-			for i, val := range t {
-				out[i] = walk(val)
-			}
-			return out
-		}
-		return x
-	}
-	b, err := json.Marshal(walk(v))
+	b, err := json.Marshal(compactNode(v, false))
 	if err != nil {
 		return raw
 	}
 	return b
+}
+
+// compactNode 递归压一个 schema 节点。
+//
+// inPropertyMap 为真表示 x 是 `properties` 这类映射的**值**：
+// 它的键是参数名（可能就叫 description），它的值是参数自己的 schema。
+func compactNode(x any, inPropertyMap bool) any {
+	switch t := x.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		if inPropertyMap {
+			// 这一层是「参数名 → schema」：键全部保留，值按 schema 走。
+			for k, val := range t {
+				out[k] = compactNode(val, false)
+			}
+			return out
+		}
+		for k, val := range t {
+			if k == "description" {
+				continue // 这个才是注解
+			}
+			// properties/patternProperties/$defs 的值是「名字 → schema」的映射。
+			out[k] = compactNode(val, isPropertyMapKey(k))
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = compactNode(val, false)
+		}
+		return out
+	}
+	return x
+}
+
+// isPropertyMapKey 判断某个 schema 关键字下面挂的是不是「名字 → schema」。
+//
+// 只有这四个：properties / patternProperties / $defs / definitions。
+// 其余（items / anyOf / additionalProperties…）挂的是 schema 本身，
+// 哪怕参数正好叫 items，也不能把它的名字当关键字处理。
+func isPropertyMapKey(k string) bool {
+	switch k {
+	case "properties", "patternProperties", "$defs", "definitions":
+		return true
+	}
+	return false
 }
 
 // emptyResponseErr 把"看起来成功、其实什么都没拿到"的响应判成错误。

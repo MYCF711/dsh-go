@@ -3,6 +3,7 @@ package transport
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -32,6 +33,40 @@ func TestEnvelopeWrapsStructAndSlice(t *testing.T) {
 		if _, ok := env["result"]; !ok {
 			t.Fatalf("%s：没有 result 键，实际 %s", c.name, rec.Body.String())
 		}
+	}
+}
+
+// 成功响应不许是 nil。
+//
+// `{"result":null}` 是"接口成功、但没有载荷"：照契约读 result 的客户端会拿到
+// 一个 null 对象/数组，多数语言里 for 一下就是空——界面表现为"什么都没有"，
+// 而 HTTP 200 让所有重试/告警逻辑都认为这是正常结果。
+func TestWriteJSONRejectsNilResult(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeJSON(rec, http.StatusOK, nil)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("nil 载荷不该回 200：%s", rec.Body.String())
+	}
+	var env struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Hint    string `json:"hint"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("错误响应不是 JSON：%v（%s）", err, rec.Body.String())
+	}
+	if env.Error.Code == "" || env.Error.Message == "" || env.Error.Hint == "" {
+		t.Fatalf("错误信封要四字段：%s", rec.Body.String())
+	}
+
+	// 类型化的 nil（例如 (*LoadResult)(nil)）也要拦：它会序列化成 {"result":null}。
+	rec = httptest.NewRecorder()
+	var typedNil *LoadResult
+	writeJSON(rec, http.StatusOK, typedNil)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("typed-nil 载荷不该回 200：%s", rec.Body.String())
 	}
 }
 

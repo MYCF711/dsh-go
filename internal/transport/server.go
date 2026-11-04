@@ -553,29 +553,47 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		j := s.opt.Journals.Get(sid)
-		// 客户端带着一个不认识的老世代，或水位比当前还大：说明两边对不上，
-		// 继续"按 seq 补"只会补出错位的数据。明确告诉它重建基线。
-		if (in.JournalEpoch != 0 && in.JournalEpoch != j.Epoch()) || in.SinceSeq > j.LastSeq() {
+		// 客户端带着一个不认识的老世代、水位比当前还大、或水位之前的历史
+		// 已经滑出内存 journal：三种都说明"按 seq 补"补不出完整数据，
+		// 必须明确要求它重建基线。
+		//
+		// 第三种最隐蔽：容量丢最老帧之后，补洞会从最老的保留帧开始回，
+		// 帧是连续的、seq 也在涨，客户端**看不出中间缺了一段**——它只会以为
+		// "那段时间就这么点事"。这是典型的"有产出、但产出里没有完整载荷、没人报错"。
+		//
+		// 用 Window 一次拿全（帧/水位/世代/有没有缺口）：分三次读的话，
+		// 恰好在两次之间挤掉一帧，"检查通过、取帧却少一帧"。
+		win := j.Window(in.SinceSeq, in.Limit)
+		staleEpoch := in.JournalEpoch != 0 && in.JournalEpoch != win.Epoch
+		tooNew := in.SinceSeq > win.LastSeq
+		gap := !staleEpoch && !tooNew && !win.Covered
+		if staleEpoch || tooNew || gap {
+			msg := "journal 世代或水位对不上，需要重新 load 基线"
+			hint := "丢弃旧水位，重新 session.load 拿 journalEpoch/lastSeq"
+			if gap {
+				msg = fmt.Sprintf("sinceSeq=%d 之前的历史已经滑出内存 journal（只保留最近 %d 帧）："+
+					"继续按 seq 补会缺一段，而且缺口看不出来", in.SinceSeq, win.LastSeq-win.Oldest+1)
+				hint = "重新 session.load 取首屏基线，从返回的 lastSeq 往后订阅；补洞只覆盖内存里还在的帧"
+			}
 			writeJSON(w, http.StatusConflict, map[string]any{
 				// 四字段信封，跟其它错误保持一致。少了 retryable 的后果是
 				// 通用客户端解不出这个字段（界面审计实测），而这条恰恰是
 				// "必须让用户知道可以重试"的那一类错误。
 				"error": map[string]any{
 					"code":      "stale_epoch",
-					"message":   "journal 世代或水位对不上，需要重新 load 基线",
-					"hint":      "丢弃旧水位，重新 session.load 拿 journalEpoch/lastSeq",
+					"message":   msg,
+					"hint":      hint,
 					"retryable": true,
 				},
-				"journalEpoch": j.Epoch(),
-				"lastSeq":      j.LastSeq(),
+				"journalEpoch": win.Epoch,
+				"lastSeq":      win.LastSeq,
 			})
 			return
 		}
-		frames, last, epoch := j.Since(in.SinceSeq, in.Limit)
 		writeJSON(w, http.StatusOK, HistoryResult{
-			Frames:       frames,
-			LastSeq:      last,
-			JournalEpoch: epoch,
+			Frames:       win.Frames,
+			LastSeq:      win.LastSeq,
+			JournalEpoch: win.Epoch,
 		})
 		return
 	}
@@ -708,6 +726,8 @@ func errorHint(code string) string {
 		return "检查入参名字（id/sessionId 都认）与类型"
 	case "encode_failure":
 		return "这是宿主内部序列化出错，不是你参数写错了；把这一步操作和 dshd 的 stderr 报告出来"
+	case "empty_result":
+		return "宿主这一侧没给出任何载荷（不是你的参数写错）；把这一步操作和 dshd 的 stderr 报告出来"
 	case "internal":
 		return "可以直接重试；反复失败就看 dshd 的 stderr"
 	}
@@ -735,6 +755,9 @@ func errorCode(msg string) string {
 	if strings.Contains(msg, "序列化失败") {
 		return "encode_failure"
 	}
+	if strings.Contains(msg, "响应是空值") {
+		return "empty_result"
+	}
 	if msg == "no_such_request" || msg == "bad_option" {
 		return msg
 	}
@@ -752,21 +775,35 @@ func errorCode(msg string) string {
 // 只在 /api 的 handler 里用，所以可以在这里一把收口——
 // 逐个 handler 改的话，总有一个会漏，而漏掉的那个就是"界面看到 0 条"。
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	// **任何类型**都要套信封，不只 map。
+	// 成功响应不许是空值。
 	//
-	// 原来只包 map[string]any，于是 LoadResult / PromptResult / []SessionSummary
-	// 这些 struct/切片一律裸返回——照契约读 `result` 的客户端拿到空。
-	// （2026-11-03 复核把 H8 打回 🟡，就是这一条。）
-	if !alreadyEnveloped(v) {
+	// `{"result":null}` 的形状是"HTTP 200 + 没有任何载荷"：客户端拿到的是 null，
+	// 照契约读 result 的代码大多会安静地把它当空处理——界面表现是"什么都没有"，
+	// 而所有重试/告警逻辑都认为这是成功。这与本仓一天撞到的两条静默成功同形，
+	// 所以宁可在出口把它变成 500（带上可执行的 hint），也不放过一个 null。
+	if v != nil && !alreadyEnveloped(v) {
 		v = map[string]any{"result": v}
 	}
-	body, err := json.Marshal(v)
+	var body []byte
+	var err error
+	switch {
+	case v == nil:
+		err = fmt.Errorf("响应是空值：handler 没有给出 result")
+	default:
+		body, err = json.Marshal(v)
+		if err == nil && string(body) == `{"result":null}` {
+			// 类型化的 nil（(*T)(nil)）会走到这里：它不是 nil 接口，但序列化后同样没有载荷。
+			err = fmt.Errorf("响应是空值：handler 给了一个 nil 的 result")
+		} else if err != nil {
+			err = fmt.Errorf("响应序列化失败: %w", err)
+		}
+	}
 	if err != nil {
 		// 这里的 payload 全是自家结构，真出错也只剩一个兜底正文。
 		//
 		// 但它仍然是**一个错误出口**，必须和别的出口同形状（四字段）。
 		// 客户端只有一个解析器：少一个字段就要特判，而特判分支没人会为它写测试。
-		fallback, _ := json.Marshal(errorBody("响应序列化失败"))
+		fallback, _ := json.Marshal(errorBody(err.Error()))
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write(append(fallback, '\n'))

@@ -202,6 +202,71 @@ func TestContextCancel(t *testing.T) {
 	}
 }
 
+// 流在 finish 之前断了（网关重启、代理超时、上游 502 之后直接关连接），
+// 不能当成功：半句话会被记成 turn completed、退出码 0。
+//
+// 判据：整条流必须至少出现过一次 finish_reason 或 [DONE]；两者都没有，
+// 说明这一次回答没有「完结」的凭据。半截内容仍然带回来（供落盘与诊断），
+// 但调用方必须看到 error。
+func TestStreamWithoutFinishOrDoneIsTruncation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"半句\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		// handler 返回 = 连接被关掉，没有 finish_reason、没有 [DONE]。
+	}))
+	t.Cleanup(srv.Close)
+
+	resp, err := New(srv.URL, "k").Stream(context.Background(), Request{Model: "m"}, nil)
+	if err == nil {
+		t.Fatalf("流没有 finish 就结束，必须报错；实际把 %q 当成了完整回答", resp.Content)
+	}
+	if !strings.Contains(err.Error(), "不完整") && !strings.Contains(err.Error(), "断开") {
+		t.Fatalf("要说清是流断了：%v", err)
+	}
+	if resp == nil || resp.Content != "半句" {
+		t.Fatalf("半截内容也要带回来（落盘/诊断要用），得到 %+v", resp)
+	}
+}
+
+// 200 + 一条内容都没有：这正是「网关列着模型、上游坏了」的形状。
+// 它不是「模型说了句空话」，而是这次调用根本没成。
+func TestStreamEmpty200IsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := New(srv.URL, "k").Stream(context.Background(), Request{Model: "m"}, nil)
+	if err == nil {
+		t.Fatal("200 + 空流必须报错，不能记成「assistant 说了空话 + turn completed」")
+	}
+	if !strings.Contains(err.Error(), "空响应") || !strings.Contains(err.Error(), "dshd models") {
+		t.Fatalf("要说清是什么并指路：%v", err)
+	}
+}
+
+// 有些网关只给 finish_reason、不发 [DONE]。那也算完整，不许误伤。
+func TestStreamFinishWithoutDoneIsComplete(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"完整\"},\"finish_reason\":\"stop\"}]}\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	t.Cleanup(srv.Close)
+
+	resp, err := New(srv.URL, "k").Stream(context.Background(), Request{Model: "m"}, nil)
+	if err != nil {
+		t.Fatalf("有 finish_reason 就是完整回答：%v", err)
+	}
+	if resp.Content != "完整" || resp.FinishReason != "stop" {
+		t.Fatalf("响应 = %+v", resp)
+	}
+}
+
 func kindStrings(ks []EventKind) []string {
 	out := make([]string, len(ks))
 	for i, k := range ks {

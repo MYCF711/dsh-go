@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"dshgo/codecs/v4"
@@ -59,10 +60,24 @@ func CreateSession(home, cwd, id, agentPreset string) (*Log, error) {
 }
 
 // Append 追加一条事件并立刻提交一帧（M2 阶段一事件一帧；批窗口 200ms 是优化项）。
+//
+// 写盘之前先拦两种"写进去也读不出来"的事件：
+//   - 没有 type：surface 只认 5 类事件，其余一律跳过，等于写了一条永远没人看的数据；
+//   - 负载是 null：文件里多一行、seq 也动了，但投影拿不到任何字段。
+//
+// 两者都不会报错，只会让日志"看起来成功、实际什么也没发生"——所以宁可在
+// 写之前拒绝，也不留一条读不回来的记录。
 func (l *Log) Append(eventType string, data any) error {
+	if strings.TrimSpace(eventType) == "" {
+		return fmt.Errorf("事件类型不能为空：写进去也没有任何投影能认出它（seq 未推进、文件未改动）")
+	}
 	raw, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("事件 %s 序列化失败: %w", eventType, err)
+	}
+	if data == nil || string(raw) == "null" {
+		return fmt.Errorf("事件 %s 的负载是 null：落盘后投影读不到任何字段"+
+			"（seq 未推进、文件未改动）；给一个真实的数据结构再写", eventType)
 	}
 	ev := v4.Event{
 		Type: eventType,
@@ -208,6 +223,29 @@ func finishReasonKind(finish string) string {
 		return "max-tokens"
 	default:
 		return finish
+	}
+}
+
+// TurnEndKind 把 agent 的 finish reason 映射成 v4 的 `turn/end.reason.kind`。
+//
+// 词汇表（research/21 §turn/end）是：completed / aborted / blocked / error /
+// max-tokens / interrupted / forked。
+//
+// 为什么需要它：`turn/end` 原来在三个入口都**恒写 "completed"**。于是一个被
+// max_tokens 截断的回合（模型只说了半句）在日志里也是「完成」——客户端读
+// turn/end 得到的结论是"这一轮做完了"，而 assistant/message 里的
+// finish=max-tokens 被它盖过去了。这正是"有产出、但结论是假的、没人报错"。
+//
+// awaiting_user 仍记 completed：它不是失败，只是把控制权交回人；
+// v4 词汇表里没有更贴切的 kind，硬造一个会让客户端解不动。
+func TurnEndKind(finish string) string {
+	switch finish {
+	case "length":
+		return "max-tokens"
+	case "aborted", "blocked", "error", "interrupted", "forked", "max-tokens":
+		return finish // 已经是 v4 的 kind，原样写
+	default:
+		return "completed"
 	}
 }
 

@@ -1,0 +1,358 @@
+# 静默成功审计：有产出、但没有有效载荷、而且没人报错
+
+> 2026-11-04。一天里真机撞到两条：网关 200 + 空流被记成「assistant 空消息 + turn completed + 退出码 0」；
+> `CompactSchema` 见 `description` 键就删，把 8 个名叫 `description` 的参数一起删了，而 `required` 里还点着它们。
+>
+> 这两条的共同形状不是"崩溃"，而是 **成功**：退出码 0、HTTP 200、事件写进了日志、函数返回了结果——
+> 只是产出里没有任何有效载荷，而且全链路没有一处报错。它们比崩溃贵，因为不触发任何告警。
+>
+> 本文是这一类路径的系统性清单、逐条判断与修复证据。扫描器：`scripts/silent-success-audit.py`。
+
+## 0. 结论
+
+| 结论 | 条数 |
+|---|---|
+| 真缺陷（已修，附红→绿） | 14 |
+| 真缺陷（越界，已登记移交；`cmd/dshd/serve*.go` 不许动） | 1 |
+| 可接受（说清为什么不伤人） | 18 |
+| 需要设计决定（两个方向的代价都写清，交给用户） | 3 |
+
+最值得记住的两条新发现（都不在今天的原始两条里）：
+
+1. **`journal` 容量丢帧后，补洞会静默缺一段**：`session.history` 回 200 + 连续帧，`frames` 里少了最老那截，
+   客户端按 seq 看是连续的，永远不知道中间缺过。WS 订阅同理。
+2. **`turn/end` 恒写 `completed`**：被 `max_tokens` 截断的回合（模型只说了半句）在日志里也是「完成」，
+   `assistant/message` 里的 `finish=max-tokens` 被它盖住。
+
+## 1. 方法（比结论重要）
+
+### 1.1 从「接口边界」入手，不从文件名猜
+
+对每一条边界问三个问题：
+
+1. **空载荷长什么样？**（0 字节 / 0 条 / nil / `{}` / `[]` / 只有 finish 没有内容）
+2. **谁会消费它，消费方看到空载荷时会怎样？**（模型看到 `（无输出）`、界面看到 0 行、客户端看到 `result:null`）
+3. **空载荷时链路上有没有任何一处报错？**（没有 ⇒ 命中本类）
+
+扫过的 9 类边界：
+
+| # | 边界 | 具体形状 |
+|---|---|---|
+| 1 | LLM 响应 | 200 + 空流、只有 finish、内容全空白、`choices: []`、usage 全 0 |
+| 2 | LLM 流 | 中途 EOF（有内容、无 finish_reason、无 `[DONE]`）、坏分片被跳过 |
+| 3 | 工具结果 | `Result{}` + `nil` err、`Data` 空数组 vs `nil`、只有 `View` 没有模型可见正文 |
+| 4 | 工具 schema | `required` 点名了 `properties` 里不存在的键、空 schema、压表之后结构被改坏 |
+| 5 | 工具表注册 | `Name()` 空串、投影表 `Register`、模块 `Register` 一个都没注册 |
+| 6 | 会话写入 | 空 `type`、`data:null`、0 字节帧、`append` 了但 `seq` 没动 |
+| 7 | 压缩投影 | 空摘要遮蔽历史、区间里没有模型可见事件却报「压缩成功」、压完 surface 没变 |
+| 8 | Transport HTTP | `200 + result:null`、`frames: []` 但 `lastSeq > 0` |
+| 9 | Transport journal/WS | 容量丢帧后补洞缺口、`reset`/`pong` 无 seq |
+
+### 1.2 判据
+
+**不是「有没有报错」，是「消费方拿到的字节里有没有信息」**：
+
+- 对模型：正文/工具结果/提示三段里至少一段非空且不是占位符；
+- 对客户端：成功信封里 `result` 不是 `null`，数组不是"由于缺口而变短"；
+- 对读盘的人：写进去的事件，投影能读出东西（`type` 在词汇表里、`data` 不是 `null`）。
+
+### 1.3 扫描器
+
+`python scripts/silent-success-audit.py`（`--json` 机器可读）。两类检查：
+
+- **数据检查**（会 FAIL）：解析全部 57 份 `json.RawMessage` schema，逐层校验
+  `required ⊆ properties`；扫 `return Result{}, nil`、`Append(…, nil)`、`writeJSON(…, nil)`；
+  模拟**旧的** `CompactSchema`（见 `description` 就删）并统计它会打断多少条 `required`——这是"为什么不能这么写"的永久反证。
+- **守卫检查**（会 FAIL）：12 条已知静默成功路径，源码里必须存在对应校验/报错。
+  守卫被删掉时这里立刻红，不靠记忆。
+
+**它的边界**：静态检查只能证明"守卫在"，不能证明"守卫在运行时真的挡住"。
+真正的运行时证据在 `internal/*` 的红测里（见 §3），本报告不把扫描器绿当成运行时绿。
+
+当前输出：57 份 schema 解析成功、0 份解析失败；旧算法会打断 5 条 `required`（对应 8 个名叫 `description` 的参数）；
+12 条守卫全在；`exit 0`。
+
+## 2. 清单全表
+
+图例：**真缺陷** = 有红测 + 修复；**可接受** = 说清为什么不伤人；**设计决定** = 两个方向的代价都写清，交给用户。
+
+### 2.1 LLM 层
+
+| 路径 | 现状 | 判据 | 结论 |
+|---|---|---|---|
+| 200 + 空流（0 个 chunk） | 旧：`Stream` 返回 `nil` err + 空 `Response`；`agent.Loop` 今天已判错，但 `modelRunner` 直接吃 `nil` err | 调用方拿到 nil err 就认为成功；空响应会被记成 `assistant` 空消息 + `turn/done` | **真缺陷**：`llm.Stream` 自己判错并指路 `dshd models`（红→绿 §3.2） |
+| 流中途 EOF（有内容、无 finish、无 `[DONE]`） | 旧：连接正常关闭 ⇒ `readSSE` 返回 nil ⇒ 半句话当完整回答 | 整条流没有"完结凭据"（`finish_reason` 或 `[DONE]`），回答必然不完整 | **真缺陷**：判"流在 finish 之前断开"，半截内容仍带回供落盘（红→绿 §3.2） |
+| 只有 finish、没有内容 | `finish=stop` + nil 内容 | 语义空判定在 agent 层：`emptyResponseErr` 已覆盖（今天那条） | 可接受（分层正确：llm 管协议完备性，agent 管"有没有可用产出"；两层都有守卫） |
+| `choices` 长度为 0 的 chunk | usage 末片合法地长这样 | 它不产生事件，只填 usage；不产生任何"看起来成功的空消息" | 可接受（OpenAI 兼容接口的正常形状） |
+| `usage` 全 0 | agent 不发 `usage/update`；`session.load` 的 `ContextTokens=0` | 0 在 `LoadResult` 里明确表示"不知道"，界面不画百分比 | 可接受（契约写明 0=未知；拿 0 做除法的地方会显出 0%，但那是显示问题不是数据丢失） |
+| `finish_reason=length` 有内容 | assistant 消息里记 `max-tokens`；`turn/end` 旧代码恒写 `completed` | `turn/end.reason.kind` 的词汇表里本来就有 `max-tokens`；写 `completed` 等于告诉客户端"这轮说完了" | **真缺陷**：`session.TurnEndKind` 映射，run/acp 两个入口都接上（§3.7） |
+| `models` 返回 `data:[]` / `data:null` | `ListModels` 返回空列表 + nil err；`dshd models` 报「通了，但一个模型都没报」；Transport 回 `{"models":[]}` | CLI 已明确报错；但 `data:null`（字段缺失/网关不兼容）与 `[]`（真没有模型）无法区分，界面只能显示同一个空列表 | **设计决定 D2**（CLI 可接受；语义要定，见 §4） |
+| `models` 条目 `id` 为空 | 原样透传给界面 | 界面会出现一个选不中的空行；不是"静默丢数据" | 可接受（低危；异常网关才会这样，空行可见） |
+
+### 2.2 工具层
+
+| 路径 | 现状 | 判据 | 结论 |
+|---|---|---|---|
+| `spi.Result{}` + `err == nil` | 旧：模型只看到 `（无输出）`，无 Hint；日志 `ok=true` | 模型不知道这次调用做没做、该不该重试；R3 明确禁止"空 Result 丢 Hint" | **真缺陷**：流水线补 Summary + 可执行 Hint + Warn 日志（红→绿 §3.4） |
+| 只返回 `View`（无模型可见正文） | 旧：`View` 被当成"有产出"，模型拿到 `（无输出）` | `View` 是给客户端画卡片的，模型看不见；对模型来说这就是空结果 | **真缺陷**（同一处修复：`View` 不计入载荷；红测覆盖 §3.4） |
+| `Data` 空数组 vs `nil` | `nil` = 没有数据（跳过）；`[]` = 集合为空（打印 `[]`） | `[]` 是答案（"没有匹配"），不能当"工具没产出" | 可接受（差异被保留，已有测试固定） |
+| schema 里 `required` 点名了不存在的键 | 全仓 57 份 schema 当前 **0 处**；但 `agent.CompactSchema` 的旧算法会**造出**这个形状（8 个参数叫 `description`，其中 5 个在 `required` 里） | 模型看到"必填、但没有类型"——凭空少一条契约，全链路不报错 | **真缺陷**：`CompactSchema` 按位置区分注解与参数名（红→绿 §3.1） |
+| `sameShape` 比较把「多一个 `description` 参数」判成同构 | 旧 `stripDescriptions` 也是"见键就删"；合并层据此把不同工具并族 | 判据是"两张 schema 的结构是否真的一样"；少一个参数就不是 | **真缺陷**（潜在，当前合并族里没有触发实例）：同一套按位置判断（红→绿 §3.8） |
+| 工具 `Name()` 为空 | `tools.Registry.Register` 返回「工具没有名字」；三个投影表也拒绝注册 | 空名字进表 ⇒ 模型看不到、调不到，且注册调用方若吞错就静默 | 可接受（守卫已在，扫描器盯住） |
+| 工具 Schema 为 `nil` / 空对象 | 57 份全部可解析且有 `properties`；零参工具的空对象是合法契约 | 非零参工具若 schema 为空，模型只能瞎猜——但当前无实例 | 可接受（当前无实例；新增工具时由 `tool_schema_test.go` 的结构比对兜住） |
+| 压表规则有两份实现（`agent.CompactSchema` / `cmd/dshd.tightenSchema`） | 两套独立代码，各自"按位置删 description" | 同一规则两处实现必然漂移；今天两条 bug 恰好是同一形状在两处各犯一次（修了主路、留了岔路） | **设计决定 D3**（见 §4） |
+
+### 2.3 会话 / 日志层
+
+| 路径 | 现状 | 判据 | 结论 |
+|---|---|---|---|
+| `Log.Append("", data)` | 旧：落一条 `type:""` 的事件；`surface` 永远跳过它 | seq 动了、文件多了字节，但任何投影都读不出来 | **真缺陷**（潜在，当前无调用点）：写盘前拒绝（红→绿 §3.5） |
+| `Log.Append(type, nil)` | 旧：落成 `data:null` | 文件里有这一行、`seq` 也动了，投影拿不到任何字段 | **真缺陷**（潜在）：写盘前拒绝（同一红测） |
+| 压缩摘要为空 | `session.Compact` 本身不校验；CLI 手工路径靠 `--summary` 非空，auto 路径靠 `Summarize` 判空 | 遮蔽历史之后 surface 变成一个空节点：历史"变短了、什么也没留下"，而 `compaction/end` 说成功 | **真缺陷**（潜在，守的是唯一写入口）：拒绝并说明（红→绿 §3.3） |
+| 压缩区间里没有模型可见事件 | 旧：只有 `tool/call` 也报「压缩成功」；`surface` 一个节点没少（反而多一条摘要） | 判据是"模型看得见的东西真的变少了"，不是"事件条数减少" | **真缺陷**（低危，manual 路径可达）：拒绝（红→绿 §3.3） |
+| 压缩后 `surface` 没变却说「已压缩」（auto 路径） | `compact.Plan` 从 surface 选 ≥2 个节点；新增的可见事件守卫再兜一层 | 有下界保证：遮蔽 ≥1 个可见节点 + 1 个替身 ⇒ surface 必减 | 可接受（有结构性保证；`dshd run` 的「surface N → M」日志会暴露异常） |
+| 写进去 0 字节 | `v4.Writer.Append` 至少写一行 JSON + `\n`；`writeFrame` 还有"帧 < 8 字节即报错" | 0 字节帧在编解码层就不成立 | 可接受（结构上不可能） |
+| `append` 了但 `seq` 没动 | `Log.Append` 在写盘**成功后**才自增；失败直接返回 | 拒绝时 seq 不动，已有测试断言 | 可接受（结构上不可能） |
+| 回合失败时没有 `turn/end`（悬挂回合） | `agent.Run` 出错后调用方直接返回，不补结局事件 | 进程退出码非 0 / ACP 回 error，**不静默**；但日志里 turn 没有闭合 | **设计决定 D1**（见 §4） |
+| `modelRunner` 用 `m.Text == ""` 过滤历史 | assistant 只有 tool_calls 时 `Text` 为空 ⇒ 整条消息被丢掉，后续 tool 结果找不到对应调用 | 模型会看到"孤立的工具结果"；历史语义被悄悄改掉 | **真缺陷（越界，移交）**：在 `cmd/dshd/serve_turn.go`，按边界不许改；建议改为按 role/内容块判断 |
+| `modelRunner` 空响应 | 旧：只写 user 消息 + `turn/done` | 与 LLM 层第 1 条同形 | **真缺陷（已修，间接）**：§3.2 的 llm 守卫让 `Stream` 直接报错 ⇒ `turn/error`；未改 `serve_turn.go` |
+
+### 2.4 Transport 层
+
+| 路径 | 现状 | 判据 | 结论 |
+|---|---|---|---|
+| `200 + result:null` | 旧：`writeJSON(w, 200, nil)` 输出 `{"result":null}`；当前没有 handler 这么写 | 客户端按契约读 `result`，拿到 null 会当空处理；HTTP 200 让重试/告警都认为成功 | **真缺陷**（潜在）：出口守卫，nil 与 typed-nil 都变 500 + 四字段错误（红→绿 §3.6） |
+| `frames: []` 但 `lastSeq > 0` | 两种情况：(a) `sinceSeq == lastSeq`，正常；(b) 容量丢帧后 `sinceSeq` 比最老保留帧还旧——旧代码静默给短数组 | (b) 里帧连续、seq 在涨、HTTP 200，客户端看不出缺口 | **真缺陷**：`Journal.Window` 的 `Covered` + history 回 `stale_epoch`、WS 发 `session/reset`（红→绿 §3.9） |
+| `sinceSeq == lastSeq` 时 `frames: []` | 正常 | 没有新帧就该是空数组；`lastSeq` 用来确认水位 | 可接受（契约正常路径） |
+| 列表接口返回 nil 切片（`session.list` / `jobs.list` / `workspace.list` / `schedule.list`） | 四个 handler 都显式把 nil 归一成 `[]` | `null` 会让客户端 for 一下当空，分不清"没数据"与"接口坏了" | 可接受（已有归一，源码确认） |
+| journal `limit` 截断 | `Since` 最多给 limit 条 | 响应带 `lastSeq`，客户端可继续拉 | 可接受（分页语义明确） |
+| `session/reset` / `pong` 没有 seq | 有意为之 | 它们不是事件流里的一帧；给假 seq 反而污染连续性判断 | 可接受（契约写明按 type 区分） |
+
+### 2.5 模块装配
+
+| 路径 | 现状 | 判据 | 结论 |
+|---|---|---|---|
+| `enabled = false` 但模块照样装配 | 历史 bug，`kernel.Apply` 已修复并有注释/测试 | 配置说关、实际开着——最典型的"改了配置什么都没发生" | 可接受（源码已确认：`Apply` 里真的 `continue`） |
+| manifest 白名单漏列模块 | 会 `slog.Warn`「manifest 是白名单，这个模块没列出来，已跳过」 | 少一个工具不能无声 | 可接受（有告警） |
+| 空能力名 / 两个模块提供同一能力 / 缺依赖 | `TopoSort` 全部返回错误 | 装配期硬错误 | 可接受（已有守卫） |
+| `enabled = true` 但 `Register` 什么也没注册 | wasm 侧：装载成功但 0 能力会打 `Warn` 并说明"只能 `dshd wasm call` 手动调"；static 侧：所有 `Module()` 的成功路径都至少注册一个工具或提供一个服务 | 没有通用守卫（要改 kernel 裁决逻辑，越界）；当前无触发实例 | 可接受（有告警 + 当前无实例；新增模块时靠 review） |
+
+## 3. 修复明细（先红后修）
+
+每条都先写会红的测试，贴红的那次输出，再修。
+
+### 3.1 `agent.CompactSchema` 删掉名叫 `description` 的参数
+
+**红**（`go test ./internal/agent -run TestCompactSchemaKeepsParamNamedDescription`）：
+
+```
+--- FAIL: TestCompactSchemaKeepsParamNamedDescription (0.00s)
+    compact_schema_test.go:83: 名叫 description 的参数被删了：模型只看到 required 里一个没类型的名字
+        {"additionalProperties":false,"properties":{"command":{"type":"string"},"options":{"items":{"properties":{},"required":["description"],"type":"object"},"type":"array"}},"required":["command","description"],"type":"object"}
+```
+
+**修**（`internal/agent/loop.go:366`）：`compactNode` 带 `inPropertyMap` 上下文——
+`properties` / `patternProperties` / `$defs` / `definitions` 这一层的键是**参数名**，一个都不删；
+其余层的 `description` 才是注解。
+
+**绿**：`ok dshgo/internal/agent`，且 `cmd/dshd` 的
+`TestCompactTableKeepsContract` / `TestTightSchemaKeepsDescriptionParam` 仍绿（投影表结构没变）。
+
+> 补充：今天那条"已修"落在 `cmd/dshd/tightenSchema`（serve 主路），
+> `agent.CompactSchema` 是 Loop 自己的岔路（`CompactTools=true` 时生效，当前显式关着）。
+> 修了主路、留了岔路——扫描器 + 本修复把两条都补齐了。
+
+### 3.2 流在 `finish` 之前断了 / 200 + 空流
+
+**红**（`go test ./internal/llm`）：
+
+```
+--- FAIL: TestStreamWithoutFinishOrDoneIsTruncation (0.01s)
+    client_test.go:223: 流没有 finish 就结束，必须报错；实际把 "半句" 当成了完整回答
+--- FAIL: TestStreamEmpty200IsError (0.01s)
+    client_test.go:244: 200 + 空流必须报错，不能记成「assistant 说了空话 + turn completed」
+```
+
+**修**（`internal/llm/client.go:95`）：记 `sawDone`；流结束时若既没有 `finish_reason` 也没有 `[DONE]`——
+空载荷报「空响应 + 指路 `dshd models`」，有载荷报「流在 finish 之前断开、回答不完整、先重试」。
+半截内容仍随 `Response` 返回，供落盘/诊断。
+
+**绿**：`ok dshgo/internal/llm`、`ok dshgo/internal/agent`、`ok dshgo/internal/compact`。
+另加 `TestStreamFinishWithoutDoneIsComplete`：只给 `finish_reason`、不发 `[DONE]` 的网关不算断流（不误伤）。
+
+### 3.3 压缩：空摘要 / 区间里没有模型可见事件
+
+**红**（`go test ./internal/session`）：
+
+```
+--- FAIL: TestCompactRejectsEmptySummary (0.18s)
+    --- FAIL: TestCompactRejectsEmptySummary/nil (0.04s)
+        compact_test.go:112: 空摘要（nil）必须报错
+    --- FAIL: .../空切片、/只有空白、/类型不是_text  同样
+--- FAIL: TestCompactRejectsRangeWithoutVisibleEvents (0.05s)
+    compact_test.go:140: 只有 tool/call 的区间不许报压缩成功：surface 根本不会变小
+```
+
+**修**（`internal/session/compact.go`）：
+- 摘要里没有非空 `text` 块 ⇒ 拒绝（`摘要为空——遮蔽之后这段历史会变成空白`）；
+- 区间里没有 surface 可见事件（`isSurfaceVisible`：5 类消息 + `compaction/summary`）⇒ 拒绝
+  （`压了 surface 不会变，摘要反而凭空多一条`）；
+- 两者都在**写任何事件之前**返回，`seq` 不动（测试断言）。
+
+**绿**：`ok dshgo/internal/session`（含级联压缩、区间校验等原有测试）。
+
+### 3.4 工具成功但什么都没返回
+
+**红**（`go test ./modules/tools`）：
+
+```
+--- FAIL: TestEmptySuccessGetsNoticeAndHint (0.06s)
+    2026/11/04 10:46:22 INFO 工具调用 tool=silent ms=0 ok=true args_bytes=0
+    pipeline_test.go:193: 空结果必须有一句人话，得到 Summary=""
+```
+
+**修**（`modules/tools/pipeline.go:172`）：执行成功且 `isEmptySuccess` 时补
+`Summary="工具 %q 执行成功，但没有返回任何模型可见的输出"` + Hint（"别假设它做了事，用只读手段核实"）+ Warn 日志。
+`View` **不计入**载荷（客户端能画卡片、模型看不见）；`Data=[]` 计入（空集合是答案）。
+
+**绿**：`ok dshgo/modules/tools`（三个子用例：全空 / `Data=[]` / 只有 `View`）。
+
+### 3.5 日志写入空事件 / null 负载
+
+**红**（`go test ./internal/session -run TestAppendRejectsEmptyEvent`）：
+
+```
+--- FAIL: TestAppendRejectsEmptyEvent (1.74s)
+    log_test.go:140: 空事件类型必须报错
+```
+
+**修**（`internal/session/log.go:70`）：`eventType` 空白、或 `data` 序列化成 `null` ⇒ 写盘前拒绝，
+`seq` 不推进、文件不多一行。
+
+**绿**：`ok dshgo/internal/session`。
+
+### 3.6 `200 + result:null`
+
+**红**（`go test ./internal/transport -run TestWriteJSONRejectsNilResult`）：
+
+```
+--- FAIL: TestWriteJSONRejectsNilResult (0.00s)
+    envelope_test.go:48: nil 载荷不该回 200：{"result":null}
+```
+
+**修**（`internal/transport/server.go` 的 `writeJSON`）：nil 与 typed-nil（序列化成 `{"result":null}`）
+都改回 500 + 四字段错误信封，新增稳定错误码 `empty_result` 与对应 hint。
+
+**绿**：`ok dshgo/internal/transport`。
+
+### 3.7 `turn/end` 恒写 `completed`
+
+**红**：这一条的红是**编译级**——测试引用 `session.TurnEndKind`，旧代码没有这个函数：
+
+```
+# dshgo/internal/session [dshgo/internal/session.test]
+./log_test.go:xxx: undefined: TurnEndKind
+```
+
+行为证据是旧调用点源码（`git show HEAD:cmd/dshd/main.go`、`acp.go`）：
+两处 `EventTurnEnd` 都硬写 `session.TurnEndData(turn, "completed", "")`，**不看 `e.Finish`**。
+
+**修**：`internal/session/log.go:241` 新增 `TurnEndKind`（`length → max-tokens`，
+`aborted/blocked/error/interrupted/forked/max-tokens` 原样，其余 `completed`），
+`cmd/dshd/main.go:749`、`cmd/dshd/acp.go:189` 两个入口改用它。
+
+**绿**：`ok dshgo/internal/session`、`go build ./...`。
+
+### 3.8 `sameShape` 把参数名 `description` 当注解
+
+**红**（`go test ./cmd/dshd -run TestSameShapeKeepsDescriptionParam`）：
+
+```
+--- FAIL: TestSameShapeKeepsDescriptionParam (0.06s)
+    tool_merged_shape_test.go:19: 多一个 description 参数的两张 schema 不是同构
+```
+
+**修**（`cmd/dshd/tool_merged.go:610`）：`stripDescriptions` 改成 `stripDescNode(v, inPropertyMap)`，
+与 `agent.CompactSchema` 同一套按位置判断；参数名保留、注解删。
+
+**绿**：`ok dshgo/cmd/dshd`（含 `TestCompactTableKeepsContract`）。
+
+### 3.9 补洞缺口
+
+**红**（`go test ./internal/transport`）：
+
+```
+--- FAIL: TestServeConnSignalsGapAfterTrim
+    wssession_test.go:130: 水位滑出内存时必须先发 session/reset，实际第一帧 {Seq:3 Type:assistant/text Data:{"text":"x"} Time:2}
+--- FAIL: TestHistorySignalsGapAfterTrim
+    （200 + 从 seq 3 开始的连续帧；1..2 无声消失）
+```
+
+**修**（`internal/transport/journal.go` 新增 `Window`——帧/水位/世代/缺口一次原子拿全，避免"检查通过、取帧却少一帧"）：
+- `session.history`：`sinceSeq` 比最老保留帧还旧 ⇒ 409 `stale_epoch`，message/hint 说清"滑出内存、重新 load"；
+- WS `sub`：同样情况 ⇒ 先发 `session/reset`，且**不再重放**保留帧，只接新帧。
+
+**绿**：`ok dshgo/internal/transport`（原有 stale_epoch、重放、空数组序列化测试全绿）。
+
+## 4. 需要设计决定
+
+### D1 回合失败时要不要补一条 `turn/end{error}`？
+
+**现状**：`agent.Run` 返回错误后，`dshd run` / ACP 直接返回，不写 `turn/end`。进程退出码非 0、ACP 回 error 帧，
+所以**不是静默**；但日志里这一轮没有闭合（悬挂 turn），与 `research/21` 记的「turn/end 恒以某 reason 收口」不一致。
+
+- **方向 A（补）**：失败路径写 `turn/end{reason:{kind:"error"/"aborted", error:{...}}}`。代价：要决定
+  `context.Canceled` 是 `aborted` 还是 `interrupted`；`dshd run` 的错误已经打到 stderr，日志里再写一份有重复；
+  还要保证"写结局失败"不能盖住原始错误。
+- **方向 B（不补）**：维持现状，由退出码 / `turn/error` 帧承担结局。代价：任何只读 v4 日志的消费者
+  （回放、统计、摘要）都得自己处理悬挂回合；DSH 语料里没有这种形状，导出的会话可能与上游不一致。
+
+我倾向 A，但它是会话格式语义的决定，不是 bug 修复——交给用户。
+
+### D2 `models.list` 的 `data:null` 与 `data:[]` 要不要区分？
+
+**现状**：两者都变成空列表。`dshd models` 会报「通了，但一个模型都没报」；界面显示空下拉。
+
+- **方向 A（区分）**：`data:null`（字段缺失）当作"网关坏了/不兼容"，返回错误；`[]` 当作"真的没有模型"。
+  代价：契约要加一个字段或状态，客户端也要改；某些网关把空列表写成 `null` 会被误判。
+- **方向 B（不区分）**：保持现状。代价：用户看到"没有可用模型"，分不清是网关没配还是接口坏了。
+
+### D3 压表逻辑现在有两份
+
+`internal/agent.CompactSchema` 与 `cmd/dshd` 的 `tightenSchema` 是两套独立实现，都各自"按位置删 description"。
+今天两条 bug 恰恰是同一形状在两处各犯一次。
+
+- **方向 A（合并）**：把"哪些键是参数名"的判断收敛到一个共享函数（`internal/spi` 或新的小包），两处都调它。
+  代价：`cmd/dshd` 会依赖 agent 包（或新包），需要确认依赖方向不违反 R1/R2；要重跑工具表面积/字节快照。
+- **方向 B（保持两份）**：各自带测试 + 扫描器盯住。代价：下次改 schema 规则仍可能只改一处。
+
+## 5. 未改但已登记（越界 / 后续）
+
+| 项 | 为什么没改 | 建议 |
+|---|---|---|
+| `cmd/dshd/serve_turn.go`：`modelRunner` 用 `m.Text == ""` 过滤历史，丢掉只有 tool_calls 的 assistant 消息 | 边界明确不许动 `cmd/dshd/serve*.go`（别人在改） | 改成按 role + `ToolCalls` 判断；补一条"历史里 tool 结果必须能找到对应调用"的测试 |
+| `cmd/dshd/serve_turn.go`：`ServerFrame{Seq: 1}` 硬编码，绕过 journal | 同上 | 走 `emitFrame`；否则客户端会看到重复 seq=1、也没有 time |
+| `cmd/dshd/serve.go`：`session.compact` 与正在跑的回合会争 `.lock`，报"正被另一个进程写入" | 同上；而且错误措辞把同进程说成"另一个进程" | 由宿主侧串行化压缩与回合，或把措辞改成"这个会话正在被写入" |
+| 模块装配的"`Register` 一个都没注册"通用守卫 | 要改 `internal/kernel` 的裁决逻辑（红线 R1/边界） | 若要做，在 `Assemble` 后按模块统计"新增工具数/提供能力数"，为 0 且非纯拦截器模块时 Warn |
+
+## 6. 复跑与验收
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+export GOCACHE=/tmp/gocache-silent
+python scripts/silent-success-audit.py     # 12 条守卫全在，exit 0
+go build ./... && go vet ./...
+go test ./... -count=1
+git archive HEAD | tar -x -C /tmp/hc-ss && (cd /tmp/hc-ss && go build ./...)
+```
+
+本次结果：扫描器 0 FAIL；`go build` / `go vet` 通过；`go test ./... -count=1` 全部 `ok`（含 `cmd/dshd`、
+`internal/{agent,llm,session,transport}`、`modules/tools`）；HEAD 隔离副本 `go build ./...` 退出码 0。
+
+**没有验证的**：真机（需要新 `dshd` + 网关）；`-race`；界面线消费这些新错误码/`session/reset` 的行为。
+单测只证明"守卫在对应的函数里生效"，不证明"真实网关/真实 UI 会按预期处理"。
+
+**一个有意收紧的点，真机要确认**：`llm.Stream` 现在要求整条流至少出现一次 `finish_reason` 或 `[DONE]`。
+如果本机网关在某些渠道上两者都不发（目前没有证据），那一轮会被判成"流中途断开"而不是"完成"。
+这是刻意的取舍：宁可报一次可重试的错误，也不把半句话记成完整回答。真机跑一轮即可确认；
+若确有这种网关，放宽点应该加在"内容看起来完整"的判定上，而不是删掉这条守卫。
