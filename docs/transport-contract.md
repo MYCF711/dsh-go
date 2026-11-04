@@ -94,8 +94,11 @@ h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
   判定"一条消息有没有内容"用宿主同一份判据（正文 / 思考 / 工具调用占一样），
   **三样都没有的消息不会出现在 `messages[]` 里**（以前它会变成一条空气泡）。
   宿主侧快照 `internal/transport/testdata/api.snapshot.json` 已在 `Message` 键表尾部
-  加上 `reasoning`；UI 侧 `../dsh-ui/testdata/api.snapshot.json` 同步时**只加这个键**，
-  不重排既有顺序、不改任何既有字段。
+  加上 `reasoning`（只加不改、顺序未动）。
+  **UI 侧不需要改快照**：`../dsh-ui/testdata/api.snapshot.json` 只记 method 面与信封
+  （14 个 method、没有 `types` 键表，全文连 `"tool"` 都出现 0 次），它不追踪消息字段。
+  所以这不是"两仓都要改的契约变更"，而是"宿主多给一个可选键、老 UI 忽略即可"。
+  UI 什么时候开始消费它，是 UI 那边的独立决定（`transport.Message` 已经有这个字段可用）。
 - **type 白名单**：v4 原始事件名 + 显式登记的 `turn/done`、`turn/error`、`approval/request`、`approval/timeout`、`approval/cancel`、`session/reset`、`pong`。新增必须 snapshot-first。
 - **连接拓扑**：当前 ServerFrame 不带 topic，每会话一条独立 WS 订阅/连接，按连接归属隔离；不得同连接混订多个会话。
 - **seq**：每会话一个 Transport journal，事件只在追加时分配一次单调 seq。不是 v4 `ev.Seq`、全局 `serveTurnSeq` 或连接序号。turn/done、turn/error 与 approval 事件同入此域；pong 无 seq 且不入日志。
