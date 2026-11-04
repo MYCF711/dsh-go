@@ -1,3 +1,44 @@
+## 0.2.1-go.30（2026-11-04）—— **静默失败与「只看 text」：36 条路径、22 条真缺陷**
+
+go.29 之后这一段的主题不是新功能，而是**把"不报错的错"逐个揪出来**。
+
+### 静默成功审计（`docs/silent-success-audit.md`）
+36 条路径全表：真缺陷 22 条已修 / 1 条越界移交 / 18 条可接受 / 3 条已拍板落地。最值钱的三条：
+
+- **journal 容量丢帧后补洞会静默缺一段**：`session.history` 回 200 + 看起来连续的帧，客户端
+  按 seq 看不出断口。现在 `Journal.Window` 原子快照，history 回 `409 stale_epoch`、WS 发 `session/reset`。
+- **`turn/end` 恒写 `completed`**：被 `max_tokens` 截断的回合在日志里也是"完成"。
+  现在按 finish 写 kind，截断留成 `max-tokens`。
+- **每个 turn 一定有结局**（`newTurnCloser`）：失败、用满步数、panic、ctx 取消都补一条
+  `turn/end{kind}`；步数用满走 `error` 而不是伪装成 `completed`。
+
+### 「只看 text」——一天里犯了 7 次的同一个病
+`session.load`、`history_search`、子代理转写、`session.fork`、ACP `session/load`、
+`Meter.Estimate`、TUI 渲染，每处都丢过"只有工具调用"或"只有思考"的消息。
+
+- 七处全部改用同一份判据 `assistantHasPayload(正文/思考/调用占一样)`。
+- **`Meter.Estimate` 少算思考 ⇒ auto-compact 提前触发**（多花 token、白丢上下文）——已修。
+- **fork 不再改写事实**：`finish`（截断的回合不再变成"正常收工"）、`tool/result` 的
+  `isError`/`cwd`/`view`、`system` 的 turn/step、`developer/message` 全部沿用源事件。
+- **新增门禁**：`scripts/text-only-guard.py` + 13 条白名单（每条写清"为什么这里只该看 text"），
+  7 处历史形状逐条造红验证；`guard-selftest.py` 19 条自测里含"新写一个 text-only 投影也红"。
+
+### 其它
+- `dshd models`：网关列着但上游坏掉的模型，原来会变成"模型说了句空话、退出码 0"；
+  现在报"这个 id 可能不可用"并给出能自证的命令。`models` 的 `data:null` 与 `[]` 已分开。
+- `edit` 失败时多说一句：85% 的失败是"版本过期"不是"记错原文"，直接告诉你"再调一次就会成功"。
+- 审批负载补 `tool` 字段（`allow_always` 的粒度是会话+工具名，客户端原来看不到在记住哪个工具）。
+- 两份压表实现收敛到 `internal/schema` 一条判断（今天两个同形 bug 各犯一次）。
+- 门禁自身的三个"假红"也修了：`go run` 失败带崩三条默认值检查、两个 `check.sh` 抢同一临时 exe、
+  守卫自测的草稿目录与 `staticcheck ./...` 赛跑。
+
+### 数字
+- `go test ./...` 48 个包；`-race` 全仓 47 包零竞争。
+- 工具表 **57 个 / 4,972 token（预算 82.9%）**——工具数从 43 涨到 57，总 token 反而降了。
+- 二进制 13~14 MB（上限 25 MB）；门禁 ALL GREEN 含 17 条审计守卫 + 19 条守卫自测。
+
+---
+
 ## 0.2.1-go.29（2026-11-04）—— **上下文预算：工具表从 92% 压到 86%，并给出第四档 lazy**
 
 这一版的主线是**钱**：工具表是每轮都要付的固定成本，而它一度占到 P0 预算的 92%。
