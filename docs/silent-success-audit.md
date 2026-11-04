@@ -1368,7 +1368,8 @@ ok  dshgo/cmd/dshd  0.709s        ← run 有自己的 builder，共用函数坏
 ```
 语料（只读快照）：/tmp/corpus-ident/sessions ← cp -a "D:/DeepSeek Harness/home/sessions"
   425 个会话 / 567,157 条事件 / 51,158 条带思考的事件 / 51,158 个思考块
-旧实现：git archive HEAD → /tmp/hc-id
+旧实现：git archive 93160a4 → /tmp/hc-id     （合并前的 HEAD；合进主线后
+                                              `git archive HEAD` 拿到的是新实现，复跑要认这个提交）
 新实现：工作树（不含 .git/probe/dist/tmp/refs）→ /tmp/hc-new
 对跑：同一条 TestZZReasoningDump，每条带思考的事件按两个口径各打一行
       R <会话相对路径> <seq> <全带 JSON> <首条 JSON>
@@ -1380,6 +1381,9 @@ $ md5sum /tmp/dump-old2.txt /tmp/dump-new2.txt
 1dd23e172370f132dec1c3140716a2b7 */tmp/dump-new2.txt      （各 182,814,295 字节）
 ```
 
+dump 工具（`TestZZReasoningDump`）**不进主线**：它只是对跑用的临时件，跑完就随副本一起丢，
+`go test ./...` 里不会多出一条要维护的用例。
+
 比的是**两个口径各自的输出**：旧实现的 `reasoningBySeq`/`ReasoningBlocksBySeq` 对
 新实现的同名调用，`seq`、首条正文、全带正文与顺序全要一致——不是"数字对得上"。
 
@@ -1389,11 +1393,11 @@ $ md5sum /tmp/dump-old2.txt /tmp/dump-new2.txt
 
 **红 → 绿**（`cmd/dshd/reasoning_ident_test.go`）：
 
-| 场景 | HEAD（旧实现） | 改后 |
+| 场景 | 合并前（`93160a4`） | 改后 |
 |---|---|---|
 | 两个新用例挂到旧实现上 | **FAIL**（`undefined: session.ReasoningBlocks` / `session.ReasoningText`，build failed） | PASS |
 | 变异 A：serve 取 `texts[len(texts)-1]` | — | **FAIL**（seq 1 首条 = "第二块：再数文件"） |
-| 变异 B：`ReasoningBlocks` 见第一块就返回 | — | **FAIL**（seq 1 全带 = 只有第一块） |
+| 变异 B：`ReasoningBlocks` 收完第一块就 `break` | — | **FAIL**（seq 1 全带 = 只有第一块） |
 | 变异 C：serve 里再写一份 `b.Type == "reasoning"` | — | **FAIL**（唯一实现的结构判据） |
 
 变异只在 `/tmp/hc-new` 副本里做，复原后复跑绿。
