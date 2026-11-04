@@ -139,6 +139,9 @@ func cmdServe(args []string) error {
 	serveReasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
 		"推理强度：空=不要（默认）| xhigh | max")
 	addr := fs.String("addr", "", "监听地址（默认 127.0.0.1:0，端口由 OS 分配）")
+	// 父进程看门狗（--parent-watch / --parent-watch-interval / --parent-pid）：
+	// 三个入口共用同一组开关，见 parentwatch.go。
+	pw := addParentWatchFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -149,6 +152,10 @@ func cmdServe(args []string) error {
 	if err := checkHome(*home); err != nil {
 		return err
 	}
+	// 看门狗要**尽早**起：启动阶段也算数。父进程在 serve 还没 ready 之前就死了，
+	// 否则会留下一个"起来得正好、但没人要"的服务。
+	watch := pw.start(os.Stderr)
+	defer watch.Stop()
 	// 工具表形态：和 run 共用同一个解析（新名优先，旧名 compact 兜底），
 	// 拼错的形态在这里就报错——不能静默退回某一档，那等于让 --tools-mode 变成假开关。
 	//
@@ -427,16 +434,26 @@ func cmdServe(args []string) error {
 	// 看不出这一档就会把机制当成故障。
 	announceToolsMode(os.Stderr, lr.toolsMode)
 
-	// 阻塞到 Ctrl-C / SIGTERM。用信号而不是 stdin EOF：
+	// 阻塞到 Ctrl-C / SIGTERM，或者**父进程没了**。用信号而不是 stdin EOF：
 	// serve 可能由壳拉起，stdin 会立刻是 EOF，那不代表"该关了"。
+	//
+	// 父进程那条分支是 2026-11-04 那 33 个孤儿进程的修法：启动它的脚本/壳
+	// 崩了之后，serve 原来会一直活着占端口。现在它自己收尾——先 Close（关端口、
+	// 把还没写出去的帧落盘），再退出，原因已经在触发时打到 stderr 了。
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	sig := <-stop
+	var by string
+	select {
+	case sig := <-stop:
+		by = sig.String()
+	case <-watch.Done():
+		by = watch.Reason()
+	}
 	signal.Stop(stop)
 
 	if err := srv.Close(); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "serve 已关闭（%v）\n", sig)
+	fmt.Fprintf(os.Stderr, "serve 已关闭（%v）\n", by)
 	return nil
 }

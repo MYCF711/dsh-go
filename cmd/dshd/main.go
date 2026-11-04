@@ -456,6 +456,9 @@ func cmdRun(argv []string) (retErr error) {
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	policy := fs.String("policy", defaultRunPolicy, "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
 	autoCompact := fs.Int("auto-compact", 40000, "每步前估算超过多少 token 就自动压缩（0=关闭）")
+	// 父进程看门狗：serve 起的工具轮就是子进程 `dshd run`（serve_tools.go 的 childArgs），
+	// 所以 run 也得挂同一组开关——否则 serve 死了、它还在跑。
+	pw := addParentWatchFlags(fs)
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -469,6 +472,22 @@ func cmdRun(argv []string) (retErr error) {
 	if err := checkHome(*home); err != nil {
 		return err
 	}
+
+	// 看门狗尽早起：参数校验通过就挂上，别等到建完会话目录才开始盯。
+	watch := pw.start(os.Stderr)
+	defer watch.Stop()
+	// run 是被 ctx 驱动的：父进程没了就把 ctx 取消，让本轮跑完手上的活再退。
+	// 直接 os.Exit 会丢掉"这一轮已经做的事"的记录，而记录是这个仓库最在意的部分。
+	runCtx, stopOnParentGone := context.WithCancel(context.Background())
+	defer stopOnParentGone()
+	go func() {
+		select {
+		case <-watch.Done():
+			fmt.Fprintf(os.Stderr, "父进程已退出（%s），本轮收尾后停止"+string(rune(10)), watch.Reason())
+			stopOnParentGone()
+		case <-runCtx.Done():
+		}
+	}()
 
 	// 从这里开始，所有 slog 落到 <home>/logs/<日期>.log。
 	// 它不替代 stderr——只是让"事后能查"这件事成立。
@@ -778,7 +797,7 @@ func cmdRun(argv []string) (retErr error) {
 	}()
 
 	hist := append(append([]llm.Message(nil), baseHist...), llm.Message{Role: "user", Content: *prompt})
-	hist, err = loop.Run(context.Background(), 1, hist)
+	hist, err = loop.Run(runCtx, 1, hist)
 	if err != nil {
 		return err
 	}

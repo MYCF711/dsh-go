@@ -446,6 +446,8 @@ func cmdACP(argv []string) error {
 	modeID := fs.String("mode", modes.DefaultID, "启动模式 id（见 --modes-dir 与内置）")
 	modesDir := fs.String("modes-dir", "", "用户自建模式目录（默认 <home>/modes）")
 	remember := fs.Bool("remember-approvals", false, "把\"以后都允许\"记到磁盘，resume 后仍然生效")
+	// 父进程看门狗：三个入口共用同一组开关，见 parentwatch.go。
+	pw := addParentWatchFlags(fs)
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -453,6 +455,10 @@ func cmdACP(argv []string) error {
 	if err := checkHome(*home); err != nil {
 		return err
 	}
+	// ACP 也会长跑：客户端是编辑器/壳的一部分，它崩了 stdin 并不会立刻 EOF
+	// （管道还挂在别的进程手里），所以光靠"读不到输入"退不出去。
+	watch := pw.start(os.Stderr)
+	defer watch.Stop()
 	// 同一套诊断日志：ACP 模式下 stdout 是协议，只能靠文件事后查。
 	// 拿不到也明说——stderr 还没被协议占用，说得出话。
 	if d := diagOrWarn(*home); d != nil {
@@ -586,7 +592,34 @@ func cmdACP(argv []string) error {
 			return false, nil
 		}
 	}
-	serveErr := srv.Serve(context.Background())
+	// 父进程没了要能把 Serve 从"卡在读 stdin"里叫醒：它的扫描循环只在读到
+	// **下一行**时才看 ctx，而父进程死掉之后多半永远不会再来一行。
+	// 所以两手一起：取消 ctx（让在飞的轮次按取消收尾），再关掉 stdin
+	// （让 Scan 立刻返回）。收尾仍然走下面同一条路——日志照落盘。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-watch.Done():
+			cancel()
+			if err := os.Stdin.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "父进程看门狗：关 stdin 失败（%v），靠 ctx 取消收尾\n", err)
+			}
+		case <-ctx.Done():
+		}
+	}()
+	serveErr := srv.Serve(ctx)
+	// 父进程看门狗触发的收尾是**预期**：不是错误，退出码给 0。
+	// 原因那一行已经在触发时打到 stderr 了，别再盖一条"读 stdin 失败"上去。
+	parentGone := false
+	select {
+	case <-watch.Done():
+		parentGone = true
+	default:
+	}
+	if parentGone {
+		serveErr = nil
+	}
 	// 客户端断连之后仍要把日志落盘：批窗口里可能还压着没写出去的帧。
 	if cerr := acpRunner.Shutdown(); cerr != nil && serveErr == nil {
 		serveErr = cerr
