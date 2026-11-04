@@ -90,6 +90,7 @@ func runDoctorWith(home, base, manifest string) doctorReport {
 		checkGateway(base),
 		checkManifest(manifest),
 		checkWasmModules(manifest),
+		checkSearchBackend(),
 		checkRecentLog(home),
 	)
 	return rep
@@ -429,5 +430,26 @@ func checkWasmModules(manifest string) checkResult {
 		parts = append(parts, strings.Join(withoutTool, "、")+"（不提供工具，只能 dshd wasm call 手动调）")
 	}
 	c.Detail = strings.Join(parts, "；")
+	return c
+}
+
+// checkSearchBackend 报"这台机器能不能搜"。
+//
+// 为什么值得单独一项：真语料里 web_search 的失败率是 **91%**（61/67），
+// 而失败原因永远是同一句"宿主没有装搜索后端"——不是工具的 bug，
+// 是这台机器没配。模型每调一次才失败一次，人却要等它反复失败才会发现。
+// 体检把它提前说出来：配一个端点，或者明确知道"这里搜不了，改用 web_fetch"。
+func checkSearchBackend() checkResult {
+	c := checkResult{Name: "搜索后端"}
+	url := os.Getenv("DSHD_SEARCH_URL")
+	if strings.TrimSpace(url) == "" {
+		// 不是致命项：不配搜索照样能用（web_fetch 直取网址）。
+		// 所以这里给的是"知道就好"，而不是"你有问题"。
+		c.OK = true
+		c.Detail = "没配（DSHD_SEARCH_URL 为空）：web_search 会明确说这里搜不了；要用搜索就配一个 SearxNG 风格端点"
+		return c
+	}
+	c.OK = true
+	c.Detail = url + "（web_search 走它）"
 	return c
 }

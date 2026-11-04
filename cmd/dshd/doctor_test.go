@@ -294,3 +294,24 @@ func TestDoctorChecksWasmModules(t *testing.T) {
 		t.Fatalf("错误里要带路径：%q", c.Detail)
 	}
 }
+
+// 体检要说清"这台机器能不能搜"，而不是等模型每调一次失败一次。
+//
+// 判据来自真语料：web_search 的失败率 91%（61/67），失败原因永远是同一句
+// "宿主没有装搜索后端"——那是环境，不是代码。所以这一项**不许报红**：
+// 不配搜索照样能用（web_fetch 直取网址），报红会让所有没配的人都以为坏了。
+func TestDoctorReportsSearchBackend(t *testing.T) {
+	t.Setenv("DSHD_SEARCH_URL", "")
+	c := checkSearchBackend()
+	if !c.OK {
+		t.Fatal("没配搜索后端不该报红：不配也能用，只是搜不了")
+	}
+	if !strings.Contains(c.Detail, "web_fetch") && !strings.Contains(c.Detail, "搜不了") {
+		t.Fatalf("要说清后果与替代：%q", c.Detail)
+	}
+
+	t.Setenv("DSHD_SEARCH_URL", "https://searx.example/")
+	if c := checkSearchBackend(); !c.OK || !strings.Contains(c.Detail, "searx.example") {
+		t.Fatalf("配了就要显示配到哪：%+v", c)
+	}
+}
