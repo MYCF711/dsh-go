@@ -85,6 +85,10 @@ type Options struct {
 	SetSessionPermission func(sessionID, perm string) error
 	// ModelsList 列网关上的模型。nil = 这个宿主没接模型出口（回 501）。
 	ModelsList func(ctx context.Context) ([]ModelEntry, error)
+	// 长连接终端。nil = 这个宿主不给终端（回 501）。
+	TerminalOpen   func(cwd string) (string, error)
+	TerminalInput  func(id, data string) error
+	TerminalOutput func(id string, since int) (TerminalOutput, error)
 	// FSRead 读一个文件；路径解析、大小上限、越界检查都在宿主那边。
 	FSRead func(path string) (FSContent, error)
 	// FSWrite 写一个文件；宿主注入。
@@ -347,6 +351,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionSetPermission(w, r)
 	case MethodModelsList:
 		s.handleModelsList(w, r)
+	case MethodTerminalOpen:
+		s.handleTerminalOpen(w, r)
+	case MethodTerminalInput:
+		s.handleTerminalInput(w, r)
+	case MethodTerminalOutput:
+		s.handleTerminalOutput(w, r)
 	case MethodFSRead:
 		s.handleFSRead(w, r)
 	case MethodFSWrite:

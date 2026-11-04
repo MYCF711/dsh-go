@@ -19,6 +19,13 @@ type Service struct {
 	jobs  map[string]*job
 	seq   int
 	order []string
+	// terms 是**长连接终端**（`terminal.open` 起的那些）。
+	//
+	// 和 `jobs` 分开：job 是"跑一条命令、有结束"；terminal 是"一直开着、
+	// 用户随时敲"。混在一起会让 job 的生命周期判断（`len(order)`、`finished()`）
+	// 变得说不清。
+	terms map[string]*Terminal
+	tseq  int
 }
 
 // SetCwd 换掉"新会话的默认工作目录"。

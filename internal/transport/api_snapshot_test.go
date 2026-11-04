@@ -103,7 +103,9 @@ func TestSessionAPISnapshot(t *testing.T) {
 	// 第 21 个 models.list：界面要模型选择器就得知道有哪些模型。
 	// 网关地址与凭据只在宿主这一侧（R7），所以只能由宿主转发，
 	// 界面不能自己发请求——也不能硬编码模型名（会过期、且会骗人）。
-	const done, target = 21, 21
+	// 第 22-24 个 terminal.open/input/output：长连接 shell。
+	// 底层 modules/exec/bash 的 session 本来就是持久 PTY，缺的只是开一个留住它。
+	const done, target = 24, 24
 	if got := len(SessionMethods()); got != done {
 		t.Fatalf("SessionMethods() 有 %d 个方法，当前进度应当是 %d 个（U0 目标 %d 个）", got, done, target)
 	}

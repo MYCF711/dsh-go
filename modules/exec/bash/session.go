@@ -61,6 +61,14 @@ type session struct {
 	cwd  string
 	dead bool
 	seq  int
+	// sink 是**额外的输出出口**（终端用）。
+	//
+	// 为什么需要它：`readLoop` 原来只把输出 append 给 `s.task`，
+	// 而终端会话**没有 task**——它是"用户一直往里敲、输出一直出来"的长连接。
+	// 没有 sink 的话，终端的输出会被 readLoop 直接丢掉（什么都看不见）。
+	//
+	// **nil = 没有额外出口**（普通的一次性命令），这是零成本的分支。
+	sink func([]byte)
 }
 
 func startSession(cwd string) (*session, error) {
@@ -99,10 +107,16 @@ func (s *session) readLoop() {
 		if n > 0 {
 			s.mu.Lock()
 			t := s.task
+			sink := s.sink
 			s.mu.Unlock()
 			if t != nil {
 				t.append(buf[:n])
 				t.scan()
+			}
+			// **先给 task 再给 sink**：一次性命令走 task、终端走 sink，
+			// 两者不会同时存在（终端会话不挂 task），顺序不影响正确性。
+			if sink != nil {
+				sink(buf[:n])
 			}
 		}
 		if err != nil {

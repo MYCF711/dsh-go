@@ -18,6 +18,7 @@ import (
 	"dshgo/internal/llm"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
+	"dshgo/modules/exec/bash"
 )
 
 // errNoModel 是 serve 的 turnRunner 给出的回答：**故意**失败。
@@ -127,6 +128,10 @@ func cmdServe(args []string) error {
 	if err := checkHome(*home); err != nil {
 		return err
 	}
+
+	// 终端服务：serve 模式不装配模块，所以单独建一份（和 run/acp 那边各自一份同构）。
+	bashSvc := bash.NewService("")
+	defer bashSvc.Close()
 
 	// 会话级模型覆盖（读盘失败不拦启动：界面上少一个下拉，比启不来好）。
 	modelOverrides := newModelOverrideStore(*home)
@@ -252,6 +257,31 @@ func cmdServe(args []string) error {
 				out = append(out, transport.ModelEntry{ID: m.ID, OwnedBy: m.OwnedBy})
 			}
 			return out, nil
+		},
+		// 长连接终端：底层 `modules/exec/bash` 的 session 本来就是持久 PTY，
+		// 缺的只是"开一个留住它"的入口。**Serve 自己建一个 Service**——
+		// serve 模式不装配模块（agent 跑在子进程里），所以这里要单独一份。
+		TerminalOpen: func(cwd string) (string, error) {
+			t, err := bashSvc.OpenTerminal(cwd)
+			if err != nil {
+				return "", err
+			}
+			return t.ID(), nil
+		},
+		TerminalInput: func(id, data string) error {
+			t := bashSvc.Terminal(id)
+			if t == nil {
+				return fmt.Errorf("没有这个终端: %s", id)
+			}
+			return t.Input(data)
+		},
+		TerminalOutput: func(id string, since int) (transport.TerminalOutput, error) {
+			t := bashSvc.Terminal(id)
+			if t == nil {
+				return transport.TerminalOutput{}, fmt.Errorf("没有这个终端: %s", id)
+			}
+			out, next, dead := t.Output(since)
+			return transport.TerminalOutput{Output: string(out), Next: next, Dead: dead}, nil
 		},
 		Addr: *addr,
 		// H14：把序号域交给 server——WS 推送与 session.history 必须读同一份，

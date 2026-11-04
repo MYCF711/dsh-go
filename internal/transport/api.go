@@ -48,10 +48,18 @@ const (
 	// 为什么必须由宿主转发：网关地址与凭据只在宿主这一侧（R7 界面不直连模型出口）。
 	// 界面要模型下拉就只能走这里——或者在界面里硬编码模型名，那会过期、且会骗人。
 	MethodModelsList Method = "models.list"
-	MethodFSRead     Method = "fs.read"
-	MethodFSWrite    Method = "fs.write"
-	MethodConfigGet  Method = "config.get"
-	MethodConfigSet  Method = "config.set"
+	// MethodTerminalOpen/Input/Output 是一条**长连接 shell** 的三个动作。
+	//
+	// 和 `jobs.*` 的区别：job 是"跑一条命令、有结束"；terminal 是"一直开着、
+	// 用户随时敲"。底层 `modules/exec/bash` 的 `session` 本来就是持久 PTY，
+	// 只是一直没有"开一个留住它"的入口。
+	MethodTerminalOpen   Method = "terminal.open"
+	MethodTerminalInput  Method = "terminal.input"
+	MethodTerminalOutput Method = "terminal.output"
+	MethodFSRead         Method = "fs.read"
+	MethodFSWrite        Method = "fs.write"
+	MethodConfigGet      Method = "config.get"
+	MethodConfigSet      Method = "config.set"
 )
 
 // SessionMethods 是 U0 第一版要兑现的全部方法（顺序固定，快照按它排）。
@@ -62,6 +70,7 @@ func SessionMethods() []Method {
 		MethodSessionDelete, MethodSessionFork, MethodSessionCompact, MethodWorkspaceList,
 		MethodJobsList, MethodJobsOutput, MethodScheduleList,
 		MethodSessionSetModel, MethodSessionSetPermission, MethodModelsList,
+		MethodTerminalOpen, MethodTerminalInput, MethodTerminalOutput,
 		MethodFSRead, MethodFSWrite, MethodConfigGet, MethodConfigSet,
 	}
 }
