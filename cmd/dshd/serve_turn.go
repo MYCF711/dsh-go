@@ -239,7 +239,7 @@ func assistantBlocks(resp *llm.Response) []map[string]any {
 //
 // OpenSessionAt 会抢写锁；抢不到就报错，不硬写——同一份会话只允许一个写入者，
 // 硬写的后果是重复 seq，而 seq 是 surface 与遮蔽的排序依据。
-func (r *modelRunner) persist(sessionID, text string, resp *llm.Response) error {
+func (r *modelRunner) persist(sessionID, text string, resp *llm.Response) (retErr error) {
 	src := newSessionSource(r.home, "")
 	path, err := src.resolve(sessionID)
 	if err != nil {
@@ -251,14 +251,51 @@ func (r *modelRunner) persist(sessionID, text string, resp *llm.Response) error 
 	}
 	defer logw.Close()
 
+	// 调试路径也要写轮边界。
+	//
+	// 以前这里只写 user/assistant 两条消息、**从不写 turn/start**：日志里没有轮次，
+	// `session.history` 的消费者只能看到一串没有边界的消息；而只要有一次失败，
+	// 又会出现"开了轮却没结局"的悬挂态——两件事都是 D1 明确要消灭的形状。
+	// 这里复用 run 那条路同一个 turnCloser：一个 turn 一条结局，失败也补。
+	turn := nextTurnNumber(path)
+	if err := logw.Append("turn/start", session.TurnStartData(turn)); err != nil {
+		return fmt.Errorf("存不下来（写轮次开始）: %w", err)
+	}
+	tc := newTurnCloser(logw, turn)
+	defer func() { _ = tc.Exit(context.Background(), retErr) }()
+
 	if err := logw.Append("user/message", session.UserMessage([]spi.Block{{Type: "text", Text: text}})); err != nil {
 		return fmt.Errorf("存不下来（写用户消息）: %w", err)
 	}
 	if resp != nil && assistantHasPayload(resp.Content, resp.Reasoning, len(resp.ToolCalls)) {
 		if err := logw.Append("assistant/message",
-			session.AssistantMessageEvent(1, 1, assistantBlocks(resp), resp.FinishReason, nil)); err != nil {
+			session.AssistantMessageEvent(turn, 1, assistantBlocks(resp), resp.FinishReason, nil)); err != nil {
 			return fmt.Errorf("存不下来（写回答）: %w", err)
 		}
 	}
-	return nil
+	finish := ""
+	if resp != nil {
+		finish = resp.FinishReason
+	}
+	return tc.End(finish)
+}
+
+// nextTurnNumber 数一下这份日志里已经开过几个 turn，下一个就是它 +1。
+//
+// 为什么不用"进程内计数器"：serve 每轮可能换一个子进程，进程内计数从 1 开始，
+// 第二次就又写 turn:1——同一个会话里出现两个 turn:1，消费者会把两轮当成一轮。
+// 也不能问正在写的那个 Log（它不暴露已写事件），所以先纯读一遍文件。
+// 读失败就退到 1：轮次号错总比"写不进去"好，而写不进去调用方会拿到 error。
+func nextTurnNumber(path string) int {
+	log, err := v4.ReadFile(path)
+	if err != nil || log == nil {
+		return 1
+	}
+	n := 0
+	for _, ev := range log.Events {
+		if ev.Type == "turn/start" {
+			n++
+		}
+	}
+	return n + 1
 }

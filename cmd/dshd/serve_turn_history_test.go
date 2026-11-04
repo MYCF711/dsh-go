@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/llm"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 	"dshgo/internal/transport"
@@ -366,5 +367,64 @@ func TestModelRunnerHistoryDropsCallWithoutResult(t *testing.T) {
 	want := `user:"跑一下" → user:"还在吗"`
 	if got := trail(msgs); got != want {
 		t.Fatalf("没有结果的工具调用应当被摘掉：\n得到 %s\n要   %s", got, want)
+	}
+}
+
+// 调试路径（DSHD_SERVE_MODEL_RUNNER=1）也要写轮边界。
+//
+// 以前 persist 只写 user/assistant 两条消息、从不写 turn/start：日志里没有轮次，
+// history 的消费者只能看到一串没有边界的消息；一旦中途失败，还会留下"开了轮没结局"
+// 的悬挂态。这条钉住：跑一轮要有 turn/start，跑完要有且只有一条 turn/end。
+func TestModelRunnerPersistWritesTurnBoundaries(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	path := seedTurnSession(t, home, cwd, "session-turnboundary", func(lg *session.Log) error {
+		return nil // 只建一个空会话：persist 需要文件存在
+	})
+
+	r := &modelRunner{home: home}
+	resp := &llm.Response{Content: "好的", FinishReason: "stop"}
+	if err := r.persist("session-turnboundary", "你好", resp); err != nil {
+		t.Fatalf("写不进去：%v", err)
+	}
+
+	log, err := v4.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var starts, ends int
+	for _, ev := range log.Events {
+		switch ev.Type {
+		case "turn/start":
+			starts++
+		case "turn/end":
+			ends++
+		}
+	}
+	if starts != 1 || ends != 1 {
+		t.Fatalf("轮边界不对：turn/start=%d turn/end=%d（都要恰好 1 条）", starts, ends)
+	}
+
+	// 第二轮：号码必须接着走，不能又是 1
+	if err := r.persist("session-turnboundary", "再说一次", resp); err != nil {
+		t.Fatal(err)
+	}
+	log, err = v4.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var turns []int
+	for _, ev := range log.Events {
+		if ev.Type != "turn/start" {
+			continue
+		}
+		var d struct {
+			Turn int `json:"turn"`
+		}
+		_ = json.Unmarshal(ev.Data, &d)
+		turns = append(turns, d.Turn)
+	}
+	if len(turns) != 2 || turns[0] == turns[1] {
+		t.Fatalf("两轮的 turn 号必须不同：%v", turns)
 	}
 }
