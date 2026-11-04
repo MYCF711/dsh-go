@@ -16,3 +16,8 @@
 .vscode/
 .idea/
 dist/
+
+# 本地临时（A/B 输出、探针二进制）
+.tmp-*\.json
+/dshtui.exe
+__pycache__/

@@ -324,9 +324,9 @@ func cmdTools(argv []string) error {
 	manifest := fs.String("manifest", "dsh.toml", "manifest 路径")
 	// 表形态：真正发给模型的是 compact。打印 full 会让人以为成本是 32 KB，
 	// 而实际发出去的是压缩后的——门禁按"发出去的那个"算才有意义。
-	schema := fs.String("schema", defaultToolSchema, "打印哪种形态（旧名，等价于 --tools-mode）：compact|full")
+	schema := fs.String("schema", defaultToolSchema, "打印哪种形态（旧名，等价于 --tools-mode）：compact|full|lazy")
 	mode := fs.String("tools-mode", "",
-		"工具表形态：compact（默认，= 去参数说明 + 去冗余 schema 骨架）| full | merged（watch/hindsight/schedule/team_task 四族各合成一个工具，多一个 action 参数）")
+		"工具表形态：compact（默认，= 去参数说明 + 去冗余 schema 骨架）| full | merged（watch/hindsight/schedule/team_task 四族各合成一个工具，多一个 action 参数）| lazy（只常驻语料前 30 名，其余用 tool_load 取）")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -349,26 +349,18 @@ func cmdTools(argv []string) error {
 	if err != nil {
 		return err
 	}
-	tools := reg.Tools()
-	if tm == toolsModeMerged {
-		mt, warn, err := newMergedTable(reg)
-		if err != nil {
-			return err
-		}
-		for _, w := range warn {
-			fmt.Fprintln(os.Stderr, "工具表："+w)
-		}
-		tools = mt.Tools()
-	}
-	table, err := toolTableOf(tools)
+	// 与 cmdRun 走**同一条**投影链（见 projectTable）：合并 → 收紧 → lazy。
+	// 分成两套写法的话，`dshd tools` 打印的就不是真正发出去的那张表了。
+	view, _, lazyRef, warns, err := projectTable(tm, reg)
 	if err != nil {
 		return err
 	}
-	if tm != toolsModeFull {
-		for i := range table {
-			// 与 cmdRun 同一条投影链（去参数说明 + 去冗余骨架），见 tightenSchema。
-			table[i].Parameters = tightenSchema(table[i].Parameters)
-		}
+	for _, w := range warns {
+		fmt.Fprintln(os.Stderr, "工具表："+w)
+	}
+	table, err := toolTableOf(view.Tools())
+	if err != nil {
+		return err
 	}
 	out, err := json.MarshalIndent(table, "", "  ")
 	if err != nil {
@@ -376,6 +368,11 @@ func cmdTools(argv []string) error {
 	}
 	fmt.Println(string(out))
 	fmt.Fprintf(os.Stderr, "工具 %d 个，%d 字节（形态 %s）\n", len(table), len(out), tm)
+	if lazyRef != nil {
+		dir := lazyRef.Directory()
+		fmt.Fprintf(os.Stderr, "lazy：常驻 %d 个，表外 %d 个；系统提示目录 %d 字节\n",
+			len(lazyRef.hot), len(lazyRef.names), len(dir))
+	}
 	return nil
 }
 
@@ -451,7 +448,7 @@ func cmdRun(argv []string) error {
 	// merged 是第三档：把同族工具（watch/hindsight/schedule/team_task）各合成
 	// 一个工具，多一个 action 参数。只改模型看到的表，执行仍按原工具名走。
 	toolsMode := fs.String("tools-mode", "",
-		"工具表形态：compact（默认）| full | merged（四族合成一个工具+action：表更小，但模型要自己挑 action，选错就白跑一步）")
+		"工具表形态：compact（默认）| full | merged（四族合成一个工具+action：表更小，但模型要自己挑 action，选错就白跑一步）| lazy（只常驻 30 个，其余先 tool_load 取；默认关闭，见 docs/tool-table-lazy.md）")
 	// 规则文件：默认工作区的 AGENTS.md；给"执行者"喂精简手册时指到 docs/WORKER.md。
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	policy := fs.String("policy", defaultRunPolicy, "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
@@ -506,29 +503,22 @@ func cmdRun(argv []string) error {
 	if err != nil {
 		return err
 	}
-	// 工具表投影（只这一层）：merged 时把四族换成"一个工具 + action"，
+	// 工具表投影（只这一层）：合并 → 收紧 → lazy，见 projectTable。
 	// 系统提示里的工具清单也要跟着换——否则模型从提示里看到旧的 17 个名字，
 	// 从 tools 字段看到 4 个，两边对不上。
-	table := spi.ToolRegistry(reg)
-	var mergedRef *mergedTable
-	if tm == toolsModeMerged {
-		mt, warn, err := newMergedTable(reg)
-		if err != nil {
-			return err
-		}
-		for _, w := range warn {
-			fmt.Fprintln(os.Stderr, "工具表："+w)
-		}
-		mergedRef = mt
-		table = mt
+	table, mergedRef, lazyRef, warns, err := projectTable(tm, reg)
+	if err != nil {
+		return err
 	}
-	// compact = 去掉参数说明（agent 循环里那步）+ 去掉冗余骨架（tightenTable）。
-	// 顺序在 merged **之后**：合并要读成员的原始 schema（顶层 type 判断、
-	// required 抄写），先收紧会让它把"顶层不是 object"误判成合不进来。
-	if tm != toolsModeFull {
-		table = tightenTable(table)
+	for _, w := range warns {
+		fmt.Fprintln(os.Stderr, "工具表："+w)
 	}
 	sys := buildSystemPrompt(table, *model, cwd, *workspaceBytes)
+	// lazy 的目录是系统提示的一部分：被藏起来的工具，它的描述也一起藏了，
+	// "缺什么先 tool_load"这条规则没有别的地方可放。
+	if lazyRef != nil {
+		sys += "\n\n" + lazyRef.Directory()
+	}
 	// --session：续一个已经存在的会话，而不是新建。
 	// 定时任务的"到期后跑一轮"就是靠这个——它必须落在**原会话**里，
 	// 新建会话会让上下文断掉（模型不记得之前聊过什么）。
@@ -623,6 +613,12 @@ func cmdRun(argv []string) error {
 		mergedRef.bindRunner(mr.Run) // Exec 兜底：即便有人绕过 Runner，也还是走同一条路由
 		loopRunner = mr
 	}
+	// lazy 在最外层：tool_load 要先被接住（它不在 registry 里），
+	// 没装载的表外工具也要在执行前挡回。放进守卫里面的话，tool_load 会被
+	// 当成"未知工具"打回，而"没装载"的调用会直接被真 registry 执行掉。
+	if lazyRef != nil {
+		loopRunner = &lazyRunner{inner: loopRunner, table: lazyRef}
+	}
 
 	chat := llm.New(*base, os.Getenv("DSHD_LLM_KEY"))
 	// meter 跨步复用：每步都用服务端给的 totalTokens 校准一次估算。
@@ -645,7 +641,7 @@ func cmdRun(argv []string) error {
 		SessionID: sessID,
 		// 这里显式关掉循环自带的压表：表在 cmdRun 里已经被 tightenTable 投影过一遍。
 		// 循环那个 CompactSchema 是"见 description 键就删"，会把名叫 description 的
-		// **参数**也删掉（bash/subagent/team_task_create 等 6 个工具真有这个参数），
+		// **参数**也删掉（ask_user_question/bash/present/team_task_create 等 8 个工具有这个参数），
 		// 而 tightenSchema 分得清"注解"和"参数名"。两条路同时开，后一条会覆盖前一条。
 		CompactTools: false,
 		// 只有显式设了才要推理：某些网关不认这个参数，默认不带更安全。

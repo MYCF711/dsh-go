@@ -31,11 +31,13 @@ import (
 	"dshgo/internal/spi"
 )
 
-// 工具表的三种形态。full / compact 是原有语义，merged 是新增的第三档。
+// 工具表的四种形态。full / compact 是原有语义，merged 是合并档，
+// lazy 是按需装载档（见 tool_lazy.go）——后两档都必须显式打开。
 const (
 	toolsModeFull    = "full"
 	toolsModeCompact = "compact"
 	toolsModeMerged  = "merged"
+	toolsModeLazy    = "lazy"
 )
 
 // mergedAction 是一个 action 取值与它对应的原工具。
@@ -156,11 +158,11 @@ func resolveToolsMode(mode, legacy string) (string, error) {
 		m = defaultToolSchema
 	}
 	switch m {
-	case toolsModeFull, toolsModeCompact, toolsModeMerged:
+	case toolsModeFull, toolsModeCompact, toolsModeMerged, toolsModeLazy:
 		return m, nil
 	}
-	return "", fmt.Errorf("--tools-mode 只能是 %s|%s|%s，收到 %q",
-		toolsModeCompact, toolsModeFull, toolsModeMerged, m)
+	return "", fmt.Errorf("--tools-mode 只能是 %s|%s|%s|%s，收到 %q",
+		toolsModeCompact, toolsModeFull, toolsModeMerged, toolsModeLazy, m)
 }
 
 // mergedTool 是投影出来的工具：名字/描述/schema 是新的，执行回落到原工具。

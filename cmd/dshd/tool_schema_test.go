@@ -729,6 +729,279 @@ func TestMergedTableIsSmallerThanCompact(t *testing.T) {
 		100*(1-float64(mergedBytes)/float64(compactBytes)))
 }
 
+// ---- lazy：按需装载 ----
+//
+// 这一档的红线有三条，都在下面钉住：
+//  1. 默认仍是 compact，lazy 只能显式打开；
+//  2. 被藏起来的工具**不在表里**、调不到，取用后**在下一步的表里**；
+//  3. 省下来的字节必须大于目录的代价，否则这一档没有存在的理由。
+
+func TestLazyNeedsExplicitFlag(t *testing.T) {
+	for _, c := range []struct{ mode, legacy, want string }{
+		{"", "", toolsModeCompact},
+		{"lazy", "", toolsModeLazy},
+		{"lazy", "full", toolsModeLazy}, // 新名优先
+		{"full", "lazy", toolsModeFull},
+	} {
+		got, err := resolveToolsMode(c.mode, c.legacy)
+		if err != nil {
+			t.Fatalf("mode=%q legacy=%q: %v", c.mode, c.legacy, err)
+		}
+		if got != c.want {
+			t.Fatalf("mode=%q legacy=%q → %q，期望 %q", c.mode, c.legacy, got, c.want)
+		}
+	}
+	if _, err := resolveToolsMode("lazzy", ""); err == nil {
+		t.Fatal("拼错的 --tools-mode 必须报错，不能静默退回 compact")
+	}
+	if defaultToolSchema != toolsModeCompact {
+		t.Fatalf("默认形态必须仍是 compact，现在是 %q", defaultToolSchema)
+	}
+}
+
+// 常驻集是可以重算的，但它必须**真的对得上装配**：名字抄错一个，
+// 那个工具就被悄悄藏起来（而且没有任何测试会发现）。
+func TestLazyHotListMatchesAssembly(t *testing.T) {
+	if len(defaultHotTools) != 30 {
+		t.Fatalf("常驻集应该是 30 个（语料前 30 名），现在是 %d 个", len(defaultHotTools))
+	}
+	reg := assembleRegistry(t)
+	have := map[string]bool{}
+	for _, tl := range reg.Tools() {
+		have[tl.Name()] = true
+	}
+	seen := map[string]bool{}
+	for i, n := range defaultHotTools {
+		if seen[n] {
+			t.Fatalf("常驻集第 %d 名 %q 重复", i+1, n)
+		}
+		seen[n] = true
+		if !have[n] {
+			t.Fatalf("常驻集第 %d 名 %q 不在装配里（名单从语料重算，但名字必须与本仓一致）", i+1, n)
+		}
+	}
+	// 名次是语料的产物，但"第 1 名 bash"是本仓的稳定事实；换名单时这条会红，
+	// 提醒先重跑 scripts/tool-table-hot.py，而不是随手改。
+	if defaultHotTools[0] != "bash" {
+		t.Fatalf("常驻集第 1 名应是 bash（语料 69.5%%），现在是 %q", defaultHotTools[0])
+	}
+}
+
+func TestLazyTableHidesAndReveals(t *testing.T) {
+	reg := assembleRegistry(t)
+	view, mt, lt, warns, err := projectTable(toolsModeLazy, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mt != nil {
+		t.Fatal("lazy 不该产出一个 merged 表")
+	}
+	if lt == nil {
+		t.Fatal("lazy 必须返回可用的取用表")
+	}
+	if len(warns) != 0 {
+		t.Fatalf("常驻集里不该有装配没有的名字：%v", warns)
+	}
+
+	// history_search 是表外工具（语料里 0 次，但确实装着）。用它验证
+	// "藏起来 → 取 → 出现在下一步的表里"。
+	const hidden = "history_search"
+	names := toolNamesOf(view.Tools())
+	if containsStr(names, hidden) {
+		t.Fatalf("%s 不该在 lazy 表里（它是表外工具）", hidden)
+	}
+	if !containsStr(names, toolLoadName) {
+		t.Fatalf("lazy 表里必须有取用入口 %s", toolLoadName)
+	}
+	if !containsStr(names, "bash") {
+		t.Fatal("常驻工具 bash 不见了")
+	}
+	if _, ok := view.Get(hidden); ok {
+		t.Fatalf("没装载的 %s 不该能 Get 到", hidden)
+	}
+
+	res, err := lt.load([]byte(`{"names":["` + hidden + `"]}`))
+	if err != nil {
+		t.Fatalf("装载失败: %v（%s）", err, res.Hint)
+	}
+	if !strings.Contains(res.Text, hidden) || !strings.Contains(res.Text, `"parameters"`) {
+		t.Fatalf("装载结果里没有 %s 的 schema：%s", hidden, res.Text)
+	}
+	names = toolNamesOf(view.Tools())
+	if !containsStr(names, hidden) {
+		t.Fatalf("装载之后 %s 应该出现在下一步的表里", hidden)
+	}
+	if _, ok := view.Get(hidden); !ok {
+		t.Fatalf("装载之后 Get(%s) 应该能拿到", hidden)
+	}
+	// 取过就不再是"表外"：第二次取要告诉模型不用再取，而不是再发一遍 schema。
+	again, err := lt.load([]byte(`{"name":"` + hidden + `"}`))
+	if err != nil {
+		t.Fatalf("重复装载不该失败: %v", err)
+	}
+	if !strings.Contains(again.Text, "已在表里") {
+		t.Fatalf("重复装载应说明已在表里：%s", again.Text)
+	}
+	// 没这个名字：必须失败、必须给 Hint（R3），且不能把已装载的清掉。
+	bad, berr := lt.load([]byte(`{"names":["web_serach"]}`))
+	if berr == nil {
+		t.Fatal("拼错的名字必须报错")
+	}
+	if bad.Hint == "" {
+		t.Fatal("失败的 tool_load 没给 Hint（R3）")
+	}
+	if !strings.Contains(bad.Text, "web_search") {
+		t.Fatalf("提示里应给出最接近的名字 web_search：%s", bad.Text)
+	}
+	if _, ok := view.Get(hidden); !ok {
+		t.Fatal("一次失败的装载不该把已装载的工具弄丢")
+	}
+}
+
+func TestLazyRunnerBlocksUnloaded(t *testing.T) {
+	reg := assembleRegistry(t)
+	_, _, lt, _, err := projectTable(toolsModeLazy, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	inner := runnerFunc(func(context.Context, string, json.RawMessage) (spi.Result, error) {
+		calls++
+		return spi.Result{Summary: "执行了"}, nil
+	})
+	r := &lazyRunner{inner: inner, table: lt}
+
+	// 1) 没装载的表外工具：挡回，且不能落到真执行器上。
+	res, err := r.Run(context.Background(), "now_line", nil)
+	if err == nil {
+		t.Fatal("没装载的 now_line 应该被挡回")
+	}
+	if calls != 0 {
+		t.Fatalf("被挡回的调用不该落到执行器（calls=%d）", calls)
+	}
+	if !strings.Contains(res.Hint, toolLoadName) {
+		t.Fatalf("挡回时要告诉模型先用 %s：%q", toolLoadName, res.Hint)
+	}
+
+	// 2) tool_load 在路由层被接住，不进真执行器。
+	if _, err := r.Run(context.Background(), toolLoadName, []byte(`{"names":["now_line"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("tool_load 不该进真执行器（calls=%d）", calls)
+	}
+
+	// 3) 装载之后再调同一个名字：正常落到执行器。
+	if _, err := r.Run(context.Background(), "now_line", nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("装载后的调用应落到执行器一次，实际 %d", calls)
+	}
+	// 4) 常驻工具一直可调。
+	if _, err := r.Run(context.Background(), "bash", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("常驻工具应落到执行器，实际 %d 次", calls)
+	}
+}
+
+func TestLazyTableSavesBytes(t *testing.T) {
+	reg := assembleRegistry(t)
+	view, _, lt, _, err := projectTable(toolsModeLazy, reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact := wireBytesOf(tightenTable(reg).Tools())
+	lazy := wireBytesOf(view.Tools())
+	dir := lt.Directory()
+	if dir == "" {
+		t.Fatal("lazy 的目录不能为空：模型没有别的地方能知道表外有什么")
+	}
+	// 装着 27 个表外工具，目录里必须一个不少。
+	for _, n := range lt.names {
+		if !strings.Contains(dir, n+" — ") {
+			t.Fatalf("目录里缺 %s", n)
+		}
+	}
+	if !strings.Contains(dir, toolLoadName) {
+		t.Fatalf("目录里必须写清用 %s 取：%s", toolLoadName, dir)
+	}
+	// 净收益 = 省下的表 - 目录代价。低于 20% 就说明藏着不如留着。
+	net := compact - lazy - len(dir)
+	if net*5 < compact {
+		t.Fatalf("lazy 的净收益太小：compact=%d lazy=%d 目录=%d 净省=%d（%.1f%%）",
+			compact, lazy, len(dir), net, 100*float64(net)/float64(compact))
+	}
+	t.Logf("lazy 比 compact 省 %d 字节：表 %d → %d，目录 +%d，净省 %d（%.1f%%）",
+		net, compact, lazy, len(dir), net, 100*float64(net)/float64(compact))
+	t.Logf("目录（%d 字节）：\n%s", len(dir), dir)
+}
+
+func TestParseLoadArgs(t *testing.T) {
+	for _, c := range []struct {
+		args string
+		want []string
+		ok   bool
+	}{
+		{`{"names":["a","b"]}`, []string{"a", "b"}, true},
+		{`{"names":"a"}`, []string{"a"}, true},
+		{`{"name":"a"}`, []string{"a"}, true},
+		{`{"tools":["a"]}`, []string{"a"}, true},
+		{`{"names":["a","a","b"]}`, []string{"a", "b"}, true},
+		{`{}`, nil, false},
+		{`null`, nil, false},
+		{`[]`, nil, false},
+	} {
+		got, err := parseLoadArgs([]byte(c.args))
+		if c.ok != (err == nil) {
+			t.Fatalf("%s: err=%v，期望 ok=%v", c.args, err, c.ok)
+		}
+		if c.ok && !sameStrings(got, c.want) {
+			t.Fatalf("%s → %v，期望 %v", c.args, got, c.want)
+		}
+	}
+	// 一次最多 8 个：再多就是把整张表搬回来，藏它没有意义。
+	got, err := parseLoadArgs([]byte(`{"names":["a","b","c","d","e","f","g","h","i","j"]}`))
+	if err != nil || len(got) != 8 {
+		t.Fatalf("超过 8 个应截断到 8，得到 %v（%v）", got, err)
+	}
+}
+
+// wireBytesOf 算"真正发给模型的字节"：名字 + 描述 + 参数 schema。
+// Caps 不算——llm.ToolDef 里没有它（审批在宿主侧用，不发给网关）。
+func wireBytesOf(tools []spi.Tool) int {
+	n := 0
+	for _, tl := range tools {
+		b, err := json.Marshal(struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Parameters  json.RawMessage `json:"parameters"`
+		}{tl.Name(), tl.Description(), tl.Schema()})
+		if err != nil {
+			panic(err)
+		}
+		n += len(b)
+	}
+	return n
+}
+
+func toolNamesOf(tools []spi.Tool) []string {
+	out := make([]string, 0, len(tools))
+	for _, tl := range tools {
+		out = append(out, tl.Name())
+	}
+	return out
+}
+
+// runnerFunc 让测试用函数实现 spi.Runner（Go 不能把函数直接当接口用）。
+type runnerFunc func(ctx context.Context, name string, args json.RawMessage) (spi.Result, error)
+
+func (f runnerFunc) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
+	return f(ctx, name, args)
+}
+
 func sameStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
