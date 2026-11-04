@@ -19,8 +19,9 @@
 //     （9007199254740993 不会变成 ...992，1e+04 不会重排）；CompactSchema 走
 //     any，数字会过一遍 float64；
 //   - tightenSchema 只递归 properties/items，$defs、anyOf、default 里的东西
-//     原样不动；CompactSchema 递归一切对象（因此也会删掉 default 数据里的
-//     同名键——这是它既有的行为，不在这条收敛里改）。
+//     原样不动；CompactSchema 递归一切 **schema 位置**（properties/items/anyOf/$defs…，
+//     注解照删），但 **数据位置**（default/const/enum/examples）的整棵子树原样保留——
+//     那里的 description 是值里的一个字段，不是注解（2026-11-04 修掉的过度删除）。
 //
 // 所以两个变换各自保留，只有「谁是注解」这个判断共用。
 package schema
@@ -52,11 +53,34 @@ func IsPropertyMapKey(k string) bool {
 // 这一层的键就是参数名——哪怕它叫 description，也只是个名字，必须保留。
 // 这是两处压表实现唯一需要共同判断的事；收在这里，是为了让「按位置判断」
 // 只有一份，而不是每个调用方各自按 key 名写一个删除分支。
+//
+// 它只回答「名字位置还是 schema 位置」。还有第三种位置——**数据位置**
+// （default/const/enum/examples 的值），见 isDataKey：那里的键是数据字段，
+// 递归压表的调用方必须先问 isDataKey，问完才轮到这个函数。
 func IsAnnotationKey(k string, inPropertyMap bool) bool {
 	return !inPropertyMap && k == description
 }
 
-// stripAnnotations 去掉 v 里所有 schema 对象上的 description 注解，保留参数名。
+// isDataKey 判断某个关键字挂的是不是**实例数据**（不是 schema）。
+//
+// default / const / enum / examples 的值是"这个参数长什么样"的样例值，
+// 不是"这个参数有哪些说明"。数据里的键全部属于值本身——哪怕它正好叫
+// description、哪怕它下面还有 properties/items 这种在别处是关键字的字眼。
+//
+// 为什么单独一个判断：删不删只有两种依据——键名和位置。D3 那条 bug 是
+// 只看键名（properties 里的参数名被删），这条是只看键名、且把数据也当 schema
+// （default 里的字段被删）。两个错误的形状一样，修法也一样：先定位置，再定键名。
+//
+// 不导出：它只服务于这一份递归，外部不该拿它再拼一份遍历。
+func isDataKey(k string) bool {
+	switch k {
+	case "default", "const", "enum", "examples":
+		return true
+	}
+	return false
+}
+
+// stripAnnotations 去掉 v 里所有 schema 对象上的 description 注解，保留参数名与数据。
 //
 // v 必须是 json.Unmarshal 进 any 的结果（map[string]any / []any / 标量）。
 // 返回新结构，不改入参。
@@ -68,6 +92,25 @@ func stripAnnotations(v any) any {
 //
 // inPropertyMap 为真表示 x 是 `properties` 这类映射的**值**：
 // 它的键是参数名（可能就叫 description），它的值是参数自己的 schema。
+//
+// 「删不删」同时取决于键名**和位置**。压表只在三种位置上做判断：
+//
+//  1. 名字映射（properties / patternProperties / $defs / definitions，见
+//     IsPropertyMapKey）：这一层的键是名字，**一个都不删**——包括名叫 description
+//     的参数或定义；它的值才是 schema，继续往下压。
+//  2. 数据位置（default / const / enum / examples，见 isDataKey）：值是实例数据，
+//     整棵子树**原样保留、不再往下压**。数据里没有注解，进去压就是在改值。
+//  3. schema 位置：其余的对象值都是 schema 本身，或其容器。这一档的常见关键字有
+//     items（旧式写法可以是 schema，也可以是 schema 数组）、prefixItems、
+//     anyOf / allOf / oneOf / not / if / then / else / contains / propertyNames /
+//     additionalProperties / additionalItems / unevaluatedProperties /
+//     unevaluatedItems / contentSchema——值是 schema 或 schema 数组，数组里每个
+//     元素也是 schema；只有这一档上的 description 才是注解，删。
+//
+// 这一档不逐个列关键字，而是「认得的名字映射按名字走、认得的数据按数据走、
+// 其余对象一律按 schema 走」。这么取舍的理由是有界：漏列一个 schema 关键字的
+// 后果是该删的注解没删（压表胖一点，**不丢数据**）；反过来把不认识的对象当
+// 数据去删，后果是值被改掉且两端都不报错。前者可接受，后者就是这两条 bug。
 func stripNode(x any, inPropertyMap bool) any {
 	switch t := x.(type) {
 	case map[string]any:
@@ -82,6 +125,11 @@ func stripNode(x any, inPropertyMap bool) any {
 		for k, val := range t {
 			if IsAnnotationKey(k, false) {
 				continue // 这个才是注解
+			}
+			if isDataKey(k) {
+				// 数据整棵子树原样带走：不动键、不动形状、也不往里递归。
+				out[k] = val
+				continue
 			}
 			// properties/patternProperties/$defs 的值是「名字 → schema」的映射。
 			out[k] = stripNode(val, IsPropertyMapKey(k))

@@ -422,13 +422,17 @@ serve 子进程由父进程的 `settleTurn` 补；独立的 `dshd run` 无法自
 | 参数上的 `description` **注解** | 删 | 删 | 是 |
 | `properties` → 参数 → `items` 里的注解 | 删 | 删 | 是 |
 | `$defs` / `patternProperties` / `anyOf` / 元组 `items` 里的注解 | 删 | **留**（只递归 properties/items） | **否** |
-| `default` 里的同名键（是数据，不是注解） | **删** | 留 | **否**（前者是既有的过度删除，这次不改） |
+| `default` 里的同名键（是数据，不是注解） | **删** → 已改成**保留**（2026-11-04，见 §5.2） | 留 | **否**（前者是既有的过度删除，这次不改）→ **已解决** |
 | 数字字面量 | 过 `float64`：`9007199254740993` → `…992`，`1e+04` → `10000` | 逐字节不变（`json.RawMessage` 承载子节点） | **否** |
 | 非对象根 / 非法 JSON | 递归/原样返回 | 原样返回 | 否 |
 
 一句话：`CompactSchema` 是"一个任何地方都能用的通用压表"，`tightenSchema` 是
 "工具表专档、逐字节保守"，两者都不能退让到对方那一侧（让 `tightenSchema` 走 `any`
 会动数字；让 `CompactSchema` 删骨架就改变它的对外语义）。所以只收敛**规则**。
+
+> 2026-11-04 补：表里 `default` 那一行不是"两种变换的差异"，而是 `CompactSchema`
+> 自己的一个缺陷——它在数据位置上删了值里的字段。已修，见 §5.2；`tightenSchema`
+> 那半格（留）正是"应该的样子"。
 
 #### 删掉的重复实现（收敛后改动的行数）
 
@@ -595,6 +599,130 @@ tool-call 块 → `Message.ToolCalls`，`tool/result` → `Message.ToolCallID`�
 **真机没有复现出"行为怪"**：模型两轮都答了 `3`。原因是孤立结果的内容里就写着 `3`，
 模型猜得出来。所以这条缺陷的可见症状不是每次都会错，而是**请求本身不合法**——
 把它当成"这次没炸"来判绿，正是本报告 §1.1 说的那种错。
+
+### 5.2 同形的两条：子代理转写丢消息、`Compact` 删 `default` 里的数据（2026-11-04，已解决）
+
+两条是同一个判据错误的第三、第四次出现：**"这段内容存不存在"用错了信号**——
+一处按正文判（`Text == ""`），一处按键名判（见到 `description` 就删），
+都没看"它在什么位置 / 它是什么角色"。两条都在共享树上先红后修。
+
+#### A. `cmd/dshd/subagent_inherit.go`：`if m.Text == "" { continue }`
+
+`subagent_fork` 的继承文本原来走 `sessionSource.Messages`（`transport.Message`，
+**只有 `Text`**），再按 `Text == ""` 过滤。于是只有 `tool_calls` 或只有 `reasoning`
+的 assistant 消息整条消失。症状比 `serve_turn.go` 那条更隐蔽：子代理不报错，
+只是"不知道父会话查过什么"，然后把已经做过的事重做一遍。
+
+**复用点（一个字没重写）**：`serve_turn.go` 里已有的两份——
+`assistantHasPayload(text, reasoning, toolCalls)`（"有没有内容"的唯一判据）与
+`reasoningBySeq(log)`（`llm.Message` 装不下 reasoning，要另解事件）。
+转写改成从 `session.Surface(log)` 派生（与 `modelRunner.history` 同一份投影，
+压缩遮蔽也按 Surface 折叠），不再经过 `transport.Message`。
+
+**没有复用的那半，以及为什么**：`historyForModel` 还会摘掉"有调用、没有结果"的
+工具调用——那是**请求**约束（发给上游要么 400、要么把下一条用户消息当工具结果）。
+转写是给人看的：摘掉它就是这次要修的那种丢数据，所以保留调用本身，
+把它写成一句人话 `[调用 bash：{"command":"ls"}]`。
+
+**转写的额外两条约束**：
+1. `tool_calls` → `[调用 名字：参数]`，`reasoning` → `[思考：…]`（带正文：子代理需要知道
+   父会话**为什么**这么干。这与请求路径相反——那里思考只能出"有没有"，把心里话当
+   回答发出去是错的）。
+2. 一条消息一行（换行与连续空白折成空格）。理由在 `modules/tool/subagentfork.inheritNote`：
+   它按**非空行数**报"继承 N 条历史"，正文带换行时这个数字是假的，模型会以为拿到
+   的历史比实际更多。`keep = 20` 改成"先判有没有内容、再取最后 20 条"。
+
+**红（修之前，共享树，同一份测试）**：
+
+```
+$ go test ./cmd/dshd -run TestSubagentInherit -count=1 -v
+    subagent_inherit_test.go:55: 转写：
+        user: 看看目录里有几个文件
+        顺便说一下大小
+        tool: 68 个文件
+    subagent_inherit_test.go:58: 用户消息没进转写（或多行正文没压成一行）：
+        ...
+--- FAIL: TestSubagentInheritKeepsToolCallsAndReasoning
+```
+
+两条 assistant 一条都没有，用户消息还被换行数成了两条——两个症状在同一份输出里。
+
+**绿（修之后）**：
+
+```
+$ go test ./cmd/dshd -run TestSubagentInherit -count=1 -v
+        user: 看看目录里有几个文件 顺便说一下大小
+        assistant: [调用 bash：{"command":"ls"}]
+        tool: 68 个文件
+        assistant: [思考：先想一下：用户要的是文件数]
+--- PASS: TestSubagentInheritKeepsToolCallsAndReasoning
+--- PASS: TestSubagentInheritWithoutSession
+```
+
+判据（任务书的三条）钉在新测试 `cmd/dshd/subagent_inherit_test.go`：
+只有 `tool_calls` 的必须出现、只有 `reasoning` 的必须出现、三样都没有的才算空
+（断言 `assistant: ` 恰好两行）；外加"一条消息一行"与"没有会话时返回空串"。
+
+#### B. `internal/schema.Compact`：`default` 里名叫 `description` 的**数据**被删
+
+`stripNode` 递归一切对象，所以进到 `default` 值内部也按 schema 删注解——
+可 `default` 的值是**实例数据**，里面的键是默认值对象的字段。删掉一个键等于
+把默认值改成了另一个值，两端都不报错。
+
+**修法：按位置判，不再按键名判**。新增 `isDataKey(k)`（不导出，只服务这一份递归），
+覆盖 `default` / `const` / `enum` / `examples` 四个数据位置：**整棵子树原样保留，
+不再往里递归**。判断规则写进了 `stripNode` 的注释，三条边界：
+
+| 位置 | 这一层的键是什么 | 压不压 |
+|---|---|---|
+| `properties` / `patternProperties` / `$defs` / `definitions`（`IsPropertyMapKey`） | 参数名 / 定义名 | **键一个都不删**（名叫 `description` 的参数或定义也留），值继续按 schema 压 |
+| `default` / `const` / `enum` / `examples`（`isDataKey`） | 数据字段名 | **整棵子树原样保留**，不递归 |
+| `items` / `prefixItems` / `anyOf` / `allOf` / `oneOf` / `not` / `if` / `then` / `else` / `contains` / `propertyNames` / `additionalProperties` / `unevaluated*` / `contentSchema` 等等 | schema 本身或 schema 数组 | 继续压，**这一档的 `description` 是注解，删** |
+
+取舍写在代码注释里：这一档**不逐个列关键字**，而是"认得的名字映射按名字走、
+认得的数据按数据走、其余对象一律按 schema 走"。漏列一个 schema 关键字的后果是
+该删的注解没删（压表胖一点，**不丢数据**）；反过来把不认识的对象当数据去删，
+就是这两条 bug。
+
+**红（修之前，共享树，先写测试）**：
+
+```
+$ go test ./internal/schema -count=1
+--- FAIL: TestCompactKeepsDescriptionInsideDefault
+    schema_test.go:155: default 里的 description 字段被删了（那是数据，不是注解）：
+        {"items":[{}],"nested":{"properties":{"description":{"type":"string"}}},"type":"ga"}
+--- FAIL: TestCompactKeepsDescriptionInsideDataKeys
+    schema_test.go:209: const 里的 description 字段被删了：{"value":"a"}（err=<nil>）
+```
+
+注意红输出里连 `default.items[0]` 都成了 `{}`：数组元素里的数据字段同样被删。
+
+**绿**：
+
+```
+$ go test ./internal/schema -count=1 -v
+--- PASS: TestCompactKeepsParamNamedDescription
+--- PASS: TestCompactKeepsDescriptionInsideDefault
+--- PASS: TestCompactKeepsDescriptionInsideDataKeys
+--- PASS: TestCompactStripsAnnotationsInSchemaPositions   # 反方向：schema 位置上的注解一个不留
+--- PASS: TestCompactBadInputPassthrough
+--- PASS: TestCompactShrinks
+```
+
+工具表字节没变：`cmd/dshd/testdata/tools.snapshot.json` 里 `default` / `const` /
+`examples` 出现 0 次、`enum` 9 次且都是标量数组，所以这条修复对**本仓真实工具 schema**
+的产物一个字节都没动（`internal/agent`、`cmd/dshd` 整包测试照旧全绿）。
+
+#### 同形但没改（越界，登记在此）
+
+- `cmd/dshd/history.go` 的 `eventText`：只拼 `type=="text"` 的块，
+  `history_search` 里 `text == ""` 直接跳过——**只有 `tool_calls` 的 assistant 在历史检索里
+  查不到**（"上次那个 ls 是哪一轮"搜不出来）。
+- `cmd/dshd/transport_source.go` 的 `messagesOf`：`transport.Message` 没有 reasoning 字段，
+  只有思考的回答在 `session.load` 投影里是**一条空消息**（`serve_turn` 推的帧带
+  `reasoning`，读回来就没了）。
+- `modules/tool/subagentfork` 的 `inheritNote` 按非空行数报"继承 N 条"——
+  本次靠"转写一条消息一行"让它算准，模块本身没动（它不认识会话，也不该为这件事改）。
 
 ## 6. 复跑与验收
 
