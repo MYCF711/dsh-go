@@ -35,6 +35,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.path.join(ROOT, "tmp", "dshd.exe")
+MODEL = ""   # 由 --model 填；空 = 用 dshd 的默认模型
 RULES = os.path.join(ROOT, "tmp", "ab-rules.txt")
 MODES = ("compact", "lazy")
 
@@ -171,6 +172,8 @@ def run_one(mode, task, max_steps, timeout):
     args = [EXE, "run", "--tools-mode", mode, "--home", home, "--policy", "allow",
             "--max-steps", str(max_steps), "--workspace-bytes", "1",
             "--agents", "tmp/ab-rules.txt", "--prompt", task["prompt"]]
+    if MODEL:
+        args += ["--model", MODEL]
     t0 = time.time()
     try:
         p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
@@ -239,6 +242,7 @@ def main():
     ap.add_argument("--md", default="", help="把结果写成 markdown 表（贴进文档用）")
     ap.add_argument("--md-from", default="", help="不跑模型：把已有 --out json 重新渲染成 markdown")
     ap.add_argument("--only", default="", help="只跑这些任务名（逗号分隔）")
+    ap.add_argument("--model", default="", help="换一个模型跑（默认用 dshd 的默认模型）；换模型必须重跑，不能外推")
     a = ap.parse_args()
 
     if a.md_from:
@@ -260,6 +264,8 @@ def main():
         print(f"表格：{a.md}")
         return
 
+    global MODEL
+    MODEL = a.model
     if not os.path.exists(EXE):
         sys.exit("先 go build -o tmp/dshd.exe ./cmd/dshd")
     if not os.path.exists(RULES):

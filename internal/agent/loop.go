@@ -168,6 +168,15 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 			return msgs, fmt.Errorf("第 %d 步模型调用失败: %w", step, err)
 		}
 
+		// 空响应不是"模型没话说"，是**这一次调用根本没成**。
+		//
+		// 真机踩过：网关列着一个模型 id，但那个上游是坏的（502 / 直接空流），
+		// 而某些网关在这种情况下回的是 **200 + 空 SSE**。于是这一轮会被记成
+		// "assistant 说了空话、turn completed"，退出码 0——用户看到的是
+		// "模型什么都没说"，而真相是"这个模型不能用"。两种事的下一步完全不同。
+		if err := emptyResponseErr(resp); err != nil {
+			return msgs, fmt.Errorf("第 %d 步模型调用失败: %w", step, err)
+		}
 		msgs = append(msgs, assistantMessage(resp))
 
 		var usage *llm.Usage
@@ -378,4 +387,25 @@ func CompactSchema(raw json.RawMessage) json.RawMessage {
 		return raw
 	}
 	return b
+}
+
+// emptyResponseErr 把"看起来成功、其实什么都没拿到"的响应判成错误。
+//
+// 判据只有一条：**正文、思考、工具调用三者皆空**。这时候无论是哪种 finish，
+// 这一轮都没有任何可用的产出，继续走下去只会让模型对着空历史瞎猜。
+// 分两种情况说清，因为下一步完全不同：
+//   - finish=length：是被 max_tokens 截断了（把上限调大，不是换模型）
+//   - 其它：这个模型 id 大概率不可用（`dshd models` 看一眼，别在这上面重试）
+func emptyResponseErr(resp *llm.Response) error {
+	if resp == nil {
+		return fmt.Errorf("模型没有返回响应体（网关可能中途断了）：先 dshd doctor 看端点通不通")
+	}
+	if len(resp.Content) > 0 || len(resp.Reasoning) > 0 || len(resp.ToolCalls) > 0 {
+		return nil
+	}
+	if resp.FinishReason == "length" {
+		return fmt.Errorf("模型输出被 max_tokens 截断了，这一轮没有任何可用内容：把上限调大再试")
+	}
+	return fmt.Errorf("模型返回了空响应（finish=%q）：这个模型 id 可能不可用——用 dshd models 看有哪些、"+
+		"或在 --model 上换一个；不要在这上面反复重试", resp.FinishReason)
 }

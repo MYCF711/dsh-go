@@ -141,6 +141,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "models":
+		err = cmdModels(os.Args[2:])
 	case "modules":
 		err = cmdModules(os.Args[2:])
 	case "exec":
@@ -557,15 +559,19 @@ func cmdRun(argv []string) error {
 	// "缺什么先 tool_load"这条规则没有别的地方可放。放在回放**之后**拼，
 	// 是因为 Directory 会跳过已装载的——那一刻表里得已经装好了。
 	if lazyRef != nil {
-		var got []string
 		if backErr != nil {
 			// 只警告、不中断：回到未装载，模型下一步 tool_load 就能拿回来。
 			fmt.Fprintf(os.Stderr, "lazy：会话日志读不出来（%v），装载集按空处理\n", backErr)
-		} else if got = restoreLoaded(lazyRef, back); len(got) > 0 {
+			// 读坏了的日志不能当输入递下去：回放的唯一输入必须是"这个会话
+			// 真读出来的那份日志"，坏了就等于这个会话什么都没装载过。
+			back = nil
+		}
+		dir, got := prepareLazy(lazyRef, back)
+		if len(got) > 0 {
 			fmt.Fprintf(os.Stderr, "lazy：从会话回放装载集 %d 个：%s\n",
 				len(got), strings.Join(got, ", "))
 		}
-		sys += "\n\n" + lazyRef.Directory()
+		sys += "\n\n" + dir
 	}
 	logSessionStart(*home, sessID, logw.Path, cwd, modes.DefaultID)
 	// 把"当前会话"指给 history_search——`run` 以前没这一步，模型回查只会得到
