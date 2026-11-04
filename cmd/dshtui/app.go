@@ -392,6 +392,24 @@ func (a *app) noteApprovalTimeout() {
 	a.push("！审批超时：" + title + " —— 已按拒绝处理")
 }
 
+// noteApprovalCancel 记一次"这一问被取消"：清 pending + 正文留一行。
+//
+// 为什么必须**点名取消者**：三种结算在屏幕上太容易长得一样了——
+// 应答留的是「→ allow_once」，超时写「审批超时」，而取消如果只写
+// 「审批结束」，用户就分不清这一问是自己拒的、到点超时的、还是被放行的。
+// 取消这一种的事实是：**宿主**按 `session.cancel` 结算并取消了这一轮，
+// 工具没有执行。所以正文那行原话照写，状态行则回到普通状态（取消不是错误）。
+func (a *app) noteApprovalCancel() {
+	title := trunc(a.pending.title, 60)
+	a.clearPending()
+	const what = " —— 宿主按 session.cancel 取消了这一轮，工具没有执行"
+	if title == "" {
+		a.push("！审批已取消" + what)
+		return
+	}
+	a.push("！审批已取消：" + title + what)
+}
+
 // 按键：
 //
 //	Ctrl+C / Ctrl+D   退出
@@ -832,6 +850,23 @@ func (a *app) handleFrame(f ServerFrame) {
 		// 已经被 expireApproval 处理过的不再重复记一行。
 		if a.pending.id != "" {
 			a.noteApprovalTimeout()
+		}
+	case "approval/cancel":
+		// 宿主按拒绝结算并**取消了这一轮**（`session.cancel` 的落点，见
+		// cmd/dshd/serve_approval.go 的 CancelSession）。负载与 approval/request
+		// 同形，所以 requestId 一比就知道是不是屏幕上这一问。
+		//
+		// 不处理它的后果不是崩，是**屏幕在骗人**：气泡还挂着「等你批准」、
+		// 倒计时还在跑，而宿主那边这一问早就没了——按 y 只会拿到 404。
+		//
+		// 为什么按 requestId 认：重连重放会把旧的 cancel 帧再送一遍，
+		// 不比对的话，一条上一轮的 cancel 会把这一轮**新**的气泡收掉。
+		var req struct {
+			RequestID string `json:"requestId"`
+		}
+		_ = json.Unmarshal(f.Data, &req)
+		if a.pending.id != "" && (req.RequestID == "" || req.RequestID == a.pending.id) {
+			a.noteApprovalCancel()
 		}
 	case "turn/error":
 		a.push("！错误：" + string(f.Data))

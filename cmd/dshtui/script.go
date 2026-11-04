@@ -58,6 +58,11 @@ type scriptStep struct {
 	Key     string `json:"key,omitempty"`
 	Label   string `json:"label,omitempty"`
 	Approve string `json:"approve,omitempty"`
+	// Cancel 只对 send 有效：审批出现时**不按键**，改发 `session.cancel`。
+	//
+	// 为什么需要它：宿主取消挂起审批这条链（H13 尾巴）只有在"审批还在屏幕上"
+	// 的那一刻才看得见效果。和 approve 互斥——一次审批只能有一种结算。
+	Cancel bool `json:"cancel,omitempty"`
 }
 
 // scriptReport 是交给断言层（scripts/tui-session-e2e.py）的全部事实。
@@ -72,6 +77,10 @@ type scriptReport struct {
 	Frames    []frameRecord  `json:"frames"`
 	Screens   []screenRecord `json:"screens"`
 	Keys      []keyRecord    `json:"keys"`
+	// Cancels 记的是"哪一轮在审批挂着时发了 session.cancel"。
+	// 不记这条，屏幕快照里那句"审批已取消"就分不清是驱动器按的取消键、
+	// 还是宿主自己超时——两者都会让气泡消失，但事实完全不同。
+	Cancels []cancelRecord `json:"cancels"`
 	// Error 非空 = 驱动器自己半路停了（断流/超时）。这时**下面的事实仍然有效**，
 	// 断言层可以拿它说清"停在哪一轮"，而不是只报一个"驱动失败"。
 	Error string `json:"error,omitempty"`
@@ -94,7 +103,7 @@ type turnRecord struct {
 
 type screenRecord struct {
 	Label string   `json:"label"`
-	At    string   `json:"at"` // after-turn | approval | answered | key | timeout | manual
+	At    string   `json:"at"` // after-turn | approval | answered | canceled | key | timeout | manual
 	Turn  int      `json:"turn"`
 	Lines []string `json:"lines"`
 }
@@ -104,6 +113,14 @@ type keyRecord struct {
 	Key   string `json:"key"`
 	Turn  int    `json:"turn"`
 	When  string `json:"when"` // approval | step
+}
+
+// cancelRecord 是一次"人在审批挂着时取消了这一轮"的记录。
+// Err 非空表示那次 session.cancel 本身失败了（宿主要么已经收工，要么不认这条会话）。
+type cancelRecord struct {
+	Label string `json:"label"`
+	Turn  int    `json:"turn"`
+	Err   string `json:"err,omitempty"`
 }
 
 // approvalKeys 是"审批这一问该敲哪个键"，与 handleRune 里那三行**同义**：
@@ -176,6 +193,10 @@ func readPlan(path string) (*scriptPlan, error) {
 						i+1, st.Approve)
 				}
 			}
+			if st.Cancel && st.Approve != "" {
+				// 一次审批只有一种结算：又按键又取消，驱动器自己就说不清屏幕该显示哪种。
+				return nil, fmt.Errorf("第 %d 步 approve 与 cancel 只能选一个（一次审批只有一种结算）", i+1)
+			}
 		case "key":
 			if !knownKey(st.Key) {
 				return nil, fmt.Errorf("第 %d 步 key=%q 不认识（可选 %s）", i+1, st.Key,
@@ -184,6 +205,11 @@ func readPlan(path string) (*scriptPlan, error) {
 		case "snapshot":
 		default:
 			return nil, fmt.Errorf("第 %d 步 kind=%q 不认识（send/key/snapshot）", i+1, st.Kind)
+		}
+		if st.Cancel && st.Kind != "send" {
+			// 只有 send 会等审批出现；key/snapshot 步写 cancel 是脚本作者以为它会发，
+			// 实际什么都不做——这种"写了不跑"的脚本比报错更浪费时间。
+			return nil, fmt.Errorf("第 %d 步 cancel 只对 send 有效（kind=%q）", i+1, st.Kind)
 		}
 	}
 	return &p, nil
@@ -259,6 +285,9 @@ func runScript(addr, token, planPath, outPath string) error {
 			rec := turnRecord{Label: st.Label, Index: turn}
 			timer := time.NewTimer(timeout)
 			done := false
+			// cancelSent 保证一轮只取消一次：approval/request 可能因重放再来一遍，
+			// 每来一条就发一次 session.cancel，第二次只会拿到"没有可取消的轮次"。
+			cancelSent := false
 			for !done {
 				select {
 				case f, ok := <-frames:
@@ -288,7 +317,24 @@ func runScript(addr, token, planPath, outPath string) error {
 							})
 							rep.Screens = append(rep.Screens,
 								snapshotOf(a, st.Label+"-answered", "answered", turn))
+						} else if st.Cancel && !cancelSent {
+							// 不按键，直接取消这一轮：这是"审批还挂在屏幕上、
+							// 宿主那边已经把它收了"的那条路径。屏幕快照要等
+							// approval/cancel 帧到了再拍——那一刻才是真的结算完。
+							cancelSent = true
+							_, cErr := a.cl.post("session.cancel", map[string]any{"id": a.sid})
+							crec := cancelRecord{Label: st.Label, Turn: turn}
+							if cErr != nil {
+								crec.Err = cErr.Error()
+							}
+							rep.Cancels = append(rep.Cancels, crec)
 						}
+					}
+					if f.Type == "approval/cancel" && cancelSent {
+						// 宿主把这条审批结算成"取消"之后的那一屏：
+						// 气泡要收掉，正文要留下"是谁取消的"。
+						rep.Screens = append(rep.Screens,
+							snapshotOf(a, st.Label+"-canceled", "canceled", turn))
 					}
 					// **只认 turn/done / turn/error**：turn/end 是"这一步结束"，
 					// 在 turn/done 之前就到（实测帧序：turn/start, user/message,

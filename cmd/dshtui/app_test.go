@@ -527,6 +527,195 @@ func TestApprovalClockSkewDoesNotPreemptivelyDeny(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------- 三种结算：屏幕上必须说清是哪一种
+
+// approvalCancelFrame 造一条宿主取消结算的帧。
+//
+// 契约里 `approval/cancel` 的负载与 `approval/request` **同形**（宿主
+// serve_approval.go 把当初那条 payload 原样再发一次），所以这里也带 toolCall.title：
+// 界面要靠它说清取消的是哪一问。
+func approvalCancelFrame(reqID, title string) ServerFrame {
+	return ServerFrame{Type: "approval/cancel", Data: json.RawMessage(fmt.Sprintf(
+		`{"requestId":%q,"sessionId":"s1","toolCall":{"title":%q}}`, reqID, title))}
+}
+
+// bodyLineWith 找正文里第一条含 sub 的行；没有就返回空串。
+func bodyLineWith(a *app, sub string) string {
+	for _, ln := range a.lines {
+		if strings.Contains(ln, sub) {
+			return ln
+		}
+	}
+	return ""
+}
+
+// 10. answered：按 y 之后正文留下的是「→ allow_once」——不是超时，也不是取消。
+func TestApprovalAnsweredLeavesAnsweredWords(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	a.approve = func(string, string) error { return nil }
+	a.handleFrame(approvalFrame("req-1", "bash · rm -rf build/", clk.t.Add(30*time.Second), 30*time.Second))
+
+	a.handleRune('y')
+	// 宿主把这次结算回推一帧（契约白名单里有 approval/answered）：
+	// 同一次结算不许因此多出一行别的说法。
+	a.handleFrame(ServerFrame{Type: "approval/answered",
+		Data: json.RawMessage(`{"requestId":"req-1","optionId":"allow_once"}`)})
+
+	line := bodyLineWith(a, "→ allow_once")
+	if line == "" {
+		t.Fatalf("应答后正文没留下选择：\n%s", strings.Join(a.lines, "\n"))
+	}
+	for _, bad := range []string{"超时", "取消"} {
+		if strings.Contains(line, bad) {
+			t.Fatalf("answered 被说成了「%s」：%q", bad, line)
+		}
+	}
+	if s := statusLine(a); strings.Contains(s, "等你批准") || strings.Contains(s, "已超时") {
+		t.Fatalf("答过之后状态行应回到普通状态：%q", s)
+	}
+}
+
+// 11. timeout：正文说的是「审批超时……已按拒绝处理」。
+func TestApprovalTimeoutLeavesTimeoutWords(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	a.handleFrame(approvalFrame("req-1", "bash · rm -rf build/", clk.t.Add(30*time.Second), 30*time.Second))
+	a.handleFrame(ServerFrame{Type: "approval/timeout",
+		Data: json.RawMessage(`{"requestId":"req-1","sessionId":"s1"}`)})
+
+	line := bodyLineWith(a, "审批超时")
+	if line == "" || !strings.Contains(line, "rm -rf build/") {
+		t.Fatalf("正文没记下超时的那一条：\n%s", strings.Join(a.lines, "\n"))
+	}
+	if strings.Contains(line, "取消") {
+		t.Fatalf("timeout 被说成了取消：%q", line)
+	}
+	if s := statusLine(a); !strings.Contains(s, "已超时，按拒绝处理") {
+		t.Fatalf("状态行没说超时：%q", s)
+	}
+}
+
+// 12. cancel：必须说清**是宿主取消了这一轮**，并收掉倒计时与按键提示。
+//
+// 这一条是 H13 的尾巴：宿主按拒绝结算并取消轮次后推 approval/cancel，
+// 界面落到 default 分支什么都不做——屏幕上那个气泡还挂着「等你批准」，
+// 按 y 只会拿到 404。即使气泡收掉，只说「审批结束」也分不清三种结算。
+func TestApprovalCancelSaysHostCancelled(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	var answered []string
+	a.approve = func(reqID, opt string) error {
+		answered = append(answered, reqID+":"+opt)
+		return nil
+	}
+	a.handleFrame(approvalFrame("req-1", "bash · rm -rf build/", clk.t.Add(30*time.Second), 30*time.Second))
+	if !strings.Contains(statusLine(a), "等你批准（30s）") {
+		t.Fatalf("前置：应当先有倒计时：%q", statusLine(a))
+	}
+
+	a.handleFrame(approvalCancelFrame("req-1", "bash · rm -rf build/"))
+
+	if a.pending.id != "" || !a.pending.deadline.IsZero() {
+		t.Fatalf("收到 approval/cancel 后倒计时/按键应立刻收掉：id=%q deadline=%v",
+			a.pending.id, a.pending.deadline)
+	}
+	line := bodyLineWith(a, "取消")
+	if line == "" {
+		t.Fatalf("正文没留下「被取消」那一行：\n%s", strings.Join(a.lines, "\n"))
+	}
+	if !strings.Contains(line, "宿主") || !strings.Contains(line, "session.cancel") {
+		t.Fatalf("没说是谁取消的：%q", line)
+	}
+	if !strings.Contains(line, "rm -rf build/") {
+		t.Fatalf("没说取消的是哪一问：%q", line)
+	}
+	for _, bad := range []string{"审批超时", "已按拒绝处理", "→ allow"} {
+		if strings.Contains(line, bad) {
+			t.Fatalf("取消被说成了别的结算（%q）：%q", bad, line)
+		}
+	}
+	if s := statusLine(a); strings.Contains(s, "等你批准") || strings.Contains(s, "还有") ||
+		strings.Contains(s, "已超时") || strings.Contains(s, "[y]") {
+		t.Fatalf("取消后状态行应回到普通状态：%q", s)
+	}
+
+	// 这一问已经不在宿主那边了：y 必须退回普通输入，不许再发应答去拿 404。
+	a.input = nil
+	a.handleRune('y')
+	if len(answered) != 0 {
+		t.Fatalf("取消之后不该再发出应答：%v", answered)
+	}
+	if string(a.input) != "y" {
+		t.Fatalf("取消之后 y 应退回普通输入，实际 %q", string(a.input))
+	}
+}
+
+// 13. cancel 与 timeout **互不覆盖**：先取消，再来一条晚到的超时帧，
+// 屏幕上不许把「取消」改回「超时」。
+//
+// 帧序真的会这样出现：取消那一刻，宿主那条超时 goroutine 正要醒；
+// 断线重放时也会把旧帧再送一遍。只要界面还认 pending，晚到的那条就会
+// 把结论改掉——用户看到的是一句和事实相反的说明。
+func TestApprovalCancelIsNotOverwrittenByLateTimeout(t *testing.T) {
+	a, clk := newApprovalApp(120, 16)
+	a.handleFrame(approvalFrame("req-1", "bash · rm -rf build/", clk.t.Add(30*time.Second), 30*time.Second))
+	a.handleFrame(approvalCancelFrame("req-1", "bash · rm -rf build/"))
+	before := append([]string(nil), a.lines...)
+
+	clk.advance(2 * time.Minute)
+	a.handleFrame(ServerFrame{Type: "approval/timeout",
+		Data: json.RawMessage(`{"requestId":"req-1","sessionId":"s1"}`)})
+	a.tickStatus()
+
+	joined := strings.Join(a.lines, "\n")
+	if strings.Contains(joined, "审批超时") || strings.Contains(joined, "已按拒绝处理") {
+		t.Fatalf("晚到的超时帧把「已取消」改成了「超时」：\n%s", joined)
+	}
+	if len(a.lines) != len(before) {
+		t.Fatalf("晚到的超时帧又记了一行：%d → %d\n%s", len(before), len(a.lines), joined)
+	}
+	if n := strings.Count(joined, "审批已取消"); n != 1 {
+		t.Fatalf("取消只该说一次，实际 %d 次：\n%s", n, joined)
+	}
+	if s := statusLine(a); strings.Contains(s, "已超时") {
+		t.Fatalf("状态行被晚到的超时帧改了：%q", s)
+	}
+}
+
+// 14. 三种结算在屏幕上必须**长得不一样**：同一句「审批结束了」会让人
+// 分不清是自己答的、超时了、还是被取消了——而这三种后续动作完全不同。
+func TestApprovalThreeSettlementsReadDifferently(t *testing.T) {
+	a1, c1 := newApprovalApp(120, 16)
+	a1.approve = func(string, string) error { return nil }
+	a1.handleFrame(approvalFrame("req-1", "bash · rm", c1.t.Add(30*time.Second), 30*time.Second))
+	a1.handleRune('y')
+
+	a2, c2 := newApprovalApp(120, 16)
+	a2.handleFrame(approvalFrame("req-1", "bash · rm", c2.t.Add(30*time.Second), 30*time.Second))
+	a2.handleFrame(ServerFrame{Type: "approval/timeout",
+		Data: json.RawMessage(`{"requestId":"req-1"}`)})
+
+	a3, c3 := newApprovalApp(120, 16)
+	a3.handleFrame(approvalFrame("req-1", "bash · rm", c3.t.Add(30*time.Second), 30*time.Second))
+	a3.handleFrame(approvalCancelFrame("req-1", "bash · rm"))
+
+	lines := []string{
+		bodyLineWith(a1, "→"),
+		bodyLineWith(a2, "审批超时"),
+		bodyLineWith(a3, "审批已取消"),
+	}
+	for i, ln := range lines {
+		if ln == "" {
+			t.Fatalf("第 %d 种结算在正文里没有一行说明：%q", i+1, ln)
+		}
+	}
+	for i := 0; i < len(lines); i++ {
+		for j := i + 1; j < len(lines); j++ {
+			if lines[i] == lines[j] {
+				t.Fatalf("第 %d 与第 %d 种结算在屏幕上分不开：%q", i+1, j+1, lines[i])
+			}
+		}
+	}
+}
+
 // ---------------------------------------------------------------- 工具卡折叠
 
 // 默认折叠：tool/call 那一行必须还在，tool/result 的内容不许出现在 view() 里。

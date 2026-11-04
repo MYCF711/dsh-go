@@ -40,6 +40,15 @@ func TestReadPlanAcceptsRoundTrip(t *testing.T) {
 	if got.Size[0] != 100 || got.TurnTimeoutMs != 1000 {
 		t.Fatalf("尺寸/超时没解析出来: %+v", got)
 	}
+
+	// cancel 是 send 的一种结算方式，必须能原样解析出来（探测"审批挂着时取消"要用它）。
+	got, err = readPlan(writePlan(t, `{"steps":[{"kind":"send","text":"取消这一轮","label":"t1","cancel":true}]}`))
+	if err != nil {
+		t.Fatalf("带 cancel 的合法脚本被拒: %v", err)
+	}
+	if !got.Steps[0].Cancel {
+		t.Fatalf("cancel 没解析出来: %+v", got.Steps[0])
+	}
 }
 
 // 选项到键的映射只有一个来源；弄反的后果是"允许"变成"拒绝"。
@@ -56,12 +65,14 @@ func TestApprovalKeyMapping(t *testing.T) {
 // 最后按超时拒绝，而失败信息看起来像"工具没执行"。
 func TestReadPlanRejectsBadSteps(t *testing.T) {
 	cases := map[string]string{
-		"没 text":     `{"steps":[{"kind":"send"}]}`,
-		"text 带换行":   `{"steps":[{"kind":"send","text":"第一行\n第二行"}]}`,
-		"approve 拼错": `{"steps":[{"kind":"send","text":"x","approve":"allow_onece"}]}`,
-		"kind 不认识":   `{"steps":[{"kind":"type","text":"x"}]}`,
-		"key 不认识":    `{"steps":[{"kind":"key","key":"ctrl+z"}]}`,
-		"没有 steps":   `{"steps":[]}`,
+		"没 text":        `{"steps":[{"kind":"send"}]}`,
+		"text 带换行":      `{"steps":[{"kind":"send","text":"第一行\n第二行"}]}`,
+		"approve 拼错":    `{"steps":[{"kind":"send","text":"x","approve":"allow_onece"}]}`,
+		"kind 不认识":      `{"steps":[{"kind":"type","text":"x"}]}`,
+		"key 不认识":       `{"steps":[{"kind":"key","key":"ctrl+z"}]}`,
+		"没有 steps":      `{"steps":[]}`,
+		"又答又取消":         `{"steps":[{"kind":"send","text":"x","approve":"allow_once","cancel":true}]}`,
+		"cancel 用在 key": `{"steps":[{"kind":"key","key":"ctrl+t","cancel":true}]}`,
 	}
 	for name, body := range cases {
 		if _, err := readPlan(writePlan(t, body)); err == nil {
