@@ -1,3 +1,13 @@
+- **`lazy` 的第二模型复测（2026-11-04，补上最后一条外部缺口）**：
+  `group/limited`（workbuddy 通道，与 deepseek 那条不同的家族）
+  `python scripts/tool-table-lazy-ab.py --model group/limited`：
+  **17/17 正确，首步 prompt_tokens 5,470 → 3,972（−27.4%）**，
+  表外任务的 13 次 `tool_load` **拉对 13 次**。
+  加上之前的 streamlake 通道（−26.7%），"换模型就不成立"这条已经不成立了。
+  **但默认仍是 compact**：翻默认要的是"模型家族 × ≥3"，
+  而本机另一个候选 `group/kimi-k3.1-pro` 现在返回 **200 但内容是空**（不是 502 了，
+  是"说了句空话、退出码 0"——正是 `models` 那条提示要报的形态）。
+
 - **进程卫生**（2026-11-04）：`serve`/`acp`/`run` 三入口共用的**父进程看门狗**
   （`cmd/dshd/parentwatch*.go`，连续 3 次探不到才退；Windows 用 `OpenProcess` 判活，
   不能用 `os.FindProcess`）+ 测试脚本统一回收（`scripts/_proc.py`，连进程树一起收）。
