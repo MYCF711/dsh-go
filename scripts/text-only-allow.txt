@@ -1,0 +1,83 @@
+# text-only 守卫的白名单
+#
+# 一行一条：路径:行号模式 | 理由
+#
+# 行号模式四种：精确行 `533`、行区间 `530-540`、函数作用域 `joinText`、整文件 `*`。
+# 用函数作用域的，是"整个函数的存在理由就是只产出正文"的那种（joinText 之类）；
+# 用精确行的，是"这个函数别处都在看 reasoning，只有这一句是局部选择"的那种。
+#
+# 写理由的规矩：必须能**查证**——说清"为什么这里只该看 text"，
+# 以及"那么'有没有内容'到底由谁判"。写"历史原因""暂不处理"的，等于没写：
+# 下一个人没法核对，守卫也就退化成了橡皮图章。
+#
+# 每一条都对应下面某个"允许的形状"，不是"这里有个红点，先按掉"。
+
+# ---- 可见正文的拼接：只产出"给人看的正文"，判空在别处 ----
+
+# transport_source 的 joinText：session.load 的 Text 字段。
+# "这条消息有没有内容"由同文件的 messagesOf 调 assistantHasPayload 判（正文/思考/调用
+# 三样占一样）；tool-call 块不拼进正文，它由 tool/result 事件那条路径对应。
+cmd/dshd/transport_source.go:joinText | 只拼可见正文（transport.Message.Text）；判空由 messagesOf 的 assistantHasPayload 负责，工具调用由 tool/result 路径对应
+
+# session 包的 joinText：llm.Message.Content（发给模型的请求形状）。
+# llm.Message 装不下 reasoning（思考正文由 SurfaceMsg.Reasoning 另带），
+# tool-call 走 ToolCalls 字段而不是正文——所以这里只看 text 是正确的投影，
+# 不是"忘了看别的"。判空在 serve_turn.historyForModel（assistantHasPayload）。
+internal/session/history.go:joinText | llm.Message.Content 是请求形状：思考走 SurfaceMsg.Reasoning、调用走 ToolCalls，正文只该拼 text
+
+# ACP 的 promptText：协议规定"相邻 text 块拼成一条 prompt"（入站方向）。
+# 入站提示里没有 reasoning/tool-call 块可看，这里的取舍由协议决定，不由投影决定。
+internal/acp/server.go:promptText | ACP 协议：相邻 text 块拼成一条 prompt；入站提示没有 reasoning/tool-call 块
+
+# 桥接层（dshd-bridge）把 ACP prompt 的 text 块拼成一段字符串，同上一条。
+# 它转的是"用户说了什么"，不投影会话消息，也不决定任何消息的存亡。
+cmd/dshd-bridge/main.go:prompt | 桥接层把 ACP prompt 的 text 块拼成字符串（协议同 promptText），不投影会话消息
+
+# TUI 的 joinContent：纯文本渲染，只画可见正文。
+# "发不发这一帧"由宿主投影决定（serve_turn 用 assistantHasPayload，帧里另带 reasoning 键）；
+# TUI 不做判空决策。已知残留：TUI 不画 reasoning 键（过渡件，界面归 ../dsh-ui），
+# 数据不丢——丢的是显示，不是内容。
+cmd/dshtui/app.go:joinContent | UI 纯文本渲染：只画可见正文；发不发帧由宿主 assistantHasPayload 决定，帧里另带 reasoning
+
+# ---- "空摘要不许遮蔽历史"：判的是摘要本身，写入时也只写 type/text ----
+
+# internal/session/compact.go 的 Compact：摘要是一组 spi.Block，落盘时同一个函数里
+# 只写 {"type": b.Type, "text": b.Text}——别的类型写进去同样等于空。
+# 这条判空是 §"空摘要遮蔽历史"那道红测的守卫：摘要为空就必须拒绝压缩，
+# 而不是把一段历史换成空白还报成功。
+internal/session/compact.go:Compact | 判"摘要是不是空的"只看 text 块；摘要写入也只写 type/text（同函数），reasoning 写进去同样是空
+
+# ---- 局部选择：函数别处都在看 reasoning，只有这一句是"这一段要不要拼" ----
+
+# ACP session/load 的正文 chunk：思考块在紧邻的上一个循环里已按
+# session.ReasoningBlocksBySeq 逐块 emit（顺序 思考→正文→调用，与 fork/serve 一致）。
+# 正文为空只表示"这条没有正文 chunk"，不决定消息是否消失。
+cmd/dshd/acp.go:762 | 思考块在上一循环已按 ReasoningBlocksBySeq emit；正文空只表示没有正文 chunk，不决定消息存亡
+
+# history_search 的检索过滤：判据来自 eventText，而 eventText 已经把
+# text / reasoning / tool-call 三样拼起来。text 为空 = 三样都没有，确实搜不到东西。
+# 这里筛的是"能不能搜到"，不是"消息在不在投影里"。
+cmd/dshd/history.go:61 | 判据来自 eventText（已拼 text/reasoning/tool-call 三样）；空 = 三样都没有，筛的是可检索性
+
+# modelRunner.historyForModel 的 default 分支：只处理 user 与压缩替身。
+# assistant 在上面单独一支，判据是 assistantHasPayload；user/替身没有思考块，
+# 正文为空确实没有信息可发。
+cmd/dshd/serve_turn.go:176 | 这一支只处理 user/压缩替身（assistant 在上面走 assistantHasPayload）；这两类没有思考块
+
+# inheritLine 的 user/tool 分支：这两类消息只有正文能带信息（tool 的调用名由上一行
+# `[调用 …]` 承担）。assistant 的"有没有内容"在上面是 assistantHasPayload。
+cmd/dshd/subagent_inherit.go:118 | user/tool 只有正文能带信息；assistant 的判据在上面走 assistantHasPayload
+
+# ---- 产物不是消息：诊断/标题，不参与压缩与投影 ----
+
+# History 的产物是 []llm.Message（请求形状），没有 reasoning 字段。
+# "有没有内容"的判据在 serve_turn.historyForModel；SurfaceMsg.Reasoning 只服务 Meter。
+internal/session/history.go:24 | 产物是 []llm.Message（请求形状，无 reasoning 字段）；判空在 historyForModel，Reasoning 只服务 Meter
+
+# CharsOf 是诊断用的字符统计（doctor/info 打印），不参与压缩决策。
+# 真正算 token 的是 rawEstimate，那里已经逐条加 m.Reasoning。
+internal/session/tokens.go:96 | 诊断用字符数，不参与压缩决策；算 token 的是 rawEstimate（已计入 m.Reasoning）
+
+# codecs/v4 的 ReadSummary 取会话标题/首行预览：标题只从 text 块取（firstText），
+# 思考不是标题。skip 掉的是"这一条没有可作标题的文字"，不是消息本身。
+codecs/v4/summary.go:54 | 会话标题/首行预览只从 text 块取；思考不是标题，skip 的是"没有可作标题的文字"

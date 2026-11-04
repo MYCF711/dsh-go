@@ -1077,6 +1077,124 @@ ASCII 4 字节 ≈ 1 token。所以 10k 字思考 ≈ 10k token。校准路径�
 `-race`；10k 字思考是合成语料——真实思考长度随模型与 `--reasoning` 强度变，判据是差值的
 **比例关系**（差 = 思考正文的 token），不是这个绝对值。
 
+### 5.6 同一个病一天犯七次之后：把它变成门禁（2026-11-04，守卫上线）
+
+§5.1–§5.5 修的是七处**具体**的投影。七处的根因是同一句话：
+
+> 把"这条消息有没有内容"判成"它的 `text` 块是不是非空"。
+
+修完七处之后，仓库里**没有任何东西**阻止第八次：新写一个投影、顺手 `if b.Type == "text"`，
+所有测试照样绿，而只有工具调用或只有思考的轮次继续静默消失。所以这一节交付的是**判据**，
+不是第八个补丁：`scripts/text-only-guard.py` + `scripts/text-only-allow.txt` 接进
+`scripts/check.sh`，白名单外的"只认 text 的投影"直接 FAIL。
+
+#### 它抓的五类形状（每一类都对应一次真实事故）
+
+| 形状 | 判据 | 对应的历史事故 |
+|---|---|---|
+| `block-type-filter` | `.Type == "text"` / `!= "text"` / `case "text":`，且这段代码不知道 `reasoning` / `tool-call` | `eventText` 只拼 text 块；`copyNode` 只铺 text+tool_call |
+| `text-presence-drop` | `x.Text == ""` / `x.Content != ""` / `TrimSpace(x) == ""` 直接 `continue` / `return 空值` | 子代理转写 `if m.Text == "" { continue }` |
+| `surface-without-reasoning` | 遍历 `session.Surface(...)` 读 `.Message` 做投影，整个函数没提过 `Reasoning` | `Meter.Estimate` 不算思考；ACP `session/load` 重放不取思考 |
+| `text-only-block-join` | 遍历内容块只把 `.Text` 拼进结果，函数里既无 reasoning 也无 tool-call | `history_search` 的 `eventText` |
+| `assistant-case-text-only` / `text-presence-emits-message` | assistant 分支只凭 text 决定要不要产出这条消息；或"text 非空"直接决定发不发一帧 | `session.load` 的 `messagesOf`；serve 推帧的 `resp.Content != ""` |
+
+三类刻意的"不抓"，否则每条投影都会红：
+
+- `parts = append(...)` 这种"这一段为空就不拼"的**局部选择**不算丢弃（只有 `continue` / 空返回才算）；
+- `if b.Type == "reasoning" && TrimSpace(b.Text) != "" { ...; break }` 这种**正向筛选**不算丢弃
+  （早期版本把 `break` 也算成丢弃，误报过一次，判据里留了注释）；
+- `{"type": b.Type, "text": b.Text}` 这种**原样再编码**不算拼正文。
+
+#### 白名单 13 条：每一条都写了"为什么这里只该看 text"
+
+`scripts/text-only-allow.txt` 是唯一的一份，这里只列分组（理由原文在文件里）：
+
+| 分组 | 条目 | 为什么允许 |
+|---|---|---|
+| 可见正文的拼接 | `transport_source.go:joinText`、`session/history.go:joinText` | 只产出"给人看的正文/请求形状的 Content"；判空由 `assistantHasPayload` 负责，tool-call 走 `ToolCalls`/`tool/result` 那条路 |
+| 协议/桥接 | `internal/acp/server.go:promptText`、`cmd/dshd-bridge/main.go:prompt` | ACP 规定"相邻 text 块拼成一条 prompt"，入站提示没有 reasoning/tool-call 块 |
+| UI 纯文本渲染 | `cmd/dshtui/app.go:joinContent` | 只画可见正文；发不发帧由宿主 `assistantHasPayload` 决定，帧里另带 `reasoning` 键 |
+| 空摘要拦截 | `internal/session/compact.go:Compact` | 判的是"摘要是不是空的"，而摘要写入也只写 `type`/`text`——思考写进去同样是空 |
+| 局部选择 | `acp.go:762`、`history.go:61`、`serve_turn.go:176`、`subagent_inherit.go:118` | 函数别处都在看 reasoning，只有这一句是"这一段要不要拼"/"能不能搜到" |
+| 产物不是消息 | `session/history.go:24`、`tokens.go:96`、`codecs/v4/summary.go:54` | 产物是 `[]llm.Message`（请求形状）/ 诊断字符数 / 会话标题，都不参与"消息存亡" |
+
+白名单支持的写法（文件头也有）：精确行、行区间、函数作用域、整文件。行号漂移 ±6 行内仍然认，
+但会打 `WARN 白名单行号漂移`；超出 ±6 行就 FAIL——**问题修掉了、或白名单在护的东西已经不存在，
+两种都要求有人去改白名单**，不许它悄悄烂着。（早期版本退到"整个函数"兜底，结果造红时
+把同一函数里新写进去的回归一起吞了，实测踩到过，所以收成 ±6。）
+
+#### 造红证据：七处历史形状逐条改回去，逐条红
+
+隔离副本（`--root` 指向 tmp 下的整树拷贝，仓库里的 `.go` 一个都没动）+ 同一份白名单：
+
+| 改回旧写法 | 守卫输出 | 命中形状 |
+|---|---|---|
+| `session.load` 用 `if text == ""` 判空 | `FAIL cmd/dshd/transport_source.go:314` | `text-presence-drop` |
+| `eventText` 只拼 text 块 | `FAIL cmd/dshd/history.go:128` | `text-only-block-join` |
+| 子代理转写 `if n.Message.Content == ""` | `FAIL cmd/dshd/subagent_inherit.go:91` | `text-presence-drop` |
+| `copyNode` 不搬思考块 | `FAIL internal/session/fork.go:349` | `assistant-case-text-only` |
+| ACP `Load` 不取 `ReasoningBlocksBySeq` | `FAIL cmd/dshd/acp.go:753` | `text-presence-emits-message` |
+| `rawEstimate` 不算 `m.Reasoning` | `FAIL internal/session/tokens.go:67` | `surface-without-reasoning` |
+| serve 推帧用 `resp.Content != ""` | `FAIL cmd/dshd/serve_turn.go:59` | `text-presence-emits-message` |
+
+两条完整输出（其余同理）：
+
+```
+$ # 隔离副本：把 messagesOf 的判据改回 text
+$ python scripts/text-only-guard.py --root <隔离副本> --allow scripts/text-only-allow.txt
+== text-only 守卫 ==
+扫描 156 个 Go 文件（cmd, internal, modules, codecs 起）
+  FAIL cmd/dshd/transport_source.go:314 [text-presence-drop] messagesOf
+       if text == "" {
+       把 text 当'有没有内容'的唯一判据，并据此丢消息；判据应是 assistantHasPayload（正文/思考/调用三样占一样）
+FAIL text-only 守卫：1 处未登记（白名单 13 条命中 13）
+[exit code: 1]
+
+$ # 隔离副本：把 rawEstimate 里的 m.Reasoning 循环删掉
+$ python scripts/text-only-guard.py --root <隔离副本> --allow scripts/text-only-allow.txt
+== text-only 守卫 ==
+扫描 156 个 Go 文件（cmd, internal, modules, codecs 起）
+  FAIL internal/session/tokens.go:67 [surface-without-reasoning] rawEstimate
+       for _, m := range surface {
+       遍历 Surface 投影消息但整个函数没取过思考正文（SurfaceMsg.Reasoning 是另带的；不看就丢）
+  WARN 白名单行号漂移 internal/session/tokens.go:96 → 命中 internal/session/tokens.go:93（请更新行号）
+FAIL text-only 守卫：1 处未登记（白名单 13 条命中 13）
+[exit code: 1]
+```
+
+这七条 + "新写一个 text-only 投影"（不是改回旧代码）+ "副本未改动必须是绿的"，
+全部固化在 `scripts/guard-selftest.py` 的第 6 节（10 条断言：7 条造红 + 副本绿基线 +
+白名单烂条目 + 新写形状，跑一遍约 12 秒）。
+
+#### 当前代码上的 FAIL 数：0
+
+```
+== text-only 守卫 ==
+扫描 156 个 Go 文件（cmd, internal, modules, codecs 起）
+PASS text-only 守卫：156 个文件 0 处未登记（白名单 13 条命中 13，漂移 0）
+```
+
+扫描范围刻意排除 `refs/`（上游源码镜像，不是我们的代码）、`tmp/`、`probe/`、`research/`、
+`play/`、`dist/`、`evidence/` 与 `*_test.go`（测试里的 text-only 断言是被测对象本身）。
+
+#### 接在哪
+
+- `scripts/check.sh`：与 perm-guard / relax-guard 同款（PASS/FAIL，`tail -1` 进 gate_log）；
+- `scripts/gate-manifest.txt`：登记 `text-only 守卫`——否则"守卫被删掉"和"守卫通过"在输出里长得一样；
+- `scripts/guard-selftest.py` §6：7 条造红 + 新写形状造红 + 副本绿基线；
+- `scripts/silent-success-audit.py`：两条 `a.need`，钉住"守卫脚本还在"和"它真的接在 check.sh 上"。
+
+#### 已知残留（登记在案，本轮不改）
+
+- `cmd/dshtui/app.go` 仍不消费帧里的 `reasoning` 键：**数据不丢**（`serve_turn` 会带上），
+  丢的是显示。TUI 是过渡件（界面归 `../dsh-ui`），白名单里这条写的就是这个边界。
+- `cmd/dshd/acp.go` 的 `Prompt` 写盘时仍只铺 text + tool_calls（§5.5 末尾已登记）：
+  从零开始的 ACP 会话没有思考块可读——那要动写侧，不在本轮"只做守卫"的范围。
+- `internal/session/list.go` 的 `summarize`（会话列表一句话摘要）只取 `textOf`：标题只该是
+  可见回答，且这轮的形状规则不把它算作"投影丢消息"，未登记为白名单，也没有造红用例。
+- 守卫是**形状**检查，不是数据流分析：跨函数传递的"只认 text"（例如某函数返回 text 空串、
+  调用方据此丢消息）不会被抓。它拦的是七次事故共同的那个界面：块类型/空判据。
+
 ## 6. 复跑与验收
 
 ```bash
@@ -1108,3 +1226,29 @@ git archive HEAD | tar -x -C /tmp/hc-ss && (cd /tmp/hc-ss && go build ./...)
 如果本机网关在某些渠道上两者都不发（目前没有证据），那一轮会被判成"流中途断开"而不是"完成"。
 这是刻意的取舍：宁可报一次可重试的错误，也不把半句话记成完整回答。真机跑一轮即可确认；
 若确有这种网关，放宽点应该加在"内容看起来完整"的判定上，而不是删掉这条守卫。
+
+**D5 复跑（2026-11-04，§5.6 的 text-only 守卫，`GOCACHE=/tmp/gocache-guard`）**：
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+export GOCACHE=/tmp/gocache-guard
+python scripts/text-only-guard.py          # 156 个文件，0 处未登记（白名单 13 条命中 13），exit 0
+python scripts/silent-success-audit.py     # 17 条守卫/数据检查 0 FAIL，exit 0
+python scripts/guard-selftest.py           # 18 条自测全 OK（含 7 条造红 + 新写形状 + 副本绿基线 + 白名单烂条目），exit 0
+go build ./... && go vet ./...             # 通过
+go test ./... -count=1                     # 全部 ok，无 FAIL
+```
+
+`bash scripts/check.sh` **在 `git archive HEAD` 的隔离副本里跑**（本仓 AGENTS.md §4：
+check.sh 会原地 `mv modules`，禁止在共享工作树运行），把本次改动的七个脚本/文档 overlay
+过去后结果 `ALL GREEN`，含：
+
+```
+  PASS  PASS text-only 守卫：156 个文件 0 处未登记（白名单 13 条命中 13，漂移 0）
+  PASS  守卫清单齐全（8 项）
+ALL GREEN
+```
+
+**没有验证的**（这一节）：守卫是**形状**检查（正则 + 语句块解析），不是数据流分析——
+跨函数传递的"只认 text"抓不到；TUI/`list.summarize` 那两处只做显示投影的取舍已在 §5.6
+末尾登记；`-race` 未跑。

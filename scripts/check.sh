@@ -75,6 +75,24 @@ else
     skip "没有放宽守卫"
   fi
 
+  # text-only 守卫：不许把"这条消息有没有内容"判成"text 块是不是非空"。
+  #
+  # 这个病 2026-11-04 一天在七处各犯了一次（session.load / history_search /
+  # 子代理转写 / session.fork / ACP session/load / Meter.Estimate / TUI extractText），
+  # 症状全是"只有 tool_calls 或只有思考的消息被丢掉、或读回空气泡"，而且都不报错。
+  # 七处都修完了，但没有任何东西拦住第八次——所以把判据变成可执行的：
+  # 白名单外的"只认 text 的投影"直接红。
+  if [ -f scripts/text-only-guard.py ]; then
+    if tg_out="$(python scripts/text-only-guard.py 2>&1)"; then
+      pass "$(printf '%s' "$tg_out" | tail -1)"
+    else
+      bad "text-only 守卫: $(printf '%s' "$tg_out" | grep 'FAIL ' | head -2 | tr '
+' ' ')"
+    fi
+  else
+    bad "找不到 scripts/text-only-guard.py —— 投影只认 text 的病没有门禁"
+  fi
+
   # 变异清单自洽：每条的 old 片段必须**恰好出现一次**，
   # 否则那条变异永远是 BAD，等于验收清单里混着一条废条目。
   if [ -f scripts/mutate.py ] && [ -f scripts/mutations.json ]; then

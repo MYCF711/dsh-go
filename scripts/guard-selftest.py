@@ -14,8 +14,16 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
-TMP = "tmp/guard-selftest"
+# 造红用的草稿目录**必须放在仓库外**。
+#
+# 以前是 `tmp/guard-selftest`：它建在仓库里，而门禁后面还会跑 `staticcheck ./...`——
+# 两个进程撞在一起时，staticcheck 正好扫到这个正在建/删的目录，报
+# `open tmp\guard-selftest: The system cannot find the file specified`，
+# 于是"守卫自测"把静态检查搞红了（实测踩过一次，红的原因与代码无关）。
+# 用系统临时目录：仓库树里的东西对 `./...` 不可见，也就不存在这个赛跑。
+TMP = os.path.join(tempfile.mkdtemp(prefix="dshgo-guard-selftest-"), "root")
 
 
 def run(args):
@@ -104,6 +112,112 @@ def main():
     code, out = run(["scripts/doc-links.py", zh_manual])
     chk("doc-links 能发现中文文件名的缺失", code != 0 and "MISS docs/不存在的中文手册.md" in out, out.strip()[-200:])
 
+    # ---- 6) text-only 守卫：把七处历史事故逐条改回去，必须逐条红 ----
+    #
+    # 这条守卫的判据不是"脚本能跑"，是"把真实事故改回去它认不认得"。
+    # 七处都来自 2026-11-04 一天内的实际修复（见 docs/silent-success-audit.md §5.6）。
+    # 全部在隔离副本里改，仓库里的 .go 文件一个都不碰。
+    #
+    # 副本放在系统临时目录，**不放在 tmp/ 下**：tmp/ 在本仓 Go module 里面，
+    # 一份拷过去的树会变成 dshgo/tmp/... 包，`go build ./...` / `go test ./...`
+    # 会连它一起编译（实测：一次全仓测试把副本里的包也跑了，还拖慢一倍）。
+    to_root = tempfile.mkdtemp(prefix="dshgo-text-only-")
+    to_tree = os.path.join(to_root, "tree")
+    for d in ("cmd", "internal", "modules", "codecs"):
+        shutil.copytree(d, os.path.join(to_tree, d))
+    allow = os.path.abspath("scripts/text-only-allow.txt")
+
+    def run_guard(root):
+        return run(["scripts/text-only-guard.py", "--root", root, "--allow", allow])
+
+    code, out = run_guard(to_tree)
+    chk("text-only 守卫：未改动的副本是绿的（造红不是副本本身坏了）",
+        code == 0 and "PASS text-only" in out, out.strip()[-200:])
+
+    # (名字, 文件, 旧写法正则, 替换) —— 每一条都对应一次真实事故。
+    text_only_reverts = [
+        ("session.load 只凭 text 判空",
+         "cmd/dshd/transport_source.go",
+         r'if !assistantHasPayload\(text, think, countToolCalls\(blocks\)\) \{',
+         'if text == "" {'),
+        ("history_search 只拼 text 块",
+         "cmd/dshd/history.go",
+         r'(?s)\tparts := make\(\[\]string, 0, len\(blocks\)\)\n\tfor _, b := range blocks \{\n.*?\n\t\}\n\treturn strings\.Join\(parts, "\\n"\)',
+         '\tparts := make([]string, 0, len(blocks))\n'
+         '\tfor _, b := range blocks {\n'
+         '\t\tif b.Text != "" {\n'
+         '\t\t\tparts = append(parts, b.Text)\n'
+         '\t\t}\n'
+         '\t}\n'
+         '\treturn strings.Join(parts, "\\n")'),
+        ("子代理转写 m.Text 为空就丢",
+         "cmd/dshd/subagent_inherit.go",
+         r'if !assistantHasPayload\(n\.Message\.Content, reasoning, len\(n\.Message\.ToolCalls\)\) \{',
+         'if n.Message.Content == "" {'),
+        ("session.fork 不搬思考块",
+         "internal/session/fork.go",
+         r'(?s)\t\tblocks := make\(\[\]map\[string\]any, 0, len\(reasoning\)\+1\+len\(m\.ToolCalls\)\)\n'
+         r'\t\tfor _, text := range reasoning \{\n'
+         r'\t\t\tblocks = append\(blocks, ReasoningBlock\(text\)\)\n'
+         r'\t\t\}\n',
+         '\t\tblocks := make([]map[string]any, 0, 1+len(m.ToolCalls))\n'),
+        ("ACP session/load 重放不看思考块",
+         "cmd/dshd/acp.go",
+         r'(?s)\treasoning := session\.ReasoningBlocksBySeq\(back\)\n\tfor _, node := range session\.Surface\(back\) \{\n\t\tm := node\.Message\n.*?\n\t\t\}\n\t\tif m\.Content != "" \{',
+         '\tfor _, node := range session.Surface(back) {\n\t\tm := node.Message\n\t\tif m.Content != "" {'),
+        ("Meter.Estimate 不算思考",
+         "internal/session/tokens.go",
+         r'(?s)\t\tfor _, text := range m\.Reasoning \{\n\t\t\ttotal \+= estimateString\(text\)\n\t\t\}\n',
+         ""),
+        ("serve 推帧用 resp.Content != \"\" 决定发不发",
+         "cmd/dshd/serve_turn.go",
+         r'if resp != nil && assistantHasPayload\(resp\.Content, resp\.Reasoning, len\(resp\.ToolCalls\)\) \{',
+         'if resp != nil && resp.Content != "" {'),
+    ]
+    for name, rel, pattern, repl in text_only_reverts:
+        target = os.path.join(to_tree, rel)
+        orig = open(target, encoding="utf-8").read()
+        new, n = re.subn(pattern, lambda _m: repl, orig, count=1)
+        if n != 1 or new == orig:
+            chk("text-only 守卫：%s → 造红片段能对上" % name, False,
+                "旧写法片段没匹配上（%s），这条自测本身失效了" % rel)
+            continue
+        open(target, "w", encoding="utf-8", newline="").write(new)
+        code, out = run_guard(to_tree)
+        open(target, "w", encoding="utf-8", newline="").write(orig)
+        chk("text-only 守卫：%s → 必须红" % name,
+            code != 0 and "FAIL" in out, out.strip()[-220:])
+
+    # 白名单自己也会烂：条目对不上任何发现时必须红。
+    # "问题已经修掉了"也算对不上——那就该有人把这一行删掉，而不是让它继续当橡皮图章。
+    stale_allow = os.path.join(TMP, "text-only-allow-stale.txt")
+    with open(stale_allow, "w", encoding="utf-8", newline="") as fh:
+        fh.write(open(allow, encoding="utf-8").read())
+        fh.write("\ncmd/dshd/history.go:9999 | 自测用的坏条目：那个文件里没有这一行\n")
+    code, out = run(["scripts/text-only-guard.py", "--allow", stale_allow])
+    chk("text-only 守卫：白名单条目对不上任何发现 → 必须红（白名单不许烂着）",
+        code != 0 and "白名单条目没命中任何发现" in out, out.strip()[-200:])
+
+    # 第八次不是"改回旧的"，是"新写一个"：新文件里的 text-only 投影也必须红。
+    brand_new = os.path.join(to_tree, "cmd", "dshd", "zz_text_only_selftest_probe.go")
+    open(brand_new, "w", encoding="utf-8", newline="").write(
+        "package main\n\n"
+        "// 自测用的假投影：新写的代码，白名单里没有它。\n"
+        "func selftestProbeJoin(blocks []block) string {\n"
+        "\tout := \"\"\n"
+        "\tfor _, b := range blocks {\n"
+        "\t\tif b.Type == \"text\" {\n"
+        "\t\t\tout += b.Text\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\treturn out\n"
+        "}\n")
+    code, out = run_guard(to_tree)
+    os.remove(brand_new)
+    chk("text-only 守卫：新写的 text-only 投影（不是改回旧代码）也红",
+        code != 0 and "FAIL" in out, out.strip()[-220:])
+
+    shutil.rmtree(to_root, ignore_errors=True)
     shutil.rmtree(TMP, ignore_errors=True)
     print("合计 OK=%d FAIL=%d" % (ok, fail))
     return 0 if fail == 0 else 1

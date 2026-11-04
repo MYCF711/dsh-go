@@ -369,6 +369,21 @@ def scan_guards(a: Audit) -> None:
         "writejson-rejects-nil", "internal/transport/server.go", r"响应是空值",
         "成功响应不许是 null",
     )
+    # D4（2026-11-04）：投影只认 `type=="text"` 的病一天在七处各犯了一次
+    # （session.load / history_search / 子代理转写 / fork / ACP load / Meter / TUI）。
+    # 症状是"有产出、但产出里没有载荷、也不报错"，正是本扫描器管的那一类。
+    # 判据本身是**形状**检查，写在 scripts/text-only-guard.py 里；
+    # 这里钉的是"它还活着、而且真的接在门禁上"——守卫被删/被摘掉时这条立刻红。
+    a.need(
+        "text-only-projection-guard-wired", "scripts/check.sh",
+        r"scripts/text-only-guard\.py",
+        "投影只认 text 的守卫必须接在门禁上（否则「修过」只能靠记忆）",
+    )
+    a.need(
+        "text-only-projection-guard-exists", "scripts/text-only-guard.py",
+        r"def scan\(src\)",
+        "守卫本体不见了：形状判据（只认 text 的投影）没有别的地方在查",
+    )
 
 
 # ---------------------------------------------------------------- 主流程
