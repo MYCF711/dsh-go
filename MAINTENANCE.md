@@ -28,7 +28,11 @@
   （含空流/半截流、压缩空摘要、`200+result:null`、journal 补洞缺口、`turn/end` 恒 completed、
   `CompactSchema` 两处删参数、`history_search` 只认正文、`session.load` 丢思考、fork 丢思考）。
 - **每个 turn 都有结局**：`newTurnCloser` 统一出口，失败/用满步数/panic 都写 `turn/end{kind:error}`。
-- **验证口径**：`go test ./...` 48 包；`scripts/check.sh` ALL GREEN（含 15 条审计守卫）；
+- **两条结构性门禁**（今天新加，专门防"同一规则写两遍"这一类）：
+  `scripts/text-only-guard.py`（投影只认 text，7 处历史形状造红）+
+  `scripts/single-source.py`（4 条规则判"同形状的第二份实现"，**白名单 0 条**，修法一律是"改调唯一实现"）。
+- **验证口径**：`go test ./...` 48 包；`-race` 全仓 48 包零竞争（`CGO_ENABLED=1` + mingw64）；
+  `scripts/check.sh` ALL GREEN（含 22 条审计守卫 + 32 条守卫自测）；
   `-race` 全仓 47 包零竞争（`CGO_ENABLED=1 CC=<mingw64 gcc>`）。
 - **还没闭环的三条**（接手先看这里）：
   1. `lazy` 翻默认的"换模型家族复测"（本机只有两个 deepseek 通道，`group/kimi-k3.1-pro` 上游是坏的）
