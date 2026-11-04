@@ -13,11 +13,13 @@ import (
 // 协议层一旦自己拼路径，就会和宿主的"工作区"定义长出第二个版本，
 // 迟早出现"界面读得到、工具读不到"这种对不上的怪事。
 //
-// 四种失败分开说，因为界面的下一步动作各不相同：
-//   - 没接线 → 501（宿主没给实现，重试没意义）
-//   - 形状不对 → 400（界面改请求）
-//   - 文件不存在 → 404（界面换个路径，别当成宿主坏了）
-//   - 其它错误 → 500，带宿主原文（"读不动"和"是空的"必须能分辨）
+// 四种失败分开说，因为界面的下一步动作各不相同（码也一并区分：
+// 客户端按码分支，不该去读中文消息）：
+//   - 没接线 → 501 not_implemented（宿主没给实现，重试没意义）
+//   - 形状不对 → 400 bad_request（界面改请求）
+//   - 文件不存在 → 404 not_found（界面换个路径，别当成宿主坏了）
+//   - 其它错误 → 500 internal，带宿主原文（"读不动"和"是空的"必须能分辨；
+//     这类是宿主自己出错，按 internal 判为可重试）
 func (s *Server) handleFSRead(w http.ResponseWriter, r *http.Request) {
 	if s.opt.FSRead == nil {
 		writeJSON(w, http.StatusNotImplemented, errorBody("fs.read 未接线"))
@@ -28,21 +30,21 @@ func (s *Server) handleFSRead(w http.ResponseWriter, r *http.Request) {
 		Path string `json:"path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	if req.Path == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 path"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 path"))
 		return
 	}
 
 	content, err := s.opt.FSRead(req.Path)
 	if err != nil {
 		if errors.Is(err, ErrNoSuchFile) {
-			writeJSON(w, http.StatusNotFound, errorBody("文件不存在"))
+			writeJSON(w, http.StatusNotFound, errorBodyFor("not_found", "文件不存在"))
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, errorBody("读失败："+err.Error()))
+		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", "读失败："+err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, content)
@@ -67,20 +69,20 @@ func (s *Server) handleFSWrite(w http.ResponseWriter, r *http.Request) {
 		Content string `json:"content"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	if req.Path == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 path"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 path"))
 		return
 	}
 
 	if err := s.opt.FSWrite(req.Path, req.Content); err != nil {
 		if errors.Is(err, ErrNoSuchFile) {
-			writeJSON(w, http.StatusNotFound, errorBody("文件不存在"))
+			writeJSON(w, http.StatusNotFound, errorBodyFor("not_found", "文件不存在"))
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, errorBody("写失败："+err.Error()))
+		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", "写失败："+err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"written": true})

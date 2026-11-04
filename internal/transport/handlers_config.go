@@ -18,7 +18,7 @@ import (
 //
 // 三种结果分开说：
 //   - 没接线 → 501（要宿主补实现，重试没有意义）
-//   - 宿主报错 → 500，带上宿主原文（"读不动"和"是空的"必须能分辨）
+//   - 宿主报错 → 500 internal，带上宿主原文（"读不动"和"是空的"必须能分辨）
 //   - 成功 → 200；没配置过给空对象 {}，不给 null
 func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	if s.opt.ConfigGet == nil {
@@ -28,7 +28,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 
 	values, err := s.opt.ConfigGet()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("读配置失败："+err.Error()))
+		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", "读配置失败："+err.Error()))
 		return
 	}
 
@@ -51,9 +51,10 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 //
 // 四种结果分开说：
 //   - 没接线 → 501
-//   - 请求体不是 JSON 对象 → 400
-//   - values 为 nil 或空 → 400（一次都不改的空调用是调用方的 bug，不该默默成功）
-//   - 宿主报错 → 500，带上宿主原文
+//   - 请求体不是 JSON 对象 → 400 bad_request
+//   - values 为 nil 或空 → 400 bad_request（一次都不改的空调用是调用方的 bug，
+//     不该默默成功）
+//   - 宿主报错 → 500 internal，带上宿主原文
 //
 // 成功回 updated=len(values)，让界面能对上"我提交了 3 项，改掉的是不是 3 项"。
 func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
@@ -63,16 +64,16 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 两种形状都收：`{"values":{…}}`（契约里的规范形状）与扁平 kv（早先界面的发法）。
-	// 只认一种的后果是 400 而 hint 为空——界面那边的表现是"保存按钮没反应"。
+	// 只认一种的后果是 400，而调用方以为自己传对了。
 	var raw map[string]json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	values := map[string]string{}
 	if inner, ok := raw["values"]; ok {
 		if err := json.Unmarshal(inner, &values); err != nil {
-			writeJSON(w, http.StatusBadRequest, errorBody("values 必须是字符串到字符串的对象"))
+			writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "values 必须是字符串到字符串的对象"))
 			return
 		}
 	} else {
@@ -87,13 +88,13 @@ func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
 	}
 	// nil 与空区分不够：两者都是"这一趟什么都没说要改"，一起拦下。
 	if len(values) == 0 {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 values：要给至少一项"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 values：要给至少一项"))
 		return
 	}
 	req := struct{ Values map[string]string }{Values: values}
 
 	if err := s.opt.ConfigSet(req.Values); err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("写配置失败："+err.Error()))
+		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", "写配置失败："+err.Error()))
 		return
 	}
 

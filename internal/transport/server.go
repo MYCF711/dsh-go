@@ -429,7 +429,8 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.opt.Create(in.Mode)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody(err.Error()))
+		// 400 是既有约定：建不出来通常是 mode 认不出来（客户端改请求才能过）。
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessionId": id})
@@ -526,7 +527,8 @@ func (s *Server) handleSessionApprove(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrBadOption):
 		writeJSON(w, http.StatusBadRequest, errorBody("bad_option"))
 	default:
-		writeJSON(w, http.StatusInternalServerError, errorBody(err.Error()))
+		// 审批通道自己炸了（broker 没了、写回失败）：按 internal 报，可重试。
+		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", err.Error()))
 	}
 }
 
@@ -569,25 +571,18 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 		gap := !staleEpoch && !tooNew && !win.Covered
 		if staleEpoch || tooNew || gap {
 			msg := "journal 世代或水位对不上，需要重新 load 基线"
-			hint := "丢弃旧水位，重新 session.load 拿 journalEpoch/lastSeq"
 			if gap {
 				msg = fmt.Sprintf("sinceSeq=%d 之前的历史已经滑出内存 journal（只保留最近 %d 帧）："+
 					"继续按 seq 补会缺一段，而且缺口看不出来", in.SinceSeq, win.LastSeq-win.Oldest+1)
-				hint = "重新 session.load 取首屏基线，从返回的 lastSeq 往后订阅；补洞只覆盖内存里还在的帧"
 			}
-			writeJSON(w, http.StatusConflict, map[string]any{
-				// 四字段信封，跟其它错误保持一致。少了 retryable 的后果是
-				// 通用客户端解不出这个字段（界面审计实测），而这条恰恰是
-				// "必须让用户知道可以重试"的那一类错误。
-				"error": map[string]any{
-					"code":      "stale_epoch",
-					"message":   msg,
-					"hint":      hint,
-					"retryable": true,
-				},
+			// 码、hint、retryable **全部**走统一构造。这一段以前是手写 JSON：
+			// 四字段靠手抄，漏了 `retryable`（界面审计实测通用客户端解不出它），
+			// 而这条恰恰是"丢掉旧水位就能继续"的那一类——必须可重试。
+			// journalEpoch/lastSeq 平铺在顶层：客户端靠它们重建基线，不是信封的一部分。
+			writeJSON(w, http.StatusConflict, errorBodyFor("stale_epoch", msg, map[string]any{
 				"journalEpoch": win.Epoch,
 				"lastSeq":      win.LastSeq,
-			})
+			}))
 			return
 		}
 		writeJSON(w, http.StatusOK, HistoryResult{
@@ -616,7 +611,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter) {
 	if s.opt.List != nil {
 		got, err := s.opt.List()
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, errorBody(err.Error()))
+			writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", err.Error()))
 			return
 		}
 		if got != nil {
@@ -672,12 +667,6 @@ func baseURL(addr net.Addr) string {
 	return "http://" + net.JoinHostPort(host, port)
 }
 
-// errorBody 造一个契约快照里的错误信封：
-//
-//	{"error":{"code":..,"message":..,"hint":..,"retryable":..}}
-//
-// 为什么不是字符串：字符串错误让照快照写的客户端**连 JSON 都解不动**，
-// 真正的原因（401 / 404）被吞成"响应不是合法 JSON"（H8，2026-11-03）。
 // alreadyEnveloped 判断这个值是不是已经带了信封（防止二次包装）。
 func alreadyEnveloped(v any) bool {
 	m, ok := v.(map[string]any)
@@ -695,25 +684,80 @@ func alreadyEnveloped(v any) bool {
 //
 //	{"error":{"code":…,"message":…,"hint":…,"retryable":…}}
 //
-// hint 是必需的：客户端要知道**下一步怎么办**，而这正是 DSH 错误契约的意义。
+// 这是**唯一**的错误体构造。别处不许手写这个 map：手写的那几处迟早会少
+// 一个字段（H8 的 `stale_epoch` 就是这么漏掉 `retryable` 的——界面审计实测，
+// 通用客户端解不出这个字段）。`TestNoHandwrittenErrorBodies` 扫源码钉住这点。
 func errorBody(msg string) map[string]any {
-	code := errorCode(msg)
-	return map[string]any{"error": map[string]any{
-		"code":    code,
-		"message": msg,
-		"hint":    errorHint(code),
-		// busy 也可重试：等这一轮结束再发就行（跟着 hint 走）。
-		"retryable": code == "internal" || code == "busy",
-	}}
+	return errorBodyFor(errorCode(msg), msg)
 }
 
-// errorHint 给每类错误一句"下一步"。没有就别编，返回空串即可。
+// errorBodyFor 用**调用方已经知道的码**造信封。
+//
+// 什么时候用它：码不该由中文消息猜出来的地方——`stale_epoch`、WS 握手的
+// `bad_handshake`、宿主侧失败的 `internal`、参数错的 `bad_request`。
+// 猜错码的后果是客户端按错的分支走（把"宿主崩了"当成"参数写错"，
+// 于是它去改参数、并且不重试）。
+//
+// hint 与 retryable 仍然只在 errorObject 那一处判定：加一个新码，
+// 就必须同时在 errorHint 与 retryableFor 里给出说法——
+// `TestRetryableDecisionCoversEveryCode` 会盯着。
+//
+// extra 平铺到信封**顶层**（`stale_epoch` 要带 journalEpoch/lastSeq，
+// 好让客户端知道该从哪个世代/水位重建基线）。"error" 与 "result" 两个键
+// 不许被 extra 覆盖——那等于让附加信息伪装成信封本身。
+func errorBodyFor(code, msg string, extra ...map[string]any) map[string]any {
+	body := make(map[string]any, len(extra)+1)
+	body["error"] = errorObject(code, msg)
+	for _, kv := range extra {
+		for k, v := range kv {
+			if k == "error" || k == "result" {
+				continue
+			}
+			body[k] = v
+		}
+	}
+	return body
+}
+
+// errorObject 就是那四个字段本身，也是唯一的构造点。
+// hint 是必需的：客户端要知道**下一步怎么办**，而这正是 DSH 错误契约的意义。
+func errorObject(code, msg string) map[string]any {
+	return map[string]any{
+		"code":      code,
+		"message":   msg,
+		"hint":      errorHint(code),
+		"retryable": retryableFor(code),
+	}
+}
+
+// retryableFor 是"这条错误能不能重试"的**唯一**判据。
+//
+// 只按码判，不按 HTTP 状态、不按消息文本——客户端也只能按码判。
+//
+//   - internal：宿主自己出错（读盘/序列化/接线炸了），同一个请求再发一次可能就过
+//   - busy：上一轮还没结束，等 turn/done（或先 session.cancel）再发就行
+//   - stale_epoch：水位/世代过期，丢掉旧水位重新 load 就能接着收
+//
+// 其余一律 false：参数错、鉴权失败、未接线、找不到东西——重发同一个请求
+// 还是同一个结果，让客户端自动重试只是把错误刷屏。
+func retryableFor(code string) bool {
+	switch code {
+	case "internal", "busy", "stale_epoch":
+		return true
+	}
+	return false
+}
+
+// errorHint 给每类错误一句"下一步"。叫不出名字的错误也必须有一句（见兜底）：
+// 空 hint 等于让客户端把"宿主未知错误"翻译成"什么都不做"。
 func errorHint(code string) string {
 	switch code {
 	case "unauthorized":
 		return "先 GET /connect?token=… 换 cookie，再调这个接口"
 	case "not_implemented":
 		return "宿主这一侧还没接线，换一个 method 或等它实现"
+	case "not_found":
+		return "检查请求路径与 HTTP 方法；要找的会话/文件/id 可能已经不在了（先 session.list 或 workspace.list 确认）"
 	case "no_such_session":
 		return "先 session.list 拿 id；确认 --home 指向的目录里有这个会话"
 	case "no_such_request":
@@ -724,6 +768,10 @@ func errorHint(code string) string {
 		return "optionId 必须是 allow_once / allow_always / reject_once 之一"
 	case "bad_request":
 		return "检查入参名字（id/sessionId 都认）与类型"
+	case "bad_handshake":
+		return "WS 握手要带 Upgrade: websocket、Connection: Upgrade、Sec-WebSocket-Key 三个头；先 GET /connect 换 cookie 再连 /ws"
+	case "stale_epoch":
+		return "丢弃旧水位，重新 session.load 拿 journalEpoch/lastSeq，再从 lastSeq 往后订阅（补洞只覆盖内存里还在的帧）"
 	case "encode_failure":
 		return "这是宿主内部序列化出错，不是你参数写错了；把这一步操作和 dshd 的 stderr 报告出来"
 	case "empty_result":
@@ -731,7 +779,7 @@ func errorHint(code string) string {
 	case "internal":
 		return "可以直接重试；反复失败就看 dshd 的 stderr"
 	}
-	return ""
+	return "这是宿主侧的错误（不是你参数写错了）：把这一步操作和 dshd 的 stderr 一起报出来"
 }
 
 // errorCode 把旧的中文错误串映射成稳定的机器码。

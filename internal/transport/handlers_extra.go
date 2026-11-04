@@ -6,6 +6,10 @@ import (
 	"net/http"
 )
 
+// 本文件的错误体全部走 `errorBodyFor(码, 消息)`：码是**这一处知道的事实**
+// （参数错 / 找不到 / 宿主失败），不该交给中文消息去猜。
+// hint 与 retryable 由 errorBodyFor 背后的 errorObject 统一判定，这里不写第二份。
+
 // handleSessionDelete 是 /api/session.delete。
 //
 // 删会话不可逆，所以这里只做三件事：校验参数、调宿主、把宿主的错误原文回给界面。
@@ -20,7 +24,7 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 		ID        string `json:"id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	// `id` 是同一个东西的另一个名字：界面那边两种写法都有（审计实测）。
@@ -29,17 +33,17 @@ func (s *Server) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
 		req.SessionID = req.ID
 	}
 	if req.SessionID == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 sessionId（或 id）"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 sessionId（或 id）"))
 		return
 	}
 	if err := s.opt.Delete(req.SessionID); err != nil {
 		// 找不到会话和删失败必须分开：前者是 404（界面换个 id 重试），
-		// 后者是 500（界面该提示"这次没删掉"）。
+		// 后者是 500（界面该提示"这次没删掉"，并且**可以重试**）。
 		if errors.Is(err, ErrNoSuchSession) {
-			writeJSON(w, http.StatusNotFound, errorBody("会话不存在"))
+			writeJSON(w, http.StatusNotFound, errorBodyFor("no_such_session", "会话不存在"))
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, errorBody("删除失败："+err.Error()))
+		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", "删除失败："+err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
@@ -57,7 +61,7 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 		Title     string `json:"title"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	// `id` 是同一个东西的另一个名字：界面那边两种写法都有（审计实测）。
@@ -66,16 +70,16 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 		req.SessionID = req.ID
 	}
 	if req.SessionID == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 sessionId（或 id）"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 sessionId（或 id）"))
 		return
 	}
 	id, err := s.opt.Fork(req.SessionID, req.Title)
 	if err != nil {
 		if errors.Is(err, ErrNoSuchSession) {
-			writeJSON(w, http.StatusNotFound, errorBody("会话不存在"))
+			writeJSON(w, http.StatusNotFound, errorBodyFor("no_such_session", "会话不存在"))
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, errorBody("分支失败："+err.Error()))
+		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", "分支失败："+err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessionId": id})
@@ -89,8 +93,10 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 //     不是失败（会话还没长到该压的时候）。
 func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
 	if s.opt.Compact == nil {
+		// 码显式给 not_implemented：这条消息里没有"未接线"三个字，
+		// 交给 errorCode 去猜会落到兜底的 `error`，客户端看不出"换个宿主才有"。
 		writeJSON(w, http.StatusNotImplemented,
-			errorBody("这个宿主还没实现 session.compact（压缩仍可在 CLI 用 dshd session compact）"))
+			errorBodyFor("not_implemented", "这个宿主还没实现 session.compact（压缩仍可在 CLI 用 dshd session compact）"))
 		return
 	}
 	var req struct {
@@ -99,7 +105,7 @@ func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
 		Keep      int    `json:"keep"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	sid := req.SessionID
@@ -107,7 +113,7 @@ func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
 		sid = req.ID
 	}
 	if sid == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 sessionId"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 sessionId"))
 		return
 	}
 	if req.Keep <= 0 {
@@ -116,7 +122,7 @@ func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
 	res, err := s.opt.Compact(sid, req.Keep)
 	if err != nil {
 		// 压缩失败要让人知道**是哪一步**：读日志、生成摘要、还是写盘。
-		writeJSON(w, http.StatusInternalServerError, errorBody("压缩失败: "+err.Error()))
+		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", "压缩失败: "+err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, res)

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -123,11 +124,13 @@ func TestWSRoundTrip(t *testing.T) {
 }
 
 // 握手缺 key 必须 400，不许"凑合过"。
+//
+// 状态码和正文都由 Upgrade 自己写（统一错误信封），所以这里**不能再补一次
+// WriteHeader**——补了就是 "superfluous response.WriteHeader"（日志噪音，
+// 而且说明调用方以为还有第二个写出口）。
 func TestUpgradeRejectsBadHandshake(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := Upgrade(w, r); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-		}
+		_, _ = Upgrade(w, r)
 	}))
 	defer srv.Close()
 	resp, err := http.Get(srv.URL)
@@ -137,5 +140,9 @@ func TestUpgradeRejectsBadHandshake(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("缺 Sec-WebSocket-Key 要 400，拿到 %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"error"`) {
+		t.Fatalf("握手失败也要走统一错误信封，实际正文：%s", body)
 	}
 }

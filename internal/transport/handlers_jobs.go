@@ -60,11 +60,11 @@ func (s *Server) handleJobsOutput(w http.ResponseWriter, r *http.Request) {
 		WaitMs int    `json:"waitMs"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	if params.ID == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 id：要取哪个任务的输出"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 id：要取哪个任务的输出"))
 		return
 	}
 	wait := time.Duration(params.WaitMs) * time.Millisecond
@@ -77,7 +77,7 @@ func (s *Server) handleJobsOutput(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.opt.JobsOutput(params.ID, wait)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody(err.Error()))
+		writeJSON(w, http.StatusNotFound, errorBodyFor("not_found", err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": out})
@@ -122,15 +122,16 @@ func (s *Server) handleSessionSetModel(w http.ResponseWriter, r *http.Request) {
 		Model string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	if params.ID == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 id：要改哪个会话"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 id：要改哪个会话"))
 		return
 	}
 	if err := s.opt.SetSessionModel(params.ID, params.Model); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody(err.Error()))
+		// 400 是既有约定：改不动通常是 model/id 认不出来（客户端该改请求）。
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"ok": true}})
@@ -151,22 +152,22 @@ func (s *Server) handleSessionSetPermission(w http.ResponseWriter, r *http.Reque
 		Permission string `json:"permission"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	if params.ID == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 id：要改哪个会话"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 id：要改哪个会话"))
 		return
 	}
 	switch params.Permission {
 	case "", "deny", "ask", "allow", "auto":
 	default:
-		writeJSON(w, http.StatusBadRequest, errorBody(
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request",
 			"permission 只能是 deny/ask/allow/auto（或空串清除），收到 "+params.Permission))
 		return
 	}
 	if err := s.opt.SetSessionPermission(params.ID, params.Permission); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody(err.Error()))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"ok": true}})
@@ -191,7 +192,8 @@ func (s *Server) handleModelsList(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	list, err := s.opt.ModelsList(ctx)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, errorBody("列模型失败："+err.Error()))
+		// 502：网关是上游，不是我们的代码；按 internal 判为可重试（网关抖完就好）。
+		writeJSON(w, http.StatusBadGateway, errorBodyFor("internal", "列模型失败："+err.Error()))
 		return
 	}
 	if list == nil {

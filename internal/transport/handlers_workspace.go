@@ -29,7 +29,7 @@ func (s *Server) handleWorkspaceList(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&params)
 	entries, err := s.opt.WorkspaceList(params.Path)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorBody("列工作区失败："+err.Error()))
+		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", "列工作区失败："+err.Error()))
 		return
 	}
 

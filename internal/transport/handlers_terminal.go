@@ -29,7 +29,8 @@ func (s *Server) handleTerminalOpen(w http.ResponseWriter, r *http.Request) {
 	id, err := s.opt.TerminalOpen(params.Cwd)
 	if err != nil {
 		// **502 而不是 500**：起不来说明底层 shell 有问题（不是我们的代码错）。
-		writeJSON(w, http.StatusBadGateway, errorBody("起终端失败："+err.Error()))
+		// 码按 internal 报：这是宿主这一侧起不来，客户端重试是合理的。
+		writeJSON(w, http.StatusBadGateway, errorBodyFor("internal", "起终端失败："+err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"id": id}})
@@ -46,15 +47,16 @@ func (s *Server) handleTerminalInput(w http.ResponseWriter, r *http.Request) {
 		Data string `json:"data"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	if params.ID == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 id：往哪个终端写"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 id：往哪个终端写"))
 		return
 	}
 	if err := s.opt.TerminalInput(params.ID, params.Data); err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody(err.Error()))
+		// 404 只表示"这个终端不在了"；别的失败（写不动）不该混进这个码里。
+		writeJSON(w, http.StatusNotFound, errorBodyFor("not_found", err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"ok": true}})
@@ -73,16 +75,16 @@ func (s *Server) handleTerminalOutput(w http.ResponseWriter, r *http.Request) {
 		Since int    `json:"since"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody("请求体不是 JSON 对象"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
 		return
 	}
 	if params.ID == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody("缺 id：取哪个终端的输出"))
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 id：取哪个终端的输出"))
 		return
 	}
 	out, err := s.opt.TerminalOutput(params.ID, params.Since)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, errorBody(err.Error()))
+		writeJSON(w, http.StatusNotFound, errorBodyFor("not_found", err.Error()))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": out})

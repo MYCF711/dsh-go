@@ -47,28 +47,36 @@ var _ Conn = (*WSConn)(nil)
 //
 // 缺任何一项握手要素都会先回 400 再返回 error——此时连接还归 http 服务器，
 // 不能用 Hijack 之后的裸写。
+//
+// 回的是**统一错误信封**（四字段），不是 http.Error 的纯文本：
+// `/ws` 也是 Transport 的出口，客户端在它上面同样只有一个 JSON 解析器。
+// 以前这里是 text/plain，客户端升级失败时拿不到 code/hint 只能瞎猜；
+// 而"握手头不全"恰恰是最该被说清楚的一类失败（改客户端就能过）。
 func Upgrade(w http.ResponseWriter, r *http.Request) (*WSConn, error) {
 	if r == nil {
-		http.Error(w, "WebSocket 握手需要请求对象", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_handshake", "WebSocket 握手需要请求对象"))
 		return nil, errors.New("升级失败：请求为 nil")
 	}
 	if !headerHasToken(r.Header, "Upgrade", "websocket") {
-		http.Error(w, "缺少 Upgrade: websocket", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_handshake", "缺少 Upgrade: websocket"))
 		return nil, errors.New("升级失败：请求头缺少 Upgrade: websocket")
 	}
 	if !headerHasToken(r.Header, "Connection", "upgrade") {
-		http.Error(w, "缺少 Connection: Upgrade", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_handshake", "缺少 Connection: Upgrade"))
 		return nil, errors.New("升级失败：请求头 Connection 不含 upgrade")
 	}
 	key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
 	if key == "" {
-		http.Error(w, "缺少 Sec-WebSocket-Key", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_handshake", "缺少 Sec-WebSocket-Key"))
 		return nil, errors.New("升级失败：请求头缺少 Sec-WebSocket-Key")
 	}
 
 	h, ok := w.(http.Hijacker)
 	if !ok {
-		http.Error(w, "这个 http.ResponseWriter 不支持 Hijack", http.StatusInternalServerError)
+		// 这一条不是客户端能改的：是宿主把一个不支持 Hijack 的 ResponseWriter
+		// 交给了 Upgrade。按 internal 报（可重试 + 让人去看 stderr）。
+		writeJSON(w, http.StatusInternalServerError,
+			errorBodyFor("internal", "这个 http.ResponseWriter 不支持 Hijack，无法接管连接"))
 		return nil, errors.New("升级失败：http.ResponseWriter 不支持 Hijack，无法接管连接")
 	}
 	conn, brw, err := h.Hijack()
