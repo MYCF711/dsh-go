@@ -84,4 +84,4 @@ codecs/v4/summary.go:54 | 会话标题/首行预览只从 text 块取；思考�
 
 # dshtui 的 --script 回放：`send` 步的语义就是"发这段文字"，所以它**必须**有正文。
 # 这不是"判断这条消息有没有内容"，是校验脚本写没写漏参数。
-cmd/dshtui/script.go:165 | send 步的语义就是发文字；空 text 是脚本写漏了参数，不是消息没内容
+cmd/dshtui/script.go:182 | send 步的语义就是发文字；空 text 是脚本写漏了参数，不是消息没内容
