@@ -326,7 +326,7 @@ func cmdTools(argv []string) error {
 	// 而实际发出去的是压缩后的——门禁按"发出去的那个"算才有意义。
 	schema := fs.String("schema", defaultToolSchema, "打印哪种形态（旧名，等价于 --tools-mode）：compact|full")
 	mode := fs.String("tools-mode", "",
-		"工具表形态：compact（默认）| full | merged（watch/hindsight/schedule/team_task 四族各合成一个工具，多一个 action 参数）")
+		"工具表形态：compact（默认，= 去参数说明 + 去冗余 schema 骨架）| full | merged（watch/hindsight/schedule/team_task 四族各合成一个工具，多一个 action 参数）")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -366,7 +366,8 @@ func cmdTools(argv []string) error {
 	}
 	if tm != toolsModeFull {
 		for i := range table {
-			table[i].Parameters = agent.CompactSchema(table[i].Parameters)
+			// 与 cmdRun 同一条投影链（去参数说明 + 去冗余骨架），见 tightenSchema。
+			table[i].Parameters = tightenSchema(table[i].Parameters)
 		}
 	}
 	out, err := json.MarshalIndent(table, "", "  ")
@@ -446,7 +447,7 @@ func cmdRun(argv []string) error {
 	// 而环境变量在 --help 里看不见，等于"藏起来的开关"。
 	reasoningEffort := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
 		"推理强度：空=不要（默认）| xhigh | max。要了才把 reasoning 写进日志与流")
-	toolSchema := fs.String("tool-schema", defaultToolSchema, "工具表形态（旧名，等价 --tools-mode）：compact=压掉参数说明（省约两成输入）| full=完整")
+	toolSchema := fs.String("tool-schema", defaultToolSchema, "工具表形态（旧名，等价 --tools-mode）：compact=压掉参数说明与冗余 schema 骨架 | full=完整")
 	// merged 是第三档：把同族工具（watch/hindsight/schedule/team_task）各合成
 	// 一个工具，多一个 action 参数。只改模型看到的表，执行仍按原工具名走。
 	toolsMode := fs.String("tools-mode", "",
@@ -509,6 +510,7 @@ func cmdRun(argv []string) error {
 	// 系统提示里的工具清单也要跟着换——否则模型从提示里看到旧的 17 个名字，
 	// 从 tools 字段看到 4 个，两边对不上。
 	table := spi.ToolRegistry(reg)
+	var mergedRef *mergedTable
 	if tm == toolsModeMerged {
 		mt, warn, err := newMergedTable(reg)
 		if err != nil {
@@ -517,7 +519,14 @@ func cmdRun(argv []string) error {
 		for _, w := range warn {
 			fmt.Fprintln(os.Stderr, "工具表："+w)
 		}
+		mergedRef = mt
 		table = mt
+	}
+	// compact = 去掉参数说明（agent 循环里那步）+ 去掉冗余骨架（tightenTable）。
+	// 顺序在 merged **之后**：合并要读成员的原始 schema（顶层 type 判断、
+	// required 抄写），先收紧会让它把"顶层不是 object"误判成合不进来。
+	if tm != toolsModeFull {
+		table = tightenTable(table)
 	}
 	sys := buildSystemPrompt(table, *model, cwd, *workspaceBytes)
 	// --session：续一个已经存在的会话，而不是新建。
@@ -607,9 +616,11 @@ func cmdRun(argv []string) error {
 	// 顺序反了就会拿合并名去查 Caps（查不到 → 审批判定跑偏），
 	// 而且守卫的"以后都允许"记忆是按工具名记的，两边名字必须一致。
 	loopRunner := spi.Runner(guarded)
-	if mt, ok := table.(*mergedTable); ok {
-		mr := &mergedRunner{inner: guarded, table: mt}
-		mt.bindRunner(mr.Run) // Exec 兜底：即便有人绕过 Runner，也还是走同一条路由
+	// 用 mergedRef 而不是再断言 table 的类型：table 现在可能被 tightenTable 包过一层，
+	// 而路由必须拿**合并层自己**（它才是 action → 原工具名 的那张表）。
+	if mergedRef != nil {
+		mr := &mergedRunner{inner: guarded, table: mergedRef}
+		mergedRef.bindRunner(mr.Run) // Exec 兜底：即便有人绕过 Runner，也还是走同一条路由
 		loopRunner = mr
 	}
 
@@ -624,15 +635,19 @@ func cmdRun(argv []string) error {
 		model: *model, maxSteps: 8, timeout: 5 * time.Minute,
 	})
 	loop := &agent.Loop{
-		Chat:         chat,
-		Compact:      runCompactor(chat, logw, *autoCompact, *model, meter),
-		Tools:        table,
-		Runner:       loopRunner,
-		Project:      session.ProjectResult,
-		Model:        *model,
-		System:       sys,
-		SessionID:    sessID,
-		CompactTools: tm != toolsModeFull,
+		Chat:      chat,
+		Compact:   runCompactor(chat, logw, *autoCompact, *model, meter),
+		Tools:     table,
+		Runner:    loopRunner,
+		Project:   session.ProjectResult,
+		Model:     *model,
+		System:    sys,
+		SessionID: sessID,
+		// 这里显式关掉循环自带的压表：表在 cmdRun 里已经被 tightenTable 投影过一遍。
+		// 循环那个 CompactSchema 是"见 description 键就删"，会把名叫 description 的
+		// **参数**也删掉（bash/subagent/team_task_create 等 6 个工具真有这个参数），
+		// 而 tightenSchema 分得清"注解"和"参数名"。两条路同时开，后一条会覆盖前一条。
+		CompactTools: false,
 		// 只有显式设了才要推理：某些网关不认这个参数，默认不带更安全。
 		Reasoning: *reasoningEffort,
 		MaxSteps:  *maxSteps,

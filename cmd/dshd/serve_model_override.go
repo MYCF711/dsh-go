@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -45,11 +46,11 @@ func (s *modelOverrideStore) Load() error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("读会话模型覆盖 %s: %w", s.path, err)
 	}
 	var m map[string]string
 	if err := json.Unmarshal(b, &m); err != nil {
-		return err // 文件坏了要说，不静默丢
+		return fmt.Errorf("解析会话模型覆盖 %s: %w", s.path, err) // 文件坏了要说，不静默丢
 	}
 	if m != nil {
 		s.m = m
@@ -90,4 +91,18 @@ func (s *modelOverrideStore) flushLocked() error {
 		return err
 	}
 	return os.Rename(tmp, s.path)
+}
+
+// resolveServeModel 在每一轮开始时解析覆盖。重新读这份小 JSON，是为了让
+// 默认 loopRunner 与 modelRunner 有完全一致的 set/clear/restart 语义：
+// setModel 成功落盘后的下一轮一定看到同一个值，损坏文件也一定明确失败。
+func resolveServeModel(home, sessionID, fallback string) (string, error) {
+	overrides := newModelOverrideStore(home)
+	if err := overrides.Load(); err != nil {
+		return "", err
+	}
+	if model := overrides.Get(sessionID); model != "" {
+		return model, nil
+	}
+	return fallback, nil
 }

@@ -12,56 +12,362 @@ import (
 	"dshgo/internal/spi"
 )
 
-// 压表只许去掉参数的说明文字。类型、enum、required、items 一个都不许动——
+// 压表只许去掉两类东西：参数的说明文字（compact），以及 schema 里
+// "接口已经规定 / 省略等于默认"的冗余骨架（tighten）。类型、enum、required、
+// additionalProperties:false、参数名，一个都不许动——
 // 少一个 required 模型就会漏参数，少一个 enum 就会传非法值。
 //
-// 这条测试盯着"两种表结构一致"，因为 compact 已经默认开启：
+// 这条测试盯着"模型看到的那张表结构不变"，因为 compact 已经默认开启：
 // 一旦有人在某处漏改，模型看到的就是残缺的契约，而单测很难发现。
+//
+// 判据不是"字节少了"，是**归一化后逐工具相等**：把"顶层 type:object / 空
+// properties / 空 required / additionalProperties:true"这四条等价写法抹平之后，
+// 完整表与投影表必须一模一样。
 func TestCompactTableKeepsContract(t *testing.T) {
-	table := buildToolTableMust(t)
-	var fullBytes, compactBytes int
-	for _, e := range table {
+	reg := assembleRegistry(t)
+	// 走投影表本身（而不是另调一次 tightenSchema）：模型收到的就是这里的 Schema()。
+	view := tightenTable(reg)
+	got := map[string]spi.Tool{}
+	for _, tl := range view.Tools() {
+		got[tl.Name()] = tl
+	}
+
+	var fullBytes, compactBytes, tightBytes, restored int
+	var descDropped int
+	n := 0
+	for _, e := range buildToolTableMust(t) {
+		n++
 		compact := agent.CompactSchema(e.Parameters)
+		tl, ok := got[e.Name]
+		if !ok {
+			t.Fatalf("%s 不在投影表里：压表把工具弄丢了", e.Name)
+		}
+		tight := tl.Schema()
 		fullBytes += len(e.Parameters)
 		compactBytes += len(compact)
+		tightBytes += len(tight)
 
-		var a, b any
-		if err := json.Unmarshal(e.Parameters, &a); err != nil {
-			t.Fatalf("%s: 原 schema 不是合法 JSON: %v", e.Name, err)
+		// 名叫 description 的**参数**不许丢：agent.CompactSchema 会连它一起删，
+		// 投影必须补回来（补回来的字节 = 投影比"压过的表再收紧"多出来的那块）。
+		want, err := countDescParams(e.Parameters)
+		if err != nil {
+			t.Fatalf("%s: %v", e.Name, err)
 		}
-		if err := json.Unmarshal(compact, &b); err != nil {
-			t.Fatalf("%s: 压完不是合法 JSON: %v", e.Name, err)
+		have, err := countDescParams(tight)
+		if err != nil {
+			t.Fatalf("%s: %v", e.Name, err)
 		}
-		if !reflect.DeepEqual(stripDesc(a), stripDesc(b)) {
+		if have != want {
+			t.Fatalf("%s：完整表有 %d 个名叫 description 的参数，投影后只剩 %d 个",
+				e.Name, want, have)
+		}
+		old, err := countDescParams(compact)
+		if err != nil {
+			t.Fatalf("%s: %v", e.Name, err)
+		}
+		descDropped += want - old
+		restored += len(tight) - len(tightenSchema(compact))
+
+		if !json.Valid(tight) {
+			t.Fatalf("%s 压完不是合法 JSON: %s", e.Name, tight)
+		}
+		// 再压一遍必须一字不差：还有 annotation 没删干净的话，第二遍就会把它删掉。
+		if again := tightenSchema(tight); string(again) != string(tight) {
+			t.Fatalf("%s 的投影不是不动点（还有该删的没删）:\n一遍: %s\n二遍: %s",
+				e.Name, tight, again)
+		}
+		// 收紧只会删东西，绝不该比完整表更大。
+		if len(tight) > len(e.Parameters) {
+			t.Fatalf("%s 收紧之后比完整表还大（%d → %d）", e.Name, len(e.Parameters), len(tight))
+		}
+
+		a, err := canonSchema(e.Parameters, true)
+		if err != nil {
+			t.Fatalf("%s: 原 schema 解析失败: %v", e.Name, err)
+		}
+		b, err := canonSchema(tight, true)
+		if err != nil {
+			t.Fatalf("%s: 投影不是合法 JSON: %v", e.Name, err)
+		}
+		if !reflect.DeepEqual(a, b) {
 			t.Fatalf("%s: 压表改动了结构\n原: %v\n压后: %v", e.Name, a, b)
 		}
 	}
-	if compactBytes >= fullBytes {
-		t.Fatalf("压完没有变小（%d → %d），默认开它就没有意义", fullBytes, compactBytes)
+	if n == 0 {
+		t.Fatal("一个工具都没有")
 	}
-	t.Logf("工具表 %d 个：%d → %d 字节（省 %.0f%%）",
-		len(table), fullBytes, compactBytes, 100*(1-float64(compactBytes)/float64(fullBytes)))
+	if tightBytes >= compactBytes {
+		t.Fatalf("收紧后反而比上一代 compact 大（%d → %d）——白改", compactBytes, tightBytes)
+	}
+	t.Logf("工具表 %d 个：参数区 %d → %d（去说明文字）→ %d（再去骨架），净省 %d 字节；"+
+		"其中 compact 原本会删掉 %d 个名叫 description 的参数，投影把它们补了回来（+%d 字节）",
+		n, fullBytes, compactBytes, tightBytes, fullBytes-tightBytes,
+		descDropped, restored)
 }
 
-func stripDesc(v any) any {
-	switch x := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, val := range x {
-			if k == "description" {
+// canonSchema 把"等价写法"归一，供上面的结构比对使用。
+//
+// 归一规则**就是这一档的契约**，多一条都算越界：
+//   - description：说明文字，compact 的正当范围；
+//   - 顶层 type:"object"：function calling 的 parameters 必须是对象，接口规定；
+//   - 空的 properties / required：省略与空等价；
+//   - additionalProperties:true：JSON Schema 的默认值。
+//
+// 别的键一律原样保留并参与比较——所以少一个 enum 值、少一个 required 项、
+// 把 additionalProperties:false 删了，都会红。
+func canonSchema(raw json.RawMessage, root bool) (any, error) {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return v, nil
+	}
+	return canonObject(obj, root), nil
+}
+
+// canonObject 归一一个 **schema 对象**。
+//
+// 注意 properties 单独处理：那一层的键是参数名，名叫 description 也只是
+// 参数名，不是注解（agent.CompactSchema 就是在这里丢了 6 个工具的参数）。
+func canonObject(m map[string]any, root bool) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, val := range m {
+		switch k {
+		case "description":
+			continue
+		case "type":
+			if root && val == "object" {
 				continue
 			}
-			out[k] = stripDesc(val)
+		case "additionalProperties":
+			if val == true {
+				continue
+			}
+		case "properties":
+			props := make(map[string]any)
+			if pm, ok := val.(map[string]any); ok {
+				for name, sub := range pm {
+					if so, ok := sub.(map[string]any); ok {
+						props[name] = canonObject(so, false)
+						continue
+					}
+					props[name] = sub
+				}
+			}
+			if len(props) == 0 {
+				continue
+			}
+			out[k] = props
+			continue
+		case "required":
+			arr, _ := val.([]any)
+			if len(arr) == 0 {
+				continue
+			}
+			sort.Slice(arr, func(i, j int) bool { return arr[i].(string) < arr[j].(string) })
+			out[k] = arr
+			continue
 		}
-		return out
+		out[k] = canonValue(val)
+	}
+	return out
+}
+
+func canonValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		return canonObject(x, false)
 	case []any:
 		out := make([]any, len(x))
-		for i, val := range x {
-			out[i] = stripDesc(val)
+		for i, e := range x {
+			out[i] = canonValue(e)
 		}
 		return out
 	}
 	return v
+}
+
+// countDescParams 数一个 schema 里"名字叫 description 的参数"有几个（任意深度）。
+//
+// 只数 properties 映射里的键——那是模型要填的参数名；schema 对象上的
+// description 是说明注解，不算。两者同名，正是这档要分清楚的东西。
+func countDescParams(raw json.RawMessage) (int, error) {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return 0, err
+	}
+	var walk func(any) int
+	walk = func(x any) int {
+		obj, ok := x.(map[string]any)
+		if !ok {
+			return 0
+		}
+		n := 0
+		for k, val := range obj {
+			if k == "properties" {
+				if pm, ok := val.(map[string]any); ok {
+					for name, sub := range pm {
+						if name == "description" {
+							n++
+						}
+						n += walk(sub)
+					}
+					continue
+				}
+			}
+			n += walk(val)
+		}
+		return n
+	}
+	return walk(v), nil
+}
+
+// 参数名恰好叫 description 时不许被当注解删掉（本仓真有 6 个工具这样）。
+//
+// 这是 agent.CompactSchema 的老毛病：它见到 description 键就删，分不清
+// "schema 上的说明" 和 "叫 description 的参数"。删掉之后 required 里还点着它，
+// 模型看到一个"必填但没类型、也没说明"的名字——等于凭空少了一条契约。
+func TestTightSchemaKeepsDescriptionParam(t *testing.T) {
+	raw := json.RawMessage(`{"type":"object","properties":{` +
+		`"description":{"type":"string","description":"给用户看的短描述"},` +
+		`"command":{"type":"string"}},"required":["command","description"],"additionalProperties":false}`)
+	got := tightenSchema(raw)
+
+	var s struct {
+		Type       string                           `json:"type"`
+		Properties map[string]struct{ Type string } `json:"properties"`
+		Required   []string                         `json:"required"`
+		Additional any                              `json:"additionalProperties"`
+	}
+	if err := json.Unmarshal(got, &s); err != nil {
+		t.Fatalf("收紧后的 schema 不是合法 JSON: %v（%s）", err, got)
+	}
+	if s.Properties["description"].Type != "string" {
+		t.Fatalf("名叫 description 的参数被删了：模型只看到 required 里一个没类型的名字\n%s", got)
+	}
+	for _, r := range s.Required {
+		if _, ok := s.Properties[r]; !ok {
+			t.Fatalf("required 点名了 %q，properties 里却没有：%s", r, got)
+		}
+	}
+	if s.Additional != false {
+		t.Fatalf("additionalProperties:false 是有内容的约束，不许删：%s", got)
+	}
+	if strings.Contains(string(got), "给用户看的短描述") {
+		t.Fatalf("参数的说明文字还在：%s", got)
+	}
+	if strings.Contains(string(got), `"object"`) {
+		t.Fatalf("顶层 type:object 还在：%s", got)
+	}
+}
+
+// 表里每个 required 的名字都必须真在 properties 里。这条不依赖"怎么压"，
+// 是契约本身的完整性：模型看不到的参数，不该被标成必填。
+func TestRequiredParamsAreDeclared(t *testing.T) {
+	check := func(what, name string, schema json.RawMessage) {
+		var s struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+			Required   []string                   `json:"required"`
+		}
+		if err := json.Unmarshal(schema, &s); err != nil {
+			t.Fatalf("%s %s 的 schema 不是合法 JSON: %v", what, name, err)
+		}
+		for _, r := range s.Required {
+			if _, ok := s.Properties[r]; !ok {
+				t.Errorf("%s %s：required 点名了 %q，properties 里没有它", what, name, r)
+			}
+		}
+	}
+	for _, e := range buildToolTableMust(t) {
+		check("完整表", e.Name, e.Parameters)
+	}
+	for _, tl := range tightenTable(assembleRegistry(t)).Tools() {
+		check("投影表", tl.Name(), tl.Schema())
+	}
+}
+
+// 收紧层不能只是个"看着小"的壳：名字、描述、Caps 必须原样透传
+// （审批按 Caps 判定），Exec 必须落到原工具，Get 与 Tools 必须给同一份 schema。
+func TestTightTableIsAThinWrapper(t *testing.T) {
+	stub := &stubTool{
+		name:   "stub",
+		desc:   "一个假工具",
+		schema: json.RawMessage(`{"type":"object","properties":{"n":{"type":"string"}},"required":["n"],"additionalProperties":false}`),
+		caps:   spi.Caps{Writes: true},
+	}
+	reg := &stubRegistry{tools: map[string]spi.Tool{"stub": stub}}
+	view := tightenTable(reg)
+
+	got, ok := view.Get("stub")
+	if !ok {
+		t.Fatal("Get(stub) 取不到")
+	}
+	if got.Name() != "stub" || got.Description() != "一个假工具" {
+		t.Fatalf("名字/描述被改了：%q %q", got.Name(), got.Description())
+	}
+	if got.Caps() != stub.caps {
+		t.Fatalf("Caps 被改了：%+v（审批会跟着跑偏）", got.Caps())
+	}
+	if len(view.Tools()) != 1 || string(view.Tools()[0].Schema()) != string(got.Schema()) {
+		t.Fatal("Tools() 与 Get() 给的 schema 不是同一份")
+	}
+	want := `{"additionalProperties":false,"properties":{"n":{"type":"string"}},"required":["n"]}`
+	if string(got.Schema()) != want {
+		t.Fatalf("投影结果 = %s，期望 %s", got.Schema(), want)
+	}
+	if _, err := got.Exec(context.Background(), json.RawMessage(`{"n":"x"}`)); err != nil {
+		t.Fatalf("Exec 没有落到原工具: %v", err)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("原工具 Exec 被调了 %d 次，期望 1", stub.calls)
+	}
+	if _, ok := view.Get("没有这个工具"); ok {
+		t.Fatal("不存在的工具不该被投影层编出来")
+	}
+	if err := view.Register(stub); err == nil {
+		t.Fatal("投影层不能注册工具")
+	}
+}
+
+type stubTool struct {
+	name   string
+	desc   string
+	schema json.RawMessage
+	caps   spi.Caps
+	calls  int
+}
+
+func (s *stubTool) Name() string            { return s.name }
+func (s *stubTool) Description() string     { return s.desc }
+func (s *stubTool) Schema() json.RawMessage { return s.schema }
+func (s *stubTool) Caps() spi.Caps          { return s.caps }
+func (s *stubTool) Exec(context.Context, json.RawMessage) (spi.Result, error) {
+	s.calls++
+	return spi.Result{Summary: "ok"}, nil
+}
+
+type stubRegistry struct{ tools map[string]spi.Tool }
+
+func (r *stubRegistry) Register(t spi.Tool) error {
+	if r.tools == nil {
+		r.tools = map[string]spi.Tool{}
+	}
+	r.tools[t.Name()] = t
+	return nil
+}
+func (r *stubRegistry) Tools() []spi.Tool {
+	out := make([]spi.Tool, 0, len(r.tools))
+	for _, t := range r.tools {
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	return out
+}
+func (r *stubRegistry) Get(name string) (spi.Tool, bool) {
+	t, ok := r.tools[name]
+	return t, ok
 }
 
 // 默认值本身也要钉住：翻默认是经过 20 次 A/B 的决定，不该被顺手改回去。

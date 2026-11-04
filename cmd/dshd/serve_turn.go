@@ -47,8 +47,13 @@ func (r *modelRunner) Run(ctx context.Context, sessionID, turnID, text string) e
 	}
 	history = append(history, llm.Message{Role: "user", Content: text})
 
+	model, err := resolveServeModel(r.home, sessionID, r.model)
+	if err != nil {
+		emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
+		return err
+	}
 	resp, err := llm.New(r.base, os.Getenv("DSHD_LLM_KEY")).Stream(ctx,
-		llm.Request{Model: r.model, Messages: history, Stream: true}, nil)
+		llm.Request{Model: model, Messages: history, Stream: true}, nil)
 	if err != nil {
 		emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
 		return err

@@ -28,7 +28,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"dshgo/internal/agent"
 	"dshgo/internal/spi"
 )
 
@@ -635,6 +634,15 @@ func stripDescriptions(v any) any {
 // 判据不是"看起来等价"，是 cmd/dshd/tool_schema_test.go 里逐工具比对
 // **归一化后的结构**：少一个 required、enum 变短，那条测试就红。
 //
+// 为什么自己删说明文字、不用 internal/agent.CompactSchema：那边是"见到
+// description 键就删"的粗暴做法，会把**名叫 description 的参数**一起删掉。
+// 本仓有 6 个工具真有这个参数（bash / subagent / subagent_fork /
+// spawn_teammate / team_task_create / team_task_update），删掉之后 required
+// 里点名了它、properties 里却没有——模型只看到一个"必填但没类型"的名字，
+// 等于凭空少了一条契约。压表不许改信息，所以这里按"注解还是参数名"分开：
+//   - 注解（某个 schema 对象上的 description）→ 删；
+//   - 参数名（properties 映射里的键）→ 原样保留，哪怕它就叫 description。
+//
 // 为什么不做 $ref 去重：OpenAI 兼容接口的每个 function 各带一份 parameters，
 // 没有跨工具的 definitions 可引用；同一个工具内部重复的片段实测只有
 // 31 处 565 字节，而定义块本身也要占字节（scripts/tool-table-anatomy.py）。
@@ -665,11 +673,7 @@ type tightTable struct {
 	byName map[string]spi.Tool
 }
 
-// tightenTable 投影出一张"compact 后半段"的表。
-//
-// 输入是**原** registry：先过 agent.CompactSchema 去说明文字，再过 tightenSchema
-// 去冗余骨架。两步分开是因为 CompactSchema 在 internal/agent（agent 循环自己
-// 也会调一次），这里只补它没去掉的那部分。
+// tightenTable 投影出一张"模型看到的最终形态"的表：去参数说明 + 去冗余骨架。
 func tightenTable(reg spi.ToolRegistry) *tightTable {
 	all := reg.Tools()
 	t := &tightTable{
@@ -680,7 +684,7 @@ func tightenTable(reg spi.ToolRegistry) *tightTable {
 	for _, tool := range all {
 		view := &tightTool{
 			inner:  tool,
-			schema: tightenSchema(agent.CompactSchema(tool.Schema())),
+			schema: tightenSchema(tool.Schema()),
 		}
 		t.tools = append(t.tools, view)
 		t.byName[tool.Name()] = view
@@ -702,8 +706,8 @@ func (t *tightTable) Register(spi.Tool) error {
 	return fmt.Errorf("投影视图不能注册工具")
 }
 
-// tightenSchema 去掉上述那几条冗余。不是 JSON 对象就原样返回——
-// 投影宁可少压一点，也不能把看不懂的东西改坏。
+// tightenSchema 是 compact 投影的全部：去掉参数说明文字，再去掉冗余骨架。
+// 不是 JSON 对象就原样返回——投影宁可少压一点，也不能把看不懂的东西改坏。
 func tightenSchema(raw json.RawMessage) json.RawMessage {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
@@ -720,12 +724,15 @@ func tightenSchema(raw json.RawMessage) json.RawMessage {
 //
 // 只用 json.RawMessage 承载子节点、不解析成 any：这样 type 取值、enum 字面量、
 // 数字（10000 不能变成 1e+04）都**逐字节**保持原样，压表动不到语义。
+//
+// 注意 properties 是**单独一段循环**、不交给通用的对象遍历：那一层的键是
+// 参数名（模型要填的东西），通用遍历会把名叫 description 的参数当注解删掉。
 func tightenObject(obj map[string]json.RawMessage, root bool) (json.RawMessage, error) {
-	// compact 已经去过说明文字；这里再删一次是给"直接调收紧"的调用方兜底。
-	delete(obj, "description")
 	if root && isRawString(obj["type"], "object") {
 		delete(obj, "type")
 	}
+	// 这一层是 schema 对象：description 是给模型看的说明，compact 本来就不发。
+	delete(obj, "description")
 	if raw, ok := obj["properties"]; ok {
 		var props map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &props); err != nil {
@@ -762,7 +769,7 @@ func tightenObject(obj map[string]json.RawMessage, root bool) (json.RawMessage, 
 			obj["items"] = next
 		}
 	}
-	if isRawString(obj["additionalProperties"], "true") {
+	if isRawBool(obj["additionalProperties"], true) {
 		delete(obj, "additionalProperties")
 	}
 	if raw, ok := obj["required"]; ok {
@@ -777,4 +784,15 @@ func tightenObject(obj map[string]json.RawMessage, root bool) (json.RawMessage, 
 // isRawString 判断一段 RawMessage 是不是指定的字符串字面量。
 func isRawString(raw json.RawMessage, want string) bool {
 	return strings.TrimSpace(string(raw)) == `"`+want+`"`
+}
+
+// isRawBool 判断一段 RawMessage 是不是指定的布尔字面量。
+//
+// 单独一个函数而不是复用 isRawString：布尔在 JSON 里不带引号，
+// 复用那个（比较 `"true"`）会永远匹配不上——踩过，additionalProperties:true 一个都没删掉。
+func isRawBool(raw json.RawMessage, want bool) bool {
+	if want {
+		return strings.TrimSpace(string(raw)) == "true"
+	}
+	return strings.TrimSpace(string(raw)) == "false"
 }
