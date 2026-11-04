@@ -1,12 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/session"
+	"dshgo/internal/spi"
 	"dshgo/internal/transport"
 )
 
@@ -78,5 +82,150 @@ func TestSessionSourceGolden(t *testing.T) {
 	// 找不到的会话必须报哨兵值，界面靠它区分「会话没了」与「读失败」。
 	if _, err := src.Messages("definitely-not-a-session-id"); !errors.Is(err, transport.ErrNoSuchSession) {
 		t.Fatalf("不存在的会话应返回 ErrNoSuchSession，实际 %v", err)
+	}
+}
+
+// B：session.load 的消息投影不能把"只有思考"的回答变成一条空消息。
+//
+// serve 推的 assistant/message 帧本来就带 reasoning（serve_turn.go 只在正文为空时
+// 带它），可读回来时 transport.Message 没有 reasoning 字段——界面上就是一条空气泡，
+// 而这次回答的全部内容都在思考块里。断了线重新 load 就等于把这条回答丢了。
+//
+// 断言按**线上 JSON** 判，不按结构体字段：旧代码没有 Reasoning 字段，
+// 这条测试必须能在旧代码上红（而不是编译不过）。
+func TestLoadKeepsReasoningOnlyAssistant(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	const sid = "session-load-reasoning"
+	seedTurnSession(t, home, cwd, sid, func(lg *session.Log) error {
+		if err := lg.Append("user/message", session.UserMessage([]spi.Block{
+			{Type: "text", Text: "先想想"},
+		})); err != nil {
+			return err
+		}
+		return lg.Append("assistant/message", session.AssistantMessageEvent(1, 1,
+			[]map[string]any{session.ReasoningBlock("先想一下：只有思考，没有正文")},
+			"stop", nil))
+	})
+
+	msgs, err := newSessionSource(home, cwd).Messages(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *transport.Message
+	for i := range msgs {
+		if msgs[i].Role == "assistant" {
+			got = &msgs[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("只有 reasoning 的 assistant 被整条丢掉了（%d 条消息）：%+v", len(msgs), msgs)
+	}
+
+	raw, merr := json.Marshal(*got)
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("解线上消息: %v（%s）", err, raw)
+	}
+	text, _ := wire["text"].(string)
+	reason, _ := wire["reasoning"].(string)
+	if strings.TrimSpace(text) == "" && strings.TrimSpace(reason) == "" {
+		t.Fatalf("session.load 里这条是空消息（text 与 reasoning 都空）："+
+			"serve 推的帧带 reasoning，读回来不能没有：%s", raw)
+	}
+	if !strings.Contains(reason, "只有思考") {
+		t.Fatalf("reasoning 正文没带回来：%s", raw)
+	}
+}
+
+// 不许误伤：只有 tool_calls 的 assistant 照样算内容。
+//
+// 它在 load 里的 text 是空的（调用本身不是正文），但**不能因此整条过滤**——
+// 工具名/参数挂在下一条 tool/result 的 Tool/Args 上，少了这一条，
+// 界面上就只剩一条"没有来源的工具结果"。判据是 assistantHasPayload 的三样占一样。
+func TestLoadKeepsToolCallOnlyAssistant(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	const sid = "session-load-toolcall"
+	seedTurnSession(t, home, cwd, sid, func(lg *session.Log) error {
+		if err := lg.Append("user/message", session.UserMessage([]spi.Block{
+			{Type: "text", Text: "看看目录"},
+		})); err != nil {
+			return err
+		}
+		if err := lg.Append("assistant/message", session.AssistantMessageEvent(1, 1,
+			[]map[string]any{session.ToolCallBlock("call_1", "bash", `{"command":"ls"}`)},
+			"tool_calls", nil)); err != nil {
+			return err
+		}
+		// 真实日志里调用另有一条 tool/call 事件（agent 循环写的），tool/result 的
+		// Tool/Args 就是从它补的。
+		if err := lg.Append("tool/call", session.ToolCallEvent(1, 1, "call_1", "bash", `{"command":"ls"}`)); err != nil {
+			return err
+		}
+		return lg.Append("tool/result", session.ToolResultEvent(1, 1, "call_1",
+			[]spi.Block{{Type: "text", Text: "68 个文件"}}, false, cwd, nil))
+	})
+
+	msgs, err := newSessionSource(home, cwd).Messages(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawAssistant, sawTool := false, false
+	for _, m := range msgs {
+		switch m.Role {
+		case "assistant":
+			sawAssistant = true
+		case "tool":
+			sawTool = true
+			if m.Tool != "bash" || !strings.Contains(m.Args, "ls") {
+				t.Fatalf("工具结果没补上调用信息（Tool=%q Args=%q）：%+v", m.Tool, m.Args, msgs)
+			}
+		}
+	}
+	if !sawAssistant {
+		t.Fatalf("只有 tool_calls 的 assistant 被过滤了——它的工具结果会变成孤立的：%+v", msgs)
+	}
+	if !sawTool {
+		t.Fatalf("工具结果丢了：%+v", msgs)
+	}
+}
+
+// 不许误伤：真正空的消息（无 text、无 reasoning、无 tool_calls）仍然不算内容。
+//
+// 旧投影只按"JSON 解得开"就收下，这类事件会变成一条空消息——界面画出空气泡，
+// 读盘的人却以为"那次模型说了什么，只是没显示"。
+func TestLoadDropsTrulyEmptyAssistant(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	const sid = "session-load-empty"
+	seedTurnSession(t, home, cwd, sid, func(lg *session.Log) error {
+		if err := lg.Append("user/message", session.UserMessage([]spi.Block{
+			{Type: "text", Text: "空一轮"},
+		})); err != nil {
+			return err
+		}
+		return lg.Append("assistant/message", session.AssistantMessageEvent(1, 1,
+			[]map[string]any{{"type": "usage-note", "text": ""}}, "stop", nil))
+	})
+
+	msgs, err := newSessionSource(home, cwd).Messages(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawUser := false
+	for _, m := range msgs {
+		if m.Role == "user" && m.Text == "空一轮" {
+			sawUser = true
+		}
+		if m.Role == "assistant" {
+			t.Fatalf("三样都没有的 assistant 仍然算内容（空消息 %+v）；整组消息：%+v", m, msgs)
+		}
+	}
+	if !sawUser {
+		t.Fatalf("用户消息不该被这次过滤误伤：%+v", msgs)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,4 +140,105 @@ func TestAttachHistoryPointsService(t *testing.T) {
 	}
 
 	attachHistory(nil) // nil 不能 panic
+}
+
+// 这一组钉住 history_search 的**可检索正文**：它不能只拼 type=="text" 的块。
+//
+// 症状：模型问"上次那个 ls 是哪一轮"，历史里明明有那次调用却搜不出来——
+// 因为那一轮的 assistant 只有 tool-call 块、正文为空。这个工具存在的意义
+// 就是"找回过期信息"，对"只有工具调用"的轮次失明等于废掉一半。
+func TestHistorySearchFindsToolCallOnlyAssistant(t *testing.T) {
+	home := t.TempDir()
+	w, err := session.CreateSession(home, "/tmp/hist-tool", "hist-tool", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append("user/message", session.UserMessage([]spi.Block{
+		{Type: "text", Text: "看看目录里有几个文件"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	// 只有工具调用、没有正文：模型直接开干时最常见的一种回答。
+	if err := w.Append("assistant/message", session.AssistantMessageEvent(1, 1,
+		[]map[string]any{session.ToolCallBlock("call_1", "bash", `{"command":"ls"}`)},
+		"tool_calls", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append("tool/result", session.ToolResultEvent(1, 1, "call_1",
+		[]spi.Block{{Type: "text", Text: "68 个文件"}}, false, "/tmp/hist-tool", nil)); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	h := &historyHolder{}
+	h.set(w.Path)
+
+	hits, err := h.Search("ls", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("只有 tool_calls 的 assistant 查不到：" +
+			"history_search 对'只有工具调用'的轮次失明（eventText 只拼了 text 块）")
+	}
+	if hits[0].Role != "assistant" {
+		t.Fatalf("命中的 role = %q，要 assistant", hits[0].Role)
+	}
+	// 片段要人能读：不是把整段事件 JSON 原样倒出来，而是转写形态。
+	if !strings.Contains(hits[0].Excerpt, "[调用 bash") {
+		t.Fatalf("片段里没有可读的调用形态：%q", hits[0].Excerpt)
+	}
+	if !strings.Contains(hits[0].Excerpt, "ls") {
+		t.Fatalf("片段里没有命中关键词：%q", hits[0].Excerpt)
+	}
+}
+
+// 与上一条同一个判据（assistantHasPayload）：思考块也算"这条消息说过话"。
+// 模型问"上次为什么那么干"时，答案可能只在思考块里。
+func TestHistorySearchFindsReasoningOnlyAssistant(t *testing.T) {
+	home := t.TempDir()
+	w, err := session.CreateSession(home, "/tmp/hist-think", "hist-think", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append("user/message", session.UserMessage([]spi.Block{
+		{Type: "text", Text: "先想想再答"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Append("assistant/message", session.AssistantMessageEvent(1, 1,
+		[]map[string]any{session.ReasoningBlock("先想一下：用户要的是文件数")},
+		"stop", nil)); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	h := &historyHolder{}
+	h.set(w.Path)
+
+	hits, err := h.Search("先想一下", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("只有 reasoning 的 assistant 查不到（思考块也是那一轮说过的话）")
+	}
+	if hits[0].Role != "assistant" {
+		t.Fatalf("命中的 role = %q，要 assistant", hits[0].Role)
+	}
+	if !strings.Contains(hits[0].Excerpt, "[思考：") {
+		t.Fatalf("片段里没有可读的思考形态：%q", hits[0].Excerpt)
+	}
+}
+
+// 不许误伤：无正文、无思考块、无 tool_calls 的 assistant 仍然不算内容。
+func TestHistoryEventTextIgnoresTrulyEmptyAssistant(t *testing.T) {
+	ev := v4.Event{
+		Type: "assistant/message",
+		Seq:  9,
+		Data: json.RawMessage(`{"message":{"content":[{"type":"usage-note","text":""}]}}`),
+	}
+	if got := eventText(ev); got != "" {
+		t.Fatalf("三样都没有的 assistant 不该有可检索正文，得到 %q", got)
+	}
 }

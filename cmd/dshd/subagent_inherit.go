@@ -99,10 +99,10 @@ func inheritLine(n session.SurfaceMsg, reasoning string) (string, bool) {
 		// （这与 serve 那条路不同：那里思考只能出"有没有"，因为它要发的是 assistant
 		// content——把心里话当回答发出去是错的；这里发的是给人看的转写。）
 		if think := strings.TrimSpace(reasoning); think != "" {
-			parts = append(parts, "[思考："+flattenText(think)+"]")
+			parts = append(parts, reasoningText(think))
 		}
 		for _, tc := range n.Message.ToolCalls {
-			parts = append(parts, "[调用 "+tc.Function.Name+"："+flattenText(tc.Function.Arguments)+"]")
+			parts = append(parts, toolCallText(tc.Function.Name, tc.Function.Arguments))
 		}
 		return "assistant: " + strings.Join(parts, " "), true
 
@@ -130,4 +130,22 @@ func inheritLine(n session.SurfaceMsg, reasoning string) (string, bool) {
 // 把换行与连续空白折成单个空格既保住全部内容，也让那个计数说得准。
 func flattenText(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// toolCallText 是"工具调用"在给人看的文本里的**唯一**写法。
+//
+// 唯一：`subagent_fork` 的继承转写（inheritLine）与 `history_search` 的可检索正文
+// （history.go 的 eventText）都调它。两处各写一份的话形态迟早漂，而"搜得到"
+// 依赖的正是这个形态——模型看见 `[调用 bash：{"command":"ls"}]` 才知道下次该按什么搜。
+// 参数原样保留、只折空白：它是给人读的 JSON 片段，不是给机器解析的字段。
+func toolCallText(name, args string) string {
+	return "[调用 " + name + "：" + flattenText(args) + "]"
+}
+
+// reasoningText 是"思考块"在给人看的文本里的唯一写法（与 toolCallText 同一理由）。
+//
+// 带正文，不只是一句"它想过"：子代理要据此知道父会话**为什么**这么干；
+// 历史检索也要能按心里那句话把那一轮找回来。
+func reasoningText(s string) string {
+	return "[思考：" + flattenText(s) + "]"
 }

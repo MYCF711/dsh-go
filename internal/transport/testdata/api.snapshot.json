@@ -36,7 +36,8 @@
       "summary",
       "time",
       "usage",
-      "view"
+      "view",
+      "reasoning"
     ],
     "SessionSummary": [
       "id",

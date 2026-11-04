@@ -717,12 +717,83 @@ $ go test ./internal/schema -count=1 -v
 
 - `cmd/dshd/history.go` 的 `eventText`：只拼 `type=="text"` 的块，
   `history_search` 里 `text == ""` 直接跳过——**只有 `tool_calls` 的 assistant 在历史检索里
-  查不到**（"上次那个 ls 是哪一轮"搜不出来）。
+  查不到**（"上次那个 ls 是哪一轮"搜不出来）。→ **已解决（§5.3，2026-11-04）**
 - `cmd/dshd/transport_source.go` 的 `messagesOf`：`transport.Message` 没有 reasoning 字段，
   只有思考的回答在 `session.load` 投影里是**一条空消息**（`serve_turn` 推的帧带
-  `reasoning`，读回来就没了）。
+  `reasoning`，读回来就没了）。→ **已解决（§5.3，2026-11-04）**
 - `modules/tool/subagentfork` 的 `inheritNote` 按非空行数报"继承 N 条"——
   本次靠"转写一条消息一行"让它算准，模块本身没动（它不认识会话，也不该为这件事改）。
+
+### 5.3 同形的两条投影丢失：history_search 看不见只有调用的轮次、load 读回空消息（2026-11-04，已解决）
+
+边界放开后，两条一起修。它们仍然是同一个判据错误：**"这条消息有没有内容"用错了信号**——
+`history_search` 只看 `type=="text"` 的块，`messagesOf` 只看"JSON 解得开"。
+
+#### A. `history_search` 对"只有工具调用"的轮次失明
+
+`eventText` 原来只拼 text 块。模型问"上次那个 `ls` 是哪一轮"时，那一轮的 assistant
+只有 `tool-call` 块、正文为空，`eventText` 返回空串，`Search` 直接跳过——
+这个工具存在的意义就是"找回过期信息"，却恰好对这种轮次失明。
+
+**修法：可检索正文 = 正文 + 思考 + 工具调用**，形态与 `subagent_inherit.go` 的转写
+**共用同一份**（新增的 `toolCallText` / `reasoningText` 放在 `subagent_inherit.go`，
+`inheritLine` 与 `eventText` 都调它；`flattenText` 也是同一份）。于是片段里是
+`[调用 bash：{"command":"ls"}]`、`[思考：…]`，不是整段事件 JSON 的转义符。
+判据因此与 `assistantHasPayload` 对齐：三样都没有的事件仍然返回空串。
+
+#### B. `session.load` 里"只有思考"的回答是一条空消息
+
+`serve` 推的 `assistant/message` 帧本来就带 `reasoning`（正文为空时才带），
+但 `transport.Message` 没有这个字段，`messagesOf` 又只取 text 块——
+读回来是 `{"seq":1,"role":"assistant","text":""}`，界面上一个空气泡。
+断线重连/重开走 `session.load` 时，这条回答就丢了。
+
+**契约决定（只加不改）**：给 `transport.Message` **尾部**加可选字段
+`Reasoning string json:"reasoning,omitempty"`；不改任何既有键、不重排既有字段。
+**没有**把思考拼进 `Text`：那会把模型的草稿当成"已经给用户的回答"，
+和 `serve` 推帧的取舍（有正文时不带 reasoning）也不一致。`messagesOf` 只在
+`Text` 为空时填 `Reasoning`，与推帧同形。快照 `internal/transport/testdata/api.snapshot.json`
+的 `Message` 键表尾部因此多一个 `reasoning`（只加）；UI 侧快照同步时也只加这个键。
+
+**判据没有第二份**：`messagesOf` 调 `assistantHasPayload(text, reasoning, toolCalls)`
+判"这条算不算内容"，思考文本来自 `reasoningBySeq(&v4.Log{Events: events})`——
+与 `serve_turn.go`、`subagent_inherit.go` 同一对函数。工具调用数从同一批内容块里数。
+延迟到"第一条正文为空的 assistant"才解思考块：绝大多数消息有正文，不必为它们多解一遍。
+
+**红（改之前，共享树，同一份测试）**：
+
+```
+--- FAIL: TestHistorySearchFindsToolCallOnlyAssistant
+    history_test.go:181: 只有 tool_calls 的 assistant 查不到：history_search 对'只有工具调用'的轮次失明（eventText 只拼了 text 块）
+--- FAIL: TestHistorySearchFindsReasoningOnlyAssistant
+    history_test.go:230: 片段里没有可读的思考形态："先想一下：用户要的是文件数"
+--- FAIL: TestLoadKeepsReasoningOnlyAssistant
+    transport_source_test.go:136: session.load 里这条是空消息（text 与 reasoning 都空）：
+        serve 推的帧带 reasoning，读回来不能没有：{"seq":1,"role":"assistant","text":"","time":1793766760801}
+--- FAIL: TestLoadDropsTrulyEmptyAssistant
+    transport_source_test.go:172: 三样都没有的 assistant 仍然算内容（空消息 {Seq:1 Role:assistant Text: ...}）
+```
+
+最后一条不是笔误：旧投影只要求"JSON 解得开"就收下，所以**真正空的消息**也会变成
+一条空气泡。这次按 `assistantHasPayload` 一并收紧了——"不许误伤"的方向是
+"真空仍然不算内容"，不是"真空继续算"。
+
+**绿**：
+
+```
+--- PASS: TestHistorySearchFindsToolCallOnlyAssistant
+--- PASS: TestHistorySearchFindsReasoningOnlyAssistant
+--- PASS: TestHistoryEventTextIgnoresTrulyEmptyAssistant   # 反方向：三样都没有仍然没有可检索正文
+--- PASS: TestLoadKeepsReasoningOnlyAssistant
+--- PASS: TestLoadDropsTrulyEmptyAssistant                # 反方向：真空仍然不算内容，user 消息不误伤
+--- PASS: TestSubagentInheritKeepsToolCallsAndReasoning   # 共用形态后转写字节没变
+```
+
+**同类还剩一条（没改，登记）**：`messagesOf` 里**只有 tool_calls、没有正文/思考**的
+assistant 仍会投影成 `text` 为空的消息——`transport.Message` 没有 `ToolCalls` 字段，
+它的工具名/参数挂在下一条 `tool/result` 上（`Tool`/`Args`），所以信息不算全丢；
+要让它带上调用本身，是比"加一个可选字符串字段"更大的契约增量，需要 UI 快照与渲染
+一起冻结，本轮不做。
 
 ## 6. 复跑与验收
 

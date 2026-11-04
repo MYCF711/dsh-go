@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/session"
@@ -273,6 +274,18 @@ func (s *sessionSource) messagesTailFull(path string, limit int) ([]transport.Me
 func (s *sessionSource) messagesOf(events []v4.Event) ([]transport.Message, error) {
 	calls := indexToolCalls(events)
 
+	// 思考块不在 llm.Message（也不在 transport.Message 的 Text）里，要另解事件。
+	// 复用 serve_turn.go 的 reasoningBySeq——"哪条 assistant 带思考"只许这一份判据。
+	// 它只读 Events，这里包一份临时日志即可；**延迟到第一条正文为空的 assistant
+	// 再算**：绝大多数消息有正文，不必为它们多解一遍整批 JSON。
+	var reasoning map[int64]string
+	reasoningOf := func(seq int64) string {
+		if reasoning == nil {
+			reasoning = reasoningBySeq(&v4.Log{Events: events})
+		}
+		return reasoning[seq]
+	}
+
 	out := make([]transport.Message, 0, len(events))
 	for _, ev := range events {
 		switch ev.Type {
@@ -284,17 +297,36 @@ func (s *sessionSource) messagesOf(events []v4.Event) ([]transport.Message, erro
 			out = append(out, transport.Message{Seq: int(ev.Seq), Role: "user", Text: text, Time: ev.Time})
 
 		case "assistant/message":
-			text, ok := textOf(ev.Data, true)
+			blocks, ok := contentBlocks(ev.Data, true)
 			if !ok {
 				continue
 			}
-			out = append(out, transport.Message{
+			text := joinText(blocks)
+			// 思考块只在正文为空时才需要：有正文就一定有内容（assistantHasPayload），
+			// 也只有那时才会把 reasoning 放进投影。这里因此不必读它——省掉一次全批解 JSON。
+			think := ""
+			if strings.TrimSpace(text) == "" {
+				think = reasoningOf(ev.Seq)
+			}
+			// 判据只有一份（assistantHasPayload）：有正文、有思考、有工具调用，
+			// 占一样就不算空。旧实现只要求"JSON 解得开"，于是真正空的消息会变成
+			// 一条空气泡；而只有思考的回答同样变成空消息——两种静默失败长得一样。
+			if !assistantHasPayload(text, think, countToolCalls(blocks)) {
+				continue
+			}
+			msg := transport.Message{
 				Seq:   int(ev.Seq),
 				Role:  "assistant",
 				Text:  text,
 				Time:  ev.Time,
 				Usage: usageOf(ev.Data),
-			})
+			}
+			// 与 serve 推帧同形：只有正文为空时才带 reasoning。
+			// 有正文时思考是草稿，不是已经给用户的回答；界面那条路径也只在正文为空时显示它。
+			if strings.TrimSpace(text) == "" {
+				msg.Reasoning = think
+			}
+			out = append(out, msg)
 
 		case "tool/result":
 			text, callID, ok := toolResultText(ev.Data)
@@ -403,6 +435,19 @@ type block struct {
 // user/message 的 content 在 data 顶层；assistant/message 的在 data.message.content。
 // 只拼 type=="text" 的块——tool-call 块不是正文，它由 tool/result 那边对应。
 func textOf(data json.RawMessage, nested bool) (string, bool) {
+	blocks, ok := contentBlocks(data, nested)
+	if !ok {
+		return "", false
+	}
+	return joinText(blocks), true
+}
+
+// contentBlocks 按两种落法取一条消息的内容块。
+//
+// 两种落法都要认（H7）：真实语料把助手内容放在 message.content，
+// 但也见过放在顶层 content 的日志。**只认一种，那些会话就是一条消息都没有**，
+// 而界面上"整会话空白"看起来像会话坏了。
+func contentBlocks(data json.RawMessage, nested bool) ([]block, bool) {
 	var d struct {
 		Content []block `json:"content"`
 		Message struct {
@@ -410,11 +455,8 @@ func textOf(data json.RawMessage, nested bool) (string, bool) {
 		} `json:"message"`
 	}
 	if err := json.Unmarshal(data, &d); err != nil {
-		return "", false
+		return nil, false
 	}
-	// 两种落法都要认（H7）：真实语料把助手内容放在 message.content，
-	// 但也见过放在顶层 content 的日志。**只认一种，那些会话就是一条消息都没有**，
-	// 而界面上"整会话空白"看起来像会话坏了。
 	blocks := d.Content
 	if nested {
 		blocks = d.Message.Content
@@ -424,7 +466,19 @@ func textOf(data json.RawMessage, nested bool) (string, bool) {
 	} else if len(blocks) == 0 {
 		blocks = d.Message.Content
 	}
-	return joinText(blocks), true
+	return blocks, true
+}
+
+// countToolCalls 数一条 assistant 消息里的 tool-call 块。
+// 只服务 assistantHasPayload——"有没有内容"不许在别处另写一份判据。
+func countToolCalls(blocks []block) int {
+	n := 0
+	for _, b := range blocks {
+		if b.Type == "tool-call" {
+			n++
+		}
+	}
+	return n
 }
 
 // usageOf 取助手事件里的用量（H1）。

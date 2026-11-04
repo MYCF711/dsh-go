@@ -113,6 +113,17 @@ type Message struct {
 	// View 是工具结果的渲染声明（H3），原样来自 spi.ViewSpec。
 	// 缺省不出现——界面见到 `kind` 才选渲染器，没有就退回「工具名 + 摘要」。
 	View json.RawMessage `json:"view,omitempty"`
+	// Reasoning 是这条助手消息的思考正文（可选，2026-11-04 加，**只加不改**）。
+	//
+	// 为什么必须有：v4 的 assistant/message 里 `type=reasoning` 的块不只是一句
+	// "它想过"——模型想了、却没有输出正文时，它就是这次回答的**全部内容**。
+	// 旧投影只取 text 块，读回来是一条空消息；而 serve 推的 assistant/message 帧
+	// 本来就带 reasoning（serve_turn.go 只在正文为空时才带）。断线重连/重开
+	// 走 session.load 时没有它，等于把这条回答丢了。
+	//
+	// 空串表示"这条没有思考块"，或"有正文，不必再带思考"——与推帧同形：
+	// 有正文时思考是草稿，不是已经给用户的回答。老客户端忽略未知键即可。
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 // UsageMsg 是一条助手消息的用量。字段名照 v4 的 usage 原样搬，不另起一套。

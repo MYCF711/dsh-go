@@ -84,6 +84,18 @@ h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
   为什么两个都发：断线重连**重放的是当初那条负载**，只发时长会让客户端把剩余时间重新算成满额
   （屏上还有 30s、宿主 10s 后就拒），那比没有倒计时更糟。
   老宿主没有这两个字段时，客户端**不许编秒数**，只能显示"倒计时不可用"。
+- **`session.load` 的 `messages[]` 现在带可选 `reasoning`**（2026-11-04 加，只加不改）：
+  一条**只有思考、没有正文**的 assistant，`text` 为空，`reasoning` 就是那次回答的全部内容。
+  为什么必须有：`session.history` 的原始帧本来就带 reasoning（`serve_turn.go` 推的
+  `assistant/message` 帧也带，正文为空时才有），而 `session.load` 的投影原来只取 text 块——
+  读回来是一条**空消息**，断线重连/重开等于把这条回答丢了。
+  有正文时宿主**不带** reasoning（与推帧同形：那时思考是草稿，不是已经给用户的回答）；
+  空串/缺键都表示"这条没有思考块"。老客户端忽略未知键即可。
+  判定"一条消息有没有内容"用宿主同一份判据（正文 / 思考 / 工具调用占一样），
+  **三样都没有的消息不会出现在 `messages[]` 里**（以前它会变成一条空气泡）。
+  宿主侧快照 `internal/transport/testdata/api.snapshot.json` 已在 `Message` 键表尾部
+  加上 `reasoning`；UI 侧 `../dsh-ui/testdata/api.snapshot.json` 同步时**只加这个键**，
+  不重排既有顺序、不改任何既有字段。
 - **type 白名单**：v4 原始事件名 + 显式登记的 `turn/done`、`turn/error`、`approval/request`、`approval/timeout`、`approval/cancel`、`session/reset`、`pong`。新增必须 snapshot-first。
 - **连接拓扑**：当前 ServerFrame 不带 topic，每会话一条独立 WS 订阅/连接，按连接归属隔离；不得同连接混订多个会话。
 - **seq**：每会话一个 Transport journal，事件只在追加时分配一次单调 seq。不是 v4 `ev.Seq`、全局 `serveTurnSeq` 或连接序号。turn/done、turn/error 与 approval 事件同入此域；pong 无 seq 且不入日志。

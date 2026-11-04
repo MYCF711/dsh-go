@@ -96,34 +96,49 @@ func hiddenSeqs(log *v4.Log) map[int64]bool {
 }
 
 // eventText 抽出一段可用于检索的正文。
+//
+// 不只 `type=="text"`：工具调用与思考块同样是"这一轮说过的话"。
+// 旧实现只拼 text 块，于是**只有 `tool_calls` 的 assistant 在 history_search 里
+// 完全查不到**——而"上次那个 ls 是哪一轮"正是这个工具存在的理由。
+//
+// 形态与 subagent_fork 的继承转写共用 toolCallText / reasoningText（同一份，不写第二份）：
+// 模型看见 `[调用 bash：{"command":"ls"}]` 就知道该按什么搜；片段里也不会是整段
+// 事件 JSON（那是机器形状，翻出来全是转义符）。
+//
+// 判据与 assistantHasPayload 对齐：正文、思考、工具调用占一样就有正文可搜；
+// 三样都没有的事件（比如只有一个空 text 块）仍然返回空串，不算内容。
 func eventText(ev v4.Event) string {
 	var d struct {
 		Message struct {
-			Content json.RawMessage `json:"content"`
+			Content []block `json:"content"`
 		} `json:"message"`
-		Content json.RawMessage `json:"content"`
+		Content []block `json:"content"`
 	}
 	if err := json.Unmarshal(ev.Data, &d); err != nil {
 		return ""
 	}
-	raw := d.Message.Content
-	if len(raw) == 0 {
-		raw = d.Content
+	blocks := d.Message.Content
+	if len(blocks) == 0 {
+		blocks = d.Content
 	}
-	if len(raw) == 0 {
-		return ""
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(raw, &blocks); err != nil {
+	if len(blocks) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(blocks))
 	for _, b := range blocks {
-		if b.Text != "" {
-			parts = append(parts, b.Text)
+		switch b.Type {
+		case "text":
+			// 空白的 text 块和"没有"没区别（assistantHasPayload 也按 TrimSpace 判）。
+			if strings.TrimSpace(b.Text) != "" {
+				parts = append(parts, b.Text)
+			}
+		case "reasoning":
+			// 空白思考块和"没有"没区别，不能让它把真空消息变成可搜命中。
+			if strings.TrimSpace(b.Text) != "" {
+				parts = append(parts, reasoningText(b.Text))
+			}
+		case "tool-call":
+			parts = append(parts, toolCallText(b.Name, b.Arguments))
 		}
 	}
 	return strings.Join(parts, "\n")
