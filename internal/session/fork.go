@@ -1,10 +1,12 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"dshgo/codecs/v4"
@@ -32,6 +34,8 @@ func Fork(src *v4.Log, home, cwd, newID string) (*Log, error) {
 	if len(surface) == 0 {
 		return nil, fmt.Errorf("源会话没有可继承的 surface")
 	}
+	// 思考块得回原始事件取：Surface 只装 text + tool_calls（见 reasoningBlocksBySeq）。
+	reasoning := reasoningBlocksBySeq(src)
 
 	seg, err := v4.EncodeSegment(newID)
 	if err != nil {
@@ -56,15 +60,60 @@ func Fork(src *v4.Log, home, cwd, newID string) (*Log, error) {
 	}()
 
 	for _, node := range surface {
-		if err = copyNode(l, node); err != nil {
+		if err = copyNode(l, node, reasoning[node.Seq]); err != nil {
 			return nil, err
 		}
 	}
 	return l, nil
 }
 
+// reasoningBlocksBySeq 标出哪些 assistant/message 事件带思考块（seq → 思考正文，按原顺序）。
+//
+// 为什么不能从 SurfaceMsg 拿：`llm.Message` 没有 reasoning 字段，`type:"reasoning"`
+// 的块在投影那一步就被丢掉了。fork 要保住"它为什么这么干"，只能回原始事件按 seq 取。
+// 这样也**不用改 SurfaceMsg 的公开形状**（只读 v4.Log.Events）。
+//
+// 与 cmd/dshd/serve_turn.go 的同名函数同一个识别形状：message.content 优先、顶层
+// content 兜底、只认 `type == "reasoning"` 且正文非空。差别只有一处——那边只回答
+// "有没有"（取第一条就够，llm.Message 装不下正文），这里要把正文搬进新日志，
+// 所以**全带**，不把第二条思考块当"重复的"丢掉。
+func reasoningBlocksBySeq(log *v4.Log) map[int64][]string {
+	out := make(map[int64][]string)
+	for _, ev := range log.Events {
+		if ev.Type != "assistant/message" {
+			continue
+		}
+		var d struct {
+			Message struct {
+				Content []block `json:"content"`
+			} `json:"message"`
+			Content []block `json:"content"`
+		}
+		if err := json.Unmarshal(ev.Data, &d); err != nil {
+			continue
+		}
+		blocks := d.Message.Content
+		if len(blocks) == 0 {
+			blocks = d.Content
+		}
+		var texts []string
+		for _, b := range blocks {
+			if b.Type == "reasoning" && strings.TrimSpace(b.Text) != "" {
+				texts = append(texts, b.Text)
+			}
+		}
+		if len(texts) > 0 {
+			out[ev.Seq] = texts
+		}
+	}
+	return out
+}
+
 // copyNode 把 surface 上的一个节点写成新会话里的一条事件。
-func copyNode(l *Log, node SurfaceMsg) error {
+//
+// reasoning 是源事件里的思考正文（surface 装不下，见 reasoningBlocksBySeq），
+// 只有 assistant/message 会用到。
+func copyNode(l *Log, node SurfaceMsg, reasoning []string) error {
 	m := node.Message
 	switch {
 	case node.Summary:
@@ -85,7 +134,16 @@ func copyNode(l *Log, node SurfaceMsg) error {
 		return l.Append("user/message", UserMessage([]spi.Block{{Type: "text", Text: m.Content}}))
 
 	case node.Type == "assistant/message":
-		blocks := make([]map[string]any, 0, 1+len(m.ToolCalls))
+		// 块顺序与 cmd/dshd/serve_turn.go 的 assistantBlocks 一致：
+		// 思考 → 正文 → 工具调用。
+		//
+		// 以前这里只铺 text + tool_calls：fork 出来的会话看起来一切正常，
+		// 只是模型再也想不起父会话为什么那么干；而"只有思考"的回答会变成
+		// 一条 content 为空的事件（投影读回来一个空气泡）。
+		blocks := make([]map[string]any, 0, len(reasoning)+1+len(m.ToolCalls))
+		for _, text := range reasoning {
+			blocks = append(blocks, ReasoningBlock(text))
+		}
 		if m.Content != "" {
 			blocks = append(blocks, TextBlock(m.Content))
 		}

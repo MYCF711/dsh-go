@@ -523,6 +523,7 @@ $ go test ./cmd/dshd -run TestDescriptionRuleIsOneJudge -v -count=1
 | `cmd/dshd/serve_turn.go`：`modelRunner` 用 `m.Text == ""` 过滤历史，丢掉只有 tool_calls 的 assistant 消息 | 边界明确不许动 `cmd/dshd/serve*.go`（别人在改） | 改成按 role + `ToolCalls` 判断；补一条"历史里 tool 结果必须能找到对应调用"的测试 → **已解决（§5.1）** |
 | `cmd/dshd/serve_turn.go`：`ServerFrame{Seq: 1}` 硬编码，绕过 journal | 同上 | 走 `emitFrame`；否则客户端会看到重复 seq=1、也没有 time → **已解决（§5.1）** |
 | `cmd/dshd/serve.go`：`session.compact` 与正在跑的回合会争 `.lock`，报"正被另一个进程写入" | 同上；而且错误措辞把同进程说成"另一个进程" | 由宿主侧串行化压缩与回合，或把措辞改成"这个会话正在被写入" |
+| `internal/session/fork.go`：fork 从 `session.Surface` 重建 assistant 事件时只带 text + tool_calls，**reasoning 块在 Surface 就被丢了**，fork 出来的会话没有思考 | 当时按"fork 只保证 surface 语义"的取舍没带思考块（`SurfaceMsg.Message` 是 `llm.Message`，装不下 reasoning） | 回原始事件按 seq 取思考块，按"思考 → 正文 → 工具调用"铺回 → **已解决（§5.4）** |
 | 模块装配的"`Register` 一个都没注册"通用守卫 | 要改 `internal/kernel` 的裁决逻辑（红线 R1/边界） | 若要做，在 `Assemble` 后按模块统计"新增工具数/提供能力数"，为 0 且非纯拦截器模块时 Warn |
 
 ### 5.1 移交的两条：已解决（2026-11-04）
@@ -794,6 +795,74 @@ assistant 仍会投影成 `text` 为空的消息——`transport.Message` 没有
 它的工具名/参数挂在下一条 `tool/result` 上（`Tool`/`Args`），所以信息不算全丢；
 要让它带上调用本身，是比"加一个可选字符串字段"更大的契约增量，需要 UI 快照与渲染
 一起冻结，本轮不做。
+
+### 5.4 fork 重建 assistant 事件时丢掉思考块（2026-11-04，已解决）
+
+**登记原文（保留）**：
+
+> `internal/session/fork.go:87-95`：fork 从 `session.Surface` 重建 assistant 事件时只带
+> text + tool_calls，**reasoning 块在 Surface 就被丢了**，fork 出来的会话没有思考。
+
+根因与 §5.1–§5.3 是同一个判据错误的第五次出现，只是这次发生在新**写入**侧而不是读侧：
+`SurfaceMsg.Message` 是 `llm.Message`，它没有 reasoning 字段；`surfaceMessage` 调
+`assistantMessage` 时只 `joinText` 了 text 块、只收了 tool-call 块，`type:"reasoning"`
+的块在**投影**那一步就没了。fork 用 surface 重建，于是思考一并丢。比"少一段文字"更隐蔽的
+是：**只有思考**的回答会变成一条 content 为空的 assistant 事件，读回来是一个空气泡。
+
+**修法：不回 Surface 加字段，直接读原始事件**。`Fork` 先按 seq 扫 `src.Events` 建
+`seq → 思考正文`（`reasoningBlocksBySeq`），再在 `copyNode` 里按
+**思考 → 正文 → 工具调用**铺块（与 `cmd/dshd/serve_turn.go` 的 `assistantBlocks` 同序）。
+因此 `SurfaceMsg` 的公开形状**一个字段没加**，`codecs/v4` 的落盘格式**一个字节没动**
+（`type:"reasoning"` 的块本来就存在，只是 fork 没带）。
+
+识别形状与 `serve_turn.go` 的 `reasoningBySeq` 一致（`message.content` 优先、顶层
+`content` 兜底、只认 `type == "reasoning"` 且正文非空）。唯一的差别是那边只回答"有没有"、
+取第一条就够；这里要把正文搬进新日志，所以同一事件里的多条思考块**全带**，
+不按"重复的"丢掉。
+
+**红（修之前，共享树，同一份测试 `internal/session/fork_reasoning_test.go`）**：
+
+```
+$ go test ./internal/session -run 'TestForkKeepsReasoningBlocks|TestForkWithoutReasoningKeepsEventSequence' -count=1 -v
+=== RUN   TestForkKeepsReasoningBlocks
+    fork_reasoning_test.go:142: 第 1 条 assistant 的块顺序 = "text,tool-call"，期望 "reasoning,text,tool-call"
+--- FAIL: TestForkKeepsReasoningBlocks (0.05s)
+--- PASS: TestForkWithoutReasoningKeepsEventSequence (0.05s)
+```
+
+那条 PASS 不是漏网：没有思考块的会话本来就正常，它是"不许误伤"的基线，
+必须在修前修后都绿。
+
+**绿（修之后）**：
+
+```
+$ go test ./internal/session -run 'TestFork' -count=1 -v
+--- PASS: TestForkKeepsReasoningBlocks
+--- PASS: TestForkWithoutReasoningKeepsEventSequence
+--- PASS: TestForkInheritsSurface
+--- PASS: TestForkDoesNotTouchSource
+--- PASS: TestForkCompactedSourceKeepsCheckpoint
+--- PASS: TestForkRejectsBadIDs
+--- PASS: TestForkWritesToExpectedPath
+--- PASS: TestForkInheritsAgentPreset
+```
+
+判据钉住三件事：
+1. 含思考的 assistant fork 后块顺序是 `reasoning,text,tool-call`，思考正文、正文、
+   工具名与参数都不变；
+2. **只有思考**的回答 fork 后仍是 `reasoning` 一个块（以前会变成空事件/空气泡）；
+3. 没有思考块的会话 fork 后事件序列**逐条等价**——口径是"事件类型 + 角色 + 内容块
+   （块类型/正文/工具名与参数/`toolCallId`）"，忽略每次写入都会变的随机 id、`turn/step`、
+   `time`、`meta.cwd`。这条口径写在新测试的 `eventFingerprint` 注释里。
+
+**同类还剩的 fork 缺口（登记，本轮不改）**：
+- `copyNode` 把 finish reason 一律写成 `"stop"`：源事件的 `max-tokens` / `tool_calls`
+  不跟着走，fork 后的最后一条回答即使是截断的也显示"完成"；
+- `tool/result` 的 `isError`、`meta.cwd`、`sourceEventSeqs`、H3 的 `view` 一律重置
+  （`false` / `""` / 空 / 不带）；
+- `system/message` 的 `turn/step` 固定成 `1,1`，`developer/message` 整类跳过；
+- `compaction/summary` 替身仍是 `source.kind = compact-checkpoint` 的 user 消息
+  （刻意：`shadowedSeqs` 在新文件里不存在，照搬会指向不存在的 seq）。
 
 ## 6. 复跑与验收
 
