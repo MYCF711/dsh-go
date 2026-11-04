@@ -1438,12 +1438,14 @@ A、B 改的是**口径**，行为用例抓得住。C 改的是**"又多了一�
 因为两份此刻一致。要等它们漂开才发作，而漂开的那一刻没有任何人知道，
 症状是"有时候思考块在、有时候不在"这种谁也复现不了的样子。
 
-所以判据只能是结构，两种，都不是行为：
+所以判据只能是结构，三种，都不是行为：
 
 - 同一个**判据字面量**出现在登记位置之外（`b.Type == "reasoning"`、`k == "description"`）；
-- 同一种**组装形状**出现在登记位置之外（一个函数里同时铺两种以上的内容块）。
+- 同一种**组装形状**出现在登记位置之外（一个函数里同时铺两种以上的内容块）；
+- 同一种**解码结构**出现在登记位置之外（同一个函数里声明两处 `Content []… json:"content"`，
+  那就是"内容有两个位置"这条取块规则的第二份，见下面的"第五刀"）。
 
-#### 四条规则（`scripts/single-source.txt`）
+#### 五条规则（`scripts/single-source.txt`）
 
 | 概念 | 唯一实现 | 形状ID | 抓的判据 |
 |---|---|---|---|
@@ -1451,6 +1453,7 @@ A、B 改的是**口径**，行为用例抓得住。C 改的是**"又多了一�
 | 思考块构造 | `internal/session/log.go:ReasoningBlock` | `reasoning-block-write` | 手写 `{"type": "reasoning", …}` 或 `spi.Block{Type: "reasoning"}` |
 | 铺块顺序 | `cmd/dshd/serve_turn.go:assistantBlocksFrom` | `assistant-block-layout` | **同一个函数里**同时构造两种以上的内容块 |
 | schema 注解判据 | `internal/schema/`（整包） | `schema-annotation-key` | `k == "description"` / `case "description":` / 自己造 `const … = "description"` |
+| 取块规则 | `internal/session/blocks.go:ContentBlocks` | `content-block-locus` | **同一个函数里**既声明 `json:"message"` 又声明两处以上 `Content []… json:"content"` |
 
 铺块那条为什么要判"两种以上"而不是判"思考→正文→调用"三段：三段匹配只能抓住**照抄**的
 那一份，而出事故的 ACP 那份恰恰**少了一段**（没有思考块），反而不会红。
@@ -1540,21 +1543,97 @@ FAIL 单点实现守卫：1 处未登记（规则 4 条，白名单 0 条，WARN
 （switch 操作数必须提到 `type` / `kind` / `block`），再被误伤就说明这个字面量确实需要
 一个理由——那时应该改的是这段代码的结构（把开关名和块类型分开），不是加白名单。
 
-#### 故意没抓的：`message.content` 优先、顶层 `content` 兜底
+#### 第五刀：取块规则收口（2026-11-04 本轮）
 
-同一段兜底（3 行）今天还在四处各写一遍：
+上一轮**故意没收**这一条，理由写在原处：`message.content` 优先、`len==0` 时顶层 `content`
+这条兜底在四处各写一遍——
 
-| 位置 | 用途 |
+| 原位置 | 用途 |
 |---|---|
-| `internal/session/reasoning.go:59` | 找思考块 |
-| `internal/session/history.go:62` | 拼 surface 的正文 |
+| `internal/session/reasoning.go:59` | 找思考块（`ReasoningBlocks`） |
+| `internal/session/history.go:62` | 拼 surface 的正文（`assistantMessage`） |
 | `cmd/dshd/history.go:120` | `history_search` 的 `eventText` |
 | `cmd/dshd/transport_source.go:461` | `session.load` 的 `messagesOf`（这里多一个 `nested` 分支） |
 
-这是一个真实的第二份实现候选，但**这轮不收**：收口要往 `internal/session` 导出一个
-"从事件取块"的函数并改四个调用点，那要动 `.go`；而这轮只做守卫。现在把它做成规则，
-会立刻产生 3 条**修不掉**的 WARN——那正是"守卫太吵"的起点。
-下一刀：先导出取块函数、四个调用点改成调它，再把 `content-fallback` 这条形状登记进来。
+收口要往 `internal/session` 导出取块函数、改四个调用点（要动 `.go`），而当场登记会立刻
+产生 3 条**修不掉**的 WARN（跨包，`second=` 最多只压得住第二处）——那正是"守卫太吵"的起点。
+本轮把这把刀落下。
+
+**唯一实现**：`internal/session/blocks.go`
+
+```go
+type Prefer int
+
+const (
+    PreferNested Prefer = iota // message.content 优先、顶层 content 兜底（v4 标准落法）
+    PreferTop                  // 顶层 content 优先、message.content 兜底（user/message 落法）
+)
+
+func ContentBlocks(data json.RawMessage, prefer Prefer) ([]ContentBlock, bool)
+```
+
+四处改成调它，签名不变（`ReasoningBlocks` / `assistantMessage` / `eventText` /
+`contentBlocks` 都还在，只是不再自己解 JSON）。第四处那个 `nested bool` 现在只干一件事：
+翻成 `PreferNested` / `PreferTop`——**它是四处里唯一真实的差别**，所以变成参数，
+而不是被"统一"掉。`cmd/dshd` 里那份一模一样的 `block` 结构体同时降级成
+`type block = session.ContentBlock`（不再是第二份定义）。
+
+**等价性是逐字节量的，不是"看起来一样"**：
+
+- 语料先 `cp -a` 到 `/tmp` 快照——语料是活的，直接对活语料跑会得到假差异；
+- 同一份探针测试同时放进 `git archive HEAD` 的副本与工作树副本，只调四个**调用点**的
+  原有函数，把输出压成逐事件指纹（还带上 `History` / `Surface` / `messagesOf` 的整体指纹）；
+- 434 个会话 / **575,374 条事件**，两份输出 `cmp` + `sha256sum` **完全一致**
+  （session 侧 123,431,559 字节 / dshd 侧 220,253,497 字节）；
+- 同一次扫描量到："两个 content 位置都有内容"的事件 **0 条**（user/message 也是 0 条）。
+  所以 `prefer` 这个参数在今天全部真实语料上不改变任何输出——留着它是为了不去赌
+  "以后也不会出现这种事件"。
+
+**守卫怎么判**（形状 `content-block-locus`）：**同一个函数里**既声明 `json:"message"`、
+又声明两处以上 `Content []… json:"content"`。判字段声明而不是判 `d.Message.Content` /
+`d.Content` 这两个取值，是因为取值写法五花八门（先赋 `d.Content` 再翻过来、拆成两个结构体
+各解一次），而"两个位置都得认"只有声明是它们共同的部分。故意不抓：`Content string`
+（tool/result、`fs.read` 那些）与 `Content json.RawMessage`（界面读 WS 帧的字段）——不是块数组；
+以及只声明一个 content 位置的地方（`system/message`、`tool/result` 只在嵌套里）——那是
+"只有一种落法"，不是这条规则。
+
+同一份判据在两棵树上的读数（这才是"规则真的在判东西"）：
+
+```
+改前的 git archive HEAD 副本（1bb0409，157 个 Go 文件）   content-block-locus 命中 4 处
+  cmd/dshd/history.go:110 [eventText]
+  cmd/dshd/transport_source.go:450 [contentBlocks]
+  internal/session/history.go:49 [assistantMessage]
+  internal/session/reasoning.go:46 [ReasoningBlocks]
+
+工作树（158 个 Go 文件）                 content-block-locus 命中 1 处
+  internal/session/blocks.go:53 [ContentBlocks]
+```
+
+**造红**：在隔离副本里把 `eventText` 改回"自己解一遍"（行为完全不变，它自己的用例
+`TestTextOfReadsBothContentShapes` 改前改后都绿），守卫必须红：
+
+```
+$ python scripts/single-source.py --root <隔离副本：eventText 改回自己解>
+== 单点实现守卫 ==
+登记 5 条规则 / 0 条白名单，扫描 158 个 Go 文件（cmd, internal, modules, codecs 起）
+  FAIL 取块规则 @ cmd/dshd/history.go:110 [content-block-locus] eventText
+       func eventText(ev v4.Event) string {
+       这条只有一份实现在 internal/session/blocks.go:ContentBlocks —— 改调 session.ContentBlocks(data, prefer)
+       为什么：「一条消息的内容块从哪取」只有一份实现：message.content 优先、len==0 时顶层 content 兜底、解不开当没有……
+FAIL 单点实现守卫：1 处未登记（规则 5 条，白名单 0 条，WARN 1）
+[exit code: 1]
+```
+
+改回 `ContentBlocks` 之后同一条命令回到 `PASS 单点实现守卫：5 条规则 / 158 个文件 /
+0 处未登记（白名单 0，WARN 1，漂移 0）`。这两步都写进了 `scripts/guard-selftest.py`
+（「eventText 重新自己解一遍 → 必须红」+「新写的第二份取块规则也红」），不是手工证据。
+
+**刻意没动的相邻一处**：`internal/session/userMessage` 只读顶层 `content`、不读
+`message.content`（而 `cmd/dshd` 的 user 分支会兜底）。它是"只有一种落法"，不是这条两位置
+规则的第二份，所以本轮的形状判据不管它；把它改成走 `ContentBlocks(raw, PreferTop)`
+会**新增**一种原来不读的落法（改行为），本轮不做。真实语料里"user 只有 `message.content`"
+的事件同样是 **0 条**，所以这个差别今天不产生任何可见后果。
 
 #### 没有验证的
 
@@ -1570,7 +1649,7 @@ FAIL 单点实现守卫：1 处未登记（规则 4 条，白名单 0 条，WARN
 export PATH="/c/Program Files/Go/bin:$PATH"
 export GOCACHE=/tmp/gocache-silent
 python scripts/silent-success-audit.py     # 守卫/数据检查全在，0 FAIL，exit 0
-python scripts/single-source.py            # 单点实现：4 条规则 0 处未登记（白名单 0），exit 0
+python scripts/single-source.py            # 单点实现：5 条规则 0 处未登记（白名单 0），exit 0
 go build ./... && go vet ./...
 go test ./... -count=1
 git archive HEAD | tar -x -C /tmp/hc-ss && (cd /tmp/hc-ss && go build ./...)
@@ -1689,6 +1768,32 @@ ALL GREEN
 **没有验证的**（D7）：`scripts/gate-manifest.txt` 没有登记这条新门禁（本轮的可改范围
 不含它）。后果是：把 check.sh 里那段删掉时，`守卫清单齐全` 不会红（新门禁自己没被守）。
 补法是往 `scripts/gate-manifest.txt` 加一行 `单点实现守卫`——一行的事，留给下一轮。
+
+**D8 复跑（2026-11-04，§5.7「第五刀」：取块规则收口，`GOCACHE=/tmp/gocache-blocks`）**：
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"
+export GOCACHE=/tmp/gocache-blocks       # 共享缓存会被并发进程清空
+go build ./...                           # exit 0
+go vet ./...                             # exit 0
+go test ./... -count=1                   # exit 0，48 个包 ok，无 FAIL
+python scripts/single-source.py          # 5 条规则 / 158 个文件 / 0 处未登记（白名单 0，WARN 1，漂移 0），exit 0
+python scripts/text-only-guard.py        # exit 0
+python scripts/guard-selftest.py         # 34 条自测全 OK（含本轮新增 2 条），exit 0
+python scripts/silent-success-audit.py   # exit 0
+git archive HEAD | tar -x -C /tmp/hc-cb && (cd /tmp/hc-cb && go build ./...)   # exit 0
+```
+
+等价性（434 个会话 / 575,374 条事件逐字节比对两份输出）与造红证据见上一节「第五刀」。
+
+本轮改了 `.go`（`internal/session/{blocks,history,reasoning,surface}.go`、
+`internal/session/fork_reasoning_test.go`、`cmd/dshd/{history,transport_source}.go`），
+**没有提交**；`git archive HEAD` 那一步判的是"基线仍然自洽"，不是本次改动已在 HEAD 里。
+
+**没有验证的**（D8）：界面侧 `cmd/dshtui` 的 `extractText` 也认两种落法（`json.RawMessage`，
+按"第一个非空"取，不是块规则），本轮范围不含 `cmd/dshtui`，形状判据也刻意不判它；
+真机 `session.load` / `history_search` / ACP `load` 三条读路径未在真机上复跑（等价性只证明
+"和改前逐字节一致"）；`-race` 未跑。
 
 ### 真机：ACP 一条带思考的轮次（2026-11-04 补验）
 
