@@ -59,14 +59,16 @@ git stash -u --keep-index -q && go build ./... ; git stash pop -q
 # 或 git archive HEAD | tar -x -C /tmp 后 build
 ```
 
-2026-11-04 自纠：Lead 自己也一直在**共享树**里跑 `scripts/check.sh`，而它第 242 行
-就是 `mv modules .modules.check`（原地搬走再搬回）。并行会话此时 build 会看到"没有 modules/"。
-规矩落到可执行的一步：**门禁一律在 `git archive HEAD | tar -x -C /tmp/gate-iso` 的副本里跑**，
-共享树只跑定向 test/build/vet。副本跑出来的结论与共享树等价（代码一致），但不会动到别人。
+2026-11-04 自纠：`check.sh` 会 `mv modules`，并行会话 build 会看不到 modules/。**门禁一律在 `git archive HEAD | tar -x -C /tmp/gate-iso` 副本跑**；共享树只跑定向 test/build/vet，不动别人。
 
-2026-11-04 三事故：① `main.go` 已提交，untracked 的 `tool_merged.go` 漏 add；② `git add main.go` 带上别人未提交的半成品 `prepareLazy`；③ 实现已提交、钉它的测试还留在工作树。规则：并行提交按目录 add 并先 `git diff --cached --stat`，只认领自己真改的路径；实现与测试同一次提交；收尾 `git status` 检查 agent 留下的未跟踪文件。
+2026-11-04 自纠（代价最大的一次）：真机验 ACP 是否落思考块时，我用的是 `tmp/dshd.exe`，
+**没先跑 `python scripts/bin-check.py`**——那是个陈旧二进制，于是看到"思考块没落盘"，
+接着花了很久去查网关、查客户端解析、查 `reasoning_effort` 有没有发出去（全都正常）。
+换成新编的二进制，第一次就落出 `['reasoning','text']`。
+规矩不是多写一句"记得验二进制"，而是**把它排在真机步骤第 0 位**：不加这一步，后面的结论全部不可信，
+而且它会把"陈旧二进制"伪装成"产品缺陷"，让人去改对的东西。
 
-共享树只跑定向 test/build/vet；完整门禁在隔离副本：
+2026-11-04 三事故：① `main.go` 已提交，untracked 的 `tool_merged.go` 漏 add；② `git add main.go` 带上别人未提交的半成品 `prepareLazy`；③ 实现已提交、钉它的测试还留在工作树。规则：并行提交按目录 add 并先 `git diff --cached --stat`，只认领自己真改的路径；实现与测试同一次提交；收尾 `git status` 检查未跟踪文件。
 
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"
@@ -75,11 +77,11 @@ go test ./...
 go list -deps ./internal/kernel   # 不含 modules/ 与业务包
 ```
 
-1. **先验二进制**：真机前跑 `python scripts/bin-check.py`，陈旧或副本分叉立即中止；案例见 `docs/verify-rules.md`。
-2. **无结论≠通过**：无机器可读汇总=`FAIL`，`--only` 0 匹配也不许报绿。红时先区分代码缺陷、过期判据、等待窗口/网关忙，不让宿主兼容旧探针。
-3. **守卫必须可反证**：新守卫在 `scripts/guard-selftest.py` 增加“弄坏必红”；help/contract/flag/method/真机各层不得外推整链。
-4. **并发与预算**：`-race` 未成功=未验证，race-guard 不替代；有 C 工具链跑 `bash scripts/race.sh`。工具表同模型真实分词，二进制 ≤25 MiB，`ALL GREEN` 仍逐项记 SKIP/WARN。
-5. **缺陷先红后修**：只在隔离旧实现验证失败，保存原始命令/断言；不破坏共享源码造红，不盲改 golden/放宽断言。
+1. 真机前 `python scripts/bin-check.py`；陈旧/分叉立即中止，案例见 `docs/verify-rules.md`。
+2. 无机器汇总=`FAIL`，0匹配不报绿；红先分代码/过期判据/等待窗。
+3. 新守卫在 `scripts/guard-selftest.py` 加“弄坏必红”；各层不外推整链。
+4. `-race` 未成功=未验证；有C工具链跑 `scripts/race.sh`；工具表真分词，二进制≤25MiB，ALL GREEN仍记SKIP/WARN。
+5. 缺陷先红后修，只隔离旧实现造红；不破坏共享源码、不盲改golden/放宽断言。
 
 ## 6. 文档与维护
 
