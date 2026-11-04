@@ -30,10 +30,10 @@
 ## 2. A/B：模型会不会去拉工具？
 
 这是 lazy 唯一真正的风险——**和 `merged` 是同一类赌注**（工具在那儿，模型不照做）。
-所以上之前先 A/B：34 个任务 × 2 形态，全部机器判定。
+所以上之前先 A/B：17 个任务 × 2 形态 × 2 次重复（**68 次真跑**），全部机器判定。
 
 ```bash
-python scripts/tool-table-lazy-ab.py            # 34 任务 × 2 形态
+python scripts/tool-table-lazy-ab.py --runs 2      # 17 任务 × 2 形态 × 2 次
 ```
 
 判据四条，全部机读、不靠人看：目标工具调没调 → 那次调用成没成 → 撞没撞步数上限 → 答案正则命中没。
@@ -82,3 +82,104 @@ lazy 侧另记：调没调 `tool_load`、拉的名字对不对。
 语料变了（换工作区、加新工具、真实使用重心迁移）名单就该重算——
 `python scripts/tool-table-hot.py --go` 的输出整段替换 `defaultHotTools`，
 然后跑 `go test ./cmd/dshd -run TestLazyHotListMatchesAssembly` 复验。
+
+---
+
+## 4. 全表（68 次真跑，逐任务）
+
+`python scripts/tool-table-lazy-ab.py --runs 2 --md tmp/lazy-ab-table.md` 生成。
+"知道去拉"= 这一轮调了 `tool_load`；"拉对"= 请求的名字里含目标工具；
+"跑通"= 目标工具被调用 + 那次调用 isError=false + 没撞满步数 + 答案正则命中。
+
+| 任务 | 用哪类工具 | 目标工具 | 形态 | 知道去拉？ | 拉对？ | 跑通？ | 步数 | 每步 prompt_tokens | 总 input | 实际调用序列 |
+|---|---|---|---|---|---|---|---:|---|---:|---|
+| now_line（点名） | 表外 | `now_line` | compact | — | — | 2/2 | 2, 2 | 5387/5477; 5387/5477 | 10864 | now_line; now_line |
+| now_line（点名） | 表外 | `now_line` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3947/4101/4191; 3947/4194/4284 | 12332 | tool_load,now_line; tool_load,read,now_line |
+| job_list（点名） | 表外 | `job_list` | compact | — | — | 2/2 | 2, 2 | 5387/5430; 5387/5438 | 10821 | job_list; job_list |
+| job_list（点名） | 表外 | `job_list` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3947/4069/4112; 3947/4067/4110 | 12126 | tool_load,job_list; tool_load,job_list |
+| schedule_list（点名） | 表外 | `schedule_list` | compact | — | — | 2/2 | 2, 2 | 5384/5456; 5384/5456 | 10840 | schedule_list; schedule_list |
+| schedule_list（点名） | 表外 | `schedule_list` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3944/4085/4157; 3944/4085/4157 | 12186 | tool_load,schedule_list; tool_load,schedule_list |
+| team_task_list（点名） | 表外 | `team_task_list` | compact | — | — | 2/2 | 2, 2 | 5386/5468; 5386/5468 | 10854 | team_task_list; team_task_list |
+| team_task_list（点名） | 表外 | `team_task_list` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3946/4137/4219; 3946/4139/4221 | 12304 | tool_load,team_task_list; tool_load,team_task_list |
+| watch_status（点名） | 表外 | `watch_status` | compact | — | — | 2/2 | 2, 2 | 5384/5443; 5384/5443 | 10827 | watch_status; watch_status |
+| watch_status（点名） | 表外 | `watch_status` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3944/4082/4141; 3944/4084/4143 | 12169 | tool_load,watch_status; tool_load,watch_status |
+| repo_here（点名） | 表外 | `repo_here` | compact | — | — | 2/2 | 2, 2 | 5391/5487; 5391/5487 | 10878 | repo_here; repo_here |
+| repo_here（点名） | 表外 | `repo_here` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3951/4094/4190; 3951/4094/4190 | 12235 | tool_load,repo_here; tool_load,repo_here |
+| working_directory（点名） | 表外 | `working_directory` | compact | — | — | 2/2 | 2, 2 | 5383/5461; 5383/5461 | 10844 | working_directory; working_directory |
+| working_directory（点名） | 表外 | `working_directory` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3943/4115/4193; 3943/4115/4193 | 12251 | tool_load,working_directory; tool_load,working_directory |
+| bash | 常驻 | `bash` | compact | — | — | 2/2 | 3, 2 | 5392/5500/5604; 5392/5493 | 13690 | read,bash; bash |
+| bash | 常驻 | `bash` | lazy | — | — | 2/2 | 2, 2 | 3952/4055; 3952/4149 | 8054 | bash; bash,read |
+| read | 常驻 | `read` | compact | — | — | 2/2 | 2, 2 | 5391/5589; 5391/5589 | 10980 | read; read |
+| read | 常驻 | `read` | lazy | — | — | 2/2 | 2, 2 | 3951/4149; 3951/4242 | 8146 | read; read,read |
+| todo_write | 常驻 | `todo_write` | compact | — | — | 2/2 | 2, 3 | 5387/5502; 5387/5502/5610 | 13694 | todo_write; todo_write,read |
+| todo_write | 常驻 | `todo_write` | lazy | — | — | 2/2 | 3, 3 | 3947/4055/4170; 3947/4055/4170 | 12172 | read,todo_write; read,todo_write |
+| glob | 常驻 | `glob` | compact | — | — | 2/2 | 2, 2 | 5392/5947; 5392/6010 | 11370 | glob; glob,working_directory |
+| glob | 常驻 | `glob` | lazy | — | — | 2/2 | 2, 2 | 3952/4507; 3952/5044 | 8728 | glob; glob,glob |
+| nameless_now_line（不点名） | 表外 | `now_line` | compact | — | — | 2/2 | 2, 2 | 5383/5473; 5383/5473 | 10856 | now_line; now_line |
+| nameless_now_line（不点名） | 表外 | `now_line` | lazy | 是（1/2） | 1/2 | 1/2 | 3, 3 | 3943/4097/4187; 3943/4032/4144 | 12173 | tool_load,now_line; **pwsh,pwsh** |
+| nameless_job_list（不点名） | 表外 | `job_list` | compact | — | — | 2/2 | 2, 2 | 5380/5423; 5380/5423 | 10803 | job_list; job_list |
+| nameless_job_list（不点名） | 表外 | `job_list` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3940/4062/4105; 3940/4062/4105 | 12107 | tool_load,job_list; tool_load,job_list |
+| nameless_schedule_list（不点名） | 表外 | `schedule_list` | compact | — | — | 2/2 | 2, 2 | 5382/5454; 5382/5454 | 10836 | schedule_list; schedule_list |
+| nameless_schedule_list（不点名） | 表外 | `schedule_list` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3942/4083/4155; 3942/4083/4155 | 12180 | tool_load,schedule_list; tool_load,schedule_list |
+| nameless_history_search（不点名） | 表外 | `history_search` | compact | — | — | 2/2 | 2, 2 | 5388/5591; 5388/5549 | 10958 | history_search; history_search |
+| nameless_history_search（不点名） | 表外 | `history_search` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3948/4180/4428; 3948/4180/4439 | 12562 | tool_load,history_search; tool_load,history_search |
+| two_hidden_tools（一次要两个） | 表外 | `schedule_list` | compact | — | — | 2/2 | 2, 2 | 5391/5491; 5391/5491 | 10882 | schedule_list,job_list; schedule_list,job_list |
+| two_hidden_tools（一次要两个） | 表外 | `schedule_list` | lazy | 是（2/2） | 2/2 | 2/2 | 3, 3 | 3951/4145/4245; 3951/4145/4245 | 12341 | tool_load(一次两个名字),schedule_list,job_list; 同 |
+| nameless_present（名字不像交付物） | 表外 | `present` | compact | — | — | 2/2 | 3, 3 | 5385/5556/5666; 5385/5556/5664 | 16606 | glob,working_directory,present; glob,working_directory,present |
+| nameless_present（名字不像交付物） | 表外 | `present` | lazy | 是（2/2） | 2/2 | 2/2 | 4, 3 | 3945/4408/4830/4958; 3945/4303/4407 | 15398 | tool_load,glob,read,present; tool_load,glob,present |
+
+**25 次 `tool_load` 的请求名字全部正确**：不点名工具的 8 次全对；一次要两个表外工具时，
+模型在**同一次调用**里给了 `{"names":["schedule_list","job_list"]}`；名字完全看不出用途的
+`present` 也认出来了。没有一次多取、乱取。把绕道那条任务再单独跑 6 次，lazy 6/6 全中
+（该任务累计 10 次 lazy 里 1 次绕道；其余 25 次表外任务 0 次绕道）。
+
+## 5. 字节账（首轮提示之外的那一半）
+
+| | 全表 compact | lazy（表 + 目录） | 差 |
+|---|---:|---:|---:|
+| 工具数 | 57 | 31（30 常驻 + `tool_load`） | −26 |
+| wire 字节（`name+description+parameters`，Caps 不发） | 16,897 | 10,066 | −6,831 |
+| 系统提示目录 | 0 | 2,127 | +2,127 |
+| **净** | 16,897 | 12,193 | **−4,704（−27.8%）** |
+
+`TestLazyTableSavesBytes` 卡住"净收益 ≥20%"——目录写太长、或者藏起来的都是小工具，
+这条会红。参数区（`tool-table-anatomy` 口径）8,535 → 约 5,500。
+
+## 6. 三个边界（都是真跑，不是推演）
+
+- **跨轮次（resume）装载状态不保留**：`dshd run` 每轮一个新进程，装载集在内存里。
+  第二轮模型凭上一轮记忆直接喊 `now_line` → 被挡回
+  （`← now_line [ERR] Error: 工具 now_line 没有装载`）→ 它读 Hint → `tool_load` → 再调成功。
+  **一次往返内自愈**，代价是每轮 +1 次调用（serve 每轮起一个子进程，这条在真机上一直成立）。
+- **步数预算要 +1**：`--max-steps 2` 时 compact 正常收敛，lazy 把"取用"那步挤掉，
+  以 `turn 用满了 2 步仍未收敛` 结束；`--max-steps 3` 两边都正常。
+  serve 默认 6 步（`cmd/dshd/serve.go:106`），本次最长的任务 compact 3 步 / lazy 4 步，
+  6 步还够；但要真上 serve，得先给这一格留余量。
+- **绕道挡不住**：挡回只挡"表外工具名"，挡不住"换个工具把事办了"（`pwsh date`）。
+  这类绕道不丢正确率，只丢这次的工具设计意图。
+
+## 7. 一处更正：哪些工具真的在表外
+
+任务书里举的 `web_search` / `github` / `subagent` / `send_message` **都在常驻 30 名之内**
+（语料名次 27 / 15 / 13 / 9），拿它们测不出 lazy。真正被藏起来的是 27 个，其中最需要
+留意的是**语料里 0 次调用**的 7 个：`enter_plan_mode`、`exit_plan_mode`、`workflow`、
+`history_search`、`plugin`、`now_line`、`exec_literal`——"第一次用它们的会话要多一次往返"
+恰好落在最没有样本、最不能外推的地方。plan mode 那两个还牵扯模式切换，上 serve 前
+建议真机跑一遍计划模式流程。
+
+## 8. 本轮验收
+
+```
+go build ./... && go vet ./...                        通过
+go test ./cmd/dshd -count=1                           通过（11.3s，含新增 TestLazy* 6 条）
+go test ./... -count=1                                通过（全部 ok，EXIT=0）
+go build -o tmp/dshd.exe ./cmd/dshd                   通过
+干净检出：git archive HEAD | tar -x -C /tmp/hc-lazy && (cd /tmp/hc-lazy && go build ./...)
+                                                      CLEAN-CHECKOUT BUILD OK
+python scripts/tool-table-hot.py                      退出码 0：Go 名单 == 语料前 30 名
+python scripts/tool-table-lazy-ab.py --runs 2         68 次真跑，见 §4
+```
+
+`TestLazy*` 六条：默认仍是 compact、lazy 要显式打开、常驻名单对得上装配、
+表外工具不在表里且装载后出现在**下一步**的表里、`lazyRunner` 挡回未装载调用且
+`tool_load` 不落真执行器、净收益 ≥20%（现 27.8%）。
