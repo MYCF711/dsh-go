@@ -17,6 +17,8 @@
   另有第四档 `--tools-mode lazy`（常驻语料前 30 名 + `tool_load` 按需取，首步 −26.7%），
   **默认仍是 compact**；翻默认还差"换模型家族复测"这一条硬证据。
 - **装载集是会话状态**：不落新文件，回放 v4 日志里已有的 `tool/call`（`cmd/dshd/tool_lazy.go`）。
+- **思考块覆盖**：`history` 原始帧 / `load` / `history_search` / 子代理转写 / `fork` / ACP `load` / `Meter.Estimate`
+  七处投影现在都认 reasoning（同一个病"只看 text"今天清完）。
 - **静默成功审计**：`docs/silent-success-audit.md` 36 条路径全表；真缺陷已修 18 条
   （含空流/半截流、压缩空摘要、`200+result:null`、journal 补洞缺口、`turn/end` 恒 completed、
   `CompactSchema` 两处删参数、`history_search` 只认正文、`session.load` 丢思考、fork 丢思考）。
@@ -26,7 +28,9 @@
 - **还没闭环的三条**（接手先看这里）：
   1. `lazy` 翻默认的"换模型家族复测"（本机只有两个 deepseek 通道，`group/kimi-k3.1-pro` 上游是坏的）
   2. `../dsh-ui` 是否开始消费 `transport.Message.reasoning`（宿主已给，UI 快照不追踪字段，无强制同步项）
-  3. `Meter.Estimate` 与 ACP `session/load` 的思考块（本轮已派活修，验收后回填这里）
+  3. ~~`Meter.Estimate` 与 ACP `session/load` 的思考块~~ **已修（M378/M379）**：
+     Surface 节点带 `Reasoning`，估算不再低估（压缩不会提前触发）；ACP load 只有思考的回答不再消失。
+     fork 的 finish/isError/cwd/view/turn-step/developer 消息也已在 M380 沿用源事件（截断的回合不再变成"正常收工"）
 
 ## 当前依赖顺序
 
