@@ -900,30 +900,36 @@ $ go test ./internal/session -run 'TestFork' -count=1 -v
   `developer/message` 的 `message` **原样搬**（tool-addition/tool-removal 的形状只在原始事件里）。
 - `turn/step` 对 assistant / tool result 也一并沿用：同一类审计事实，没有理由只修一处。
 
-**红（修之前，共享树，新测试 `internal/session/fork_facts_test.go`）**：
+**红（修之前：隔离副本 `git archive 1f2f679` —— 改动前的提交 —— + 当前测试文件）**：
 
 ```
 $ go test ./internal/session -run 'TestForkKeeps|TestForkWithoutFactsKeepsEventSequence' -count=1
---- FAIL: TestForkKeepsAssistantFinishReason
+--- FAIL: TestForkKeepsAssistantFinishReason (0.03s)
     fork_facts_test.go:129: fork 后的 finish = "completed"，期望 "max-tokens"（源里是 length）：被 max-tokens 截断的回合不许变成正常收工
---- FAIL: TestForkKeepsToolResultIsError
-    fork_facts_test.go:170: fork 后的 isError = false，期望 true：失败的工具体不许在分叉后变成成功
---- FAIL: TestForkKeepsToolResultCwd
-    fork_facts_test.go:201: fork 后的 meta.cwd = ""，期望 "/work/real"：工具结果在哪跑的，分叉后不许变成空
---- FAIL: TestForkKeepsSystemTurnStep
-    fork_facts_test.go:226: fork 后的 system turn/step = 1,1，期望 4,2（源里写的就是这个）
---- FAIL: TestForkKeepsDeveloperMessage
-    fork_facts_test.go:256: fork 产物里有 0 条 developer/message，期望 1：工具增删声明整类丢了
---- FAIL: TestForkKeepsToolResultView
-    fork_facts_test.go:309: fork 后的 view = null，期望 {"kind":"card","title":"68 个文件"}
+--- FAIL: TestForkKeepsTopLevelFinishFallback (0.03s)
+    fork_facts_test.go:167: 顶层 finish=length 没跟过去：fork 后 kind = "completed"，期望 "max-tokens"
+--- FAIL: TestForkKeepsToolResultIsError (0.04s)
+    fork_facts_test.go:198: fork 后的 isError = false，期望 true：失败的工具体不许在分叉后变成成功
+--- FAIL: TestForkKeepsToolResultCwd (0.04s)
+    fork_facts_test.go:229: fork 后的 meta.cwd = ""，期望 "/work/real"：工具结果在哪跑的，分叉后不许变成空
+--- FAIL: TestForkKeepsSystemTurnStep (0.03s)
+    fork_facts_test.go:254: fork 后的 system turn/step = 1,1，期望 4,2（源里写的就是这个）
+--- FAIL: TestForkKeepsDeveloperMessage (0.03s)
+    fork_facts_test.go:284: fork 产物里有 0 条 developer/message，期望 1：工具增删声明整类丢了
+--- FAIL: TestForkKeepsToolResultView (0.04s)
+    fork_facts_test.go:337: fork 后的 view = null，期望 {"kind":"card","title":"68 个文件"}
 FAIL
+FAIL	dshgo/internal/session	0.361s
 ```
 
-**绿（修之后）**：
+同一次运行里 `TestForkWithoutFactsKeepsEventSequence` 是 PASS——它问的是"没有这些事实时会不会误伤"，
+修前修后都该绿。
+
+**绿（修之后，共享树）**：
 
 ```
 $ go test ./internal/session -run 'TestFork' -count=1
-ok  	dshgo/internal/session	0.641s
+ok  	dshgo/internal/session	0.669s
 ```
 
 "不许误伤"的判据沿用上一轮的 `eventFingerprint`（事件类型 + 角色 + 内容块 + `toolCallId`，

@@ -140,6 +140,34 @@ func TestForkKeepsAssistantFinishReason(t *testing.T) {
 	}
 }
 
+// TestForkKeepsTopLevelFinishFallback：没有 stream 的老语料，顶层 finish 也要跟着走。
+//
+// 真实语料两种形状都有：v4 的 `stream:[{type:"finish",reason:{kind}}]`，
+// 以及更早/别处产生的 `finish` / `finishReason` 顶层字段。只认一种就会让另一种
+// 退回默认值——那正是这条缺陷的原始形态。
+func TestForkKeepsTopLevelFinishFallback(t *testing.T) {
+	home := t.TempDir()
+	src := newForkSrc(t, home, "src-finish2").
+		add("system/message", SystemMessageData(1, 1, "你是 dsh-go")).
+		add("user/message", UserMessage([]spi.Block{{Type: "text", Text: "讲个长故事"}})).
+		add("assistant/message", map[string]any{
+			"turn": 1, "step": 1,
+			"message":   map[string]any{"role": "assistant", "content": []map[string]any{TextBlock("半句")}},
+			"finish":    "length",
+			"surfaceOp": "append",
+		}).
+		done()
+
+	back := forkRead(t, home, "fork-finish2", src)
+	as := eventsOfType(back.Events, "assistant/message")
+	if len(as) != 1 {
+		t.Fatalf("fork 产物里有 %d 条 assistant/message，期望 1", len(as))
+	}
+	if got, want := assistantFinishKind(t, as[0]), "max-tokens"; got != want {
+		t.Fatalf("顶层 finish=length 没跟过去：fork 后 kind = %q，期望 %q", got, want)
+	}
+}
+
 // TestForkKeepsToolResultIsError：判据 2 —— 失败的工具体 fork 后仍是失败。
 func TestForkKeepsToolResultIsError(t *testing.T) {
 	home := t.TempDir()
