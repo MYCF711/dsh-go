@@ -1269,7 +1269,8 @@ exit=1
 3. **模块级 `timeout_ms` 取的是最大值**：`Exec` 会用自己的 `ctx` 收紧，所以走 `spi.Tool` 的每个工具都拿到自己声明的 deadline；不经过 `Exec` 的入口（上面第 2 条）拿到的是最大那个。
 4. **宿主无法验证客人真的按 `tool` 分了流**：客人完全可以无视这个字段。判据只能是测试与夹具（`TestWasmTwoToolsRouteByToolField` 断言两个工具**输出不同**）。这一点写进作者手册了。
 5. ~~**`-race` 没跑**~~ **已补（M349）**：本机 `C:/toolchains/mingw64/bin/gcc.exe` 下
-   `go test -race ./internal/wasmhost ./cmd/dshtui ./internal/transport ./cmd/dshd` 全部 ok、零 DATA RACE。
+   `go test -race ./internal/wasmhost ./cmd/dshtui ./internal/transport ./cmd/dshd` 全部 ok、零 DATA RACE；
+   随后 `bash scripts/race.sh` **全仓 47 个包**跑通，零 DATA RACE。
    `wasmToolRouter`、重建路径、TUI 的滚动/审批并发都在里面跑过。**压测仍未做**。
 6. ~~**`cmd/dshd/doctor.go` 的 wasm 文案仍偏旧**~~ **已补（M349）**：文案改成"工具多的模块写 `[[module.tool]]`，并让 provides 里的 `tool:<名>` 逐个对齐"，跨模块与单模块两种场景都点到。
 7. §8.7 / §9.5 里没验的那些（interpreter 引擎、c-archive、千次实例化泄漏、体积 4.4 MB）**不变**。~~恶意客人~~ **已补（M355）**：五条坏行为各有一条用例钉着，见 §11（**只覆盖那五条**，无上限内存增长 / CPU 预算 / WASI 面仍没打）。
