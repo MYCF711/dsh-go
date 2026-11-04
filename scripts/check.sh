@@ -84,7 +84,8 @@ else
   # 白名单外的"只认 text 的投影"直接红。
   if [ -f scripts/text-only-guard.py ]; then
     if tg_out="$(python scripts/text-only-guard.py 2>&1)"; then
-      pass "$(printf '%s' "$tg_out" | tail -1)"
+      # 守卫自己那句已经以 "PASS " 开头，别再套一层（会打出 "PASS  PASS ..."）
+      pass "$(printf '%s' "$tg_out" | tail -1 | sed 's/^PASS  *//')"
     else
       bad "text-only 守卫: $(printf '%s' "$tg_out" | grep 'FAIL ' | head -2 | tr '
 ' ' ')"
