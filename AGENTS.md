@@ -36,9 +36,8 @@ v4、提示装配与架构理由读 `PLAN.md`；P0 旧工具/“不做”清单�
 
 完整且唯一详细定义在 `docs/transport-contract.md`，开工必须主动读它，不能只靠本入口：
 
-- HTTP `POST /api/<method>` 的 body 是**裸参数对象**，不包 `params`；成功 `result`，错误四字段。
-- `/connect` 换 cookie 后才能请求；HTTP/WS 同认证。WS 为 **`/ws`**，不是 `/api/mux`。
-- 客户端控制帧 `t=sub/unsub/ping`；服务端 `{seq,type,data,time}`，不是 `t=ev/kind`。type 只取快照白名单（含 v4 原词、`turn/done`、`turn/error`、approval、reset、pong）。
+- HTTP `POST /api/<method>` body 是**裸参数**，不包 `params`；成功 `result`，错误四字段；先 `/connect` 换 cookie，HTTP/WS 同认证。
+- WS 为 **`/ws`**；控制帧 `t=sub/unsub/ping`，服务端 `{seq,type,data,time}`，type 只取白名单（v4 原词、turn done/error、approval、reset、pong）。
 - **每会话一条独立 WS + 一个 Transport journal**；seq 在 journal 追加时分配，不能是 v4 seq、全局 turn seq或连接序号。
 - WS 与 `session.history` 读同一 journal；history 返回原始 `frames`，不是抽过 text 的 messages。load 只作首屏投影。
 - `journalEpoch` 随 load/history/sub 传递；不匹配用 `session/reset`/`stale_epoch` 强制重建基线。reasoning/tool/approval 断线后必须可恢复。
@@ -46,38 +45,28 @@ v4、提示装配与架构理由读 `PLAN.md`；P0 旧工具/“不做”清单�
 
 ## 4. 共享仓与进程安全
 
-- 改前重读；`FS_STALE_VERSION` 先合并。不得 checkout/reset 覆盖他人，不原地移动 `modules/` 或兄弟仓，不按镜像名杀 `dshd.exe/app.exe`。
-- `scripts/regress.sh` 有全局 taskkill，`scripts/check.sh` 原地移动 modules：隔离修复前**禁止在共享工作树运行**。抽模块、旧代码造红、变异测试只在执行者独占隔离副本。
+- 改前重读；`FS_STALE_VERSION` 先合并。禁止 checkout/reset 覆盖他人、原地移动 `modules/` 或兄弟仓、按镜像名杀 `dshd.exe/app.exe`。
+- `scripts/regress.sh` 有全局 taskkill，`check.sh` 原地移动 modules：隔离修复前禁在共享树运行；造红/变异只在独占副本。
 - 测试用临时 home、`--port 0`、ready 地址/token、无头窗口；只回收自己启动且核对归属的 PID。不得重启/关闭 DSH 或 magpie，不写 profiles/asar/原始会话，不抢现有 GUI 地址。
 - commit/PR/push 由任务书显式授权；提交只 add 认领路径并检查 cached diff，不夹带他人改动。**两仓 push 都需用户当次确认。**
 
 ## 5. 验证与交付（硬规则）
 
-**提交前必须自证 HEAD 单独能编译**，工作树绿不算：
+**提交前必须自证 HEAD 单独能编译**（工作树绿不算）：
 
 ```bash
 git stash -u --keep-index -q && go build ./... ; git stash pop -q
 # 或 git archive HEAD | tar -x -C /tmp 后 build
 ```
 
-2026-11-04 事故：`main.go` 已提交，untracked 的 `tool_merged.go` 实现却漏 add，导致 main 不编译。并行提交按目录 add，提交后必须干净检出复验，不得漏实现文件。
+2026-11-04 自纠：Lead 自己也一直在**共享树**里跑 `scripts/check.sh`，而它第 242 行
+就是 `mv modules .modules.check`（原地搬走再搬回）。并行会话此时 build 会看到"没有 modules/"。
+规矩落到可执行的一步：**门禁一律在 `git archive HEAD | tar -x -C /tmp/gate-iso` 的副本里跑**，
+共享树只跑定向 test/build/vet。副本跑出来的结论与共享树等价（代码一致），但不会动到别人。
 
-2026-11-04 第二次同类事故（同一个坑，我（Lead）亲自踩的）：`git add cmd/dshd/main.go`
-把别人**工作树里半成品**的改动一起提交了（它引用了还没提交的 `prepareLazy`）——
-HEAD 又不编译。这条规矩因此升级为硬性：
+2026-11-04 三事故：① `main.go` 已提交，untracked 的 `tool_merged.go` 漏 add；② `git add main.go` 带上别人未提交的半成品 `prepareLazy`；③ 实现已提交、钉它的测试还留在工作树。规则：并行提交按目录 add 并先 `git diff --cached --stat`，只认领自己真改的路径；实现与测试同一次提交；收尾 `git status` 检查 agent 留下的未跟踪文件。
 
-**并行会话在工作树里改过的文件，`git add` 之前必须先 `git diff --cached --stat` 看一眼内容是不是"我认得的那份"。**
-只认领自己确实改过的路径；不确定就把那个文件从 add 列表里拿掉，让别人自己提交。
-
-2026-11-04 第三条（派活的坑）：子代理**写完了测试文件但没来得及报告就失败**，
-   而我在它落盘之前就提交了实现（M378）——于是"实现进了仓库、钉它的测试留在工作树"，
-   隔了一个轮次才发现。规矩：**实现与它的测试必须在同一次提交里落地**；
-   派活收尾时用 `git status` 看一眼有没有该 agent 留下的未跟踪文件，别只看它报了什么。
-
-
-
-
-共享树只跑审查过的定向测试、build/vet；完整门禁在隔离副本执行：
+共享树只跑定向 test/build/vet；完整门禁在隔离副本：
 
 ```bash
 export PATH="/c/Program Files/Go/bin:$PATH"
