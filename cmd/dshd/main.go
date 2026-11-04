@@ -297,7 +297,12 @@ type ToolEntry struct {
 
 // buildToolTable 按名字排序，保证同一装配产生同样的字节。
 func buildToolTable(reg spi.ToolRegistry) ([]ToolEntry, error) {
-	tools := reg.Tools()
+	return toolTableOf(reg.Tools())
+}
+
+// toolTableOf 是同一个投影，只是入口是"一列工具"——merged 模式下去掉成员的
+// 表也走它，两条路必须产出同一种形状。
+func toolTableOf(tools []spi.Tool) ([]ToolEntry, error) {
 	entries := make([]ToolEntry, 0, len(tools))
 	for _, t := range tools {
 		if !json.Valid(t.Schema()) {
@@ -319,8 +324,14 @@ func cmdTools(argv []string) error {
 	manifest := fs.String("manifest", "dsh.toml", "manifest 路径")
 	// 表形态：真正发给模型的是 compact。打印 full 会让人以为成本是 32 KB，
 	// 而实际发出去的是压缩后的——门禁按"发出去的那个"算才有意义。
-	schema := fs.String("schema", defaultToolSchema, "打印哪种形态：compact（默认，实际发出的）| full")
+	schema := fs.String("schema", defaultToolSchema, "打印哪种形态（旧名，等价于 --tools-mode）：compact|full")
+	mode := fs.String("tools-mode", "",
+		"工具表形态：compact（默认）| full | merged（watch/hindsight/schedule/team_task 四族各合成一个工具，多一个 action 参数）")
 	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	tm, err := resolveToolsMode(*mode, *schema)
+	if err != nil {
 		return err
 	}
 	mods, err := loadMods(*manifest, defaultHome(), 0, nil)
@@ -338,11 +349,22 @@ func cmdTools(argv []string) error {
 	if err != nil {
 		return err
 	}
-	table, err := buildToolTable(reg)
+	tools := reg.Tools()
+	if tm == toolsModeMerged {
+		mt, warn, err := newMergedTable(reg)
+		if err != nil {
+			return err
+		}
+		for _, w := range warn {
+			fmt.Fprintln(os.Stderr, "工具表："+w)
+		}
+		tools = mt.Tools()
+	}
+	table, err := toolTableOf(tools)
 	if err != nil {
 		return err
 	}
-	if *schema != "full" {
+	if tm != toolsModeFull {
 		for i := range table {
 			table[i].Parameters = agent.CompactSchema(table[i].Parameters)
 		}
@@ -352,7 +374,7 @@ func cmdTools(argv []string) error {
 		return err
 	}
 	fmt.Println(string(out))
-	fmt.Fprintf(os.Stderr, "工具 %d 个，%d 字节\n", len(table), len(out))
+	fmt.Fprintf(os.Stderr, "工具 %d 个，%d 字节（形态 %s）\n", len(table), len(out), tm)
 	return nil
 }
 
@@ -424,7 +446,11 @@ func cmdRun(argv []string) error {
 	// 而环境变量在 --help 里看不见，等于"藏起来的开关"。
 	reasoningEffort := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
 		"推理强度：空=不要（默认）| xhigh | max。要了才把 reasoning 写进日志与流")
-	toolSchema := fs.String("tool-schema", defaultToolSchema, "工具表形态：compact=压掉参数说明（省约两成输入）| full=完整")
+	toolSchema := fs.String("tool-schema", defaultToolSchema, "工具表形态（旧名，等价 --tools-mode）：compact=压掉参数说明（省约两成输入）| full=完整")
+	// merged 是第三档：把同族工具（watch/hindsight/schedule/team_task）各合成
+	// 一个工具，多一个 action 参数。只改模型看到的表，执行仍按原工具名走。
+	toolsMode := fs.String("tools-mode", "",
+		"工具表形态：compact（默认）| full | merged（四族合成一个工具+action：表更小，但模型要自己挑 action，选错就白跑一步）")
 	// 规则文件：默认工作区的 AGENTS.md；给"执行者"喂精简手册时指到 docs/WORKER.md。
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	policy := fs.String("policy", defaultRunPolicy, "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
@@ -434,6 +460,10 @@ func cmdRun(argv []string) error {
 	}
 	if *prompt == "" {
 		return fmt.Errorf("缺 --prompt")
+	}
+	tm, err := resolveToolsMode(*toolsMode, *toolSchema)
+	if err != nil {
+		return err
 	}
 	if err := checkHome(*home); err != nil {
 		return err
@@ -475,7 +505,21 @@ func cmdRun(argv []string) error {
 	if err != nil {
 		return err
 	}
-	sys := buildSystemPrompt(reg, *model, cwd, *workspaceBytes)
+	// 工具表投影（只这一层）：merged 时把四族换成"一个工具 + action"，
+	// 系统提示里的工具清单也要跟着换——否则模型从提示里看到旧的 17 个名字，
+	// 从 tools 字段看到 4 个，两边对不上。
+	table := spi.ToolRegistry(reg)
+	if tm == toolsModeMerged {
+		mt, warn, err := newMergedTable(reg)
+		if err != nil {
+			return err
+		}
+		for _, w := range warn {
+			fmt.Fprintln(os.Stderr, "工具表："+w)
+		}
+		table = mt
+	}
+	sys := buildSystemPrompt(table, *model, cwd, *workspaceBytes)
 	// --session：续一个已经存在的会话，而不是新建。
 	// 定时任务的"到期后跑一轮"就是靠这个——它必须落在**原会话**里，
 	// 新建会话会让上下文断掉（模型不记得之前聊过什么）。
@@ -559,6 +603,15 @@ func cmdRun(argv []string) error {
 		sessionID: sessID, approvals: approval.New(),
 		policyDeniesUnattended: deniesSilently(*policy, isTerminal(os.Stdin)),
 	}
+	// merged 的路由器在守卫**外层**：先把 action 还原成原工具名，再交给守卫。
+	// 顺序反了就会拿合并名去查 Caps（查不到 → 审批判定跑偏），
+	// 而且守卫的"以后都允许"记忆是按工具名记的，两边名字必须一致。
+	loopRunner := spi.Runner(guarded)
+	if mt, ok := table.(*mergedTable); ok {
+		mr := &mergedRunner{inner: guarded, table: mt}
+		mt.bindRunner(mr.Run) // Exec 兜底：即便有人绕过 Runner，也还是走同一条路由
+		loopRunner = mr
+	}
 
 	chat := llm.New(*base, os.Getenv("DSHD_LLM_KEY"))
 	// meter 跨步复用：每步都用服务端给的 totalTokens 校准一次估算。
@@ -567,19 +620,19 @@ func cmdRun(argv []string) error {
 	// 子代理复用同一套零件：同一个模型、同一张工具表、同一个执行器。
 	// 差别只有系统提示与步数上限（它只干一件小事）。
 	subp.Bind(&subRunner{
-		chat: chat, tools: reg, runner: guarded,
+		chat: chat, tools: table, runner: loopRunner,
 		model: *model, maxSteps: 8, timeout: 5 * time.Minute,
 	})
 	loop := &agent.Loop{
 		Chat:         chat,
 		Compact:      runCompactor(chat, logw, *autoCompact, *model, meter),
-		Tools:        reg,
-		Runner:       guarded,
+		Tools:        table,
+		Runner:       loopRunner,
 		Project:      session.ProjectResult,
 		Model:        *model,
 		System:       sys,
 		SessionID:    sessID,
-		CompactTools: *toolSchema != "full",
+		CompactTools: tm != toolsModeFull,
 		// 只有显式设了才要推理：某些网关不认这个参数，默认不带更安全。
 		Reasoning: *reasoningEffort,
 		MaxSteps:  *maxSteps,
