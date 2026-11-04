@@ -62,6 +62,14 @@ git stash -u --keep-index -q && go build ./... ; git stash pop -q
 
 2026-11-04 事故：`main.go` 已提交，untracked 的 `tool_merged.go` 实现却漏 add，导致 main 不编译。并行提交按目录 add，提交后必须干净检出复验，不得漏实现文件。
 
+2026-11-04 第二次同类事故（同一个坑，我（Lead）亲自踩的）：`git add cmd/dshd/main.go`
+把别人**工作树里半成品**的改动一起提交了（它引用了还没提交的 `prepareLazy`）——
+HEAD 又不编译。这条规矩因此升级为硬性：
+
+**并行会话在工作树里改过的文件，`git add` 之前必须先 `git diff --cached --stat` 看一眼内容是不是"我认得的那份"。**
+只认领自己确实改过的路径；不确定就把那个文件从 add 列表里拿掉，让别人自己提交。
+
+
 
 共享树只跑审查过的定向测试、build/vet；完整门禁在隔离副本执行：
 
