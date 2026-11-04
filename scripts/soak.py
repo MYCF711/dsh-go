@@ -13,6 +13,10 @@
     python scripts/soak.py --turns 30 --agents 5 # 5 个进程，每个 6 轮
 
 判定用"前后比值"，不用绝对值——绝对值和机器有关，形状才和代码有关。
+
+收尾：每个 Agent 的 `dshd acp` 由 `_proc` 托管（登记表 + atexit + 信号钩子），
+main 里再用 try/finally 显式收一遍——以前 session/new 失败直接 return 1 时，
+已经起来的那些 acp 会全部留在系统里。
 """
 
 import argparse
@@ -22,6 +26,8 @@ import subprocess
 import sys
 import tempfile
 import time
+
+import _proc
 
 
 def rss_kb(pid):
@@ -72,11 +78,9 @@ def find_locks(home):
 class Agent:
     def __init__(self, exe, home, cwd):
         self.home = home
-        self.proc = subprocess.Popen(
-            [exe, "acp", "--home", home, "--workspace-bytes", "0"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1,
-            cwd=cwd)
+        # 统一管理器：进程一登记，退出路径（正常/异常/KeyboardInterrupt）就都有兜底。
+        self.proc = _proc.run_acp(bin=exe, home=home,
+                                  extra=["--workspace-bytes", "0"], cwd=cwd)
         self.seq = 0
 
     def call(self, method, params, timeout=180):
@@ -99,13 +103,11 @@ class Agent:
 
     def close(self):
         try:
-            self.proc.stdin.close()
+            self.proc.close_stdin()
         except Exception:
             pass
-        try:
-            self.proc.wait(timeout=10)
-        except Exception:
-            self.proc.kill()
+        if self.proc.wait(10) is None:      # 10 秒还不退：连树一起收
+            self.proc.kill_tree("soak 收尾")
 
 
 def main():
@@ -128,34 +130,36 @@ def main():
 
     rows = []
     t_start = time.time()
-    for a_i, ag in enumerate(agents):
-        ag.call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
-        sid = (ag.call("session/new", {"cwd": ws.replace("\\", "/"), "mcpServers": []}) or {})
-        sid = (sid.get("result") or {}).get("sessionId")
-        if not sid:
-            print("✗ session/new 失败")
-            return 1
-        for t in range(per_agent):
-            t0 = time.time()
-            r = ag.call("session/prompt",
-                        {"sessionId": sid, "prompt": [{"type": "text", "text": args.prompt}]})
-            dt = time.time() - t0
-            size, files = dir_size(home)
-            rows.append({
-                "agent": a_i, "turn": t + 1,
-                "roundtrip_s": round(dt, 2),
-                "rss_kb": rss_kb(ag.proc.pid),
-                "handles": handles(ag.proc.pid),
-                "home_bytes": size, "home_files": files,
-                "ok": r is not None and "result" in (r or {}),
-            })
-            mark = "ok" if rows[-1]["ok"] else "FAIL"
-            print(f"  a{a_i} t{t+1:02d}  {dt:5.1f}s  rss={rows[-1]['rss_kb']}KB  "
-                  f"handles={rows[-1]['handles']}  home={size/1024:.0f}KB/{files}f  {mark}",
-                  flush=True)
-
-    for ag in agents:
-        ag.close()
+    try:
+        for a_i, ag in enumerate(agents):
+            ag.call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+            sid = (ag.call("session/new", {"cwd": ws.replace("\\", "/"), "mcpServers": []}) or {})
+            sid = (sid.get("result") or {}).get("sessionId")
+            if not sid:
+                print("✗ session/new 失败")
+                return 1
+            for t in range(per_agent):
+                t0 = time.time()
+                r = ag.call("session/prompt",
+                            {"sessionId": sid, "prompt": [{"type": "text", "text": args.prompt}]})
+                dt = time.time() - t0
+                size, files = dir_size(home)
+                rows.append({
+                    "agent": a_i, "turn": t + 1,
+                    "roundtrip_s": round(dt, 2),
+                    "rss_kb": rss_kb(ag.proc.pid),
+                    "handles": handles(ag.proc.pid),
+                    "home_bytes": size, "home_files": files,
+                    "ok": r is not None and "result" in (r or {}),
+                })
+                mark = "ok" if rows[-1]["ok"] else "FAIL"
+                print(f"  a{a_i} t{t+1:02d}  {dt:5.1f}s  rss={rows[-1]['rss_kb']}KB  "
+                      f"handles={rows[-1]['handles']}  home={size/1024:.0f}KB/{files}f  {mark}",
+                      flush=True)
+    finally:
+        # 早退（session/new 失败）也要收：这一条以前会留 N 个 acp 进程。
+        for ag in agents:
+            ag.close()
 
     locks = find_locks(home)
     total = time.time() - t_start
