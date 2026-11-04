@@ -8,13 +8,18 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"strings"
 )
 
 // Screen 是一块可重画的全屏区域。
 type Screen struct {
-	out    *os.File
+	// out 是 io.Writer 而不是 *os.File：终端层（alt-screen 进/出、整行清屏、裁宽、
+	// 差分重画）是唯一没有测试覆盖的一层，而它坏了的症状是"界面花掉/键没反应"——
+	// 单测看不见。抽成 Writer 之后这些 ANSI 字节可以在测试里逐字节断言。
+	out    io.Writer
 	width  int
 	height int
 	inAlt  bool
@@ -27,6 +32,11 @@ type Screen struct {
 func NewScreen() *Screen {
 	w, h := termSize()
 	return &Screen{out: os.Stdout, width: w, height: h}
+}
+
+// newScreenTo 给测试用：把输出接到任意 Writer，尺寸自己定。
+func newScreenTo(out io.Writer, width, height int) *Screen {
+	return &Screen{out: out, width: width, height: height}
 }
 
 // Enter 进 alt-screen 并隐藏光标。
@@ -58,18 +68,40 @@ func (s *Screen) Resize() {
 //
 // 超宽的行按显示宽度硬切（点阵与正文都是等宽假设），
 // 少行就补空行——**不清屏不重画**会让上一帧的尾巴留在下面。
+//
+// 差分：与上一帧**逐字节相同**的行不重画，只用 `\x1b[<行>;1H` 把光标挪过去。
+// 为什么值得：流式输出每 ~100ms 一帧，整屏重画在慢终端（Windows 控制台）上看得见闪。
+//
+// 以前这个字段（prev）只是**声明了却没人用**，而 `TestRenderSkipsUnchangedRows`
+// 在测试里把"哪些行变了"自己算了一遍——测的是测试自己的算术，不是渲染器。
+// 现在差分真的在这里，测试也调这个函数。
 func (s *Screen) Render(lines []string) {
-	var b strings.Builder
-	b.WriteString("\x1b[H") // 光标回左上
+	next := make([]string, s.height)
 	for i := 0; i < s.height; i++ {
-		b.WriteString("\x1b[2K") // 清整行
 		if i < len(lines) {
-			b.WriteString(fitWidth(lines[i], s.width))
-		}
-		if i < s.height-1 {
-			b.WriteString("\r\n")
+			next[i] = fitWidth(lines[i], s.width)
 		}
 	}
+	var b strings.Builder
+	for i := 0; i < s.height; i++ {
+		if i < len(s.prev) && s.prev[i] == next[i] {
+			// 这一行没变：只定位，不清不写。
+			b.WriteString("\x1b[")
+			b.WriteString(strconv.Itoa(i + 1))
+			b.WriteString(";1H")
+			continue
+		}
+		if i == 0 {
+			b.WriteString("\x1b[H")
+		} else {
+			b.WriteString("\x1b[")
+			b.WriteString(strconv.Itoa(i + 1))
+			b.WriteString(";1H")
+		}
+		b.WriteString("\x1b[2K") // 清整行
+		b.WriteString(next[i])
+	}
+	s.prev = next
 	fmt.Fprint(s.out, b.String())
 }
 

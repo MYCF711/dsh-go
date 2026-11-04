@@ -116,25 +116,35 @@ func TestSlashCommands(t *testing.T) {
 }
 
 // 差分渲染：上一帧相同的行必须**跳过**，否则每帧都在重画整屏。
-// 这条测的是 Screen 的行为，不是布局——但两者共同决定"流式时不闪"。
+//
+// 这条以前是**假测试**：它把"哪些行变了"的算术在测试里自己算了一遍，
+// 而 `Screen.Render` 根本没做差分（`prev` 只是声明了没人用）——
+// 也就是说，它测的是测试自己的循环，渲染器坏成什么样它都是绿的。
+// 现在改成调真的 Render，并断言"没变的行只有光标定位、没有清行与重写"。
 func TestRenderSkipsUnchangedRows(t *testing.T) {
-	scr := &Screen{width: 20, height: 4}
 	var buf strings.Builder
-	scr.out = nil // 不走真终端
+	scr := newScreenTo(&buf, 20, 4)
 
-	// 直接测"哪些行被判为变化"：先画一帧，再画只改最后一行的一帧
-	scr.prev = []string{fitWidth("a", 20), fitWidth("b", 20), fitWidth("c", 20), fitWidth("d", 20)}
-	lines := []string{"a", "b", "c", "CHANGED"}
-	changed := 0
-	for i, ln := range lines {
-		if fitWidth(ln, scr.width) != scr.prev[i] {
-			changed++
+	scr.Render([]string{"a", "b", "c", "d"})
+	if got := strings.Count(buf.String(), "\x1b[2K"); got != 4 {
+		t.Fatalf("首帧没有上一帧可比，4 行都要画，实际清行 %d 次", got)
+	}
+
+	buf.Reset()
+	scr.Render([]string{"a", "b", "c", "CHANGED"})
+	out := buf.String()
+	if got := strings.Count(out, "\x1b[2K"); got != 1 {
+		t.Fatalf("只改了最后一行，应当只清 1 行，实际 %d：%q", got, out)
+	}
+	// 未变的三行仍要被定位到（否则光标会落在错的行上，画到别处去）
+	for _, want := range []string{"\x1b[1;1H", "\x1b[2;1H", "\x1b[3;1H", "\x1b[4;1H"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("缺少光标定位 %q：%q", want, out)
 		}
 	}
-	if changed != 1 {
-		t.Fatalf("应当只有 1 行变化，实际 %d", changed)
+	if !strings.Contains(out, "CHANGED") {
+		t.Fatalf("变了的那行必须重写：%q", out)
 	}
-	_ = buf
 }
 
 // 状态行：未知用量显示 "?"，不要显示 0 —— "不知道"和"没有"是两件事。
