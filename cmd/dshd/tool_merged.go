@@ -636,10 +636,11 @@ func stripDescriptions(v any) any {
 //
 // 为什么自己删说明文字、不用 internal/agent.CompactSchema：那边是"见到
 // description 键就删"的粗暴做法，会把**名叫 description 的参数**一起删掉。
-// 本仓有 6 个工具真有这个参数（bash / subagent / subagent_fork /
-// spawn_teammate / team_task_create / team_task_update），删掉之后 required
-// 里点名了它、properties 里却没有——模型只看到一个"必填但没类型"的名字，
-// 等于凭空少了一条契约。压表不许改信息，所以这里按"注解还是参数名"分开：
+// 本仓有 8 个工具真有这个参数（ask_user_question 的 options[]、bash、present、
+// spawn_teammate、subagent、subagent_fork、team_task_create、team_task_update）。
+// 删掉之后 required 里点名了它、properties 里却没有——模型只看到一个
+// "必填但没类型"的名字，等于凭空少了一条契约。压表不许改信息，所以这里按
+// "注解还是参数名"分开：
 //   - 注解（某个 schema 对象上的 description）→ 删；
 //   - 参数名（properties 映射里的键）→ 原样保留，哪怕它就叫 description。
 //
