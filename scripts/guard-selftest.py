@@ -357,6 +357,33 @@ def main():
         "\treturn b\n",
         "schema-annotation-key")
 
+    # 本轮（§5.7「第五刀」）：取块规则「message.content 优先 / 顶层 content 兜底」。
+    #
+    # 这一条为什么必须靠结构判据：把 eventText 改回自己解一遍，**行为完全一样**，
+    # 它自己的用例（TestTextOfReadsBothContentShapes）改前改后都是绿的——
+    # 要等四处漂开才发作，而那时看到的是"这个会话加载出来一条消息都没有"。
+    ss_revert(
+        "eventText 重新自己解一遍 message.content / content（本轮之前）",
+        "cmd/dshd/history.go",
+        r"\tblocks, ok := session\.ContentBlocks\(ev\.Data, session\.PreferNested\)\n"
+        r"\tif !ok \{\n"
+        r"\t\treturn \"\"\n"
+        r"\t\}\n",
+        "\tvar d struct {\n"
+        "\t\tMessage struct {\n"
+        "\t\t\tContent []block `json:\"content\"`\n"
+        "\t\t} `json:\"message\"`\n"
+        "\t\tContent []block `json:\"content\"`\n"
+        "\t}\n"
+        "\tif err := json.Unmarshal(ev.Data, &d); err != nil {\n"
+        "\t\treturn \"\"\n"
+        "\t}\n"
+        "\tblocks := d.Message.Content\n"
+        "\tif len(blocks) == 0 {\n"
+        "\t\tblocks = d.Content\n"
+        "\t}\n",
+        "content-block-locus")
+
     # 第九次不是"改回旧的"，是"新写一个"：新文件里的第二份判据也必须红。
     new_probe = os.path.join(ss_tree, "cmd", "dshd", "zz_single_source_selftest_probe.go")
     open(new_probe, "w", encoding="utf-8", newline="").write(
@@ -369,6 +396,30 @@ def main():
     os.remove(new_probe)
     chk("单点实现守卫：新写的第二份判据（不是改回旧代码）也红",
         code != 0 and "reasoning-type-discriminator" in out, out.strip()[-260:])
+
+    # 取块规则的另一半：**新写**一份（不是改回旧代码）也必须红——否则这条规则只管历史，
+    # 拦不住下一个"我自己解一遍算了"的人。
+    new_locus = os.path.join(ss_tree, "cmd", "dshd", "zz_single_source_selftest_locus.go")
+    open(new_locus, "w", encoding="utf-8", newline="").write(
+        "package main\n\n"
+        "// 自测用的第二份取块规则：新写的代码，登记表里没有它。\n"
+        "func selftestProbeBlocks(raw []byte) []block {\n"
+        "\tvar d struct {\n"
+        "\t\tMessage struct {\n"
+        "\t\t\tContent []block `json:\"content\"`\n"
+        "\t\t} `json:\"message\"`\n"
+        "\t\tContent []block `json:\"content\"`\n"
+        "\t}\n"
+        "\t_ = json.Unmarshal(raw, &d)\n"
+        "\tif len(d.Message.Content) > 0 {\n"
+        "\t\treturn d.Message.Content\n"
+        "\t}\n"
+        "\treturn d.Content\n"
+        "}\n")
+    code, out = run_ss(ss_tree)
+    os.remove(new_locus)
+    chk("单点实现守卫：新写的第二份取块规则（不是改回旧代码）也红",
+        code != 0 and "content-block-locus" in out, out.strip()[-260:])
 
     # 反面：**正常写一个新投影**不许红——它就是该绿的形状。
     #

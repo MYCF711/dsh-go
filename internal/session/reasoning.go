@@ -1,7 +1,6 @@
 package session
 
 import (
-	"encoding/json"
 	"strings"
 
 	"dshgo/codecs/v4"
@@ -38,8 +37,8 @@ func ReasoningText(kind, text string) (string, bool) {
 // 两条规则：
 //   - 只认 `assistant/message`。别的类型先返回，**不解析 JSON**（工具结果可能很大，
 //     不该为了找思考块把它们全部解一遍）；
-//   - `message.content` 优先、顶层 `content` 兜底。只认前者的后果很隐蔽：早期/别处
-//     产生的 assistant/message 直接把 content 挂在顶层，那些回答的思考会静默消失。
+//   - 块从哪取不在这儿：那条规则只有一份，在 ContentBlocks（`message.content` 优先、
+//     顶层 `content` 兜底）。这里只回答"这些块里哪些是思考"，判据是 ReasoningText。
 //
 // 解不开就当"没有思考"，不返回错误：调用方（fork / 界面投影 / 历史组装）要的是
 // 一份投影，一条坏事件不该把整批读路径打断。
@@ -47,18 +46,10 @@ func ReasoningBlocks(ev v4.Event) []string {
 	if ev.Type != "assistant/message" {
 		return nil
 	}
-	var d struct {
-		Message struct {
-			Content []block `json:"content"`
-		} `json:"message"`
-		Content []block `json:"content"`
-	}
-	if err := json.Unmarshal(ev.Data, &d); err != nil {
+	// 取块是单点（ContentBlocks）：这里只判"块里哪些是思考"。
+	blocks, ok := ContentBlocks(ev.Data, PreferNested)
+	if !ok {
 		return nil
-	}
-	blocks := d.Message.Content
-	if len(blocks) == 0 {
-		blocks = d.Content
 	}
 	var texts []string
 	for i := range blocks {

@@ -27,18 +27,9 @@ func History(log *v4.Log) []llm.Message {
 	return out
 }
 
-// block 是内容块的最小形状。
-type block struct {
-	Type      string `json:"type"`
-	Text      string `json:"text"`
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
-
 func userMessage(raw json.RawMessage) (llm.Message, bool) {
 	var d struct {
-		Content []block `json:"content"`
+		Content []ContentBlock `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return llm.Message{}, false
@@ -47,21 +38,12 @@ func userMessage(raw json.RawMessage) (llm.Message, bool) {
 }
 
 func assistantMessage(raw json.RawMessage) (llm.Message, bool) {
-	var d struct {
-		Message struct {
-			Content []block `json:"content"`
-		} `json:"message"`
-		// 顶层的 content：早期/别处产生的 assistant/message 直接挂在这儿。
-		// 只认 message.content 的后果很隐蔽：**历史里少几条助手消息**，
-		// 看起来像"那次模型没回答"，没人会怀疑到投影这一层。
-		Content []block `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &d); err != nil {
+	// 取块是单点（ContentBlocks）：message.content 优先、顶层 content 兜底。
+	// 只认前者的后果很隐蔽：**历史里少几条助手消息**，看起来像"那次模型没回答"，
+	// 没人会怀疑到投影这一层。
+	blocks, ok := ContentBlocks(raw, PreferNested)
+	if !ok {
 		return llm.Message{}, false
-	}
-	blocks := d.Message.Content
-	if len(blocks) == 0 {
-		blocks = d.Content
 	}
 	msg := llm.Message{Role: "assistant", Content: joinText(blocks)}
 	for _, b := range blocks {
@@ -79,9 +61,9 @@ func assistantMessage(raw json.RawMessage) (llm.Message, bool) {
 func toolMessage(raw json.RawMessage) (llm.Message, bool) {
 	var d struct {
 		Message struct {
-			ToolCallID string  `json:"toolCallId"`
-			Content    []block `json:"content"`
-			IsError    bool    `json:"isError"`
+			ToolCallID string         `json:"toolCallId"`
+			Content    []ContentBlock `json:"content"`
+			IsError    bool           `json:"isError"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal(raw, &d); err != nil {
@@ -97,7 +79,7 @@ func toolMessage(raw json.RawMessage) (llm.Message, bool) {
 	}, true
 }
 
-func joinText(blocks []block) string {
+func joinText(blocks []ContentBlock) string {
 	out := ""
 	for _, b := range blocks {
 		if b.Type != "text" {

@@ -49,8 +49,8 @@ func Surface(log *v4.Log) []SurfaceMsg {
 		switch ev.Type {
 		case "compaction/summary", "compaction/prune":
 			var d struct {
-				Summary       []block `json:"summary"`
-				ShadowedSeqs  []int64 `json:"shadowedSeqs"`
+				Summary       []ContentBlock `json:"summary"`
+				ShadowedSeqs  []int64        `json:"shadowedSeqs"`
 				ShadowedRange *struct {
 					Start int64 `json:"start"`
 					End   int64 `json:"end"`
@@ -164,7 +164,7 @@ func surfaceMessage(ev v4.Event) (llm.Message, string, bool) {
 	case "system/message", "developer/message":
 		var d struct {
 			Message struct {
-				Content []block `json:"content"`
+				Content []ContentBlock `json:"content"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(ev.Data, &d); err != nil {

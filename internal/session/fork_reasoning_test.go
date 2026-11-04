@@ -56,29 +56,28 @@ func buildReasoningSrc(t *testing.T, home string) *v4.Log {
 }
 
 // eventBlocks 取出一条事件里模型可见的内容块。
-// 形状与 session 的投影、serve_turn 的 reasoningBySeq 一致：message.content 优先，
-// 顶层 content 兜底。
-func eventBlocks(t *testing.T, ev v4.Event) (role, toolCallID string, blocks []block) {
+// 取块本身不在这里判：它直接调 ContentBlocks（同一份实现，message.content 优先、
+// 顶层 content 兜底）。这个 helper 只补 session 投影不关心的 role / toolCallId。
+func eventBlocks(t *testing.T, ev v4.Event) (role, toolCallID string, blocks []ContentBlock) {
 	t.Helper()
 	var d struct {
 		Message struct {
-			Role       string  `json:"role"`
-			Content    []block `json:"content"`
-			ToolCallID string  `json:"toolCallId"`
+			Role       string `json:"role"`
+			ToolCallID string `json:"toolCallId"`
 		} `json:"message"`
-		Content []block `json:"content"`
 	}
 	if err := json.Unmarshal(ev.Data, &d); err != nil {
 		t.Fatalf("事件 %s（seq %d）解不开: %v", ev.Type, ev.Seq, err)
 	}
-	blocks = d.Message.Content
-	if len(blocks) == 0 {
-		blocks = d.Content
+	var ok bool
+	blocks, ok = ContentBlocks(ev.Data, PreferNested)
+	if !ok {
+		t.Fatalf("事件 %s（seq %d）的内容块取不出来", ev.Type, ev.Seq)
 	}
 	return d.Message.Role, d.Message.ToolCallID, blocks
 }
 
-func blockTypeList(blocks []block) string {
+func blockTypeList(blocks []ContentBlock) string {
 	out := make([]string, 0, len(blocks))
 	for _, b := range blocks {
 		out = append(out, b.Type)

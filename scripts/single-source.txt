@@ -42,6 +42,11 @@
 # 各删错一次，一共删掉 8 个名叫 description 的参数（5 个还在 required 里）。
 schema 注解判据 | internal/schema/ | schema-annotation-key | 「description 是注解还是参数名」只有一处判断（按键名 + 按位置）。别处再按字面量判一次，就是第二份：两份各错一次，而模型看到「必填、但没有类型」时全链路不报错
 
+# 2026-11-04（本轮）：四处各写一遍"内容块从哪取"——同一形状各解一遍 JSON、同一条件
+# 各写一遍 len==0 兜底。前三处 message.content 优先，cmd/dshd 的 user 分支顶层优先；
+# 漂了没有任何测试会红：两条读路径各自的用例形状不同，各自都是绿的。
+取块规则 | internal/session/blocks.go:ContentBlocks | content-block-locus | 「一条消息的内容块从哪取」只有一份实现：message.content 优先、len==0 时顶层 content 兜底、解不开当没有（两个位置都有内容时先看哪个，是函数的参数，不是第二份规则）。别处再声明一遍"两个 Content []… json:"content""就是第二份，而只认一种落法的后果很隐蔽：那些会话在历史/界面上"一条消息都没有"，看起来像会话坏了，不像读错了键
+
 [allow]
 
 # 白名单格式：路径:行号 | 形状ID | 理由
@@ -51,4 +56,4 @@ schema 注解判据 | internal/schema/ | schema-annotation-key | 「description 
 # 理由必须能查证；「历史原因」「暂时保留」这种没法核对的话，等于白名单烂在这儿。
 # 条目没命中任何发现 → FAIL（问题修掉了、或代码改名了，两种都要求改这一行）。
 #
-# 目前 **0 条**：四条规则在今天的代码上都不需要白名单（见 docs/silent-success-audit.md §5.7）。
+# 目前 **0 条**：五条规则在今天的代码上都不需要白名单（见 docs/silent-success-audit.md §5.7）。

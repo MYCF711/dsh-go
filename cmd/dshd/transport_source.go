@@ -421,14 +421,9 @@ func (s *sessionSource) resolve(sessionID string) (string, error) {
 	}
 }
 
-// block 是 v4 内容块的最小形状。
-type block struct {
-	Type      string `json:"type"`
-	Text      string `json:"text"`
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
+// block 是 v4 内容块的最小形状；它只有一份定义（session.ContentBlock），
+// 这里只是一个别名——以前这里是**独立的第二份结构体**，v4 加字段时两边各跟一半。
+type block = session.ContentBlock
 
 // textOf 取一条消息的可见正文。
 //
@@ -442,31 +437,19 @@ func textOf(data json.RawMessage, nested bool) (string, bool) {
 	return joinText(blocks), true
 }
 
-// contentBlocks 按两种落法取一条消息的内容块。
+// contentBlocks 按两种落法取一条消息的内容块 —— 取块本身不在这儿判，只有一份实现在
+// session.ContentBlocks；这里只把"先看哪个位置"（user 顶层优先、assistant 嵌套优先）
+// 翻成那个函数的参数。
 //
 // 两种落法都要认（H7）：真实语料把助手内容放在 message.content，
 // 但也见过放在顶层 content 的日志。**只认一种，那些会话就是一条消息都没有**，
 // 而界面上"整会话空白"看起来像会话坏了。
 func contentBlocks(data json.RawMessage, nested bool) ([]block, bool) {
-	var d struct {
-		Content []block `json:"content"`
-		Message struct {
-			Content []block `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal(data, &d); err != nil {
-		return nil, false
-	}
-	blocks := d.Content
+	prefer := session.PreferTop
 	if nested {
-		blocks = d.Message.Content
-		if len(blocks) == 0 {
-			blocks = d.Content
-		}
-	} else if len(blocks) == 0 {
-		blocks = d.Message.Content
+		prefer = session.PreferNested
 	}
-	return blocks, true
+	return session.ContentBlocks(data, prefer)
 }
 
 // countToolCalls 数一条 assistant 消息里的 tool-call 块。

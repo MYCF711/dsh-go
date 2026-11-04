@@ -11,19 +11,22 @@
 | 2 | 三份铺块逻辑（`run` / `serve` / `acp`），ACP 那份不写思考块——那轮想过什么从日志里整轮消失，而 history / fork / load 三处读路径全是对的。收敛到 `assistantBlocksFrom` | 941460c / 3c9e457 |
 | 3 | 两份思考块识别（serve 取第一条 / fork 全带），同一形状各解一遍 JSON。收敛到 `internal/session/reasoning.go` | b4809d1 |
 | 4 | 七处"只认 text"的投影 → 129 条回答整条消失。已有 `scripts/text-only-guard.py` | 926ff4e 等 |
+| 5 | 「内容块从哪取」在四处各写一遍（`session.ReasoningBlocks` / `session.assistantMessage` / `cmd/dshd.eventText` / `cmd/dshd.contentBlocks`），同一形状各解一遍 JSON、同一条件各写一遍 `len==0` 兜底。收敛到 `internal/session/blocks.go` | 本轮 |
 
 第 4 条已经被 `text-only-guard.py` 守住，本守卫**不重复实现它**（重复实现一条守卫，
-本身就是这份守卫要抓的病）。本守卫管的是前三条的**共同形状**。
+本身就是这份守卫要抓的病）。本守卫管的是 1–3 条与第 5 条的**共同形状**。
 
 ## 为什么判结构，不判行为
 
 行为测试在两处实现"当前一致"时永远全绿。第 3 条的变异 C（把"取第一条"和"全带"
 写成两份）就是靠结构判据才抓住的：两份都对、都过测试、结果不同只在某类事件上出现。
 
-所以这里的判据只有两种，都是结构：
+所以这里的判据只有三种，都是结构：
 
   * **同一个判据字面量**出现在登记位置之外（`b.Type == "reasoning"`、`k == "description"`）；
-  * **同一种组装形状**出现在登记位置之外（一个函数里同时铺两种以上的内容块）。
+  * **同一种组装形状**出现在登记位置之外（一个函数里同时铺两种以上的内容块）；
+  * **同一种解码结构**出现在登记位置之外（同一个函数里声明两处 `Content []… json:"content"`，
+    那就是"内容有两个位置"这条取块规则的第二份）。
 
 ## 怎么保证不吵（这是设计约束，不是附带好处）
 
@@ -303,12 +306,65 @@ def shape_schema_annotation_key(src, delegates):
     return out
 
 
+# ---------------------------------------------------------------- 形状 5：取块规则
+
+
+# 一个"内容块数组"字段：`Content []block `json:"content"``。
+# 刻意只认 `[]…`：`Content string`（tool/result、fs.read 那些）不是块数组，
+# `Content json.RawMessage`（界面读 WS 帧的字段）也不是块数组。
+CONTENT_FIELD = re.compile(r'\bContent\s+\[\]\s*[\w.*]+\s*`json:"content"`')
+MESSAGE_TAG = re.compile(r'`json:"message"`')
+
+
+def shape_content_block_locus(src, delegates):
+    """「一条消息的内容块从哪取」——只该在 internal/session/blocks.go 里取一次。
+
+    命中的形状：**同一个函数里**既声明了 `… `json:"message"``，又声明了两处以上
+    `Content []… `json:"content"``。那就是"同一份内容有两个位置"的解码结构，
+    也正是从四处收口过来的那个形状：
+
+        var d struct {
+            Message struct {
+                Content []block `json:"content"`
+            } `json:"message"`
+            Content []block `json:"content"`
+        }
+
+    为什么判"字段声明"而不是判 `d.Message.Content` / `d.Content` 这两个取值：
+    取值写法五花八门（先赋 `d.Content` 再翻过来、中间过一层变量、拆成两个结构体
+    各解一次）。**两个位置都得认**这件事，只有字段声明是它们共同的部分。
+
+    对应的历史重复（本轮收口）：`session.ReasoningBlocks`、`session.assistantMessage`、
+    `cmd/dshd.eventText`、`cmd/dshd.contentBlocks` 各解一遍、各写一遍 `len==0` 兜底，
+    其中前三处 message.content 优先、第四处的 user 分支顶层优先。漂了没有任何测试会红：
+    两条读路径各自的用例形状不同，各自都是绿的。
+
+    刻意不抓的：`Content string` / `Content json.RawMessage`（不是块数组，见上），
+    以及只声明一个 content 位置的地方（`system/message`、`tool/result` 只在嵌套里）——
+    那是"只有一种落法"，不是本条规则。
+
+    委派：函数里调了 ContentBlocks 就说明它在复用，不算第二份。
+    """
+    out = []
+    for start, _name in src.funcs:
+        _, end = src.func_range(start)
+        body = src.keep[start:end + 1]
+        if sum(1 for line in body if CONTENT_FIELD.search(line)) < 2:
+            continue
+        if not any(MESSAGE_TAG.search(line) for line in body):
+            continue
+        out.append(_hit(src, start, "content-block-locus",
+                        "取块规则", "改调 session.ContentBlocks(data, prefer)"))
+    return out
+
+
 # 形状ID → 实现。加规则时：形状判据写在这里，归哪个唯一实现在 single-source.txt 里写。
 SHAPES = {
     "reasoning-type-discriminator": shape_reasoning_type_discriminator,
     "reasoning-block-write": shape_reasoning_block_write,
     "assistant-block-layout": shape_assistant_block_layout,
     "schema-annotation-key": shape_schema_annotation_key,
+    "content-block-locus": shape_content_block_locus,
 }
 
 # 形状ID → "同一函数里出现这个调用 = 它在委派，不算第二份实现"。
@@ -317,6 +373,7 @@ DELEGATES = {
     "reasoning-block-write": re.compile(r"\bReasoningBlock\s*\("),
     "assistant-block-layout": re.compile(r"\bassistantBlocksFrom\s*\("),
     "schema-annotation-key": re.compile(r"\bIsAnnotationKey\s*\("),
+    "content-block-locus": re.compile(r"\bContentBlocks\s*\("),
 }
 
 

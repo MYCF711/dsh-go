@@ -108,18 +108,11 @@ func hiddenSeqs(log *v4.Log) map[int64]bool {
 // 判据与 assistantHasPayload 对齐：正文、思考、工具调用占一样就有正文可搜；
 // 三样都没有的事件（比如只有一个空 text 块）仍然返回空串，不算内容。
 func eventText(ev v4.Event) string {
-	var d struct {
-		Message struct {
-			Content []block `json:"content"`
-		} `json:"message"`
-		Content []block `json:"content"`
-	}
-	if err := json.Unmarshal(ev.Data, &d); err != nil {
+	// 取块规则只有一份（session.ContentBlocks）：message.content 优先、顶层 content 兜底。
+	// 这里只负责"按块顺序把 text / reasoning / tool-call 拼出来"。
+	blocks, ok := session.ContentBlocks(ev.Data, session.PreferNested)
+	if !ok {
 		return ""
-	}
-	blocks := d.Message.Content
-	if len(blocks) == 0 {
-		blocks = d.Content
 	}
 	if len(blocks) == 0 {
 		return ""
