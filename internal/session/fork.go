@@ -36,8 +36,8 @@ func Fork(src *v4.Log, home, cwd, newID string) (*Log, error) {
 	}
 	// Surface 只装 text + tool_calls；"这条回答是怎么收工的、这个工具体成没成、
 	// 在哪跑的、属于哪一轮哪一步"都不在里面。两张表都按 seq 回原始事件取，
-	// 不往 SurfaceMsg 上加字段（见 reasoningBlocksBySeq / forkFactsBySeq）。
-	reasoning := reasoningBlocksBySeq(src)
+	// 不往 SurfaceMsg 上加字段（见 ReasoningBlocksBySeq / forkFactsBySeq）。
+	reasoning := ReasoningBlocksBySeq(src)
 	facts := forkFactsBySeq(src)
 
 	seg, err := v4.EncodeSegment(newID)
@@ -70,59 +70,6 @@ func Fork(src *v4.Log, home, cwd, newID string) (*Log, error) {
 	return l, nil
 }
 
-// reasoningBlocksBySeq 标出哪些 assistant/message 事件带思考块（seq → 思考正文，按原顺序）。
-//
-// 为什么不能从 SurfaceMsg 拿：`llm.Message` 没有 reasoning 字段，`type:"reasoning"`
-// 的块在投影那一步就被丢掉了。fork 要保住"它为什么这么干"，只能回原始事件按 seq 取。
-// 这样也**不用改 SurfaceMsg 的公开形状**（只读 v4.Log.Events）。
-//
-// 与 cmd/dshd/serve_turn.go 的同名函数同一个识别形状：message.content 优先、顶层
-// content 兜底、只认 `type == "reasoning"` 且正文非空。差别只有一处——那边只回答
-// "有没有"（取第一条就够，llm.Message 装不下正文），这里要把正文搬进新日志，
-// 所以**全带**，不把第二条思考块当"重复的"丢掉。
-func reasoningBlocksBySeq(log *v4.Log) map[int64][]string {
-	out := make(map[int64][]string)
-	for _, ev := range log.Events {
-		if ev.Type != "assistant/message" {
-			continue
-		}
-		var d struct {
-			Message struct {
-				Content []block `json:"content"`
-			} `json:"message"`
-			Content []block `json:"content"`
-		}
-		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			continue
-		}
-		blocks := d.Message.Content
-		if len(blocks) == 0 {
-			blocks = d.Content
-		}
-		var texts []string
-		for _, b := range blocks {
-			if b.Type == "reasoning" && strings.TrimSpace(b.Text) != "" {
-				texts = append(texts, b.Text)
-			}
-		}
-		if len(texts) > 0 {
-			out[ev.Seq] = texts
-		}
-	}
-	return out
-}
-
-// ReasoningBlocksBySeq 是 reasoningBlocksBySeq 的导出版本，给**包外**的读路径复用。
-//
-// 现在有两个包外使用者，都只要这一份识别规则、不要第二份实现：
-//   - cmd/dshd 的 ACP `session/load` 重放（`acpRunner.Load`）：Surface 装不下思考，
-//     重放时得回原始事件取，否则"只有思考"的回答在 load 之后整条消失；
-//   - 诊断/测试。
-//
-// 为什么不直接把内部函数改名：Fork 与它的测试已经在用未导出的名字，改名会让
-// 这处修复多改一批调用点；包一层既不加第二份逻辑，也不动既有形状。
-func ReasoningBlocksBySeq(log *v4.Log) map[int64][]string { return reasoningBlocksBySeq(log) }
-
 // srcFact 是一条源事件里"Surface 装不下、fork 又必须原样搬走"的事实。
 //
 // 为什么不给 SurfaceMsg 加字段：History / compact.Select / Meter 这些读路径一个都不
@@ -153,7 +100,7 @@ type srcFact struct {
 
 // forkFactsBySeq 按 seq 建"源事件事实表"。
 //
-// 与 reasoningBlocksBySeq 同一个做法（Surface 一个字段不加），但这里管的是**结论类**
+// 与 ReasoningBlocksBySeq 同一个做法（Surface 一个字段不加），但这里管的是**结论类**
 // 字段：finish / isError / cwd / turn-step / view / developer 形状。
 // 单条事件解不开就当作"源里没写这些字段"（与旧行为一致），不让一条坏事件打断整个 fork。
 func forkFactsBySeq(log *v4.Log) map[int64]srcFact {
@@ -304,7 +251,7 @@ func finishName(raws ...json.RawMessage) string {
 // copyNode 把 surface 上的一个节点写成新会话里的一条事件。
 //
 // f 是这条事件在源日志里的事实（finish / isError / cwd / turn-step / view / developer 形状），
-// reasoning 是源事件里的思考正文（surface 装不下，见 reasoningBlocksBySeq）。
+// reasoning 是源事件里的思考正文（surface 装不下，见 ReasoningBlocksBySeq）。
 func copyNode(l *Log, node SurfaceMsg, f srcFact, reasoning []string) error {
 	m := node.Message
 	switch {

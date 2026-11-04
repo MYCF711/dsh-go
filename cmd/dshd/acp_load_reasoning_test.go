@@ -17,7 +17,7 @@ import (
 
 // 这一组钉住 ACP `session/load` 的**重放保真**：`session.Surface` 只装
 // text + tool_calls（`llm.Message` 没有 reasoning 字段），所以 Load 必须自己回
-// 原始事件取思考块（与 fork 同一份 reasoningBlocksBySeq），否则断线重连/重开之后：
+// 原始事件取思考块（与 fork 同一份 `session.ReasoningBlocksBySeq`），否则断线重连/重开之后：
 //
 //   - 只有思考的回答会在重放里**整条消失**（正文为空、没有调用，什么也不 emit）；
 //   - 有正文的回答丢掉了"它为什么这么干"。

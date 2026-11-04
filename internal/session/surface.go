@@ -24,7 +24,7 @@ type SurfaceMsg struct {
 	// 就靠它对齐：漏了它，`anchorEst` 偏小 ⇒ 刻度偏大 ⇒ 自动压缩提前触发。
 	//
 	// **只加不改**：这是可选字段，既有消费者（compact.Select、History、fork 之外
-	// 的读路径）都不读它；fork 也不用它（那边要从事件搬正文，见 reasoningBlocksBySeq）。
+	// 的读路径）都不读它；fork 也不用它（那边要从事件搬正文，见 ReasoningBlocksBySeq）。
 	Reasoning []string
 }
 
@@ -93,9 +93,9 @@ func Surface(log *v4.Log) []SurfaceMsg {
 	}
 
 	// 思考正文得回原始事件取：surfaceMessage 只能产出 llm.Message，装不下 reasoning。
-	// 识别规则与 fork 共用同一份（reasoningBlocksBySeq），不写第二份；只解
-	// assistant/message 的事件，别的类型在函数里先按 type 跳过。
-	reasoning := reasoningBlocksBySeq(log)
+	// 识别规则只有一份（ReasoningBlocksBySeq）；只解 assistant/message 的事件，
+	// 别的类型在那个函数里先按 type 跳过。
+	reasoning := ReasoningBlocksBySeq(log)
 
 	// 先把可见节点按日志顺序铺好（压缩事件本身不出现在这里）。
 	out := make([]SurfaceMsg, 0, len(log.Events))

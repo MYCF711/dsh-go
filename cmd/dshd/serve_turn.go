@@ -182,35 +182,27 @@ func historyForModel(log *v4.Log) []llm.Message {
 	return out
 }
 
-// reasoningBySeq 标出哪些 assistant/message 事件带思考块（seq → 思考正文）。
+// reasoningBySeq 标出哪些 assistant/message 事件带思考块（seq → **第一条**思考正文）。
 //
-// 只回答"有没有"，不搬运正文：llm.Message 装不下 reasoning，而把模型的心里话
-// 当正文塞回去，等于把它的草稿当成"已经给用户的回答"。
+// 识别规则不在这儿：它只有一份，在 `session.ReasoningBlocks`（`ReasoningBlocksBySeq`
+// 是它的批量版）。这里只做一次"收窄"：
+//
+//   - 只回答"有没有"，不搬运全文——llm.Message 装不下 reasoning，而把模型的心里话
+//     当正文塞回去，等于把它的草稿当成"已经给用户的回答"；
+//   - 所以取 `[0]`。这是**既有行为**，不是随手简化：一条 assistant 带多个思考块时，
+//     这条路径从来只认第一块；合并实现不许顺带改成"全带"，那会让历史组装的
+//     assistantHasPayload 判据跟着漂（多一个口径，就多一处会漂的地方）。
+//
+// 以前这里自己解一遍 ev.Data、自己写一遍 `type=="reasoning" && TrimSpace!=""`，
+// 与 session 的 fork 版本各写一份——见 TestReasoningFirstOnlyIsKept。
 func reasoningBySeq(log *v4.Log) map[int64]string {
-	out := make(map[int64]string)
-	for _, ev := range log.Events {
-		if ev.Type != "assistant/message" {
-			continue
-		}
-		// 与 session 的投影同一个形状：message.content 优先，顶层 content 兜底。
-		var d struct {
-			Message struct {
-				Content []block `json:"content"`
-			} `json:"message"`
-			Content []block `json:"content"`
-		}
-		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			continue
-		}
-		blocks := d.Message.Content
-		if len(blocks) == 0 {
-			blocks = d.Content
-		}
-		for _, b := range blocks {
-			if b.Type == "reasoning" && strings.TrimSpace(b.Text) != "" {
-				out[ev.Seq] = b.Text
-				break
-			}
+	all := session.ReasoningBlocksBySeq(log)
+	out := make(map[int64]string, len(all))
+	for seq, texts := range all {
+		// ReasoningBlocksBySeq 的契约是"只收正文非空的块"，len(texts) 必 ≥1；
+		// 仍然按"取得到才写"写，将来它放宽口径时也不会静默越界。
+		if len(texts) > 0 {
+			out[seq] = texts[0]
 		}
 	}
 	return out

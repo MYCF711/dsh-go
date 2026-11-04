@@ -133,9 +133,14 @@ func eventText(ev v4.Event) string {
 				parts = append(parts, b.Text)
 			}
 		case "reasoning":
-			// 空白思考块和"没有"没区别，不能让它把真空消息变成可搜命中。
-			if strings.TrimSpace(b.Text) != "" {
-				parts = append(parts, reasoningText(b.Text))
+			// 判据只有一份（session.ReasoningText）：空白思考块和"没有"没区别，
+			// 不能让它把真空消息变成可搜命中。
+			//
+			// 为什么不直接调 session.ReasoningBlocks(ev)：这里要的是**按块顺序**拼
+			// text / reasoning / tool-call，只能自己走块列表；能共用的是"什么算一个
+			// 思考块"这条判据，不是整条事件的取法。
+			if text, ok := session.ReasoningText(b.Type, b.Text); ok {
+				parts = append(parts, reasoningText(text))
 			}
 		case "tool-call":
 			parts = append(parts, toolCallText(b.Name, b.Arguments))

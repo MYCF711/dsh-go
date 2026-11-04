@@ -814,7 +814,8 @@ assistant 仍会投影成 `text` 为空的消息——`transport.Message` 没有
 是：**只有思考**的回答会变成一条 content 为空的 assistant 事件，读回来是一个空气泡。
 
 **修法：不回 Surface 加字段，直接读原始事件**。`Fork` 先按 seq 扫 `src.Events` 建
-`seq → 思考正文`（`reasoningBlocksBySeq`），再在 `copyNode` 里按
+`seq → 思考正文`（当时叫 `reasoningBlocksBySeq`，现为 `ReasoningBlocksBySeq`），再在
+`copyNode` 里按
 **思考 → 正文 → 工具调用**铺块（与 `cmd/dshd/serve_turn.go` 的 `assistantBlocks` 同序）。
 因此 `SurfaceMsg` 的公开形状**一个字段没加**，`codecs/v4` 的落盘格式**一个字节没动**
 （`type:"reasoning"` 的块本来就存在，只是 fork 没带）。
@@ -823,6 +824,9 @@ assistant 仍会投影成 `text` 为空的消息——`transport.Message` 没有
 `content` 兜底、只认 `type == "reasoning"` 且正文非空）。唯一的差别是那边只回答"有没有"、
 取第一条就够；这里要把正文搬进新日志，所以同一事件里的多条思考块**全带**，
 不按"重复的"丢掉。
+
+> 这两份"同一形状各写一遍"的识别后来合并成了一份（`internal/session/reasoning.go`），
+> 口径仍留在调用点——见 §5.6 末尾"识别思考块的两份实现合并"。
 
 **红（修之前，共享树，同一份测试 `internal/session/fork_reasoning_test.go`）**：
 
@@ -971,9 +975,10 @@ reasoning 字段，`type:"reasoning"` 的块在 `surfaceMessage` 那步就没了
 `acpRunner.Load` 按 surface 重放：正文空、没有工具调用，于是循环体一个 `emit` 都不发。
 断线重连/重开之后，那一轮在客户端上**像没发生过**——比"少一段文字"更贵的是它不报错。
 
-**修法：复用 fork 那份识别规则，不写第三份**。`internal/session/fork.go` 新增导出包装
-`ReasoningBlocksBySeq`（一行转发 `reasoningBlocksBySeq`；不改内部函数名——`Fork` 与它的测试
-已经在用旧名字，改名只会把这次修复摊到更多调用点）。`Load` 先按 seq 取思考正文，再按
+**修法：复用 fork 那份识别规则，不写第三份**。`internal/session` 当时把 fork 的
+`reasoningBlocksBySeq` 包了一层导出 `ReasoningBlocksBySeq` 给包外用（后来这两份识别合并成
+一份，见本节末尾"识别思考块的两份实现合并"——现在它是 `internal/session/reasoning.go` 里的
+唯一实现，不再是一行转发）。`Load` 先按 seq 取思考正文，再按
 **思考 → 正文 → 调用** 重放，与 `serve_turn.assistantBlocks`、`fork.copyNode` 同序。
 
 **这一条没给 `SurfaceMsg` 加字段**：Load 跟 fork 一样回原始事件取。
@@ -1006,7 +1011,7 @@ budget 检查），它吃 `[]SurfaceMsg`。所以修法只能是让 Surface 节�
 `rawEstimate` 计入：
 
 - **`SurfaceMsg` 尾部只加一个可选字段** `Reasoning []string`（该事件的思考块，按原顺序），
-  `Surface` 用同一份 `reasoningBlocksBySeq` 铺上去；
+  `Surface` 用同一份 `ReasoningBlocksBySeq` 铺上去；
 - **只加不改**：既有字段、`llm.Message` 的形状、`codecs/v4` 落盘格式一处没动；
   `compact.Select` / `History` / fork 的写侧都不读这个字段；
 - **没有**把思考拼进 `Content`：那会把模型的草稿当成"已经给用户的回答"，
@@ -1316,6 +1321,90 @@ ok  dshgo/cmd/dshd  0.709s        ← run 有自己的 builder，共用函数坏
 
 **没有验证的**：真机 `dshd run` 走一遍带思考的轮次（单测用的是 `cmdRun` 真函数 +
 假网关，覆盖到 Emit 与落盘，但没有真实模型）；`-race` 未跑。
+
+#### 残留清零：识别思考块的两份实现合并（2026-11-04）
+
+上一轮把**构造**思考块的重复清零（`assistantBlocksFrom`）；这一轮清的是**识别**那一份。
+合并前有三处读同一个形状：
+
+| 位置 | 用途 | 口径 |
+|---|---|---|
+| `cmd/dshd/serve_turn.go:189` `reasoningBySeq` | 历史组装只问"这条消息有没有思考" | 只取**第一条**满足的块 |
+| `internal/session/fork.go:83` `reasoningBlocksBySeq` | fork 把思考原样搬进新会话 | **全带** |
+| `cmd/dshd/history.go:135` `case "reasoning"` | `history_search` 按块顺序拼正文 | 块级判据 |
+
+三处解析的是同一形状：`message.content` 优先、顶层 `content` 兜底、
+`type == "reasoning"` 且 `TrimSpace(text) != ""`。
+
+**唯一实现**：`internal/session/reasoning.go`。三层，一层比一层窄：
+
+| 函数 | 形状 | 使用者 |
+|---|---|---|
+| `ReasoningText(kind, text) (string, bool)` | 块级："什么算一个思考块" | `history.go` 的 `eventText` |
+| `ReasoningBlocks(ev v4.Event) []string` | 事件级：一条事件的**全部**思考正文 | `ReasoningBlocksBySeq`、测试 |
+| `ReasoningBlocksBySeq(log) map[int64][]string` | 批量：`seq → 全部正文` | `Fork`、`Surface`、ACP `Load`、serve 的 `reasoningBySeq` |
+
+`ReasoningBlocks` 第一个判断就是 `ev.Type != "assistant/message"` → 直接返回、**不解析 JSON**
+（工具结果可能很大，不该为找思考块把它们全解一遍）。批量版因此不再前置一次类型判断——
+那会是第二份规则，而它只会漂。
+
+**口径留在调用点，不进识别函数**：
+
+- `Fork` 直接用返回的切片（**全带**，同一事件里的第二块不许被当"重复的"丢掉）；
+- `serve_turn.go` 的 `reasoningBySeq` 变成薄包装，取 `[0]`。这是**既有行为**，不是顺手
+  简化：`assistantHasPayload` 的判据跟着它，换口径等于同时改"这条消息算不算有内容"；
+- `history.go` 的 `case "reasoning"` 收进 `ReasoningText`。它**不能**改用
+  `ReasoningBlocks(ev)`——那里必须按块顺序拼 text / reasoning / tool-call，只能自己走块
+  列表；能共用的是判据，不是整条事件的取法。
+
+`codecs/v4` 的事件结构、落盘格式一个字节没动（只读 `v4.Event`）。
+
+**等价性：425 个真实会话、逐条逐字节相同。**
+
+先把语料**快照**再对跑。第一次直接对着活语料跑是错的：两次跑之间会话还在增长（其中就有
+本会话与被并发 agent 写着的两个会话），`S` 行差 3 条、`R` 行差 4 条——那是语料在动，不是
+实现差异。
+
+```
+语料（只读快照）：/tmp/corpus-ident/sessions ← cp -a "D:/DeepSeek Harness/home/sessions"
+  425 个会话 / 567,157 条事件 / 51,158 条带思考的事件 / 51,158 个思考块
+旧实现：git archive HEAD → /tmp/hc-id
+新实现：工作树（不含 .git/probe/dist/tmp/refs）→ /tmp/hc-new
+对跑：同一条 TestZZReasoningDump，每条带思考的事件按两个口径各打一行
+      R <会话相对路径> <seq> <全带 JSON> <首条 JSON>
+
+$ cmp /tmp/dump-old2.txt /tmp/dump-new2.txt
+IDENTICAL_BYTES
+$ md5sum /tmp/dump-old2.txt /tmp/dump-new2.txt
+1dd23e172370f132dec1c3140716a2b7 */tmp/dump-old2.txt
+1dd23e172370f132dec1c3140716a2b7 */tmp/dump-new2.txt      （各 182,814,295 字节）
+```
+
+比的是**两个口径各自的输出**：旧实现的 `reasoningBySeq`/`ReasoningBlocksBySeq` 对
+新实现的同名调用，`seq`、首条正文、全带正文与顺序全要一致——不是"数字对得上"。
+
+**这份语料证明不了"只取第一条 vs 全带"的口径**：51,158 条带思考的事件里，**每一条都
+恰好只有一个思考块**（多于一块的事件 = 0）。真实数据只能证明"识别没变"，证明不了"口径
+没被换"——后者靠合成语料那几条用例钉。
+
+**红 → 绿**（`cmd/dshd/reasoning_ident_test.go`）：
+
+| 场景 | HEAD（旧实现） | 改后 |
+|---|---|---|
+| 两个新用例挂到旧实现上 | **FAIL**（`undefined: session.ReasoningBlocks` / `session.ReasoningText`，build failed） | PASS |
+| 变异 A：serve 取 `texts[len(texts)-1]` | — | **FAIL**（seq 1 首条 = "第二块：再数文件"） |
+| 变异 B：`ReasoningBlocks` 见第一块就返回 | — | **FAIL**（seq 1 全带 = 只有第一块） |
+| 变异 C：serve 里再写一份 `b.Type == "reasoning"` | — | **FAIL**（唯一实现的结构判据） |
+
+变异只在 `/tmp/hc-new` 副本里做，复原后复跑绿。
+
+用例钉三个口径 + 一条结构判据：多块事件（fork 全带 / serve 首条）、空白块不占位、
+顶层 `content` 兜底、非 `assistant/message` 事件不算、`ReasoningText` 的块级判据；
+结构那条读源码，挡的是"哪天图省事又在调用点解一遍 JSON"的回潮——行为测试挡不住它，
+两处实现只要当前一致就全绿，直到其中一处改了才发作。
+
+**没有验证的**：`-race` 未跑；没在真机上把新 `dshd` 起起来重放一次带思考的会话（等价性
+用 425 个真实会话的离线对跑代替）。
 
 
 ## 6. 复跑与验收
