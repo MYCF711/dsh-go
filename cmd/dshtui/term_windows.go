@@ -17,6 +17,7 @@ var (
 	procSetConsoleMode             = kernel32.NewProc("SetConsoleMode")
 	procGetConsoleMode             = kernel32.NewProc("GetConsoleMode")
 	procGetConsoleScreenBufferInfo = kernel32.NewProc("GetConsoleScreenBufferInfo")
+	procGetConsoleTitleW           = kernel32.NewProc("GetConsoleTitleW")
 	procSetConsoleTitleW           = kernel32.NewProc("SetConsoleTitleW")
 )
 
@@ -73,12 +74,28 @@ func termSize() (int, int) {
 	return w, hgt
 }
 
-func setTitle(s string) {
+// setConsoleTitle 改控制台窗口标题。任务管理器的「窗口标题」列、
+// `tasklist /v` 的 Window Title 读的就是它——所以标题只设 OSC 序列不够。
+func setConsoleTitle(s string) {
 	p, err := syscall.UTF16PtrFromString(s)
 	if err != nil {
 		return
 	}
 	procSetConsoleTitleW.Call(uintptr(unsafe.Pointer(p)))
+}
+
+// currentTitle 读当前控制台标题（进 alt-screen 前存下来，退出时还回去）。
+// 读不到就返回空串——调用方据此跳过"恢复"，不去覆盖一个不知道的值。
+func currentTitle() string {
+	buf := make([]uint16, 1024)
+	n, _, _ := procGetConsoleTitleW.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if n == 0 {
+		return ""
+	}
+	if int(n) < len(buf) {
+		buf = buf[:n]
+	}
+	return syscall.UTF16ToString(buf)
 }
 
 // 输入侧：默认控制台是"行缓冲 + 回显"，按键要回车才到程序里，

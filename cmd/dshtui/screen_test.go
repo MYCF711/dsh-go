@@ -31,8 +31,7 @@ func TestScreenEnterLeaveBytes(t *testing.T) {
 	}
 }
 
-// Render 必须画满整屏：每一行都清行首、短行补空、超宽行裁到显示宽度。
-// 少画一行的症状是"上一帧的尾巴留在下面"，而那看起来像消息重复。
+// Render 必须画满整屏：每一行都清行首、短行补空、超宽行裁到显示宽度。// 少画一行的症状是"上一帧的尾巴留在下面"，而那看起来像消息重复。
 func TestScreenRenderFillsEveryRow(t *testing.T) {
 	var b strings.Builder
 	s := newScreenTo(&b, 10, 4)
@@ -76,6 +75,57 @@ func TestScreenSkipsUnchangedRows(t *testing.T) {
 	}
 	if len(second) >= len(first) {
 		t.Fatalf("没变的帧应该更短：第一帧 %d 字节，第二帧 %d 字节", len(first), len(second))
+	}
+}
+
+// 进 alt-screen 时必须把窗口标题换成产品名：任务管理器/终端标题栏上
+// 认得出"这是 DSH TUI GO"，而不是一个空的或不认识的名字。
+func TestEnterSetsProductTitle(t *testing.T) {
+	var b strings.Builder
+	s := newScreenTo(&b, 20, 3)
+	s.enterAlt()
+	out := b.String()
+	if !strings.Contains(out, oscTitle(productName)) {
+		t.Fatalf("进入时要发标题序列 %q：%q", oscTitle(productName), out)
+	}
+	if !strings.HasPrefix(out, "\x1b[?1049h") {
+		t.Fatalf("先进 alt-screen 再改标题：%q", out)
+	}
+	if !s.inAlt {
+		t.Fatal("enterAlt 之后 inAlt 必须为 true（否则 Leave 不会恢复）")
+	}
+}
+
+// 退出必须把原来的标题还回去——顺序上先退出 alt-screen，再改标题。
+func TestLeaveRestoresTitle(t *testing.T) {
+	var b strings.Builder
+	s := newScreenTo(&b, 20, 3)
+	s.enterAlt() // 真终端标题可能读得到也可能读不到，下面直接给定，不依赖环境
+	b.Reset()
+	s.prevTitle = "C:\\Windows\\System32\\cmd.exe"
+	s.Leave()
+	out := b.String()
+	if !strings.Contains(out, "\x1b[?1049l") {
+		t.Fatalf("Leave 要退出 alt-screen：%q", out)
+	}
+	if !strings.Contains(out, oscTitle("C:\\Windows\\System32\\cmd.exe")) {
+		t.Fatalf("Leave 要把原标题还回去：%q", out)
+	}
+	if strings.Index(out, "\x1b[?1049l") > strings.Index(out, "\x1b]0;") {
+		t.Fatalf("先退出 alt-screen，再恢复标题：%q", out)
+	}
+}
+
+// 读不到原标題时不要发**空的** OSC：那会把人家终端的标题清成空白，
+// 比"标题没恢复"更糟。这里用空 prevTitle 直接验那条分支。
+func TestLeaveSkipsEmptyTitle(t *testing.T) {
+	var b strings.Builder
+	s := newScreenTo(&b, 20, 3)
+	s.inAlt = true
+	s.prevTitle = ""
+	s.Leave()
+	if got := b.String(); strings.Contains(got, "\x1b]0;") {
+		t.Fatalf("空标题不该发 OSC：%q", got)
 	}
 }
 

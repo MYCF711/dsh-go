@@ -23,7 +23,12 @@ func termSize() (int, int) {
 	return w, h
 }
 
-func setTitle(string) {}
+// setConsoleTitle 在非 Windows 上是空操作：标题由 Screen 的 OSC 序列设（见 screen.go）。
+func setConsoleTitle(string) {}
+
+// currentTitle 在非 Windows 上读不到：返回空串，Leave 就只吐退出序列、
+// 不发空的 OSC（发空的会把人家终端标题清掉）。
+func currentTitle() string { return "" }
 
 func atoi(s string) (int, error) {
 	n := 0

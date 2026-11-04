@@ -141,9 +141,11 @@ func (a *app) run() error {
 	restore := rawInput()
 	defer func() {
 		restore()
+		// Leave 连着把窗口标题还回去（进 alt-screen 前的那个），
+		// 标题本身由 Screen.Enter 设成产品名——这里不再单独设一次，
+		// 否则两处各写一个名字，迟早又改成不一样的。
 		a.scr.Leave()
 	}()
-	setTitle("dsh-TUI (dsh-go)")
 
 	if err := a.newSession(); err != nil {
 		return err
@@ -948,7 +950,7 @@ func (a *app) view() []string {
 
 	// 状态行
 	left := fmt.Sprintf(" %s · 会话 %s · 工具 %d · ctx %s",
-		"dsh-go", short(a.sid), a.tools, ctxPercent(a.ctxTokens, a.ctxWindow))
+		productName, short(a.sid), a.tools, ctxPercent(a.ctxTokens, a.ctxWindow))
 	if a.tps > 0 {
 		left += fmt.Sprintf(" · %.1f tok/s", a.tps)
 	}
@@ -1257,7 +1259,7 @@ func ctxPercent(used, window int) string {
 // 导出的东西多半是拿去回看"谁说了什么"，把角色抹掉就没用了。
 func renderMarkdown(msgs []message) string {
 	var b strings.Builder
-	b.WriteString("导出自 dsh-TUI(dsh-go)\n\n")
+	b.WriteString("导出自 " + versionLine() + "\n\n")
 	for _, m := range msgs {
 		who := m.Role
 		switch m.Role {

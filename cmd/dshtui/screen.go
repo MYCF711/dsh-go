@@ -27,6 +27,9 @@ type Screen struct {
 	// 整屏重画在 30 行时够快，但流式输出每 100ms 一帧就会看出闪，
 	// 而且终端越慢（Windows 控制台）越明显。
 	prev []string
+	// prevTitle 是进 alt-screen 之前的窗口标题。退出时必须还回去：
+	// 否则关掉 TUI 后那个控制台窗口永远顶着产品名，人以为它还活着。
+	prevTitle string
 }
 
 func NewScreen() *Screen {
@@ -39,24 +42,45 @@ func newScreenTo(out io.Writer, width, height int) *Screen {
 	return &Screen{out: out, width: width, height: height}
 }
 
-// Enter 进 alt-screen 并隐藏光标。
+// Enter 进 alt-screen、隐藏光标，并把窗口标题换成产品名。
+//
+// 标题走两条路，是故意的：
+//   - `\x1b]0;…\x07`（OSC 0）是终端世界的标准做法，Windows Terminal / 其他终端都认；
+//   - `setConsoleTitle` 是 conhost 的 API，`tasklist /v` 与任务管理器读的就是它。
+//
+// 只做前者，某些终端/控制台组合下标题不变；只做后者，非 Windows 上等于没做。
 func (s *Screen) Enter() {
 	if !enableVT() {
 		// 打不开 VT 时不要硬来：直接告诉人原因，比满屏乱码有用。
 		fmt.Fprintln(os.Stderr, "这个终端不支持 ANSI 转义（Win10 以前的控制台）；请用 Windows Terminal")
 		os.Exit(1)
 	}
-	s.inAlt = true
-	fmt.Fprint(s.out, "\x1b[?1049h\x1b[?25l\x1b[2J")
+	s.enterAlt()
 }
 
-// Leave 恢复原屏幕与光标。**必须幂等**：异常退出路径也会调它。
+// enterAlt 是 Enter 的字节部分，单独一件是因为它可测：
+// Enter 会先探测真终端（探测失败直接 os.Exit），测试不能碰那条路。
+func (s *Screen) enterAlt() {
+	s.inAlt = true
+	s.prevTitle = currentTitle()
+	fmt.Fprint(s.out, "\x1b[?1049h\x1b[?25l\x1b[2J"+oscTitle(productName))
+	setConsoleTitle(productName)
+}
+
+// Leave 恢复原屏幕、光标与窗口标题。**必须幂等**：异常退出路径也会调它。
 func (s *Screen) Leave() {
 	if !s.inAlt {
 		return
 	}
 	s.inAlt = false
-	fmt.Fprint(s.out, "\x1b[?25h\x1b[?1049l")
+	// prevTitle 为空（非 Windows，或终端的标题读不出来）时只吐退出序列；
+	// 吐一个空的 OSC 会把人家的标题清掉，那比不恢复更糟。
+	out := "\x1b[?25h\x1b[?1049l"
+	if s.prevTitle != "" {
+		out += oscTitle(s.prevTitle)
+	}
+	fmt.Fprint(s.out, out)
+	setConsoleTitle(s.prevTitle)
 }
 
 // Resize 更新尺寸（每帧开始前调用，处理窗口变化）。
