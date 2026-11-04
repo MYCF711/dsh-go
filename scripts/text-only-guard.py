@@ -311,7 +311,12 @@ def scan(src):
 
     for i, line in enumerate(src.keep):
         # ---- 1) block-type-filter ----
-        m = re.search(r'\.Type\s*(?:==|!=)\s*"text"', line)
+        # 两种写法都要认：
+        #   b.Type == "text"      —— 结构体字段
+        #   b["type"] == "text"   —— map 形式（本仓真有：fork/assistantBlocks 用的是
+        #                            []map[string]any，新写一个 map 投影完全可能）
+        # 只认前一种时，用 map 写的新投影会**静默通过**（实测：造红只对结构体形式生效）。
+        m = re.search(r'\.Type\s*(?:==|!=)\s*"text"|\[\s*"type"\s*\]\s*(?:==|!=)\s*"text"', line)
         if m:
             end = src.block_after(i)
             body = src.body_text(i, end)

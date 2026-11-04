@@ -217,6 +217,33 @@ def main():
     chk("text-only 守卫：新写的 text-only 投影（不是改回旧代码）也红",
         code != 0 and "FAIL" in out, out.strip()[-220:])
 
+    # map 形式的同形：`b["type"] == "text"`。
+    #
+    # 为什么单独一条：守卫一开始只认 `b.Type`（结构体字段），我在隔离副本里塞一个
+    # map 形式的投影，它**没红**——而本仓的 fork/assistantBlocks 真是拿
+    # `[]map[string]any` 在操作，所以这盲区是活的，不是理论问题。
+    map_probe = os.path.join(to_tree, "cmd", "dshd", "zz_text_only_selftest_map_probe.go")
+    map_src = "\n".join([
+        "package main",
+        "",
+        "// 自测用的假投影（map 形式）。",
+        "func selftestProbeMapJoin(blocks []map[string]any) string {",
+        "\tout := \"\"",
+        "\tfor _, b := range blocks {",
+        "\t\tif b[\"type\"] == \"text\" {",
+        "\t\t\tout += b[\"text\"].(string)",
+        "\t\t}",
+        "\t}",
+        "\treturn out",
+        "}",
+        "",
+    ])
+    open(map_probe, "w", encoding="utf-8", newline="").write(map_src)
+    code, out = run_guard(to_tree)
+    os.remove(map_probe)
+    chk("text-only 守卫：map 形式的 b[\"type\"]==\"text\" 也红（结构体形式之外的另一半）",
+        code != 0 and "FAIL" in out, out.strip()[-220:])
+
     shutil.rmtree(to_root, ignore_errors=True)
     shutil.rmtree(TMP, ignore_errors=True)
     print("合计 OK=%d FAIL=%d" % (ok, fail))
