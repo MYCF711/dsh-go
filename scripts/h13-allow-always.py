@@ -106,6 +106,11 @@ def attempt():
             t = d.get("tool")
             if not t and isinstance(d.get("request"), dict):
                 t = d["request"].get("tool")
+            if not t and isinstance(d.get("toolCall"), dict):
+                # 宿主以前只给 toolCall{title,kind,rawInput}，读不出工具名 →
+                # 这条判据当时在"模型第二次换了工具"时会冤枉宿主。现已补 `tool` 字段，
+                # 老宿主用 kind 兜底（kind 就是工具类别，同工具同类）。
+                t = d["toolCall"].get("kind")
             if not t:
                 t = "?keys=" + ",".join(sorted(d.keys()))
             tools.append(t)

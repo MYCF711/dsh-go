@@ -76,6 +76,9 @@ h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
 - **HTTP**：`POST /api/<method>`，body 直接是该 method 的参数对象，不包 `{"params":…}`；成功为 `{result:…}`，错误为 `{error:{code,message,hint,retryable}}`。
 - **认证**：launch token 经 `/connect` 换 cookie；HTTP 与 WS 同 cookie；先 Connect 再 list/load/subscribe。
 - **WS**：路径 `/ws`。客户端控制帧为 `t=sub/unsub/ping`，sub 带 `topic/session:<id>`、`sinceSeq`、`journalEpoch`。服务端事件为 `{seq,type,data,time}`，不是 `{t:"ev",kind:…}`。
+- **`approval/request` 的 data 里现在还带 `tool`**（2026-11-04 加，只加不改）：
+  `allow_always` 的粒度就是（会话 + 工具名），而 `toolCall` 里只有 title/kind/rawInput，
+  客户端看不到自己在记住哪个工具。老客户端忽略这个键即可。
 - **`approval/request` 的 data 里有两个时间字段**（2026-11-04 加，只加不改）：
   `timeoutMs`（这次等多久）与 `deadlineMs`（墙钟截止，Unix 毫秒）。
   为什么两个都发：断线重连**重放的是当初那条负载**，只发时长会让客户端把剩余时间重新算成满额

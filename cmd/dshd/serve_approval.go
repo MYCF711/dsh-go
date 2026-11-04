@@ -278,6 +278,10 @@ func (b *approvalBroker) handle(req approvalReq) {
 		// 为什么要绝对时刻：断线重连时重放的是**当初这条负载**（见 payloads）；
 		// 只发时长的旧负载会被客户端当成"从现在起再等一整轮"，屏幕上说还有 90s，
 		// 宿主 3s 后就拒了——那比不显示倒计时更坏。
+		// 工具名单独给一个字段：`allow_always` 的粒度就是（会话 + 工具名），
+		// 而 toolCall 里只有 title/kind/rawInput——**客户端看不到自己正在记住哪个工具**。
+		// 只加不改：老客户端忽略多出来的键。
+		"tool":       req.Tool,
 		"timeoutMs":  b.timeout.Milliseconds(),
 		"deadlineMs": time.Now().Add(b.timeout).UnixMilli(),
 		"toolCall": map[string]any{
