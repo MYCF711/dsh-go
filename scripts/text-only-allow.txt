@@ -52,7 +52,7 @@ internal/session/compact.go:Compact | 判"摘要是不是空的"只看 text 块�
 # ACP session/load 的正文 chunk：思考块在紧邻的上一个循环里已按
 # session.ReasoningBlocksBySeq 逐块 emit（顺序 思考→正文→调用，与 fork/serve 一致）。
 # 正文为空只表示"这条没有正文 chunk"，不决定消息是否消失。
-cmd/dshd/acp.go:764 | 思考块在上一循环已按 ReasoningBlocksBySeq emit；正文空只表示没有正文 chunk，不决定消息存亡
+cmd/dshd/acp.go:797 | 思考块在上一循环已按 ReasoningBlocksBySeq emit；正文空只表示没有正文 chunk，不决定消息存亡
 
 # history_search 的检索过滤：判据来自 eventText，而 eventText 已经把
 # text / reasoning / tool-call 三样拼起来。text 为空 = 三样都没有，确实搜不到东西。
@@ -81,3 +81,7 @@ internal/session/tokens.go:96 | 诊断用字符数，不参与压缩决策；算
 # codecs/v4 的 ReadSummary 取会话标题/首行预览：标题只从 text 块取（firstText），
 # 思考不是标题。skip 掉的是"这一条没有可作标题的文字"，不是消息本身。
 codecs/v4/summary.go:54 | 会话标题/首行预览只从 text 块取；思考不是标题，skip 的是"没有可作标题的文字"
+
+# dshtui 的 --script 回放：`send` 步的语义就是"发这段文字"，所以它**必须**有正文。
+# 这不是"判断这条消息有没有内容"，是校验脚本写没写漏参数。
+cmd/dshtui/script.go:165 | send 步的语义就是发文字；空 text 是脚本写漏了参数，不是消息没内容
