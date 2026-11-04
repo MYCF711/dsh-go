@@ -514,11 +514,8 @@ func cmdRun(argv []string) error {
 		fmt.Fprintln(os.Stderr, "工具表："+w)
 	}
 	sys := buildSystemPrompt(table, *model, cwd, *workspaceBytes)
-	// lazy 的目录是系统提示的一部分：被藏起来的工具，它的描述也一起藏了，
-	// "缺什么先 tool_load"这条规则没有别的地方可放。
-	if lazyRef != nil {
-		sys += "\n\n" + lazyRef.Directory()
-	}
+	// lazy 的系统提示目录**故意不在这里拼**：它要等装载集回放完（见下面那一段），
+	// 否则上一轮已经装载过的工具会在目录里被重复列一遍。
 	// --session：续一个已经存在的会话，而不是新建。
 	// 定时任务的"到期后跑一轮"就是靠这个——它必须落在**原会话**里，
 	// 新建会话会让上下文断掉（模型不记得之前聊过什么）。
@@ -541,11 +538,34 @@ func cmdRun(argv []string) error {
 
 	// 续会话时必须把**已有历史**读进来，否则模型看到的是一张白纸：
 	// 它会在旧日志上追加新消息，却不知道前面聊过什么（实测会回答"这是第一条消息"）。
+	//
+	// 这份解析结果**两处用**：续会话的历史、lazy 的装载集回放。所以只读一次
+	// （长会话的日志可能几十 MB，读两遍纯属浪费）。读不出来不是致命错误：
+	// 没历史 = 白纸，装载集空 = 回到"什么都没装载"，两条都各自有降级路径。
+	back, backErr := v4.ReadFile(logw.Path)
 	var baseHist []llm.Message
-	if *resumeSession != "" {
-		if back, rerr := v4.ReadFile(logw.Path); rerr == nil {
-			baseHist = session.History(back)
+	if backErr == nil && *resumeSession != "" {
+		baseHist = session.History(back)
+	}
+	// lazy 的装载集是**会话状态**，不是进程状态：serve 每轮起一个新的 run 进程，
+	// 上一轮 tool_load 取过的工具这一轮必须直接可用——否则模型凭上一轮的记忆
+	// 直接喊它会被挡回，白跑一次 tool_load（docs/tool-table-lazy.md §6 第一条）。
+	// 状态就存在这份 append-only 日志里（每次 tool_load 都是一条 tool/call 事件），
+	// 这里只是回放它：不额外落盘、不新增事件、读路径不写盘。
+	//
+	// lazy 的目录是系统提示的一部分：被藏起来的工具，它的描述也一起藏了，
+	// "缺什么先 tool_load"这条规则没有别的地方可放。放在回放**之后**拼，
+	// 是因为 Directory 会跳过已装载的——那一刻表里得已经装好了。
+	if lazyRef != nil {
+		var got []string
+		if backErr != nil {
+			// 只警告、不中断：回到未装载，模型下一步 tool_load 就能拿回来。
+			fmt.Fprintf(os.Stderr, "lazy：会话日志读不出来（%v），装载集按空处理\n", backErr)
+		} else if got = restoreLoaded(lazyRef, back); len(got) > 0 {
+			fmt.Fprintf(os.Stderr, "lazy：从会话回放装载集 %d 个：%s\n",
+				len(got), strings.Join(got, ", "))
 		}
+		sys += "\n\n" + lazyRef.Directory()
 	}
 	logSessionStart(*home, sessID, logw.Path, cwd, modes.DefaultID)
 	// 把"当前会话"指给 history_search——`run` 以前没这一步，模型回查只会得到

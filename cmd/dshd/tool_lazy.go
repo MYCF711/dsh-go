@@ -17,6 +17,12 @@
 // A/B 也测不出"模型会不会用机制"。挡回的代价是一次 tool_load；收益是这条
 // 规则可被证伪、可被测量。
 //
+// 装载集是**会话状态**，不是进程状态：serve 每轮起一个新的 run 进程，上一轮
+// 取过的工具这一轮必须直接可用，否则模型凭记忆喊它会被挡回、白跑一次 tool_load。
+// 它不额外落盘——每次 tool_load 本来就是一条 tool/call 事件，写在 append-only
+// 会话日志里，新一轮只是把它**回放**出来（见下面"装载集是会话状态"那一段）。
+// 于是挡回只剩一种情形：**这个会话从没取过它**。
+//
 // 隐藏的 30 名之外的 27 个是谁：由 scripts/tool-table-hot.py 从真实语料
 // （D:/DeepSeek Harness/home/sessions）重算，**不是手抄的名单**。
 // 2026-11-04 的语料：80,898 次 tool/call，我们自己的 57 个工具里前 30 名覆盖
@@ -31,6 +37,7 @@ import (
 	"strings"
 	"sync"
 
+	"dshgo/codecs/v4"
 	"dshgo/internal/spi"
 )
 
@@ -233,6 +240,119 @@ func (t *lazyTable) Directory() string {
 		fmt.Fprintf(&b, "%s — %s\n", n, shortClause(t.hidden[n].Description(), 30))
 	}
 	return b.String()
+}
+
+// ---- 装载集是会话状态：跨进程（跨轮）保留 ----
+
+// restore 把"回放出来的名字"灌回表里，返回这次**真的**灌进去的那些。
+//
+// 只认一条：名字必须还在当前的表外集合里。模块被卸掉、常驻名单重算过
+// （某个工具从表外变成常驻、或反过来）都会让老日志里的名字对不上——
+// 对不上就不装载：宁可少给一个入口（模型下一步 tool_load 还能拿回来），
+// 也不能让工具表里出现一个装配根本提供不了的入口。
+func (t *lazyTable) restore(names []string) []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []string
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" || t.hotSet[n] || t.loaded[n] {
+			continue
+		}
+		if _, ok := t.hidden[n]; !ok {
+			continue
+		}
+		t.loaded[n] = true
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// loadedNames 返回当前已装载的名字（排好序）。诊断与测试用。
+func (t *lazyTable) loadedNames() []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]string, 0, len(t.loaded))
+	for n := range t.loaded {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// lazyLoadHistory 从一份已解析的会话日志里回放"这个会话取过哪些工具"。
+//
+// 存哪、为什么存在这里（而不是会话目录下的派生文件 / Transport journal /
+// home 里的按会话索引）：
+//
+//	tool_load 每次被调用，都会以一条 `tool/call` 事件写进 v4 会话日志
+//	（agent.Loop 的 EventToolCall → session.ToolCallEvent）。也就是说
+//	**装载史本来就在那份 append-only 日志里**，这里只是把它读出来——
+//	不新增文件、不新增事件、读路径不写盘（R5）。
+//
+// 另外三处的取舍：
+//   - 会话目录下的派生文件：同一件事的第二个写者。日志里明明记着这次装载，
+//     再造一份就可能对不上（进程被 kill 在写 tool/result 之前），而两边不一致时
+//     没人能判谁对。而且它会长出 v4 之外的新落盘格式，得自己处理路径规则、
+//     写锁与清理，收益却是零——需要的事实日志里已经有了。
+//   - Transport journal：那是 serve 里按连接派生的投影，`run` 根本没有
+//     （而且是同一份日志的下游，绕远）。本轮也不许改 serve*.go。
+//   - home 下的按会话索引：要么读路径写盘（R5 不允许），要么另做失效/GC
+//     （会话被删、被 fork、id 复用），而它索引的事实就在会话文件里。
+//
+// 扫的是**原始事件**（l.Events），不是 surface：压缩只改模型的上下文，
+// 不改变"这个会话取过哪些工具"。压缩之后模型照样能直接调它们，因为
+// 每一轮的 tools 字段里都有它们（见本文件开头"状态化注入"那一段）。
+//
+// 宽容到底：任何一条事件读不动（参数不是 JSON、名字是空串）就跳过它。
+// 回放的是派生状态，没有"因为一条坏事件整轮跑不起来"的道理。
+func lazyLoadHistory(l *v4.Log) []string {
+	if l == nil {
+		return nil
+	}
+	var out []string
+	for _, ev := range l.Events {
+		if ev.Type != "tool/call" {
+			continue
+		}
+		var d struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal(ev.Data, &d); err != nil {
+			continue
+		}
+		if d.Name != toolLoadName {
+			continue
+		}
+		args := d.Arguments
+		// 我们自己的写入点把 arguments 写成 JSON **字符串**；这里容忍它
+		// 本来就是对象的情况（别的写入者/手工造的样本），否则一条就废掉整段回放。
+		var asStr string
+		if err := json.Unmarshal(args, &asStr); err == nil {
+			args = json.RawMessage(asStr)
+		}
+		names, err := parseLoadArgs(args)
+		if err != nil {
+			continue
+		}
+		out = append(out, names...)
+	}
+	return out
+}
+
+// restoreLoaded 是 cmdRun 里那一步的全部决策，单独拎出来是为了可测：
+// 日志在（back != nil）就回放，读不出来（back == nil）就当空集。
+//
+// **它永远不返回错误**——这是这个设计的兜底：装载集坏掉/过期/读不出来时，
+// 唯一允许的后果是"回到什么都没装载"，也就是改造前那条自愈路径
+// （挡回 → Hint → tool_load）原样还在。工具不会因为状态坏了而不可用。
+func restoreLoaded(t *lazyTable, back *v4.Log) []string {
+	if t == nil {
+		return nil
+	}
+	return t.restore(lazyLoadHistory(back))
 }
 
 // load 执行一次 tool_load：把名字解析出来、校验、标记装载，并把 schema 发回去。
