@@ -355,6 +355,33 @@ func restoreLoaded(t *lazyTable, back *v4.Log) []string {
 	return t.restore(lazyLoadHistory(back))
 }
 
+// prepareLazy 是 lazy 模式"一轮开始时"的全部动作，**只有这一份定义**：
+//
+//	回放装载集（从这一轮所属会话的 v4 日志）→ 再拼系统提示目录
+//
+// 顺序不能反：Directory 会跳过已装载的工具，先拼目录就会把上一轮取过的工具
+// 又列一遍（重复信息 = 白花字节，而且模型会以为它还没装载）。
+//
+// 为什么入参只有"这个会话的日志"：装载集是**会话状态**。
+// cmdRun 走这一条；serve 的每一轮走的是子进程 `dshd run`，也就是 cmdRun 本身
+// ——所以 serve 与 run 不是"两条一样的接线"，是**同一条**（serve 只负责把
+// --tools-mode 透传下去，见 serve_tools.go 的 childArgs）。这样处理还有一个
+// 直接后果：serve 一个进程里并发/切换多个会话时，回放的输入永远只有
+// `--session` 指的那份日志，**没有任何比它更宽的来源**，A 会话的装载集
+// 也就没有载体能漏到 B——B 照旧会被挡回并自愈。
+func prepareLazy(t *lazyTable, back *v4.Log) (dir string, restored []string) {
+	if t == nil {
+		return "", nil
+	}
+	// **两行，不能合成一句 return。** Go 会把 return 的操作数按书写顺序求值，
+	// 写成 `return t.Directory(), restoreLoaded(t, back)` 就是先拼目录再回放——
+	// 目录里于是还列着"已经装载"的工具，模型会被告知一个它其实可以直接调的工具
+	// 需要 tool_load（实测：真 serve 第二轮直接调用成功，而系统提示还在说它没装载）。
+	restored = restoreLoaded(t, back)
+	dir = t.Directory()
+	return dir, restored
+}
+
 // load 执行一次 tool_load：把名字解析出来、校验、标记装载，并把 schema 发回去。
 //
 // 返回的 Text 会进模型上下文（tool 消息），之后每一步都跟着重发——所以只发

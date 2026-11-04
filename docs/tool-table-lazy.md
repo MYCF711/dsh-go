@@ -333,9 +333,9 @@ tmp/lazy-resume-raw3-after.txt                              同一会话第 3 �
 `TestLazyRestoreFallsBackToUnloaded`（状态坏了回到未装载、自愈路径还在）。
 反证见 §6.1 证据 2 最后一条。
 
-**没验的**：serve 那条真机链（本轮不许改 `serve*.go`，`serve` 的 turn 走的是
-`modelRunner`/`loopRunner`，不是 `cmdRun`）——所以"每轮一个新进程"是用
-`dshd run --session` 两轮模拟的，不是 serve 自己跑出来的。
+**当时没验的（2026-11-04 已补验，见 §10）**：serve 那条真机链——那一轮不许改
+`serve*.go`，`serve` 的 turn 走的是 `modelRunner`/`loopRunner`，不是 `cmdRun`，
+所以"每轮一个新进程"是用 `dshd run --session` 两轮模拟的，不是 serve 自己跑出来的。
 
 ---
 
@@ -367,3 +367,163 @@ deepseek-v4.1-flash-1017             (streamlake)
 而我们的宿主原来会把它变成"assistant 说了句空话、turn completed、退出码 0"。
 现在这种空响应被明确判成失败，并告诉用户 `dshd models` 看一眼（这条命令本轮才加上，
 之前那句提示指着一个不存在的命令）。
+
+---
+
+## 10. serve 那条链：已接上，已真机验（2026-11-04）
+
+§6.1 把装载集做成了**会话状态**，但当时只在 `run` 上验过（`--session` 两轮模拟），
+serve 那条链一行没动——`serve` 也**没有** `--tools-mode` 这个开关，等于压根打不开。
+这一节：接线 + 真 serve 两轮 + 两个会话的隔离。
+
+### 10.1 接线：serve 与 run 不是"两条一样的路"，是**同一条**
+
+`serve` 的一轮**就是**子进程 `dshd run`（`cmd/dshd/serve_tools.go` 的 `loopRunner`），
+也就是 `cmdRun` 本身。lazy 的整条逻辑（常驻集投影 → 从会话日志回放装载集 →
+拼系统提示目录 → 挡回未装载调用）**没有第二份实现**，要补的只有一件事：
+把 `--tools-mode` 从 serve 透传到子进程。
+
+| 文件 | 改动 |
+|---|---|
+| `cmd/dshd/serve.go` | 新增 `--tools-mode`（走 `resolveToolsMode(…, defaultToolSchema)`：**默认仍是 compact**，lazy 只显式打开；拼错的形态在建任何东西之前就报错）；解析结果放进 `loopRunner.toolsMode`；启动时往 stderr 播报「工具表 lazy（…）」（看不见的形态 = 没打开） |
+| `cmd/dshd/serve_tools.go` | `loopRunner.toolsMode` 字段；抽出 `childArgs(sessionID, text)`——`--tools-mode` 与 `--session` 必须在**同一条** argv 里 |
+| `cmd/dshd/serve_loop.go` | 每轮那份**逐字段拷贝**的 `loopRunner` 副本补上 `toolsMode`：漏一个字段就只有"走 modelOverrideLoopRunner 的那条路"不带形态，外面完全看不出来 |
+| `cmd/dshd/tool_lazy.go` | 抽出 `prepareLazy(t, back) → (系统提示目录, 回放到的名字)`：把"**先回放、再拼目录**"做成唯一一份定义，`cmdRun` 改调它 |
+| `cmd/dshd/main.go` | `run` 那一侧改成调 `prepareLazy`（行为不变，见 §10.5 的自我修正） |
+
+没抽成"一条路径"的只有一处，而且也不该抽：serve 与 run 之间隔着**进程边界**，
+父进程再建一张表就是同一件事的第二个实现（历史上 serve/run/acp 三条路各投影一次，
+表就不一样过）。serve 侧只做"解析 + 透传"，投影与回放全在子进程。
+
+### 10.2 会话隔离是怎么成立的
+
+一条 serve 进程里会话会切换、会并发，而**装载集必须按会话隔离**。这里靠三条：
+
+1. **父进程不持有装载集**。`loopRunner` 里没有任何按会话索引的装载状态——
+   要透传的只有 `--tools-mode` 这个常量。没有载体，就漏不了。
+2. **每轮一个新进程、一份新表**。子进程的 `lazyTable` 从空集开始，唯一能给它
+   装载的是"回放"，而回放的输入只有 `--session` 指的那份日志。
+3. **回放的输入没有比"这个会话的日志"更宽的来源**。`lazyLoadHistory` 只吃
+   `*v4.Log`；`restore` 只认当前还在表外集合里的名字。A 会话取过什么，
+   对 B 那份日志来说不存在。
+
+### 10.3 真机证据（真 serve，两轮 + 两会话）
+
+```bash
+export PATH="/c/Program Files/Go/bin:$PATH"; export GOCACHE=/tmp/gocache-servelazy
+go build -o tmp/dshd.exe ./cmd/dshd
+rm -rf tmp/serve-lazy-home && mkdir -p tmp/serve-lazy-home
+python tmp/serve-lazy-verify.py      # 起 serve / connect / create+prompt / 取会话文件
+```
+
+脚本自己起服务（`--tools-mode lazy --policy allow --max-steps 6 --addr 127.0.0.1:0`，
+端口由 OS 分配）、自己回收。**取证用 v4 会话文件**（`<home>/sessions/*/<sid>/session.v4.jsonl.zstd`，
+用 zstandard 解），不是 `session.history`——理由见下面那条坑。脚本会写出
+`tmp/serve-lazy-evidence.json`（每轮的 calls/results/system 正文）。
+
+启动与 ready：
+
+```
+ready 行原样：ready {"url":"http://127.0.0.1:63895","token":"012ec636…ba8a9d"}
+serve stderr：policy allow（无人值守；写操作会被拒绝）；每轮最多 6 步
+serve stderr：工具表 lazy（只常驻语料前 30 名；表外工具先 tool_load 取，装载集按会话从 v4 日志回放）
+```
+
+**A 会话两轮**（第二条 prompt：表外工具 `now_line`，且明说"先直接调、不要先 tool_load"）：
+
+```
+A 第一轮（新会话，now_line 还没装载）
+  → tool_load {"names": ["now_line"]}
+  → now_line {}
+  ← [ok] 已装载（下一步起出现在 tools 里…）{"name":"now_line",…}
+  ← [ok] 2026-11-04 10:30:45 星期三{"rfc3339":"2026-11-04T10:30:45+08:00",…}
+A 第二轮（同一会话的**新进程**；装载集应从会话日志回放）
+  → now_line {}
+  ← [ok] 2026-11-04 10:30:47 星期三{"rfc3339":"2026-11-04T10:30:47+08:00",…}
+  assistant: 现在是 **10:30:47**，日期是 2026-11-04（星期三）…顺带说明：因为上一轮
+  已经用 tool_load 加载过这个工具，它现在就在工具表里，直接调用 now_line 即可，没有再被挡回。
+```
+
+判据（全部机读）：A2 **0 次**「工具 X 没有装载」挡回；A2 这一轮**没有** `tool_load`；
+A2 的 `system/message` 目录里**没有** `now_line — `（已装载 → 回放生效）、但**有**
+`repo_here — `（目录整体还在）；A1 的目录里**有** `now_line — `（对照）；子进程 stderr 上
+有 `lazy：从会话回放装载集 1 个：now_line`。
+
+**会话隔离**（新起两个会话，发**同一条** prompt）：
+
+```
+B1（模型直接去 tool_load）
+  → bash … → tool_load {"names": ["now_line"]} → now_line {}
+B2（模型先直调，被挡回后自愈）
+  → now_line {}
+  ← [ERR] Error: 工具 now_line 没有装载 提示：now_line 不在工具表里（lazy 模式只常驻 30 个）。
+          先 tool_load {"names":["now_line"]} 拿到 schema，下一步再调用。
+  → tool_load {"names": ["now_line"]}
+  ← [ok] 已装载…
+  → now_line {}
+  ← [ok] 2026-11-04 10:31:04 星期三…
+```
+
+判据：两个 B 会话**都没有 now_line 这个入口**（要么先被挡回、要么先 tool_load——
+`tool_load` 一定出现在 now_line **成功**那次之前）；两个 B 的目录里**都有** `now_line — `
+（对照 A2 没有）；两个 B 的系统提示与 A2 的字面不同（5900 vs 5874 字，A2 少的那一行
+正是已装载工具的目录行）；**全程只有 A 那一条「回放装载集」记录**，B 们一次都没有。
+
+B 走哪条路是**模型这一轮的选择**（两种都合法），所以脚本跑两个 B 会话、两种都记录，
+不去挑好看的那次——真正确定性的是"目录里有它 / 没有它"和"有没有回放记录"这两条。
+
+**取证用会话文件、不用 `session.history`**：serve 的 `follow` 每轮都从日志 0 偏移重读，
+把早先的事件**再推一次**（新 journal seq），而且子进程写一半时它可能漏掉头几帧。
+两条都会让"第 N 个 turn"、按帧数切片这类判断错位——本轮就被它骗过一次
+（误判 A2 又调了 `tool_load`，实际是 A1 的事件被重推）。`session.history` 仍然是
+界面那条流，只是不适合当"第几轮做了什么"的判据。
+
+### 10.4 单测（`cmd/dshd/serve_lazy_test.go`，新增 4 条）
+
+- `TestServeForwardsToolsModeToTurnChild`（**钉接线**）：显式 lazy 时每一轮的子进程 argv
+  里都有 `--tools-mode lazy`，且 `--session` 是这一轮的会话、argv 里不出现别的会话 id；
+  不显式打开时**不传**这个开关（默认 compact 仍是默认），拼错的形态必须报错。
+  它同时钉住 `modelOverrideLoopRunner` 那份逐字段拷贝没漏 `toolsMode`。
+- `TestAnnounceToolsMode`（**钉播报**）：打到屏幕上的形态必须等于实际用的那个，
+  且 lazy 那句要说清"表外工具先 tool_load"——lazy 下"模型说没有这个工具"是预期行为，
+  播报里看不出这一档就会被当成故障去查。
+- `TestServeLazyLoadedSetIsPerSession`（**钉按会话隔离**）：同一条"进程"里先跑 A 再跑 B、
+  再颠倒顺序各跑一次——A 的那一轮直接可用，B 的那一轮**必须先挡回、再自己 tool_load 才通**；
+  B 的表里不能出现 A 的装载，B 的工具表里不能出现 now_line，但 B 的目录里**要**有它；
+  两次回放都不许改动会话日志一个字节（R5 读路径不写盘）。
+- `TestServeLazyReplaySurvivesServeRestart`（**钉"重启后同一会话仍能回放"**——serve 每轮
+  一个新进程，这条是核心）：三代全新表（每代都从空集出发、且不是同一个实例）都能回放
+  `now_line`；日志里再追加一次装载后，下一代看到**两个**；日志读不出来时降级成空集、
+  自愈路径还在；回放不额外落盘（home 里除了 `session.v4.jsonl.zstd` 一个文件都不许有）。
+
+**反证**（隔离副本 `/tmp` 里改完即弃，不碰共享工作树）：把 `prepareLazy` 写回
+`return t.Directory(), restoreLoaded(t, back)`（"先拼目录再回放"），
+`TestServeLazyLoadedSetIsPerSession` 立刻红：`已装载的 now_line 还留在系统提示目录里（拼目录早于回放）`。
+
+### 10.5 一处自我修正：`prepareLazy` 的求值顺序
+
+把 `cmdRun` 里那两行抽成 `prepareLazy` 时，我先写成了一句
+`return t.Directory(), restoreLoaded(t, back)`——注释还写着"顺序不能反"，
+代码却正好反了：**Go 按书写顺序求值 return 的操作数**，所以目录是先拼的。
+后果很隐蔽：回放**生效了**（模型确实直接调通了 now_line），但系统提示还在说
+"now_line 没有 schema，先 tool_load"——两边自相矛盾。真机上 A2 的
+"目录里还列着 now_line、而模型已经直接调通"把它抓了出来（§10.3 里 A2 目录 5874 字
+vs B 5900 字，差的就是这一行）。现在拆成两句，并由单测卡住（见 §10.4 反证）。
+
+### 10.6 本轮验收
+
+```
+go build ./... && go vet ./...                        通过（BUILD+VET OK）
+go test ./cmd/dshd -count=1                           通过（12.1s，含新增 4 条）
+go test ./... -count=1                                通过（47 个包 ok，无 FAIL）
+go build -o tmp/dshd.exe ./cmd/dshd                   通过（BIN OK）
+python tmp/serve-lazy-verify.py                       合计 OK=30 FAIL=0（真 serve：两轮 + 两会话）
+                                                      输出存档 tmp/serve-lazy-verify.out
+干净检出：git archive HEAD | tar -x -C /tmp/hc-sl && (cd /tmp/hc-sl && go build ./...)
+                                                      ✗ 失败：cmd/dshd/main.go:569: undefined: prepareLazy
+                                                      ——HEAD 上 main.go 已经被别的会话的提交扫进去了，
+                                                        而 tool_lazy.go 的 prepareLazy 还在本轮的工作树里没提交
+「HEAD + 本轮改动」的隔离副本（/tmp/hc-mine）          build/vet/test 全过（本轮改动是自洽的、完整的）
+```
+
+`TestServe*`/`TestAnnounce*` 新增 4 条 + 原有 `TestLazy*` 8 条，共 12 条全过。

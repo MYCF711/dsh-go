@@ -44,6 +44,45 @@ type loopRunner struct {
 	home      string
 	policy    string
 	maxSteps  int
+	// toolsMode 是透传给子进程的工具表形态（compact/full/merged/lazy）。
+	//
+	// 为什么是"透传"而不是"serve 自己投影一张表"：serve 的每一轮**就是**
+	// 子进程 `dshd run`，也就是 cmdRun 本身——lazy 的整条接线（常驻集投影 →
+	// 从**这个会话**的 v4 日志回放装载集 → 拼系统提示目录 → 挡回未装载调用）
+	// 全都在那一侧。父进程再实现一遍就是同一件事的第二个实现，两边一定会漂
+	// （历史上 serve/run/acp 三条路各投影一次，表就不一样过）。
+	//
+	// 于是 lazy 的会话隔离也是免费的：每轮一个新进程、一份新表，回放的输入
+	// 只有 `--session` 指的那份日志。父进程**不留**任何装载集状态，
+	// 也就没有"A 会话的装载集漏到 B"的载体。
+	toolsMode string
+}
+
+// childArgs 拼"起一轮 run 子进程"的全部参数。
+//
+// 抽成方法是为了可测，也为了把 lazy 的接线钉在一处：--tools-mode 必须和
+// --session 出现在**同一条** argv 里。少传一个，serve 这条链就根本没接上
+// 懒加载（表永远停在 compact，装载集无从回放），而界面上看不出任何异常。
+func (r *loopRunner) childArgs(sessionID, text string) []string {
+	args := []string{"run",
+		"--home", r.home,
+		"--session", sessionID,
+		"--prompt", text,
+		"--policy", r.policy,
+		"--max-steps", fmt.Sprint(r.maxSteps),
+	}
+	// 空 = 用子进程自己的默认值（compact）。cmdServe 一定会给一个解析过的值；
+	// 直接构造 loopRunner 的老调用者（测试）不受影响。
+	if r.toolsMode != "" {
+		args = append(args, "--tools-mode", r.toolsMode)
+	}
+	if r.model != "" {
+		args = append(args, "--model", r.model)
+	}
+	if r.reasoning != "" {
+		args = append(args, "--reasoning", r.reasoning)
+	}
+	return args
 }
 
 func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) error {
@@ -52,19 +91,7 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 		r.emitTurn(sessionID, turnID, err)
 		return err
 	}
-	args := []string{"run",
-		"--home", r.home,
-		"--session", sessionID,
-		"--prompt", text,
-		"--policy", r.policy,
-		"--max-steps", fmt.Sprint(r.maxSteps),
-	}
-	if r.model != "" {
-		args = append(args, "--model", r.model)
-	}
-	if r.reasoning != "" {
-		args = append(args, "--reasoning", r.reasoning)
-	}
+	args := r.childArgs(sessionID, text)
 	cmd := exec.CommandContext(ctx, exe, args...)
 	var stderr bytes.Buffer
 

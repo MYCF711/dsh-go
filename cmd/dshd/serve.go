@@ -61,6 +61,23 @@ func announcePolicy(w io.Writer, policy string, maxSteps int) {
 	fmt.Fprintf(w, "policy %s（无人值守；写操作会被拒绝）；每轮最多 %d 步\n", policy, maxSteps)
 }
 
+// announceToolsMode 把子进程实际使用的工具表形态打到屏幕上。
+//
+// 和审批策略同一条理由：**看不见的形态与没打开没有区别**。lazy 与 compact 下
+// 模型的行为不一样（表外工具先被挡回、要多一次 tool_load），出问题时第一句
+// 该问的是"这个进程到底跑的是哪一档"——而不是去猜"模型为什么说没有这个工具"。
+func announceToolsMode(w io.Writer, mode string) {
+	if mode == "" {
+		mode = defaultToolSchema
+	}
+	if mode == toolsModeLazy {
+		fmt.Fprintf(w, "工具表 lazy（只常驻语料前 %d 名；表外工具先 tool_load 取，"+
+			"装载集按会话从 v4 日志回放）\n", len(defaultHotTools))
+		return
+	}
+	fmt.Fprintf(w, "工具表 %s\n", mode)
+}
+
 // readyLine 是打到 stdout 的那一行，壳按它解析。
 //
 // 字段顺序由结构体顺序决定（encoding/json 的保证），壳可以按字面解析；
@@ -111,6 +128,10 @@ func cmdServe(args []string) error {
 	// 这条帮助文字以前写着"ask 等于永远挂起"，那是 H13 之前的事实，
 	// 留着它会让人以为审批不能用——**过期的帮助文本比没有帮助更糟**。
 	servePolicy := fs.String("policy", "deny", "子进程用哪个审批策略：deny/allow/ask（ask 会把审批转给界面）")
+	// 工具表形态：默认 compact（和 run 一致）。lazy 只显式打开——它改的是**模型
+	// 行为**（表外工具要多一次 tool_load），不是纯字节账，见 docs/tool-table-lazy.md §3。
+	serveToolsMode := fs.String("tools-mode", "",
+		"工具表形态：compact（默认）| full | merged | lazy（只常驻最常用的 30 个，其余先用 tool_load 取；装载集按会话从 v4 日志回放，默认关闭）")
 	// 模型必须能选：serve 起子进程跑真模型，用户换模型却只能去改环境变量，
 	// 那是"藏起来的开关"。默认值和 run 保持一致。
 	serveModel := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "模型 id（透传给子进程）")
@@ -126,6 +147,17 @@ func cmdServe(args []string) error {
 	}
 	// 和 run/acp 同一条防线：--home 指到文件上要在建任何东西之前就说清楚。
 	if err := checkHome(*home); err != nil {
+		return err
+	}
+	// 工具表形态：和 run 共用同一个解析（新名优先，旧名 compact 兜底），
+	// 拼错的形态在这里就报错——不能静默退回某一档，那等于让 --tools-mode 变成假开关。
+	//
+	// serve 这一侧只做"解析 + 原样传给子进程"：工具表的投影（合并/收紧/lazy）
+	// 和 lazy 的装载集回放都在**子进程**里，而那个子进程就是 cmdRun 本身
+	// （见 serve_tools.go 的 childArgs）。父进程不再建第二张表——
+	// 否则它就是同一件事的第二个实现，迟早和 run 漂开。
+	toolsMode, err := resolveToolsMode(*serveToolsMode, defaultToolSchema)
+	if err != nil {
 		return err
 	}
 
@@ -180,7 +212,8 @@ func cmdServe(args []string) error {
 	// 改成拿启动时刻做基准：两次启动撞上同一纳秒不可能，而它仍然是单调递增的整数。
 	journals := transport.NewJournals(newEpochFunc())
 	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps,
-		journals: journals, reasoning: *serveReasoning, model: *serveModel}
+		journals: journals, reasoning: *serveReasoning, model: *serveModel,
+		toolsMode: toolsMode}
 	mr := &modelRunner{home: *home, journals: journals, model: *serveModel,
 		base: envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1")}
 
@@ -390,6 +423,9 @@ func cmdServe(args []string) error {
 	// 打 stderr，不打 stdout：stdout 只放那一行 ready（壳按行解析握手）。
 	// H11（2026-11-03 界面线报）：这行原来打在 stdout，客户端把第二行当成了协议内容。
 	announcePolicy(os.Stderr, lr.policy, lr.maxSteps)
+	// 形态也播报：lazy 下"模型说没有这个工具"是**预期行为**（它该先 tool_load），
+	// 看不出这一档就会把机制当成故障。
+	announceToolsMode(os.Stderr, lr.toolsMode)
 
 	// 阻塞到 Ctrl-C / SIGTERM。用信号而不是 stdin EOF：
 	// serve 可能由壳拉起，stdin 会立刻是 EOF，那不代表"该关了"。
