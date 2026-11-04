@@ -181,6 +181,10 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	// 位置在 close(done) **之前**：follow 收尾时会再 drain 一次，补写的这一帧
 	// 于是也进了 journal——session.history 与 session.load 看到的是同一个结局。
 	if werr != nil || ctx.Err() != nil {
+		// 先清写锁，再补 turn/end：被**杀**掉的子进程不会删自己的锁
+		// （TerminateProcess 连 defer 都不跑）。不先清，settleTurn 自己也会被
+		// 那把锁挡在门外——于是既没有 turn/end，也没有下一轮。
+		r.dropChildLock(sessionID, cmd.Process.Pid)
 		if turn, serr := r.settleTurn(ctx, sessionID, cmd.Process.Pid, werr); serr != nil {
 			fmt.Fprintf(os.Stderr, "补 turn/end 失败（日志里这一轮仍是悬挂）：%v\n", serr)
 		} else if turn > 0 {
@@ -441,21 +445,51 @@ func turnEndForSettle(ctx context.Context, cause error) (kind, detail string) {
 
 // openForSettle 打开会话写入端；被**刚退出的那个子进程**留下的写锁挡道时，
 // 只清理那一把锁，然后重试一次。
-//
-// 为什么可以清：锁文件里记着 pid，而 cmd.Wait 已经证明这个 pid 退出了；
-// 别的 pid 的锁一概不碰——删错锁等于把"同一份会话只有一个写入者"的约束拆了。
 func openForSettle(path string, childPID int) (*session.Log, error) {
 	logw, err := session.OpenSessionAt(path)
 	if err == nil {
 		return logw, nil
 	}
-	if childPID <= 0 || !lockBelongsTo(path+".lock", childPID) {
-		return nil, err
-	}
-	if rerr := os.Remove(path + ".lock"); rerr != nil {
+	// 挡道的如果是刚退出那个子进程的锁，清掉再试；别人的锁就让错误原样报上去。
+	if derr := dropStaleLock(path, childPID); derr != nil {
 		return nil, err
 	}
 	return session.OpenSessionAt(path)
+}
+
+// dropStaleLock 删掉**刚刚退出的那个子进程**留下的会话写锁。
+//
+// 为什么必须有人做：`exec.CommandContext` 取消时是 TerminateProcess，
+// 子进程的 defer 一行都跑不到——它 claimWriter 建的那把锁就留在了磁盘上。
+// 下一轮的子进程一上来就抢这把锁，抢到的是死进程的，于是第二轮直接
+// "会话正被另一个进程写入"。现象是"取消一次，这个会话就废了"。
+//
+// 只认 pid **精确匹配**：锁里记着 pid，而 cmd.Wait 已经证明这个 pid 退出了。
+// 别的 pid 的锁一概不碰——删错锁等于把"同一份会话只有一个写入者"的约束拆了。
+func dropStaleLock(sessionPath string, childPID int) error {
+	if childPID <= 0 {
+		return nil
+	}
+	lock := sessionPath + ".lock"
+	if !lockBelongsTo(lock, childPID) {
+		return nil
+	}
+	if err := os.Remove(lock); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// dropChildLock 是 dropStaleLock 的"按会话找锁"版本。
+func (r *loopRunner) dropChildLock(sessionID string, pid int) {
+	src := newSessionSource(r.home, "")
+	path, err := src.resolve(sessionID)
+	if err != nil {
+		return // 没有这份会话 = 没有锁可清
+	}
+	if err := dropStaleLock(path, pid); err != nil {
+		fmt.Fprintf(os.Stderr, "清理子进程留下的会话写锁失败（下一轮可能撞锁）：%v\n", err)
+	}
 }
 
 // lockBelongsTo 判断锁文件是不是 childPID 留下的（只认 pid 精确匹配）。

@@ -26,11 +26,14 @@ import (
 // 为什么不做成"父进程直接执行工具"：工具跑在子进程里，父进程没有那次调用的上下文。
 // 父进程只当**传话的**，判定仍然发生在真正执行的地方。
 type approvalBroker struct {
-	mu      sync.Mutex
-	pending map[string]chan bool
-	// payloads 留着原始负载，供重连时重放（requestId → 负载 + 属于哪个会话）。
-	payloads map[string]pendingPayload
-	stdin    io.WriteCloser
+	mu sync.Mutex
+	// pending 是"已经问出去、还没人回答"的请求（requestId → 那条请求）。
+	//
+	// 负载、应答通道、取消信号装在**同一张表**里：三张表各自增删时，迟早出现
+	// "应答通道删了、负载还留着"这种半死状态，而它会被重放成一条永远答不了的问题——
+	// 界面上看着像卡住了，宿主这边却已经没有等待者。
+	pending map[string]*pendingAsk
+	stdin   io.WriteCloser
 	// writeMu 串行化对子进程 stdin 的写。
 	//
 	// 为什么必须有：审批可以有**两个**来源同时结算——客户端点了允许、
@@ -65,14 +68,28 @@ type pendingPayload struct {
 	data      json.RawMessage
 }
 
+// pendingAsk 是一条**还挂着、等回答**的审批。
+type pendingAsk struct {
+	payload pendingPayload
+	// ch 收决定：true = 允许。带 1 格缓冲，所以结算方永远不会因为
+	// 等待者还没跑到 select 而卡住。
+	ch chan bool
+	// stop 在宿主**主动取消**这条请求时关闭，让超时那条 goroutine 立刻收工。
+	//
+	// 不关的后果不是"多一条日志"：每轮都会起一个**新子进程**，它的 requestId
+	// 又从 perm-1 开始编，于是取消后第 120 秒，那行 `allow:false` 会写进
+	// 下一个子进程的 stdin，命中它这一轮某个真实请求——用户看到的是
+	// "我明明没答，它自己拒了"。
+	stop chan struct{}
+}
+
 func newApprovalBroker(stdin io.WriteCloser, emit func(sessionID, typ string, data json.RawMessage)) *approvalBroker {
 	return &approvalBroker{
-		pending:  map[string]chan bool{},
-		payloads: map[string]pendingPayload{},
-		allowed:  map[string]map[string]bool{},
-		stdin:    stdin,
-		emit:     emit,
-		timeout:  approvalTimeout(),
+		pending: map[string]*pendingAsk{},
+		allowed: map[string]map[string]bool{},
+		stdin:   stdin,
+		emit:    emit,
+		timeout: approvalTimeout(),
 	}
 }
 
@@ -257,9 +274,7 @@ func (b *approvalBroker) handle(req approvalReq) {
 	}
 
 	ch := make(chan bool, 1)
-	b.mu.Lock()
-	b.pending[req.RequestID] = ch
-	b.mu.Unlock()
+	stop := make(chan struct{})
 
 	// 形状与 ACP 的 session/request_permission 对齐（docs/h13-approval.md §契约）：
 	// 界面两边显示同一套东西，用户在不同客户端看到的措辞才不会打架。
@@ -275,7 +290,7 @@ func (b *approvalBroker) handle(req approvalReq) {
 		//	timeoutMs  —— 总等待时长（就是下面 time.After 用的那个数，不是另编的）
 		//	deadlineMs —— 绝对截止时刻（Unix 毫秒）
 		//
-		// 为什么要绝对时刻：断线重连时重放的是**当初这条负载**（见 payloads）；
+		// 为什么要绝对时刻：断线重连时重放的是**当初这条负载**（见 pending）；
 		// 只发时长的旧负载会被客户端当成"从现在起再等一整轮"，屏幕上说还有 90s，
 		// 宿主 3s 后就拒了——那比不显示倒计时更坏。
 		// 工具名单独给一个字段：`allow_always` 的粒度就是（会话 + 工具名），
@@ -297,21 +312,38 @@ func (b *approvalBroker) handle(req approvalReq) {
 			{"optionId": "reject_once", "name": "拒绝", "kind": "reject_once"},
 		},
 	})
+
+	// 登记必须在 emit **之前**：反过来的话，客户端秒答（或这一刻正好 cancel）
+	// 会落在一个还没登记的 requestId 上，得到 404，而界面已经显示"已批准/已取消"。
+	b.mu.Lock()
+	if b.pending == nil { // 直接构造的 broker（老测试）也要能用
+		b.pending = map[string]*pendingAsk{}
+	}
+	b.pending[req.RequestID] = &pendingAsk{
+		payload: pendingPayload{sessionID: req.SessionID, tool: req.Tool, data: payload},
+		ch:      ch,
+		stop:    stop,
+	}
+	b.mu.Unlock()
+
 	if b.emit != nil {
 		b.emit(req.SessionID, "approval/request", payload)
 	}
-	// 留着原始负载：客户端断开重连后要把这个"还在等"的问题再摆到它面前。
-	b.mu.Lock()
-	b.payloads[req.RequestID] = pendingPayload{sessionID: req.SessionID, tool: req.Tool, data: payload}
-	b.mu.Unlock()
 
 	// 超时按拒绝结算，并让界面知道"是超时，不是有人点了拒绝"。
 	go func() {
 		select {
 		case allow := <-ch:
 			b.reply(req.RequestID, allow)
+		case <-stop:
+			// 已经被 cancel 结算过了：这里**什么都不做**。
+			// 再推一条超时、再写一行应答，都是在编造另一件事。
 		case <-time.After(b.timeout):
-			b.forget(req.RequestID)
+			// 只有还能**认领**到这条请求的人才有权结算：cancel 已经把记录摘掉时，
+			// 这里必须闭嘴——否则界面上先显示"已取消"，两分钟后又冒出一条"已超时"。
+			if _, ok := b.claim(req.RequestID); !ok {
+				return
+			}
 			if b.emit != nil {
 				b.emit(req.SessionID, "approval/timeout", payload)
 			}
@@ -328,10 +360,10 @@ func (b *approvalBroker) handle(req approvalReq) {
 func (b *approvalBroker) Pending(sessionID string) []json.RawMessage {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := make([]json.RawMessage, 0, len(b.payloads))
-	for _, p := range b.payloads {
-		if p.sessionID == sessionID {
-			out = append(out, p.data)
+	out := make([]json.RawMessage, 0, len(b.pending))
+	for _, ask := range b.pending {
+		if ask.payload.sessionID == sessionID {
+			out = append(out, ask.payload.data)
 		}
 	}
 	return out
@@ -356,26 +388,34 @@ func (b *approvalBroker) Resolve(requestID, optionID string) error {
 	if !ok {
 		return transport.ErrBadOption
 	}
-	b.mu.Lock()
-	ch, found := b.pending[requestID]
-	var pend pendingPayload
-	if found {
-		pend = b.payloads[requestID]
-		delete(b.pending, requestID)
-		delete(b.payloads, requestID) // 答过了就不再重放
-	}
-	b.mu.Unlock()
+	ask, found := b.claim(requestID)
 	if !found {
-		// 已经答过、已经超时、或者是编的——三种都当作"这个请求不在了"。
+		// 已经答过、已经超时、被取消、或者是编的——四种都当作"这个请求不在了"。
 		return transport.ErrNoSuchRequest
 	}
 	// "以后都允许"要真的记住：否则界面给了这个选项、用户点了，
 	// 下次同一个工具还被问一遍——**选项在、语义空**比没这个选项更糟。
 	if optionID == "allow_always" {
-		b.markAlways(pend.sessionID, pend.tool)
+		b.markAlways(ask.payload.sessionID, ask.payload.tool)
 	}
-	ch <- allow
+	ask.ch <- allow
 	return nil
+}
+
+// claim 把一条还挂着的问题认领下来（一次性：认领过的就从表里没了）。
+//
+// 三条结算路径（界面回答、超时到期、cancel）都必须**先认领再动手**：
+// 认领不到说明别人已经结算过，这时候什么都不做才是对的——否则界面上会
+// 先看到"已取消"，两分钟后又冒出一条"已超时"。
+func (b *approvalBroker) claim(id string) (*pendingAsk, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ask, ok := b.pending[id]
+	if !ok {
+		return nil, false
+	}
+	delete(b.pending, id)
+	return ask, true
 }
 
 // alwaysAllowed 查「这个会话里这个工具已经选了以后都允许」。
@@ -401,11 +441,60 @@ func (b *approvalBroker) markAlways(sessionID, tool string) {
 	b.allowed[sessionID][tool] = true
 }
 
-func (b *approvalBroker) forget(id string) {
+// CancelSession 把这条会话上**所有还挂着**的审批按拒绝结算，并推 `approval/cancel`。
+//
+// 为什么 cancel 必须走到这里：`session.cancel` 只取消轮次的话，子进程被杀掉，
+// 而那条请求在宿主表里还是"等你批准"——界面上留着一个永远答不上的气泡，
+// journal 里没有结局帧，客户端重连还会把它当"还挂着"重放出来。
+//
+// 顺序是"先拒绝、后推帧"：拒绝写回子进程，工具**一定**不会执行；
+// 哪怕子进程这一拍还没来得及死，它拿到的也是明确的拒绝。
+//
+// 返回结算了几条（0 = 这条会话上没有挂着的审批）。
+func (b *approvalBroker) CancelSession(sessionID string) int {
 	b.mu.Lock()
-	delete(b.pending, id)
-	delete(b.payloads, id)
+	var ids []string
+	for id, ask := range b.pending {
+		if ask.payload.sessionID == sessionID {
+			ids = append(ids, id)
+		}
+	}
+	victims := make([]*pendingAsk, 0, len(ids))
+	for _, id := range ids {
+		victims = append(victims, b.pending[id])
+		delete(b.pending, id)
+	}
 	b.mu.Unlock()
+
+	for i, ask := range victims {
+		// 先让超时那条 goroutine 收工：它认领会失败，所以不会重复结算。
+		close(ask.stop)
+		b.reply(ids[i], false)
+		if b.emit != nil {
+			// 负载与 approval/request **同形**：客户端靠 requestId 收掉那个气泡，
+			// 不需要第二条解码路径（approval/timeout 也是这么发的）。
+			b.emit(sessionID, "approval/cancel", ask.payload.data)
+		}
+	}
+	return len(victims)
+}
+
+// cancelTurn 是 `session.cancel` 的落点：**先**把挂着的审批按拒绝结算，再取消这一轮。
+//
+// 顺序不能反：先取消轮次会立刻杀掉子进程，那条审批就成了"永远等不到回答"的僵尸；
+// 反过来先拒绝，子进程拿到的是明确的拒绝（工具不执行），然后再中止这一轮。
+func cancelTurn(b *approvalBroker, p *promptService, sessionID string) error {
+	rejected := 0
+	if b != nil {
+		rejected = b.CancelSession(sessionID)
+	}
+	err := p.Cancel(sessionID)
+	if err != nil && rejected > 0 {
+		// 审批确实被拒掉了（工具不会执行），只是这一轮在这一拍已经自己收工了。
+		// 这种"差一拍"不该报成 409：界面会以为取消失败、再去点一次。
+		return nil
+	}
+	return err
 }
 
 // reply 把决定写回子进程。写失败不影响判定本身（子进程读不到会按拒绝处理）。

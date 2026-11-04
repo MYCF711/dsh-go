@@ -413,7 +413,9 @@ func cmdServe(args []string) error {
 			return prompts.Submit(context.Background(), sessionID, text)
 		},
 		Cancel: func(sessionID string) error {
-			return prompts.Cancel(sessionID)
+			// H13 pending cancel：挂着的审批**先**按拒绝结算（并推 approval/cancel），
+			// 再取消这一轮。顺序与理由见 cancelTurn。
+			return cancelTurn(broker, prompts, sessionID)
 		},
 		// Create 真建一份 v4 会话（见 serve_create.go）：id 用 crypto/rand、
 		// header 带 agentPreset、返回前 Close 刷盘。cwd 传空 = serve 自己的当前目录。
