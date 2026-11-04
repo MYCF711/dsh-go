@@ -238,6 +238,10 @@ func finishReasonKind(finish string) string {
 //
 // awaiting_user 仍记 completed：它不是失败，只是把控制权交回人；
 // v4 词汇表里没有更贴切的 kind，硬造一个会让客户端解不动。
+//
+// 注意：这个函数只负责**模型收工**那一路的映射。失败路径（模型报错、步数用满、
+// 取消、panic）由调用方的出口统一补 `turn/end{kind:"error"/"aborted"}`——
+// 见 cmd/dshd/main.go 的 turnCloser。失败绝不许从这里拿到 completed。
 func TurnEndKind(finish string) string {
 	switch finish {
 	case "length":

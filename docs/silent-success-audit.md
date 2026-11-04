@@ -117,7 +117,7 @@
 | 压缩后 `surface` 没变却说「已压缩」（auto 路径） | `compact.Plan` 从 surface 选 ≥2 个节点；新增的可见事件守卫再兜一层 | 有下界保证：遮蔽 ≥1 个可见节点 + 1 个替身 ⇒ surface 必减 | 可接受（有结构性保证；`dshd run` 的「surface N → M」日志会暴露异常） |
 | 写进去 0 字节 | `v4.Writer.Append` 至少写一行 JSON + `\n`；`writeFrame` 还有"帧 < 8 字节即报错" | 0 字节帧在编解码层就不成立 | 可接受（结构上不可能） |
 | `append` 了但 `seq` 没动 | `Log.Append` 在写盘**成功后**才自增；失败直接返回 | 拒绝时 seq 不动，已有测试断言 | 可接受（结构上不可能） |
-| 回合失败时没有 `turn/end`（悬挂回合） | `agent.Run` 出错后调用方直接返回，不补结局事件 | 进程退出码非 0 / ACP 回 error，**不静默**；但日志里 turn 没有闭合 | **设计决定 D1**（见 §4） |
+| 回合失败时没有 `turn/end`（悬挂回合） | `agent.Run` 出错后调用方直接返回，不补结局事件 | 进程退出码非 0 / ACP 回 error，**不静默**；但日志里 turn 没有闭合 | **已解决（D1，2026-11-04）**：run / ACP / serve 子进程三条路的入口都并到同一个出口，失败补 `turn/end{reason.kind=error/aborted}`（见 §4 D1 结论） |
 | `modelRunner` 用 `m.Text == ""` 过滤历史 | assistant 只有 tool_calls 时 `Text` 为空 ⇒ 整条消息被丢掉，后续 tool 结果找不到对应调用 | 模型会看到"孤立的工具结果"；历史语义被悄悄改掉 | **真缺陷（已修，见 §5.1）**：原在 `cmd/dshd/serve_turn.go`，当时按边界不许改；后来放开，判据换成 `assistantHasPayload`（正文/思考块/tool_calls 任一） |
 | `modelRunner` 空响应 | 旧：只写 user 消息 + `turn/done` | 与 LLM 层第 1 条同形 | **真缺陷（已修，间接）**：§3.2 的 llm 守卫让 `Stream` 直接报错 ⇒ `turn/error`；未改 `serve_turn.go` |
 
@@ -319,6 +319,63 @@
   （回放、统计、摘要）都得自己处理悬挂回合；DSH 语料里没有这种形状，导出的会话可能与上游不一致。
 
 我倾向 A，但它是会话格式语义的决定，不是 bug 修复——交给用户。
+
+#### D1 结论：**补**（2026-11-04 拍板）
+
+> 原文保留。理由：只读日志的消费者（回放、UI、事后取证、`history_search`）现在必须
+> 自己处理"turn 没闭合"的悬挂态；而"退出码/错误帧"只在**当场**有，日志里没有。
+> 日志是 append-only 的事实来源，它必须能自洽——一个 turn 开了就一定要有一条结局。
+
+**不改 v4 落盘格式**（R5）：只往既有的 `turn/end` 里取合适的 `reason.kind` 放已有的
+`reason.error.message` / `reason.reason`，事件帧结构、字段名、seq 语义一律不动。
+
+**出口只有一个**：`cmd/dshd/main.go` 的 `turnCloser`。`turn/start` 之后立刻建它，
+`Emit` 的 `EventTurnEnd` 走 `End(finish)`，函数出口 `defer` 走 `Exit(ctx, err)`，
+panic 展开走 `ExitOnPanic(v)` 后**原样 panic 回去**。三条路都进同一个 `write`，
+靠 `closed` 标志保证一条 turn 只有一条 `turn/end`。
+
+**kind 表**（只用 v4 词汇表里已有的值，没有新造 kind）：
+
+| 结局 | `reason.kind` | 原因字段 | 说明 |
+|---|---|---|---|
+| 模型收工（stop / tool_calls / awaiting_user） | `completed` | — | 与原来一致 |
+| 被 `max_tokens` 截断（finish=length） | `max-tokens` | — | 与原来一致 |
+| 步数用满未收敛 | `error` | `error.message` = "turn 用满了 N 步仍未收敛…" | **不新造 `max-steps`**：v4 没有这个词，而"没收敛"由原文说清 |
+| 模型报错 / 空响应 / 压缩失败 / Emit 写盘失败 | `error` | `error.message` = 原始错误 | 失败原因不归纳、不翻译 |
+| 取消（`context.Canceled`） | `aborted` | `reason` = "这一轮被取消…" | v4 的 `aborted` 本来带原因 |
+| 超时（`context.DeadlineExceeded`） | `aborted` | `reason` = "这一轮超时被中止…" | 同上；没用 `interrupted` 是因为它不带原因字段 |
+| panic | `error` | `error.message` = "宿主 panic，这一轮没有跑完：…" | panic 仍原样抛出 |
+| turn 开了、没有任何人写结局、也没有错误 | `error` | `error.message` = "宿主没有写出结局…（宿主缺陷）" | 宁可显眼地不对，也不伪装成 `completed` |
+
+**不写 turn/end 的路径清单**（改前，`文件:行`）：
+
+| 路径 | 触发条件 |
+|---|---|
+| `cmd/dshd/main.go:767` `loop.Run` 返回后直接 `return err` | 模型调用失败、空响应、`--max-steps` 用满、压缩失败、Emit 写盘失败 |
+| `cmd/dshd/acp.go:225` 同上（`Prompt` 返回） | 同一组条件；另有 `ctx.Err() != nil` 时回 `"cancelled", nil, nil` 的那条 |
+| `cmd/dshd/acp.go:115` 之后的 `user/message` 写盘失败 | 立刻 `return`，turn 已开 |
+| panic / 提前 return（两侧） | 任何在两处 `turn/start` 之后的崩溃 |
+| `cmd/dshd/serve_tools.go:156` `loopRunner` 的子进程被 `exec.CommandContext` 杀掉 | 取消、父进程退出、崩溃——子进程根本没机会跑自己的出口 |
+
+「工具失败」**不在**表里，这是有意的：工具错误被记成 `tool/result{isError:true}` 后循环
+继续，turn 仍会正常收工；把它算成"回合失败"会把一次可恢复的工具错误伪装成整轮失败。
+
+**serve 子进程**：子进程自己就是 `dshd run`，上面那个出口对它同样生效。父进程只在
+`werr != nil || ctx.Err() != nil` 时回看一次日志（`settleTurn`），给"硬杀/崩溃"留下的
+悬挂 turn 补一条 `turn/end`——`aborted`（被取消）或 `error`（非零退出，带子进程原因）。
+补写前会抢写锁；锁文件里的 pid 正好是刚退出的那个子进程时才清掉它（别人的锁一概不碰）。
+
+**红→绿**：
+- 红（HEAD 的 git archive 副本 + 新测试）：`TestRunClosesTurnOnEveryExit` 的 3 条失败
+  子用例与 `TestACPPromptClosesTurnOnEveryExit` 的 3 条全部报
+  `turn/start 1 条、turn/end 0 条`；
+- 绿（工作树）：`ok dshgo/cmd/dshd`，同一组用例含"正常收敛 → completed""被截断 →
+  max-tokens"两条成功路径，且断言 `turn/end` **恰好一条**（幂等）。
+
+**还没覆盖的**：写结局本身失败（磁盘满/只读）时日志仍然是悬挂的——这一条无法在日志里
+表达，只能在 stderr 说（`cmdRun` 不会用这个错误盖住原始错误）。进程被**硬杀**
+（SIGKILL，或 `dshd run` 直接 Ctrl+C 的默认终止）时进程内没有机会跑任何 defer：
+serve 子进程由父进程的 `settleTurn` 补；独立的 `dshd run` 无法自补，只能靠退出码/重跑。
 
 ### D2 `models.list` 的 `data:null` 与 `data:[]` 要不要区分？
 
