@@ -336,3 +336,34 @@ tmp/lazy-resume-raw3-after.txt                              同一会话第 3 �
 **没验的**：serve 那条真机链（本轮不许改 `serve*.go`，`serve` 的 turn 走的是
 `modelRunner`/`loopRunner`，不是 `cmdRun`）——所以"每轮一个新进程"是用
 `dshd run --session` 两轮模拟的，不是 serve 自己跑出来的。
+
+---
+
+## 2026-11-04：换通道复测（前置条件①）—— 结果一致，但**同一个模型家族**
+
+翻默认的四条前置条件里第①条是"换模型必须重跑 A/B，不能外推"。`dshd models` 现在能看到网关挂着 6 个：
+
+```
+group/deepseek-v4.1-flash1017        (wps-lingxi)   ← 之前全部 A/B 用的
+group/model-free / group/limited     (wps-lingxi / workbuddy)
+group/kimi-k3.1-pro                  (wps-lingxi)   ← **坏的**
+streamlake/deepseek-v4.1-flash-1017  (streamlake)   ← 这次用的
+deepseek-v4.1-flash-1017             (streamlake)
+```
+
+**换到 `streamlake/deepseek-v4.1-flash-1017` 重跑（17 任务 × 2 形态 × 1 次）：**
+
+| | compact | lazy |
+|---|---:|---:|
+| 全部 | 17/17 | **17/17** |
+| 表外任务 | 13/13 | **13/13**（`tool_load` 13 次，**13 次全拉对**） |
+| 首步 prompt_tokens | 5,388.6 | **3,948.6（−26.7%）** |
+
+**这条证据的边界要说清**：换的是**通道/供应商**（wps-lingxi → streamlake），
+不是模型家族——两个都是 `deepseek-v4.1-flash-1017`。所以它证明的是
+"这套机制不依赖某个通道的怪癖"，**不**证明"换个模型家族也成立"。
+
+**顺带发现（已修）**：`group/kimi-k3.1-pro` 是**坏的**——直接问网关回 502，
+而我们的宿主原来会把它变成"assistant 说了句空话、turn completed、退出码 0"。
+现在这种空响应被明确判成失败，并告诉用户 `dshd models` 看一眼（这条命令本轮才加上，
+之前那句提示指着一个不存在的命令）。
