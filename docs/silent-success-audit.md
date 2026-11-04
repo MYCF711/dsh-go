@@ -1212,6 +1212,8 @@ PASS text-only 守卫：156 个文件 0 处未登记（白名单 13 条命中 13
   一行包装，serve 的行为一字未动。
 - ACP 的写盘 sink（`acp.go` 里 `agent.EventAssistantMsg` 那个分支）改成调同一个函数，
   删掉它自己那份铺块——仓库里不再有第二份。
+  （当时其实还剩一份：`cmd/dshd/main.go` 的 `run` 路径自己攒 `stepReasoning` 再铺块。
+  见下方「残留清零：run 也走同一个铺块函数」。）
 - 思考正文取自 `agent.AssistantTurn.Reasoning`（即 `llm.Response.Reasoning`，也即事件流里
   `agent.EventReasoning` 增量拼起来的那段）。**不另攒一份**：同一次快照的两面各攒一份，
   正是这轮审计要消灭的"两处各自维护、迟早漂"。测试拿事件流拼出来的文本和落盘块直接比对，
@@ -1248,6 +1250,73 @@ PASS text-only 守卫：156 个文件 0 处未登记（白名单 13 条命中 13
 **没有验证的**：真机 ACP 客户端（需要新 `dshd` + 客户端重连/重开走一遍 `session/load`）；
 `-race` 未跑。单测证明的是"写侧落盘的块与顺序"，不证明"真实客户端会把
 `agent_thought_chunk` 画出来"——那是客户端那边的事。
+
+#### 残留清零：run 也走同一个铺块函数（2026-11-04）
+
+ACP 那轮之后，仓库里还剩**最后一份**重复：`cmd/dshd/main.go` 的 `run` 路径在
+`agent.EventAssistantMsg` 分支里自己攒 `stepReasoning`（`strings.Builder`），再手工
+`ReasoningBlock` / `TextBlock` / `ToolCallBlock` 拼一遍。于是三条入口里：
+
+| 入口 | 铺块从哪来 |
+|---|---|
+| `serve` | `assistantBlocks(resp)` → `assistantBlocksFrom` |
+| `acp` | `assistantBlocksFrom(a.Content, a.Reasoning, a.ToolCalls)` |
+| `run` | **自己那份**（思考另攒一个 builder） |
+
+**改法**：`run` 的 Emit 里改成
+`assistantBlocksFrom(a.Content, a.Reasoning, a.ToolCalls)`，删掉 `stepReasoning`
+与整个 `agent.EventReasoning` 分支（它唯一的用途就是喂那个 builder）。思考**不另攒**：
+`a.Reasoning` 就是 `llm.Response.Reasoning`，也即事件流里 `EventReasoning` 增量拼起来
+的那段（`internal/llm/client.go` 里两处写的是同一个 `reasoning` 变量）。净删 11 行
+（9 insertions / 20 deletions，`git diff --numstat`）。
+
+**为什么这条没在 ACP 那轮一起改**：当时任务书圈定的可改范围只有 `acp.go` 与
+`serve_turn.go`，`main.go` 明确不在范围内。这也说明"唯一一份"当时是**计划**而不是事实——
+文档写着"仓库里不再有第二份"时，`run` 那份还活着。
+
+**红→绿**（`cmd/dshd/run_reasoning_test.go`，全部读落盘的 v4 文件）：
+
+| 用例 | HEAD | 改后 |
+|---|---|---|
+| 思考+正文+调用 → `reasoning→text→tool-call` | PASS（旧实现顺序本来就对） | PASS |
+| 没有思考的一轮（`data` 原始字节基线） | PASS | PASS（逐字节一样） |
+| 只有空白的思考/正文（共用 `TrimSpace` 判据） | **FAIL**（`reasoning→text`） | PASS（`content: []`） |
+
+第一条在 HEAD 上就绿，这是**如实记录**、不是红证据：旧 `run` 的顺序本来就正确，
+它是回归护栏。真正的红是第三条——旧实现按 `Len() > 0` / `!= ""` 判，共用函数按
+`TrimSpace` 判，这条用例在 HEAD 上失败、改后通过。
+
+**"最后一份重复真的没了"的可执行证据**（变异只在独占副本里做）：把
+`assistantBlocksFrom` 的思考块分支关掉（`if false && …`），再跑同一份 `run` 用例：
+
+```
+# HEAD 副本（git archive HEAD）+ 变异
+ok  dshgo/cmd/dshd  0.709s        ← run 有自己的 builder，共用函数坏了它看不见
+
+# 改后副本（HEAD + 本次改动）+ 同一个变异
+--- FAIL: TestRunPersistsReasoningBlocks
+    落盘块顺序 = "text→tool-call"，期望 reasoning→text→tool-call（与 serve/acp 同序）
+```
+
+同一处变异，改前对 `run` 不可见、改后立刻红——这就是"`run` 从这条规则的第二份实现
+变成共用函数的一个调用点"的直接读数。
+
+**"不许误伤"的口径**：与 ACP 那条相同——比 `assistant/message` 的 **`data` 原始字节**，
+不比整行（行信封带墙钟 `time`），也不比解出来的结构（会放过键序/空数组/多余字段）。
+基线用例没有思考、没有调用、没有 usage，期望值就是改前代码跑出来的字面量。
+
+**唯一的行为差（已知且刻意）**：只有空白字符的思考/正文，以前 `run` 会各落一个块
+（`Len() > 0` / `!= ""`），现在按共用函数的 `TrimSpace` 判据不落（这一轮仍落
+`assistant/message`，`content` 是空数组）。与 ACP 那轮登记的是同一处收敛；为 `run`
+的旧判据开特例，等于把"同一条规则两处实现"请回来。
+
+**顺带**：`cmd/dshd/serve_turn.go` 一个字没改（`assistantBlocksFrom` 本来就是目标形状，
+不需要导出、也不需要微调），`scripts/text-only-allow.txt` 没加条目（守卫仍 PASS，
+`main.go` 本来就没有白名单条目，行号漂移不涉及它）。
+
+**没有验证的**：真机 `dshd run` 走一遍带思考的轮次（单测用的是 `cmdRun` 真函数 +
+假网关，覆盖到 Emit 与落盘，但没有真实模型）；`-race` 未跑。
+
 
 ## 6. 复跑与验收
 
