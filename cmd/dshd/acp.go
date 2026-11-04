@@ -142,13 +142,15 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		switch e.Kind {
 		case agent.EventAssistantMsg:
 			a := e.Assistant
-			blocks := make([]map[string]any, 0, 1+len(a.ToolCalls))
-			if a.Content != "" {
-				blocks = append(blocks, session.TextBlock(a.Content))
-			}
-			for _, tc := range a.ToolCalls {
-				blocks = append(blocks, session.ToolCallBlock(tc.ID, tc.Function.Name, tc.Function.Arguments))
-			}
+			// 铺块走 serve 那条路的**同一份**逻辑（serve_turn.assistantBlocksFrom）：
+			// 思考 → 正文 → 调用。
+			//
+			// 以前这里自己铺一份、只铺 text + tool_calls：于是 ACP 跑完的一轮在 v4 里
+			// **没有思考块**。而 history / fork / session.load 三个投影都已经会认思考块——
+			// 每一环都对，只是源里没写，读回来等于那轮模型没想过任何事。
+			// 思考正文取自 `a.Reasoning`：它就是 `llm.Response.Reasoning`，也即
+			// 事件流里那些 `agent.EventReasoning` 增量拼起来的那段（同一次快照的两面）。
+			blocks := assistantBlocksFrom(a.Content, a.Reasoning, a.ToolCalls)
 			var usage map[string]any
 			if a.Usage != nil {
 				usage = map[string]any{

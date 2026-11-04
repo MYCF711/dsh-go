@@ -222,14 +222,27 @@ func reasoningBySeq(log *v4.Log) map[int64]string {
 // 以前只写 text 块，且只在 Content != "" 时写：只有思考块的回答根本不落盘，
 // 只有工具调用的回答即使在日志里也看不出它调了什么。
 func assistantBlocks(resp *llm.Response) []map[string]any {
-	blocks := make([]map[string]any, 0, 2+len(resp.ToolCalls))
-	if strings.TrimSpace(resp.Reasoning) != "" {
-		blocks = append(blocks, session.ReasoningBlock(resp.Reasoning))
+	return assistantBlocksFrom(resp.Content, resp.Reasoning, resp.ToolCalls)
+}
+
+// assistantBlocksFrom 是"一次回答 → v4 content 块"的**唯一一份**铺块逻辑：
+// 思考 → 正文 → 调用。serve（`assistantBlocks`）与 ACP 的写盘 sink 都调它。
+//
+// 参数取三样零件而不是 *llm.Response，是因为 ACP 那条路手里只有
+// `agent.AssistantTurn`（同一个模型的同一份产物，只是它在 agent 层的形状）。
+// 为它写第三份铺块，就是本轮任务要消灭的那种"两处各自维护、迟早漂"。
+//
+// 为什么思考块放正文之前：折叠出来就是"先想了什么、再回答什么"；顺序反了，
+// 读日志的人会以为模型先说了话又倒回去想。
+func assistantBlocksFrom(text, reasoning string, toolCalls []llm.ToolCall) []map[string]any {
+	blocks := make([]map[string]any, 0, 2+len(toolCalls))
+	if strings.TrimSpace(reasoning) != "" {
+		blocks = append(blocks, session.ReasoningBlock(reasoning))
 	}
-	if strings.TrimSpace(resp.Content) != "" {
-		blocks = append(blocks, session.TextBlock(resp.Content))
+	if strings.TrimSpace(text) != "" {
+		blocks = append(blocks, session.TextBlock(text))
 	}
-	for _, tc := range resp.ToolCalls {
+	for _, tc := range toolCalls {
 		blocks = append(blocks, session.ToolCallBlock(tc.ID, tc.Function.Name, tc.Function.Arguments))
 	}
 	return blocks
