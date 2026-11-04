@@ -9,6 +9,25 @@
 - 两仓已有大量实现，不是尚未开工，也不是整产品已验收。历史 ✅、截图、ACP/mockd、handler 单测各自只证明一层。
 - 并行会话正在推进 H13 审批与 H14 契约迁移；开工先看两仓最新提交、工作树和测试，不回滚他人成果，不按本页旧描述重复实现。
 
+
+## 2026-11-04 收尾状态（给下一个接手的人）
+
+- **已发版**：`v0.2.1-go.29`（release 页有 3 个平台二进制 + SHA256SUMS）。主线是上下文预算与静默失败。
+- **工具表**：默认 `compact`，实测占 P0 预算 **86%**（5,158 token / 上限 6,000）。
+  另有第四档 `--tools-mode lazy`（常驻语料前 30 名 + `tool_load` 按需取，首步 −26.7%），
+  **默认仍是 compact**；翻默认还差"换模型家族复测"这一条硬证据。
+- **装载集是会话状态**：不落新文件，回放 v4 日志里已有的 `tool/call`（`cmd/dshd/tool_lazy.go`）。
+- **静默成功审计**：`docs/silent-success-audit.md` 36 条路径全表；真缺陷已修 18 条
+  （含空流/半截流、压缩空摘要、`200+result:null`、journal 补洞缺口、`turn/end` 恒 completed、
+  `CompactSchema` 两处删参数、`history_search` 只认正文、`session.load` 丢思考、fork 丢思考）。
+- **每个 turn 都有结局**：`newTurnCloser` 统一出口，失败/用满步数/panic 都写 `turn/end{kind:error}`。
+- **验证口径**：`go test ./...` 48 包；`scripts/check.sh` ALL GREEN（含 15 条审计守卫）；
+  `-race` 全仓 47 包零竞争（`CGO_ENABLED=1 CC=<mingw64 gcc>`）。
+- **还没闭环的三条**（接手先看这里）：
+  1. `lazy` 翻默认的"换模型家族复测"（本机只有两个 deepseek 通道，`group/kimi-k3.1-pro` 上游是坏的）
+  2. `../dsh-ui` 是否开始消费 `transport.Message.reasoning`（宿主已给，UI 快照不追踪字段，无强制同步项）
+  3. `Meter.Estimate` 与 ACP `session/load` 的思考块（本轮已派活修，验收后回填这里）
+
 ## 当前依赖顺序
 
 1. **G0 / H14 契约门**：唯一 owner 冻结 `docs/transport-contract.md`、两边快照与 golden；统一 HTTP 裸参数、`/ws`、帧词表、每会话 journal/epoch 和原始 history frames。真实 apiclient 只对契约夹具做合成重放；不在此阶段提前实现真实 H6/H13。
