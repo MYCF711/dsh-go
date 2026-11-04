@@ -384,6 +384,42 @@ def scan_guards(a: Audit) -> None:
         r"def scan\(src\)",
         "守卫本体不见了：形状判据（只认 text 的投影）没有别的地方在查",
     )
+    # D5（2026-11-04）：同一条规则被写了第二份。
+    #
+    # 这一天修的四类事故（两份压表实现 / 三份铺块逻辑 / 两份思考块识别 /
+    # 七处只认 text 的投影）是同一个形状：规则有两份实现，然后各自漂移。
+    # 它正落在本扫描器负责的"静默"档：两份实现当前一致时**没有任何信号**，
+    # 而漂开之后错的那一份照样返回成功。
+    #
+    # 判据是结构（同一判据字面量 / 同一种组装形状出现在登记位置之外），
+    # 在 scripts/single-source.py + scripts/single-source.txt。
+    # 这里钉的是"守卫活着 + 接在门禁上 + 三条事故各自的唯一实现入口还在"——
+    # 谁把唯一实现拆成两份，单点实现门禁当场红；这几条保证它还在被跑。
+    a.need(
+        "single-source-guard-wired", "scripts/check.sh",
+        r"scripts/single-source\.py",
+        "单点实现守卫必须接在门禁上（否则「收口了」只能靠记忆）",
+    )
+    a.need(
+        "single-source-guard-exists", "scripts/single-source.py",
+        r"def shape_assistant_block_layout",
+        "守卫本体不见了：形状判据（同一规则的第二份实现）没有别的地方在查",
+    )
+    a.need(
+        "single-source-registry-exists", "scripts/single-source.txt",
+        r"铺块顺序 \|",
+        "登记表不见了 = 守卫不知道该守哪几条规则（空登记表等于没守）",
+    )
+    a.need(
+        "single-source-reasoning-entry", "internal/session/reasoning.go",
+        r"func ReasoningText\(",
+        "思考块识别被拆回去了：两份判据各解一遍事件的症状是「有时候思考在、有时候不在」",
+    )
+    a.need(
+        "single-source-blocks-entry", "cmd/dshd/serve_turn.go",
+        r"func assistantBlocksFrom\(",
+        "铺块顺序被拆回去了：第二个写盘路径漏写的那种块不会报错，只会静默不落盘",
+    )
 
 
 # ---------------------------------------------------------------- 主流程

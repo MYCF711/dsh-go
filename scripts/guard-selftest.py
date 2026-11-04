@@ -245,6 +245,199 @@ def main():
         code != 0 and "FAIL" in out, out.strip()[-220:])
 
     shutil.rmtree(to_root, ignore_errors=True)
+
+    # ---- 7) 单点实现守卫：把三条历史事故逐条改回"双实现"，必须逐条红 ----
+    #
+    # 这条守卫的判据是**结构**（同一判据字面量/同一种组装形状出现在登记位置之外），
+    # 所以造红不能靠"让它行为不同"——只能真的把第二份实现放回去。
+    # 三条事故的旧代码逐字取自 git（提交号见每条注释），不是想象的形状。
+    ss_root = tempfile.mkdtemp(prefix="dshgo-single-source-")
+    ss_tree = os.path.join(ss_root, "tree")
+    for d in ("cmd", "internal", "modules", "codecs"):
+        shutil.copytree(d, os.path.join(ss_tree, d))
+    ss_rules = os.path.abspath("scripts/single-source.txt")
+
+    def run_ss(root, rules=None):
+        return run(["scripts/single-source.py", "--root", root, "--rules", rules or ss_rules])
+
+    code, out = run_ss(ss_tree)
+    chk("单点实现守卫：未改动的副本是绿的（造红不是副本本身坏了）",
+        code == 0 and "PASS 单点实现守卫" in out, out.strip()[-220:])
+    chk("单点实现守卫：登记的第二处（fork 铺块）以 WARN 出现而不是被吞掉",
+        "WARN 铺块顺序" in out and "internal/session/fork.go:copyNode" in out, out.strip()[-220:])
+
+    def ss_revert(name, rel, pattern, repl, expect_shape):
+        """在副本上把某一处改回"第二份实现"，跑守卫，恢复。"""
+        target = os.path.join(ss_tree, rel)
+        orig = open(target, encoding="utf-8").read()
+        new, n = re.subn(pattern, lambda _m: repl, orig, count=1)
+        if n != 1 or new == orig:
+            chk("单点实现守卫：%s → 造红片段能对上" % name, False,
+                "旧写法片段没匹配上（%s），这条自测本身失效了" % rel)
+            return
+        open(target, "w", encoding="utf-8", newline="").write(new)
+        code, out = run_ss(ss_tree)
+        open(target, "w", encoding="utf-8", newline="").write(orig)
+        chk("单点实现守卫：%s → 必须红（%s）" % (name, expect_shape),
+            code != 0 and "FAIL" in out and expect_shape in out, out.strip()[-260:])
+
+    # 事故 2（941460c / 3c9e457）：ACP 写盘自己铺一份块，只铺 text + 工具调用。
+    ss_revert(
+        "ACP 写盘重新自己铺块（941460c 之前）",
+        "cmd/dshd/acp.go",
+        r"\t\t\tblocks := assistantBlocksFrom\(a\.Content, a\.Reasoning, a\.ToolCalls\)\n",
+        "\t\t\tblocks := make([]map[string]any, 0, 1+len(a.ToolCalls))\n"
+        "\t\t\tif a.Content != \"\" {\n"
+        "\t\t\t\tblocks = append(blocks, session.TextBlock(a.Content))\n"
+        "\t\t\t}\n"
+        "\t\t\tfor _, tc := range a.ToolCalls {\n"
+        "\t\t\t\tblocks = append(blocks, session.ToolCallBlock(tc.ID, tc.Function.Name, tc.Function.Arguments))\n"
+        "\t\t\t}\n",
+        "assistant-block-layout")
+
+    # 事故 3（b4809d1）：serve 自己解一遍事件、自己写一遍思考块判据。
+    ss_revert(
+        "serve 的 reasoningBySeq 重新自己解析（b4809d1 之前）",
+        "cmd/dshd/serve_turn.go",
+        r"\tall := session\.ReasoningBlocksBySeq\(log\)\n",
+        "\tout2 := make(map[int64]string, len(log.Events))\n"
+        "\tfor _, ev := range log.Events {\n"
+        "\t\tif ev.Type != \"assistant/message\" {\n"
+        "\t\t\tcontinue\n"
+        "\t\t}\n"
+        "\t\tvar d struct {\n"
+        "\t\t\tMessage struct {\n"
+        "\t\t\t\tContent []block `json:\"content\"`\n"
+        "\t\t\t} `json:\"message\"`\n"
+        "\t\t\tContent []block `json:\"content\"`\n"
+        "\t\t}\n"
+        "\t\tif err := json.Unmarshal(ev.Data, &d); err != nil {\n"
+        "\t\t\tcontinue\n"
+        "\t\t}\n"
+        "\t\tblocks := d.Message.Content\n"
+        "\t\tif len(blocks) == 0 {\n"
+        "\t\t\tblocks = d.Content\n"
+        "\t\t}\n"
+        "\t\tfor _, b := range blocks {\n"
+        "\t\t\tif b.Type == \"reasoning\" && strings.TrimSpace(b.Text) != \"\" {\n"
+        "\t\t\t\tout2[ev.Seq] = b.Text\n"
+        "\t\t\t\tbreak\n"
+        "\t\t\t}\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\t_ = out2\n"
+        "\tall := session.ReasoningBlocksBySeq(log)\n",
+        "reasoning-type-discriminator")
+
+    # 事故 1（409879e / a882d5b）：tightenSchema 重新按字面量删 description。
+    ss_revert(
+        "tightenSchema 重新 k == \"description\"（a882d5b 之前）",
+        "cmd/dshd/tool_merged.go",
+        r"if schemarule\.IsAnnotationKey\(k, false\) \{",
+        'if k == "description" {',
+        "schema-annotation-key")
+
+    # 事故 1 的另一半：CompactSchema 重新自己压一遍。
+    ss_revert(
+        "agent.CompactSchema 重新自己删键（409879e 之前）",
+        "internal/agent/loop.go",
+        r"\treturn schema\.Compact\(raw\)\n",
+        "\tvar v any\n"
+        "\tif err := json.Unmarshal(raw, &v); err != nil {\n"
+        "\t\treturn raw\n"
+        "\t}\n"
+        "\tif m, ok := v.(map[string]any); ok {\n"
+        "\t\tfor k := range m {\n"
+        "\t\t\tif k == \"description\" {\n"
+        "\t\t\t\tdelete(m, k)\n"
+        "\t\t\t}\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\tb, _ := json.Marshal(v)\n"
+        "\treturn b\n",
+        "schema-annotation-key")
+
+    # 第九次不是"改回旧的"，是"新写一个"：新文件里的第二份判据也必须红。
+    new_probe = os.path.join(ss_tree, "cmd", "dshd", "zz_single_source_selftest_probe.go")
+    open(new_probe, "w", encoding="utf-8", newline="").write(
+        "package main\n\n"
+        "// 自测用的第二份实现：新写的代码，登记表里没有它。\n"
+        "func selftestProbeIsThinking(kind string) bool {\n"
+        "\treturn kind == \"reasoning\"\n"
+        "}\n")
+    code, out = run_ss(ss_tree)
+    os.remove(new_probe)
+    chk("单点实现守卫：新写的第二份判据（不是改回旧代码）也红",
+        code != 0 and "reasoning-type-discriminator" in out, out.strip()[-260:])
+
+    # 反面：**正常写一个新投影**不许红——它就是该绿的形状。
+    #
+    # 这一条是这条守卫"会不会太吵"的实测判据：新投影要看思考块，正确的写法是
+    # 在 case 里调唯一实现；这种写法必须绿，否则守卫第一天就会逼人去加白名单。
+    ok_probe = os.path.join(ss_tree, "cmd", "dshd", "zz_single_source_selftest_ok.go")
+    open(ok_probe, "w", encoding="utf-8", newline="").write(
+        "package main\n\n"
+        "// 自测用的新投影：分块走 switch，判据调唯一实现。\n"
+        "func selftestProbeThinkingText(b block) string {\n"
+        "\tswitch b.Type {\n"
+        "\tcase \"reasoning\":\n"
+        "\t\tif text, ok := session.ReasoningText(b.Type, b.Text); ok {\n"
+        "\t\t\treturn text\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\treturn \"\"\n"
+        "}\n\n"
+        "// 往 schema 里写说明文字不是「判断注解」，不该算第二份。\n"
+        "func selftestProbeSetDoc(m map[string]any, doc string) {\n"
+        "\tm[\"description\"] = doc\n"
+        "}\n")
+    code, out = run_ss(ss_tree)
+    os.remove(ok_probe)
+    chk("单点实现守卫：委派给唯一实现的新投影是绿的（不会逼人加白名单）",
+        code == 0 and "PASS 单点实现守卫" in out, out.strip()[-260:])
+
+    # 登记表自己兜底：指的位置不在了 → 红（否则所有同形状代码都会被算成"在登记位置之外"）。
+    tmp_rules = os.path.join(TMP, "single-source-owner-gone.txt")
+    with open(tmp_rules, "w", encoding="utf-8", newline="") as fh:
+        fh.write("[rule]\n思考块识别 | internal/session/gone.go:ReasoningText | "
+                 "reasoning-type-discriminator | 自测：唯一实现被搬走了\n")
+    code, out = run_ss(ss_tree, tmp_rules)
+    chk("单点实现守卫：唯一实现的文件不存在 → 必须红",
+        code != 0 and "唯一实现的文件不存在" in out, out.strip()[-200:])
+
+    tmp_rules2 = os.path.join(TMP, "single-source-symbol-gone.txt")
+    with open(tmp_rules2, "w", encoding="utf-8", newline="") as fh:
+        fh.write("[rule]\n思考块识别 | internal/session/reasoning.go:NoSuchFunc | "
+                 "reasoning-type-discriminator | 自测：唯一实现被改名了\n")
+    code, out = run_ss(ss_tree, tmp_rules2)
+    chk("单点实现守卫：唯一实现的符号被改名 → 必须红",
+        code != 0 and "找不到符号" in out, out.strip()[-200:])
+
+    tmp_rules3 = os.path.join(TMP, "single-source-stale-allow.txt")
+    with open(tmp_rules3, "w", encoding="utf-8", newline="") as fh:
+        fh.write("[rule]\n思考块识别 | internal/session/reasoning.go:ReasoningText | "
+                 "reasoning-type-discriminator | 自测：白名单腐烂\n"
+                 "[allow]\n"
+                 "cmd/dshd/history.go:9999 | reasoning-type-discriminator | 自测：那个文件里没有这一行\n")
+    code, out = run_ss(ss_tree, tmp_rules3)
+    chk("单点实现守卫：白名单条目对不上任何发现 → 必须红（白名单不许烂着）",
+        code != 0 and "白名单条目没命中任何发现" in out, out.strip()[-200:])
+
+    tmp_rules4 = os.path.join(TMP, "single-source-bad-shape.txt")
+    with open(tmp_rules4, "w", encoding="utf-8", newline="") as fh:
+        fh.write("[rule]\n猜的规则 | internal/session/reasoning.go | no-such-shape | 自测：形状ID不存在\n")
+    code, out = run_ss(ss_tree, tmp_rules4)
+    chk("单点实现守卫：登记表写了不认识的形状ID → 必须红（不许静默忽略一条规则）",
+        code != 0 and "形状 ID 不认识" in out, out.strip()[-200:])
+
+    empty_root = os.path.join(TMP, "single-source-empty")
+    os.makedirs(empty_root, exist_ok=True)
+    code, out = run_ss(empty_root)
+    chk("单点实现守卫：空目录不报绿（没扫到东西 ≠ 通过）",
+        code != 0 and "0 个 Go 文件" in out, out.strip()[-200:])
+
+    shutil.rmtree(ss_root, ignore_errors=True)
+
     shutil.rmtree(TMP, ignore_errors=True)
     print("合计 OK=%d FAIL=%d" % (ok, fail))
     return 0 if fail == 0 else 1

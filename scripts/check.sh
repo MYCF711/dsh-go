@@ -94,6 +94,29 @@ else
     bad "找不到 scripts/text-only-guard.py —— 投影只认 text 的病没有门禁"
   fi
 
+  # 单点实现守卫：同一条规则被写了第二份。
+  #
+  # 2026-11-04 一整天的事故都是这一个形状：两份压表实现都"见 description 键就删"
+  # （各删错一次，一共删掉 8 个名叫 description 的参数）、三份铺块逻辑里 ACP 那份
+  # 漏了思考块（那轮想过什么从日志里整轮消失）、两份思考块识别各解析一遍事件。
+  #
+  # 为什么必须是结构判据：行为测试在两处实现"当前一致"时永远全绿——第三份思考块
+  # 识别的变异只有靠"同一判据字面量出现在两处"才抓得住。判据与登记表在
+  # scripts/single-source.py / scripts/single-source.txt。
+  #
+  # 不吵是硬约束：每条 FAIL 的修法都是"改成调用登记的唯一实现"，不是"加白名单"
+  # （白名单当前 0 条）。真有第二处收不了口的，登记在表里只打 WARN。
+  if [ -f scripts/single-source.py ]; then
+    if ss_out="$(python scripts/single-source.py 2>&1)"; then
+      # 守卫自己那句已经以 "PASS " 开头，别再套一层
+      pass "$(printf '%s' "$ss_out" | tail -1 | sed 's/^PASS  *//')"
+    else
+      bad "单点实现守卫: $(printf '%s' "$ss_out" | grep -E '^  FAIL ' | head -2 | tr '\n' ' ')"
+    fi
+  else
+    bad "找不到 scripts/single-source.py —— 同一条规则写第二份的病没有门禁"
+  fi
+
   # 变异清单自洽：每条的 old 片段必须**恰好出现一次**，
   # 否则那条变异永远是 BAD，等于验收清单里混着一条废条目。
   if [ -f scripts/mutate.py ] && [ -f scripts/mutations.json ]; then

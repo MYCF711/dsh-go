@@ -1,0 +1,54 @@
+# 单点实现登记表 —— 「同一条规则只许有一份实现」的机器可读版本
+#
+# 由 scripts/single-source.py 读取并扫描；接在 scripts/check.sh 里。
+# 这一节回答一个问题：**哪一个判断/哪一种形状，只许出现在一处？**
+#
+# 格式（一行一条）：
+#
+#     概念 | 唯一实现 | 形状ID | 为什么这是同一件事
+#
+#   · 概念      人读的名字，出错时原样打进 FAIL 行
+#   · 唯一实现  `路径` 或 `路径:符号`；以 / 结尾表示整个包
+#               （守卫会核对它还在：文件/目录不存在，或者 :符号 找不到，直接 FAIL）
+#   · 形状ID    由 scripts/single-source.py 实现；这里只登记「哪一条形状归哪个唯一实现」
+#   · 为什么    要求能查证：说清「为什么这两处是同一件事」+「多一份会怎么错」
+#
+# 可选第 5 列：`second=路径:符号`
+#
+#   登记表如果如实记录了「这条规则现在确实有第二处、而且收不了口」，就写在这里。
+#   守卫对登记过的第二处只打 WARN（每次门禁都会打出来，不是橡皮图章），
+#   对**第三处**照样 FAIL。第二处消失了却还留着这一列 → FAIL（要求改登记表）。
+#
+#   为什么会存在第二处：跨包。internal/session 不能 import cmd/dshd，
+#   所以它没法调用登记在 cmd/dshd 里的那份。收口的唯一方向是把逻辑下沉到
+#   internal/session 并让两边都调它——那要改 .go，不在本轮范围里。
+#
+# 白名单在 [allow] 段，理由必填。
+
+[rule]
+
+# 2026-11-04 事故 3：两份思考块识别（serve 取第一条 / fork 全带），解析规则各写一遍，
+# 漂了也没人报错——一处认顶层 content、另一处不认，症状是"有时候思考块在、有时候不在"。
+思考块识别 | internal/session/reasoning.go:ReasoningText | reasoning-type-discriminator | 「一个内容块算不算思考」只有一条：类型是 reasoning 且正文 TrimSpace 非空。别处再写一遍 b.Type == "reasoning" 就是第二份判据，而两份必然漂（旧的两份：一份取第一条、一份全带，还都不认顶层 content）
+
+# 思考块怎么写成 v4 块。写作与识别是一对：识别认的字段、写入必须同一个。
+思考块构造 | internal/session/log.go:ReasoningBlock | reasoning-block-write | 「思考块长什么样」只有一处：{"type":"reasoning","text":…}。手写这份 map 的后果是 v4 往块里加字段时只有一处跟上，另一处写的块读回来没有那个字段
+
+# 2026-11-04 事故 2：三份铺块逻辑（run / serve / acp 各一份），ACP 那份不写思考块，
+# 那轮想过什么从日志里整轮消失，而 history / fork / load 三处读路径全是对的。
+铺块顺序 | cmd/dshd/serve_turn.go:assistantBlocksFrom | assistant-block-layout | 「一次回答铺成哪些块、什么顺序、什么条件才铺」只有一处：思考 → 正文 → 调用。第二个写盘路径自己铺一份时，它漏的那一种块不会报错，只会静默不落盘 | second=internal/session/fork.go:copyNode
+
+# 2026-11-04 事故 1：CompactSchema 与 stripDescriptions 都"见 description 键就删"，
+# 各删错一次，一共删掉 8 个名叫 description 的参数（5 个还在 required 里）。
+schema 注解判据 | internal/schema/ | schema-annotation-key | 「description 是注解还是参数名」只有一处判断（按键名 + 按位置）。别处再按字面量判一次，就是第二份：两份各错一次，而模型看到「必填、但没有类型」时全链路不报错
+
+[allow]
+
+# 白名单格式：路径:行号 | 形状ID | 理由
+#
+# 只有一种情况该写在这里：**这一处确实该出现这个字面量，而且它不能改成调用唯一实现**。
+# 能改成调用唯一实现的，就不许写白名单——那正是守卫要你做的那件事。
+# 理由必须能查证；「历史原因」「暂时保留」这种没法核对的话，等于白名单烂在这儿。
+# 条目没命中任何发现 → FAIL（问题修掉了、或代码改名了，两种都要求改这一行）。
+#
+# 目前 **0 条**：四条规则在今天的代码上都不需要白名单（见 docs/silent-success-audit.md §5.7）。
