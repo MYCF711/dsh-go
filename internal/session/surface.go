@@ -15,6 +15,17 @@ type SurfaceMsg struct {
 	Source  string // user / system / developer / tool / compact-checkpoint
 	Message llm.Message
 	Summary bool // 来自 compaction/summary
+
+	// Reasoning 是这条事件里的思考正文（`type:"reasoning"` 的块，按原顺序）。
+	//
+	// 为什么不在 Message 里：`llm.Message` 是**请求形状**（role/content/tool_calls），
+	// 没有 reasoning 字段，思考块在 surfaceMessage 那一步就被丢掉了。而它是生成这次
+	// 回答时真实占掉 token 的文本（服务端把思考计进 completion），Meter 的锚点比例
+	// 就靠它对齐：漏了它，`anchorEst` 偏小 ⇒ 刻度偏大 ⇒ 自动压缩提前触发。
+	//
+	// **只加不改**：这是可选字段，既有消费者（compact.Select、History、fork 之外
+	// 的读路径）都不读它；fork 也不用它（那边要从事件搬正文，见 reasoningBlocksBySeq）。
+	Reasoning []string
 }
 
 // Surface 把事件日志折叠成 surface。
@@ -81,6 +92,11 @@ func Surface(log *v4.Log) []SurfaceMsg {
 		}
 	}
 
+	// 思考正文得回原始事件取：surfaceMessage 只能产出 llm.Message，装不下 reasoning。
+	// 识别规则与 fork 共用同一份（reasoningBlocksBySeq），不写第二份；只解
+	// assistant/message 的事件，别的类型在函数里先按 type 跳过。
+	reasoning := reasoningBlocksBySeq(log)
+
 	// 先把可见节点按日志顺序铺好（压缩事件本身不出现在这里）。
 	out := make([]SurfaceMsg, 0, len(log.Events))
 	for _, ev := range log.Events {
@@ -95,7 +111,8 @@ func Surface(log *v4.Log) []SurfaceMsg {
 			// 或 fork 过来的 source.kind = compact-checkpoint 的 user/message（就在这里）。
 			out = append(out, SurfaceMsg{
 				Seq: ev.Seq, Type: ev.Type, Source: src, Message: m,
-				Summary: src == "compact-checkpoint",
+				Summary:   src == "compact-checkpoint",
+				Reasoning: reasoning[ev.Seq],
 			})
 		}
 	}

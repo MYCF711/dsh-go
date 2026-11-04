@@ -12,7 +12,7 @@
 
 | 结论 | 条数 |
 |---|---|
-| 真缺陷（已修，附红→绿） | 14 + 2（原「越界移交」的两条，见 §5.1） |
+| 真缺陷（已修，附红→绿） | 16 + 2（原「越界移交」的两条见 §5.1；`session.Surface` 漏思考的下游两条见 §5.5） |
 | 真缺陷（越界，已登记移交；`cmd/dshd/serve*.go` 当时不许动）→ 已由后续会话修复 | 1 → 0 |
 | 可接受（说清为什么不伤人） | 18 |
 | 需要设计决定（两个方向的代价都写清，交给用户） | 3 |
@@ -120,6 +120,8 @@
 | 回合失败时没有 `turn/end`（悬挂回合） | `agent.Run` 出错后调用方直接返回，不补结局事件 | 进程退出码非 0 / ACP 回 error，**不静默**；但日志里 turn 没有闭合 | **已解决（D1，2026-11-04）**：run / ACP / serve 子进程三条路的入口都并到同一个出口，失败补 `turn/end{reason.kind=error/aborted}`（见 §4 D1 结论） |
 | `modelRunner` 用 `m.Text == ""` 过滤历史 | assistant 只有 tool_calls 时 `Text` 为空 ⇒ 整条消息被丢掉，后续 tool 结果找不到对应调用 | 模型会看到"孤立的工具结果"；历史语义被悄悄改掉 | **真缺陷（已修，见 §5.1）**：原在 `cmd/dshd/serve_turn.go`，当时按边界不许改；后来放开，判据换成 `assistantHasPayload`（正文/思考块/tool_calls 任一） |
 | `modelRunner` 空响应 | 旧：只写 user 消息 + `turn/done` | 与 LLM 层第 1 条同形 | **真缺陷（已修，间接）**：§3.2 的 llm 守卫让 `Stream` 直接报错 ⇒ `turn/error`；未改 `serve_turn.go` |
+| `cmd/dshd/acp.go` 的 `Load` 只按 `session.Surface` 推 text + tool_calls | 思考块在 surface 投影那步就丢了 ⇒ 只有思考的回答正文为空、没有调用，`session/load` 重放里**整条消失** | 断线重连/重开之后那一轮像没发生过（有正文的也丢了"为什么这么干"） | **真缺陷（已修，见 §5.5）**：复用 `session.ReasoningBlocksBySeq`，按 思考 → 正文 → 调用 重放 |
+| `session.Meter.Estimate(session.Surface(...))` 不计思考正文 | 自动压缩的触发器就是它；思考通常比正文长 ⇒ 估算系统性偏低，校准到服务端锚点后又会偏高 | 该压的时候没压，或反方向提前压：多花一次摘要的钱、丢还有用的上下文（比显示不准更实） | **真缺陷（已修，见 §5.5）**：`SurfaceMsg` 尾部只加可选 `Reasoning`，`rawEstimate` 计入；tool/result 不重复算 |
 
 ### 2.4 Transport 层
 
@@ -516,7 +518,8 @@ $ go test ./cmd/dshd -run TestDescriptionRuleIsOneJudge -v -count=1
 
 > **2026-11-04 更新**：前两条（`serve_turn.go` 的历史过滤、`ServerFrame{Seq: 1}`）
 > 当时因为 `cmd/dshd/serve*.go` 被别人占着而移交，**现已修复**——原条目保留不动，
-> 证据见 §5.1；`internal/session/fork.go` 的思考块也已在 §5.4 修复。
+> 证据见 §5.1；`internal/session/fork.go` 的思考块也已在 §5.4 修复；
+> `session.Surface` 漏思考的下游两条（ACP `session/load` 重放、`Meter.Estimate`）见 §5.5。
 > 表里仍标着"登记"的只剩 `session.compact` 争锁与模块装配守卫两条。
 
 | 项 | 为什么没改 | 建议 |
@@ -865,6 +868,133 @@ $ go test ./internal/session -run 'TestFork' -count=1 -v
 - `compaction/summary` 替身仍是 `source.kind = compact-checkpoint` 的 user 消息
   （刻意：`shadowedSeqs` 在新文件里不存在，照搬会指向不存在的 seq）。
 
+### 5.5 `session.Surface` 漏思考的下游两条：ACP `session/load` 重放丢整条回答、`Meter.Estimate` 少算思考（2026-11-04，已解决）
+
+**登记原文（保留）**：
+
+> A. `cmd/dshd/acp.go:744` 的 `Load` 只按 `session.Surface` 推 text + tool_calls，所以 ACP 的
+> `session/load` 回来时，**"只有思考"的回答整条消失**。
+>
+> B. `Meter.Estimate(session.Surface(...))` 不计思考正文。后果：auto-compact 的 token 估算偏低
+> → 过早压缩（多花 token、丢上下文）。这比显示不准更实。
+
+根因与 §5.1–§5.4 是同一个判据错误的第六、七次出现，而且这两条**共用同一个源头**：
+`session.Surface` 只投影 text + tool_calls（`SurfaceMsg.Message` 是 `llm.Message`，没有
+reasoning 字段，`type:"reasoning"` 的块在 `surfaceMessage` 那步就没了）。§5.4 修的是写侧
+（fork），这两条是读侧/计量侧——所以判据还是那一个：**"这条消息有没有内容 / 占多少上下文"
+必须认思考块，而不是只认正文**。
+
+#### A. `session/load` 重放里"只有思考"的回答整条消失
+
+`acpRunner.Load` 按 surface 重放：正文空、没有工具调用，于是循环体一个 `emit` 都不发。
+断线重连/重开之后，那一轮在客户端上**像没发生过**——比"少一段文字"更贵的是它不报错。
+
+**修法：复用 fork 那份识别规则，不写第三份**。`internal/session/fork.go` 新增导出包装
+`ReasoningBlocksBySeq`（一行转发 `reasoningBlocksBySeq`；不改内部函数名——`Fork` 与它的测试
+已经在用旧名字，改名只会把这次修复摊到更多调用点）。`Load` 先按 seq 取思考正文，再按
+**思考 → 正文 → 调用** 重放，与 `serve_turn.assistantBlocks`、`fork.copyNode` 同序。
+
+**这一条没给 `SurfaceMsg` 加字段**：Load 跟 fork 一样回原始事件取。
+
+**红（改之前，同一份测试 `cmd/dshd/acp_load_reasoning_test.go`）**：
+
+```
+--- FAIL: TestACPLoadReplaysReasoningOnlyAssistant
+    acp_load_reasoning_test.go:101: 重放了 5 条事件，期望 7 条：
+         got: assistant/text|你是 dsh-go; assistant/text|数文件; assistant/text|我先数一下; tool/call|; assistant/text|68 个
+        want: assistant/text|你是 dsh-go; assistant/text|数文件; assistant/reasoning|先想一下：用户要的是文件数; assistant/text|我先数一下; tool/call|; assistant/text|68 个; assistant/reasoning|用户其实想知道目录大小
+```
+
+`got` 里连第三条 assistant 都没有：它（只有思考）在重放里一条事件也发不出来。
+
+**绿**：
+
+```
+--- PASS: TestACPLoadReplaysReasoningOnlyAssistant
+--- PASS: TestACPLoadWithoutReasoningReplaysNoThoughts   # 反方向：日志里没思考时不许凭空多出 reasoning 事件
+```
+
+判据钉的是**整条重放序列**（种类 + 正文，逐条比对），不是"有没有 reasoning 事件"：
+所以顺序被一起钉住了——思考在前、正文在中、调用在后；system/user/tool 结果的位置也不许动。
+
+#### B. `Meter.Estimate` 少算思考正文（自动压缩的触发器）
+
+`Meter.Estimate` 是自动压缩的**唯一触发器**（`acpRunner.autoCompactNow`、`dshd run` 的
+budget 检查），它吃 `[]SurfaceMsg`。所以修法只能是让 Surface 节点带上思考正文，再让
+`rawEstimate` 计入：
+
+- **`SurfaceMsg` 尾部只加一个可选字段** `Reasoning []string`（该事件的思考块，按原顺序），
+  `Surface` 用同一份 `reasoningBlocksBySeq` 铺上去；
+- **只加不改**：既有字段、`llm.Message` 的形状、`codecs/v4` 落盘格式一处没动；
+  `compact.Select` / `History` / fork 的写侧都不读这个字段；
+- **没有**把思考拼进 `Content`：那会把模型的草稿当成"已经给用户的回答"，
+  与 §5.3 里 `session.load` 的取舍（有正文时不带 reasoning）也是一致的。
+
+**判据不是"数字变大"，是同一份会话改前/改后的差 ≈ 思考正文的 token 量。**
+改前对照用"同一份日志去掉思考块"来当：旧代码看不见思考，等价于那份日志算出来的数。
+
+| | 正文 1,000 字 | ＋思考 10,000 字 |
+|---|---|---|
+| `Estimate`（未校准） | 1,008 | 11,008 |
+| 差 | — | **10,000** ＝ `estimateString(思考正文)` |
+| 倍率 | 1× | ≈ 10.9× |
+
+口径沿用 `estimateString`（tokens.go 里与 magpie usage 反推过的经验值）：中文 1 字 ≈ 1 token，
+ASCII 4 字节 ≈ 1 token。所以 10k 字思考 ≈ 10k token。校准路径上 `Observe` 的 `estNow` 与
+`Estimate` 用的是同一个函数，比例仍自洽。
+
+**方向写清（否则这段容易被读成"数字越大越好"）**：服务端的 `usage.totalTokens` 里，
+**这一次生成**的思考是计进 completion 的；而 Meter 的锚点比例就是
+`anchorReal / anchorEst`，`anchorEst` 也是这个函数算的。所以少算思考 ⇒ `anchorEst` 偏小
+⇒ 刻度偏大 ⇒ 之后每一步都估高 ⇒ **压缩提前**（这才是 B 的"多花 token、丢上下文"）。
+反方向也要说明：**历史里的思考并不会被重新发给模型**（`llm.Message` 装不下 reasoning，
+请求路径只拿它判"有没有内容"），所以把历史思考一并计入是**保守的上界**——宁可早压一点，
+也不要在真超窗时才动手。这条取舍写在 `rawEstimate` 的注释里，判据钉的是"思考必须被算进去"，
+不是"估算等于真实值"。
+
+**不重复计数（读代码 + 逐项手算双重确认）**：`tool/result` 的正文只从 `m.Message.Content`
+算一次；assistant 的 `ToolCalls` 是调用侧的 name/arguments（与结果正文本来就是不同文本）；
+思考只走 `Reasoning`，与 `Content` 无交集；结构开销按**节点** +4，不按块数加。
+
+**红**：
+
+```
+--- FAIL: TestMeterEstimateCountsReasoningText
+    tokens_reasoning_test.go:95: 思考正文没有被算进估算：改后 - 改前 = 0，期望 10000（思考 10000 字）
+        改前 = 1008、改后 = 1008
+--- FAIL: TestMeterReasoningDoesNotDoubleCountToolResults
+    tokens_reasoning_test.go:125: 估算 = 1267，逐项手算 = 11267：有项被算重/漏算（思考 10000、正文 1000、结果 250）
+```
+
+**绿**：
+
+```
+--- PASS: TestMeterEstimateCountsReasoningText
+--- PASS: TestMeterReasoningDoesNotDoubleCountToolResults
+--- PASS: TestSurfaceCarriesReasoningText   # 来源：思考挂在 SurfaceMsg 上、且没被拼进正文；别的角色不误伤
+--- PASS: TestForkKeepsReasoningBlocks      # 换成导出包装之后 fork 的行为与 §5.4 完全一致
+```
+
+改动文件：`internal/session/{fork,surface,tokens}.go`、`cmd/dshd/acp.go`；测试
+`cmd/dshd/acp_load_reasoning_test.go`、`internal/session/tokens_reasoning_test.go`。
+`internal/kernel`、`internal/transport`、`codecs/v4`、`modules/`、`cmd/dshtui/`、
+`cmd/dshd/serve*.go` 一行没动。
+
+**同类还剩（登记，本轮不改）**：
+
+- `cmd/dshd/acp.go` 的 `Prompt` 写盘时只铺 text + tool_calls（`AssistantTurn.Reasoning` 没写成
+  `reasoning` 块）：**ACP 会话的思考从不落盘**。于是 A 的重放、B 的估算都只在"别的入口
+  （`dshd run` / `serve`）写的会话"上生效；从零开始的 ACP 会话仍然没有思考可读。修法与
+  `serve_turn.assistantBlocks` 同款（一行 `session.ReasoningBlock`），本轮按任务书只动了 `Load`。
+- `session.HistoryToSurface`（ACP `usage_update` 的 `used` 用它估算）装不下思考：`r.hist` 是
+  `[]llm.Message`。那是显示路径，且 `contextUsed` 优先用服务端实测的 prompt+completion，影响小。
+- `compact.keepFrom` 的尾巴预算用 `session.EstimateRunes(Content)`，也不含思考：它决定"留多长的
+  尾巴"，不决定"要不要压"（后者才是 `Meter.Estimate`），所以不在本轮判据里。
+
+**没验证的**：真机 ACP 客户端（需要新 `dshd` + 客户端断线重连走一遍 `session/load`）；
+`-race`；10k 字思考是合成语料——真实思考长度随模型与 `--reasoning` 强度变，判据是差值的
+**比例关系**（差 = 思考正文的 token），不是这个绝对值。
+
 ## 6. 复跑与验收
 
 ```bash
@@ -882,6 +1012,12 @@ git archive HEAD | tar -x -C /tmp/hc-ss && (cd /tmp/hc-ss && go build ./...)
 **D3 复跑（2026-11-04，`GOCACHE=/tmp/gocache-d3`）**：扫描器 15 条守卫 0 FAIL；`go build ./...` /
 `go vet ./...` 通过；`go test ./... -count=1` 全部 `ok`；`git archive HEAD` 隔离副本 `go build ./...`
 退出码 0。工具表快照 `cmd/dshd/testdata/tools.snapshot.json` 无 diff。
+
+**D4 复跑（2026-11-04，`GOCACHE=/tmp/gocache-acp`，§5.5 那两条）**：扫描器 15 条守卫 0 FAIL、
+退出码 0；`go build ./...` / `go vet ./...` 通过；`go test ./... -count=1` 退出码 0（48 个包 `ok`，
+无 `FAIL`）；`git archive HEAD` 隔离副本 `go build ./...` 退出码 0——HEAD 单独能编译（本次改动未提交，
+判的是"基线仍然自洽"）。新增测试文件 `cmd/dshd/acp_load_reasoning_test.go`、
+`internal/session/tokens_reasoning_test.go`。
 
 **没有验证的**：真机（需要新 `dshd` + 网关）；`-race`；界面线消费这些新错误码/`session/reset` 的行为。
 单测只证明"守卫在对应的函数里生效"，不证明"真实网关/真实 UI 会按预期处理"。

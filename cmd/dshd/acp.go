@@ -741,8 +741,24 @@ func (r *acpRunner) Load(ctx context.Context, sessionID, cwd string, emit func(a
 	if err != nil {
 		return fmt.Errorf("读会话失败: %w", err)
 	}
+	// 思考块得回原始事件取：session.Surface 只投影 text + tool_calls
+	// （`llm.Message` 没有 reasoning 字段，`type:"reasoning"` 的块在投影那步就丢了）。
+	// 与 fork 共用同一份识别规则（session.ReasoningBlocksBySeq），不写第二份。
+	//
+	// 不取会怎样：**只有思考**的回答在重放时一个事件都发不出来（正文为空、
+	// 没有工具调用），断线重连/重开之后那一轮就像没发生过；有正文的回答也丢了
+	// "它为什么这么干"。
+	reasoning := session.ReasoningBlocksBySeq(back)
 	for _, node := range session.Surface(back) {
 		m := node.Message
+		// 顺序与 serve_turn.assistantBlocks / fork.copyNode 一致：思考 → 正文 → 调用。
+		for _, text := range reasoning[node.Seq] {
+			if err := emit(agent.Event{
+				Kind: agent.EventReasoning, Text: text, Turn: 1, Step: 1,
+			}); err != nil {
+				return err
+			}
+		}
 		if m.Content != "" {
 			kind := agent.EventText
 			if m.Role == "user" {

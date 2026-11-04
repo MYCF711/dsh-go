@@ -109,6 +109,17 @@ func reasoningBlocksBySeq(log *v4.Log) map[int64][]string {
 	return out
 }
 
+// ReasoningBlocksBySeq 是 reasoningBlocksBySeq 的导出版本，给**包外**的读路径复用。
+//
+// 现在有两个包外使用者，都只要这一份识别规则、不要第二份实现：
+//   - cmd/dshd 的 ACP `session/load` 重放（`acpRunner.Load`）：Surface 装不下思考，
+//     重放时得回原始事件取，否则"只有思考"的回答在 load 之后整条消失；
+//   - 诊断/测试。
+//
+// 为什么不直接把内部函数改名：Fork 与它的测试已经在用未导出的名字，改名会让
+// 这处修复多改一批调用点；包一层既不加第二份逻辑，也不动既有形状。
+func ReasoningBlocksBySeq(log *v4.Log) map[int64][]string { return reasoningBlocksBySeq(log) }
+
 // copyNode 把 surface 上的一个节点写成新会话里的一条事件。
 //
 // reasoning 是源事件里的思考正文（surface 装不下，见 reasoningBlocksBySeq），
