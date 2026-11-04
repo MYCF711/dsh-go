@@ -131,6 +131,11 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 		cmd.Stderr = &stderr
 	}
 
+	// 起跑水位必须在**起子进程之前**取：子进程一起来就会写 turn/start 与
+	// user/message，等 follow 的 goroutine 被调度起来再问"日志现在多长"，
+	// 那两帧就被当成历史跳过去了（见 followBaseline）。
+	prog := r.followBaseline(sessionID)
+
 	if err := cmd.Start(); err != nil {
 		r.emitTurn(sessionID, turnID, err)
 		return err
@@ -142,7 +147,6 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	// 边跑边推：日志是 append 的，按条数差量推就够。
 	// 必须**等 follow 真的退出**再发终局帧：否则它可能在我们发出 turn/done 之后
 	// 又推一帧（子进程刚写完、我们刚读完的那个窗口），界面就会看到"结束后还有消息"。
-	var prog followProgress
 	var fw sync.WaitGroup
 	done := make(chan struct{})
 	// DSHD_SERVE_NO_FOLLOW=1 时不起 follow goroutine。
@@ -199,11 +203,52 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	return nil
 }
 
-// follow 每 200ms 看一次日志，把 seq 更大的**全部事件**推出去。
+// followBaseline 取 follow 的起跑水位：**这一轮开始之前**日志已经写到哪。
+//
+// 为什么要有它：follow 原来从 offset 0 / lastSeq 0 起跑，于是**每一轮**都把
+// 整份会话日志从头再推一遍——第 k 轮界面上就多出前 k-1 轮的消息。四轮实测
+// （scripts/tui-session-e2e.py）：四次 prompt、日志里 4 条 user/message，
+// 而 journal 里 10 条 user/message、10 个 turn/start（seq 1-66）。
+// **日志是干净的，脏的是推给界面的那一路。**
+//
+// 为什么用文件长度而不是"最后一条事件的 seq"：日志是 O_APPEND 追加的，
+// 长度就是下一帧的起点；按 seq 过滤则要先把整份日志读一遍（2.2 万事件
+// 300ms 级），每轮付一次没有意义。尾部有半帧也不影响：新帧从 EOF 开始，
+// splitFrames 从那里解是干净的。
+//
+// 返回值同时带着已解析的 path：follow 拿到它就不用再 glob 一次。
+//
+// lastSeq 从 **-1** 起，不是 0：v4 的 seq 从 0 开始（`session.Log` 写下的第一条
+// 事件就是 seq=0），而 follow 的判据是 `ev.Seq <= lastSeq` ——初值取 0 会把
+// **每个会话的第一条事件**永久吞掉。实测证据：tui-session-e2e 的日志第一条是
+// seq=0 的 system/message，四轮里界面上从来没有它。
+func (r *loopRunner) followBaseline(sessionID string) followProgress {
+	base := followProgress{lastSeq: -1}
+	src := newSessionSource(r.home, "")
+	path, err := src.resolve(sessionID)
+	if err != nil {
+		// 还没有这份会话（多半是子进程会建）：本来就是空的，从 0 起跑没有历史可重复。
+		return base
+	}
+	base.path = path
+	st, serr := os.Stat(path)
+	if serr != nil {
+		// 拿不到"现在多长"就没法划水位。退回老行为（可能重推历史）——
+		// 文件刚被删/换的时候，**看得见比干净重要**：宁可重复，也不吞掉这一轮。
+		return base
+	}
+	base.offset = st.Size()
+	return base
+}
+
+// follow 每 200ms 看一次日志，把起跑水位之后的**全部事件**推出去。
 //
 // 为什么不是只推消息：界面要显示"它调了什么工具"。
 // 只推 assistant/message 的话，用户看到答案却看不到过程——
 // 而"看不到过程"正是这类 agent 界面最不能接受的事。
+//
+// **起跑水位由 followBaseline 给**（Run 在起子进程之前取）：offset 之前的
+// 事件属于已经推过的轮次，再推一遍就是界面上"一次 prompt 变两三turn"的重复。
 func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan struct{}, prog *followProgress) {
 	src := newSessionSource(r.home, "")
 	// 全程复用一个解码器：这个循环每 200ms 跑一次，建一次解码器就够。
@@ -221,9 +266,12 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 		defer rd.Close()
 	}
 	var (
-		offset  int64
-		lastSeq int64
-		path    string
+		// 起跑水位：这一轮之前写下的都不再推（见 followBaseline）。
+		offset = prog.offset
+		// -1 = 本轮还没推过任何一条。**不能是 0**：v4 的 seq 从 0 起，
+		// `ev.Seq <= lastSeq` 会把 seq=0 那条（每个会话的第一条事件）吞掉。
+		lastSeq = prog.lastSeq
+		path    = prog.path
 	)
 	defer func() {
 		prog.offset, prog.lastSeq, prog.path = offset, lastSeq, path

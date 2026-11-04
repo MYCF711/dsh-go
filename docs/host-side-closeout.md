@@ -48,11 +48,51 @@ python scripts/h-suite.py --fast    # 不需要模型的 7 条（约 1 分钟）
 | 条目 | 缺什么 | 在哪个仓 |
 |---|---|---|
 | H13 pending cancel | cancel→拒绝、工具不执行、`approval/cancel`、第二轮 prompt | **本仓**；补失败测试与实现后再验 |
-| H14/H6 serve 接线 | follow 零水位重复、debug runner 绕过 journal；特殊 replay/reset/pong 形状补测试 | **本仓**；不能用核心 journal 单测代替 |
+| H14/H6 serve 接线 | follow 零水位重复（**已修，见 §5.1**）；debug runner 绕过 journal、特殊 replay/reset/pong 形状补测试 | **本仓**；不能用核心 journal 单测代替 |
 | H8 stale_epoch | 特殊错误体缺 `retryable` | **本仓**；统一 errorBody 并补四字段测试 |
 | H14 UI | 快照旧路径/帧/messages、History 带 epoch、共享 golden、reset 与宿主重启 cookie | `../dsh-ui` + 跨仓 |
 | H1 / H2 / H9 / H10 | 当前同版本 UI 消费、未知值与真实 home 副本遍历 | `../dsh-ui` + 跨仓 |
 | H6 UI 恢复 | reasoning 已有显示证据；仍需断线恢复、去重与同版本复验 | 两仓 |
+
+### 5.1 【已收口】follow 零水位重复：一次 prompt 在界面上变成两三turn
+
+**症状（真机，`scripts/tui-session-e2e.py` 四轮）**：四次 `session.prompt`，
+v4 日志里恰好 4 条 `user/message`（seq 2/7/15/23，字节级干净）；
+界面收到的 journal 里是 10 条 `user/message`、10 个 `turn/start`（seq 1–66）——
+第 k 轮多出前 k-1 轮的历史，看起来像"一次 prompt 跑了三四turn"。
+
+**根因（一处）**：`loopRunner.follow` 每轮从 `offset 0 / lastSeq 0` 起跑，
+而 `follow` 的出口就是 `emitFrame`（journal 唯一发号入口），于是**每一轮都把整份
+会话日志从头再推一遍**。v4 日志本身是 append-only 且正确的，脏的只有"推给界面"
+那一路。子进程那条路没有重复写：父进程**只读**日志，不落盘。
+
+**同一处的第二格**：v4 的 seq 从 **0** 起（`session.Log` 的第一条事件就是 `seq=0`），
+而 `follow` 的判据是 `ev.Seq <= lastSeq`。`lastSeq` 初值取 0 时，
+**每个会话的第一条事件永远推不出去**——e2e 的日志第一条是 `seq=0` 的
+`system/message`，四轮里界面上一次都没有；首条若正好是 `turn/start`，
+界面就是"有 user/message、没有 turn/start"。
+
+**改法**（`cmd/dshd/serve_tools.go`，只有这一处）：
+
+- `followBaseline` 在**起子进程之前**取水位：解析会话路径 + 文件长度
+  （O_APPEND 的下一帧就从 EOF 开始）。必须在 spawn 之前——子进程一起来就写
+  `turn/start`/`user/message`，等 follow 的 goroutine 被调度起来再问"现在多长"
+  会把这两帧当历史跳过去。
+- `follow` 从水位之后读；`lastSeq` 初值 **-1**，`seq=0` 那条不再被吞。
+- 水位同时把已解析的 path 带过去，于是 `done` 之后的那个 drain 分支有了路径：
+  以前子进程 200ms 内就退出的轮次（快失败、参数错）**整轮一条帧都没有**，只剩
+  `turn/done`。这条是修水位时顺带关掉的，`TestLoopRunnerFastChildStillPushesFrames` 钉住。
+
+**证据**：
+
+| 层 | 证据 |
+|---|---|
+| 单测（旧实现红、新实现绿） | `cmd/dshd/serve_follow_test.go`：`TestLoopRunnerOnlyPushesThisTurnsFrames`（历史重推：旧 `user/message=2`）、`TestLoopRunnerFastChildStillPushesFrames`（旧整轮 0 帧）、`TestLoopRunnerPushesFirstEventOfNewSession`（旧丢 `seq=0`）、`TestFollowBaseline*` |
+| 帧序号（真机） | e2e 每轮 `user/message` 条数 `[1,1,1,1]`；WS 抓包 `turn/start` 4 条、`user/message` 4 条 |
+| 日志没被改坏 | 同一份 e2e 会话的 v4 日志仍是 26 条事件、4 条 `user/message` |
+
+**边界**：`codecs/v4` 落盘格式一行没动；`serve_journal.go` 的 `emitFrame` 仍是唯一发号入口；
+`modelRunner`（`DSHD_SERVE_MODEL_RUNNER=1` 的调试路）行为未变，它本来就不 tail 日志。
 
 ## 6. 两条已知未验证（写清楚，不让它悄悄变成"应该没问题"）
 
