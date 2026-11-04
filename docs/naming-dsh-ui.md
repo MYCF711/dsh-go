@@ -1,5 +1,24 @@
 # 界面仓要改的：统合到「DSH GUI GO」
 
+> **2026-11-04 用户定的口径（原话）**：
+>
+> > 「exe 要写产品名，而且要全程，代码里面无所谓。因为 exe 是面向用户的。
+> >  就像 DSH 官方也是全程，而且还分大小写」
+>
+> 官方参照物：`D:\DeepSeek Harness\Desktop\DeepSeek Harness.exe` —— 全名、带空格、分大小写，
+> 任务管理器里就叫 `DeepSeek Harness`。所以三条线的产物是：
+>
+> | 角色 | 产品名 | exe 文件名 |
+> |---|---|---|
+> | 宿主 | `DSH GO` | `DSH GO.exe` |
+> | TUI | `DSH TUI GO` | `DSH TUI GO.exe` |
+> | 界面 | `DSH GUI GO` | `DSH GUI GO.exe` |
+>
+> 换句话说：**先把产品名定下来，exe 就逐字照抄它**。`dshgo.exe` / `dshgogui.exe` / `dshtui.exe`
+> 这类缩写名不算"全程"，要改。代码内部的包名、变量名、函数名随意。
+
+
+
 > 这份是**跨仓交接单**，给 `../dsh-ui` 那边执行。本仓（`DSH-GO`）已经把 TUI 侧做完
 > （`754105f` 之后、`7b4c5cf M392`），这里是同一件事在界面仓的对应清单。
 >
