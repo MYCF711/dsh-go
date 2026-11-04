@@ -516,7 +516,8 @@ $ go test ./cmd/dshd -run TestDescriptionRuleIsOneJudge -v -count=1
 
 > **2026-11-04 更新**：前两条（`serve_turn.go` 的历史过滤、`ServerFrame{Seq: 1}`）
 > 当时因为 `cmd/dshd/serve*.go` 被别人占着而移交，**现已修复**——原条目保留不动，
-> 证据见 §5.1。后两条仍然登记着。
+> 证据见 §5.1；`internal/session/fork.go` 的思考块也已在 §5.4 修复。
+> 表里仍标着"登记"的只剩 `session.compact` 争锁与模块装配守卫两条。
 
 | 项 | 为什么没改 | 建议 |
 |---|---|---|
