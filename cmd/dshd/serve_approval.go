@@ -49,6 +49,9 @@ type approvalBroker struct {
 	// onJobs 收到子进程推上来的后台任务清单（`@@JOBS@@` 行）。
 	// nil = 这个宿主不关心（老测试）。
 	onJobs func(jobs []transport.JobInfo)
+	// onJobsForSession 保留原全局 last-snapshot list 语义，同时给每行补真实归属。
+	onJobsForSession func(sessionID string, jobs []transport.JobInfo)
+	actions          *jobActionBroker
 
 	// timeout 到了没人答 → 按**拒绝**结算。没人回答时"默认同意"是最坏的选择。
 	timeout time.Duration
@@ -126,6 +129,10 @@ func (b *approvalBroker) setEmit(fn func(sessionID, typ string, data json.RawMes
 // **必须逐行**：stderr 之前是 bytes.Buffer（跑完才读），那样审批要等到轮次结束——
 // 而审批的意义就是"跑到一半停下来问"。这里是唯一的改动理由。
 func (b *approvalBroker) Watch(r io.Reader, alsoTo io.Writer) {
+	b.WatchSession("", r, alsoTo)
+}
+
+func (b *approvalBroker) WatchSession(sessionID string, r io.Reader, alsoTo io.Writer) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
@@ -138,14 +145,17 @@ func (b *approvalBroker) Watch(r io.Reader, alsoTo io.Writer) {
 		// 后台任务清单也走这条 stderr 通道（见 main.go 的 emitJobs）。
 		// **先认它再认审批**：两个标记前缀不同，顺序不影响正确性，
 		// 但把新的放前面，读代码的人一眼看到"这条通道不止审批一件事"。
+		if b.actions != nil && b.actions.deliver(line) {
+			continue
+		}
 		if respID, payload, ok := parseJobsOutResp(line); ok {
 			b.deliverJobsOut(respID, payload)
 			continue
 		}
 		if jobs, ok := parseJobsLine(line); ok {
-			// onJobs 没接就当没有这件事：这条通道主要是审批，
-			// 后台任务清单是顺路带过来的（原先这里是个空 else 分支，静态检查抓到了）。
-			if b.onJobs != nil {
+			if b.onJobsForSession != nil {
+				b.onJobsForSession(sessionID, jobs)
+			} else if b.onJobs != nil {
 				b.onJobs(jobs)
 			}
 			continue
@@ -377,7 +387,9 @@ func (b *approvalBroker) PendingFrames(sessionID string) []transport.ServerFrame
 	raw := b.Pending(sessionID)
 	out := make([]transport.ServerFrame, 0, len(raw))
 	for _, d := range raw {
-		out = append(out, transport.ServerFrame{Type: "approval/request", Data: d})
+		out = append(out, transport.ServerFrame{
+			Type: "approval/request", Data: d, Time: time.Now().UnixMilli(),
+		})
 	}
 	return out
 }

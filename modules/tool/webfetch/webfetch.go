@@ -154,7 +154,7 @@ func truncHint(truncated bool) string {
 }
 
 // versionish 只用于 User-Agent；版本号由宿主在装配时不注入，这里给个稳定值。
-const versionish = "0.2.1"
+const versionish = "0.2.2"
 
 // Module 返回装配用的模块描述。
 func Module() kernel.Module {

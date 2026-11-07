@@ -22,7 +22,7 @@ func TestLiveMagpie(t *testing.T) {
 	}
 	model := os.Getenv("DSHD_LLM_MODEL")
 	if model == "" {
-		model = "group/deepseek-v4.1-flash1017"
+		model = "group/deepseek-v4.1-flash-1017"
 	}
 
 	c := New(base, os.Getenv("DSHD_LLM_KEY"))

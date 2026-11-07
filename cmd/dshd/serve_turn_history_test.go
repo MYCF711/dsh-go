@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -251,7 +252,8 @@ func TestModelRunnerHistoryKeepsTextOnlyAssistant(t *testing.T) {
 
 // 红：assistant/message 帧原来写死 Seq:1 并直接 pub，绕过 journal——
 // 客户端会看到重复 seq、没有 time，补洞时也读不到这一帧。
-// 绿：走 emitFrame，seq 由 journal 接着发（这里先垫一帧，所以应是 2）。
+// 绿：走 emitFrame，seq 由 journal 接着发。这里先垫一帧，真实 step/start/text
+// 分别是 2/3，因此 assistant/message 必须是 4，不能写死或绕过新增事件。
 func TestModelRunnerAssistantFrameUsesJournalSeq(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
@@ -279,8 +281,16 @@ func TestModelRunnerAssistantFrameUsesJournalSeq(t *testing.T) {
 	if assist == nil {
 		t.Fatalf("没推出 assistant/message 帧：%+v", pushed)
 	}
-	if assist.Seq != 2 {
-		t.Fatalf("assistant/message 帧的 seq = %d，要 2（journal 垫了一帧；写死 1 就是绕过了 journal）", assist.Seq)
+	if assist.Seq != 4 {
+		t.Fatalf("assistant/message 帧的 seq = %d，要 4（垫帧 + step/start + text；写死或绕序都不对）", assist.Seq)
+	}
+	var frameTypes []string
+	for _, frame := range pushed {
+		frameTypes = append(frameTypes, frame.Type)
+	}
+	wantTypes := []string{"step/start", "assistant/text", "assistant/message", "step/end", TurnDone}
+	if !reflect.DeepEqual(frameTypes, wantTypes) {
+		t.Fatalf("modelRunner 完整帧序列=%v want=%v", frameTypes, wantTypes)
 	}
 	if assist.Time == 0 {
 		t.Fatalf("assistant/message 帧没有 time——硬编码 ServerFrame 的典型症状：%+v", *assist)

@@ -26,7 +26,10 @@ type Context struct {
 	// 用途：给不同角色的会话喂不同的手册——维护者读 AGENTS.md，
 	// 写代码的执行者读 docs/WORKER.md。两者内容差一个量级。
 	ExtraRulesPath string
-	// MaxWorkspaceBytes 是 AGENTS.md 这类外部内容的字节上限。
+	// GlobalRulesPath 是全局 AGENTS.md 的路径（绝对路径或相对 Cwd）；空 = 不注入全局规则。
+	GlobalRulesPath string
+	// MaxGlobalBytes 与 MaxWorkspaceBytes 是两条规则链各自的正文字节上限，互不争用。
+	MaxGlobalBytes    int
 	MaxWorkspaceBytes int
 }
 
@@ -40,9 +43,13 @@ type Provider interface {
 // 很小的提问从 1,909 input token 涨到 6,248（+4,339）。8000 字节 ≈ 2.5k token，
 // 是「规则基本还在、每轮不心疼」的折中；要全量传用 MaxWorkspaceBytes 或 CLI 参数。
 const defaultMaxWorkspaceBytes = 8000
+const defaultMaxGlobalBytes = 8000
 
 // Assemble 按顺序拼接所有非空段。
 func Assemble(ctx Context, providers ...Provider) string {
+	if ctx.MaxGlobalBytes <= 0 {
+		ctx.MaxGlobalBytes = defaultMaxGlobalBytes
+	}
 	if ctx.MaxWorkspaceBytes <= 0 {
 		ctx.MaxWorkspaceBytes = defaultMaxWorkspaceBytes
 	}
@@ -114,6 +121,22 @@ func (ToolGuide) Build(c Context) string {
 	return b.String()
 }
 
+// GlobalRules 把全局 AGENTS.md 带进来；它与工作区规则各有独立预算。
+type GlobalRules struct{}
+
+func (GlobalRules) Name() string { return "global" }
+
+func (GlobalRules) Build(c Context) string {
+	if c.GlobalRulesPath == "" {
+		return ""
+	}
+	p := c.GlobalRulesPath
+	if !filepath.IsAbs(p) && c.Cwd != "" {
+		p = filepath.Join(c.Cwd, p)
+	}
+	return rulesFromFile("全局约定", p, c.MaxGlobalBytes)
+}
+
 // WorkspaceRules 把工作区里的 AGENTS.md 带进来（有界、可缺省）。
 type WorkspaceRules struct{}
 
@@ -133,23 +156,29 @@ func (WorkspaceRules) Build(c Context) string {
 	}
 	candidates = append(candidates, filepath.Join(c.Cwd, "AGENTS.md"))
 	for _, p := range candidates {
-		b, err := os.ReadFile(p)
-		if err != nil || len(b) == 0 {
-			continue
+		if section := rulesFromFile("工作区约定", p, c.MaxWorkspaceBytes); section != "" {
+			return section
 		}
-		limit := c.MaxWorkspaceBytes
-		text := string(b)
-		if limit > 0 && len(text) > limit {
-			text = text[:limit] + "\n\n（以上内容已截断：原文件更大，需要细节请用 read 工具）"
-		}
-		return "工作区约定（" + filepath.ToSlash(p) + "）：\n" + strings.TrimSpace(text)
 	}
 	return ""
+}
+
+// rulesFromFile 的 limit 只限制文件正文，不包含段标题和截断说明。
+func rulesFromFile(title, path string, limit int) string {
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	text := string(b)
+	if limit > 0 && len(text) > limit {
+		text = text[:limit] + "\n\n（以上内容已截断：原文件更大，需要细节请用 read 工具）"
+	}
+	return title + "（" + filepath.ToSlash(path) + "）：\n" + strings.TrimSpace(text)
 }
 
 // ---------- 便捷入口 ----------
 
 // Default 是默认的装配组合。
 func Default(c Context) string {
-	return Assemble(c, Runtime{}, ToolGuide{}, WorkspaceRules{})
+	return Assemble(c, Runtime{}, ToolGuide{}, GlobalRules{}, WorkspaceRules{})
 }

@@ -42,7 +42,7 @@ const (
 	maxErrSnippet = 500
 	apiBase       = "https://api.github.com/"
 	// 只用于 User-Agent；与宿主版本解耦，避免把版本号写进 Schema 契约。
-	versionish = "0.2.1"
+	versionish = "0.2.2"
 )
 
 // writeMethods 是会改远端状态的 HTTP 方法。

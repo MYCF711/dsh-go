@@ -6,7 +6,11 @@
 //  3. 装卸类工具只在用户自建模式下可见（内置模式一律不给）。
 package modes
 
-import "fmt"
+import (
+	"fmt"
+
+	"dshgo/internal/sandbox"
+)
 
 // Mode 是一个模式。
 type Mode struct {
@@ -18,6 +22,28 @@ type Mode struct {
 	Tools []string `json:"tools,omitempty"`
 	// Approval 是该模式的审批倾向（空 = 沿用宿主配置）。
 	Approval string `json:"approval,omitempty"`
+	// Sandbox 是该模式对应的真实 runtime sandbox 档位：
+	// read-only / workspace-write / danger-full-access。
+	//
+	// 空 = workspace-write（安全默认：只收窄，不放宽）。显式写了未知值，
+	// 装配期 LoadDir 与 SandboxMode 都会 fail-loud，不静默降级。
+	Sandbox string `json:"sandbox,omitempty"`
+}
+
+// SandboxMode 把会话 mode 映射成 runtime sandbox 档位。
+//
+// 映射是**真值**，不是显示值：工具、FS、命令闸门都按它判定。
+// 未知 sandbox 字段给出 ErrUnknownMode，绝不回落到某一档。
+func (m Mode) SandboxMode() (sandbox.Mode, error) {
+	raw := m.Sandbox
+	if raw == "" {
+		return sandbox.ModeWorkspaceWrite, nil
+	}
+	mode, err := sandbox.ParseMode(raw)
+	if err != nil {
+		return "", fmt.Errorf("模式 %q 的 sandbox=%q 无效: %w", m.ID, m.Sandbox, err)
+	}
+	return mode, nil
 }
 
 // Allows 判断某个工具在这个模式下是否可见。
@@ -42,8 +68,9 @@ func Builtins() []Mode {
 		{
 			ID:          DefaultID,
 			Name:        "Default",
-			Description: "全部工具可用。",
+			Description: "全部工具可用；写入限制在 canonical 工作区内（workspace-write 档）。",
 			Builtin:     true,
+			Sandbox:     string(sandbox.ModeWorkspaceWrite),
 		},
 		{
 			ID:          "read-only",
@@ -52,6 +79,21 @@ func Builtins() []Mode {
 			Builtin:     true,
 			Tools:       []string{"read", "glob", "grep", "history_search"},
 			Approval:    "deny",
+			Sandbox:     string(sandbox.ModeReadOnly),
+		},
+		{
+			ID:          "workspace-write",
+			Name:        "Workspace write",
+			Description: "全部工具可用；只允许写 canonical 工作区，命令 cwd 也必须在工作区内。",
+			Builtin:     true,
+			Sandbox:     string(sandbox.ModeWorkspaceWrite),
+		},
+		{
+			ID:          "danger-full-access",
+			Name:        "Danger full access",
+			Description: "全部工具可用；不虚构路径沙盒，写/执行可越出工作区（仍保留审批与读后写）。",
+			Builtin:     true,
+			Sandbox:     string(sandbox.ModeDangerFullAccess),
 		},
 	}
 }

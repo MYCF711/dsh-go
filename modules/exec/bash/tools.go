@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"dshgo/internal/kernel"
+	"dshgo/internal/sandbox"
 	"dshgo/internal/spi"
 )
 
@@ -16,6 +17,10 @@ import (
 type Options struct {
 	// IdleBudget 是「多久没有输出就转后台」。默认 10 分钟（与 DSH 的前台宽限同量级）。
 	IdleBudget time.Duration
+	// SandboxGate 是命令策略闸门。nil 时从进程环境解析（DSHD_SANDBOX_MODE）；
+	// 环境也没有 = 策略层未接线，工具保持旧行为，但任何 sandbox_permissions
+	// 请求都会 fail-loud，不会静默当作放行。
+	SandboxGate *sandbox.Gate
 }
 
 func (o Options) idle() time.Duration {
@@ -30,8 +35,16 @@ func registerTools(s *kernel.Scope, svc *Service, opts Options) error {
 	if err != nil {
 		return err
 	}
+	gate := opts.SandboxGate
+	if gate == nil {
+		// 装配期解析：未知 DSHD_SANDBOX_MODE 必须在这里炸，不能等到第一条命令。
+		gate, err = sandbox.GateFromEnv(svc.Cwd())
+		if err != nil {
+			return fmt.Errorf("bash 装配沙箱策略失败: %w", err)
+		}
+	}
 	for _, t := range []spi.Tool{
-		&shellTool{svc: svc, budget: opts.idle()},
+		&shellTool{svc: svc, budget: opts.idle(), gate: gate},
 		&jobOutputTool{svc: svc},
 		&jobKillTool{svc: svc},
 		&jobListTool{svc: svc},
@@ -51,7 +64,8 @@ var shellSchema = json.RawMessage(`{
     "command": {"type": "string", "description": "要执行的 bash 命令；cwd 跨命令保留"},
     "description": {"type": "string", "description": "这段命令干什么，5-10 个字，给用户看的（例如「列出当前目录」）"},
     "idle_seconds": {"type": "integer", "minimum": 1, "maximum": 900, "description": "多久无输出转后台，默认 600"},
-    "run_in_background": {"type": "boolean", "description": "立刻转后台并返回 job_id，不等命令结束（长任务用这个，别去调小 idle_seconds）"}
+    "run_in_background": {"type": "boolean", "description": "立刻转后台并返回 job_id，不等命令结束（长任务用这个，别去调小 idle_seconds）"},
+    "sandbox_permissions": {"type": "string", "enum": ["workspace-write", "danger-full-access"], "description": "可选：仅本次调用的 sandbox 请求。danger-full-access 需要先经审批；不会改变会话档位"}
   },
   "required": ["command", "description"],
   "additionalProperties": false
@@ -60,6 +74,8 @@ var shellSchema = json.RawMessage(`{
 type shellTool struct {
 	svc    *Service
 	budget time.Duration
+	// gate 是命令策略闸门；nil = 策略层未接线（旧行为，但拒绝任何一次性升级请求）。
+	gate *sandbox.Gate
 }
 
 func (t *shellTool) Name() string   { return "bash" }
@@ -70,10 +86,11 @@ func (t *shellTool) Description() string {
 func (t *shellTool) Schema() json.RawMessage { return shellSchema }
 
 type shellArgs struct {
-	Command         string `json:"command"`
-	Description     string `json:"description"`
-	IdleSeconds     int    `json:"idle_seconds"`
-	RunInBackground bool   `json:"run_in_background"`
+	Command            string `json:"command"`
+	Description        string `json:"description"`
+	IdleSeconds        int    `json:"idle_seconds"`
+	RunInBackground    bool   `json:"run_in_background"`
+	SandboxPermissions string `json:"sandbox_permissions"`
 }
 
 type shellData struct {
@@ -91,6 +108,23 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 	}
 	if strings.TrimSpace(a.Command) == "" {
 		return spi.Result{Hint: "command 不能为空"}, fmt.Errorf("command 为空")
+	}
+	permission, err := sandbox.ParsePermission(a.SandboxPermissions)
+	if err != nil {
+		return spi.Result{Hint: `sandbox_permissions 只能是 workspace-write 或 danger-full-access（或省略）`}, err
+	}
+	// 策略先于一切进程动作：deny / needs-approval 在这里就返回，
+	// svc.Run/RunBackground 不会被调用，因此不会启动 shell、不会留下 job。
+	decision, err := t.authorize(ctx, a.Command, permission)
+	if err != nil {
+		out := spi.Result{Data: sandboxResult(decision)}
+		if decision != nil && decision.Action == sandbox.ActionNeedsApproval {
+			out.Summary = "沙箱升级待审批，命令未执行"
+		} else {
+			out.Summary = "沙箱策略拒绝，命令未执行"
+		}
+		out.Hint = sandboxHint(err)
+		return out, err
 	}
 
 	// 立刻转后台：不走"等 idle 超时"那条路。
@@ -140,7 +174,6 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 	}()
 
 	var res spi.ExecResult
-	var err error
 	select {
 	case out := <-done:
 		res, err = out.res, out.err
@@ -190,6 +223,50 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 			Body:  res.Output,
 		},
 	}, nil
+}
+
+// authorize 在启动任何进程之前做策略判定。
+//
+// 返回 nil decision 表示"策略层未接线且本次没有请求升级"——旧行为；
+// 只要 decision 非 nil 且不是 allow，调用方必须直接返回错误。
+func (t *shellTool) authorize(ctx context.Context, command string, permission sandbox.Permission) (*sandbox.Decision, error) {
+	if t.gate == nil {
+		if permission != "" {
+			return nil, fmt.Errorf("%w: 本进程没有 %s；带 sandbox_permissions 的调用一律拒绝",
+				sandbox.ErrPolicyUnwired, sandbox.EnvMode)
+		}
+		return nil, nil
+	}
+	d, err := t.gate.EvaluateCommand(ctx, command, t.svc.Cwd(), permission)
+	if err != nil {
+		return nil, err
+	}
+	if d.Action == sandbox.ActionAllow {
+		return &d, nil
+	}
+	return &d, d.Error()
+}
+
+func sandboxResult(d *sandbox.Decision) any {
+	if d == nil {
+		return nil
+	}
+	return map[string]any{"sandbox": d}
+}
+
+func sandboxHint(err error) string {
+	switch {
+	case errors.Is(err, sandbox.ErrNeedsApproval):
+		return "这次调用请求了 danger-full-access，但审批还没完成；让用户批准这次调用后重试，或改成工作区内的操作"
+	case errors.Is(err, sandbox.ErrDenied):
+		return "当前会话 sandbox 档位拒绝这条命令；把命令限制在工作区 cwd 内，或让用户显式切到 danger-full-access 档"
+	case errors.Is(err, sandbox.ErrPolicyUnwired):
+		return "宿主没有把 sandbox 策略接进本进程；去掉 sandbox_permissions 参数，或让宿主设置 DSHD_SANDBOX_MODE"
+	case errors.Is(err, sandbox.ErrMissingContext):
+		return "这次工具调用没有会话上下文，策略无法判定；不要重试同一次调用，报告宿主"
+	default:
+		return "命令没有启动；按错误里的原因调整后再试"
+	}
 }
 
 // ---------- job_output ----------
@@ -321,7 +398,7 @@ func (t *jobKillTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result
 	return spi.Result{
 		Summary: "已终止 " + a.JobID,
 		Data:    map[string]any{"job_id": a.JobID, "killed": true},
-		Hint:    "终止只杀掉 bash 进程；它的子进程可能仍在跑，必要时用 bash 手动清理",
+		Hint:    "已停止该任务所属的进程树；Windows 使用 Job Object，Unix 使用独立进程组，停止前已核对根进程身份",
 	}, nil
 }
 

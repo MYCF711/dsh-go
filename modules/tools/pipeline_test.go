@@ -9,7 +9,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"dshgo/internal/agent"
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
 )
@@ -248,6 +250,60 @@ func TestPipelineRejectsNonJSONArgs(t *testing.T) {
 	}
 }
 
+// JSON null 能 unmarshal 进 map 却留下 nil map：判据必须单独拒绝它，
+// 否则同一个 `null` 参数在 agent 循环（拒绝）和流水线（放行）得到两种结论。
+func TestPipelineRejectsNullArgs(t *testing.T) {
+	ran := false
+	p, k := newPipe(t, Options{}, &stubTool{name: "loose", ran: &ran})
+	defer k.Root().Dispose()
+
+	res, err := p.Run(context.Background(), "loose", json.RawMessage(`null`))
+	if err == nil {
+		t.Fatal("null 参数必须报错")
+	}
+	if ran {
+		t.Fatal("参数不合法时不该执行工具")
+	}
+	if !strings.Contains(res.Hint, "JSON") {
+		t.Fatalf("Hint 要说清是 JSON 的问题: %q", res.Hint)
+	}
+	if !strings.Contains(err.Error(), "null") {
+		t.Fatalf("错误要说清是 null: %v", err)
+	}
+}
+
+// 判据只有一份：流水线直接调 agent.ValidateToolCallArguments。
+// 这条表把"什么算 malformed"钉死，防两层再次各写一套。
+func TestValidateToolCallArgumentsSingleCriterion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    string
+		wantErr bool
+	}{
+		{name: "object", args: `{}`},
+		{name: "object with fields", args: `{"file_path":"a.txt","n":1}`},
+		{name: "nested", args: `{"a":{"b":[1,2]}}`},
+		// 没有参数不是"参数坏了"：零参数工具的 tool call 就是空串。
+		{name: "empty", args: ``},
+		{name: "whitespace", args: "  \n\t "},
+		{name: "null", args: `null`, wantErr: true},
+		{name: "array", args: `[1,2]`, wantErr: true},
+		{name: "string", args: `"{\"a\":1}"`, wantErr: true},
+		{name: "number", args: `1`, wantErr: true},
+		{name: "truncated", args: `{"file_path": "{not json"`, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := agent.ValidateToolCallArguments(json.RawMessage(tc.args))
+			if tc.wantErr && err == nil {
+				t.Fatalf("%q 必须判成 malformed", tc.args)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("%q 是合法参数，却被判成 malformed: %v", tc.args, err)
+			}
+		})
+	}
+}
+
 // 每次工具调用都要在日志里留一条：名字、耗时、成败、错误原文。
 // 出事之后人要能回答"它到底跑了什么、跑了多久、成没成"。
 func TestPipelineLogsEveryToolCall(t *testing.T) {
@@ -297,5 +353,442 @@ func TestPipelineLogsEveryToolCall(t *testing.T) {
 	}
 	if e, _ := errRec["error"].(string); e == "" {
 		t.Fatal("失败那条要带错误原文")
+	}
+}
+
+// ---------- 统一 per-call 截止时间（timeout-policy） ----------
+
+// hangTool 是一个**挂死**的假工具：它不看 ctx，只在 release 关闭后才返回。
+//
+// 用它证明两件事：①流水线到点会自己返回，而不是陪着工具一直等；②超时之后工具
+// 晚到的结果绝不会被当成这次调用的成功结果（真工具里对应卡在无 deadline 的读上）。
+type hangTool struct {
+	name     string
+	release  chan struct{}
+	started  chan struct{} // Exec 进入时关闭
+	finished chan struct{} // Exec 真正返回时关闭
+	ctxDone  chan struct{} // Exec 收到的 ctx 结束时关闭
+}
+
+func (h *hangTool) Name() string            { return h.name }
+func (h *hangTool) Description() string     { return "挂死的假工具" }
+func (h *hangTool) Caps() spi.Caps          { return spi.Caps{} }
+func (h *hangTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+
+func (h *hangTool) Exec(ctx context.Context, _ json.RawMessage) (spi.Result, error) {
+	if h.started != nil {
+		close(h.started)
+	}
+	if h.ctxDone != nil {
+		go func() {
+			<-ctx.Done()
+			close(h.ctxDone)
+		}()
+	}
+	<-h.release
+	if h.finished != nil {
+		close(h.finished)
+	}
+	return spi.Result{Summary: "假成功：挂死的工具自己跑完了"}, nil
+}
+
+// slowTool 是"慢但正常"的工具：不看 ctx，睡够了就返回成功。
+//
+// 它用来证明统一 deadline **没有**落到不该落的地方（预算内完成 = 原样成功）。
+type slowTool struct {
+	name string
+	d    time.Duration
+	res  spi.Result
+}
+
+func (s *slowTool) Name() string            { return s.name }
+func (s *slowTool) Description() string     { return "慢但正常" }
+func (s *slowTool) Caps() spi.Caps          { return spi.Caps{} }
+func (s *slowTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+
+func (s *slowTool) Exec(context.Context, json.RawMessage) (spi.Result, error) {
+	time.Sleep(s.d)
+	return s.res, nil
+}
+
+// ctxTool 是"听 ctx 的"工具：等到 ctx 结束，把它原样返回。
+type ctxTool struct {
+	started chan struct{}
+}
+
+func (c *ctxTool) Name() string            { return "waits" }
+func (c *ctxTool) Description() string     { return "等 ctx" }
+func (c *ctxTool) Caps() spi.Caps          { return spi.Caps{} }
+func (c *ctxTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+
+func (c *ctxTool) Exec(ctx context.Context, _ json.RawMessage) (spi.Result, error) {
+	close(c.started)
+	<-ctx.Done()
+	return spi.Result{}, ctx.Err()
+}
+
+// panicTool 是"会炸"的工具：Exec 里直接 panic。
+type panicTool struct{ name string }
+
+func (p *panicTool) Name() string            { return p.name }
+func (p *panicTool) Description() string     { return "会炸" }
+func (p *panicTool) Caps() spi.Caps          { return spi.Caps{} }
+func (p *panicTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (p *panicTool) Exec(context.Context, json.RawMessage) (spi.Result, error) {
+	panic("boom")
+}
+
+// 挂死的工具必须被统一截止时间掐断，而不是把整轮拖死。
+//
+// 红：旧实现（execute 阶段直接调 tool.Exec，没有任何 deadline）会让 Run 一直等
+// 下去——这条测试在受控的短等待（2 秒）后判定"它还在等"并失败，而不是真挂 10 分钟。
+func TestHungToolIsCutByDeadline(t *testing.T) {
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	tl := &hangTool{
+		name:     "hang",
+		release:  release,
+		started:  make(chan struct{}),
+		finished: make(chan struct{}),
+	}
+	budget := 100 * time.Millisecond
+	p, k := newPipe(t, Options{ToolTimeout: budget}, tl)
+	defer k.Root().Dispose()
+
+	done := make(chan struct{})
+	var res spi.Result
+	var err error
+	go func() {
+		res, err = p.Run(context.Background(), "hang", json.RawMessage(`{}`))
+		close(done)
+	}()
+
+	<-tl.started
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("挂死的工具没有返回：流水线没有统一截止时间，这一轮会被它拖死")
+	}
+
+	if err == nil {
+		t.Fatal("超时必须报错，不能把超时写成成功")
+	}
+	var te *ToolTimeoutError
+	if !errors.As(err, &te) {
+		t.Fatalf("超时必须是可辨认的 *ToolTimeoutError，得到 %T: %v", err, err)
+	}
+	if te.Tool != "hang" || te.Budget != budget {
+		t.Fatalf("错误里要写清哪个工具、多大预算，得到 %+v", te)
+	}
+	// 超时不是取消，也不是"上游把这一轮掐了"：agent 循环对这两类有不同文案，
+	// 混进来模型会以为有人停了它。
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("超时不该被认成取消/打断：%v", err)
+	}
+
+	// 模型可见的结构化错误：一句人话 + 事实 + 下一步。
+	if res.Hint == "" || !strings.Contains(res.Hint, budget.String()) {
+		t.Fatalf("Hint 要说清等了多久并给下一步，得到 %q", res.Hint)
+	}
+	if res.Summary == "" {
+		t.Fatal("Summary 要给人一句能读的话")
+	}
+	data, ok := res.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("超时要给结构化 Data，得到 %#v", res.Data)
+	}
+	if data["code"] != "tool_timeout" || data["tool"] != "hang" {
+		t.Fatalf("结构化错误字段不对：%#v", data)
+	}
+	if data["timeout_ms"] != budget.Milliseconds() {
+		t.Fatalf("timeout_ms 应为 %d，得到 %#v", budget.Milliseconds(), data["timeout_ms"])
+	}
+	// Hint 非空就不是 R3 违规：别把"超时"记成"工具作者没写 Hint"。
+	if v := p.Violations(); len(v) != 0 {
+		t.Fatalf("超时有 Hint，不该记 R3 违规：%v", v)
+	}
+
+	// 超时的时候工具**还在跑**：这就是"到点不再等"。
+	select {
+	case <-tl.finished:
+		t.Fatal("工具已经返回，这不是超时场景")
+	default:
+	}
+	// 工具晚到的结果不许变成这次调用的结果。
+	close(release)
+	released = true
+	<-tl.finished
+	if strings.Contains(res.Summary+res.Hint, "假成功") {
+		t.Fatalf("超时之后工具吐的结果被写成了成功：%+v", res)
+	}
+	if err == nil || !errors.As(err, &te) {
+		t.Fatal("工具晚到不影响已经返回的超时结论")
+	}
+}
+
+// Exec 拿到的必须是**可取消**的 ctx：超时之后工具自己能看到取消信号。
+//
+// 只有这样才能让"听 ctx 的"工具真的停下来，而不是光靠流水线丢下它不管。
+func TestTimeoutCancelsExecContext(t *testing.T) {
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	tl := &hangTool{
+		name:    "hang",
+		release: release,
+		started: make(chan struct{}),
+		ctxDone: make(chan struct{}),
+	}
+	p, k := newPipe(t, Options{ToolTimeout: 80 * time.Millisecond}, tl)
+	defer k.Root().Dispose()
+
+	if _, err := p.Run(context.Background(), "hang", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("应超时")
+	}
+	select {
+	case <-tl.ctxDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("超时之后 Exec 的 ctx 没有结束：工具收不到取消信号")
+	}
+	close(release)
+	released = true
+}
+
+// 用户取消 ≠ 超时：两条路都要能认出来，而且取消也不能陪着工具一直等。
+func TestCancelIsNotReportedAsTimeout(t *testing.T) {
+	tl := &ctxTool{started: make(chan struct{})}
+	p, k := newPipe(t, Options{ToolTimeout: 10 * time.Second}, tl)
+	defer k.Root().Dispose()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	var res spi.Result
+	var err error
+	go func() {
+		res, err = p.Run(ctx, "waits", json.RawMessage(`{}`))
+		close(done)
+	}()
+
+	<-tl.started
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("取消之后流水线还在等工具：取消要立刻归还")
+	}
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("取消必须原样报成 context.Canceled，得到 %T: %v", err, err)
+	}
+	var te *ToolTimeoutError
+	if errors.As(err, &te) {
+		t.Fatalf("取消被报成了超时：%+v", te)
+	}
+	if res.Hint == "" {
+		t.Fatal("取消也要给 Hint：结果未知时模型要知道先核实现场")
+	}
+}
+
+// 预算内完成的调用不受影响：结果、错误、Hint 原样透传。
+func TestCompletedCallIsUntouched(t *testing.T) {
+	want := spi.Result{Summary: "正常完成", Data: map[string]any{"n": 1}, Hint: "原样提示"}
+	tl := &slowTool{name: "ok", d: 5 * time.Millisecond, res: want}
+	p, k := newPipe(t, Options{ToolTimeout: 5 * time.Second}, tl)
+	defer k.Root().Dispose()
+
+	res, err := p.Run(context.Background(), "ok", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("预算内完成不该报错：%v", err)
+	}
+	if res.Summary != want.Summary || res.Hint != want.Hint {
+		t.Fatalf("结果被改动了：%+v", res)
+	}
+	if len(p.Violations()) != 0 {
+		t.Fatalf("成功不该记违规：%v", p.Violations())
+	}
+}
+
+// 一个调用超时，不许把下一个调用也带下水（deadline 是每次调用各一份）。
+func TestDeadlineDoesNotLeakToNextCall(t *testing.T) {
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	hang := &hangTool{name: "hang", release: release, started: make(chan struct{})}
+	ok := &slowTool{name: "ok", d: 60 * time.Millisecond, res: spi.Result{Summary: "后面这次成功"}}
+	p, k := newPipe(t, Options{ToolTimeout: 100 * time.Millisecond}, hang, ok)
+	defer k.Root().Dispose()
+
+	if _, err := p.Run(context.Background(), "hang", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("第一次调用应超时")
+	}
+	res, err := p.Run(context.Background(), "ok", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("上一次调用的超时串到了下一次：%v", err)
+	}
+	if res.Summary != "后面这次成功" {
+		t.Fatalf("第二次调用结果不对：%+v", res)
+	}
+	close(release)
+	released = true
+}
+
+// 并发调用各自的窗口互不串：一个挂着超时，另一个照常在预算内成功。
+func TestConcurrentCallsHaveIndependentDeadlines(t *testing.T) {
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	hang := &hangTool{name: "hang", release: release, started: make(chan struct{})}
+	ok := &slowTool{name: "ok", d: 20 * time.Millisecond, res: spi.Result{Summary: "并发这次成功"}}
+	p, k := newPipe(t, Options{ToolTimeout: 300 * time.Millisecond}, hang, ok)
+	defer k.Root().Dispose()
+
+	type outcome struct {
+		res spi.Result
+		err error
+	}
+	hangOut := make(chan outcome, 1)
+	okOut := make(chan outcome, 1)
+	go func() {
+		r, e := p.Run(context.Background(), "hang", json.RawMessage(`{}`))
+		hangOut <- outcome{r, e}
+	}()
+	go func() {
+		r, e := p.Run(context.Background(), "ok", json.RawMessage(`{}`))
+		okOut <- outcome{r, e}
+	}()
+
+	select {
+	case o := <-okOut:
+		if o.err != nil || o.res.Summary != "并发这次成功" {
+			t.Fatalf("另一个调用的超时串了过来：%+v err=%v", o.res, o.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("正常的那个调用没有返回")
+	}
+
+	select {
+	case o := <-hangOut:
+		var te *ToolTimeoutError
+		if !errors.As(o.err, &te) {
+			t.Fatalf("挂死的那个应超时，得到 %T: %v", o.err, o.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("挂死的调用没有在预算附近返回")
+	}
+	close(release)
+	released = true
+}
+
+// 显式关闭（负值）：行为回到"只看各工具自己"，慢活照常跑完。
+func TestToolTimeoutCanBeDisabled(t *testing.T) {
+	tl := &slowTool{name: "slow", d: 80 * time.Millisecond, res: spi.Result{Summary: "慢慢跑完"}}
+	p, k := newPipe(t, Options{ToolTimeout: -1}, tl)
+	defer k.Root().Dispose()
+
+	res, err := p.Run(context.Background(), "slow", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("关闭超时后不该被掐：%v", err)
+	}
+	if res.Summary != "慢慢跑完" {
+		t.Fatalf("结果不对：%+v", res)
+	}
+}
+
+// 默认预算必须存在，而且**比各工具自带的最长超时更宽**——否则这一层就是
+// 在偷偷改各工具的超时语义（bash 的 idle 上限 15 分钟会永远跑不到）。
+func TestDefaultToolTimeoutDoesNotShadowToolBudgets(t *testing.T) {
+	t.Setenv(toolTimeoutEnv, "")
+	tl := &slowTool{name: "ok", res: spi.Result{Summary: "ok"}}
+	p, k := newPipe(t, Options{}, tl)
+	defer k.Root().Dispose()
+
+	if p.opts.ToolTimeout != defaultToolTimeout {
+		t.Fatalf("默认值没接上：%s", p.opts.ToolTimeout)
+	}
+	if p.opts.ToolTimeout < 15*time.Minute {
+		t.Fatalf("统一预算 %s 比 bash 自带的 15 分钟上限还短，会改掉工具自己的超时语义", p.opts.ToolTimeout)
+	}
+}
+
+// 环境变量是运维侧的旋钮：正数=预算、0=默认、负数=关闭、写错=默认。
+func TestToolTimeoutEnvKnob(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  string
+		want time.Duration
+	}{
+		{name: "empty", env: "", want: defaultToolTimeout},
+		{name: "zero", env: "0", want: defaultToolTimeout},
+		{name: "seconds", env: "7", want: 7 * time.Second},
+		{name: "off", env: "-1", want: -1},
+		{name: "garbage", env: "abc", want: defaultToolTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(toolTimeoutEnv, tc.env)
+			if got := (Options{}).withDefaults().ToolTimeout; got != tc.want {
+				t.Fatalf("env=%q 期望 %s，得到 %s", tc.env, tc.want, got)
+			}
+		})
+	}
+}
+
+// 工具 panic 不许把宿主带走：现在执行体跑在流水线的 goroutine 里，没有人替它
+// recover——漏了这一步，一个 panic 就是整个进程退出，而不是一次失败的工具调用。
+func TestToolPanicBecomesError(t *testing.T) {
+	tl := &panicTool{name: "boom"}
+	p, k := newPipe(t, Options{ToolTimeout: time.Second}, tl)
+	defer k.Root().Dispose()
+
+	res, err := p.Run(context.Background(), "boom", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("panic 必须转成错误")
+	}
+	if !strings.Contains(err.Error(), "panic") {
+		t.Fatalf("要说明是 panic: %v", err)
+	}
+	if res.Hint == "" {
+		t.Fatal("失败必须带 Hint（R3）")
+	}
+}
+
+// 听 ctx 的工具在 deadline 上会**立刻**把 ctx.Err() 交回来——那不是"完成"，
+// 而是被我们叫醒。同一次超时不许有时报"超时"、有时报"被打断/结果未知"
+// （agent 循环对这两类的文案完全不同）。多跑几轮：两个 channel 同时就绪时
+// select 是随机挑的，跑一轮有一半概率看不出问题。
+func TestCtxAwareToolStillReportedAsTimeout(t *testing.T) {
+	budget := 5 * time.Millisecond
+	for i := 0; i < 30; i++ {
+		tl := &ctxTool{started: make(chan struct{})}
+		p, k := newPipe(t, Options{ToolTimeout: budget}, tl)
+		res, err := p.Run(context.Background(), "waits", json.RawMessage(`{}`))
+		var te *ToolTimeoutError
+		ok := errors.As(err, &te)
+		hint, data := res.Hint, res.Data
+		k.Root().Dispose()
+		if !ok {
+			t.Fatalf("第 %d 轮：工具交回的 ctx.Err() 被当成结果了，超时报成 %T: %v", i, err, err)
+		}
+		if hint == "" || data == nil {
+			t.Fatalf("第 %d 轮：超时结果必须是结构化的（Hint+Data）", i)
+		}
 	}
 }

@@ -10,17 +10,44 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
+// pendingPrompt 是一次已经发起、但还没收到宿主 accepted 的提交。
+// frames 暂存等待期间到达的 WS 帧：宿主可能先写 durable user/message 再返回 HTTP，
+// 界面不能因此提前显示草稿，也不能把这帧丢掉。
+type pendingPrompt struct {
+	id     uint64
+	sid    string
+	text   string
+	frames []ServerFrame
+	// anonymousEchoSeen 只给没有任何 durable 身份的旧宿主帧做确认前去重。
+	// 有 id/seq 时走 seenUser，绝不按正文做全局去重。
+	anonymousEchoSeen bool
+}
+
+// promptOutcome 是一次 HTTP 提交的结果。id/sid 用来丢弃迟到的旧结果，
+// 防止它清掉下一次重试的草稿或把两轮终局接错。
+type promptOutcome struct {
+	id   uint64
+	sid  string
+	text string
+	ack  promptAck
+	err  error
+}
+
 type app struct {
 	scr  *Screen
 	cl   *client
 	sid  string
 	addr string
+	// themeExplicit 来自 main 已解析的 --theme / DSH_TUI_THEME。
+	// 显式选择优先于 OSC 11，且启动时连探测控制码都不发。
+	themeExplicit bool
 
 	// transcript 是已经"排版好"的行；不做富文本，先把内容跑通。
 	lines []string
@@ -29,15 +56,65 @@ type app struct {
 	// 为什么不直接把结果行删掉：折叠必须可逆。删掉就得在展开时重放历史帧，
 	// 而重放会重新触发计数/审批等副作用。所以内容是照收的，只在**显示**时过滤——
 	// 过滤发生在 view() 里，展开只是翻一个 bool。
-	meta   []lineMeta
-	input  []rune
-	status string
-	tools  int
-	busy   bool
-	start  time.Time
+	meta  []lineMeta
+	input []rune
+	// inputCaret 是 grapheme 边界上的 rune 下标；inputCaretSet=false 保留
+	// 直接构造 app 时的历史零值语义——光标在草稿末尾。inputScroll 是首个
+	// 可见 grapheme 的序号，渲染只按显示列计算，不按 rune 数切字。
+	inputCaret    int
+	inputCaretSet bool
+	inputScroll   int
+	status        string
+	tools         int
+	busy          bool
+	start         time.Time
+	// runningAccum/runningSince 把本轮计时拆成已结算活跃段与当前活跃段。
+	// WS down 时结算并清空后者，open 只从累计值继续，不清零也不补断线墙钟。
+	runningAccum time.Duration
+	runningSince time.Time
 
 	// showToolResults 是工具结果行的展开开关：默认 false（折叠）。
 	showToolResults bool
+	// expandAll 是"长内容展开"（Ctrl+O）：代码块超过阈值的那部分、
+	// 工具正文超过 3 行的部分、以及思考正文。
+	//
+	// 与 showToolResults **刻意分开**：Ctrl+T 回答的是"这个结果要不要看"，
+	// Ctrl+O 回答的是"这一行太长要不要全看"。合成一个键的话，
+	// 想读完整结果就得连带着把所有思考也摊开。
+	expandAll bool
+	// color 是消息层是否输出 ANSI（生产 true，测试/转储 false）。
+	//
+	// 关掉时样式标记被丢掉，输出的就是纯文本——逐字可比，
+	// 断言不会因为换配色而集体失效。两边排版结果逐列一致（见 textwidth.go）。
+	color bool
+
+	// model/effort/cwd 是首屏与状态行要显示的真实字段，全部可能未知。
+	// 都来自 session.load；effort 缺键、空值或未知枚举时保持未知。
+	model  string
+	effort string
+	cwd    string
+	// tipIdx 是首屏提示行下标；测试零值固定取第 0 条。
+	tipIdx int
+
+	// cards 是工具卡（按出现顺序，只留最近若干张）。
+	cards []*toolCard
+	// think 是还没结算的思考块（见 thinking.go 的 thinkingBuf）。
+	think thinkingBuf
+	// pendingEcho 只是等待 accepted 时的草稿指纹，供无 id/seq 的旧帧做本次
+	// 提交内的去重。它不再表示"正文已经上屏"：用户正文只来自 durable 帧。
+	pendingEcho string
+	pendingSend *pendingPrompt
+	nextSendID  uint64
+	// promptResults 由 HTTP goroutine 写、主事件循环读；app 的其余状态只在
+	// 主事件循环里改，不把锁和终端渲染搅在一起。
+	promptResults chan promptOutcome
+	// sendPrompt 是测试注入点；生产里使用 client.requestPrompt。
+	sendPrompt func(sid, text string) (promptAck, error)
+	// activeTurnID 来自己接受的 HTTP 确认。带 turnId 的旧终局不能结束新一轮。
+	activeTurnID string
+	// seenUser 按 durable message id（缺 id 时按 Transport seq）去重。
+	// 刻意不按正文：同文发送两次是两条不同的用户消息。
+	seenUser map[string]struct{}
 	// searching/searchQuery 是会话内搜索：在**显示得出来的行**里找子串。
 	// 不做高亮（差分渲染下着色一错就很难查），只报命中数。
 	searching   bool
@@ -51,6 +128,10 @@ type app struct {
 	// 少修一次的症状是"回看时内容莫名往前跳一行"。
 	scroll int
 
+	// statusPopup 是当前状态字段的只读详情层。sid 防止旧会话弹层串入新会话；
+	// pinned 区分 hover 预览与点击固定，全部数据仍在渲染时读取当前真实状态。
+	statusPopup *statusPopupState
+
 	// 用量与速率：都来自 session.load，**不自己估**。
 	ctxTokens  int
 	ctxWindow  int
@@ -60,7 +141,13 @@ type app struct {
 	quit       bool
 	err        string
 
-	frames <-chan ServerFrame
+	frames            <-chan ServerFrame
+	connectionEvents  <-chan connectionEvent
+	closeSubscription func()
+	// 当前订阅与 WS 代际；只有匹配的 down 才能暂停计时。
+	connectionSubscription uint64
+	connectionGeneration   uint64
+	connectionDown         bool
 	// pickFrom 非空时，下一次输入被当作"选第 N 个会话"。
 	pickFrom []sessionRow
 
@@ -82,6 +169,13 @@ type app struct {
 	// now 是时钟。生产里是 time.Now；测试里换成可控的假时钟，
 	// 否则"每秒变小""到 0 超时"只能用真等待来验，测试会又慢又不稳。
 	now func() time.Time
+
+	// 鲸鱼动画只在交互 run() 开启。dump/script/直接构造的测试 app 保持零值，
+	// 因而继续渲染确定性 standard。seed 可注入，状态推进复用 now 假时钟。
+	animateWhale bool
+	whaleSeed    uint64
+	whale        *whaleAnimation
+	pendingHeart bool
 }
 
 // 审批倒计时的两档显示与阈值。
@@ -108,12 +202,50 @@ const approvalTimeoutNote = "审批已超时，按拒绝处理"
 // 折叠只看它，不看文本内容——靠前缀字符串猜"这行是不是工具结果"
 // 会在模型正文恰好以 "  ← " 开头时误伤，那是查不出来的错。
 type lineMeta struct {
+	// role 是这一行在屏幕上的角色；布局据此加前缀和着色，不猜文本。
+	role lineRole
 	// toolResult 表示这是 tool/result 的摘要行（折叠时默认不显示）。
 	toolResult bool
 	// isError 表示这次工具调用失败了。**错误永远显示**：
 	// 把失败折叠起来，等于让人以为工具成功了。
 	isError bool
+	// thinking 表示这是思考块的正文行：默认不显示（只留折叠行），
+	// Ctrl+O 展开。思考是"模型怎么想的"，不是回答本身，默认占满屏是错的。
+	thinking bool
+	// capRank / capLimit 是"这一行属于可按阈值折叠的正文的第几行"。
+	//
+	// capLimit == 0 表示不参与这种折叠（绝大多数行）。为什么把阈值也放进
+	// meta 而不是写成全局常量：代码块显示 12 行、工具正文只留 3 行，
+	// 用同一个数会逼着其中一边将就——要么代码块被折得太狠，要么工具卡臃肿。
+	capRank  int
+	capLimit int
+	// capHint > 0 表示这是一行"还有 N 行"的提示。它只在**真的藏了东西**、
+	// 且还没展开时显示；展开后留着它就是在说假话。
+	capHint int
 }
+
+// lineRole 是一行在屏幕上的角色。
+type lineRole uint8
+
+const (
+	rolePlain lineRole = iota
+	roleUser
+	roleUserCont
+	roleAssistant
+	roleAssistantCont
+	roleThinking
+	roleThinkingBody
+	roleTool
+	roleToolResult
+	roleError
+)
+
+// 行首标记来自上游 terminal-utils/figures.ts。
+const (
+	markerUser      = "❯"
+	markerAssistant = "●"
+	markerThinking  = "⚓"
+)
 
 // maxLines 是内存里保留的正文行数：不随会话无限涨，翻页/滚动是下一步的事。
 const maxLines = 500
@@ -123,7 +255,36 @@ func newApp(addr, token string) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &app{scr: NewScreen(), cl: cl, addr: addr, start: time.Now(), now: time.Now}, nil
+	wd, _ := os.Getwd()
+	a := &app{
+		scr: NewScreen(), cl: cl, addr: addr, start: time.Now(), now: time.Now,
+		cwd: wd, color: os.Getenv("NO_COLOR") == "", whaleSeed: rand.Uint64(),
+		themeExplicit: themeForced,
+	}
+	if n := len(splashTips); n > 0 {
+		a.tipIdx = rand.IntN(n)
+	}
+	return a, nil
+}
+
+// applyStats 把 session.load 的真实用量与身份字段搬到界面上。
+// model/cwd 的空字符串不覆盖已知值：宿主暂时不知道，不等于抹掉上一次真值。
+// effort 则以每次 load 为权威快照：最新记录变成未知时必须清掉旧真值；
+// nil 与显式空串在 stats 里仍可区分，状态行对两者都如实显示 `?`。
+func (a *app) applyStats(st stats) {
+	a.ctxTokens = st.ContextTokens
+	a.ctxWindow = st.ContextWindow
+	a.outTokens = st.OutputTotal
+	if st.Model != "" {
+		a.model = st.Model
+	}
+	if st.CWD != "" {
+		a.cwd = st.CWD
+	}
+	a.effort = ""
+	if st.Effort != nil {
+		a.effort = *st.Effort
+	}
 }
 
 // clock 返回这个 app 的当前时间。now 为空（测试里直接构造的零值 app）时退回真时钟，
@@ -137,6 +298,8 @@ func (a *app) clock() time.Time {
 
 // run 是主循环。返回 nil 表示正常退出。
 func (a *app) run() error {
+	// 只有真交互界面播开屏；--script 也调用 newApp，但不进入 run，保持 standard。
+	a.animateWhale = true
 	a.scr.Enter()
 	restore := rawInput()
 	defer func() {
@@ -147,20 +310,72 @@ func (a *app) run() error {
 		a.scr.Leave()
 	}()
 
+	// 在按键解码器启动前做有界背景探测；两者共用同一个 stdin 泵。
+	// 显式主题、非 TTY、超时、DA1 不支持与非法响应都会立即/按期回退，
+	// 而探测期间敲下的普通键会通过 prefixSource 交给下面的解码器。
+	input := newStdinSource(os.Stdin)
+	interactive := isTerminalFile(os.Stdin) && isTerminalFile(os.Stdout)
+	name, probe := startupThemeName(a.themeExplicit, themeName, input, a.scr.out, interactive, osc11Timeout)
+	themeName = name
+	input = &prefixSource{prefix: probe.replay, src: input}
+
 	if err := a.newSession(); err != nil {
 		return err
 	}
 
 	keys := make(chan rune, 32)
 	specials := make(chan string, 8)
-	go readKeys(keys, specials)
+	go decodeKeys(input, keys, specials)
 
-	frames := a.frames
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
+	defer func() {
+		if a.closeSubscription != nil {
+			a.closeSubscription()
+		}
+	}()
+
+	// 动画没有自己的 goroutine：主循环只持有一个可重建、可停止的 timer。
+	// 不可见/断线/退出时 channel 置 nil，select 不再有动画分支可醒。
+	var whaleTimer *time.Timer
+	var whaleTicks <-chan time.Time
+	defer func() {
+		if whaleTimer != nil {
+			whaleTimer.Stop()
+		}
+	}()
 
 	for !a.quit {
+		a.advanceWhaleAnimation()
+		if d, ok := a.whaleWakeup(); ok {
+			if whaleTimer == nil {
+				whaleTimer = time.NewTimer(d)
+			} else {
+				if !whaleTimer.Stop() {
+					select {
+					case <-whaleTimer.C:
+					default:
+					}
+				}
+				whaleTimer.Reset(d)
+			}
+			whaleTicks = whaleTimer.C
+		} else {
+			if whaleTimer != nil {
+				if !whaleTimer.Stop() {
+					select {
+					case <-whaleTimer.C:
+					default:
+					}
+				}
+			}
+			whaleTicks = nil
+		}
 		a.render()
+		// 每轮重新取 channel：/new 或 A/B 切换后，旧订阅的帧与连接事件
+		// 都不能继续占用主循环的 select 分支。
+		frames := a.frames
+		events := a.connectionEvents
 		select {
 		case r := <-keys:
 			a.handleRune(r)
@@ -168,14 +383,26 @@ func (a *app) run() error {
 			a.handleSpecial(k)
 		case f, ok := <-frames:
 			if !ok {
-				// 流断了：重连由 client 负责，这里只把状态说清楚，不让界面假装还在跑。
-				a.status = "连接已断开，正在重连…"
-				frames = nil
+				if frames == a.frames {
+					a.frames = nil
+				}
 				continue
 			}
 			a.handleFrame(f)
+		case ev, ok := <-events:
+			if !ok {
+				if events == a.connectionEvents {
+					a.connectionEvents = nil
+				}
+				continue
+			}
+			a.handleConnectionEvent(ev)
+		case result := <-a.promptResults:
+			a.handlePromptResult(result)
 		case <-tick.C:
 			a.tickStatus()
+		case <-whaleTicks:
+			// 下一轮开头用 a.now 推进；测试直接调纯 advance，不在此等待。
 		}
 	}
 	return nil
@@ -204,22 +431,37 @@ func (a *app) pick(text string) bool {
 
 // switchTo 切到另一个已有会话：换订阅，不新建。
 func (a *app) switchTo(row sessionRow) error {
-	ch, _, err := a.cl.Subscribe(row.ID, 0)
+	ch, events, closeFn, err := a.cl.SubscribeWithEvents(row.ID, 0)
 	if err != nil {
 		return err
 	}
+	if a.closeSubscription != nil {
+		a.closeSubscription()
+	}
+	a.closeSubscription = closeFn
 	a.sid = row.ID
 	a.frames = ch
+	a.connectionEvents = events
 	a.lines = nil
 	a.meta = nil
 	a.scroll = 0 // 换了会话就没有可回看的旧内容了
 	a.tools = 0
 	a.ctxTokens, a.outTokens, a.tps = 0, 0, 0
+	a.cards = nil
+	a.think = thinkingBuf{}
+	a.resetSessionSendState()
+	// 先清会话作用域的 effort：B 无记录或 load 失败时也不能继续显示 A 的值。
+	a.effort = ""
+	if st, err := a.cl.loadStats(row.ID); err == nil {
+		a.applyStats(st)
+	}
 	title := row.Title
 	if title == "" {
 		title = "(无标题)"
 	}
 	a.push("已切到 " + short(row.ID) + " — " + trunc(title, 40))
+	// 动画也是会话作用域：A/B 切换不带上一个会话的层相位或待触发 heart。
+	a.restartWhaleAnimation()
 	return nil
 }
 
@@ -234,18 +476,52 @@ func atoiSmall(s string) (int, error) {
 	return n, nil
 }
 
+// resetSessionSendState 切换会话时作废旧提交与 durable 去重作用域。
+// 已在飞的 HTTP 仍会完成，但结果里的 id/sid 不再匹配，因而不会碰新会话。
+func (a *app) resetSessionSendState() {
+	a.closeStatusPopup()
+	a.pendingSend = nil
+	a.pendingEcho = ""
+	a.activeTurnID = ""
+	a.seenUser = nil
+	a.busy = false
+	// 计时与连接代际都属于会话作用域；A/B 切换后从各自的新轮次重新累计。
+	a.start = time.Time{}
+	a.runningAccum = 0
+	a.runningSince = time.Time{}
+	a.connectionSubscription = 0
+	a.connectionGeneration = 0
+	a.connectionDown = false
+	if a.status == disconnectedStatus {
+		a.status = ""
+	}
+}
+
 func (a *app) newSession() error {
 	sid, err := a.cl.createSession()
 	if err != nil {
 		return err
 	}
-	a.sid = sid
-	ch, _, err := a.cl.Subscribe(sid, 0)
+	ch, events, closeFn, err := a.cl.SubscribeWithEvents(sid, 0)
 	if err != nil {
 		return err
 	}
+	if a.closeSubscription != nil {
+		a.closeSubscription()
+	}
+	a.closeSubscription = closeFn
+	a.sid = sid
 	a.frames = ch
-	a.push("会话 " + short(sid))
+	a.connectionEvents = events
+	a.resetSessionSendState()
+	// 正文保持空，空会话才能显示首屏；会话 id 已在状态行。
+	// 新会话还没有自己的配置记录，不能继承上一条会话的 effort。
+	a.effort = ""
+	if st, err := a.cl.loadStats(sid); err == nil {
+		a.applyStats(st)
+	}
+	// 新会话是一次新的 logo mount；script 的 animateWhale=false 不会进入这里。
+	a.restartWhaleAnimation()
 	return nil
 }
 
@@ -416,11 +692,17 @@ func (a *app) noteApprovalCancel() {
 //	Ctrl+T            展开 / 折叠工具结果（默认折叠）
 //	Ctrl+F            进入会话内搜索（Esc 退出）
 //	Enter             发送；搜索模式下退出搜索
-//	Backspace         删一个字；搜索模式下删空后再按 = 退出搜索
+//	Backspace         删前一个 grapheme；搜索删空后再按 = 退出搜索
+//	Ctrl+A / Ctrl+E   行首 / 行尾（Home / End 同效）
 //
 // 为什么是 Ctrl+T / Ctrl+F 而不是裸 t / 裸 /：输入行是**同一块键盘**，
 // 裸 t 会把"测试一下"的 t 吃掉，裸 / 会让 /help 这类命令永远打不出来。
 // 单字母快捷键要配"普通模式/输入模式"两态才安全，那是下一步的事。
+// promptInputLocked 把 HTTP accepted 之前的草稿视为只读。
+func (a *app) promptInputLocked() bool {
+	return a.pendingSend != nil
+}
+
 func (a *app) handleRune(r rune) {
 	// 有审批在等时，y/a/n 先给审批用——这时候打字没有意义。
 	if a.pending.id != "" {
@@ -436,29 +718,45 @@ func (a *app) handleRune(r rune) {
 			return
 		}
 	}
+	if a.promptInputLocked() {
+		// 等 accepted 时保留草稿且禁止修改；查看/折叠和退出仍然可用。
+		switch r {
+		case 3, 4:
+			a.quit = true
+		case 15:
+			a.toggleLongContent()
+		case 20:
+			a.toggleToolResults()
+		}
+		return
+	}
 	// 搜索模式下按键先归搜索：除了退出，别的都进查询串。
 	if a.searching {
 		a.handleSearchRune(r)
 		return
 	}
 	switch r {
+	case 1: // Ctrl+A：与上游 readline 行首绑定一致
+		a.setInputCaret(0)
 	case 3: // Ctrl+C
 		a.quit = true
 	case 4: // Ctrl+D
 		a.quit = true
+	case 5: // Ctrl+E：与上游 readline 行尾绑定一致
+		a.setInputCaret(len(a.input))
 	case 6: // Ctrl+F
 		a.enterSearch()
+	case 15: // Ctrl+O
+		a.toggleLongContent()
 	case 20: // Ctrl+T
 		a.toggleToolResults()
 	case 127, 8: // Backspace
-		if n := len(a.input); n > 0 {
-			a.input = a.input[:n-1]
-		}
+		a.deleteInputBackward()
 	case 13, 10: // Enter
 		a.submit()
 	default:
 		if r >= 32 {
-			a.input = append(a.input, r)
+			a.insertInputRune(r)
 		}
 	}
 }
@@ -469,15 +767,23 @@ func (a *app) handleRune(r rune) {
 // 按回车才出结果会让人多按一次键才知道词对不对。
 func (a *app) handleSearchRune(r rune) {
 	switch r {
+	case 1: // Ctrl+A
+		a.setInputCaret(0)
 	case 3, 4: // Ctrl+C / Ctrl+D：退出程序永远有效
 		a.quit = true
+	case 5: // Ctrl+E
+		a.setInputCaret(len(a.input))
+	case 15: // Ctrl+O：搜索时也能展开思考与长内容
+		a.toggleLongContent()
 	case 20: // Ctrl+T：搜索时也能展开工具结果（命中数会跟着变）
 		a.toggleToolResults()
 	case 127, 8: // Backspace
-		if n := len(a.input); n > 0 {
-			a.input = a.input[:n-1]
+		if a.deleteInputBackward() {
 			a.syncSearch()
 			return
+		}
+		if len(a.input) > 0 {
+			return // 光标已在行首，但后面还有查询文本，不能误退搜索
 		}
 		// 查询删空了再按一次退格 = 退出搜索（不想伸手找 Esc 的人也能退）
 		a.exitSearch()
@@ -486,7 +792,7 @@ func (a *app) handleSearchRune(r rune) {
 		a.exitSearch()
 	default:
 		if r >= 32 {
-			a.input = append(a.input, r)
+			a.insertInputRune(r)
 			a.syncSearch()
 		}
 	}
@@ -496,7 +802,7 @@ func (a *app) handleSearchRune(r rune) {
 func (a *app) enterSearch() {
 	a.searching = true
 	a.searchQuery = ""
-	a.input = nil
+	a.clearInput()
 	// 清掉上一次的错误：状态行位置有限，搜索时得让位给命中数
 	// （错误本身已经推进正文，不会因为这里清掉就丢）。
 	a.err = ""
@@ -506,7 +812,7 @@ func (a *app) enterSearch() {
 func (a *app) exitSearch() {
 	a.searching = false
 	a.searchQuery = ""
-	a.input = nil
+	a.clearInput()
 }
 
 func (a *app) syncSearch() {
@@ -526,6 +832,17 @@ func (a *app) toggleToolResults() {
 	}
 }
 
+// toggleLongContent 统一展开思考、长代码块和工具结果的长正文。
+// 它只翻转显示状态，不重放帧；Ctrl+T 仍独立控制工具结果是否出现。
+func (a *app) toggleLongContent() {
+	a.expandAll = !a.expandAll
+	if a.expandAll {
+		a.status = "思考与长内容已展开（Ctrl+O 收起）"
+	} else {
+		a.status = "思考与长内容已折叠"
+	}
+}
+
 // isHidden 判断第 i 行在当前折叠状态下要不要显示。
 // **错误行永远显示**：折叠是省地方，不是把失败藏起来。
 func (a *app) isHidden(i int) bool {
@@ -539,17 +856,37 @@ func (a *app) isHidden(i int) bool {
 // 都走它。两处各写一遍的话，迟早会出现"折叠的行被算进了可见行"这种错，
 // 而它的症状只是回看时少/多一行，很难归因。
 func (a *app) hiddenMeta(m lineMeta) bool {
+	// 失败正文永远显示，优先级高于所有折叠阈值。
+	if m.toolResult && m.isError {
+		return false
+	}
+	// 折叠提示只在"确实藏了东西、而且还没展开"时显示。
+	// 展开后还留着它，屏幕上就会出现"… +5 行"下面紧接着那 5 行。
+	if m.capHint > 0 {
+		if a.expandAll {
+			return true
+		}
+		return m.toolResult && !a.showToolResults && !m.isError
+	}
+	// 超过阈值的长正文（代码块、工具正文）。
+	if m.capLimit > 0 && !a.expandAll && m.capRank >= m.capLimit {
+		return true
+	}
+	// 思考正文：默认只留折叠行。
+	if m.thinking && !a.expandAll {
+		return true
+	}
 	if a.showToolResults {
 		return false
 	}
 	return m.toolResult && !m.isError
 }
 
-// bodyHeight 是正文区能放的行数（整屏去掉分隔线、状态行、输入行）。
+// bodyHeight 是正文区能放的行数：底部固定为横线、上下文条、状态行、输入行。
 func (a *app) bodyHeight() int {
-	body := a.scr.height - 3
-	if body < 1 {
-		body = 1
+	body := a.scr.height - 4
+	if body < 0 {
+		body = 0
 	}
 	return body
 }
@@ -570,9 +907,6 @@ func (a *app) maxScroll() int {
 // visibleCount 是 visibleLines 的**条数**，不复制、不分配。
 // 判断仍然只走 isHidden，两个口径不会分叉。
 func (a *app) visibleCount() int {
-	if a.showToolResults {
-		return len(a.lines)
-	}
 	n := 0
 	for i := range a.lines {
 		if !a.isHidden(i) {
@@ -602,20 +936,23 @@ func (a *app) setScroll(n int) {
 func (a *app) scrollBack(n int)    { a.setScroll(a.scroll + n) }
 func (a *app) scrollForward(n int) { a.setScroll(a.scroll - n) }
 
-// visibleLines 返回"现在屏幕上该显示的行"。
-//
-// 搜索和渲染都走它：两边算的是同一份集合，不会出现"报了 3 处但屏上找不到"。
-// 折叠时它只是过滤，不复制全量历史（lines 仍是唯一那份）。
-func (a *app) visibleLines() []string {
-	if a.showToolResults {
-		return a.lines
-	}
-	out := make([]string, 0, len(a.lines))
-	for i, ln := range a.lines {
-		if a.isHidden(i) {
-			continue
+// visibleIndex 返回当前可见行在 lines 里的下标；布局据此同时取文本和角色。
+func (a *app) visibleIndex() []int {
+	out := make([]int, 0, len(a.lines))
+	for i := range a.lines {
+		if !a.isHidden(i) {
+			out = append(out, i)
 		}
-		out = append(out, ln)
+	}
+	return out
+}
+
+// visibleLines 返回当前可见行的纯文本；搜索与渲染取同一份集合。
+func (a *app) visibleLines() []string {
+	idx := a.visibleIndex()
+	out := make([]string, len(idx))
+	for k, i := range idx {
+		out[k] = plainMessageLine(a.lines[i])
 	}
 	return out
 }
@@ -635,17 +972,51 @@ func matchCount(lines []string, query string) int {
 	return n
 }
 
-// handleSpecial 处理方向上的一类按键（都由 readKeys 解码成名字）。
+// handleSpecial 处理解码后的命名键。
 //
-//	PgUp / PgDn       翻一屏（正好是一屏的行数，接得上、也不留缝）
-//	↑ / ↓             单行
-//	Home / Ctrl+Home  到最上面
-//	End / Ctrl+End    回到最底部（scroll=0 就恢复"跟随新输出"）
+//	PgUp / PgDn       正文翻一屏；↑ / ↓ 正文单行
+//	Ctrl+Home/End     正文顶部/底部（保留既有回看语义）
+//	Home / End        草稿行首/行尾
+//	Left / Right      一个 grapheme；Ctrl/Alt+Left/Right 一个空白分隔词
+//	Delete            删除光标后的 grapheme
 //
-// Ctrl+End 与 End 在这里是同一件事：这个界面没有行内光标，"到行尾"没有意义，
-// 而"回到底部继续跟随"是回看之后最常用的那一下。两种终端的 Ctrl+Home/End
-// 编码还不一样（`\x1b[1;5H` 与 `\x1b[1;5~`），索性合并。
+// F5/F6/F7/F12 在上游只有解码没有动作，因而这里刻意没有对应 case。
 func (a *app) handleSpecial(k string) {
+	// 状态区先认领自己实际画出的 hit box；其它鼠标坐标仍交给鲸鱼命中。
+	if a.handleStatusSpecial(k) {
+		return
+	}
+	if a.handleWhaleSpecial(k) {
+		return
+	}
+	// Esc 一次只关闭最上层，绝不清空待确认草稿或顺带退出搜索。
+	if k == "esc" && a.closeStatusPopup() {
+		return
+	}
+	// 正文查看键在发送只读期间仍然可用。
+	switch k {
+	case "pgup":
+		a.scrollBack(a.bodyHeight())
+		return
+	case "pgdn":
+		a.scrollForward(a.bodyHeight())
+		return
+	case "up":
+		a.scrollBack(1)
+		return
+	case "down":
+		a.scrollForward(1)
+		return
+	case "ctrl+home":
+		a.setScroll(a.maxScroll())
+		return
+	case "ctrl+end":
+		a.setScroll(0)
+		return
+	}
+	if a.promptInputLocked() {
+		return // Esc、移动与删除都不能改写待确认草稿或它的光标
+	}
 	switch k {
 	case "esc":
 		// 搜索里的 Esc = 退出搜索并清掉查询串；别的时候 = 清输入行。
@@ -653,44 +1024,127 @@ func (a *app) handleSpecial(k string) {
 			a.exitSearch()
 			return
 		}
-		a.input = nil
-	case "pgup":
-		a.scrollBack(a.bodyHeight())
-	case "pgdn":
-		a.scrollForward(a.bodyHeight())
-	case "up":
-		a.scrollBack(1)
-	case "down":
-		a.scrollForward(1)
+		a.clearInput()
 	case "home":
-		a.setScroll(a.maxScroll())
+		a.setInputCaret(0)
 	case "end":
-		a.setScroll(0)
+		a.setInputCaret(len(a.input))
+	case "left":
+		caret := a.inputCaretPosition()
+		clusters := inputClusters(a.input)
+		at := inputCaretCluster(clusters, caret)
+		if at > 0 {
+			a.setInputCaret(clusters[at-1].start)
+		}
+	case "right":
+		caret := a.inputCaretPosition()
+		clusters := inputClusters(a.input)
+		at := inputCaretCluster(clusters, caret)
+		if at < len(clusters) {
+			a.setInputCaret(clusters[at].end)
+		}
+	case "ctrl+left", "alt+left":
+		a.setInputCaret(inputWordBoundaryLeft(a.input, a.inputCaretPosition()))
+	case "ctrl+right", "alt+right":
+		a.setInputCaret(inputWordBoundaryRight(a.input, a.inputCaretPosition()))
+	case "delete":
+		if a.deleteInputForward() && a.searching {
+			a.syncSearch()
+		}
 	}
 }
 
 func (a *app) submit() {
+	if a.promptInputLocked() {
+		return
+	}
 	text := strings.TrimSpace(string(a.input))
-	a.input = nil
 	if text == "" {
+		a.clearInput()
 		return
 	}
-	// /resume 之后输入的数字 = 选第 N 个会话
-	if a.pick(text) {
+	// /resume 之后输入的数字 = 选第 N 个会话。非序号会取消选择并继续作为
+	// 普通 prompt，这份草稿必须留到它自己的 accepted/failure，不能提前清掉。
+	if a.pickFrom != nil && a.pick(text) {
+		a.clearInput()
 		return
 	}
+	// 命令不是宿主 prompt，沿用原来的立即执行语义；只有真正发送的草稿
+	// 才保留到 accepted。空草稿和命令都不会进入 pending。
 	if strings.HasPrefix(text, "/") {
+		a.clearInput()
 		a.command(text)
 		return
 	}
-	a.push("› " + text)
-	if err := a.cl.prompt(a.sid, text); err != nil {
-		a.err = err.Error()
-		return
+
+	a.nextSendID++
+	p := &pendingPrompt{id: a.nextSendID, sid: a.sid, text: text}
+	a.pendingSend = p
+	a.pendingEcho = text
+	a.err = ""
+	if a.promptResults == nil {
+		// 一个会话同时只有一个当前提交；余量用于吸收已切换/已重试的迟到结果。
+		a.promptResults = make(chan promptOutcome, 8)
 	}
+	send := a.sendPrompt
+	if send == nil {
+		if a.cl != nil {
+			send = a.cl.requestPrompt
+		} else {
+			send = func(string, string) (promptAck, error) {
+				return promptAck{}, fmt.Errorf("Transport 客户端未初始化")
+			}
+		}
+	}
+	go func() {
+		ack, err := send(p.sid, p.text)
+		a.promptResults <- promptOutcome{id: p.id, sid: p.sid, text: p.text, ack: ack, err: err}
+	}()
+}
+
+// handlePromptResult 结算一次 HTTP 提交，并返回随确认一起释放的 WS 帧。
+// 返回值供 --script 继续驱动审批/终局；交互主循环只需调用，不需要读取返回值。
+func (a *app) handlePromptResult(result promptOutcome) []ServerFrame {
+	p := a.pendingSend
+	if p == nil || result.id != p.id || result.sid != p.sid || result.sid != a.sid {
+		// 迟到的旧 HTTP 结果对新草稿没有任何权利。
+		return nil
+	}
+	frames := p.frames
+	a.pendingSend = nil
+	a.pendingEcho = ""
+
+	if result.err != nil || !result.ack.Accepted {
+		// 草稿原样留在输入行；busy 从未因这次失败被设为 true。
+		if result.err != nil {
+			a.err = "发送失败：" + result.err.Error() + "；草稿已保留，可重试"
+		} else {
+			a.err = "发送失败：宿主返回 accepted=false；草稿已保留，可重试"
+		}
+		// 等待期间若已经收到 durable 帧，它们是真实历史，不能随失败回滚。
+		// 没有 durable 帧时这里不会制造任何用户正文。
+		for _, f := range frames {
+			a.handleFrameNow(f)
+		}
+		return frames
+	}
+
+	// 只有真实 accepted 才清草稿并恢复输入。正文仍只由下面的 durable 帧产生。
+	a.clearInput()
+	a.err = ""
 	a.busy = true
+	a.activeTurnID = result.ack.TurnID
 	a.outAtStart = a.outTokens
-	a.start = time.Now()
+	a.start = a.clock()
+	a.runningAccum = 0
+	a.runningSince = time.Time{}
+	if !a.connectionDown {
+		a.runningSince = a.start
+	}
+	for _, f := range frames {
+		a.handleFrameNow(f)
+	}
+	return frames
 }
 
 // command 是最小的一批斜杠命令。**没有实现的不装作有**：明确说"还没有"。
@@ -698,7 +1152,8 @@ func (a *app) command(text string) {
 	switch strings.Fields(text)[0] {
 	case "/help":
 		a.push("命令：/help 帮助 · /new 新会话 · /clear 清屏 · /quit 退出 · /tools 折叠/展开工具结果")
-		a.push("按键：Ctrl+T 折叠/展开工具结果 · Ctrl+F 搜索会话（Esc 退出） · Esc 清输入")
+		a.push("按键：Ctrl+T 工具结果 · Ctrl+O 思考/长代码与长结果 · Ctrl+F 搜索（Esc 退出） · Esc 清输入")
+		a.push("编辑：←/→ 移动 · Ctrl+←/→ 词跳 · Home/End 行首/行尾 · Backspace/Delete 删除")
 		a.push("滚动：PgUp/PgDn 翻一屏 · ↑/↓ 一行 · Ctrl+Home 到最上面 · Ctrl+End 回到底部（继续跟随）")
 	case "/new":
 		if err := a.newSession(); err != nil {
@@ -783,35 +1238,82 @@ func (a *app) command(text string) {
 	}
 }
 
-// handleFrame 把一帧变成几行字。只做**看得懂**的映射，不猜结构。
+// userFrameKey 返回 durable 内容身份。Transport seq 是缺 id 时的重放兜底，
+// 不把不同会话的序号混在一起（seenUser 在切换会话时重置）。
+func userFrameKey(f ServerFrame) string {
+	var m struct {
+		ID      string `json:"id"`
+		V4Seq   int64  `json:"v4Seq"`
+		Message struct {
+			ID string `json:"id"`
+		} `json:"message"`
+	}
+	_ = json.Unmarshal(f.Data, &m)
+	if m.ID != "" {
+		return "id:" + m.ID
+	}
+	if m.Message.ID != "" {
+		return "id:" + m.Message.ID
+	}
+	if m.V4Seq > 0 {
+		return fmt.Sprintf("v4:%d", m.V4Seq)
+	}
+	if f.Seq > 0 {
+		return fmt.Sprintf("seq:%d", f.Seq)
+	}
+	return ""
+}
+
+// duplicateUserFrame 在帧到达时登记身份；pending 中暂存与之后落定因此不会重复计数。
+func (a *app) duplicateUserFrame(f ServerFrame) bool {
+	key := userFrameKey(f)
+	if key != "" {
+		if a.seenUser == nil {
+			a.seenUser = make(map[string]struct{})
+		}
+		if _, exists := a.seenUser[key]; exists {
+			return true
+		}
+		a.seenUser[key] = struct{}{}
+		return false
+	}
+	// 老宿主连 id/seq 都没有时，只能在本次 accepted 前做一次 scoped fallback。
+	// 绝不能把正文写进全局 seen：同文两次发送是两条合法消息。
+	if p := a.pendingSend; p != nil && a.pendingEcho != "" && extractUserText(f.Data) == a.pendingEcho {
+		if p.anonymousEchoSeen {
+			return true
+		}
+		p.anonymousEchoSeen = true
+	}
+	return false
+}
+
+// handleFrame 先处理确认前排序与 durable 去重，再做实际渲染。
 func (a *app) handleFrame(f ServerFrame) {
+	if f.Type == "user/message" && a.duplicateUserFrame(f) {
+		return
+	}
+	if p := a.pendingSend; p != nil {
+		p.frames = append(p.frames, f)
+		return
+	}
+	a.handleFrameNow(f)
+}
+
+// handleFrameNow 把一帧变成几行字。只做**看得懂**的映射，不猜结构。
+func (a *app) handleFrameNow(f ServerFrame) {
 	switch f.Type {
 	case "user/message":
-		return // 自己刚打的那句已经显示了，避免重复
+		// submit 从不画用户正文；只有 durable user/message 能进入 transcript。
+		if text := extractUserText(f.Data); text != "" {
+			a.pushUserMessage(text)
+		}
 	case "assistant/message":
-		if t := extractText(f.Data); t != "" {
-			for _, ln := range strings.Split(strings.TrimRight(t, "\n"), "\n") {
-				a.push(ln)
-			}
-			a.push("")
-		}
+		a.pushAssistant(f)
 	case "tool/call":
-		a.tools++
-		name, title := extractTool(f.Data)
-		if title != "" {
-			a.push("· " + name + " — " + title)
-		} else if name != "" {
-			a.push("· " + name)
-		}
+		a.pushToolCall(f)
 	case "tool/result":
-		// 结果行照收（展开时要能立刻显示），但打上"可折叠"的标记。
-		// 失败的结果 always-visible：见 isHidden。
-		if brief := extractBrief(f.Data); brief != "" {
-			a.pushMeta("  ← "+brief, lineMeta{
-				toolResult: true,
-				isError:    extractIsError(f.Data),
-			})
-		}
+		a.pushToolResult(f)
 	case "approval/request":
 		var req struct {
 			RequestID string `json:"requestId"`
@@ -869,27 +1371,88 @@ func (a *app) handleFrame(f ServerFrame) {
 			a.noteApprovalCancel()
 		}
 	case "turn/error":
-		a.push("！错误：" + string(f.Data))
+		if a.activeTurnID != "" && frameTurnID(f.Data) != "" && frameTurnID(f.Data) != a.activeTurnID {
+			return
+		}
+		a.flushThinking(f.Time)
+		a.pushRole(roleError, "！错误："+string(f.Data))
 		a.busy = false
+		a.activeTurnID = ""
+		// 这一轮结束了：还没收到 result 的工具卡要**改口**。
+		// 不改的话，屏幕上那张卡永远停在一个"不知道跑到哪"的样子，
+		// 而人从这一帧往后已经不可能再等到它的结果了。
+		a.settleOpenCards(toolAborted)
 	case "turn/done", "turn/end":
-		if a.busy {
+		if a.activeTurnID != "" && frameTurnID(f.Data) != "" && frameTurnID(f.Data) != a.activeTurnID {
+			return
+		}
+		a.flushThinking(f.Time)
+		// 先结算工具卡，再拉用量：loadStats 是网络调用，卡在它前面的话
+		// 一轮结束时卡片会短暂停在旧状态（用户看得到那一瞬）。
+		a.settleOpenCards(toolAborted)
+		if a.busy && a.cl != nil {
 			if st, err := a.cl.loadStats(a.sid); err == nil {
-				a.ctxTokens = st.ContextTokens
-				a.ctxWindow = st.ContextWindow
 				delta := st.OutputTotal - a.outAtStart
 				secs := time.Since(a.start).Seconds()
 				if secs > 0.2 && delta > 0 {
 					a.tps = float64(delta) / secs
 				}
-				a.outTokens = st.OutputTotal
+				a.applyStats(st)
 			}
 		}
 		a.busy = false
+		a.activeTurnID = ""
+	}
+}
+
+// frameTurnID 只读取终局帧显式携带的 turnId；缺字段时不编身份。
+func frameTurnID(data json.RawMessage) string {
+	var m struct {
+		TurnID string `json:"turnId"`
+	}
+	_ = json.Unmarshal(data, &m)
+	return m.TurnID
+}
+
+// settleOpenCards 把还挂着的工具卡按 status 结算并重画头部。
+//
+// "还挂着" = toolRunning / toolUnknown：前者是这一轮在跑却始终没等到结果，
+// 后者是重放里只见到半边。两种都归到"结果未知"，绝不升级成"成功"。
+func (a *app) settleOpenCards(status toolStatus) {
+	for _, c := range a.cards {
+		if c.status != toolRunning && c.status != toolUnknown {
+			continue
+		}
+		c.status = status
+		a.redrawCard(c)
 	}
 }
 
 func (a *app) push(s string) {
 	a.pushMeta(s, lineMeta{})
+}
+
+func (a *app) pushRole(role lineRole, s string) {
+	a.pushMeta(s, lineMeta{role: role})
+}
+
+// pushBlock 给测试与普通多行系统文本使用：首行带角色，续行只缩进。
+func (a *app) pushBlock(role, cont lineRole, text string) {
+	for i, ln := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		if i == 0 {
+			a.pushRole(role, ln)
+			continue
+		}
+		a.pushRole(cont, ln)
+	}
+}
+
+// fmtDuration 是状态行真实运行时长与思考时长的统一写法。
+func fmtDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Round(time.Second)/time.Second))
+	}
+	return fmt.Sprintf("%dm%02ds", int(d/time.Minute), int((d%time.Minute)/time.Second))
 }
 
 // pushMeta 追加一行并带上它的来历。裁剪时 lines 与 meta **必须一起裁**，
@@ -918,6 +1481,18 @@ func (a *app) pushMeta(s string, m lineMeta) {
 		} else {
 			a.meta = nil // 防御：万一有人绕过 push 直接改 lines
 		}
+		// 工具卡记的是**行号**，裁头就得跟着减，否则它会去改别人的行
+		// （症状是"某段正文突然变成一张工具卡的头"）。被裁出屏幕的卡
+		// 标成 -1：它还在 cards 里，只是没有可以改口的那一行了。
+		for _, c := range a.cards {
+			if c.hdr < 0 {
+				continue
+			}
+			c.hdr -= excess
+			if c.hdr < 0 {
+				c.hdr = -1
+			}
+		}
 	}
 	if a.scroll > 0 {
 		// 回看位置可能已经贴到新的顶部（内容被裁掉一截），趁机夹回去，
@@ -933,14 +1508,13 @@ func (a *app) tickStatus() {
 	// 再用一个 goroutine 去改 a 的字段，就多一种"渲染时状态被改一半"的可能，
 	// 而那种错只会表现为偶尔少画一行。250ms 粒度足够——显示本来就只到秒。
 	a.expireApproval()
-	if a.busy {
-		a.status = fmt.Sprintf("· 工作中 %s", time.Since(a.start).Round(time.Second))
-	} else if a.status == "" {
+	// 运行时长由 statusRow 按 start 现算，不存进会过期的 status。
+	if !a.busy && a.status == "" {
 		a.status = "就绪"
 	}
 }
 
-func (a *app) render() {
+func (a *app) renderLegacy() {
 	a.scr.Resize()
 	a.scr.Render(a.view())
 }
@@ -950,7 +1524,7 @@ func (a *app) render() {
 //
 // 折叠与搜索都只影响"取哪几行"和状态行文字，不改变条数：
 // 每屏仍**恰好** height 行（上面 body 行 + 分隔线 + 状态行 + 输入行）。
-func (a *app) view() []string {
+func (a *app) viewLegacy() []string {
 	body := a.bodyHeight()
 	lines := make([]string, 0, a.scr.height)
 
@@ -1039,10 +1613,8 @@ func (a *app) view() []string {
 
 // ---------------------------------------------------------------- 输入
 
-// readKeys 把字节流转成 rune / 按键名。
-//
-// 不做完整行编辑（历史/光标移动）：那是下一步。这里只保证
-// "能打字、能删、能回车、能退、能翻页"——足够验证整条链路。
+// readKeys 把字节流转成 rune / 按键名。行编辑状态住在 input.go；
+// 这里只负责字节边界，不让方向/Home/F 键序列漏进草稿。
 func readKeys(runes chan<- rune, specials chan<- string) {
 	decodeKeys(newStdinSource(os.Stdin), runes, specials)
 }
@@ -1156,7 +1728,9 @@ func decodeKeys(src byteSource, runes chan<- rune, specials chan<- string) {
 	var pend []byte
 	pendingEsc := false
 	csi := false
-	var seq []byte // CSI/SS3 的参数与终结字节（"5~"、"1;5H"、"A"）
+	osc := false
+	oscEscape := false // OSC 内刚读到 ESC；只有后续 '\\' 才构成 ST。
+	var seq []byte     // CSI/SS3 的参数与终结字节（"5~"、"1;5H"、"A"）
 	for {
 		c, timeout, ok := src.next(pendingEsc)
 		if timeout {
@@ -1177,6 +1751,13 @@ func decodeKeys(src byteSource, runes chan<- rune, specials chan<- string) {
 		switch {
 		case pendingEsc:
 			pendingEsc = false
+			if c == ']' {
+				// OSC 11 等终端响应与键盘共用 stdin。整段消费到 BEL/ST，
+				// 尤其启动探测超时后迟到的响应也不能落入输入行。
+				osc = true
+				oscEscape = false
+				continue
+			}
 			if c == '[' || c == 'O' {
 				// CSI（ESC [ …）与 SS3（ESC O …）走同一条路：
 				// 方向键在真终端上两种都有
@@ -1186,11 +1767,29 @@ func decodeKeys(src byteSource, runes chan<- rune, specials chan<- string) {
 			}
 			// 孤立 ESC 后面跟的是普通按键：ESC 照发，这个字节照常处理
 			specials <- "esc"
+		case osc:
+			if oscEscape {
+				oscEscape = false
+				if c == '\\' {
+					osc = false
+				}
+				continue
+			}
+			switch c {
+			case 0x07:
+				osc = false
+			case 0x1b:
+				oscEscape = true
+			}
+			continue
 		case csi:
 			// 终结字节也要进 seq（"A"、"5~"、"1;5H" 的末字节都是）
 			seq = append(seq, c)
+			// Linux 控制台 F5 = ESC [ [ E：第二个 '[' 虽落在通用 CSI
+			// 终结范围内，但在这里是序列本体，不能提前结束并漏一个 E 到草稿。
+			linuxF5Prefix := c == '[' && len(seq) == 1
 			// 终结字节在 0x40–0x7E
-			if c >= 0x40 && c <= 0x7e {
+			if !linuxF5Prefix && c >= 0x40 && c <= 0x7e {
 				csi = false
 				if name := keyName(seq); name != "" {
 					specials <- name
@@ -1220,54 +1819,6 @@ func decodeKeys(src byteSource, runes chan<- rune, specials chan<- string) {
 	}
 }
 
-// keyName 把 CSI/SS3 的参数+终结字节认成按键名。
-//
-// 只认**确定知道**的几个，认不出来返回空串（静默吞掉）：
-// 往输入行里塞 "[1;2C" 比没反应糟得多。修饰键（"1;5H" 里的 5）直接不看——
-// 这个界面里 Ctrl+Home 和 Home 是同一件事（见 handleSpecial）。
-func keyName(seq []byte) string {
-	if len(seq) == 0 {
-		return ""
-	}
-	numPart := seq[:len(seq)-1]
-	if i := indexByte(numPart, ';'); i >= 0 {
-		numPart = numPart[:i]
-	}
-	num, _ := atoiSmall(string(numPart)) // SS3 的 "OA" 没有数字，得到 0
-	switch seq[len(seq)-1] {
-	case 'A':
-		return "up"
-	case 'B':
-		return "down"
-	case 'H':
-		return "home"
-	case 'F':
-		return "end"
-	case '~':
-		switch num {
-		case 1, 7:
-			return "home" // ESC[1~ / ESC[7~
-		case 4, 8:
-			return "end" // ESC[4~ / ESC[8~
-		case 5:
-			return "pgup"
-		case 6:
-			return "pgdn"
-		}
-	}
-	return ""
-}
-
-// indexByte 是 bytes.IndexByte 的最小替代：这里只处理几个字节，不值得再引一个包。
-func indexByte(b []byte, c byte) int {
-	for i := range b {
-		if b[i] == c {
-			return i
-		}
-	}
-	return -1
-}
-
 // ---------------------------------------------------------------- 小工具
 
 // ctxPercent 画上下文占用：**知道上限才画百分比**，不知道就只报用了多少。
@@ -1284,10 +1835,8 @@ func ctxPercent(used, window int) string {
 	if pct > 100 {
 		pct = 100
 	}
-	const width = 10
-	filled := int(pct / 100 * width)
-	bar := strings.Repeat("▓", filled) + strings.Repeat("░", width-filled)
-	return fmt.Sprintf("%s %.0f%% (%s/%s)", bar, pct, fmtTokens(used), fmtTokens(window))
+	// 条形图由 contextBarRow 画；状态行只保留真实读数。
+	return fmt.Sprintf("%s/%s %.1f%%", fmtTokens(used), fmtTokens(window), pct)
 }
 
 // renderMarkdown 把消息列表排成 markdown。**保留角色**：
@@ -1383,7 +1932,17 @@ func extractTool(data json.RawMessage) (string, string) {
 	if name == "" {
 		name = m.Tool
 	}
-	return name, m.Title
+	title := m.Title
+	if title == "" {
+		// v4 ToolCallEvent 没有 title，只有 arguments JSON。原样展示真实参数，
+		// 不按工具名编一个"读取文件"/"运行命令"的标题。
+		var call struct {
+			Arguments string `json:"arguments"`
+		}
+		_ = json.Unmarshal(data, &call)
+		title = call.Arguments
+	}
+	return name, title
 }
 
 func extractBrief(data json.RawMessage) string {

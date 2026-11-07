@@ -13,8 +13,9 @@
 // 是两种**变换**，不是同一个东西的两种写法。差异是实测的（探针见
 // docs/silent-success-audit.md §4 D3）：
 //
-//   - tightenSchema 还删冗余骨架（顶层 type:object / 空 properties / 空 required /
-//     additionalProperties:true），CompactSchema 不删；
+//   - tightenSchema 还删可省骨架（非空对象的顶层 type:object、空 required、
+//     additionalProperties:true），CompactSchema 不删；**无参/空对象必须保留
+//     type:object 与空 properties**，否则上游 schema 转换器会拒发（见 503 事故）；
 //   - tightenSchema 用 json.RawMessage 承载子节点，type/enum/数字逐字节不变
 //     （9007199254740993 不会变成 ...992，1e+04 不会重排）；CompactSchema 走
 //     any，数字会过一遍 float64；

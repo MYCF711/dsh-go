@@ -3,6 +3,8 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -92,6 +94,191 @@ func TestStepFailureDoesNotAbortScript(t *testing.T) {
 	}
 	if m["failed"] != 1 {
 		t.Fatalf("失败计数应当是 1：%v", m)
+	}
+}
+
+// context.Canceled 与 DeadlineExceeded 一样，只结算当前步骤并继续。
+func TestCancellationDoesNotAbortScript(t *testing.T) {
+	f := &fakeRunner{reply: func(tool string, _ json.RawMessage) (spi.Result, error) {
+		if tool == "boom" {
+			return spi.Result{Text: "cancel-body", Hint: "已取消"}, context.Canceled
+		}
+		return spi.Result{Summary: "after cancel"}, nil
+	}}
+	res, err := run(t, ctxWith(f), scriptArg(t, `[{"tool":"boom"},{"tool":"after"}]`))
+	if err != nil {
+		t.Fatalf("取消不该让整个脚本返回 error：%v", err)
+	}
+	if !reflect.DeepEqual(f.calls, []string{"boom", "after"}) {
+		t.Fatalf("取消后必须继续后续步骤：%v", f.calls)
+	}
+	if !strings.Contains(res.Text, "cancel-body") || !strings.Contains(res.Text, "after [ok]") {
+		t.Fatalf("取消 trace 与后续步骤都要保留：%s", res.Text)
+	}
+	m, _ := res.Data.(map[string]any)
+	steps, _ := m["steps"].([]trace)
+	if m["ok"] != false || m["failed"] != 1 || len(steps) != 2 || steps[0].OK || !steps[0].IsError {
+		t.Fatalf("取消必须只记一个失败步骤：%#v", m)
+	}
+}
+
+// 普通嵌套失败必须保留子调用的真实结果，但仍只是一步失败：写 trace、
+// 继续后续步骤、整体 err=nil。W22 已修原生 agent 错误投影，不需要靠
+// 整次 workflow error 来保留 actual-body。
+func TestNestedFailurePreservesTraceAndResult(t *testing.T) {
+	nestedErr := errors.New("nested failed")
+	want := spi.Result{
+		Summary: "child summary",
+		Text:    "actual-body",
+		Data:    map[string]any{"answer": 42, "nested": map[string]any{"kept": true}},
+		Artifacts: []spi.Artifact{
+			{Name: "full-output", Path: `artifacts\full-output.txt`, Bytes: 123},
+		},
+		Hint: "child hint",
+		View: &spi.ViewSpec{Kind: spi.ViewCard, Title: "child view", Body: "view-body"},
+	}
+	assertTrace := func(t *testing.T, tr trace, want spi.Result) {
+		t.Helper()
+		if tr.OK {
+			t.Error("失败步骤的 OK 必须为 false")
+		}
+		if !tr.IsError {
+			t.Error("失败步骤的 isError 必须为 true")
+		}
+		if tr.Brief != "actual-body" || tr.Text != want.Text {
+			t.Errorf("Brief/Text 必须保留真实正文：Brief=%q Text=%q", tr.Brief, tr.Text)
+		}
+		if tr.Detail != nestedErr.Error() {
+			t.Errorf("Detail 必须保留错误原文：%q", tr.Detail)
+		}
+		if !reflect.DeepEqual(tr.Data, want.Data) {
+			t.Errorf("trace.Data 丢失或被改写：\n got: %#v\nwant: %#v", tr.Data, want.Data)
+		}
+		if !reflect.DeepEqual(tr.Artifacts, want.Artifacts) {
+			t.Errorf("trace.Artifacts 丢失或被改写：\n got: %#v\nwant: %#v", tr.Artifacts, want.Artifacts)
+		}
+		if !reflect.DeepEqual(tr.View, want.View) {
+			t.Errorf("trace.View 丢失或被改写：\n got: %#v\nwant: %#v", tr.View, want.View)
+		}
+		if tr.Hint != want.Hint {
+			t.Errorf("trace.Hint 丢失或被改写：got %q want %q", tr.Hint, want.Hint)
+		}
+	}
+	newRunner := func() *fakeRunner {
+		return &fakeRunner{reply: func(tool string, _ json.RawMessage) (spi.Result, error) {
+			if tool == "boom" {
+				return want, nestedErr
+			}
+			return spi.Result{Summary: "after ok", Data: map[string]any{"after": true}}, nil
+		}}
+	}
+
+	t.Run("trace", func(t *testing.T) {
+		tr, val, err := runOne(context.Background(), newRunner(), 0,
+			step{Tool: "boom"}, nil, nil)
+		if err != nil {
+			t.Fatalf("普通单步失败不得成为 runOne 的 hardErr：%v", err)
+		}
+		assertTrace(t, tr, want)
+		if !reflect.DeepEqual(val, want.Data) {
+			t.Errorf("失败结果仍应可供后续步骤引用：\n got: %#v\nwant: %#v", val, want.Data)
+		}
+		raw, marshalErr := json.Marshal(tr)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if !strings.Contains(string(raw), "actual-body") || !strings.Contains(string(raw), `"isError":true`) {
+			t.Errorf("序列化 trace 必须含真实正文和 isError：%s", raw)
+		}
+	})
+
+	t.Run("result", func(t *testing.T) {
+		f := newRunner()
+		res, err := run(t, ctxWith(f), scriptArg(t, `[{"tool":"boom"},{"tool":"after"}]`))
+		if err != nil {
+			t.Fatalf("普通单步失败不得成为整次 workflow error：%v", err)
+		}
+		if !reflect.DeepEqual(f.calls, []string{"boom", "after"}) {
+			t.Fatalf("普通失败后必须继续后续步骤：%v", f.calls)
+		}
+		if !strings.Contains(res.Text, "actual-body") || !strings.Contains(res.Text, "after [ok]") {
+			t.Fatalf("结果 Text 必须含真实正文和后续成功步骤：%s", res.Text)
+		}
+		m, ok := res.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("结果 Data 形状不对：%T", res.Data)
+		}
+		if m["ok"] != false || m["failed"] != 1 {
+			t.Fatalf("普通失败必须计入 Data.ok=false / failed=1：%v", m)
+		}
+		steps, ok := m["steps"].([]trace)
+		if !ok || len(steps) != 2 {
+			t.Fatalf("必须保留失败与后续两步 trace：%#v", m["steps"])
+		}
+		assertTrace(t, steps[0], want)
+		if !steps[1].OK || steps[1].IsError {
+			t.Fatalf("后续步骤必须成功且不误标 isError：%+v", steps[1])
+		}
+	})
+
+	t.Run("empty hint", func(t *testing.T) {
+		withoutHint := want
+		withoutHint.Hint = ""
+		f := &fakeRunner{reply: func(string, json.RawMessage) (spi.Result, error) {
+			return withoutHint, nestedErr
+		}}
+		tr, _, err := runOne(context.Background(), f, 0, step{Tool: "boom"}, nil, nil)
+		if err != nil {
+			t.Fatalf("空 Hint 的普通失败同样不得成为 hardErr：%v", err)
+		}
+		assertTrace(t, tr, withoutHint)
+		if tr.Hint != "" {
+			t.Fatalf("trace 不得伪造子调用 Hint：%q", tr.Hint)
+		}
+	})
+}
+
+// 嵌套失败 trace 里的原始正文必须**有界**：一次 workflow 可能跑几十步，
+// 每步都把整段正文抄进 Data.steps 会把结果撑爆（spill 阈值 4000）。
+// 但"有界"不等于"换成 err.Error()"——开头那段真实正文必须还在。
+func TestNestedFailureBoundsTraceText(t *testing.T) {
+	nestedErr := errors.New("nested failed")
+	huge := "actual-body\n" + strings.Repeat("x", maxTextRunes*2)
+	f := &fakeRunner{reply: func(string, json.RawMessage) (spi.Result, error) {
+		return spi.Result{
+			Text:    huge,
+			Data:    map[string]any{"kept": true},
+			Hint:    "child hint",
+			View:    &spi.ViewSpec{Kind: spi.ViewPlain, Body: "view-body"},
+			Summary: "child summary",
+		}, nestedErr
+	}}
+
+	tr, _, err := runOne(context.Background(), f, 0, step{Tool: "boom"}, nil, nil)
+	if err != nil {
+		t.Fatalf("普通单步失败不得成为 runOne 的 hardErr：%v", err)
+	}
+	if !tr.IsError {
+		t.Fatal("失败步骤的 isError 必须为 true")
+	}
+	if !strings.HasPrefix(tr.Text, "actual-body") {
+		t.Fatalf("trace 必须以真实正文开头，不能只剩错误串：%.40q", tr.Text)
+	}
+	if len([]rune(tr.Text)) > maxTextRunes+1 {
+		t.Fatalf("trace.Text 必须有界：%d rune > %d", len([]rune(tr.Text)), maxTextRunes+1)
+	}
+	if tr.Detail != nestedErr.Error() {
+		t.Fatalf("Detail 必须保留错误原文：%q", tr.Detail)
+	}
+	if !reflect.DeepEqual(tr.Data, map[string]any{"kept": true}) {
+		t.Fatalf("Data 丢失：%#v", tr.Data)
+	}
+	if tr.Hint != "child hint" || tr.View == nil || tr.View.Body != "view-body" {
+		t.Fatalf("Hint/View 丢失：%+v", tr)
+	}
+	// Brief 仍是一行摘要，且不是错误串——模型先看到"哪一步、吐了什么"。
+	if strings.Contains(tr.Brief, nestedErr.Error()) || tr.Brief != "actual-body" {
+		t.Fatalf("Brief 该是真实正文首行：%q", tr.Brief)
 	}
 }
 

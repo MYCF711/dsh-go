@@ -46,6 +46,8 @@ type acpRunner struct {
 	ask func(ctx context.Context, sessionID, tool string, args string) (bool, error)
 	// ctxWindow 用于 usage_update 的分母。
 	ctxWindow int
+	// capacity 是这个 runner 固定模型的有效容量；MaxOutput 进入常规请求。
+	capacity llm.ModelCapacity
 	// system 是装配好的系统提示（会作为事件落盘）。
 	system string
 	// autoCompact 是自动压缩的 token 阈值（0 = 关闭）。
@@ -74,12 +76,21 @@ type acpRunner struct {
 }
 
 func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home string, steps int) *acpRunner {
-	return &acpRunner{
+	r := &acpRunner{
 		reg: reg, runner: runner, base: base, model: model, home: home, steps: steps,
 		logs: map[string]*session.Log{}, turns: map[string]int{}, hist: map[string][]llm.Message{},
-		used: map[string]int{}, ctxWindow: 128000, meter: map[string]*session.Meter{}, keepRecent: 8,
+		used: map[string]int{}, meter: map[string]*session.Meter{}, keepRecent: 8,
 		approvals: approval.New(), sessionModes: map[string]string{}, modeID: modes.DefaultID,
 	}
+	r.setModelCapacity(llm.ModelCapacity{})
+	return r
+}
+
+// setModelCapacity 在启动参数或测试给出显式声明后统一重算有效容量。
+// 只在 Prompt 前调用；模型本身仍由既有路由固定，不在这里选择。
+func (r *acpRunner) setModelCapacity(declared llm.ModelCapacity) {
+	r.capacity = llm.ResolveModelCapacity(r.model, declared)
+	r.ctxWindow = r.capacity.ContextWindow
 }
 
 // Prompt 的返回值是**命名**的，因为出口兜底要看见最终的错误：
@@ -133,6 +144,16 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	}()
 	if err := logw.Append("user/message", session.UserMessage(user)); err != nil {
 		return "", nil, err
+	}
+	if err := captureRewindCheckpointForLog(r.home, logw); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+	}
+	// 官方 0.2.2 #78 `llm/stream`：请求前缀先耐久，再派发模型请求。
+	// 与 run / serve 同一条判据；失败即 fail-closed（这一轮不派发），
+	// 出口兜底照旧把 turn/end 补上（D1），不会留下悬挂的 turn。
+	acpCheckpoint := session.NewCheckpointRequest("text", []byte(text))
+	if _, err := session.WriteDurableCheckpoint(r.home, logw.Path, &acpCheckpoint); err != nil {
+		return "", nil, fmt.Errorf("durability checkpoint 落盘失败，模型请求未派发: %w", err)
 	}
 
 	var lastCallSeq int64
@@ -214,26 +235,34 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		return emit(e)
 	}
 
-	var runner spi.Runner = r.runner
-	if r.ask != nil {
-		runner = &guardedRunner{
-			inner: r.runner, reg: r.reg, ask: r.ask,
-			sessionID: sessionID, approvals: r.approvals,
-			modeApproval: r.modeOf(sessionID).Approval,
-		}
+	// 模型声明与执行准入共用同一轮、同一个过滤视图。只裁工具表不够：
+	// 模型或直接调用方仍能点名隐藏工具，执行入口必须再拒绝一次。
+	mode := r.modeOf(sessionID)
+	view := modes.Filter(r.reg, mode)
+	var runner spi.Runner = &guardedRunner{
+		inner: r.runner, reg: r.reg, view: view, ask: r.ask,
+		sessionID: sessionID, approvals: r.approvals,
+		modeApproval: mode.Approval,
 	}
 
 	loop := &agent.Loop{
 		Chat:      llm.New(r.base, os.Getenv("DSHD_LLM_KEY")),
-		Tools:     modes.Filter(r.reg, r.modeOf(sessionID)),
+		Tools:     view,
 		Runner:    runner,
 		Project:   session.ProjectResult,
 		Model:     r.model,
+		Capacity:  r.capacity,
 		Reasoning: r.reasoning,
 		System:    r.system,
 		SessionID: sessionID,
 		MaxSteps:  r.steps,
 		Emit:      sink,
+		// 官方 0.2.2 #78 `agent/pre-step`：每一步模型请求之前先让请求前缀耐久。
+		// ACP 的 v4 不落 step/start，所以每一步的锚点就是该步请求前的事件数；
+		// 第一步与 prompt 侧车同锚点（幂等命中）。
+		PreStep: func(context.Context, int) error {
+			return writeDurableCheckpointForSession(r.home, sessionID, nil)
+		},
 	}
 
 	// hist 必须在压缩**之后**取：autoCompactNow 会把 r.hist 换成压缩后的历史，
@@ -262,8 +291,11 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 // 这里不按工具名判断：名字表是 dsc 踩过的坑（sandbox.go:52），
 // 一个改了名字的工具就会绕过审批。
 type guardedRunner struct {
-	inner     spi.Runner
+	inner spi.Runner
+	// reg 用于读取工具的 Caps；view 是本轮模型声明与执行准入共用的快照。
+	// 非 ACP 调用方没有模式视图时 view 为空，准入退回 reg，原有行为不变。
 	reg       spi.ToolRegistry
+	view      spi.ToolRegistry
 	ask       func(ctx context.Context, sessionID, tool string, args string) (bool, error)
 	sessionID string
 	approvals *approval.Memory
@@ -275,14 +307,15 @@ type guardedRunner struct {
 }
 
 func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
-	// 给"工具里再调工具"留一条**同样受管**的通道：放进去的是 g 自己，
-	// 所以子调用照样过审批、照样过计划模式闸门、照样过 spill。
-	// 不放这个，模块就只能去 Inject 裸 Pipeline —— 那等于绕开"问人"这一层。
-	if spi.SubDispatchFrom(ctx).Runner == nil {
-		ctx = spi.WithSubDispatch(ctx, spi.SubDispatch{Runner: g})
+	var tool spi.Tool
+	known := false
+	if g.reg != nil {
+		tool, known = g.reg.Get(name)
 	}
-
-	if t, ok := g.reg.Get(name); ok && t.Caps().NeedsApproval() {
+	// ask=nil 的 ACP 路径原来不做审批；这里只新增可见性准入，不能悄悄新增审批。
+	needsApproval := g.ask != nil && known && tool.Caps().NeedsApproval()
+	needAsk := false
+	if needsApproval {
 		// 「以后都允许」**不能被子调用继承**。
 		//
 		// 理由：记忆是按（会话, 工具）记的，而一段 workflow 里同一个写类工具
@@ -291,16 +324,38 @@ func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessa
 		// 所以嵌套调用一律重新问（无人值守策略下就是一律拒）。
 		nested := spi.SubDispatchFrom(ctx).Depth > 0
 		remembered := !nested && g.approvals != nil && g.approvals.Allowed(g.sessionID, name)
-		allow, needAsk := approvalDecision(g.modeApproval, remembered)
-		switch {
-		case allow:
-			return g.inner.Run(ctx, name, args)
-		case needAsk:
-			// 落到下面去问
-		default:
+		allow, ask := approvalDecision(g.modeApproval, remembered)
+		if !allow && !ask {
+			// deny 的既有结果优先于可见性错误；两种路径都不会落到底层执行器。
 			return spi.Result{Hint: "当前模式的审批策略是 deny：换成只读工具，或让用户切到别的模式"},
 				fmt.Errorf("模式策略拒绝了 %s", name)
 		}
+		needAsk = ask
+	}
+
+	// 工具表过滤只是模型声明，不是执行授权。无论是否配置审批，隐藏和未知工具
+	// 都必须在这里失败；workflow 的 SubDispatch 放回 g 自己，因此子调用也过这一闸门。
+	view := g.view
+	if view == nil {
+		view = g.reg
+	}
+	if view == nil {
+		return spi.Result{Hint: "当前环境没有可用工具表；不要继续尝试未声明的工具"},
+			fmt.Errorf("当前模式未声明工具 %q", name)
+	}
+	if _, ok := view.Get(name); !ok {
+		return spi.Result{Hint: "只调用本轮工具表中列出的名字；隐藏或未知工具都不会执行"},
+			fmt.Errorf("当前模式未声明工具 %q", name)
+	}
+
+	// 给"工具里再调工具"留一条**同样受管**的通道：放进去的是 g 自己，
+	// 所以子调用照样过可见性准入、审批、计划模式闸门和 spill。
+	// ask=nil 原来没有 guardedRunner，也没有 SubDispatch；保持这条行为不变。
+	if g.ask != nil && spi.SubDispatchFrom(ctx).Runner == nil {
+		ctx = spi.WithSubDispatch(ctx, spi.SubDispatch{Runner: g})
+	}
+
+	if needAsk {
 		ok, err := g.ask(ctx, g.sessionID, name, string(args))
 		if err != nil {
 			return spi.Result{Hint: "审批失败：客户端可能断开了；重试或改用只读工具"}, fmt.Errorf("审批失败: %w", err)
@@ -430,7 +485,7 @@ func (r *acpRunner) Close(sessionID string) error {
 func cmdACP(argv []string) error {
 	fs := flag.NewFlagSet("acp", flag.ContinueOnError)
 	manifest := fs.String("manifest", "dsh.toml", "manifest 路径")
-	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "模型 id")
+	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"), "模型 id")
 	// 三个入口（run/serve/acp）要有同一个开关：ACP 是 Martty 那条路，
 	// 这里缺了就意味着"同一个模型，换个客户端就没有 reasoning"——那种差异最难解释。
 	reasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
@@ -442,7 +497,8 @@ func cmdACP(argv []string) error {
 	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	autoCompact := fs.Int("auto-compact", 40000, "surface 估算超过多少 token 就自动压缩（0=关闭）")
-	ctxWindow := fs.Int("context-window", 128000, "上下文窗口大小（usage_update 的分母）")
+	ctxWindow := fs.Int("context-window", 0, "显式上下文窗口（usage_update 分母）；0=按模型容量解析")
+	maxOutput := fs.Int("max-output", 0, "显式单次最大输出 token；0=按模型容量解析")
 	modeID := fs.String("mode", modes.DefaultID, "启动模式 id（见 --modes-dir 与内置）")
 	modesDir := fs.String("modes-dir", "", "用户自建模式目录（默认 <home>/modes）")
 	remember := fs.Bool("remember-approvals", false, "把\"以后都允许\"记到磁盘，resume 后仍然生效")
@@ -485,14 +541,12 @@ func cmdACP(argv []string) error {
 		return err
 	}
 
-	assembled := buildSystemPrompt(reg, *model, mustGetwd(), *workspaceBytes)
 	acpRunner := newACPRunner(reg, runner, *base, *model, *home, *steps)
+	assembled := buildSystemPromptWithHome(reg, *model, mustGetwd(), acpRunner.home, *workspaceBytes)
 	acpRunner.reasoning = *reasoning
 	acpRunner.system = assembled
 	acpRunner.autoCompact = *autoCompact
-	if *ctxWindow > 0 {
-		acpRunner.ctxWindow = *ctxWindow
-	}
+	acpRunner.setModelCapacity(llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput})
 	dir := *modesDir
 	if dir == "" {
 		dir = filepath.Join(*home, "modes")
@@ -631,14 +685,25 @@ func cmdACP(argv []string) error {
 // 用途：给"写代码的执行者"喂精简手册（docs/WORKER.md），而不是维护者那本。
 var rulesPath = flag.String("agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 
-// buildSystemPrompt 用现有工具表装配系统提示（确定性：同输入同输出）。
+// buildSystemPrompt 保留非 ACP 入口的原行为：没有显式 home，就不注入全局规则。
 func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes int) string {
+	return buildSystemPromptWithHome(reg, model, cwd, "", workspaceBytes)
+}
+
+// buildSystemPromptWithHome 分别给 <home>/AGENTS.md 与项目规则同样的正文预算。
+func buildSystemPromptWithHome(reg spi.ToolRegistry, model, cwd, home string, workspaceBytes int) string {
+	globalRulesPath := ""
+	if home != "" {
+		globalRulesPath = filepath.Join(home, "AGENTS.md")
+	}
 	return prompt.Default(prompt.Context{
 		Model:             model,
 		Cwd:               cwd,
 		Platform:          runtime.GOOS + "/" + runtime.GOARCH,
 		Date:              time.Now().Format("2006-01-02"),
 		Tools:             reg.Tools(),
+		GlobalRulesPath:   globalRulesPath,
+		MaxGlobalBytes:    workspaceBytes,
 		MaxWorkspaceBytes: workspaceBytes,
 		ExtraRulesPath:    *rulesPath,
 	})

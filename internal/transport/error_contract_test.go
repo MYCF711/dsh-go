@@ -46,17 +46,20 @@ var errorEnvelopeKeys = []string{"code", "message", "hint", "retryable"}
 // 这张表故意不 import 实现里的判断函数：两边独立，才有对照价值。
 var retryableSemantics = map[string]bool{
 	// ---- 改请求/改客户端才能过 ----
-	"unauthorized":    false, // 先 /connect 换 cookie
-	"not_found":       false, // 路径、方法或目标写错了
-	"not_implemented": false, // 宿主没接这条线，重试一万次也一样
-	"bad_request":     false, // 参数错：必须改参数
-	"bad_handshake":   false, // 握手头不全：改客户端
-	"no_such_session": false, // 会话不在：先 session.list
-	"no_such_request": false, // 审批已应答/已超时
-	"bad_option":      false, // optionId 写错了
-	"encode_failure":  false, // 宿主序列化出 bug，重试还是同一个 bug
-	"empty_result":    false, // 宿主没给载荷（宿主缺陷）
-	"error":           false, // 叫不出名字的宿主错误：不自动重试
+	"unauthorized":      false, // 先 /connect 换 cookie
+	"not_found":         false, // 路径、方法或目标写错了
+	"not_implemented":   false, // 宿主没接这条线，重试一万次也一样
+	"bad_request":       false, // 参数错：必须改参数
+	"revision_conflict": false, // 先读最新 revision，不能盲重试覆盖
+	"job_finished":      false, // 已结束不能重复停止
+	"cross_session":     false, // 不能越 home/会话操作
+	"bad_handshake":     false, // 握手头不全：改客户端
+	"no_such_session":   false, // 会话不在：先 session.list
+	"no_such_request":   false, // 审批已应答/已超时
+	"bad_option":        false, // optionId 写错了
+	"encode_failure":    false, // 宿主序列化出 bug，重试还是同一个 bug
+	"empty_result":      false, // 宿主没给载荷（宿主缺陷）
+	"error":             false, // 叫不出名字的宿主错误：不自动重试
 	// ---- 等一等/换基线再来就过 ----
 	"internal":    true, // 宿主自己出错：同样的请求再发一次可能就好了
 	"busy":        true, // 上一轮还没结束：等 turn/done 再发
@@ -192,6 +195,15 @@ func failingOptions(j *Journals) Options {
 			return JobOutput{}, errors.New("no such job: " + id)
 		},
 		ScheduleList: func() []ScheduleItem { return nil },
+		ScheduleDelete: func(sessionID, id, expectedRevision string) (ScheduleDeleteResult, error) {
+			return ScheduleDeleteResult{}, ErrNoSuchSchedule
+		},
+		ScheduleClear: func() (ScheduleClearResult, error) {
+			return ScheduleClearResult{}, hostErr
+		},
+		JobsStop: func(sessionID, id string) (JobStopResult, error) {
+			return JobStopResult{}, ErrNoSuchJob
+		},
 		SetSessionModel: func(id, model string) error {
 			return errors.New("模型 id 不认识")
 		},
@@ -302,6 +314,9 @@ func TestEveryHTTPErrorHasFourFieldEnvelope(t *testing.T) {
 		{"fs.read 文件不存在", "", "/api/fs.read", `{"path":"nope.txt"}`},
 		{"fs.write 文件不存在", "", "/api/fs.write", `{"path":"nope.txt","content":""}`},
 		{"jobs.output 任务不存在", "", "/api/jobs.output", `{"id":"nope"}`},
+		{"jobs.stop 任务不存在", "", "/api/jobs.stop", `{"sessionId":"s","id":"nope"}`},
+		{"schedule.delete 任务不存在", "", "/api/schedule.delete", `{"sessionId":"s","id":"nope"}`},
+		{"schedule.clear 存储失败", "", "/api/schedule.clear", `{}`},
 		{"terminal.input 终端不存在", "", "/api/terminal.input", `{"id":"nope","data":"ls"}`},
 		{"terminal.output 终端不存在", "", "/api/terminal.output", `{"id":"nope"}`},
 		{"config.set values 为空", "", "/api/config.set", `{"values":{}}`},

@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -99,29 +100,7 @@ func OpenSession(home, cwd, id string) (*Log, error) {
 	if err != nil {
 		return nil, err
 	}
-	back, err := v4.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	if back.Header.ID != id {
-		return nil, fmt.Errorf("文件里的会话 id 是 %q，与请求的 %q 不符", back.Header.ID, id)
-	}
-	if err := claimWriter(path); err != nil {
-		return nil, err
-	}
-	w, err := v4.OpenAppend(path)
-	if err != nil {
-		releaseWriter(path)
-		// 这时候**文件是能读的**（上面 ReadFile 已经成功了），只是打不开写入。
-		// 原始错误只有 `open <path>: Access is denied.`——看不出"读没问题、写不行"，
-		// 也不知道下一步该干什么。
-		return nil, fmt.Errorf("会话能读、但打不开写入（%s）：%w；"+
-			"文件只读/被占用/磁盘满都会这样。已有 %d 条事件不受影响，可以先用 `dshd session info --in` 查看",
-			path, err, len(back.Events))
-	}
-	lg := &Log{w: w, Path: path, seq: int64(len(back.Events)), now: time.Now}
-	lg.lockPath = path + ".lock"
-	return lg, nil
+	return openSessionWriter(path, id)
 }
 
 // claimWriter 保证**同一时刻只有一个进程在写一份会话**。
@@ -140,13 +119,37 @@ func claimWriter(path string) error {
 		}
 		return fmt.Errorf("建写锁失败: %w", err)
 	}
-	fmt.Fprintf(f, "pid=%d"+string(rune(10))+"at=%s"+string(rune(10)),
-		os.Getpid(), time.Now().Format(time.RFC3339))
-	f.Close()
+	_, writeErr := fmt.Fprintf(f, "pid=%d\nat=%s\n", os.Getpid(), time.Now().Format(time.RFC3339))
+	closeErr := f.Close()
+	if writeErr != nil {
+		if removeErr := os.Remove(lock); removeErr != nil && !os.IsNotExist(removeErr) {
+			writeErr = errors.Join(writeErr, fmt.Errorf("清理写锁失败: %w", removeErr))
+		}
+		return fmt.Errorf("写锁文件失败: %w", writeErr)
+	}
+	if closeErr != nil {
+		if removeErr := os.Remove(lock); removeErr != nil && !os.IsNotExist(removeErr) {
+			closeErr = errors.Join(closeErr, fmt.Errorf("清理写锁失败: %w", removeErr))
+		}
+		return fmt.Errorf("关闭锁文件失败: %w", closeErr)
+	}
 	return nil
 }
 
-func releaseWriter(path string) { os.Remove(path + ".lock") }
+func releaseWriter(path string) error {
+	err := os.Remove(path + ".lock")
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func joinSessionUnlockError(err error, path string) error {
+	if releaseErr := releaseWriter(path); releaseErr != nil {
+		return errors.Join(err, fmt.Errorf("释放会话写锁 %s: %w", path+".lock", releaseErr))
+	}
+	return err
+}
 
 // SessionPath 按 v4 的目录规则算出会话文件路径。
 func SessionPath(home, cwd, id string) (string, error) {
@@ -159,24 +162,30 @@ func SessionPath(home, cwd, id string) (string, error) {
 
 // OpenSessionAt 直接按文件路径续写（CLI 用：文件可能不在 <home>/sessions 布局里）。
 func OpenSessionAt(path string) (*Log, error) {
-	back, err := v4.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	// 同样要抢写锁：这条路径以前漏了，等于给"同一份会话两个写入者"开了后门
-	// （实测踩过：手工放一个僵尸锁，resume 照样成功）。
+	return openSessionWriter(path, "")
+}
+
+// openSessionWriter 是 OpenSession/OpenSessionAt 共用的唯一快照与加锁顺序。
+// 必须先抢锁再读事件快照；否则锁前 ReadFile 会按旧 len(events) 发出重复 seq。
+func openSessionWriter(path, expectedID string) (*Log, error) {
 	if err := claimWriter(path); err != nil {
 		return nil, err
 	}
+	back, err := v4.ReadFile(path)
+	if err != nil {
+		return nil, joinSessionUnlockError(err, path)
+	}
+	if expectedID != "" && back.Header.ID != expectedID {
+		err := fmt.Errorf("文件里的会话 id 是 %q，与请求的 %q 不符", back.Header.ID, expectedID)
+		return nil, joinSessionUnlockError(err, path)
+	}
 	w, err := v4.OpenAppend(path)
 	if err != nil {
-		releaseWriter(path)
 		// 这时候**文件是能读的**（上面 ReadFile 已经成功了），只是打不开写入。
-		// 原始错误只有 `open <path>: Access is denied.`——看不出"读没问题、写不行"，
-		// 也不知道下一步该干什么。
-		return nil, fmt.Errorf("会话能读、但打不开写入（%s）：%w；"+
+		openErr := fmt.Errorf("会话能读、但打不开写入（%s）：%w；"+
 			"文件只读/被占用/磁盘满都会这样。已有 %d 条事件不受影响，可以先用 `dshd session info --in` 查看",
 			path, err, len(back.Events))
+		return nil, joinSessionUnlockError(openErr, path)
 	}
 	lg := &Log{w: w, Path: path, seq: int64(len(back.Events)), now: time.Now}
 	lg.lockPath = path + ".lock"

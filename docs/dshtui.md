@@ -6,10 +6,17 @@
 ## 现在能做什么
 
 ```bash
-./dshtui --dump-splash          # 开屏（逐格比对用）
-./dshtui --dump-splash --color  # 带真彩
+./dshtui --dump-screen                 # 120×36 整屏（无颜色，逐格比对用）
+./dshtui --dump-screen --size 80x24    # 窄档：阶梯②，鲸鱼整块撤掉
+./dshtui --dump-screen --size 40x10    # 太矮：阶梯④，一行纯文字
+./dshtui --dump-splash                 # 只打 header 开屏
+./dshtui --dump-splash --color         # 带真彩
 ./dshtui --addr <宿主 url> --token <token> --send "你好"
 ```
+
+视觉层按 MIT 上游 `ccch1mneyyy/dsh-TUI` 源码移植：鲸鱼 + DEEPSEEK/HARNESS
+四档布局、消息 `❯/●/thinking`、上下文条、状态行；细节与 exact/derived/未做见
+[`tui-visual.md`](tui-visual.md)。
 
 `--send` 是最小闭环，同时是**链路自检**：建会话 → 订阅 → 发消息 → 按行打印帧。
 
@@ -63,6 +70,10 @@
 
 ## 还没做
 
-- 全屏 alt-screen 与差分重绘
-- 流式 Markdown、工具卡、上下文进度条 / TPS
-- 命令（`/resume`、`/compact`…）、@ 文件引用、历史搜索
+- 扫光、富 Markdown、工具卡/差异、终端图片预览（Sixel/Kitty）；
+- `/resume`、`/compact`、`/export`、`/btw` 等完整命令；
+- @ 文件引用、历史搜索、鼠标交互；
+- 上下文构成明细。effort 已由 W74 投影真实 v4 配置；没有记录的会话仍显示 `?`，见 [`tui-effort.md`](tui-effort.md)。
+
+全屏 alt-screen 与差分重绘已在 `screen.go`；首屏/消息/状态行视觉见
+[`tui-visual.md`](tui-visual.md)。

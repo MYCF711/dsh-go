@@ -42,8 +42,9 @@ func newModelRequestRecorder(t *testing.T) (base string, requests <-chan llm.Req
 		// llm.Message.Content 只有 MarshalJSON（字段标签是 json:"-"），
 		// 所以先按线上 JSON 解码，再还原成 llm.Request 做断言。
 		var wire struct {
-			Model    string `json:"model"`
-			Messages []struct {
+			Model     string `json:"model"`
+			Reasoning string `json:"reasoning_effort"`
+			Messages  []struct {
 				Role    string `json:"role"`
 				Content string `json:"content"`
 			} `json:"messages"`
@@ -51,7 +52,7 @@ func newModelRequestRecorder(t *testing.T) (base string, requests <-chan llm.Req
 		if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
 			t.Errorf("解码 llm.Request: %v", err)
 		}
-		req := llm.Request{Model: wire.Model}
+		req := llm.Request{Model: wire.Model, Reasoning: wire.Reasoning}
 		for _, msg := range wire.Messages {
 			req.Messages = append(req.Messages, llm.Message{Role: msg.Role, Content: msg.Content})
 		}

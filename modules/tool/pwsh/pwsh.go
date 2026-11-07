@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"dshgo/internal/kernel"
+	"dshgo/internal/sandbox"
 	"dshgo/internal/spi"
 )
 
@@ -33,7 +34,8 @@ var schema = json.RawMessage(`{
   "properties": {
     "command": {"type": "string", "description": "要执行的 PowerShell 命令（一条或多条，用分号分隔）"},
     "workdir": {"type": "string", "description": "可选：工作目录（相对当前工作目录），默认当前目录"},
-    "timeout_seconds": {"type": "integer", "description": "可选：超时秒数，默认 120，上限 600"}
+    "timeout_seconds": {"type": "integer", "description": "可选：超时秒数，默认 120，上限 600"},
+    "sandbox_permissions": {"type": "string", "enum": ["workspace-write", "danger-full-access"], "description": "可选：仅本次调用的 sandbox 请求。danger-full-access 需要先经审批；不会改变会话档位"}
   },
   "required": ["command"],
   "additionalProperties": false
@@ -52,7 +54,47 @@ const (
 // 写字节，中文会变成乱码。pwsh 7 默认就是 UTF-8，不需要动。
 const legacyPrologue = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; `
 
-type Tool struct{}
+// execCommandContext 是包内唯一的进程构造点。
+// 测试把它换成一个计数桩，直接证明"策略拒绝时零进程"，而不是只看副作用。
+var execCommandContext = exec.CommandContext
+
+type Tool struct {
+	// gate 是命令策略闸门；nil = 策略层未接线（旧行为，但拒绝任何一次性升级请求）。
+	gate *sandbox.Gate
+	// lastDecision 只保留给错误结果的结构化 Data；授权判断本身不读它。
+	lastDecision *sandbox.Decision
+}
+
+// Option 是 Tool 的可选项（测试注入与将来宿主接线用）。
+type Option func(*Tool)
+
+// WithSandboxGate 注入命令策略闸门。nil 被忽略。
+func WithSandboxGate(g *sandbox.Gate) Option {
+	return func(t *Tool) {
+		if g != nil {
+			t.gate = g
+		}
+	}
+}
+
+func newTool(opts ...Option) (*Tool, error) {
+	t := &Tool{}
+	for _, opt := range opts {
+		opt(t)
+	}
+	if t.gate == nil {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("取当前目录失败: %w", err)
+		}
+		gate, err := sandbox.GateFromEnv(wd)
+		if err != nil {
+			return nil, fmt.Errorf("pwsh 装配沙箱策略失败: %w", err)
+		}
+		t.gate = gate
+	}
+	return t, nil
+}
 
 func (t *Tool) Name() string { return "pwsh" }
 func (t *Tool) Caps() spi.Caps {
@@ -65,9 +107,10 @@ func (t *Tool) Description() string {
 }
 
 type args struct {
-	Command        string `json:"command"`
-	Workdir        string `json:"workdir"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
+	Command            string `json:"command"`
+	Workdir            string `json:"workdir"`
+	TimeoutSeconds     int    `json:"timeout_seconds"`
+	SandboxPermissions string `json:"sandbox_permissions"`
 }
 
 type data struct {
@@ -103,6 +146,19 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		}
 	}
 
+	permission, err := sandbox.ParsePermission(a.SandboxPermissions)
+	if err != nil {
+		return spi.Result{Hint: `sandbox_permissions 只能是 workspace-write 或 danger-full-access（或省略）`}, err
+	}
+	// 策略判定必须发生在 resolveShell/exec.Command 之前：deny/needs-approval 时零进程。
+	if err := t.authorize(ctx, cmdline, dir, permission); err != nil {
+		return spi.Result{
+			Summary: "沙箱策略拒绝，命令未执行",
+			Data:    map[string]any{"sandbox": t.lastDecision},
+			Hint:    sandboxHint(err),
+		}, err
+	}
+
 	shell, isLegacy, err := resolveShell()
 	if err != nil {
 		return spi.Result{Hint: "找不到 PowerShell：装 PowerShell 7（提供 pwsh）或改用 bash 工具"}, err
@@ -124,7 +180,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	}
 	// 注意：这里一个参数传整条脚本。命令里带双引号时，Go 会按 argv 规则转义，
 	// PowerShell 多数情况下能正确还原；极复杂的嵌套引号建议写进 .ps1 再执行。
-	cmd := exec.CommandContext(runCtx, shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd := execCommandContext(runCtx, shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -168,6 +224,53 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		return res, fmt.Errorf("pwsh 退出码 %d: %s", exitCodeOf(runErr), firstLine(body))
 	}
 	return res, nil
+}
+
+// authorize 在启动任何进程之前做策略判定。
+func (t *Tool) authorize(ctx context.Context, command, workdir string, permission sandbox.Permission) error {
+	cwd := workdir
+	if strings.TrimSpace(cwd) == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("取当前目录失败: %w", err)
+		}
+		cwd = wd
+	}
+	cwd, err := filepath.Abs(cwd)
+	if err != nil {
+		return fmt.Errorf("解析工作目录失败: %w", err)
+	}
+	if t.gate == nil {
+		if permission != "" {
+			return fmt.Errorf("%w: 本进程没有 %s；带 sandbox_permissions 的调用一律拒绝",
+				sandbox.ErrPolicyUnwired, sandbox.EnvMode)
+		}
+		return nil
+	}
+	d, err := t.gate.EvaluateCommand(ctx, command, cwd, permission)
+	if err != nil {
+		return err
+	}
+	t.lastDecision = &d
+	if d.Action == sandbox.ActionAllow {
+		return nil
+	}
+	return d.Error()
+}
+
+func sandboxHint(err error) string {
+	switch {
+	case errors.Is(err, sandbox.ErrNeedsApproval):
+		return "这次调用请求了 danger-full-access，但审批还没完成；让用户批准这次调用后重试，或改成工作区内的操作"
+	case errors.Is(err, sandbox.ErrDenied):
+		return "当前会话 sandbox 档位拒绝这条命令；把命令限制在工作区 cwd 内，或让用户显式切到 danger-full-access 档"
+	case errors.Is(err, sandbox.ErrPolicyUnwired):
+		return "宿主没有把 sandbox 策略接进本进程；去掉 sandbox_permissions 参数，或让宿主设置 DSHD_SANDBOX_MODE"
+	case errors.Is(err, sandbox.ErrMissingContext):
+		return "这次工具调用没有会话上下文，策略无法判定；不要重试同一次调用，报告宿主"
+	default:
+		return "命令没有启动；按错误里的原因调整后再试"
+	}
 }
 
 // resolveShell 首选 pwsh（7+），退回 Windows PowerShell 5.1，两者都没有就报错。
@@ -252,8 +355,9 @@ func (w *limitWriter) Truncated() bool {
 	return w.truncated
 }
 
-// Module 返回装配用的模块描述。
-func Module() kernel.Module {
+// Module 返回装配用的模块描述。Options 只服务测试与将来的宿主接线；
+// 生产 cmd/dshd 仍按旧签名调用，闸门从进程环境解析。
+func Module(opts ...Option) kernel.Module {
 	return kernel.Module{
 		ID:       "tool-pwsh",
 		Backend:  kernel.BackendStatic,
@@ -263,7 +367,11 @@ func Module() kernel.Module {
 			if err != nil {
 				return err
 			}
-			return reg.Register(&Tool{})
+			tool, err := newTool(opts...)
+			if err != nil {
+				return err
+			}
+			return reg.Register(tool)
 		},
 	}
 }

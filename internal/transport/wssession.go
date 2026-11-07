@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Conn 是一条连接的读写面。WS 的真实实现以后补，测试用内存管道。
@@ -29,7 +30,18 @@ type Conn interface {
 type connSubscriber struct {
 	conn Conn
 
-	mu sync.Mutex
+	// mu 只串行化 socket 写字节；eventMu 串行化事件顺序与 replay→live 交接。
+	mu      sync.Mutex
+	eventMu sync.Mutex
+
+	// replaying 期间 Push 只进缓冲区，不碰 socket。这样即使 Conn 的实现
+	// 在 WriteServerFrame 里同步触发 Append+Publish，也不会自锁或插队。
+	stateMu      sync.Mutex
+	replaying    bool
+	replayBuffer []ServerFrame
+	deliveredSeq int
+	journal      *Journal
+	epoch        int64
 }
 
 // 钉住契约：连接订阅者就是 Hub 要的那种订阅者。
@@ -37,11 +49,134 @@ var _ Subscriber = (*connSubscriber)(nil)
 
 // Push 把一帧写给客户端。返回 error 表示连接已坏，Hub 会把它从所有 topic 上摘掉。
 func (s *connSubscriber) Push(frame ServerFrame) error {
+	// 快路径不拿 eventMu：重放期间只缓冲，避免 Conn 写回调里的同步 Publish 自锁。
+	s.stateMu.Lock()
+	if s.replaying {
+		s.replayBuffer = append(s.replayBuffer, frame)
+		s.stateMu.Unlock()
+		return nil
+	}
+	s.stateMu.Unlock()
+
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	// 等 eventMu 时可能恰好开始了一次重复 sub；再次检查，仍只缓冲。
+	s.stateMu.Lock()
+	if s.replaying {
+		s.replayBuffer = append(s.replayBuffer, frame)
+		s.stateMu.Unlock()
+		return nil
+	}
+	if s.journal != nil {
+		s.stateMu.Unlock()
+		// Publish 只负责提醒“journal 可能有新帧”。并发 emit 的 Publish 顺序
+		// 不保证与 Append 一致，必须读 journal 补到最新，不能按到达先后发号。
+		return s.catchUpLocked()
+	}
+	s.stateMu.Unlock()
+	// 无 journal 是老调用方：保持 Hub 原样透传，不发明去重或重放语义。
 	return s.write(frame)
 }
 
-// write 是这条连接**唯一**的写入口：Hub 推送与 pong 都走它，所以两者不会交错。
+// beginReplay 打开交接闸。重复 sub 不许把本连接已经交付的水位倒退；
+// rebuild 是例外：reset 明确宣告旧水位作废，改用当前 journal 的基线。
+func (s *connSubscriber) beginReplay(journal *Journal, epoch int64, sinceSeq int, rebuild bool) {
+	s.eventMu.Lock()
+	s.stateMu.Lock()
+	if rebuild || sinceSeq > s.deliveredSeq {
+		s.deliveredSeq = sinceSeq
+	}
+	s.journal = journal
+	s.epoch = epoch
+	s.replaying = true
+	s.replayBuffer = nil
+	s.stateMu.Unlock()
+	s.eventMu.Unlock()
+}
+
+// finishReplay 在订阅已经挂上之后交付重放帧，再把 journal 补到最新。
+// 缓冲只记录“有 Publish 来过”；实际帧永远从 journal 取，因此缓冲里只有
+// seq=N+1、seq=N 的 Publish 迟到时，也不会漏掉 N。
+func (s *connSubscriber) finishReplay(frames []ServerFrame) error {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	for _, f := range frames {
+		if err := s.writeEventLocked(f); err != nil {
+			return err
+		}
+	}
+	for {
+		if err := s.catchUpLocked(); err != nil {
+			return err
+		}
+		s.stateMu.Lock()
+		win := s.journal.Window(s.deliveredSeq, 0)
+		if !win.Covered || win.Epoch != s.epoch {
+			s.stateMu.Unlock()
+			return fmt.Errorf("transport: journal 在重放收尾时换代或滑窗")
+		}
+		if len(s.replayBuffer) == 0 && len(win.Frames) == 0 {
+			// “无新 Publish + journal 已补齐 + 关闭重放”在同一把锁里完成。
+			// 之后的 Push 会走实时 catchUp，不存在两侧都不送的空窗。
+			s.replaying = false
+			s.stateMu.Unlock()
+			return nil
+		}
+		s.replayBuffer = nil
+		s.stateMu.Unlock()
+	}
+}
+
+// catchUpLocked 从当前交付水位读同一 journal，直到暂时没有新帧。
+// 调用方持有 eventMu，所以并发 Push 不会把两份 catch-up 交错写到 socket。
+func (s *connSubscriber) catchUpLocked() error {
+	for {
+		s.stateMu.Lock()
+		journal, epoch, since := s.journal, s.epoch, s.deliveredSeq
+		s.stateMu.Unlock()
+		if journal == nil {
+			return nil
+		}
+		win := journal.Window(since, 0)
+		if !win.Covered || win.Epoch != epoch {
+			return fmt.Errorf("transport: journal 在实时补洞时换代或滑窗")
+		}
+		if len(win.Frames) == 0 {
+			return nil
+		}
+		for _, f := range win.Frames {
+			if err := s.writeEventLocked(f); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// writeEventLocked 的调用方持有 eventMu；seq<=0 的控制状态不参与水位。
+func (s *connSubscriber) writeEventLocked(frame ServerFrame) error {
+	s.stateMu.Lock()
+	if frame.Seq > 0 && frame.Seq <= s.deliveredSeq {
+		s.stateMu.Unlock()
+		return nil
+	}
+	s.stateMu.Unlock()
+	if err := s.write(frame); err != nil {
+		return err
+	}
+	if frame.Seq > 0 {
+		s.stateMu.Lock()
+		s.deliveredSeq = frame.Seq
+		s.stateMu.Unlock()
+	}
+	return nil
+}
+
+// write 是这条连接**唯一**的字节写入口：Hub 推送、控制帧与 pong 都走它。
+// envelope time 在这里兜底，原始 seq/data 不动；已有时间（尤其 journal 重放）原样保留。
 func (s *connSubscriber) write(frame ServerFrame) error {
+	if frame.Time <= 0 {
+		frame.Time = time.Now().UnixMilli()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.conn.WriteServerFrame(frame)
@@ -109,70 +244,55 @@ func ServeConn(conn Conn, hub *Hub) error {
 
 		switch frame.T {
 		case FrameSub:
-			// H14：先核世代。客户端带着一个不认识的世代来订阅，说明中间的 journal
-			// 已经换代（宿主重启 / 主动重建基线）。这时按 seq 继续推只会推错位的数据，
-			// 所以先发一条 session/reset 让它丢弃水位——**它不能自己发现这件事**。
-			//
-			// 同一处理也要覆盖"水位之前的历史已经滑出内存"：capacity 丢最老帧之后，
-			// 重放会从最老的保留帧开始，帧连续、seq 也在涨，客户端看不出缺口。
-			var win Window
-			hasJournal := hub.journals != nil
-			rebuild := false
-			if hasJournal {
-				// Window 一次拿全帧/水位/世代/有没有缺口：分开读的话，
-				// 恰好在两次之间挤掉一帧，"判据通过、重放却少一帧"。
-				win = hub.journals.Get(topicSession(frame.Topic)).Window(frame.SinceSeq, 0)
-				rebuild = (frame.JournalEpoch != 0 && win.Epoch != frame.JournalEpoch) || !win.Covered
-				if rebuild {
-					reset, _ := json.Marshal(map[string]any{
-						"journalEpoch": win.Epoch,
-						"lastSeq":      win.LastSeq,
-					})
-					// reset 不带 seq：它不是事件流里的一帧（与 pong 同理），
-					// 给它编号反而会污染客户端的连续性判断。
-					if err := sub.write(ServerFrame{Type: "session/reset", Data: reset}); err != nil {
-						return err
-					}
+			sessionID := topicSession(frame.Topic)
+			if hub.journals == nil {
+				// 老调用方没有 journal：保留只接新帧的行为，不伪造可重放历史。
+				if err := replayPending(hub, sessionID, nil, sub); err != nil {
+					return err
+				}
+				hub.Subscribe(frame.Topic, frame.SinceSeq, sub)
+				break
+			}
+
+			journal := hub.journals.Get(sessionID)
+			win := journal.Window(frame.SinceSeq, 0)
+			rebuild := (frame.JournalEpoch != 0 && win.Epoch != frame.JournalEpoch) || !win.Covered
+			replayBase := frame.SinceSeq
+			if rebuild {
+				replayBase = win.LastSeq
+			}
+
+			// 先开闸、发 reset，再挂订阅。此后所有实时帧只会进交接缓冲，
+			// 不会插到 reset 或历史帧前面。
+			sub.beginReplay(journal, win.Epoch, replayBase, rebuild)
+			if rebuild {
+				reset, _ := json.Marshal(map[string]any{
+					"journalEpoch": win.Epoch,
+					"lastSeq":      win.LastSeq,
+				})
+				if err := sub.write(ServerFrame{Type: "session/reset", Data: reset}); err != nil {
+					return err
 				}
 			}
-			// 重放还挂着的请求（H13）：断线期间冒出来的审批问题，客户端不重放就永远
-			// 看不到——而子进程还在那边等着，用户眼里就是"卡住了"。
-			if hub.pendingReplay != nil {
-				for _, pf := range hub.pendingReplay(topicSession(frame.Topic)) {
-					if err := sub.write(pf); err != nil {
-						return err
-					}
-				}
+			hub.Subscribe(frame.Topic, replayBase, sub)
+
+			// 订阅后再取一次快照：第一次 Window→Subscribe 之间追加的帧也因此
+			// 进入重放集；第二次 Window 之后追加的帧已在 Hub 缓冲里，两侧无缝。
+			latest := journal.Window(replayBase, 0)
+			if !latest.Covered || latest.Epoch != win.Epoch {
+				// 交接期间又换代/滑窗，不能拿错位数据充数。关连接让客户端
+				// 重新 load/sub，比静默丢一段更可诊断。
+				return fmt.Errorf("transport: journal 在订阅交接期间换代")
 			}
-			// **把断线期间漏掉的帧重放出去**（H14）。客户端带 sinceSeq 来订阅，
-			// 说明它手里有水位、缺的那一段还在 journal 里——不重放的话"带水位重订"
-			// 名不副实：客户端只能自己再调一次 session.history 兜底。
-			//
-			// 顺序很重要：**先重放、再 Subscribe**。重放期间这个 sub 还不在
-			// hub.topics 里，Publish 不会推给它，所以不会出现"新帧插到旧帧前面"
-			// 的乱序；Subscribe 的起点用重放的最后一条，之后只推更新的。
-			//
-			// `sinceSeq=0` 也重放：那是"首次订阅、从头来"，journal 里的历史
-			// 正是客户端要的。**只重放 sinceSeq>0 是错的**——实测首次订阅一条帧
-			// 都收不到（既没历史、也没等来新事件），界面像是卡住。
-			//
-			// 已经要求重建基线（rebuild）时**不重放**：那种情况客户端要去
-			// session.load 拿完整首屏，这里只接新帧，免得把半截历史当补洞结果。
-			replayTo := frame.SinceSeq
-			if hasJournal {
-				if rebuild {
-					replayTo = win.LastSeq
-				} else if len(win.Frames) > 0 {
-					for _, f := range win.Frames {
-						if err := sub.write(f); err != nil {
-							return err
-						}
-					}
-					replayTo = win.Frames[len(win.Frames)-1].Seq
-				}
+
+			// pending 是无 seq 的状态帧；若同一 requestId 已在本次 journal
+			// 重放集里，就不再额外制造第二份审批。
+			if err := replayPending(hub, sessionID, latest.Frames, sub); err != nil {
+				return err
 			}
-			// 重复 sub 由 Hub 处理：以最后一次 sinceSeq 为准，不会重复收帧。
-			hub.Subscribe(frame.Topic, replayTo, sub)
+			if err := sub.finishReplay(latest.Frames); err != nil {
+				return err
+			}
 
 		case FrameUnsub:
 			hub.Unsubscribe(frame.Topic, sub)
@@ -193,6 +313,43 @@ func ServeConn(conn Conn, hub *Hub) error {
 			return fmt.Errorf("%w: t=%q", ErrUnknownFrameType, frame.T)
 		}
 	}
+}
+
+// replayPending 重放仍挂起的审批。journal 已包含同一请求时只交付 journal 那一份；
+// 不在本次重放区间的 pending 仍按原规则以 seq=0 状态帧恢复。
+func replayPending(hub *Hub, sessionID string, replayed []ServerFrame, sub *connSubscriber) error {
+	if hub.pendingReplay == nil {
+		return nil
+	}
+	for _, pf := range hub.pendingReplay(sessionID) {
+		duplicate := false
+		for _, jf := range replayed {
+			if sameApprovalRequest(pf, jf) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
+		if err := sub.write(pf); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sameApprovalRequest(a, b ServerFrame) bool {
+	if a.Type != "approval/request" || b.Type != "approval/request" {
+		return false
+	}
+	var ad, bd struct {
+		RequestID string `json:"requestId"`
+	}
+	if json.Unmarshal(a.Data, &ad) == nil && json.Unmarshal(b.Data, &bd) == nil && ad.RequestID != "" {
+		return ad.RequestID == bd.RequestID
+	}
+	return string(a.Data) == string(b.Data)
 }
 
 // topicSession 从 "session:<id>" 里取会话 id；不是这个形状时原样返回，
@@ -228,9 +385,9 @@ func checkClientFrame(frame ClientFrame, first bool) error {
 		if err := requireSessionTopic(frame.Topic); err != nil {
 			return fmt.Errorf("%s: %w", where, err)
 		}
-		if frame.SinceSeq < 0 {
-			return fmt.Errorf("%w: %s的 sinceSeq=%d 是负数；要从头开始就整个省略该字段",
-				ErrBadSeq, where, frame.SinceSeq)
+		if frame.SinceSeq < SinceNothing {
+			return fmt.Errorf("%w: %s的 sinceSeq=%d 小于 %d；要「我什么都没拿」就省略该字段或写 %d",
+				ErrBadSeq, where, frame.SinceSeq, SinceNothing, SinceNothing)
 		}
 		return nil
 

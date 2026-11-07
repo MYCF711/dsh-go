@@ -112,8 +112,9 @@ func ParseClientFrame(raw []byte) (ClientFrame, error) {
 		if err := requireSessionTopic(f.Topic); err != nil {
 			return ClientFrame{}, err
 		}
-		if f.SinceSeq < 0 {
-			return ClientFrame{}, fmt.Errorf("%w: sinceSeq=%d 是负数；要从头开始就整个省略该字段", ErrBadSeq, f.SinceSeq)
+		if f.SinceSeq < SinceNothing {
+			return ClientFrame{}, fmt.Errorf("%w: sinceSeq=%d 小于 %d；要「我什么都没拿」就省略该字段或写 %d",
+				ErrBadSeq, f.SinceSeq, SinceNothing, SinceNothing)
 		}
 		return f, nil
 

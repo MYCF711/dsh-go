@@ -1,9 +1,10 @@
 // tool_merged.go 是"只改模型看到什么"的两个投影层。
 //
 //  1. merged：把同族工具合成一个带 action 参数的工具（见下方 mergedTable）。
-//  2. tighten：compact 表在去掉参数说明之后，再去掉 schema 里"接口已经规定或
-//     省略等于默认"的骨架（见文件末尾 tightenTable）。两者都只改序列化，
-//     modules/ 里的 Exec、Caps、审批链路一个字节都不动。
+//  2. tighten：compact 表在去掉参数说明之后，再去掉 schema 里可省的骨架
+//     （见文件末尾 tightenTable）。两者都只改序列化，modules/ 里的 Exec、
+//     Caps、审批链路一个字节都不动。无参对象的 type/properties 不是可省骨架：
+//     上游 schema 转换器会拒绝只剩 additionalProperties 的形态。
 //
 // 为什么合并要单独一档、收紧却并进 compact：合并改的是**模型看到的接口**
 // （工具名与 action），属于 R4 契约变更，必须显式打开；收紧只改 JSON 的写法，
@@ -722,9 +723,6 @@ func tightenSchema(raw json.RawMessage) json.RawMessage {
 // **schema 对象**（properties 的值、items 的值），所以位置参数是 false；
 // 参数名那一层永远不走这段遍历。
 func tightenObject(obj map[string]json.RawMessage, root bool) (json.RawMessage, error) {
-	if root && isRawString(obj["type"], "object") {
-		delete(obj, "type")
-	}
 	// 这一层是 schema 对象：description 是给模型看的说明，compact 本来就不发。
 	// 删哪个键由唯一那份判断决定，不在这里按 key 名写删除分支。
 	for k := range obj {
@@ -732,11 +730,14 @@ func tightenObject(obj map[string]json.RawMessage, root bool) (json.RawMessage, 
 			delete(obj, k)
 		}
 	}
+	// properties 缺失也按"空对象"处理：parameters 的根必须是对象。
+	emptyProps := true
 	if raw, ok := obj["properties"]; ok {
 		var props map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &props); err != nil {
 			return nil, err
 		}
+		emptyProps = len(props) == 0
 		for name, sub := range props {
 			var child map[string]json.RawMessage
 			if err := json.Unmarshal(sub, &child); err != nil {
@@ -748,15 +749,28 @@ func tightenObject(obj map[string]json.RawMessage, root bool) (json.RawMessage, 
 			}
 			props[name] = next
 		}
-		if len(props) == 0 {
-			delete(obj, "properties")
-		} else {
-			b, err := json.Marshal(props)
-			if err != nil {
-				return nil, err
-			}
-			obj["properties"] = b
+		if props == nil {
+			props = map[string]json.RawMessage{}
 		}
+		// **空 properties 不能删**：无参工具若只剩
+		// {"additionalProperties":false}，WPS 灵犀的上游 schema 转换器会在
+		// 开流前直接拒绝，插件把它归一成 503 upstream_unavailable。顶层
+		// type:object 同理，见下面。参数区因此固定保留空对象骨架。
+		b, err := json.Marshal(props)
+		if err != nil {
+			return nil, err
+		}
+		obj["properties"] = b
+	}
+	// type:object 但 properties 缺失/为空时，补回空对象。无参工具与
+	// 嵌套空对象都必须保持可被上游 schema 转换器解析的完整形状。
+	if isRawString(obj["type"], "object") && emptyProps {
+		obj["properties"] = json.RawMessage("{}")
+	}
+	// 顶层 type:object 只有在 properties 非空时才是可省的冗余骨架。
+	// 无参对象必须同时留下 type 与 properties，否则上游解析器直接失败。
+	if root && isRawString(obj["type"], "object") && !emptyProps {
+		delete(obj, "type")
 	}
 	if raw, ok := obj["items"]; ok {
 		var child map[string]json.RawMessage

@@ -38,9 +38,8 @@ func (s *Server) handleSessionSetGoal(w http.ResponseWriter, r *http.Request) {
 		goal = string([]rune(goal)[:maxGoalLen])
 	}
 	if err := s.opt.SetSessionGoal(params.ID, goal); err != nil {
-		// 400 是这个 method 的既有约定（写覆盖时"这个会话/id 认不出来"是主因），
-		// 所以码按 bad_request 给：**请求改一下才能过**，不是让客户端自动重试。
-		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", err.Error()))
+		// 参数/迁移错误维持既有 400；真实 state/journal 提交失败必须是 500。
+		writeEffortGoalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{

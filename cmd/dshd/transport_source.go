@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/llm"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 	"dshgo/internal/transport"
@@ -31,6 +33,10 @@ type sessionSource struct {
 	perms *permissionOverrideStore
 	// goals 是会话级目标（`<home>/state/session-goal.json`）。同样可以 nil。
 	goals *goalOverrideStore
+	// efforts 是独立的会话 effort key 覆盖；与上面的 v4 实际 effort 不混用。
+	efforts *effortOverrideStore
+	// catalog 与生产 serve/runner 共享同一 env fallback，不用新开的空 store 判自定义 level。
+	catalog *llm.ModelCatalogStore
 }
 
 func newSessionSource(home, cwd string) *sessionSource {
@@ -180,6 +186,100 @@ func (s *sessionSource) Model(sessionID string) (string, error) {
 	return "", nil
 }
 
+// Effort 报这条会话最新配置记录里的推理强度；空串 = 不知道。
+//
+// v4 header 的严格白名单没有 effort，request/context 也只有路由与容量。
+// 真值只在 request/header.header.config.reasoningEffort（完整配置快照）或
+// model/selection.reasoningEffort（显式选择）里。两类记录按日志顺序取最新一条：
+// 最新记录缺键、空值或未知枚举都表示当前值未知，绝不回退到更早记录，也不拿
+// 本进程 --reasoning、模型名或目录里的 reasoningEfforts 冒充会话实际配置。
+func (s *sessionSource) Effort(sessionID string) (string, error) {
+	path, err := s.resolve(sessionID)
+	if err != nil {
+		return "", err
+	}
+	lg, err := v4.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for i := len(lg.Events) - 1; i >= 0; i-- {
+		ev := lg.Events[i]
+		switch ev.Type {
+		case "request/header":
+			var d struct {
+				Header struct {
+					Config json.RawMessage `json:"config"`
+				} `json:"header"`
+			}
+			if json.Unmarshal(ev.Data, &d) != nil {
+				return "", nil
+			}
+			return s.effortFromRecord(d.Header.Config), nil
+		case "model/selection":
+			return s.effortFromRecord(ev.Data), nil
+		}
+	}
+	return "", nil
+}
+
+// effortFromRecord 保留旧枚举兼容，同时允许当前 catalog 真实声明的自定义 key。
+// 未知值仍回空串，不把任意历史字符串当成可选择的 level。
+func (s *sessionSource) effortFromRecord(raw json.RawMessage) string {
+	if effort := knownEffortField(raw); effort != "" {
+		return effort
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return ""
+	}
+	var effort, model string
+	if value, exists := obj["reasoningEffort"]; !exists || json.Unmarshal(value, &effort) != nil || effort == "" {
+		return ""
+	}
+	if value, exists := obj["model"]; exists {
+		_ = json.Unmarshal(value, &model)
+	}
+	if model == "" {
+		return ""
+	}
+	_, declared, err := catalogEffortWire(s.home, model, effort, s.catalog)
+	if err == nil && declared {
+		return effort
+	}
+	return ""
+}
+
+// knownEffortField 只认对象里精确小写的已知枚举。off 是显式记录的真值；
+// 缺键、null、空串、非字符串和未来自定义枚举都回空串（未知），不是 off。
+func knownEffortField(raw json.RawMessage) string {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return ""
+	}
+	value, exists := obj["reasoningEffort"]
+	if !exists {
+		return ""
+	}
+	var effort string
+	if json.Unmarshal(value, &effort) != nil {
+		return ""
+	}
+	switch effort {
+	case "off", "low", "high", "xhigh", "max":
+		return effort
+	default:
+		return ""
+	}
+}
+
+// EffortSelection 只读独立覆盖 store；无覆盖与读取失败不会被进程默认值冒充。
+func (s *sessionSource) EffortSelection(sessionID string) (string, error) {
+	if s.efforts == nil {
+		return "", nil
+	}
+	return s.efforts.Selection(sessionID)
+}
+
 // Goal 报这条会话当前在做的事（没设过就回空串 = 没有目标）。
 //
 // **不是从 v4 读**：goal 是界面状态（用户/agent 当场设的），
@@ -188,7 +288,11 @@ func (s *sessionSource) Goal(sessionID string) (string, error) {
 	if s.goals == nil {
 		return "", nil
 	}
-	return s.goals.Get(sessionID), nil
+	snapshot, err := s.goals.Snapshot(sessionID)
+	if err != nil || snapshot.Goal == nil {
+		return "", err
+	}
+	return snapshot.Goal.Objective, nil
 }
 
 // Permission 报这条会话的审批策略覆盖（没设过就回空串 = 不知道）。
@@ -290,11 +394,16 @@ func (s *sessionSource) messagesOf(events []v4.Event) ([]transport.Message, erro
 	for _, ev := range events {
 		switch ev.Type {
 		case "user/message":
-			text, ok := textOf(ev.Data, false)
+			blocks, ok := contentBlocks(ev.Data, false)
 			if !ok {
 				continue
 			}
-			out = append(out, transport.Message{Seq: int(ev.Seq), Role: "user", Text: text, Time: ev.Time})
+			text := joinText(blocks)
+			out = append(out, transport.Message{
+				Seq: int(ev.Seq), Role: "user", Text: text, Time: ev.Time,
+				V4Seq: v4SeqPtr(ev.Seq), MessageID: persistentMessageID(ev),
+				Content: durableUserContent(blocks),
+			})
 
 		case "assistant/message":
 			blocks, ok := contentBlocks(ev.Data, true)
@@ -315,11 +424,13 @@ func (s *sessionSource) messagesOf(events []v4.Event) ([]transport.Message, erro
 				continue
 			}
 			msg := transport.Message{
-				Seq:   int(ev.Seq),
-				Role:  "assistant",
-				Text:  text,
-				Time:  ev.Time,
-				Usage: usageOf(ev.Data),
+				Seq:       int(ev.Seq),
+				Role:      "assistant",
+				Text:      text,
+				Time:      ev.Time,
+				Usage:     usageOf(ev.Data),
+				V4Seq:     v4SeqPtr(ev.Seq),
+				MessageID: persistentMessageID(ev),
 			}
 			// 与 serve 推帧同形：只有正文为空时才带 reasoning。
 			// 有正文时思考是草稿，不是已经给用户的回答；界面那条路径也只在正文为空时显示它。
@@ -329,12 +440,26 @@ func (s *sessionSource) messagesOf(events []v4.Event) ([]transport.Message, erro
 			out = append(out, msg)
 
 		case "tool/result":
-			text, callID, ok := toolResultText(ev.Data)
+			res, ok := loadToolResultOf(ev.Data)
 			if !ok {
 				continue
 			}
-			msg := transport.Message{Seq: int(ev.Seq), Role: "tool", Text: text, Time: ev.Time}
-			if c, found := calls[callID]; found {
+			msg := transport.Message{
+				Seq: int(ev.Seq), Role: "tool", Text: res.Text, Time: ev.Time,
+				// TOOL-IDENTITY-LOAD（W187）：关联身份原样来自事件本身。
+				// 缺键就是 nil，由 omitempty 整个省略——**不补 0**，
+				// 界面会把 0 当成"第 0 轮第 0 步"去恢复一条编出来的结果。
+				CallID: res.CallID,
+				Turn:   res.Turn,
+				Step:   res.Step,
+				// TOOL-RESULT-ENVELOPE（W190）：成败与 durable 元数据/结构化结果
+				// 原样透传。缺键/`false`/`null` 都由 omitempty 整个省略——
+				// 界面靠缺键判断"没有"，凭空补 false/空对象就是编。
+				IsError:    res.IsError,
+				Meta:       res.Meta,
+				Structured: res.Structured,
+			}
+			if c, found := calls[res.CallID]; found {
 				msg.Tool = c.name
 				msg.Args = c.args
 			}
@@ -425,6 +550,21 @@ func (s *sessionSource) resolve(sessionID string) (string, error) {
 // 这里只是一个别名——以前这里是**独立的第二份结构体**，v4 加字段时两边各跟一半。
 type block = session.ContentBlock
 
+// durableUserContent 只在确有附件/引用时暴露完整块，旧纯文本 load 形状不变。
+func durableUserContent(blocks []block) []transport.ContentBlock {
+	special := false
+	for _, b := range blocks {
+		if b.Type == "attachment" || b.Type == "reference" {
+			special = true
+			break
+		}
+	}
+	if !special {
+		return nil
+	}
+	return transportBlocksFromSession(blocks)
+}
+
 // textOf 取一条消息的可见正文。
 //
 // user/message 的 content 在 data 顶层；assistant/message 的在 data.message.content。
@@ -496,18 +636,76 @@ func usageOf(data json.RawMessage) *transport.UsageMsg {
 	}
 }
 
-// toolResultText 取 tool/result 的正文与 callId。
-func toolResultText(data json.RawMessage) (string, string, bool) {
+// toolResultData 是 tool/result 事件里 load 投影要用的字段。
+//
+// Turn/Step 用指针：v4 的 tool/result **总是**带数值 turn/step，但老日志、
+// 手写事件或非 v4 来源可能没有。缺键时必须是 nil（省略），不能落成 0——
+// 0 是合法数字，界面会拿它当真实身份去恢复。
+//
+// IsError/Meta/Structured 是 durable 结果信封的其余部分（W190）：
+// 成败、宿主元数据、工具自己的结构化结果。三者都只有**真值**才投影。
+type toolResultData struct {
+	Text       string
+	CallID     string
+	Turn       *int
+	Step       *int
+	IsError    bool
+	Meta       json.RawMessage
+	Structured json.RawMessage
+}
+
+// loadToolResultOf 取 tool/result 的正文、真实关联身份（callId/turn/step）
+// 与结果信封（isError/meta/structured）。
+//
+// 身份只认事件自己的 `message.toolCallId` 与顶层 `turn`/`step`：
+// 不从 tool/call 索引反推（那是调用方的身份，不是结果的身份），也不合成。
+func loadToolResultOf(data json.RawMessage) (toolResultData, bool) {
 	var d struct {
-		Message struct {
-			ToolCallID string  `json:"toolCallId"`
-			Content    []block `json:"content"`
+		Turn       *int            `json:"turn"`
+		Step       *int            `json:"step"`
+		Meta       json.RawMessage `json:"meta"`
+		Structured json.RawMessage `json:"structured"`
+		Message    struct {
+			ToolCallID string          `json:"toolCallId"`
+			Content    []block         `json:"content"`
+			IsError    json.RawMessage `json:"isError"`
 		} `json:"message"`
 	}
 	if err := json.Unmarshal(data, &d); err != nil {
-		return "", "", false
+		return toolResultData{}, false
 	}
-	return joinText(d.Message.Content), d.Message.ToolCallID, true
+	return toolResultData{
+		Text:       joinText(d.Message.Content),
+		CallID:     d.Message.ToolCallID,
+		Turn:       d.Turn,
+		Step:       d.Step,
+		IsError:    isTrueJSON(d.Message.IsError),
+		Meta:       rawValue(d.Meta),
+		Structured: rawValue(d.Structured),
+	}, true
+}
+
+// isTrueJSON 只认 durable 里**字面量** true。
+//
+// 为什么不用 `*bool` 字段：`isError` 不是布尔（外来日志写成 `"true"`/`1`）时，
+// encoding/json 会让整个 tool/result 解不开——那条结果连同正文一起消失。
+// 那是"新增一个字段反而把老日志弄丢"的回归，比少一个 isError 严重得多；
+// 而界面认的本来也只有 `=== true`。
+func isTrueJSON(raw json.RawMessage) bool {
+	return string(bytes.TrimSpace(raw)) == "true"
+}
+
+// rawValue 只在 durable 真的带了一个**值**时返回原样字节。
+//
+// 缺键（len==0）与显式 `null` 都返回 nil，由 omitempty 整个省略。
+// 为什么连 null 也省略：界面用 `undefined` 区分"没有元数据"，
+// 透传 `null` 会变成"有元数据、值是 null"，那是另一种编。
+func rawValue(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	return trimmed
 }
 
 func joinText(blocks []block) string {

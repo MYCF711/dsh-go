@@ -151,6 +151,7 @@ var specialKeys = map[string]string{
 // 这半边走 handleRune（Ctrl+T/Ctrl+F/回车）。混在一起会让
 // "Ctrl+T 到底调没调 toggleToolResults"变成猜的。
 var keyRunes = map[string]rune{
+	"ctrl+o": 15,
 	"ctrl+t": 20,
 	"ctrl+f": 6,
 	"enter":  13,
@@ -269,6 +270,7 @@ func runScript(addr, token, planPath, outPath string) error {
 	}
 
 	frames := a.frames
+	events := a.connectionEvents
 	turn := 0
 	for _, st := range plan.Steps {
 		switch st.Kind {
@@ -288,6 +290,51 @@ func runScript(addr, token, planPath, outPath string) error {
 			// cancelSent 保证一轮只取消一次：approval/request 可能因重放再来一遍，
 			// 每来一条就发一次 session.cancel，第二次只会拿到"没有可取消的轮次"。
 			cancelSent := false
+			// processFrame 只处理已经在 app 中落定的帧。HTTP accepted 前被暂存的帧
+			// 会在 promptResults 分支释放后走同一个入口，审批应答与终局判断不重写。
+			processFrame := func(f ServerFrame) {
+				if f.Type == "approval/request" {
+					// 先拍"问题在屏幕上"的那一帧，再按 y。
+					rep.Screens = append(rep.Screens,
+						snapshotOf(a, st.Label+"-approval", "approval", turn))
+					if st.Approve != "" {
+						r := approvalKeys[st.Approve]
+						a.handleRune(r)
+						rep.Keys = append(rep.Keys, keyRecord{
+							Label: st.Label, Key: string(r), Turn: turn, When: "approval",
+						})
+						rep.Screens = append(rep.Screens,
+							snapshotOf(a, st.Label+"-answered", "answered", turn))
+					} else if st.Cancel && !cancelSent {
+						// 不按键，直接取消这一轮：这是"审批还挂在屏幕上、
+						// 宿主那边已经把它收了"的那条路径。屏幕快照要等
+						// approval/cancel 帧到了再拍——那一刻才是真的结算完。
+						cancelSent = true
+						_, cErr := a.cl.post("session.cancel", map[string]any{"id": a.sid})
+						crec := cancelRecord{Label: st.Label, Turn: turn}
+						if cErr != nil {
+							crec.Err = cErr.Error()
+						}
+						rep.Cancels = append(rep.Cancels, crec)
+					}
+				}
+				if f.Type == "approval/cancel" && cancelSent {
+					rep.Screens = append(rep.Screens,
+						snapshotOf(a, st.Label+"-canceled", "canceled", turn))
+				}
+				// **只认 turn/done / turn/error**：turn/end 是"这一步结束"，
+				// 在 turn/done 之前就到。停在 turn/end 会漏掉真正的终局。
+				if f.Type == "turn/done" || f.Type == "turn/error" {
+					if a.activeTurnID != "" && frameTurnID(f.Data) != "" && frameTurnID(f.Data) != a.activeTurnID {
+						return // app 已忽略的旧终局，驱动器也不能拿它收轮
+					}
+					rec.Status = "done"
+					if f.Type == "turn/error" {
+						rec.Status = "error"
+					}
+					done = true
+				}
+			}
 			for !done {
 				select {
 				case f, ok := <-frames:
@@ -301,51 +348,40 @@ func runScript(addr, token, planPath, outPath string) error {
 						rep.Error = fmt.Sprintf("第 %d 轮流断了（订阅没了）", turn)
 						return fmt.Errorf("%s", rep.Error)
 					}
+					buffered := a.pendingSend != nil
 					a.handleFrame(f)
 					rep.Frames = append(rep.Frames, frameRecord{
 						Turn: turn, Seq: f.Seq, Type: f.Type, Data: f.Data,
 					})
-					if f.Type == "approval/request" {
-						// 先拍"问题在屏幕上"的那一帧，再按 y。
-						rep.Screens = append(rep.Screens,
-							snapshotOf(a, st.Label+"-approval", "approval", turn))
-						if st.Approve != "" {
-							r := approvalKeys[st.Approve]
-							a.handleRune(r)
-							rep.Keys = append(rep.Keys, keyRecord{
-								Label: st.Label, Key: string(r), Turn: turn, When: "approval",
-							})
-							rep.Screens = append(rep.Screens,
-								snapshotOf(a, st.Label+"-answered", "answered", turn))
-						} else if st.Cancel && !cancelSent {
-							// 不按键，直接取消这一轮：这是"审批还挂在屏幕上、
-							// 宿主那边已经把它收了"的那条路径。屏幕快照要等
-							// approval/cancel 帧到了再拍——那一刻才是真的结算完。
-							cancelSent = true
-							_, cErr := a.cl.post("session.cancel", map[string]any{"id": a.sid})
-							crec := cancelRecord{Label: st.Label, Turn: turn}
-							if cErr != nil {
-								crec.Err = cErr.Error()
-							}
-							rep.Cancels = append(rep.Cancels, crec)
-						}
+					if !buffered {
+						processFrame(f)
 					}
-					if f.Type == "approval/cancel" && cancelSent {
-						// 宿主把这条审批结算成"取消"之后的那一屏：
-						// 气泡要收掉，正文要留下"是谁取消的"。
-						rep.Screens = append(rep.Screens,
-							snapshotOf(a, st.Label+"-canceled", "canceled", turn))
+				case ev, ok := <-events:
+					if !ok {
+						events = nil
+						continue
 					}
-					// **只认 turn/done / turn/error**：turn/end 是"这一步结束"，
-					// 在 turn/done 之前就到（实测帧序：turn/start, user/message,
-					// assistant/message, turn/end, turn/done）。停在 turn/end 就会
-					// 漏掉 turn/done，界面那条"这一轮结束"的状态也永远不更新。
-					if f.Type == "turn/done" || f.Type == "turn/error" {
-						rec.Status = "done"
-						if f.Type == "turn/error" {
-							rec.Status = "error"
+					a.handleConnectionEvent(ev)
+				case result := <-a.promptResults:
+					if a.pendingSend == nil || result.id != a.pendingSend.id {
+						continue // 旧提交的迟到结果不属于这一轮
+					}
+					buffered := a.handlePromptResult(result)
+					if result.err != nil || !result.ack.Accepted {
+						timer.Stop()
+						rec.Status = "error"
+						rec.Frames = len(rep.Frames) - startFrames
+						rec.ElapsedMs = time.Since(start).Milliseconds()
+						rep.Turns = append(rep.Turns, rec)
+						rep.Error = a.err
+						rep.Screens = append(rep.Screens, snapshotOf(a, st.Label+"-send-error", "error", turn))
+						return fmt.Errorf("%s", rep.Error)
+					}
+					for _, f := range buffered {
+						processFrame(f)
+						if done {
+							break
 						}
-						done = true
 					}
 				case <-timer.C:
 					rec.Status = "timeout"

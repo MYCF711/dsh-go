@@ -47,15 +47,18 @@ const (
 // 所以改成一个常驻 goroutine 读完再按标签分发。
 var (
 	stdinOnce  sync.Once
-	approvalCh = make(chan string, 1) // 审批应答（一次一条，缓冲 1 够）
-	jobsOutCh  = make(chan string, 4) // 任务输出请求（允许几秒内积压几条）
+	approvalCh = make(chan string, 1)  // 审批应答（一次一条，缓冲 1 够）
+	jobsOutCh  = make(chan string, 4)  // 任务输出请求（允许几秒内积压几条）
+	steerReqCh = make(chan string, 16) // 同一根 stdin 上的当前 turn steer，保序交给唯一 inbox
 )
 
 func startStdinDispatcher() {
 	stdinOnce.Do(func() {
 		go func() {
 			sc := bufio.NewScanner(os.Stdin)
-			sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+			// content 文本上限 1 MiB，但 JSON 转义与 steer envelope 会放大；
+			// 附件字节不进 stdin。8 MiB 上限保住最坏块顺序且仍有明确背压边界。
+			sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
 			for sc.Scan() {
 				line := sc.Text()
 				switch {
@@ -71,6 +74,9 @@ func startStdinDispatcher() {
 					case jobsOutCh <- line:
 					default:
 					}
+				case strings.HasPrefix(line, steerIPCRequestTag):
+					// steer 不能静默丢弃：背压挡住读端比父进程等一个永不到的 ACK 好。
+					steerReqCh <- line
 				}
 				// 其它行（诊断输出、手敲的东西）一律忽略——这里不是人读的终端。
 			}
@@ -80,6 +86,7 @@ func startStdinDispatcher() {
 			// 得显式做，否则 markerAsk 会把整轮挂死（实测：测试直接卡住）。
 			close(approvalCh)
 			close(jobsOutCh)
+			close(steerReqCh)
 		}()
 	})
 }

@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+
+	"dshgo/internal/llm"
 )
 
 // 会话级模型覆盖。
@@ -105,4 +108,32 @@ func resolveServeModel(home, sessionID, fallback string) (string, error) {
 		return model, nil
 	}
 	return fallback, nil
+}
+
+// resolveServeProvider 在每轮重新读取 catalog，两个 runner 因而看到同一份
+// SetModel/重开后的配置。目录损坏与已声明 provider 的坏配置绝不回退；只有
+// 普通 model id（catalog 未收录或条目三个 provider 字段全缺）保留 legacy。
+func resolveServeProvider(home, model string) (llm.ModelProviderConfig, bool, error) {
+	provider, err := llm.OpenModelCatalog(home).ResolveProvider(model)
+	if llm.ModelCatalogErrorCode(err) == "not_found" {
+		return llm.ModelProviderConfig{}, false, nil
+	}
+	if err != nil {
+		return llm.ModelProviderConfig{}, false, fmt.Errorf("解析模型 %q 的 provider 配置: %w", model, err)
+	}
+	if provider.BaseURL == "" {
+		return llm.ModelProviderConfig{}, false, nil
+	}
+	return provider, true, nil
+}
+
+func redactServeProviderError(err error, credential string) error {
+	if err == nil {
+		return nil
+	}
+	message := llm.RedactCredential(err.Error(), credential)
+	if message == err.Error() {
+		return err
+	}
+	return errors.New(message)
 }

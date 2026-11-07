@@ -63,7 +63,8 @@ func (s *Screen) Enter() {
 func (s *Screen) enterAlt() {
 	s.inAlt = true
 	s.prevTitle = currentTitle()
-	fmt.Fprint(s.out, "\x1b[?1049h\x1b[?25l\x1b[2J"+oscTitle(productName))
+	// 1000=按钮事件，1003=任意移动（hover），1006=SGR 坐标；Leave 成对关闭。
+	fmt.Fprint(s.out, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1003h\x1b[?1006h"+oscTitle(productName))
 	setConsoleTitle(productName)
 }
 
@@ -75,7 +76,7 @@ func (s *Screen) Leave() {
 	s.inAlt = false
 	// prevTitle 为空（非 Windows，或终端的标题读不出来）时只吐退出序列；
 	// 吐一个空的 OSC 会把人家的标题清掉，那比不恢复更糟。
-	out := "\x1b[?25h\x1b[?1049l"
+	out := "\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?25h\x1b[?1049l"
 	if s.prevTitle != "" {
 		out += oscTitle(s.prevTitle)
 	}
@@ -103,7 +104,13 @@ func (s *Screen) Render(lines []string) {
 	next := make([]string, s.height)
 	for i := 0; i < s.height; i++ {
 		if i < len(lines) {
-			next[i] = fitWidth(lines[i], s.width)
+			if i == s.height-1 {
+				// 最后一行固定是输入编辑器：ZWJ emoji 要按一个 grapheme
+				// 计宽，不能被通用 rune 宽度裁成省略号。
+				next[i] = fitInputWidth(lines[i], s.width)
+			} else {
+				next[i] = fitWidth(lines[i], s.width)
+			}
 		}
 	}
 	var b strings.Builder
@@ -129,17 +136,8 @@ func (s *Screen) Render(lines []string) {
 	fmt.Fprint(s.out, b.String())
 }
 
-// fitWidth 把一行裁/补到恰好 w 个显示列。
+// fitWidth 把一行裁/补到恰好 w 个**显示列**（见 width.go）。
+// CJK、组合符与 ANSI 都由同一套列宽逻辑处理，避免终端自行折行。
 func fitWidth(s string, w int) string {
-	r := []rune(s)
-	if len(r) > w {
-		if w <= 1 {
-			return string(r[:w])
-		}
-		return string(r[:w-1]) + "…"
-	}
-	if len(r) < w {
-		return s + strings.Repeat(" ", w-len(r))
-	}
-	return s
+	return clipWidth(s, w)
 }

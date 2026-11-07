@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -240,6 +241,46 @@ func TestCancelWaitsForTurnToFinish(t *testing.T) {
 	if !finished.Load() {
 		t.Fatal("Cancel 在上一轮收工之前就返回了——下一轮会撞上死进程留下的会话写锁")
 	}
+}
+
+// pending approval 已按 dfd73da 结算，不代表卡住的工具已经收工。
+// cancelTurn 会为“审批已拒 + 轮次恰好结束”吞 ErrNoSuchTurn；serve 入口必须
+// 识别同一 turnID 仍在活动表里的情形，恢复超时错误而不是假报取消完成。
+func TestCancelServeTurnTimeoutWithPendingApprovalKeepsLiveState(t *testing.T) {
+	emitted := &emitLog{}
+	stdin := &fakeStdin{}
+	b := newApprovalBroker(stdin, func(sid, typ string, data json.RawMessage) {
+		emitted.push(typ)
+	})
+	started := make(chan struct{})
+	releaseTool := make(chan struct{})
+	p := newPromptService(turnRunnerFunc(func(ctx context.Context, _, _, _ string) error {
+		close(started)
+		<-ctx.Done()
+		<-releaseTool
+		return ctx.Err()
+	}))
+	p.cancelWait = 20 * time.Millisecond
+	if _, err := p.Submit(context.Background(), "s1", "写个文件"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	b.Watch(strings.NewReader(approvalRequestTag+
+		`{"requestId":"perm-cancel-timeout","sessionId":"s1","tool":"write"}`+"\n"), nil)
+	waitFrames(t, emitted, 1)
+
+	err := cancelServeTurn(b, p, "s1")
+	if !errors.Is(err, ErrCancelTimeout) {
+		t.Fatalf("pending 已拒但工具未收工时应报 ErrCancelTimeout，实际 %v", err)
+	}
+	if !hasType(emitted.all(), "approval/cancel") {
+		t.Fatalf("pending approval 没有按原语义推 approval/cancel：%v", emitted.all())
+	}
+	if !p.Busy("s1") {
+		t.Fatal("pending cancel 超时后 live turn 被清成空闲")
+	}
+	close(releaseTool)
+	waitBusy(t, p, "s1", false)
 }
 
 // 清写锁只认**刚退出的那个 pid**：别人的锁删掉就等于把"同一份会话只有一个写入者"拆了。

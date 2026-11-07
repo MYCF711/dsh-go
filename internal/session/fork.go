@@ -2,10 +2,12 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,16 +15,153 @@ import (
 	"dshgo/internal/spi"
 )
 
-// Fork 从一个已有会话派生一个**新会话**。
-//
-// 语义：
-//   - 继承的是 **surface**（模型真正看到的那部分），不是原始日志的全部事件——
-//     被压缩遮蔽过的东西不会跟着过去，否则新会话会立刻重新超窗；
-//   - 新 header 记 `parentSession`，血缘可查；
-//   - **不继承审批记忆**（审批记忆本来就不落盘，这是刻意的）。
-//
-// 结果仍然是一份合法的 v4 日志：能被我们的解码器、也能被 DSH 的 zlib 读。
+var (
+	// ErrInvalidAnchor 表示 anchor 不存在、歧义、或指向非用户消息。
+	ErrInvalidAnchor = errors.New("invalid user anchor")
+	// ErrNoRewindConversation 表示所选用户消息之前没有可续的对话。
+	ErrNoRewindConversation = errors.New("no conversation before user anchor")
+)
+
+// Fork 从一个已有会话派生一个**新会话**。无 anchor 的旧语义逐字保留：
+// 继承 surface、记 parentSession、不继承授权，也不凭空新增 title 事件。
 func Fork(src *v4.Log, home, cwd, newID string) (*Log, error) {
+	return forkCopy(src, home, cwd, newID, nil, nil)
+}
+
+// ForkAt 复制到指定用户消息（inclusive）。anchor 与 dsh-go 事件桥一致：
+// 优先是源 v4 Event.Seq 的十进制字符串，也接受该用户消息已持久化的 id。
+// title 非 nil 时按官方 session/title 形状原样保存，包括首尾空格。
+func ForkAt(src *v4.Log, home, cwd, newID, anchor string, title *string) (*Log, error) {
+	seq, err := ResolveUserAnchor(src, anchor)
+	if err != nil {
+		return nil, err
+	}
+	cut := logThrough(src, seq)
+	visible := false
+	for _, node := range Surface(cut) {
+		if node.Seq == seq && node.Type == "user/message" && node.Source == "user" {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		return nil, fmt.Errorf("%w: anchored user message is not in the visible surface", ErrInvalidAnchor)
+	}
+	return forkCopy(src, home, cwd, newID, &forkCut{seq: seq, inclusive: true}, title)
+}
+
+// ForkBefore 复制到指定用户消息之前，供 conversation rewind 使用。
+// 与 /fork 的 inclusive anchor 不同；第一条用户消息之前没有对话时明确拒绝。
+func ForkBefore(src *v4.Log, home, cwd, newID, anchor string) (*Log, error) {
+	seq, err := ValidateForkBefore(src, anchor)
+	if err != nil {
+		return nil, err
+	}
+	return forkCopy(src, home, cwd, newID, &forkCut{seq: seq, inclusive: false}, nil)
+}
+
+// ValidateForkBefore 在不创建子会话的前提下验证 conversation rewind 的切点。
+// both 模式必须先过这道检查再恢复文件，避免非法/首个 anchor 留下半完成状态。
+func ValidateForkBefore(src *v4.Log, anchor string) (int64, error) {
+	seq, err := ResolveUserAnchor(src, anchor)
+	if err != nil {
+		return 0, err
+	}
+	cut := logBefore(src, seq)
+	for _, node := range Surface(cut) {
+		if node.Type != "system/message" {
+			return seq, nil
+		}
+	}
+	return 0, fmt.Errorf("%w: %s", ErrNoRewindConversation, anchor)
+}
+
+// ResolveUserAnchor 把 durable anchor 解析成唯一、真实的用户事件 seq。
+func ResolveUserAnchor(src *v4.Log, anchor string) (int64, error) {
+	if src == nil || anchor == "" {
+		return 0, fmt.Errorf("%w: empty anchor", ErrInvalidAnchor)
+	}
+	var found int64
+	matches := 0
+	for _, ev := range src.Events {
+		if ev.Type != "user/message" {
+			continue
+		}
+		var d struct {
+			ID        string `json:"id"`
+			MessageID string `json:"messageId"`
+			Message   struct {
+				ID        string `json:"id"`
+				MessageID string `json:"messageId"`
+			} `json:"message"`
+			Source struct {
+				Kind string `json:"kind"`
+			} `json:"source"`
+		}
+		if json.Unmarshal(ev.Data, &d) != nil {
+			continue
+		}
+		matched := anchor == strconv.FormatInt(ev.Seq, 10)
+		for _, id := range []string{d.ID, d.MessageID, d.Message.ID, d.Message.MessageID} {
+			if id != "" && anchor == id {
+				matched = true
+			}
+		}
+		if !matched {
+			continue
+		}
+		if d.Source.Kind != "user" {
+			return 0, fmt.Errorf("%w: anchor is not a user message", ErrInvalidAnchor)
+		}
+		found = ev.Seq
+		matches++
+	}
+	if matches != 1 {
+		return 0, fmt.Errorf("%w: matched %d user messages", ErrInvalidAnchor, matches)
+	}
+	return found, nil
+}
+
+func logThrough(src *v4.Log, seq int64) *v4.Log {
+	cut := *src
+	cut.Events = nil
+	for _, ev := range src.Events {
+		if ev.Seq <= seq {
+			cut.Events = append(cut.Events, ev)
+		}
+	}
+	return &cut
+}
+
+func logBefore(src *v4.Log, seq int64) *v4.Log {
+	cut := *src
+	cut.Events = nil
+	for _, ev := range src.Events {
+		if ev.Seq < seq {
+			cut.Events = append(cut.Events, ev)
+		}
+	}
+	return &cut
+}
+
+// AppendSessionTitle 追加官方 title 事件，并写一个小的同目录读索引。
+// 索引让 session.list 不必为了找可能被后续几十万事件推远的 title 而解压整份日志；
+// v4 事件仍是跨实现可读的权威记录，二者都在返回成功前落盘。
+func AppendSessionTitle(l *Log, title string) error {
+	return appendSessionMetadata(l, "session/title", map[string]any{
+		"title":       title,
+		"messageSeqs": []int64{},
+		"source":      map[string]any{"kind": "user"},
+	})
+}
+
+type forkCut struct {
+	seq       int64
+	inclusive bool
+}
+
+// forkCopy 是 whole/inclusive/exclusive 三种边界共用的唯一复制实现。
+func forkCopy(src *v4.Log, home, cwd, newID string, cutoff *forkCut, title *string) (*Log, error) {
 	if newID == "" {
 		return nil, fmt.Errorf("fork 需要新的会话 id")
 	}
@@ -30,13 +169,23 @@ func Fork(src *v4.Log, home, cwd, newID string) (*Log, error) {
 		return nil, fmt.Errorf("新会话 id 不能和源会话相同")
 	}
 
-	surface := Surface(src)
+	source := src
+	if cutoff != nil {
+		if cutoff.inclusive {
+			source = logThrough(src, cutoff.seq)
+		} else {
+			source = logBefore(src, cutoff.seq)
+		}
+	}
+	surface := Surface(source)
 	if len(surface) == 0 {
 		return nil, fmt.Errorf("源会话没有可继承的 surface")
 	}
 	// Surface 只装 text + tool_calls；"这条回答是怎么收工的、这个工具体成没成、
 	// 在哪跑的、属于哪一轮哪一步"都不在里面。两张表都按 seq 回原始事件取，
 	// 不往 SurfaceMsg 上加字段（见 ReasoningBlocksBySeq / forkFactsBySeq）。
+	// 保留 src 作为本函数唯一的只读日志变量；cutoff 时它已是边界后的副本。
+	src = source
 	reasoning := ReasoningBlocksBySeq(src)
 	facts := forkFactsBySeq(src)
 
@@ -64,6 +213,11 @@ func Fork(src *v4.Log, home, cwd, newID string) (*Log, error) {
 
 	for _, node := range surface {
 		if err = copyNode(l, node, facts[node.Seq], reasoning[node.Seq]); err != nil {
+			return nil, err
+		}
+	}
+	if title != nil {
+		if err = AppendSessionTitle(l, *title); err != nil {
 			return nil, err
 		}
 	}

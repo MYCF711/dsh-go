@@ -23,6 +23,12 @@ type Client struct {
 	// 不知名的 "Go-http-client"——用户看到的第一反应是"这是谁在偷偷调模型"。
 	// 这是我们的请求，就该署我们的名（2026-11-03 用户截图反馈）。
 	UserAgent string
+
+	// retry 是这条 client 的重试参数；nil = 生产默认（见 retry.go 的 defaultRetryConfig）。
+	//
+	// 故意不导出：重试的次数/预算/退避只能按 client、按请求各自持有。留一个
+	// 全局可写开关，就会出现"A 会话退避过 3 次，B 会话第一次重试就没配额了"。
+	retry *retryConfig
 }
 
 // New 造一个客户端。HTTP 超时故意设长：流式响应的空闲由 ctx 控制，不由 Transport 控制。
@@ -37,20 +43,141 @@ func New(baseURL, apiKey string) *Client {
 	}
 }
 
+// RedactCredential 是 catalog test 与真实 runner 共用的秘密文本清洗。
+// 只清洗准备交给日志、Transport 或 HTTP 的文本；credential 本身不进入错误链。
+func RedactCredential(message string, credentials ...string) string {
+	for _, credential := range credentials {
+		if credential != "" {
+			message = strings.ReplaceAll(message, credential, "[redacted]")
+		}
+	}
+	return message
+}
+
 // Stream 发起一次流式请求。
 //
 // 事件顺序保证：reasoning 全部先于 content（DeepSeek 系模型的行为），
 // tool_call 在 content 之后；onEvent 返回错误即中止。
+//
+// 请求形状：model/messages/tools/stream 永远原样发出；可选字段的差异由
+// compat.go 处理——默认形状逐字节不变，能力已知时直接走兼容形状，只有在
+// 400/422 的响应体明确指向某个可选字段时，才做一次最小回退（最多 3 次，
+// 每次只动一个字段，已试过的形状不再重试）。
+//
+// 重试（retry.go）发生在这个循环里、**流开始之前**：429/5xx/连接层瞬时错误按
+// 退避重放，401/403/404/400/422 与"已经往外发过字之后"的失败一律不重放。
+// 对上层（agent 的 step、serve 的 turn 与 SSE）来说，这里仍然只是**一次**调用：
+// 重试不新增 step、不新增帧、不重复写历史。
 func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) error) (*Response, error) {
 	req.Stream = true
 	if req.StreamOptions == nil {
 		req.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("序列化请求失败: %w", err)
-	}
 
+	profile := c.requestProfile(req.Model)
+	attempted := map[wireProfile]bool{profile: true}
+	var adjustments []string
+
+	// 重试状态只活在这条调用里：两个 Client 实例、两条并发流各算各的。
+	state := newRetryState(c.retryPolicy())
+	// profileTries 只数"形状尝试"（首发 + 可选字段回退），与重试次数分开记账：
+	// 触发了重试不代表协商的上界也该跟着放宽。
+	profileTries := 1
+	// emitted 记录这条流是否真的往外发过事件；发过之后绝不重放。
+	emitted := 0
+
+	for {
+		// 已取消/已超时就别再发新请求了：保留 ctx 的原因，别把它包成"连不上网关"。
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		body, err := marshalWireRequest(req, profile)
+		if err != nil {
+			return nil, fmt.Errorf("序列化请求失败: %w", err)
+		}
+		state.sent++
+		resp, err := c.post(ctx, body)
+		if err != nil {
+			// 连接层失败。错误本身已经是 GatewayError(GatewayConnect)，这里补上
+			// "共发了几次"，再看这次抖动要不要重放。
+			markAttempts(err, state.sent)
+			if !transientConnectError(err) {
+				return nil, err
+			}
+			wait, ok := state.plan(0)
+			if !ok {
+				return nil, err
+			}
+			if waitErr := state.wait(ctx, wait); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			// 记下被这个端点真正接受过的形状：同一端点的后续请求（包括别的
+			// Client 实例）不必再吃一次 400。
+			rememberCapability(c.BaseURL, req.Model, profile)
+			snap, err := consumeStream(resp, countingOnEvent(onEvent, &emitted))
+			if err == nil {
+				return snap, nil
+			}
+			// 已经往外发过字：绝不重放（半句话不能拼成两段）。一条内容都没发过
+			// 时的瞬时网络错误（连接被重置/对端关连接）可以重来一次。
+			if emitted > 0 || !transientConnectError(err) {
+				return snap, err
+			}
+			wait, ok := state.plan(0)
+			if !ok {
+				return snap, err
+			}
+			if waitErr := state.wait(ctx, wait); waitErr != nil {
+				// 这一轮半成品不是回答：重试被取消时不能把它交回去当结果。
+				return nil, waitErr
+			}
+			continue
+		}
+
+		// 网关的响应体可能有几 KB（HTML 错误页、堆栈、内部主机名）。先读到一个
+		// 上限：协商要看里面点了哪个参数，交给客户端的只是截断后的片段。
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		// 头必须在关 body 之前取；解析失败就当没给（走自身退避）。
+		retryAfter, _ := parseRetryAfter(resp.Header, time.Now())
+		_ = resp.Body.Close()
+
+		if next, change, ok := negotiateWire(profile, sentFields(req, profile), resp.StatusCode, string(raw)); ok &&
+			profileTries < maxWireAttempts && !attempted[next] {
+			profile = next
+			attempted[next] = true
+			profileTries++
+			adjustments = append(adjustments, change)
+			continue
+		}
+
+		gwErr := &GatewayError{
+			Kind: GatewayStatus, Base: c.BaseURL,
+			Code: resp.StatusCode, Body: errorSnippet(raw, c.APIKey),
+			Attempts: state.sent, Adjust: adjustments,
+		}
+		// 429/5xx 是"可能只是抖了一下"：按退避与 Retry-After 重放；预算/次数/
+		// 单次等待任一超界就立刻把这条错误交出去（不吞错、不把 429 说成成功）。
+		if retryableStatus(resp.StatusCode) {
+			if wait, ok := state.plan(retryAfter); ok {
+				if waitErr := state.wait(ctx, wait); waitErr != nil {
+					return nil, waitErr
+				}
+				continue
+			}
+		}
+		return nil, gwErr
+	}
+}
+
+// post 只发**一次**请求，自己不认识重试：429/5xx 的重放、连接层抖动的重放
+// 统一在 Stream 里决定（那里才知道"流有没有开始往外发字"）。
+//
+// 这层保持"一次调用 = 一次 HTTP 请求"，重试次数才有一个唯一记账点
+// （retryState.sent），不至于两处各数一遍。
+func (c *Client) post(ctx context.Context, body []byte) (*http.Response, error) {
 	url := strings.TrimSuffix(c.BaseURL, "/") + "/chat/completions"
 	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -74,17 +201,12 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 		// 这里只留"连不上哪个网关"，底层原因用 %w 留给日志。
 		return nil, &GatewayError{Kind: GatewayConnect, Base: c.BaseURL, Err: err}
 	}
-	defer resp.Body.Close()
+	return resp, nil
+}
 
-	if resp.StatusCode != http.StatusOK {
-		// 网关的响应体可能有几 KB（HTML 错误页、堆栈、内部主机名），
-		// 全塞给客户端既不安全也没用。留 300 字符够定位了。
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		return nil, &GatewayError{
-			Kind: GatewayStatus, Base: c.BaseURL,
-			Code: resp.StatusCode, Body: strings.TrimSpace(string(b)),
-		}
-	}
+// consumeStream 读 200 的 SSE 响应并拼成完整响应。
+func consumeStream(resp *http.Response, onEvent func(Event) error) (*Response, error) {
+	defer resp.Body.Close()
 
 	acc := newAccumulator(onEvent)
 	// 整条流必须有一个「完结」的凭据：finish_reason 或 `[DONE]`。

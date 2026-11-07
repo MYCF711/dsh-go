@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/modes"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
 )
@@ -36,16 +38,25 @@ type loopRunner struct {
 	// broker 是审批的父进程半边（H13）。只在 --policy ask 时用；
 	// 它把子进程 stderr 上的 @@APPROVAL@@ 转成 approval/request 帧，
 	// 并把界面 session.approve 的决定写回子进程 stdin。
-	broker *approvalBroker
+	broker     *approvalBroker
+	jobActions *jobActionBroker
+	// sandboxPresets / sandboxStore 是沙盒三档的真值来源：子进程的 bash/pwsh
+	// 靠注入的环境变量判定档位，**不读父进程 env**（A/B 会互相污染）。
+	sandboxPresets *modes.Registry
+	sandboxStore   *sandboxModeStore
 	// model 是透传给子进程的模型 id（空 = 用 run 的默认值）。
 	model string
-	// reasoning 是透传给子进程的推理强度（空 = 不要）。
-	// 界面要能显示 reasoning，宿主就得先把"要不要推理"传下去。
-	reasoning string
-	pub       func(topic string, f transport.ServerFrame)
-	home      string
-	policy    string
-	maxSteps  int
+	// reasoning 是透传给子进程的推理强度 wire（空 = 不要）。
+	// reasoningSet 区分“无覆盖，沿用子进程默认”与 off:null 的显式空 wire。
+	reasoning    string
+	reasoningSet bool
+	// effortLevel 是本轮真实 catalog key；recordEffort 只在生产 wrapper 开启。
+	effortLevel  string
+	recordEffort bool
+	pub          func(topic string, f transport.ServerFrame)
+	home         string
+	policy       string
+	maxSteps     int
 	// toolsMode 是透传给子进程的工具表形态（compact/full/merged/lazy）。
 	//
 	// 为什么是"透传"而不是"serve 自己投影一张表"：serve 的每一轮**就是**
@@ -65,7 +76,7 @@ type loopRunner struct {
 // 抽成方法是为了可测，也为了把 lazy 的接线钉在一处：--tools-mode 必须和
 // --session 出现在**同一条** argv 里。少传一个，serve 这条链就根本没接上
 // 懒加载（表永远停在 compact，装载集无从回放），而界面上看不出任何异常。
-func (r *loopRunner) childArgs(sessionID, text string) []string {
+func (r *loopRunner) childArgs(sessionID, text string, promptContentFile ...string) []string {
 	args := []string{"run",
 		"--home", r.home,
 		"--session", sessionID,
@@ -81,20 +92,61 @@ func (r *loopRunner) childArgs(sessionID, text string) []string {
 	if r.model != "" {
 		args = append(args, "--model", r.model)
 	}
-	if r.reasoning != "" {
+	if r.reasoning != "" || r.reasoningSet {
+		// off:null 也必须显式带空值，否则 cmdRun 会重新继承 DSHD_REASONING_EFFORT。
 		args = append(args, "--reasoning", r.reasoning)
+	}
+	if r.recordEffort {
+		// level 与 wire 必须一起到达真正发请求的 cmdRun；provider 分支也复用
+		// 这份 argv，因此不再依赖父进程回合后的 override store 补记。
+		args = append(args, "--record-effort", "--effort-level", r.effortLevel)
+	}
+	if len(promptContentFile) > 0 && promptContentFile[0] != "" {
+		args = append(args, "--prompt-content-file", promptContentFile[0])
+		// 与 --prompt 互斥；模型文本由子进程从真实块和附件字节派生。
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--prompt" {
+				args = append(args[:i], args[i+2:]...)
+				break
+			}
+		}
 	}
 	return args
 }
 
 func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) error {
+	return r.run(ctx, sessionID, turnID, text, "")
+}
+
+// RunContent 保留完整块到 run 子进程，结束后只清理本轮自己的交接文件。
+func (r *loopRunner) RunContent(ctx context.Context, sessionID, turnID string, blocks []transport.ContentBlock) error {
+	path, err := writePromptContentFile(r.home, blocks)
+	if err != nil {
+		r.emitTurn(sessionID, turnID, err)
+		return err
+	}
+	defer os.Remove(path)
+	return r.run(ctx, sessionID, turnID, "", path)
+}
+
+func (r *loopRunner) run(ctx context.Context, sessionID, turnID, text, promptContentFile string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		r.emitTurn(sessionID, turnID, err)
 		return err
 	}
-	args := r.childArgs(sessionID, text)
+	args := append(r.childArgs(sessionID, text, promptContentFile), "--turn-id", turnID)
 	cmd := exec.CommandContext(ctx, exe, args...)
+	// 沙盒档位：子进程的 bash/pwsh 靠这几个变量判定 allow/deny/needs-approval。
+	// 只写子进程 Env（os.Environ + 增量），绝不 os.Setenv——A/B 会话会互相污染。
+	if r.sandboxStore != nil && r.sandboxPresets != nil {
+		env, envErr := sandboxWriteChildEnv(r.home, sessionID, r.sandboxPresets, r.sandboxStore)
+		if envErr != nil {
+			r.emitTurn(sessionID, turnID, envErr)
+			return envErr
+		}
+		cmd.Env = append(os.Environ(), env...)
+	}
 	var stderr bytes.Buffer
 
 	// 审批要"跑到一半停下来问"（H13），所以 ask 策略下不能等子进程跑完再读 stderr。
@@ -105,22 +157,28 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	// `@@JOBS@@`（后台任务清单）。只在 ask 时挂的话，`--policy allow` 下 jobs.list
 	// 永远是空的——实测过一次：模型真起了 job-1、子进程真写了 @@JOBS@@ 行，
 	// 而父进程因为没挂 Watch 什么都没收到，界面上看到一个空列表。
+	var jobStdin io.WriteCloser
 	if r.broker != nil {
-		if r.policy == "ask" {
-			cmd.Env = append(os.Environ(), "DSHD_APPROVAL_STDIO=1")
-			stdin, serr := cmd.StdinPipe()
-			if serr == nil {
-				r.broker.useStdin(stdin)
-			} else {
-				fmt.Fprintf(os.Stderr, "审批 stdin 没建起来（%v），这一轮不会问人\n", serr)
+		stdin, serr := cmd.StdinPipe()
+		if serr == nil {
+			jobStdin = stdin
+			if cmd.Env == nil {
+				cmd.Env = os.Environ()
 			}
+			cmd.Env = append(cmd.Env, "DSHD_JOBS_STDIO=1", "DSHD_STEER_STDIO=1")
+			if r.policy == "ask" {
+				cmd.Env = append(cmd.Env, "DSHD_APPROVAL_STDIO=1")
+				r.broker.useStdin(stdin)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "jobs/审批 stdin 没建起来（%v），本轮任务动作不可用\n", serr)
 		}
 		epipe, eerr := cmd.StderrPipe()
 		if eerr == nil {
 			watchWG.Add(1)
 			go func() {
 				defer watchWG.Done()
-				r.broker.Watch(epipe, &stderr)
+				r.broker.WatchSession(sessionID, epipe, &stderr)
 			}()
 		} else {
 			// 拿不到管道就退回缓冲：至少错误播报还在（jobs 就看不到了）。
@@ -139,6 +197,19 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	if err := cmd.Start(); err != nil {
 		r.emitTurn(sessionID, turnID, err)
 		return err
+	}
+	var actionRun *jobActionRun
+	if r.jobActions != nil {
+		run, err := r.jobActions.registerTurnRun(sessionID, turnID, cmd.Process.Pid, exe, jobStdin)
+		actionRun = run
+		if err != nil {
+			_ = cmd.Process.Kill() // 只回收本函数刚启动、已核对 executable 的 PID
+			_ = cmd.Wait()
+			watchWG.Wait()
+			r.emitTurn(sessionID, turnID, err)
+			return err
+		}
+		defer r.jobActions.unregisterRun(run)
 	}
 	// 把子进程的身份写在 stderr 上：出问题时第一句该问的是"它到底起没起来"。
 	// 上一轮就是因为没有这一行，分不清"被杀"和"压根没起"。
@@ -163,6 +234,8 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 	// 等 stderr 那条扫描 goroutine 收尾：它在写 stderr 缓冲区，
 	// 而下面读那个缓冲区——不等就是一个数据竞争（也读不全最后几行）。
 	watchWG.Wait()
+	// 所有已写出的 steer ACK 都已分发后再宣布退出；之后的提交立刻明确过晚。
+	r.jobActions.markExited(actionRun)
 	// 子进程说了什么，运维侧必须看得到。
 	// 没有这一行时，serve 起的子进程失败只能靠 WS 上的 turn/error 观察，
 	// 而 e2e/curl 场景根本没人读 WS——于是"它没写盘"就变成一个无解释的现象。
@@ -200,6 +273,8 @@ func (r *loopRunner) Run(ctx context.Context, sessionID, turnID, text string) er
 		r.emitTurn(sessionID, turnID, e)
 		return e
 	}
+	// effort selection 已由 cmdRun 在每个真实模型 step 的入口处写入；
+	// 父进程不再于回合结束后按 override store 补一条无法证明请求生效的记录。
 	// 结局帧的序号由 journal 统一分配：它一定排在已经推出去的那些事件之后，
 	// 不再需要"把计数器推到日志末尾"这种影子同步——那样两个来源迟早对不上。
 	_ = topic
@@ -334,9 +409,14 @@ func (r *loopRunner) follow(ctx context.Context, sessionID string, done <-chan s
 					continue
 				}
 				lastSeq = ev.Seq
+				// W144 的 selection 是 v4 内部真实配置记录，不是 WS 白名单事件；
+				// 水位必须前进，但不能因为它移到 step/start 就意外新增一类推送。
+				if ev.Type == "model/selection" {
+					continue
+				}
 				// 走 emit：由 journal 发号。**不要再拿 ev.Seq 当送达序号**——
 				// 那是 v4 日志的序号，跟这条连接上推了几帧没关系。
-				r.emit(sessionID, ev.Type, ev.Data)
+				emitFrameAt(r.journals, r.pub, sessionID, ev.Type, projectV4MessageIdentity(ev), ev.Time)
 			}
 		}
 	}
@@ -365,7 +445,10 @@ func (r *loopRunner) drain(rd *v4.Reader, noReuse bool, path string, offset *int
 				continue
 			}
 			*lastSeq = ev.Seq
-			r.emit(sessionID, ev.Type, ev.Data)
+			if ev.Type == "model/selection" {
+				continue
+			}
+			emitFrameAt(r.journals, r.pub, sessionID, ev.Type, projectV4MessageIdentity(ev), ev.Time)
 		}
 	}
 }

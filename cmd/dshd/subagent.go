@@ -32,6 +32,10 @@ type subRunner struct {
 	model    string
 	maxSteps int
 	timeout  time.Duration
+	// home 是 durable 子会话的落点（<home>/sessions/...）。
+	// 空 = 这次装配不提供可续问（req.Continuable 会**响亮失败**，
+	// 而不是回一个指向空目录的 child id）。
+	home string
 	// depth 是当前嵌套深度：0 表示主代理。子代理内部再调 subagent 会被拒。
 	depth int
 }
@@ -119,13 +123,63 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 	if strings.TrimSpace(text) == "" {
 		return spi.SubagentResult{Steps: len(hist)}, fmt.Errorf("子代理没有产出正文")
 	}
-	return spi.SubagentResult{
+	res := spi.SubagentResult{
 		Text:  text,
 		Steps: len(hist),
 		// 说清楚这次用的是谁的授权：runner 是主会话那个 guarded，
 		// 审批记忆按会话记——主会话批准过的工具，子代理不会重问。
 		BorrowedApprovals: s.runner != nil,
-	}, nil
+	}
+	// 可续问：把这一趟真实往返落成一条 durable 子会话，官方 `subagents.prompt`
+	// 才有地址可投。**放在成功之后**——委派失败不留孤儿会话（一个空会话既不能
+	// 续问也没人清理）。
+	if req.Continuable || strings.TrimSpace(req.ChildSessionID) != "" {
+		childID, err := s.continuation(ctx, req, prompt, text)
+		if err != nil {
+			// 响亮失败：这次委派的结果照实交回去，但"可续问"这件事没成，
+			// 绝不能回一个编出来的 child id。
+			return spi.SubagentResult{}, fmt.Errorf("委派已完成但可续问子会话没建成: %w", err)
+		}
+		res.ChildSessionID = childID
+	}
+	return res, nil
+}
+
+// continuation 是**真实 spawn** 的落点：建 durable 子会话 + 父子帧 + 委派往返。
+//
+// 为什么父会话 id 从 ctx 取：`dshd serve` 每一轮都是 `dshd run --session <id>`
+// 子进程，Loop 把会话身份绑在每一步的 ctx 上（agent.Loop.SessionID →
+// spi.WithSession），所以工具这条链上 ctx 里本来就有"我在为哪个会话干活"。
+// 显式 ParentSessionID 优先（调用方可能替别的会话派活）。
+func (s *subRunner) continuation(ctx context.Context, req spi.SubagentRequest, prompt, answer string) (string, error) {
+	parentID := strings.TrimSpace(req.ParentSessionID)
+	if parentID == "" {
+		parentID = strings.TrimSpace(spi.SessionFrom(ctx))
+	}
+	if parentID == "" {
+		return "", fmt.Errorf("可续问委派需要父会话 id：ctx 上没有会话身份，也没有显式 ParentSessionID")
+	}
+	home := strings.TrimSpace(s.home)
+	if home == "" {
+		return "", fmt.Errorf("这次装配没有 home：可续问子会话落不了盘")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	rec, err := (agent.ChildSpawn{
+		Home:            home,
+		ParentSessionID: parentID,
+		Cwd:             cwd,
+	}).Spawn(agent.ChildSpawnOptions{
+		ChildSessionID: strings.TrimSpace(req.ChildSessionID),
+		Prompt:         prompt,
+		Answer:         answer,
+	})
+	if err != nil {
+		return "", err
+	}
+	return rec.ChildSessionID, nil
 }
 
 const subSystemPrompt = `你是一个子代理。你只负责交给你的那件事，做完就给结论。

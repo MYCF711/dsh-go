@@ -37,11 +37,22 @@
       "time",
       "usage",
       "view",
-      "reasoning"
+      "reasoning",
+      "v4Seq",
+      "messageId",
+      "content",
+      "callId",
+      "turn",
+      "step",
+      "isError",
+      "meta",
+      "structured"
     ],
     "SessionSummary": [
       "id",
       "title",
+      "titleExplicit",
+      "titleSource",
       "cwd",
       "updatedAt"
     ],
@@ -58,7 +69,9 @@
       "contextWindow",
       "journalEpoch",
       "lastSeq",
-      "cwd"
+      "cwd",
+      "effort",
+      "effortSelection"
     ],
     "PromptResult": [
       "accepted",

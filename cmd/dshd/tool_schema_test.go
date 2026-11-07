@@ -263,6 +263,38 @@ func TestTightSchemaKeepsDescriptionParam(t *testing.T) {
 	}
 }
 
+// 无参工具的 parameters 不能压成只有 additionalProperties。
+//
+// 2026-11-04 真机：job_list 原始 schema 是
+// {"type":"object","properties":{},"additionalProperties":false}，但 compact
+// 同时删掉顶层 type:object 与空 properties，模型实际收到
+// {"additionalProperties":false}。WPS 灵犀的 schema 转换器在开流前直接拒绝
+// 这种形态，插件归一成 503 upstream_unavailable。这里同时钉住单点与全表。
+func TestTightSchemaNoArgKeepsObjectSkeleton(t *testing.T) {
+	const want = `{"additionalProperties":false,"properties":{},"type":"object"}`
+	jobList := json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)
+	if got := string(tightenSchema(jobList)); got != want {
+		t.Fatalf("job_list 压缩后 = %s，期望 %s", got, want)
+	}
+
+	for _, tl := range tightenTable(assembleRegistry(t)).Tools() {
+		var root map[string]json.RawMessage
+		if err := json.Unmarshal(tl.Schema(), &root); err != nil {
+			t.Fatalf("%s 的 schema 不是合法 JSON: %v", tl.Name(), err)
+		}
+		props, hasProps := root["properties"]
+		if hasProps && strings.TrimSpace(string(props)) != "{}" {
+			continue // 有参数的工具，顶层 type:object 可以省
+		}
+		if !isRawString(root["type"], "object") {
+			t.Errorf("%s 是无参对象，但压缩后丢了 type:object: %s", tl.Name(), tl.Schema())
+		}
+		if !hasProps {
+			t.Errorf("%s 是无参对象，但压缩后丢了空 properties: %s", tl.Name(), tl.Schema())
+		}
+	}
+}
+
 // 表里每个 required 的名字都必须真在 properties 里。这条不依赖"怎么压"，
 // 是契约本身的完整性：模型看不到的参数，不该被标成必填。
 func TestRequiredParamsAreDeclared(t *testing.T) {

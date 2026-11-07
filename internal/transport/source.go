@@ -78,6 +78,17 @@ type ModelSourcer interface {
 	Model(sessionID string) (string, error)
 }
 
+// EffortSourcer 是 Source 的可选增强：给出这条会话最新配置记录里的推理强度。
+// 空串表示旧会话无记录、记录缺字段或枚举未知；不得由协议层补进程默认值。
+type EffortSourcer interface {
+	Effort(sessionID string) (string, error)
+}
+
+// EffortSelectionSourcer 给出独立 store 中的覆盖 key；空串只表示没有覆盖。
+type EffortSelectionSourcer interface {
+	EffortSelection(sessionID string) (string, error)
+}
+
 // Compactor 是 Source 的可选增强：能对会话做一次压缩（追加遮蔽事件）。
 //
 // 为什么是可选接口：压缩要读模型、要往日志追加，不是每个 Source 都能干
@@ -139,6 +150,20 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 				res.Model = m
 			}
 		}
+		if es, ok := src.(EffortSourcer); ok {
+			if effort, eerr := es.Effort(sessionID); eerr == nil && effort != "" {
+				res.Effort = effort
+			}
+		}
+		if es, ok := src.(EffortSelectionSourcer); ok {
+			selection, eerr := es.EffortSelection(sessionID)
+			if eerr != nil {
+				return LoadResult{}, eerr
+			}
+			if selection != "" {
+				res.EffortSelection = selection
+			}
+		}
 		if gs, ok := src.(GoalSourcer); ok {
 			if goal, gerr := gs.Goal(sessionID); gerr == nil && goal != "" {
 				res.Goal = goal
@@ -178,6 +203,20 @@ func LoadSession(src Source, sessionID string, limit int) (LoadResult, error) {
 	if ms, ok := src.(ModelSourcer); ok {
 		if m, merr := ms.Model(sessionID); merr == nil {
 			res.Model = m
+		}
+	}
+	if es, ok := src.(EffortSourcer); ok {
+		if effort, eerr := es.Effort(sessionID); eerr == nil && effort != "" {
+			res.Effort = effort
+		}
+	}
+	if es, ok := src.(EffortSelectionSourcer); ok {
+		selection, eerr := es.EffortSelection(sessionID)
+		if eerr != nil {
+			return LoadResult{}, eerr
+		}
+		if selection != "" {
+			res.EffortSelection = selection
 		}
 	}
 	return res, nil

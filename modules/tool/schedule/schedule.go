@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"dshgo/internal/kernel"
+	schedulestore "dshgo/internal/schedule"
 	"dshgo/internal/spi"
 )
 
@@ -41,6 +42,9 @@ const (
 )
 
 const (
+	// 当前值与到期推进层共用；兼容版本白名单也由 internal/schedule 单点校验。
+	currentScheduleVersion = schedulestore.CurrentScheduleVersion
+
 	maxTitleRunes = 120
 	// 列表回给模型的上限：定时任务再多也不是"清单"而是噪声，截断后让人去删。
 	maxListItems = 200
@@ -74,6 +78,7 @@ type Schedule struct {
 
 // scheduleFile 是一个会话落盘的形状。
 type scheduleFile struct {
+	Version   int        `json:"version"`
 	Schedules []Schedule `json:"schedules"`
 }
 
@@ -102,7 +107,8 @@ func (s *store) display(sessionID string) string {
 	return strings.ReplaceAll(s.path(sessionID), `\`, "/")
 }
 
-// load 读出一个会话的定时任务；文件不存在或为空都当空表（第一次用不该报错）。
+// load 读出一个会话的定时任务；只有文件不存在才当空表。
+// 空白/损坏 JSON 与不兼容版本都必须报错，调用方因此不会在随后 save 时覆盖原文件。
 // 调用方必须已持锁。
 func (s *store) load(sessionID string) ([]Schedule, error) {
 	buf, err := os.ReadFile(s.path(sessionID))
@@ -112,12 +118,12 @@ func (s *store) load(sessionID string) ([]Schedule, error) {
 	if err != nil {
 		return nil, fmt.Errorf("读定时任务文件 %s 失败: %w", s.display(sessionID), err)
 	}
-	if len(strings.TrimSpace(string(buf))) == 0 {
-		return nil, nil
-	}
 	var f scheduleFile
 	if err := json.Unmarshal(buf, &f); err != nil {
 		return nil, fmt.Errorf("定时任务文件 %s 不是合法 JSON: %w", s.display(sessionID), err)
+	}
+	if err := schedulestore.ValidateScheduleVersion(buf); err != nil {
+		return nil, fmt.Errorf("定时任务文件 %s 版本不兼容: %w", s.display(sessionID), err)
 	}
 	return f.Schedules, nil
 }
@@ -128,7 +134,7 @@ func (s *store) save(sessionID string, items []Schedule) error {
 	if items == nil {
 		items = []Schedule{}
 	}
-	buf, err := json.MarshalIndent(scheduleFile{Schedules: items}, "", "  ")
+	buf, err := json.MarshalIndent(scheduleFile{Version: currentScheduleVersion, Schedules: items}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化定时任务失败: %w", err)
 	}

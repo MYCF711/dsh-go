@@ -1,38 +1,147 @@
 # dsh-go
 
-用 Go 重写 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）的宿主。
+用 Go 重写 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）的**宿主**。
 
-**一句话**：内核只做插件运行时，任何业务能力——包括 agent loop、工具、会话、传输、UI——都由 manifest 装配、都能被换掉；工具层为模型设计，不为 shell 设计。
+**一句话**：内核只做插件运行时，任何业务能力——agent loop、工具、会话、传输——都由 manifest 装配、都能被换掉；工具层为模型设计，不为 shell 设计。
 
-| | 现状（实测） | 目标 |
-|---|---:|---:|
-| 常驻私有工作集 | 870 MB | < 150 MB |
-| 冷启动 | 数秒 | < 100 ms |
-| 工具表 token | 12,209 | ≤ 6,000 |
+> 界面不在本仓。原生界面（Go + Viva）在 `../dsh-ui`；本仓只提供 Transport 与宿主能力。
 
-## 文档
+---
 
-| 文件 | 讲什么 |
+## 现在能做什么
+
+| 能力 | 状态 |
 |---|---|
-| [PLAN.md](PLAN.md) | **方案**：十项已拍板决策、架构、里程碑、CI 规则 |
-| [AGENTS.md](AGENTS.md) | **操作手册**：六条红线、代码地图、写代码的规矩 |
-| [MAINTENANCE.md](MAINTENANCE.md) | **维护台账**：接手先读这页 |
-| [CHECKLIST.md](CHECKLIST.md) | **交付门**：代码交付前 / 发版前两张表 |
-| [UPDATING.md](UPDATING.md) | **发布流程** |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献约定 |
-| [CHANGELOG.md](CHANGELOG.md) | 变更日志与上游版本映射 |
-| `research/` | 六份调研（全部带 `文件:行号`） |
-| `evidence/` | 三份审计原始产物 |
+| 宿主 serve（HTTP `/api` + 每会话 WS） | ✅ 可用 |
+| **dsh-TUI 直连**（真实终端界面） | ✅ 可用，见下节 |
+| 会话 / 消息 / 工具 / 审批 / 取消 / 恢复 | ✅ 可用 |
+| 后台任务、终端、日程、目标、压缩、模型切换 | ✅ 可用 |
+| 官方 0.2.2 方法对齐 | 🟡 82/153 已接线，其余逐条收口（见 [兼容性](#兼容性)） |
+| 沙盒 | 🟡 策略层（三档 + 一次性升级）；**无 OS 级隔离** |
 
-## 状态
+版本：稳定 `0.2.2-go.1`，测试 `0.2.2-beta.1`（上游基线 `0.2.2-rc.1`）。
 
-宿主与独立 `../dsh-ui` 原生界面均已有实现，当前执行入口见 `AGENTS.md`；宿主顺序见 `PLAN.md` §14.1，跨线契约与证据见 `docs/transport-contract.md`。不要把最初 M0–M5 或 P0 工具清单当成当前工作单。
+---
 
-## 版本
+## 快速开始
 
-`<上游版本>-go.<N>`，N 是 Go 自有序号，不是上游 rc 序号；当前值读源码与 `CHANGELOG.md`。上游基线为 DSH `0.2.1-rc.5`。
-仓库私密开发，**不发 npm**；分发走 GitHub Release 的二进制。
+```bash
+# 1) 构建
+export PATH="/c/Program Files/Go/bin:$PATH"     # Windows / Git Bash
+go build ./...
+
+# 2) 起宿主（--port 0 = 由系统分配端口，启动后会打印 url 与 token）
+./dshd.exe serve --home /tmp/dsh-home --addr 127.0.0.1:0 --policy ask
+
+# 3) 用 curl 冒烟
+curl -s -c /tmp/c.txt "http://127.0.0.1:<port>/connect?token=<token>"
+curl -s -b /tmp/c.txt -X POST "http://127.0.0.1:<port>/api/session.list" -d '{}'
+```
+
+真实模型需要网关：
+
+```bash
+export DSHD_LLM_BASE="http://127.0.0.1:3425/v1"
+export DSHD_LLM_KEY="<your-key>"
+```
+
+---
+
+## 用 dsh-TUI 玩
+
+**dsh-TUI 是官方终端界面，本宿主是它的后端之一（`--backend dsh-go`）。** 已经可以直接用。
+
+```bash
+# 1) 起宿主（同上），记下打印的 url 与 token
+
+# 2) 起 TUI，指向本宿主
+node ../dsh-TUI/bin/dsh-tui.js --backend dsh-go \
+  --base http://127.0.0.1:<port> --token <token>
+
+# 无头自检（不需要终端，适合 CI）
+node ../dsh-TUI/bin/dsh-tui.js --backend dsh-go --dump-screen --size 120x36
+```
+
+TUI 里常用的东西：
+
+| 你要做的 | 怎么做 |
+|---|---|
+| 发消息 | 直接打字 + `Enter` |
+| 中断当前回答 | `Esc` |
+| 切换模型 | `/model` |
+| 切权限模式 | `/permission`（read-only / workspace-write / danger-full-access） |
+| 看后台任务 | `/jobs` |
+| 压缩上下文 | `/compact` |
+| 导出会话 | `/export`（Markdown） |
+| 恢复历史会话 | 启动时 `--session <id>` |
+| 断线重连 | 自动（WS journal 续传，不重放历史） |
+
+> 已知限制：TUI 侧 `/permission` 每项会画两行、极窄终端下工具卡参数偶见多余括号——这两个是 TUI 渲染问题，已登记在 `LEAD.md` 的 KNOWN-ISSUE，**不在宿主**。
+
+---
+
+## 架构
+
+```
+cmd/dshd           宿主入口（serve / run / acp / schedule / 子命令）
+internal/kernel    插件运行时：只认 Scope，不认业务
+internal/spi       模块契约（Tool / FS / …）
+internal/transport HTTP /api + /ws，每会话一个 journal
+internal/session   v4 append-only 会话日志（唯一真值）
+internal/officialwire  官方 0.2.2 wire（/connect cookie、envelope、remote.mux、$events）
+modules/           业务能力：exec/bash、fs、tool/*、scheduler、goal……
+codecs/            v4 编解码
+```
+
+三条硬规矩（详见 [AGENTS.md](AGENTS.md)）：内核不识业务、模块只拿 `Scope`、只有 Transport 能跨线。
+
+---
+
+## 兼容性
+
+官方桌面端 0.2.2-rc.1 有 **153 个 typert 方法**（方法名全集见 [`docs/evidence/official-desktop-api-methods-0.2.2-rc.1.txt`](docs/evidence/official-desktop-api-methods-0.2.2-rc.1.txt)）。
+
+- **逐方法状态**：[docs/official-desktop-api-parity.md](docs/official-desktop-api-parity.md) —— 已接线 82，其余按 account / 外部服务 / 媒体市场三组收口，每条都给「真实现」或「官方形状未实现 + 缺什么」。
+- **Wire 兼容**：`/connect` cookie、`POST /api/<ns>/<method>` envelope、200-on-error、`/api/remote.mux` 七帧、`$events` 全生命周期、multipart 附件——已用**未修改的官方客户端包**联调通过。
+- **宿主插件面**：97 项官方 base 的 DONE/PARTIAL/MISSING 见 [docs/official-plugins-022-map.md](docs/official-plugins-022-map.md)。
+
+---
+
+## 仓库结构
+
+```
+AGENTS.md        给 AI 的操作手册（红线、代码地图、验证规则）
+LEAD.md          派单账本：谁在做什么、做到哪、证据在哪
+PLAN.md          方案：架构决策与里程碑
+docs/            契约、证据、审计、官方结构树
+scripts/         门禁与探针（bin-check / doc-links / regress …）
+refs/            上游参考源码（不入库，scripts/fetch-refs.sh 拉取）
+```
+
+发版产物**不入库**：`*.exe` 已在 `.gitignore`，走 GitHub Release 附件。
+
+---
+
+## 分支保护
+
+**禁止强推。** `.githooks/pre-push` 会拒绝任何非快进更新（`git config core.hooksPath .githooks` 已设）。
+
+协作方式：
+
+```bash
+git worktree add ../<task>-<id> -b task/<id>   # 每个任务一棵树
+# … 干活 …
+git merge --no-ff task/<id>                     # 全绿后显式合并
+```
+
+- 禁止 `git add -A`（会带进别人半成品）。
+- 测试红的分支不进主线。
+- 稳定版过 CI 才推 GitHub；日常分支只留本地。
+
+---
 
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。
+
+上游项目与商标归 DeepSeek 所有；本仓是独立重写实现。

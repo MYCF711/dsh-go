@@ -34,7 +34,7 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.path.join(ROOT, "tmp", "DSH GO.exe")
 BASE = os.environ.get("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1")
-MODEL = os.environ.get("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017")
+MODEL = os.environ.get("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017")
 
 # merged 表里"模型看到的调用" -> 原工具名。脚本自己也要认这套映射，
 # 否则没法判断 merged 下它到底选对没有。

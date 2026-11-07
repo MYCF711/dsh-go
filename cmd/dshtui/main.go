@@ -3,24 +3,28 @@
 // 产品名是 **DSH TUI GO**，产物文件名逐字相同（`DSH TUI GO.exe`，见 brand.go
 // 与 scripts/build.sh）。下面用法里的 `dshtui` 是命令行 token，脚本与文档照旧。
 //
-// 这一版只做一件能验收的事：**开屏**。
-// 点阵字体不是手抄的——`splash_gen.go` 由 `scripts/import-splash.py` 从
-// dsh-TUI（MIT）的源文件机械生成，逐格一致。手抄 5 行点阵错一格，
-// 看起来只会像"这个字母有点怪"，那是最难发现的一类错。
+// 界面视觉按 MIT 上游 dsh-TUI 的**源码**移植（不是照截图手绘）：
+// 点阵字体由 `scripts/import-splash.py` 从 `splashFonts.ts` 机械生成到
+// `splash_gen.go`；鲸鱼精灵原样落在 `assets/whale_standard.txt`；
+// 4 档窄终端阶梯、字距求解器、配色令牌逐项对照，见 docs/tui-visual.md。
 //
 // 用法：
 //
 //	dshtui --version                只打印版本（不连宿主、不启动界面）
-//	dshtui --dump-splash            打印开屏（无颜色），用来做逐格比对
+//	dshtui --dump-screen            打印 120×36 整屏快照（无颜色，不连宿主）
+//	dshtui --dump-screen --size 80x24   同一档的窄终端快照
+//	dshtui --dump-splash            只打印首屏 header（无颜色）
 //	dshtui --dump-splash --color    带真彩 ANSI
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -37,8 +41,14 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("dshtui", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	dump := fs.Bool("dump-splash", false, "打印开屏并退出（用于逐格比对）")
+	dump := fs.Bool("dump-splash", false, "打印开屏 header 并退出（无颜色，用于逐格比对）")
+	dumpScreen := fs.Bool("dump-screen", false, "打印整屏快照并退出（无颜色；尺寸见 --size）")
+	dumpTranscript := fs.String("dump-transcript", "", "读取 Transport 帧 JSON（数组或 session.history 的 frames）并打印消息层快照")
+	expand := fs.Bool("expand", false, "配合 --dump-transcript：展开思考与长内容")
+	showTools := fs.Bool("show-tool-results", false, "配合 --dump-transcript：展开工具结果")
+	size := fs.String("size", "120x36", "配合 --dump-screen/--dump-splash/--dump-transcript 的终端尺寸，格式 列x行")
 	color := fs.Bool("color", false, "开屏带真彩 ANSI")
+	theme := fs.String("theme", "", "主题档：dark | light（缺省按 DSH_TUI_THEME / COLORFGBG 猜）")
 	addr := fs.String("addr", "http://127.0.0.1:7788", "宿主 Transport 地址")
 	token := fs.String("token", "", "宿主 /connect 的一次性 token")
 	prompt := fs.String("send", "", "不带界面地发一条消息并打印收到的帧（验证链路）")
@@ -60,12 +70,38 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2 // 与 flag 包默认的用法错误退出码一致
 	}
 
+	// 主题档在**任何**渲染之前定下来：它决定后面每一行的颜色。
+	themeName = resolveThemeName(*theme)
+
 	if *showVersion {
 		fmt.Fprintln(stdout, versionLine())
 		return 0
 	}
+	if *dumpScreen {
+		text, err := dumpScreenSnapshot(*size, *color)
+		if err != nil {
+			fmt.Fprintln(stderr, "dshtui:", err)
+			return 2
+		}
+		fmt.Fprint(stdout, text)
+		return 0
+	}
+	if *dumpTranscript != "" {
+		text, err := dumpTranscriptSnapshot(*dumpTranscript, *size, *color, *expand, *showTools)
+		if err != nil {
+			fmt.Fprintln(stderr, "dshtui:", err)
+			return 2
+		}
+		fmt.Fprint(stdout, text)
+		return 0
+	}
 	if *dump {
-		fmt.Fprint(stdout, renderSplash(*color))
+		text, err := dumpSplashOnly(*size, *color)
+		if err != nil {
+			fmt.Fprintln(stderr, "dshtui:", err)
+			return 2
+		}
+		fmt.Fprint(stdout, text)
 		return 0
 	}
 	// --script 走无界面回放（见 script.go）；它不改默认路径，只是多一个入口。
@@ -100,71 +136,113 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// renderWordmark 把一行文字渲染成 5 行点阵。
+// parseSize 解析 `列x行`（也接受 `列X行` 与 `列*行`）。
 //
-// 表里没有的字形走 fallback 块——**不是跳过**，跳过会让版面错位，
-// 而错位比缺字更难看出问题出在哪。
-func renderWordmark(s string) [5]string {
-	var rows [5]string
-	for _, r := range strings.ToUpper(s) {
-		g, ok := splashGlyphs[r]
-		if !ok {
-			g = splashFallback
-		}
-		for i := 0; i < 5; i++ {
-			rows[i] += g[i]
-		}
+// 为什么要 --size 而不是直接问终端：快照要**可比**——终端大小随时会变，
+// 而"80 列这一档长什么样"必须能在任何机器上复现，否则断言跟着机器走。
+func parseSize(size string) (int, int, error) {
+	s := strings.ToLower(strings.TrimSpace(size))
+	s = strings.NewReplacer("×", "x", "*", "x", ",", "x").Replace(s)
+	parts := strings.Split(s, "x")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("尺寸要写成 列x行（例如 120x36），收到 %q", size)
 	}
-	return rows
+	w, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || w <= 0 {
+		return 0, 0, fmt.Errorf("列数不合法：%q", parts[0])
+	}
+	h, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || h <= 0 {
+		return 0, 0, fmt.Errorf("行数不合法：%q", parts[1])
+	}
+	return w, h, nil
 }
 
-// splashPalette 是雾蓝档的深浅两色（品牌色只用在字上，正文永远中性灰）。
-const (
-	colorBrand = "\x1b[38;2;122;162;247m" // 雾蓝
-	colorDim   = "\x1b[38;2;72;96;150m"   // 暗一档
-	colorReset = "\x1b[0m"
-)
-
-func renderSplash(withColor bool) string {
-	top := renderWordmark("DEEPSEEK")
-	bottom := renderWordmark("HARNESS")
-
-	// 两行居中对齐。参考实现要求两行**列数相等**（靠字距/缩进撑平）；
-	// 这里用居中拿到同样的观感，且不依赖某款字体的特定度量。
-	w := runeLen(top[0])
-	if w2 := runeLen(bottom[0]); w2 > w {
-		w = w2
+// dumpScreenSnapshot 渲染整屏快照（无颜色、不连宿主）。
+//
+// 它走的是**同一条** layout()：快照与真屏同源，所以"快照里有、屏幕上没有"
+// 这种分叉在结构上不存在。行尾空格裁掉（那只是补宽），空行保留。
+func dumpScreenSnapshot(size string, withColor bool) (string, error) {
+	w, h, err := parseSize(size)
+	if err != nil {
+		return "", err
 	}
+	a := &app{scr: &Screen{width: w, height: h}, cwd: dumpCWD(), color: withColor}
+	return renderSnapshot(a.layout(), withColor), nil
+}
 
+// dumpTranscriptSnapshot 从调用方给的 Transport 帧文件排版消息层，不连宿主。
+// 接受 session.history 的 {"frames":[…]} 以及裸 […]；除此以外不补消息、不编状态。
+func dumpTranscriptSnapshot(path, size string, withColor, expand, showTools bool) (string, error) {
+	w, h, err := parseSize(size)
+	if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("读转储帧失败: %w", err)
+	}
+	frames, err := decodeTranscriptFrames(raw)
+	if err != nil {
+		return "", fmt.Errorf("转储帧格式不对: %w", err)
+	}
+	a := &app{
+		scr: &Screen{width: w, height: h}, cwd: dumpCWD(), color: withColor,
+		expandAll: expand, showToolResults: showTools,
+	}
+	for _, f := range frames {
+		a.handleFrame(f)
+	}
+	return renderSnapshot(a.layout(), withColor), nil
+}
+
+func decodeTranscriptFrames(raw []byte) ([]ServerFrame, error) {
+	var history struct {
+		Frames []ServerFrame `json:"frames"`
+	}
+	if err := json.Unmarshal(raw, &history); err == nil && history.Frames != nil {
+		return history.Frames, nil
+	}
+	var frames []ServerFrame
+	if err := json.Unmarshal(raw, &frames); err != nil {
+		return nil, err
+	}
+	return frames, nil
+}
+
+// dumpSplashOnly 只渲染首屏 header（正文区那一块），不带 footer。
+func dumpSplashOnly(size string, withColor bool) (string, error) {
+	w, h, err := parseSize(size)
+	if err != nil {
+		return "", err
+	}
+	a := &app{scr: &Screen{width: w, height: h}, cwd: dumpCWD(), color: withColor}
+	rows := splashFirstScreen(a.splashInfo(), a.bodyHeight())
+	return renderSnapshot(rows, withColor), nil
+}
+
+// dumpCWD 是快照里的工作目录：本进程的 cwd。
+//
+// 它是**真值**（不是编的占位），所以在不同机器上快照会不同——
+// 断言不许钉这一行，只钉结构与其它字段（见 visuals_test.go 的注释）。
+func dumpCWD() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
+}
+
+// renderSnapshot 把若干行拼成快照输出：每行一处，行尾空格裁掉。
+func renderSnapshot(rows []styledLine, withColor bool) string {
 	var b strings.Builder
-	b.WriteString("\n")
-	for i := 0; i < 5; i++ {
-		b.WriteString("  " + paint(pad(top[i], w), colorBrand, withColor) + "\n")
+	for _, r := range rows {
+		text := r.render(withColor)
+		if !withColor {
+			text = strings.TrimRight(text, " ")
+		}
+		b.WriteString(text)
+		b.WriteString("\n")
 	}
-	b.WriteString("\n")
-	for i := 0; i < 5; i++ {
-		b.WriteString("  " + paint(pad(bottom[i], w), colorDim, withColor) + "\n")
-	}
-	b.WriteString("\n")
-	b.WriteString("  探索未至之境！\n")
 	return b.String()
-}
-
-// pad 把一行按显示宽度居中（点阵全是半角块字符，一格=一个 rune）。
-func pad(s string, width int) string {
-	gap := width - runeLen(s)
-	if gap <= 0 {
-		return s
-	}
-	left := gap / 2
-	return strings.Repeat(" ", left) + s + strings.Repeat(" ", gap-left)
-}
-
-func runeLen(s string) int { return len([]rune(s)) }
-
-func paint(s, color string, withColor bool) string {
-	if !withColor {
-		return s
-	}
-	return color + s + colorReset
 }

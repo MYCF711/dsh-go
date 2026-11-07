@@ -5,6 +5,7 @@
 package local
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"dshgo/internal/kernel"
+	"dshgo/internal/sandbox"
 	"dshgo/internal/spi"
 )
 
@@ -23,14 +25,40 @@ type stamp struct {
 
 // FS 实现 spi.FS。
 type FS struct {
-	root  string
-	extra []string // 工作区之外仍然允许读的根（外置结果 artifact）
-	mu    sync.Mutex
-	seen  map[string]stamp
+	root     string
+	homeDir  func() (string, error)
+	extra    []string // 工作区之外仍然允许读的根（外置结果 artifact）
+	extraCan []string // extra 的 canonical 形式（不存在时保留 Abs 结果）
+	sandbox  *sandbox.Boundary
+	mu       sync.Mutex
+	seen     map[string]stamp
 }
 
 // Option 是 New 的可选项。
 type Option func(*FS)
+
+// WithHome 设置显式 ~ 路径使用的宿主 home。
+//
+// 缺省使用 os.UserHomeDir，并且只在解析 ~ 或 ~/... 时调用；注入临时目录
+// 可以让测试完全不碰真实用户 home。home 不要求预先存在，但 tilde 路径
+// 归一化后必须仍在这个目录内。
+func WithHome(dir string) Option {
+	return func(f *FS) {
+		f.homeDir = func() (string, error) { return dir, nil }
+	}
+}
+
+// WithSandboxBoundary 注入 FS 的路径策略。
+//
+// 生产由进程环境解析（DSHD_SANDBOX_MODE；缺省 workspace-write，与既有边界一致）；
+// 这个选项给测试和宿主将来的 per-session 接线用。nil 被忽略，不会把边界关掉。
+func WithSandboxBoundary(b *sandbox.Boundary) Option {
+	return func(f *FS) {
+		if b != nil {
+			f.sandbox = b
+		}
+	}
+}
 
 // WithExtraReadRoot 允许**读**工作区之外的某个根。
 //
@@ -57,11 +85,37 @@ func New(root string, opts ...Option) (*FS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("解析工作区根失败: %w", err)
 	}
-	f := &FS{root: filepath.ToSlash(filepath.Clean(abs)), seen: make(map[string]stamp)}
+	f := &FS{
+		root:    filepath.ToSlash(filepath.Clean(abs)),
+		homeDir: os.UserHomeDir,
+		seen:    make(map[string]stamp),
+	}
 	for _, o := range opts {
 		o(f)
 	}
+	for _, e := range f.extra {
+		canonical, err := sandbox.CanonicalPath(e)
+		if err != nil {
+			canonical = e // artifact 目录可能还没建；保留 Abs 形式，等它出现再按同一规则比较
+		}
+		f.extraCan = append(f.extraCan, filepath.ToSlash(canonical))
+	}
+	if f.sandbox == nil {
+		boundary, err := sandbox.BoundaryFromEnv(f.root)
+		if err != nil {
+			return nil, err
+		}
+		f.sandbox = boundary
+	}
 	return f, nil
+}
+
+// SandboxMode 返回 FS 当前生效的真实档位（给工具结果和测试用）。
+func (f *FS) SandboxMode() sandbox.Mode {
+	if f.sandbox == nil {
+		return ""
+	}
+	return f.sandbox.Mode()
 }
 
 func (f *FS) Root() string { return f.root }
@@ -84,24 +138,68 @@ func (f *FS) SetRoot(root string) error {
 	if err != nil {
 		return err
 	}
+	boundary, err := sandbox.NewBoundary(f.SandboxMode(), abs)
+	if err != nil {
+		return err
+	}
 	f.mu.Lock()
 	f.root = filepath.ToSlash(filepath.Clean(abs))
+	f.sandbox = boundary
 	f.seen = make(map[string]stamp) // 换根之后"读过哪些文件"的账要清空
 	f.mu.Unlock()
 	return nil
 }
 
-// within 判断 abs 是否在允许的根之内（工作区 + 只读额外根）。
+// within 判断 canonical 路径是否在允许的根之内（工作区 + 只读额外根）。
+// 传进来的必须是 canonical 路径；字符串前缀比较会把 workspace-evil 放进来，
+// 所以这里用 withinRoot 的 filepath.Rel 规则。
 func (f *FS) within(abs string) bool {
-	if abs == f.root || strings.HasPrefix(abs, f.root+"/") {
+	slashed := filepath.ToSlash(abs)
+	if withinRoot(filepath.ToSlash(f.sandbox.WorkspaceRoot()), slashed) {
 		return true
 	}
-	for _, e := range f.extra {
-		if abs == e || strings.HasPrefix(abs, e+"/") {
+	for _, e := range f.extraCan {
+		if withinRoot(e, slashed) {
 			return true
 		}
 	}
 	return false
+}
+
+func withinRoot(root, path string) bool {
+	rel, err := filepath.Rel(filepath.FromSlash(root), filepath.FromSlash(path))
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
+}
+
+func (f *FS) resolveHome() (string, error) {
+	home, err := f.homeDir()
+	if err != nil {
+		return "", fmt.Errorf("解析宿主 home 失败: %w", err)
+	}
+	if strings.TrimSpace(home) == "" {
+		return "", fmt.Errorf("解析宿主 home 失败: home 为空")
+	}
+	abs, err := filepath.Abs(home)
+	if err != nil {
+		return "", fmt.Errorf("解析宿主 home 失败: %w", err)
+	}
+	return filepath.ToSlash(filepath.Clean(abs)), nil
+}
+
+// withinHome 是显式 tilde 通道自己的边界；不能因目标同时位于 root/extra
+// 就允许 ~/.. 跳出 home。保留根目录末尾的 /，避免 C:/ 或 / 变成空前缀。
+func withinHome(abs, home string) bool {
+	if abs == home {
+		return true
+	}
+	prefix := home
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return strings.HasPrefix(abs, prefix)
 }
 
 // Resolve 归一化并做越界检查。
@@ -110,6 +208,23 @@ func (f *FS) Resolve(p string) (string, error) {
 		return "", fmt.Errorf("路径为空；给一个相对工作区根(%s)的路径", f.root)
 	}
 	slashed := strings.ReplaceAll(p, "\\", "/")
+
+	// 只有完整的 ~ 或 ~/... 是 home 通道。~other 和路径中间的 ~
+	// 继续走下面的旧规则，不会被 shell 式展开。
+	if slashed == "~" || strings.HasPrefix(slashed, "~/") {
+		home, err := f.resolveHome()
+		if err != nil {
+			return "", err
+		}
+		rest := strings.TrimLeft(strings.TrimPrefix(slashed, "~"), "/")
+		abs := filepath.Join(filepath.FromSlash(home), filepath.FromSlash(rest))
+		slash := filepath.ToSlash(abs)
+		if withinHome(slash, home) {
+			return slash, nil
+		}
+		return "", fmt.Errorf("路径 %q 越出宿主 home %s；显式 ~ 路径只允许操作 home 内的文件", p, home)
+	}
+
 	var abs string
 	if filepath.IsAbs(filepath.FromSlash(slashed)) {
 		abs = filepath.Clean(filepath.FromSlash(slashed))
@@ -117,10 +232,20 @@ func (f *FS) Resolve(p string) (string, error) {
 		abs = filepath.Join(filepath.FromSlash(f.root), filepath.FromSlash(slashed))
 	}
 	slash := filepath.ToSlash(abs)
-	if f.within(slash) {
+	if f.sandbox != nil && f.sandbox.Mode() == sandbox.ModeDangerFullAccess {
+		// danger-full-access 明确不提供路径沙盒：读/写可以越出工作区。
 		return slash, nil
 	}
-	return "", fmt.Errorf("路径 %q 越出工作区 %s；只允许操作工作区内的文件", p, f.root)
+	canonical, err := sandbox.CanonicalPath(slash)
+	if err != nil {
+		return "", err
+	}
+	canonicalSlash := filepath.ToSlash(canonical)
+	if f.within(canonicalSlash) {
+		return slash, nil
+	}
+	return "", fmt.Errorf("%w: 路径 %q 越出工作区 %s（canonical %s）；只允许操作工作区内的文件",
+		sandbox.ErrOutsideReadBoundary, p, f.root, canonicalSlash)
 }
 
 // Read 先 stat 再读，并用 stat 的结果登记——若读的瞬间文件被改，登记的是旧值，
@@ -155,7 +280,10 @@ func (f *FS) Read(p string) ([]byte, error) {
 func (f *FS) CheckWritable(p, op string) error {
 	abs, err := f.Resolve(p)
 	if err != nil {
-		return err
+		return f.resolveWriteError(p, err)
+	}
+	if _, err := f.sandbox.CheckWrite(abs); err != nil {
+		return f.writePolicyError(p, err)
 	}
 	st, err := os.Stat(abs)
 	if os.IsNotExist(err) {
@@ -202,7 +330,10 @@ func (f *FS) Stat(p string) (int64, bool, error) {
 func (f *FS) Write(p string, data []byte) error {
 	abs, err := f.Resolve(p)
 	if err != nil {
-		return err
+		return f.resolveWriteError(p, err)
+	}
+	if _, err := f.sandbox.CheckWrite(abs); err != nil {
+		return f.writePolicyError(p, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return fmt.Errorf("建目录失败: %w", err)
@@ -214,6 +345,28 @@ func (f *FS) Write(p string, data []byte) error {
 		f.mark(abs, st.ModTime(), st.Size())
 	}
 	return nil
+}
+
+// resolveWriteError 把"读边界"的越界错误在写路径上标注成写边界错误，
+// 让调用方用 errors.Is(err, sandbox.ErrWriteOutsideWorkspace) 分类。
+func (f *FS) resolveWriteError(p string, err error) error {
+	if errors.Is(err, sandbox.ErrOutsideReadBoundary) {
+		return fmt.Errorf("%w: %v", sandbox.ErrWriteOutsideWorkspace, err)
+	}
+	return err
+}
+
+// writePolicyError 把策略错误翻成模型能照做的下一步。
+// 错误链保留 sentinel，宿主/测试可以 errors.Is；文案说清"哪一档、为什么、怎么办"。
+func (f *FS) writePolicyError(p string, err error) error {
+	switch {
+	case errors.Is(err, sandbox.ErrReadOnlyWrite):
+		return fmt.Errorf("路径 %q 写被拒绝：%w；要写文件先把会话档位切到 workspace-write 或 danger-full-access", p, err)
+	case errors.Is(err, sandbox.ErrWriteOutsideWorkspace):
+		return fmt.Errorf("路径 %q 越出工作区 %s；不允许写工作区外的文件（要越界写请显式选择 danger-full-access 档）: %w", p, f.root, err)
+	default:
+		return err
+	}
 }
 
 func (f *FS) mark(abs string, mod time.Time, size int64) {

@@ -102,7 +102,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		s.Name = "dsh-go-acp"
 	}
 	if s.Version == "" {
-		s.Version = "0.2.1-go.5"
+		s.Version = "0.2.2-go.1"
 	}
 	if s.Err == nil {
 		s.Err = os.Stderr

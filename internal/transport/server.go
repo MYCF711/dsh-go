@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -63,10 +64,40 @@ type Options struct {
 	Compact func(sessionID string, keep int) (CompactResult, error)
 	// Prompt 发起一轮，立刻返回（回答走 WS）；宿主注入。
 	Prompt func(sessionID, text string) (PromptResult, error)
+	// PromptPlacement 是 additive placement 入口。缺省 placement 仍走旧 Prompt，
+	// 因而旧宿主/旧测试完全不变；非 turn 在新回调缺失时明确 501。
+	PromptPlacement func(sessionID, text, placement string) (PromptResult, error)
+	// PromptBlocks 是 additive 有序内容块入口。仅当请求带 content 时调用；
+	// 旧 text 请求始终走上面的 Prompt，保持既有 runner 与客户端完全兼容。
+	PromptBlocks func(sessionID string, blocks []ContentBlock) (PromptResult, error)
+	// PromptBlocksPlacement 是 content 的 additive placement 入口。
+	PromptBlocksPlacement func(sessionID string, blocks []ContentBlock, placement string) (PromptResult, error)
+	// Attachments 提供授权读取与受控字节存储；nil 时两个 additive 方法回 501。
+	Attachments AttachmentStore
+	// OfficialJobTerminal 是官方 job.*/terminal.* 11 个方法的路由层（0.2.2 对齐）。
+	// nil 时这些方法回 501 并说清未接线；既有 jobs.*/terminal.* 方法不受影响。
+	OfficialJobTerminal *OfficialJobTerminal
 	// Delete 删掉一个会话；宿主注入（删除是不可逆操作，由宿主决定物理删还是标记）。
 	Delete func(sessionID string) error
-	// Fork 从一个会话开分支；宿主注入。
+	// Fork 从一个会话开分支；宿主注入。保留给旧宿主/旧测试。
 	Fork func(sessionID, title string) (string, error)
+	// ForkAnchored 是 additive 实现。生产宿主优先走这里；旧回调仍保留，
+	// 缺新回调时旧宿主忽略 title 的行为不被 Transport 静默改写成已确认。
+	ForkAnchored func(sessionID string, anchor, title *string) (ForkResult, error)
+	// RewindPreview/RewindApply 是真实 checkpoint 与 cut-before-anchor 入口。
+	RewindPreview func(sessionID, anchor string) (RewindPreview, error)
+	RewindApply   func(sessionID, anchor, mode string) (RewindResult, error)
+	// TranscriptPage 读 durable v4 投影，不允许用 Transport journal/history 代替。
+	TranscriptPage func(sessionID, cursor string, limit int) (TranscriptPageResult, error)
+	// RenameSession / SetSessionColor 的 commit 必须在 durable 写成功后调用，
+	// 并返回其结果。生产宿主把 durable 写入与 commit 放在同一 per-home 锁内，
+	// 因而并发 A/B 写入的 WS 顺序不会反超磁盘真值。Transport 在 commit 内先追加
+	// 同一 Transport journal，成功后才向 WS 发布；任一步失败都不返回成功 ACK。
+	RenameSession   func(sessionID, title string, commit func() error) error
+	GetSessionColor func(sessionID string) (string, error)
+	SetSessionColor func(sessionID, color string, commit func() error) error
+	// WorkspaceInit 由宿主真实独占创建模板并逐项报告，不由 Transport 碰文件系统。
+	WorkspaceInit func(cwd string) (WorkspaceInitResult, error)
 	// WorkspaceList 列当前工作区的顶层条目；宿主注入。
 	// WorkspaceList 列目录。**path 为空 = 进程工作目录**（向后兼容旧调用）。
 	//
@@ -77,16 +108,35 @@ type Options struct {
 	// **nil = 这个宿主没有后台任务能力**（比如不带 exec 模块），回 501 不是 500。
 	JobsList   func() []JobInfo
 	JobsOutput func(id string, wait time.Duration) (JobOutput, error)
+	// JobsOutputScoped 是真实分页/会话隔离入口；cursor/limit 单位是 Unicode code point。
+	// 非 nil 时生产路径必须带 sessionId，旧 JobsOutput 只作兼容 fallback。
+	JobsOutputScoped func(sessionID, id string, cursor, limit int, wait time.Duration) (JobOutput, error)
+	JobsStop         func(sessionID, id string) (JobStopResult, error)
 	// ScheduleList 列定时任务。nil = 这个宿主没有 schedule 能力（回 501）。
-	ScheduleList func() []ScheduleItem
+	ScheduleList   func() []ScheduleItem
+	ScheduleDelete func(sessionID, id, expectedRevision string) (ScheduleDeleteResult, error)
+	ScheduleClear  func() (ScheduleClearResult, error)
 	// SetSessionModel 改一个会话的模型覆盖。nil = 这个宿主不支持（回 501）。
 	SetSessionModel func(sessionID, model string) error
 	// SetSessionPermission 改一个会话的审批策略覆盖。nil = 不支持（回 501）。
 	SetSessionPermission func(sessionID, perm string) error
+	// SetSessionPermissionMode 是 SetSessionPermission 的加法版本：除了写覆盖，
+	// 还回真实生效的 sandbox 档位（官方 0.2.2 三档：read-only/workspace-write/
+	// danger-full-access）。nil 时退回上面的旧回调，响应保持 {ok:true}。
+	SetSessionPermissionMode func(sessionID, perm string) (map[string]any, error)
+	// HandlerWrap 让宿主在 HTTP 层外面再包一层（官方 0.2.2 wire 兼容用）。
+	// nil 或返回 nil 时**一个字节都不变**：Start 直接用 Server 自己当 handler。
+	HandlerWrap func(*Server) http.Handler
 	// ModelsList 列网关上的模型。nil = 这个宿主没接模型出口（回 501）。
 	ModelsList func(ctx context.Context) ([]ModelEntry, error)
 	// SetSessionGoal 设/清一个会话的 goal。nil = 不支持（回 501）。
 	SetSessionGoal func(sessionID, goal string) error
+	// SetSessionEffort 按当前模型 catalog 校验并持久化会话 effort 覆盖。
+	SetSessionEffort func(sessionID, effort string) error
+	// GoalGet/Pause/Resume 读取或迁移真实 snapshot；ACK 本身不是 change event。
+	GoalGet    func(sessionID string) (GoalResult, error)
+	GoalPause  func(sessionID string) error
+	GoalResume func(sessionID string) error
 	// 长连接终端。nil = 这个宿主不给终端（回 501）。
 	TerminalOpen   func(cwd string) (string, error)
 	TerminalInput  func(id, data string) error
@@ -101,6 +151,9 @@ type Options struct {
 	ConfigSet func(kv map[string]string) error
 	// Cancel 取消在飞的一轮；没有在飞的返回 ErrNoSuchTurn。
 	Cancel func(sessionID string) error
+	// CancelPlacement 是 additive cancel receipt 入口。cause=user 保留队列，
+	// interrupt/switch/dispose 清队列；turnID 可只撤一个 queued 项。
+	CancelPlacement func(sessionID, cause, turnID string) (CancelResult, error)
 	// Journals 是每会话的序号域（H14）。非 nil 时 session.history 直接读它，
 	// 保证与 WS 推送同一个 seq 域；nil 时退回宿主注入的 History（老行为）。
 	Journals *Journals
@@ -110,6 +163,24 @@ type Options struct {
 	Approve func(requestID, optionID string) error
 	// SetMode 换模式；宿主注入。
 	Create func(mode string) (string, error)
+	// PluginHandler 是 additive plugin.* 适配器。它只在下面的既有 cookie
+	// 认证成功后调用；nil 时保持闭合分派的 501。handler 自己限定八个方法，
+	// 这里不复制第二份方法表，也不把裸 handler 注册成独立路由。
+	PluginHandler http.Handler
+	// SettingsFormHandler 是 additive ConfigForm 适配器，同样只在 cookie
+	// 认证成功后调用。它不改 SessionMethods 的 canonical 25。
+	SettingsFormHandler http.Handler
+	// ModelCatalogHandler 是 additive models.catalog.* 适配器。它在同一
+	// cookie 门后分派，不改变 canonical models.list 的网关语义。
+	ModelCatalogHandler http.Handler
+	// W149 additive 能力；全部 nil 时保持原有 501 闭合分派。
+	ContextUsage func(sessionID, detail string) (ContextUsageView, error)
+	MCPList      func(sessionID string) ([]MCPServerView, error)
+	MCPReconnect func(ctx context.Context, sessionID, name string) error
+	MCPToggle    func(ctx context.Context, sessionID, name string, enabled bool) error
+	SideQuery    func(ctx context.Context, sessionID, requestID, prompt string, onText func(string) error) (string, error)
+	SideCancel   func(sessionID, requestID string) error
+	SideClose    func(sessionID string) error
 }
 
 // Server 是界面线的宿主入口。
@@ -171,8 +242,14 @@ func (s *Server) Start() (string, error) {
 		return "", err
 	}
 
+	var handler http.Handler = s
+	if s.opt.HandlerWrap != nil {
+		if wrapped := s.opt.HandlerWrap(s); wrapped != nil {
+			handler = wrapped
+		}
+	}
 	srv := &http.Server{
-		Handler:           s,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	s.srv = srv
@@ -303,6 +380,19 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 // handleAPI 走 cookie 认证；没有效 cookie 一律 401。
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/")
+	rec := &statusRecorder{ResponseWriter: w}
+	w = rec
+	defer func() {
+		status := rec.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		if status >= http.StatusBadRequest {
+			fmt.Fprintf(os.Stderr, "transport: /api/%s status=%d\n", name, status)
+		}
+	}()
+
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusNotFound, errorBody("not found"))
 		return
@@ -312,13 +402,118 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := strings.TrimPrefix(r.URL.Path, "/api/")
-	// 每个 /api 调用打一行到 stderr。
-	//
-	// 为什么单独记：界面连没连上宿主，从进程表看不出来（窗口开着、进程在跑，
-	// 也可能一次都没调过来）。有了这行，"它到底说没说话"从猜变成查。
-	fmt.Fprintf(os.Stderr, "transport: /api/%s\n", name)
+	// 成功调用默认不刷 stderr；只有显式打开 trace 才逐条打印。
+	// 失败调用由上面的 defer 统一打 status，避免把正常轮询误读成报错。
+	if apiTraceEnabled() {
+		fmt.Fprintf(os.Stderr, "transport: /api/%s\n", name)
+	}
+	// 官方 0.2.2 桌面端方法（L1 语义/字段对齐）。顺序是硬要求：
+	// settings.official 必须排在 `settings.` 前缀分支之前，否则被既有 SettingsFormHandler 接走；
+	// pluginManager.* 虽然以 plugin 开头但下一字符是 'M'，`plugin.` 前缀不会误吞。
+	if IsOfficialSettingsCredentialMethod(name) {
+		s.serveOfficialSettingsCredentialAPI(w, r, name)
+		return
+	}
+	if IsOfficialPluginManagerMethod(name) {
+		s.ServeOfficialPluginManagerAPI(w, r)
+		return
+	}
+	if IsOfficialAgentMethod(name) {
+		s.serveOfficialAgentAPI(w, r, name)
+		return
+	}
+	if IsOfficialWorkspaceMethod(name) {
+		s.serveOfficialWorkspaceAPI(w, r, name)
+		return
+	}
+	if IsOfficialScheduleMethod(name) {
+		s.serveOfficialScheduleAPI(w, r, name)
+		return
+	}
+	// 官方 forge / liveshare 27 个方法：本仓无外部服务，全部返回
+	// 结构化未实现（点名方法 + 缺什么），不返回假数据。
+	// 官方 account / llm.discoverModels / 媒体市场（cotTranslation 等）：
+	// 能本地实现的真实现，其余返回结构化未实现（点名缺什么）。
+	if IsOfficialAccountMethod(name) {
+		s.serveOfficialAccountAPI(w, r, name)
+		return
+	}
+	if IsOfficialMediaMarketMethod(name) {
+		s.ServeOfficialMediaMarketAPI(w, r)
+		return
+	}
+	if IsOfficialForgeLiveshareMethod(name) {
+		s.serveOfficialForgeLiveshareAPI(w, r, name)
+		return
+	}
+	if s.opt.OfficialJobTerminal != nil && s.opt.OfficialJobTerminal.Handles(name) {
+		s.opt.OfficialJobTerminal.Serve(w, r)
+		return
+	}
+	if strings.HasPrefix(name, "plugin.") && s.opt.PluginHandler != nil {
+		s.opt.PluginHandler.ServeHTTP(w, r)
+		return
+	}
+	if strings.HasPrefix(name, "settings.") && s.opt.SettingsFormHandler != nil {
+		s.opt.SettingsFormHandler.ServeHTTP(w, r)
+		return
+	}
+	if strings.HasPrefix(name, "models.catalog.") && s.opt.ModelCatalogHandler != nil {
+		s.opt.ModelCatalogHandler.ServeHTTP(w, r)
+		return
+	}
 	switch Method(name) {
+	// 官方 0.2.2 `session.*` 方法（常量与 handler 都在 handlers_session_official.go）。
+	// 注意常量名是 MethodSessionWorkspacePathApps、handler 名是
+	// handleSessionWorkspacePathApplications——名字故意不同，别按后缀猜。
+	case MethodSessionPage:
+		s.handleSessionPage(w, r)
+	case MethodSessionState:
+		s.handleSessionState(w, r)
+	case MethodSessionProjections:
+		s.handleSessionProjections(w, r)
+	case MethodSessionObserveState:
+		s.handleSessionObserveState(w, r)
+	case MethodSessionObserveProjections:
+		s.handleSessionObserveProjections(w, r)
+	case MethodSessionObserveEvent:
+		s.handleSessionObserveEvent(w, r)
+	case MethodSessionFollow:
+		s.handleSessionFollow(w, r)
+	case MethodSessionEvents:
+		s.handleSessionEvents(w, r)
+	case MethodSessionUpdateQueue:
+		s.handleSessionUpdateQueue(w, r)
+	case MethodSessionWait:
+		s.handleSessionWait(w, r)
+	case MethodSessionSearch:
+		s.handleSessionSearch(w, r)
+	case MethodSessionAttachment:
+		s.handleSessionAttachment(w, r)
+	case MethodSessionSelectModel:
+		s.handleSessionSelectModel(w, r)
+	case MethodSessionOpenWorkspacePath:
+		s.handleSessionOpenWorkspacePath(w, r)
+	case MethodSessionWorkspacePathApps:
+		s.handleSessionWorkspacePathApplications(w, r)
+	case MethodAttachmentPut:
+		s.handleAttachmentPut(w, r)
+	case MethodAttachmentGet:
+		s.handleAttachmentGet(w, r)
+	case MethodContextUsage:
+		s.handleContextUsage(w, r)
+	case MethodMCPList:
+		s.handleMCPList(w, r)
+	case MethodMCPReconnect:
+		s.handleMCPReconnect(w, r)
+	case MethodMCPToggle:
+		s.handleMCPToggle(w, r)
+	case MethodSideQuery:
+		s.handleSideQuery(w, r)
+	case MethodSideCancel:
+		s.handleSideCancel(w, r)
+	case MethodSideClose:
+		s.handleSideClose(w, r)
 	case MethodSessionList:
 		s.handleSessionList(w)
 	case MethodSessionLoad:
@@ -337,16 +532,36 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleSessionDelete(w, r)
 	case MethodSessionFork:
 		s.handleSessionFork(w, r)
+	case MethodSessionRewindPreview:
+		s.handleSessionRewindPreview(w, r)
+	case MethodSessionRewindApply:
+		s.handleSessionRewindApply(w, r)
+	case MethodSessionTranscriptPage:
+		s.handleSessionTranscriptPage(w, r)
+	case MethodSessionRename:
+		s.handleSessionRename(w, r)
+	case MethodSessionColorGet:
+		s.handleSessionColorGet(w, r)
+	case MethodSessionColorSet:
+		s.handleSessionColorSet(w, r)
 	case MethodSessionCompact:
 		s.handleSessionCompact(w, r)
 	case MethodWorkspaceList:
 		s.handleWorkspaceList(w, r)
+	case MethodWorkspaceInit:
+		s.handleWorkspaceInit(w, r)
 	case MethodJobsList:
 		s.handleJobsList(w, r)
 	case MethodJobsOutput:
 		s.handleJobsOutput(w, r)
+	case MethodJobsStop:
+		s.handleJobsStop(w, r)
 	case MethodScheduleList:
 		s.handleScheduleList(w, r)
+	case MethodScheduleDelete:
+		s.handleScheduleDelete(w, r)
+	case MethodScheduleClear:
+		s.handleScheduleClear(w, r)
 	case MethodSessionSetModel:
 		s.handleSessionSetModel(w, r)
 	case MethodSessionSetPermission:
@@ -355,6 +570,14 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleModelsList(w, r)
 	case MethodSessionSetGoal:
 		s.handleSessionSetGoal(w, r)
+	case MethodSessionSetEffort:
+		s.handleSessionSetEffort(w, r)
+	case MethodSessionGoalGet:
+		s.handleSessionGoalGet(w, r)
+	case MethodSessionGoalPause:
+		s.handleSessionGoalTransition(w, r, false)
+	case MethodSessionGoalResume:
+		s.handleSessionGoalTransition(w, r, true)
 	case MethodTerminalOpen:
 		s.handleTerminalOpen(w, r)
 	case MethodTerminalInput:
@@ -374,43 +597,178 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleSessionPrompt 是 /api/session.prompt：**立刻返回**，回答走 WS/
-// 宿主侧实现负责不阻塞——这里只做协议。
+// attachmentErrorStatus 让宿主适配器给出精确错误码，同时保持四字段信封唯一构造点。
+type attachmentErrorStatus interface {
+	AttachmentError() (code string, status int)
+}
+
+func writeAttachmentError(w http.ResponseWriter, err error, fallbackCode string, fallbackStatus int) {
+	code, status := fallbackCode, fallbackStatus
+	if typed, ok := err.(attachmentErrorStatus); ok {
+		code, status = typed.AttachmentError()
+	}
+	writeJSON(w, status, errorBodyFor(code, err.Error()))
+}
+
+func (s *Server) handleAttachmentPut(w http.ResponseWriter, r *http.Request) {
+	if s.opt.Attachments == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
+		return
+	}
+	var in struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Path == "" {
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "attachment.put 需要非空 path"))
+		return
+	}
+	attachment, err := s.opt.Attachments.Put(in.Path)
+	if err != nil {
+		writeAttachmentError(w, err, "bad_request", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"attachment": attachment})
+}
+
+func (s *Server) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
+	if s.opt.Attachments == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
+		return
+	}
+	var in struct {
+		ID           string `json:"id"`
+		AttachmentID string `json:"attachmentId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "attachment.get 需要合法 JSON"))
+		return
+	}
+	id := fillID(in.ID, in.AttachmentID)
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "attachment.get 需要 id 或 attachmentId"))
+		return
+	}
+	content, err := s.opt.Attachments.Get(id)
+	if err != nil {
+		writeAttachmentError(w, err, "not_found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"attachment": content.Attachment,
+		"dataBase64": base64.StdEncoding.EncodeToString(content.Data),
+	})
+}
+
+// handleSessionPrompt 是 /api/session.prompt。placement 是 additive 请求字段；
+// canonical 成功结果仍只有 accepted/turnId，模型回答与 runner 错误走 WS。
 func (s *Server) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		SessionID string `json:"sessionId"`
 		// ID 是契约快照里的名字（H9）。两个都收：只认一个就是静默 404。
-		ID   string `json:"id"`
-		Text string `json:"text"`
+		ID        string         `json:"id"`
+		Text      string         `json:"text"`
+		Content   []ContentBlock `json:"content"`
+		Placement string         `json:"placement"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
-	if s.opt.Prompt == nil {
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "session.prompt 需要合法 JSON"))
+		return
+	}
+	placement, err := NormalizeSubmitPlacement(in.Placement)
+	if err != nil {
+		writePromptError(w, err)
+		return
+	}
+	sid := fillID(in.SessionID, in.ID)
+	if in.Content != nil {
+		var res PromptResult
+		switch {
+		case in.Placement != "" && s.opt.PromptBlocksPlacement != nil:
+			res, err = s.opt.PromptBlocksPlacement(sid, in.Content, placement)
+		case placement == string(PlacementTurn) && s.opt.PromptBlocks != nil:
+			res, err = s.opt.PromptBlocks(sid, in.Content)
+		case s.opt.PromptBlocksPlacement != nil:
+			res, err = s.opt.PromptBlocksPlacement(sid, in.Content, placement)
+		default:
+			writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
+			return
+		}
+		if err != nil {
+			if _, ok := err.(attachmentErrorStatus); ok {
+				writeAttachmentError(w, err, "bad_request", http.StatusBadRequest)
+			} else {
+				writePromptError(w, err)
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
+
+	var res PromptResult
+	switch {
+	case in.Placement != "" && s.opt.PromptPlacement != nil:
+		res, err = s.opt.PromptPlacement(sid, in.Text, placement)
+	case placement == string(PlacementTurn) && s.opt.Prompt != nil:
+		res, err = s.opt.Prompt(sid, in.Text)
+	case s.opt.PromptPlacement != nil:
+		res, err = s.opt.PromptPlacement(sid, in.Text, placement)
+	default:
+		// 非 turn 不能在旧 Prompt 上静默降级：那会把 steer/now 伪造成普通新轮。
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 		return
 	}
-	res, err := s.opt.Prompt(fillID(in.SessionID, in.ID), in.Text)
 	if err != nil {
-		// 宿主侧对"上一轮还没结束"会返回错误；协议层不认具体错误类型，
-		// 一律按冲突报——界面据此提示"等这一轮结束"，而不是当成参数错误。
-		writeJSON(w, http.StatusConflict, errorBody(err.Error()))
+		writePromptError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
 }
 
-// handleSessionCancel 是 /api/session.cancel。
+func writePromptError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrPlacementInvalid):
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", err.Error()))
+	case errors.Is(err, ErrPlacementUnsupported):
+		writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented", err.Error()))
+	default:
+		writeJSON(w, http.StatusConflict, errorBody(err.Error()))
+	}
+}
+
+// handleSessionCancel 是 /api/session.cancel。cause/turnId 是 additive；
+// 旧宿主只在 user 且未指定 turnID 时走旧 Cancel，绝不把 interrupt 假装成清过队列。
 func (s *Server) handleSessionCancel(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		SessionID string `json:"sessionId"`
 		// ID 是契约快照里的名字（H9）。两个都收：只认一个就是静默 404。
-		ID string `json:"id"`
+		ID     string `json:"id"`
+		Cause  string `json:"cause"`
+		TurnID string `json:"turnId"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&in)
+	sid := fillID(in.SessionID, in.ID)
+	if s.opt.CancelPlacement != nil {
+		res, err := s.opt.CancelPlacement(sid, in.Cause, in.TurnID)
+		if err != nil {
+			writePromptError(w, err)
+			return
+		}
+		if res.StillQueued == nil {
+			res.StillQueued = []string{}
+		}
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
+	if (in.Cause != "" && in.Cause != "user") || in.TurnID != "" {
+		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
+		return
+	}
 	if s.opt.Cancel == nil {
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 		return
 	}
-	if err := s.opt.Cancel(fillID(in.SessionID, in.ID)); err != nil {
+	if err := s.opt.Cancel(sid); err != nil {
 		writeJSON(w, http.StatusConflict, errorBody(err.Error()))
 		return
 	}
@@ -644,6 +1002,22 @@ func (s *Server) authorized(r *http.Request) bool {
 	return ok == 1
 }
 
+// MintInternalCookie 给**进程内**的消费者发一份有效 cookie。
+//
+// 为什么需要它：launch token 是一次性的（`s.used`），桌面壳启动时已经用它换过
+// 一张 cookie；进程内另一个消费者（官方 0.2.2 wire 的 LegacyClient）再拿同一张
+// token 去换只会得到 401。这里直接发一张新的 cookie，不消耗 token、不影响外部分发。
+func (s *Server) MintInternalCookie() string {
+	value, err := newSecret()
+	if err != nil {
+		return ""
+	}
+	s.mu.Lock()
+	s.cookies[value] = struct{}{}
+	s.mu.Unlock()
+	return value
+}
+
 // newSecret 生成 secretBytes 字节的随机数，返回 hex 串。
 func newSecret() (string, error) {
 	buf := make([]byte, secretBytes)
@@ -768,6 +1142,12 @@ func errorHint(code string) string {
 		return "optionId 必须是 allow_once / allow_always / reject_once 之一"
 	case "bad_request":
 		return "检查入参名字（id/sessionId 都认）与类型"
+	case "revision_conflict":
+		return "重新 schedule.list 读取最新 revision，再基于最新内容重试；不要覆盖别人的修改"
+	case "job_finished":
+		return "任务已经结束，只能 jobs.output 读取保留输出，不能重复停止"
+	case "cross_session":
+		return "只能操作当前 home、当前会话且由本宿主启动的任务；先核对 sessionId 与 jobs.list"
 	case "bad_handshake":
 		return "WS 握手要带 Upgrade: websocket、Connection: Upgrade、Sec-WebSocket-Key 三个头；先 GET /connect 换 cookie 再连 /ws"
 	case "stale_epoch":
@@ -863,6 +1243,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(append(body, '\n'))
 }
 
+// apiTraceEnabled 控制是否逐条打印成功的 /api 调用。
+// 默认关闭；失败调用始终由 handleAPI 的 defer 打印 status。
+func apiTraceEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("DSHD_TRACE_API"))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 // statusRecorder 记住实际写出去的 HTTP 状态码。
 //
 // 为什么需要：`/api` 的日志原来只有方法名，看不出这一调用是成功还是 404/501。
@@ -876,3 +1267,20 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
 }
+
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(p)
+}
+
+// Flush 保留流式接口能力；sideQuery 等 handler 会 type assert http.Flusher。
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap 让 http.ResponseController 能取回底层 writer。
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }

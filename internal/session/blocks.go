@@ -15,6 +15,18 @@ type ContentBlock struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+	// 以下字段只用于用户 attachment/reference 块；原有 text/reasoning/tool-call
+	// 的键与值保持不变。块在 content 数组中的位置就是持久顺序。
+	AttachmentID  string `json:"attachmentId,omitempty"`
+	ByteSize      int64  `json:"byteSize,omitempty"`
+	MIME          string `json:"mime,omitempty"`
+	SHA256        string `json:"sha256,omitempty"`
+	Width         int    `json:"width,omitempty"`
+	Height        int    `json:"height,omitempty"`
+	ReferenceID   string `json:"referenceId,omitempty"`
+	ReferenceType string `json:"referenceType,omitempty"`
+	Path          string `json:"path,omitempty"`
+	SessionID     string `json:"sessionId,omitempty"`
 }
 
 // Prefer 说明两个 content 位置里先看哪一个。

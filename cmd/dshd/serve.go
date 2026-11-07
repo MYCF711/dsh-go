@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,7 +18,11 @@ import (
 	"encoding/binary"
 
 	"dshgo/internal/llm"
+	"dshgo/internal/modes"
+	"dshgo/internal/pluginmgr"
+	officialpluginmgr "dshgo/internal/pluginmgr/official"
 	"dshgo/internal/session"
+	"dshgo/internal/settingsform"
 	"dshgo/internal/transport"
 	"dshgo/modules/exec/bash"
 )
@@ -147,7 +153,7 @@ func cmdServe(args []string) error {
 		"工具表形态：compact（默认）| full | merged | lazy（只常驻最常用的 30 个，其余先用 tool_load 取；装载集按会话从 v4 日志回放，默认关闭）")
 	// 模型必须能选：serve 起子进程跑真模型，用户换模型却只能去改环境变量，
 	// 那是"藏起来的开关"。默认值和 run 保持一致。
-	serveModel := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "模型 id（透传给子进程）")
+	serveModel := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"), "模型 id（透传给子进程）")
 	// 推理强度透传给子进程；空 = 不要。界面线要能看到 reasoning 就得从这里打开。
 	serveReasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
 		"推理强度：空=不要（默认）| xhigh | max")
@@ -158,6 +164,12 @@ func cmdServe(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	explicitServeModel := strings.TrimSpace(os.Getenv("DSHD_LLM_MODEL")) != "" || strings.TrimSpace(os.Getenv("DSH_GO_MODEL")) != ""
+	fs.Visit(func(current *flag.Flag) {
+		if current.Name == "model" {
+			explicitServeModel = true
+		}
+	})
 	if *home == "" {
 		return errors.New("缺 --home")
 	}
@@ -181,6 +193,14 @@ func cmdServe(args []string) error {
 		return err
 	}
 
+	// CLI 用显式 --root；serve 的唯一推导是必需的 --home 下的固定子目录。
+	// Open 在返回前完成启动 reconcile 与当前包校验，损坏/悬挂事务必须在
+	// listener ready 之前失败，不能先对外暴露一个状态未定的插件面。
+	pluginManager, err := pluginmgr.Open(filepath.Join(*home, "plugins"))
+	if err != nil {
+		return fmt.Errorf("插件管理器启动 reconcile 失败: %w", err)
+	}
+
 	// 终端服务：serve 模式不装配模块，所以单独建一份（和 run/acp 那边各自一份同构）。
 	bashSvc := bash.NewService("")
 	defer bashSvc.Close()
@@ -188,17 +208,47 @@ func cmdServe(args []string) error {
 	// 会话级模型覆盖：启动时先检查一次；损坏文件不拦 HTTP 服务，但后续模型
 	// 轮次会明确报错，绝不悄悄按默认模型跑出一个假成功。
 	modelOverrides := newModelOverrideStore(*home)
-	if err := modelOverrides.Load(); err != nil {
-		fmt.Fprintf(os.Stderr, "会话模型覆盖读盘失败（%v）；修复前模型轮次会报错\n", err)
+	modelLoadErr := modelOverrides.Load()
+	if modelLoadErr != nil {
+		fmt.Fprintf(os.Stderr, "会话模型覆盖读盘失败（%v）；修复前模型轮次会报错\n", modelLoadErr)
 	}
 
 	// 会话级审批策略覆盖（同款；读盘失败就全按 --policy 走）。
 	permissionOverrides := newPermissionOverrideStore(*home)
-	if err := permissionOverrides.Load(); err != nil {
-		fmt.Fprintf(os.Stderr, "会话权限覆盖读盘失败（%v），本轮全部按 --policy 走\n", err)
+	permissionLoadErr := permissionOverrides.Load()
+	if permissionLoadErr != nil {
+		fmt.Fprintf(os.Stderr, "会话权限覆盖读盘失败（%v），本轮全部按 --policy 走\n", permissionLoadErr)
+	}
+	// 通用设置直接复用上面两份 runner 已读取的存储，不读 ui-config。
+	settingsStore := newServeSettingsStore(*serveModel, *servePolicy, modelOverrides, permissionOverrides)
+	settingsStore.setLoadErrors(modelLoadErr, permissionLoadErr)
+	// 持久模型目录与 active 默认共用 W61 store；目录本身不保存第二个 active。
+	// 损坏目录只让目录 API fail-loud，绝不拿空目录覆盖原文件。
+	modelCatalog := llm.OpenModelCatalog(*home)
+	if _, err := modelCatalog.List(); err != nil {
+		fmt.Fprintf(os.Stderr, "模型目录读盘失败（%v）；修复前目录 API 会报错\n", err)
+	}
+	if modelCatalog.Missing() && explicitServeModel {
+		discoveryCtx, cancelDiscovery := context.WithTimeout(context.Background(), 3*time.Second)
+		applied, discoveryErr := configureEnvModelCatalog(discoveryCtx, modelCatalog, *serveModel,
+			envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), os.Getenv("DSHD_LLM_KEY"))
+		cancelDiscovery()
+		if discoveryErr != nil {
+			fmt.Fprintf(os.Stderr, "env 模型元数据发现失败（%v）；catalog/effort 能力保持未知\n", llm.RedactCredential(discoveryErr.Error(), os.Getenv("DSHD_LLM_KEY")))
+		} else if applied {
+			fmt.Fprintf(os.Stderr, "已从当前 provider 投影 env 模型 %q 的真实 catalog 元数据（未创建 catalog 文件）\n", *serveModel)
+		} else {
+			fmt.Fprintf(os.Stderr, "provider 未返回 env 模型 %q 的元数据；catalog/effort 能力保持未知\n", *serveModel)
+		}
 	}
 
-	// 会话级 goal（"现在在做什么"）。读盘失败就全当没设过。
+	// 会话级 effort 覆盖只存 catalog key；损坏文件在后续读写中持续 fail-loud。
+	effortOverrides := newEffortOverrideStore(*home)
+	if err := effortOverrides.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "会话 effort 覆盖读盘失败（%v）；修复前 effort API/runner 会报错\n", err)
+	}
+
+	// 会话级 goal 是真实 snapshot；旧扁平文件在 Load 内同步迁移并持久 id/revision。
 	goalOverrides := newGoalOverrideStore(*home)
 	if err := goalOverrides.Load(); err != nil {
 		fmt.Fprintf(os.Stderr, "会话 goal 读盘失败（%v），界面不显示目标条\n", err)
@@ -209,6 +259,14 @@ func cmdServe(args []string) error {
 	src := newSessionSource(*home, "")
 	src.perms = permissionOverrides
 	src.goals = goalOverrides
+	src.efforts = effortOverrides
+	src.catalog = modelCatalog
+	attachments := newAttachmentStore(*home)
+	mcpServers := openMCPManager(*home)
+	mcpServers.StartAll()
+	defer mcpServers.Close()
+	sideQueries := newSideQueryService(*home, *serveModel, envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), *serveReasoning, src)
+	defer sideQueries.Close()
 
 	// Prompt / Cancel 走同一个服务，busy 的唯一结束点由它保证。
 	// runner 现在固定拒绝（见 errNoModel 的注释）。
@@ -231,29 +289,77 @@ func cmdServe(args []string) error {
 	//
 	// 改成拿启动时刻做基准：两次启动撞上同一纳秒不可能，而它仍然是单调递增的整数。
 	journals := transport.NewJournals(newEpochFunc())
+	// 跨进程恢复的是原始 Transport 帧，不是 v4 首屏投影。启动时只读恢复；
+	// 新 epoch 仍由本进程分配，旧 epoch/水位继续走 reset/stale_epoch。
+	if _, err := restoreServeJournals(*home, journals); err != nil {
+		return fmt.Errorf("启动恢复 Transport journal 失败：%w", err)
+	}
+	// 沙盒策略层：档位存 <home>/state/session-sandbox.json；preset 目录可扩展。
+	sandboxStore := newSandboxModeStore(*home)
+	if err := sandboxStore.Load(); err != nil {
+		return err
+	}
+	diskPresets, err := modes.LoadDir(filepath.Join(*home, "modes"))
+	if err != nil {
+		return err
+	}
+	sandboxPresets, err := modes.NewRegistry(diskPresets)
+	if err != nil {
+		return err
+	}
+
+	goalOverrides.journal = &goalChangeJournal{journals: journals}
+	jobActions := newJobActionBroker(*home)
 	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps,
 		journals: journals, reasoning: *serveReasoning, model: *serveModel,
-		toolsMode: toolsMode}
-	mr := &modelRunner{home: *home, journals: journals, model: *serveModel,
-		base: envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1")}
+		toolsMode: toolsMode, jobActions: jobActions,
+		sandboxPresets: sandboxPresets, sandboxStore: sandboxStore}
+	mr := &modelRunner{home: *home, journals: journals, model: *serveModel, reasoning: *serveReasoning, recordEffort: true,
+		base: envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), catalog: modelCatalog}
 
 	// 审批的父进程半边（H13）：整进程一个 broker，每轮换 stdin。
 	// emit 用 lr 的方法，所以帧一样进 journal、一样可重放。
 	broker := newApprovalBroker(nil, nil)
-	broker.setEmit(func(sid, typ string, data json.RawMessage) { lr.emit(sid, typ, data) })
+	// 官方 wire 的 $events 事件源：审批帧同时喂给它，官方 GUI 才能收到
+	// waterfall 并回答（`$events/result`）。不接这条，官方侧只会看到 ready。
+	approvalEvents := newApprovalEventSource(broker)
+	broker.setEmit(func(sid, typ string, data json.RawMessage) {
+		lr.emit(sid, typ, data)
+		approvalEvents.OnApprovalFrame(sid, typ, data)
+	})
 	// 子进程推上来的后台任务清单 → 存到 lr，jobs.list 从这里读。
-	broker.onJobs = func(jobs []transport.JobInfo) {
+	broker.onJobsForSession = func(sessionID string, jobs []transport.JobInfo) {
+		for i := range jobs {
+			jobs[i].SessionID = sessionID
+		}
 		lr.jobsMu.Lock()
 		lr.jobs = jobs
 		lr.jobsMu.Unlock()
 	}
+	broker.actions = jobActions
 	lr.broker = broker
 	if useModelRunner {
 		runner = mr
 	} else {
-		runner = &modelOverrideLoopRunner{base: lr}
+		runner = &modelOverrideLoopRunner{base: lr, permissions: permissionOverrides, recordEffort: true, catalog: modelCatalog}
 	}
+	// 官方 goal-round-driver（官方插件 #60）：真实 turn 正常收工后按 active goal 推进轮次。
+	// 只包一层 turnRunner（Run/RunContent/Steer/SteerContent 原样透传），不新建 turn、
+	// 不排 prompt；启动先重算一次，把上个进程漏记的轮次补上。
+	goalRounds := newGoalRoundDriver(goalOverrides, *home)
+	if err := goalRounds.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "goal 轮次游标读盘失败（%v）；修复前不推进轮次\n", err)
+	}
+	if err := goalRounds.Reconcile(); err != nil {
+		fmt.Fprintf(os.Stderr, "goal 轮次重启重算失败（%v）\n", err)
+	}
+	runner = goalRounds.wrap(runner)
 	prompts := newPromptService(runner)
+	// now 与普通 session.cancel 共用同一条真实取消链：先拒 pending approval，
+	// 再 cancel 并等 runner/follow/v4 收工；不能只杀 context 留下审批僵尸。
+	prompts.interrupt = func(sessionID string) error {
+		return cancelServeTurn(broker, prompts, sessionID)
+	}
 
 	// 建会话的能力在起来之前就确定（cwd 定一次，不随后续请求漂移）。
 	create, err := serveCreate(*home, "")
@@ -261,8 +367,54 @@ func cmdServe(args []string) error {
 		return err
 	}
 
-	srv, err := transport.NewServer(transport.Options{
+	// 官方 0.2.2 job.*/terminal.* 需要在 Options 里注入，所以要在 NewServer 之前造好。
+	officialJT, err := newOfficialJobTerminalService(*home, bashSvc, jobActions, func(string) []transport.JobInfo {
+		lr.jobsMu.Lock()
+		defer lr.jobsMu.Unlock()
+		return lr.jobs
+	}, src.Cwd)
+	if err != nil {
+		return err
+	}
+	defer officialJT.Close()
+
+	srv, err := transport.NewServer(withOfficialSessionOptions(*home, withSessionOperationOptions(*home, transport.Options{
 		Source: src,
+		// 只把适配器交给 Transport；它们在既有 cookie 认证之后才会被调用。
+		PluginHandler:       newPluginHTTPHandler(pluginManager),
+		SettingsFormHandler: newSettingsFormHTTPHandler(settingsStore),
+		ModelCatalogHandler: newModelCatalogHTTPHandler(modelCatalog, settingsStore),
+		Attachments:         attachments,
+		// 官方 0.2.2 wire（M1）：默认关，DSHD_OFFICIAL_WIRE=1 才挂载。
+		// 返回 nil 时 transport 一个字节都不变（见 Options.HandlerWrap）。
+		HandlerWrap: officialWireMount(officialWireDeps{
+			Home:        *home,
+			Journals:    journals,
+			Attachments: attachments,
+			Events:      approvalEvents,
+		}),
+		ContextUsage:        src.ContextUsage,
+		MCPList: func(sessionID string) ([]transport.MCPServerView, error) {
+			if _, err := src.resolve(sessionID); err != nil {
+				return nil, err
+			}
+			return mcpServers.List()
+		},
+		MCPReconnect: func(_ context.Context, sessionID, name string) error {
+			if _, err := src.resolve(sessionID); err != nil {
+				return err
+			}
+			return mcpServers.Reconnect(name)
+		},
+		MCPToggle: func(_ context.Context, sessionID, name string, enabled bool) error {
+			if _, err := src.resolve(sessionID); err != nil {
+				return err
+			}
+			return mcpServers.Toggle(name, enabled)
+		},
+		SideQuery:  sideQueries.Run,
+		SideCancel: sideQueries.Cancel,
+		SideClose:  sideQueries.CloseSession,
 		// 后台任务：清单是**子进程推上来的那份**；输出要**当场问子进程**。
 		//
 		// **JobsOutput 只在轮次进行中可用**：每轮起一个新的子进程（`loopRunner`），
@@ -290,10 +442,26 @@ func cmdServe(args []string) error {
 			}
 			return out, nil
 		},
+		JobsOutputScoped: func(sessionID, id string, cursor, limit int, wait time.Duration) (transport.JobOutput, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), wait+5*time.Second)
+			defer cancel()
+			return jobActions.Output(ctx, sessionID, id, cursor, limit, wait)
+		},
+		JobsStop: func(sessionID, id string) (transport.JobStopResult, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+			defer cancel()
+			return jobActions.Stop(ctx, sessionID, id)
+		},
 		// 定时任务：直接读 `<home>/state/schedules/`（和 `dshd schedule list` 同一个来源）。
 		// **不复用 lr**：它不是子进程推的，是磁盘上的文件，每次问都能拿到最新的。
 		ScheduleList: func() []transport.ScheduleItem {
 			return serveScheduleList(*home)
+		},
+		ScheduleDelete: func(sessionID, id, expectedRevision string) (transport.ScheduleDeleteResult, error) {
+			return serveScheduleDelete(*home, sessionID, id, expectedRevision)
+		},
+		ScheduleClear: func() (transport.ScheduleClearResult, error) {
+			return serveScheduleClear(*home)
 		},
 		// 会话级模型覆盖：写 <home>/state/session-model.json。
 		// **不写 v4**（R5 读路径不写盘）；这是界面状态，进了日志会污染重放。
@@ -301,8 +469,23 @@ func cmdServe(args []string) error {
 			return modelOverrides.Set(sessionID, model)
 		},
 		// 审批策略覆盖：写 <home>/state/session-permission.json（白名单在 handler 里校）。
+		// 官方 0.2.2 三档：策略半边由 serve_sandbox_policy.go 实现，这里只做装配。
+		SetSessionPermissionMode: func(sessionID, perm string) (map[string]any, error) {
+			res, err := sandboxSetPermission(*home, sessionID, perm, sandboxPresets, sandboxStore, permissionOverrides)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"ok":          true,
+				"permission":  res.Mode,
+				"mode":        res.Effective,
+				"preset":      res.Preset,
+				"enforcement": res.Enforcement,
+			}, nil
+		},
 		SetSessionPermission: func(sessionID, perm string) error {
-			return permissionOverrides.Set(sessionID, perm)
+			_, err := sandboxSetPermission(*home, sessionID, perm, sandboxPresets, sandboxStore, permissionOverrides)
+			return err
 		},
 		// 模型列表：由宿主转发（网关地址与凭据只在这一侧，R7 界面不直连）。
 		// 和 `run`/`acp` 用同一组环境变量，免得界面看到的模型和实际能跑的不是一套。
@@ -324,6 +507,12 @@ func cmdServe(args []string) error {
 		SetSessionGoal: func(sessionID, goal string) error {
 			return goalOverrides.Set(sessionID, goal)
 		},
+		SetSessionEffort: func(sessionID, effort string) error {
+			return setServeEffort(effortOverrides, *home, sessionID, effort, *serveModel, modelCatalog)
+		},
+		GoalGet:    goalOverrides.Snapshot,
+		GoalPause:  goalOverrides.Pause,
+		GoalResume: goalOverrides.Resume,
 		// 长连接终端：底层 `modules/exec/bash` 的 session 本来就是持久 PTY，
 		// 缺的只是"开一个留住它"的入口。**Serve 自己建一个 Service**——
 		// serve 模式不装配模块（agent 跑在子进程里），所以这里要单独一份。
@@ -383,7 +572,7 @@ func cmdServe(args []string) error {
 			return serveWorkspaceList(path)
 		},
 		Delete: func(sessionID string) error {
-			return serveDelete(*home, sessionID)
+			return serveDelete(*home, sessionID, broker, prompts)
 		},
 		Fork: func(sessionID, title string) (string, error) {
 			return serveFork(*home, sessionID, title)
@@ -396,7 +585,7 @@ func cmdServe(args []string) error {
 				return transport.CompactResult{}, err
 			}
 			res, err := autoCompact(context.Background(), path, keep, 0,
-				envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"),
+				envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"),
 				envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"))
 			if err != nil {
 				return transport.CompactResult{}, err
@@ -412,23 +601,88 @@ func cmdServe(args []string) error {
 			// 绑在请求上会在响应写完时把刚要开始的一轮掐掉。
 			return prompts.Submit(context.Background(), sessionID, text)
 		},
+		PromptPlacement: func(sessionID, text, placement string) (transport.PromptResult, error) {
+			return prompts.SubmitPlacement(context.Background(), sessionID, text, placement)
+		},
+		PromptBlocks: func(sessionID string, blocks []transport.ContentBlock) (transport.PromptResult, error) {
+			resolved, err := attachments.ResolveBlocks(blocks)
+			if err != nil {
+				return transport.PromptResult{}, err
+			}
+			return prompts.SubmitBlocks(context.Background(), sessionID, resolved)
+		},
+		PromptBlocksPlacement: func(sessionID string, blocks []transport.ContentBlock, placement string) (transport.PromptResult, error) {
+			resolved, err := attachments.ResolveBlocks(blocks)
+			if err != nil {
+				return transport.PromptResult{}, err
+			}
+			return prompts.SubmitBlocksPlacement(context.Background(), sessionID, resolved, placement)
+		},
 		Cancel: func(sessionID string) error {
 			// H13 pending cancel：挂着的审批**先**按拒绝结算（并推 approval/cancel），
-			// 再取消这一轮。顺序与理由见 cancelTurn。
-			return cancelTurn(broker, prompts, sessionID)
+			// 再取消这一轮。cancelServeTurn 额外保留超时的真实 live 状态。
+			return cancelServeTurn(broker, prompts, sessionID)
 		},
-		// Create 真建一份 v4 会话（见 serve_create.go）：id 用 crypto/rand、
-		// header 带 agentPreset、返回前 Close 刷盘。cwd 传空 = serve 自己的当前目录。
-		Create: create,
-	})
+		CancelPlacement: func(sessionID, cause, turnID string) (transport.CancelResult, error) {
+			// queued-only retraction 没有当前审批可结算；其它取消仍走同一 broker。
+			if cause == "" {
+				cause = "user"
+			}
+			if turnID != "" && prompts.currentTurnID(sessionID) != turnID {
+				return prompts.CancelPlacement(sessionID, cause, turnID)
+			}
+			if cause != "user" && cause != "interrupt" && cause != "switch" && cause != "dispose" {
+				return prompts.CancelPlacement(sessionID, cause, turnID)
+			}
+			if broker != nil {
+				broker.CancelSession(sessionID)
+			}
+			return prompts.CancelPlacement(sessionID, cause, turnID)
+		},
+		// Create 真建一份 v4 会话，并把创建当时的通用默认物化到既有
+		// session override 键；后续每轮仍由原 runner 读同一存储。
+		Create: createWithSettingsDefaults(create, settingsStore),
+		// 官方 job.*/terminal.*（11 个方法）的路由层。
+		OfficialJobTerminal: officialJT.Handler(),
+	}), prompts))
 	if err != nil {
 		return err
 	}
+	// 其余官方 0.2.2 方法接线（additive；宿主实现全在 cmd/dshd 与
+	// internal/pluginmgr/official，Transport 只做协议翻译）。
+	srv.AttachOfficialAgentAPI(newAgentOfficialAPI(agentOfficialDeps{
+		home: *home, goals: goalOverrides, journals: journals, src: src,
+		submit: func(sessionID, text string) (transport.PromptResult, error) {
+			return prompts.Submit(context.Background(), sessionID, text)
+		},
+		// 带 placement 的同一入口：subagents.prompt 的 delivery:"steer" 走它。
+		// 不接时 steer 回 400（响亮失败），queue 仍可用。
+		submitPlacement: func(sessionID, text, placement string) (transport.PromptResult, error) {
+			return prompts.SubmitPlacement(context.Background(), sessionID, text, placement)
+		},
+		// 官方 subagents.interruptByParent 的真实取消通道。缺它时该方法
+		// 回响亮 501（说清缺这行），不会静默成功。
+		interrupt: func(sessionID string) error {
+			_, err := prompts.CancelPlacement(sessionID, "interrupt", "")
+			return err
+		},
+	}))
+	srv.AttachOfficialSettingsCredentialAPI(transport.OfficialSettingsCredentialAPI{
+		Settings:    settingsform.New(settingsStore),
+		Credentials: transport.NewCatalogCredentialStore(modelCatalog),
+	})
+	attachOfficialWorkspace(srv, *home, src, prompts)
+	attachOfficialSchedule(srv, *home, func(sessionID, text string) (transport.PromptResult, error) {
+		return prompts.Submit(context.Background(), sessionID, text)
+	})
+	srv.AttachOfficialPluginManagerAPI(officialpluginmgr.New(pluginManager))
+	srv.AttachOfficialAccountAPI(newAccountOfficialAPI(accountOfficialDeps{home: *home}))
 	if useModelRunner {
 		mr.pub = srv.Publish
 	} else {
 		lr.pub = srv.Publish
 	}
+	goalOverrides.journal.pub = srv.Publish
 
 	base, err := srv.Start()
 	if err != nil {

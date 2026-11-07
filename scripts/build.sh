@@ -60,12 +60,11 @@ mkdir -p dist
 : > dist/SHA256SUMS
 
 # 名字只在这里写一遍：下面两段循环都从这张表取。
-#   <产品名>|<包路径>
-# 产品名同时是产物名，与 `--version` 首行逐字一致（宿主 cmd/dshd/main.go 的
-# productName、TUI cmd/dshtui/brand.go 的 productName）。
+#   <产品名>|<包路径>|<产物基名>
+# 宿主产物按用户要求使用 dsh-<版本号>；`--version` 首词仍是产品名 DSH GO。
 PRODUCTS=(
-  "DSH GO|./cmd/dshd"
-  "DSH TUI GO|./cmd/dshtui"
+  "DSH GO|./cmd/dshd|dsh-${VER}"
+  "DSH TUI GO|./cmd/dshtui|DSH TUI GO"
 )
 
 TARGETS=("windows/amd64" "linux/amd64" "darwin/arm64")
@@ -74,8 +73,8 @@ echo "构建 ${VER} @ ${COMMIT} (${DATE})"
 echo
 
 for row in "${PRODUCTS[@]}"; do
-  IFS='|' read -r name pkg <<<"${row}"
-  echo "${name} ${VER}"
+  IFS='|' read -r name pkg artifact <<<"${row}"
+  echo "${name} ${VER} → ${artifact}"
 
   for target in "${TARGETS[@]}"; do
     os=${target%%/*}
@@ -83,36 +82,36 @@ for row in "${PRODUCTS[@]}"; do
     ext=""
     [ "${os}" = "windows" ] && ext=".exe"
     dir="dist/${os}-${arch}"
-    out="${dir}/${name}${ext}"
+    out="${dir}/${artifact}${ext}"
 
     mkdir -p "${dir}"
     GOOS=${os} GOARCH=${arch} CGO_ENABLED=0 \
       go build -trimpath -ldflags "${LDFLAGS}" -o "${out}" "${pkg}"
 
     size=$(du -h "${out}" | cut -f1)
-    printf '  %-44s %s\n' "${os}-${arch}/${name}${ext}" "${size}"
-    ( cd dist && sha256sum "${os}-${arch}/${name}${ext}" >> SHA256SUMS )
+    printf '  %-44s %s\n' "${os}-${arch}/${artifact}${ext}" "${size}"
+    ( cd dist && sha256sum "${os}-${arch}/${artifact}${ext}" >> SHA256SUMS )
   done
 
   # 本机（windows/amd64）再留一份**不带平台目录**的 `dist/<产品名>.exe`：
   # 手工跑、任务管理器里看名字、脚本直接调，用的都是这一个文件。
   # 顺手拿它 `--version` 自检：产物名必须等于版本行首词，对不上就是
   # PRODUCTS 表和代码里的 productName 分叉了（那正是"两个名字"的来源）。
-  if [ -f "dist/windows-amd64/${name}.exe" ]; then
-    cp "dist/windows-amd64/${name}.exe" "dist/${name}.exe"
-    got=$("./dist/${name}.exe" --version 2>/dev/null | head -1 || true)
+  if [ -f "dist/windows-amd64/${artifact}.exe" ]; then
+    cp "dist/windows-amd64/${artifact}.exe" "dist/${artifact}.exe"
+    got=$("./dist/${artifact}.exe" --version 2>/dev/null | head -1 || true)
     case "${got}" in
       "${name} ${VER}"*)
-        printf '  %-44s %s\n' "${name}.exe" "${got}"
+        printf '  %-44s %s\n' "${artifact}.exe" "${got}"
         ;;
       *)
-        echo "  !! ${name}.exe --version 输出不对：${got:-（空）}" >&2
+        echo "  !! ${artifact}.exe --version 输出不对：${got:-（空）}" >&2
         exit 1
         ;;
     esac
-    ( cd dist && sha256sum "${name}.exe" >> SHA256SUMS )
+    ( cd dist && sha256sum "${artifact}.exe" >> SHA256SUMS )
   fi
   echo
 done
 
-echo "产物在 dist/（每个平台一个目录，文件名就是产品名），校验和 dist/SHA256SUMS"
+echo "产物在 dist/（宿主为 dsh-<版本号>，TUI保留产品名），校验和 dist/SHA256SUMS"

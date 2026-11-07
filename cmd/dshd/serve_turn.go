@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/llm"
@@ -23,59 +23,173 @@ import (
 // 所以关掉 serve 再打开，这轮对话还在。
 type modelRunner struct {
 	// journals 同上（H14）：所有推给界面的帧都从这一处发号。
-	journals *transport.Journals
-	pub      func(topic string, f transport.ServerFrame)
-	home     string
-	base     string
-	model    string
+	journals     *transport.Journals
+	pub          func(topic string, f transport.ServerFrame)
+	home         string
+	base         string
+	model        string
+	reasoning    string // host 默认 wire；会话覆盖在每轮局部解析，不写共享 runner。
+	recordEffort bool   // 生产 serve 开启；旧直接构造测试保持原有 v4 夹具形状。
+	catalog      *llm.ModelCatalogStore
+	// steers 按 sessionID+turnID 绑定当前 model 调用序列；map 只在 Run
+	// 存活期间登记，最终边界原子 drain-or-close，过晚提交不会变成新 turn。
+	steerMu sync.Mutex
+	steers  map[string]*modelTurnInbox
+	// wake/finished 处理 prompt ACK 后 Run goroutine 尚未注册的早到 steer；
+	// finished 每会话只记最新 turn，避免无限积累历史 turnID。
+	steerWake chan struct{}
+	finished  map[string]string
 }
 
 func (r *modelRunner) Run(ctx context.Context, sessionID, turnID, text string) error {
+	return r.runModelTurnWithEffort(ctx, sessionID, turnID, modelInputFromText(text))
+}
+
+// RunContent 与 text 共用同一个模型步进循环；附件/引用不会在 steer 入口
+// 被降级成文件名或另起 followup。
+func (r *modelRunner) RunContent(ctx context.Context, sessionID, turnID string, blocks []transport.ContentBlock) error {
+	input, err := modelInputFromBlocks(r.home, blocks)
+	if err != nil {
+		emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
+		return err
+	}
+	return r.runModelTurnWithEffort(ctx, sessionID, turnID, input)
+}
+
+// runModelTurnWithEffort 是 W144 与 W138 的手工三方合并入口。W138 已把旧 Run
+// 主体迁到 runModelTurn，因此这里保留同一 inbox/FIFO/drain-or-close/原子持久化
+// 执行链，并在每个真实模型 step（含 steer 后续 step）携带本轮解析出的 effort。
+// W138 原 runModelTurn 留在其新文件中（不属于本任务可写路径）；公开 Run/RunContent 都走这里。
+func (r *modelRunner) runModelTurnWithEffort(ctx context.Context, sessionID, turnID string, initial modelTurnInput) error {
+	inbox, err := r.registerModelSteer(sessionID, turnID)
+	if err != nil {
+		emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
+		return err
+	}
+	defer r.unregisterModelSteer(sessionID, turnID, inbox)
+	fail := func(err error) error {
+		// 先拒绝新接管，再让客户端看到终局；反过来会留下“error 后又 accepted”的窗口。
+		inbox.close()
+		emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
+		return err
+	}
+
 	history, err := r.history(sessionID)
 	if err != nil {
-		// 读不出来就说出来。"读不出来就当空的"会让模型在没有任何上下文的
-		// 情况下回答，而那种回答**看起来完全正常**——最难查的一类。
-		emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
-		return err
+		return fail(err)
 	}
-	history = append(history, llm.Message{Role: "user", Content: text})
-
 	model, err := resolveServeModel(r.home, sessionID, r.model)
 	if err != nil {
-		emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
-		return err
+		return fail(err)
 	}
-	resp, err := llm.New(r.base, os.Getenv("DSHD_LLM_KEY")).Stream(ctx,
-		llm.Request{Model: model, Messages: history, Stream: true}, nil)
+	reasoning, effortLevel, _, err := resolveServeEffort(r.home, sessionID, model, r.reasoning, r.catalog)
 	if err != nil {
-		emitTurnFrame(r.journals, r.pub, sessionID, turnID, err)
-		return err
+		return fail(err)
+	}
+	provider, routed, err := resolveServeProvider(r.home, model)
+	if err != nil {
+		return fail(err)
+	}
+	base, credential := r.base, os.Getenv("DSHD_LLM_KEY")
+	if routed {
+		base, credential = provider.BaseURL, provider.Credential()
 	}
 
-	// 先推正文，让界面立刻看到字——turn/done 只表示这一轮结束了。
-	//
-	// 判据是 assistantHasPayload，不是 `resp.Content != ""`：只有思考块的回答
-	// 也是回答。按正文判的话这一轮既没有帧、也没有落盘，界面上就是"发了没反应"。
-	if resp != nil && assistantHasPayload(resp.Content, resp.Reasoning, len(resp.ToolCalls)) {
-		payload := map[string]any{"text": resp.Content}
-		if strings.TrimSpace(resp.Reasoning) != "" && strings.TrimSpace(resp.Content) == "" {
-			// 只有思考、没有正文时，只带 text 的这一帧是空的（客户端画一个空气泡）。
-			// 多带一个键是增量的：老客户端忽略它，新客户端可以显示"它想了什么"。
-			payload["reasoning"] = resp.Reasoning
+	src := newSessionSource(r.home, "")
+	path, err := src.resolve(sessionID)
+	if err != nil {
+		return fail(err)
+	}
+	turn := nextTurnNumber(path)
+	events := []modelTurnEvent{{input: &initial, turn: turn}}
+	// initialIndex 是"本轮首条用户消息在 history 里的位置"：图片降级重试要**原地**
+	// 换掉这一条（见 offloadRetrier.tryOffloadRetry），不是追加一条新消息。
+	initialIndex := len(history)
+	history = append(history, initial.message)
+	retrier := &offloadRetrier{}
+	step := 0
+	for {
+		// 首步前也是一个 step 边界；首步在飞时收到的项则在下面的响应后边界接管。
+		queued, _ := inbox.drain(false)
+		for _, input := range queued {
+			events = append(events, modelTurnEvent{input: input, turn: turn})
+			history = append(history, input.message)
 		}
-		data, _ := json.Marshal(payload)
-		// 走 emitFrame：seq 由这条会话的 journal 发号，与 session.history 同源。
-		// 以前这里写死 ServerFrame{Seq: 1}，客户端会看到重复 seq、没有 time，
-		// 补洞时也读不到这一帧（journal 里根本没有它）。
-		emitFrame(r.journals, r.pub, sessionID, "assistant/message", data)
-	}
-	// 落盘。顺序：先用户、再助手——与真实会话一致，读回时才对得上。
-	// 存不下来必须说出来：**"回答看见了但没存"** 比"没回答"更难查。
-	if perr := r.persist(sessionID, text, resp); perr != nil {
-		emitTurnFrame(r.journals, r.pub, sessionID, turnID, perr)
-		return perr
+		step++
+		if r.recordEffort {
+			// selection 与下面 Request.Model/Reasoning 来自同一份本轮解析值；
+			// 首步与 steer 后续步各记录一次，并落在本 step 的真实事件序列里。
+			events = append(events, modelTurnEvent{typ: "model/selection", turn: turn, step: step, model: model, effort: effortLevel})
+		}
+		start := modelTurnEvent{typ: "step/start", turn: turn, step: step}
+		events = append(events, start)
+		emitModelStreamEvent(r.journals, r.pub, sessionID, start)
+		deltaIndex := 0
+		// attemptMark 是本 step 开始前的事件下标：降级重试要把这一次失败的
+		// 半截流（assistant/text 增量）从**落盘**里退回，否则一次失败会写成两段回答。
+		attemptMark := len(events)
+		resp, streamErr := llm.New(base, credential).Stream(ctx,
+			llm.Request{Model: model, Messages: history, Stream: true, Reasoning: reasoning}, func(e llm.Event) error {
+				typ := ""
+				switch e.Kind {
+				case llm.EventReasoning:
+					typ = "assistant/reasoning"
+				case llm.EventContent:
+					typ = "assistant/text"
+				default:
+					return nil
+				}
+				event := modelTurnEvent{typ: typ, turn: turn, step: step, index: deltaIndex, text: e.Text, model: model}
+				deltaIndex++
+				events = append(events, event)
+				emitModelStreamEvent(r.journals, r.pub, sessionID, event)
+				return nil
+			})
+		if streamErr != nil {
+			rawErr := streamErr
+			streamErr = redactServeProviderError(streamErr, credential)
+			// 官方插件 80：图片预算超限的失败降级一次再试（见 serve_offload_retry.go）。
+			if degraded, indexes, retried := retrier.tryOffloadRetry(rawErr, initial, history, initialIndex); retried {
+				initial = degraded
+				events = events[:attemptMark]
+				// 决策挂在本轮首条用户事件上：落盘时紧跟 user/message 写成
+				// image/offload（durable 块一个字节都不改）。
+				events[0].offloadImages = len(indexes)
+				events[0].offloadIndexes = indexes
+				events = append(events, modelTurnEvent{
+					typ: "llm/retry", turn: turn, step: step,
+					offloadImages: len(indexes), offloadIndexes: indexes,
+				})
+				emitImageOffloadRetry(r.journals, r.pub, sessionID, turn, step, len(indexes))
+				continue
+			}
+			return fail(streamErr)
+		}
+		events = append(events, modelTurnEvent{response: resp, turn: turn, step: step})
+		emitModelAssistant(r.journals, r.pub, sessionID, resp)
+		end := modelTurnEvent{typ: "step/end", turn: turn, step: step}
+		events = append(events, end)
+		emitModelStreamEvent(r.journals, r.pub, sessionID, end)
+		if resp != nil {
+			history = append(history, llm.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
+		}
+
+		queued, closed := inbox.drain(true)
+		for _, input := range queued {
+			events = append(events, modelTurnEvent{input: input, turn: turn})
+			history = append(history, input.message)
+		}
+		if closed {
+			if err := ctx.Err(); err != nil {
+				return fail(err)
+			}
+			break
+		}
 	}
 
+	if err := r.persistModelEvents(sessionID, events); err != nil {
+		return fail(err)
+	}
 	emitTurnFrame(r.journals, r.pub, sessionID, turnID, nil)
 	return nil
 }
@@ -244,7 +358,14 @@ func assistantBlocksFrom(text, reasoning string, toolCalls []llm.ToolCall) []map
 //
 // OpenSessionAt 会抢写锁；抢不到就报错，不硬写——同一份会话只允许一个写入者，
 // 硬写的后果是重复 seq，而 seq 是 surface 与遮蔽的排序依据。
-func (r *modelRunner) persist(sessionID, text string, resp *llm.Response) (retErr error) {
+func (r *modelRunner) persist(sessionID, text string, resp *llm.Response) error {
+	input := modelInputFromText(text)
+	return r.persistModelEvents(sessionID, []modelTurnEvent{{input: &input}, {response: resp}})
+}
+
+// persistModelEvents 在一个 turn/start/end 内按真实顺序写所有 user/assistant
+// 事件。Run 只在最终边界后调用一次，因此第二步取消/模型错误不会留下半套 steer 历史。
+func (r *modelRunner) persistModelEvents(sessionID string, events []modelTurnEvent) (retErr error) {
 	src := newSessionSource(r.home, "")
 	path, err := src.resolve(sessionID)
 	if err != nil {
@@ -256,31 +377,70 @@ func (r *modelRunner) persist(sessionID, text string, resp *llm.Response) (retEr
 	}
 	defer logw.Close()
 
-	// 调试路径也要写轮边界。
-	//
-	// 以前这里只写 user/assistant 两条消息、**从不写 turn/start**：日志里没有轮次，
-	// `session.history` 的消费者只能看到一串没有边界的消息；而只要有一次失败，
-	// 又会出现"开了轮却没结局"的悬挂态——两件事都是 D1 明确要消灭的形状。
-	// 这里复用 run 那条路同一个 turnCloser：一个 turn 一条结局，失败也补。
 	turn := nextTurnNumber(path)
+	for _, event := range events {
+		if event.turn > 0 {
+			turn = event.turn
+			break
+		}
+	}
 	if err := logw.Append("turn/start", session.TurnStartData(turn)); err != nil {
 		return fmt.Errorf("存不下来（写轮次开始）: %w", err)
 	}
 	tc := newTurnCloser(logw, turn)
 	defer func() { _ = tc.Exit(context.Background(), retErr) }()
 
-	if err := logw.Append("user/message", session.UserMessage([]spi.Block{{Type: "text", Text: text}})); err != nil {
-		return fmt.Errorf("存不下来（写用户消息）: %w", err)
-	}
-	if resp != nil && assistantHasPayload(resp.Content, resp.Reasoning, len(resp.ToolCalls)) {
-		if err := logw.Append("assistant/message",
-			session.AssistantMessageEvent(turn, 1, assistantBlocks(resp), resp.FinishReason, nil)); err != nil {
-			return fmt.Errorf("存不下来（写回答）: %w", err)
-		}
-	}
+	step := 0
+	userCount := 0
 	finish := ""
-	if resp != nil {
+	for _, event := range events {
+		if event.input != nil {
+			data := session.UserMessage([]spi.Block{{Type: "text", Text: event.input.text}})
+			if event.input.content {
+				data = session.UserContentMessage(event.input.durable)
+			}
+			if err := logw.Append("user/message", data); err != nil {
+				return fmt.Errorf("存不下来（写用户消息）: %w", err)
+			}
+			if event.offloadImages > 0 {
+				// 这一轮这条用户消息里有几张图在重试时被降级成官方占位文本：
+				// 决策写在消息之后，durable 块原样（v4 append-only）。重新 Surface
+				// 之后那几张就是占位文本，模型仍按附件 id 取回原件。
+				if err := logw.Append(session.ImageOffloadEventType, session.ImageOffloadData{
+					Targets: offloadTargets(logw.Seq()-1, event.offloadIndexes),
+				}); err != nil {
+					return fmt.Errorf("存不下来（写图片降级决策）: %w", err)
+				}
+			}
+			userCount++
+			if userCount == 1 {
+				// 保留并行 W145 在原始单 user persist 后拍照的行为；steer 不改写其锚点。
+				if err := captureRewindCheckpointForLog(r.home, logw); err != nil {
+					fmt.Fprintf(os.Stderr, "%v\n", err)
+				}
+			}
+		}
+		if event.typ != "" {
+			if err := logw.Append(event.typ, modelStreamEventData(event)); err != nil {
+				return fmt.Errorf("存不下来（写 %s）: %w", event.typ, err)
+			}
+			continue
+		}
+		resp := event.response
+		if resp == nil {
+			continue
+		}
+		step++
+		if event.step > 0 {
+			step = event.step
+		}
 		finish = resp.FinishReason
+		if assistantHasPayload(resp.Content, resp.Reasoning, len(resp.ToolCalls)) {
+			if err := logw.Append("assistant/message",
+				session.AssistantMessageEvent(turn, step, assistantBlocks(resp), resp.FinishReason, nil)); err != nil {
+				return fmt.Errorf("存不下来（写回答）: %w", err)
+			}
+		}
 	}
 	return tc.End(finish)
 }

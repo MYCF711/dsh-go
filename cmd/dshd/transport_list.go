@@ -31,14 +31,18 @@ func listSessions(home, cwd string) ([]transport.SessionSummary, error) {
 	out := make([]transport.SessionSummary, 0, len(listings))
 	for _, l := range listings {
 		title := l.Summary
-		if title == "" {
+		if l.Title != nil {
+			title = *l.Title
+		} else if title == "" {
 			title = untitled
 		}
 		out = append(out, transport.SessionSummary{
-			ID:        l.SessionID,
-			Title:     title,
-			CWD:       l.Cwd,
-			UpdatedAt: l.UpdatedAt.Format(time.RFC3339),
+			ID:            l.SessionID,
+			Title:         title,
+			TitleExplicit: l.Title != nil,
+			TitleSource:   l.TitleSource,
+			CWD:           l.Cwd,
+			UpdatedAt:     l.UpdatedAt.Format(time.RFC3339),
 		})
 	}
 	return out, nil

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"dshgo/internal/llm"
 	"dshgo/internal/schema"
@@ -29,6 +30,7 @@ const (
 	EventReasoning    EventKind = "assistant/reasoning"
 	EventText         EventKind = "assistant/text"
 	EventAssistantMsg EventKind = "assistant/message"
+	EventUserMsg      EventKind = "user/message"
 	EventToolCall     EventKind = "tool/call"
 	EventToolResult   EventKind = "tool/result"
 	EventStepEnd      EventKind = "step/end"
@@ -52,6 +54,9 @@ type Event struct {
 	// 以下只在 EventAssistantMsg 上出现：一步的完整产物（写会话用）。
 	Assistant *AssistantTurn
 
+	// 以下只在 EventUserMsg 上出现：下一模型步边界接管的用户消息。
+	User *UserMessage
+
 	// 以下只在 EventUsage 上出现：累计用量与窗口大小。
 	UsageUsed int
 	UsageSize int
@@ -66,6 +71,69 @@ type AssistantTurn struct {
 	Usage     *llm.Usage
 }
 
+// UserMessage 是一条待注入当前 turn 的用户消息。Data 由调用方持久化，agent 不解释。
+type UserMessage struct {
+	Message llm.Message
+	Data    any
+}
+
+// ErrSteerClosed 表示 steer 信箱已经关闭，不再接受消息。
+var ErrSteerClosed = errors.New("agent: steer inbox closed")
+
+// SteerInbox 在当前 turn 内按 FIFO 接收用户消息；Run 返回时关闭并清空未消费项。
+type SteerInbox struct {
+	mu     sync.Mutex
+	items  []UserMessage
+	closed bool
+}
+
+// NewSteerInbox 创建一个初始开放的 steer 信箱。
+func NewSteerInbox() *SteerInbox {
+	return &SteerInbox{}
+}
+
+// Submit 在信箱开放时追加一条消息；关闭后必定返回 ErrSteerClosed。
+func (s *SteerInbox) Submit(item UserMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrSteerClosed
+	}
+	s.items = append(s.items, item)
+	return nil
+}
+
+// Close 幂等关闭信箱，并丢弃所有尚未消费的消息。
+func (s *SteerInbox) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	s.items = nil
+}
+
+// drain 取出当前已有消息。信箱保持开放，Submit 可在下一边界被接管。
+func (s *SteerInbox) drain() []UserMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items := s.items
+	s.items = nil
+	return items
+}
+
+// drainOrClose 与 Submit 使用同一把锁：有消息就原子取走并继续 turn，
+// 没有消息就关闭；此后的 Submit 不可能成功却错过收尾边界。
+func (s *SteerInbox) drainOrClose() ([]UserMessage, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.items) == 0 {
+		s.closed = true
+		return nil, false
+	}
+	items := s.items
+	s.items = nil
+	return items, true
+}
+
 // Loop 是一次会话的驱动器。
 type Loop struct {
 	Chat   Chat
@@ -75,6 +143,9 @@ type Loop struct {
 	Project func(spi.Result) []spi.Block
 	// Model 与系统提示由调用方给；Loop 不猜。
 	Model string
+	// Capacity 是调用方显式声明的容量；零值字段由 llm 的唯一解析点补全。
+	// 未声明自定义模型的 MaxOutput 会进入常规请求的 MaxTokens。
+	Capacity llm.ModelCapacity
 	// Reasoning 是推理强度（网关的 reasoning_effort）。空 = 不带这个参数。
 	// 不是所有模型都认它，所以只能由调用方显式开。
 	Reasoning string
@@ -87,6 +158,8 @@ type Loop struct {
 	// 空字符串不算错——单会话场景（`dshd run`）本来就是匿名的。
 	SessionID string
 	MaxSteps  int
+	// Steers 非空时，在当前 turn 的下一模型步边界注入用户消息。
+	Steers *SteerInbox
 	// Emit 观测量；返回错误即中断整个 turn。
 	Emit func(Event) error
 	// lastImages 暂存"上一步工具产出的图片"，由 runTool2 写、调用方读走即清。
@@ -97,6 +170,19 @@ type Loop struct {
 	// 为什么放在 Loop 里：压缩是**策略**（选区间 + 生成摘要），
 	// 但"什么时候压"必须由跑 turn 的人决定——它才知道预算和会话文件在哪。
 	Compact func(ctx context.Context, step int, history []llm.Message) ([]llm.Message, error)
+	// PreStep 可选：每一步模型请求**发出之前**调用（官方 0.2.2 #78
+	// `session-checkpoint-policy` 的 `agent/pre-step` 钩子）。
+	//
+	// 官方原件（asar 只读解出，dsh-session-checkpoint-policy/lib/index.js:67-70）：
+	//
+	//	ctx.on("agent/pre-step", async ({ agent }, next) => {
+	//	    await ctx.sessions.flush(agent.session);
+	//	    return next();
+	//	});
+	//
+	// 返回错误即中止本轮：模型请求一次都不派发（fail-closed）。放在这里而不是
+	// 各入口各写一遍，是因为"每一步都要"这件事只由循环知道——入口只看得见第一步。
+	PreStep func(ctx context.Context, step int) error
 }
 
 func (l *Loop) emit(ev Event) error {
@@ -113,10 +199,13 @@ func (l *Loop) maxSteps() int {
 	return 32
 }
 
-// Run 跑一个 turn：直到模型不再请求工具，或步数用尽。
+// Run 跑一个 turn：直到模型不再请求工具且没有待接管 steer，或步数用尽。
 //
 // messages 会被追加（assistant 消息与 tool 结果都进历史），返回值是新历史。
 func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.Message, error) {
+	if l.Steers != nil {
+		defer l.Steers.Close()
+	}
 	// 工具靠这个知道"我是哪个会话"；不设的话读信箱一类的工具只能拒绝。
 	if l.SessionID != "" {
 		ctx = spi.WithSession(ctx, l.SessionID)
@@ -124,12 +213,33 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 	if l.Chat == nil {
 		return history, fmt.Errorf("agent: 没有配置 Chat")
 	}
+	// 模型在一轮内固定，容量也只解析一次；各 step 复用同一份结果，
+	// 不因其它模型或会话的声明而改变。
+	capacity := llm.ResolveModelCapacity(l.Model, l.Capacity)
 	msgs := append([]llm.Message(nil), history...)
 	if l.System != "" && (len(msgs) == 0 || msgs[0].Role != "system") {
 		msgs = append([]llm.Message{{Role: "system", Content: l.System}}, msgs...)
 	}
 
 	for step := 1; step <= l.maxSteps(); step++ {
+		if err := ctx.Err(); err != nil {
+			return msgs, err
+		}
+		// 官方 #78 agent/pre-step：每一步模型请求之前先让请求前缀耐久。
+		// 放在步首（steer / 压缩 / step-start 之前）：这一步里的**任何**模型
+		// 请求（包括压缩用的侧查询）都在耐久边界之后；失败即整步不派发。
+		if l.PreStep != nil {
+			if err := l.PreStep(ctx, step); err != nil {
+				return msgs, fmt.Errorf("第 %d 步请求前落盘失败，模型请求未派发: %w", step, err)
+			}
+		}
+		if l.Steers != nil {
+			var err error
+			msgs, err = l.emitSteers(ctx, turn, step, msgs, l.Steers.drain())
+			if err != nil {
+				return msgs, err
+			}
+		}
 		if l.Compact != nil {
 			next, err := l.Compact(ctx, step, msgs)
 			if err != nil {
@@ -147,9 +257,10 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 		}
 
 		req := llm.Request{
-			Model:    l.Model,
-			Messages: msgs,
-			Tools:    l.toolDefs(),
+			Model:     l.Model,
+			Messages:  msgs,
+			Tools:     l.toolDefs(),
+			MaxTokens: capacity.MaxOutput,
 			// 只有显式要了才带：默认不带，避免把不支持该参数的网关打挂。
 			Reasoning: l.Reasoning,
 		}
@@ -178,6 +289,17 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 		if err := emptyResponseErr(resp); err != nil {
 			return msgs, fmt.Errorf("第 %d 步模型调用失败: %w", step, err)
 		}
+
+		// 这是**整个 completed response** 的执行闸门，不是单个 call 的参数检查。
+		// 任一 call 的完整参数不是 JSON object，就在**任何** assistant 消息落历史、
+		// assistant/message 事件、首个 pre-execute/审批/Runner.Run/EventToolCall、
+		// 下一次模型请求之前终止整条响应；否则排在前面的合法 call 会已经产生副作用。
+		// 作废的响应不写历史：它不是模型产出的一部分（下一次请求也不该看见它），
+		// 也不补 tool/result——错误由调用方现有的 turn/error、turn/end{kind:error} 出口记录。
+		if err := validateCompletedToolCalls(resp.ToolCalls); err != nil {
+			return msgs, fmt.Errorf("第 %d 步响应终止: %w", step, err)
+		}
+
 		msgs = append(msgs, assistantMessage(resp))
 
 		var usage *llm.Usage
@@ -194,6 +316,19 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 		}
 
 		if len(resp.ToolCalls) == 0 {
+			// 无工具步在 drain-or-close 之前就已经完成；steer 只会开启下一步，
+			// 不能把上一步的 step/end 留到 steer user 之后或最终 turn/end 才补造。
+			if err := l.emit(Event{Kind: EventStepEnd, Turn: turn, Step: step}); err != nil {
+				return msgs, err
+			}
+			var continueTurn bool
+			msgs, continueTurn, err = l.drainSteersOrClose(ctx, turn, step, msgs)
+			if err != nil {
+				return msgs, err
+			}
+			if continueTurn {
+				continue
+			}
 			if err := l.emit(Event{Kind: EventTurnEnd, Turn: turn, Step: step, Finish: resp.FinishReason}); err != nil {
 				return msgs, err
 			}
@@ -222,8 +357,16 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 		if err := l.emit(Event{Kind: EventStepEnd, Turn: turn, Step: step}); err != nil {
 			return msgs, err
 		}
-		// 工具有话说"必须等人"：本轮到此为止，别再让模型自己往下编。
+		// 工具有话说"必须等人"：有 steer 就接管同 turn，没有才收尾。
 		if stopAfter {
+			var continueTurn bool
+			msgs, continueTurn, err = l.drainSteersOrClose(ctx, turn, step, msgs)
+			if err != nil {
+				return msgs, err
+			}
+			if continueTurn {
+				continue
+			}
 			if err := l.emit(Event{Kind: EventTurnEnd, Turn: turn, Step: step, Finish: "awaiting_user"}); err != nil {
 				return msgs, err
 			}
@@ -232,6 +375,83 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 	}
 
 	return msgs, fmt.Errorf("turn 用满了 %d 步仍未收敛（模型一直在请求工具）", l.maxSteps())
+}
+
+// emitSteers 在一个模型步边界按 FIFO 发事件；只有 emit 成功的项才进入模型历史。
+func (l *Loop) emitSteers(ctx context.Context, turn, step int, msgs []llm.Message, items []UserMessage) ([]llm.Message, error) {
+	for i := range items {
+		if err := ctx.Err(); err != nil {
+			return msgs, err
+		}
+		item := &items[i]
+		if err := l.emit(Event{Kind: EventUserMsg, Turn: turn, Step: step, User: item}); err != nil {
+			return msgs, err
+		}
+		msgs = append(msgs, item.Message)
+	}
+	return msgs, nil
+}
+
+// drainSteersOrClose 决定一个看似收尾的响应是否真的结束当前 turn。
+// 有待接管的 steer 时，它们属于下一模型步，因此事件使用 step+1。
+func (l *Loop) drainSteersOrClose(ctx context.Context, turn, step int, msgs []llm.Message) ([]llm.Message, bool, error) {
+	if l.Steers == nil {
+		return msgs, false, nil
+	}
+	items, ok := l.Steers.drainOrClose()
+	if !ok {
+		return msgs, false, nil
+	}
+	if step >= l.maxSteps() {
+		return msgs, false, fmt.Errorf("turn 用满了 %d 步，仍有 steer 等待下一模型步", l.maxSteps())
+	}
+	msgs, err := l.emitSteers(ctx, turn, step+1, msgs, items)
+	if err != nil {
+		return msgs, false, err
+	}
+	return msgs, true, nil
+}
+
+// ValidateToolCallArguments 是「tool_call.arguments 必须是 JSON 对象」的**唯一**实现。
+//
+// 两个调用点，判据完全相同：
+//   - Loop 在完整响应返回后、任何 assistant 消息/事件/审批/执行之前，对响应里
+//     **全部** tool call 做一次预检（全有或全无）；
+//   - tools.Pipeline 在 pre-execute 之后、Tool.Exec 之前做同一条判据的深防御。
+//
+// 为什么要说"唯一"：这两层各写一份时已经漂过一次——循环把 JSON `null` 判成
+// malformed，流水线却放行（`json.Unmarshal` 到 map 对 `null` 会成功并留下 nil
+// map）。同一个参数在两处得到两种结论，模型看到的行为就取决于走的是哪条路径。
+//
+// 判据只有一条：**有参数时**必须能 unmarshal 成 `map[string]json.RawMessage`
+// 且结果非 nil。没有参数（空串/纯空白）不是"参数坏了"——零参数工具的 tool call
+// 本来就可能是空串，把它当 malformed 会让整条响应作废。
+func ValidateToolCallArguments(args json.RawMessage) error {
+	if len(strings.TrimSpace(string(args))) == 0 {
+		return nil
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(args, &probe); err != nil {
+		return err
+	}
+	if probe == nil {
+		return errors.New("得到 null")
+	}
+	return nil
+}
+
+// validateCompletedToolCalls 校验一次模型响应里的全部完整工具参数。
+//
+// 只判断 JSON object 这一层，不查工具名、schema 或 required 字段；那些仍由
+// Runner 按原有语义处理（未知工具、缺必填字段都是**可恢复**的 tool 错误，
+// 让模型下一步自我纠正，不能被这道格式闸门顺手改成整轮失败）。
+func validateCompletedToolCalls(calls []llm.ToolCall) error {
+	for _, call := range calls {
+		if err := ValidateToolCallArguments(json.RawMessage(call.Function.Arguments)); err != nil {
+			return fmt.Errorf("工具调用 %q 的参数不是 JSON 对象: %w", call.ID, err)
+		}
+	}
+	return nil
 }
 
 // runTool 执行一次工具调用并返回给模型的 tool 消息。
@@ -254,22 +474,32 @@ func (l *Loop) runTool2(ctx context.Context, turn, step int, call llm.ToolCall) 
 	}
 	res, err := l.Runner.Run(ctx, call.Function.Name, json.RawMessage(args))
 	if err != nil {
-		// 失败时**模型看到的**和**客户端看到的**必须是同一份文本。
-		// 早先发给客户端的是工具原始的 res（Summary 为空），
-		// 界面上就是一行红色但什么都不说的记录。
-		shown := spi.Result{
-			Summary: "Error: " + err.Error(),
-			Hint:    res.Hint,
-		}
+		// 失败结果**也是**工具真实产出：从原 res 出发，保留
+		// Text / Data / Artifacts / Truncated / View，只附加 err 与 IsError。
+		// 新建一个只有 Summary/Hint 的空 Result 会把 actual body 整个丢掉——
+		// 而失败时"它到底吐了什么"恰恰是模型判断下一步的唯一依据。
+		// Hint 随原 res 保留；err 与 IsError 仍经 Event 显式传递。
+		shown := res
+		failure := "Error: " + err.Error()
 		// 取消/中断 ≠ 失败：命令可能已经跑完了，只是我们没收到结果。
 		// DSH 的措辞就是这个意思——"结果未知，你自己决定要不要重试"。
 		// 说成 "failed" 会让模型以为命令没执行，从而做出错误判断。
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			shown.Summary = "The tool call was interrupted after it was recorded, but no result was durably recorded. " +
+			failure = "The tool call was interrupted after it was recorded, but no result was durably recorded. " +
 				"Its outcome is unknown. Decide whether to retry from the tool's output or a safer read."
 			shown.Hint = "结果未知：先读一下现场（文件/进程/日志）确认它到底做没做，再决定重试与否"
 		}
+		// 没有真实正文时，错误摘要就是模型能看到的全部内容。
+		if shown.Text == "" {
+			shown.Summary = failure
+		}
 		msg.Content = renderBlocks(l.project(shown))
+		if shown.Text != "" {
+			// ProjectResult 在 Text 非空时**只用** Text，会把错误摘要整条藏掉：
+			// 模型于是只看到工具正文，以为这次调用成功了。失败既有"错在哪"，
+			// 也有工具真实返回了什么，两样都要进模型消息。
+			msg.Content = failure + "\n\n" + msg.Content
+		}
 		_ = l.emit(Event{
 			Kind: EventToolResult, Turn: turn, Step: step,
 			CallID: call.ID, ToolName: call.Function.Name, IsError: true, Err: err, Result: &shown,

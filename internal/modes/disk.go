@@ -18,6 +18,7 @@ type fileMode struct {
 	CopyOf      string   `toml:"copy_of"`
 	Tools       []string `toml:"tools"`
 	Approval    string   `toml:"approval"`
+	Sandbox     string   `toml:"sandbox"`
 	Builtin     bool     `toml:"builtin"`
 }
 
@@ -76,6 +77,7 @@ func LoadDir(dir string) ([]Mode, error) {
 			Description: fm.Description,
 			Tools:       fm.Tools,
 			Approval:    fm.Approval,
+			Sandbox:     fm.Sandbox,
 			Builtin:     false,
 		}
 		if fm.CopyOf != "" {
@@ -89,6 +91,14 @@ func LoadDir(dir string) ([]Mode, error) {
 			if m.Approval == "" {
 				m.Approval = base.Approval
 			}
+			if m.Sandbox == "" {
+				m.Sandbox = base.Sandbox
+			}
+		}
+		// 用户模式的 sandbox 字段必须在装配期就是真值；未知值直接报错，
+		// 不能等到第一次工具调用才发现（那时模型已经看到工具表了）。
+		if _, err := m.SandboxMode(); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 		out = append(out, m)
 	}

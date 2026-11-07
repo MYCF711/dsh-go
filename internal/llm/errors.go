@@ -26,6 +26,11 @@ type GatewayError struct {
 	Code int
 	Body string
 	Err  error
+	// Attempts 是这条请求实际发出的次数：1 表示没有重试（400/422 以外一律是 1）。
+	Attempts int
+	// Adjust 是协商里做过的可选字段回退，例如「去掉 stream_options」。
+	// 它是给人看的：客户端的下一步动作取决于"到底哪个字段被端点拒了"。
+	Adjust []string
 }
 
 // base 去掉尾斜杠，免得文案里出现 `http://x/v1/：`
@@ -55,6 +60,12 @@ func (e *GatewayError) Error() string {
 				b = string(r[:200]) + "…"
 			}
 			msg += "：" + b
+		}
+		if len(e.Adjust) > 0 {
+			// 回退过还失败，必须说清试过什么：否则客户端只会看到"还是 400"，
+			// 不知道该去改哪个开关（或者该换个模型/端点）。
+			msg += fmt.Sprintf("（已做 %d 次可选字段回退：%s；最后一次响应同上）",
+				len(e.Adjust), strings.Join(e.Adjust, "、"))
 		}
 		return msg
 	}

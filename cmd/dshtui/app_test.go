@@ -13,7 +13,9 @@ import (
 // 藏在绘制调用里就没法测了。
 func newTestApp(w, h int) *app {
 	s := &Screen{width: w, height: h}
-	return &app{scr: s, sid: "session-abcdef12"}
+	// 旧布局用例默认钉在日序号 0（bold）；每日轮换用例会显式替换 now。
+	date := time.Date(1970, 1, 1, 12, 0, 0, 0, time.Local)
+	return &app{scr: s, sid: "session-abcdef12", now: func() time.Time { return date }}
 }
 
 // 每屏必须**恰好**是终端高度：多一行会顶掉滚屏，少一行底部会残留上一帧。
@@ -878,8 +880,8 @@ func TestSearchCountsMatchesAndEscClears(t *testing.T) {
 	if strings.Contains(after[len(after)-2], "匹配") {
 		t.Fatalf("退出搜索后状态行不该还留着命中数：%q", after[len(after)-2])
 	}
-	if !strings.HasPrefix(after[len(after)-1], "› ") {
-		t.Fatalf("退出搜索后输入行前缀应回到 ›：%q", after[len(after)-1])
+	if !strings.HasPrefix(after[len(after)-1], markerUser+" ") {
+		t.Fatalf("退出搜索后输入行前缀应回到 %s：%q", markerUser, after[len(after)-1])
 	}
 }
 
@@ -913,11 +915,11 @@ func TestTrimKeepsMetaAligned(t *testing.T) {
 	if len(a.lines) != maxLines || len(a.meta) != maxLines {
 		t.Fatalf("裁剪后 lines=%d meta=%d，应都为 %d", len(a.lines), len(a.meta), maxLines)
 	}
-	if strings.Contains(strings.Join(a.view(), "\n"), "← ok") {
+	if strings.Contains(strings.Join(a.view(), "\n"), "⎿ ok") {
 		t.Fatal("折叠时结果行不该出现")
 	}
 	a.handleRune(20)
-	if !strings.Contains(strings.Join(a.view(), "\n"), "← ok") {
+	if !strings.Contains(strings.Join(a.view(), "\n"), "⎿ ok") {
 		t.Fatal("展开后结果行没出现——meta 很可能和 lines 错位了")
 	}
 }
@@ -964,10 +966,10 @@ func TestCtxPercent(t *testing.T) {
 		used, window int
 		want         string
 	}{
-		{0, 0, "?"},         // 什么都还不知道
-		{12000, 0, "12.0k"}, // 知道用了多少，不知道上限 → 只报数字
-		{50000, 100000, "▓▓▓▓▓░░░░░ 50% (50.0k/100.0k)"},    // 两样都知道 → 画条
-		{200000, 100000, "▓▓▓▓▓▓▓▓▓▓ 100% (200.0k/100.0k)"}, // 超了也不画成 120%
+		{0, 0, "?"},                              // 什么都还不知道
+		{12000, 0, "12.0k"},                      // 知道用了多少，不知道上限 → 只报数字
+		{50000, 100000, "50.0k/100.0k 50.0%"},    // 两样都知道 → 读数（条画在 footer 第一行）
+		{200000, 100000, "200.0k/100.0k 100.0%"}, // 超了也不报成 120%
 	}
 	for _, c := range cases {
 		if got := ctxPercent(c.used, c.window); got != c.want {
@@ -1042,8 +1044,9 @@ func TestPageUpMovesBackOneScreen(t *testing.T) {
 	}
 
 	status := after[len(after)-2]
-	if !strings.Contains(status, "↑ 回看中（还有 9 行）· PgDn/Ctrl+End 回到底部") {
-		t.Fatalf("状态行没报回看与剩余行数：%q", status)
+	// 报出的数必须就是本次 PgUp 跨过的一屏行数，而不是钉死旧 footer 的 9 行。
+	if want := fmt.Sprintf("↑ 回看中（还有 %d 行）· PgDn/Ctrl+End 回到底部", body); !strings.Contains(status, want) {
+		t.Fatalf("状态行没报回看与剩余行数（应为 %q）：%q", want, status)
 	}
 }
 
@@ -1139,7 +1142,7 @@ func TestCtrlEndResumesFollowing(t *testing.T) {
 
 	a.handleSpecial("pgup")
 	a.handleSpecial("pgup")
-	a.handleSpecial("end")
+	a.handleSpecial("ctrl+end")
 	if a.scroll != 0 {
 		t.Fatalf("Ctrl+End 之后 scroll 应为 0，实际 %d", a.scroll)
 	}
@@ -1157,7 +1160,7 @@ func TestCtrlEndResumesFollowing(t *testing.T) {
 	}
 
 	// Ctrl+Home 到最上面：首行就是第一行
-	a.handleSpecial("home")
+	a.handleSpecial("ctrl+home")
 	if a.view()[0] != all[0] {
 		t.Fatalf("Ctrl+Home 之后首行应为 %q，实际 %q", all[0], a.view()[0])
 	}
@@ -1277,7 +1280,7 @@ func TestReadKeysMapsScrollKeys(t *testing.T) {
 	for s := range sch {
 		specials = append(specials, s)
 	}
-	want := "pgup,pgdn,home,end,down,up,esc"
+	want := "pgup,pgdn,ctrl+home,ctrl+end,down,up,esc"
 	if got := strings.Join(specials, ","); got != want {
 		t.Fatalf("按键解码 = %v，期望 %s", specials, want)
 	}

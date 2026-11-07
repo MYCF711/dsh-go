@@ -66,15 +66,15 @@ import (
 
 // 这三个由 -ldflags 覆盖（scripts/build.sh），默认值给 go run 用。
 var (
-	version   = "0.2.1-go.31"
+	version   = "0.2.2-go.1"
 	commit    = "dev"
 	buildTime = "unknown"
 )
 
-// productName 是**面向用户的产品名**，也是产物的文件名（Windows 上是 `DSH GO.exe`）。
+// productName 是**面向用户的产品名**，用于 `--version` 首词和版本资源。
 //
-// 它必须与 scripts/build.sh 那张 PRODUCTS 表逐字一致（空格、大小写都算）：
-// 人认识这个程序靠的是任务管理器和文件名，版本行再写另一个称呼就等于同名两物。
+// 新宿主产物按用户要求命名为 `dsh-<版本号>.exe`（构建脚本 PRODUCTS 的 artifact
+// 字段），不再把 dshd.exe 当作新产物名；`--version` 首词仍与 TUI/版本资源一致。
 // 子命令用法里的 `dshd` 是命令行里的 token（脚本、文档照旧），不是产品名。
 const productName = "DSH GO"
 
@@ -97,6 +97,12 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 			// 放 temp 里模型读不到自己刚被外置的结果。
 			SpillDir: filepath.Join(home, "artifacts"),
 			MaxChars: maxChars,
+			// 官方 0.2.2 #78 `session-checkpoint-policy` 的 `tools/execute` 钩子：
+			// 顶层调用的工具体是副作用边界，执行前先让请求前缀耐久；
+			// 失败即零执行（pipeline 里 fail-closed，见 modules/tools/pipeline.go）。
+			BeforeDispatch: func(_ context.Context, call *spi.Call) error {
+				return writeDurableCheckpointForSession(home, call.Session, nil)
+			},
 		}),
 		bash.Module(wd, bash.Options{}),
 		local.Module(wd, local.WithExtraReadRoot(filepath.Join(home, "artifacts"))),
@@ -171,6 +177,12 @@ func main() {
 		err = cmdDoctor(os.Args[2:])
 	case "serve":
 		err = cmdServe(os.Args[2:])
+	case "plugins":
+		// runPluginsCLI 自己写成功/四字段错误信封；不能再让 main 的错误
+		// 出口追加一行文本或改写退出码，否则 CLI 的 JSON 契约就被破坏。
+		if code := cmdPlugins(os.Args[2:]); code != 0 {
+			os.Exit(code)
+		}
 	// `version` 与 `--version` 同一件事：TUI 只认 `--version`（它是旗标式 CLI），
 	// 宿主是子命令式。两边都认同一个探针，scripts/build.sh 才能用一条命令
 	// 核对"产物名 = 版本行首词"，否则那一栏对一个程序是假的。
@@ -205,10 +217,33 @@ func usage() {
   dshd run --prompt "<话>" [--max-steps N]    跑一个真实 turn（模型 + 工具 + 结果回灌）
   dshd acp                                    在 stdin/stdout 上跑 ACP 服务端（stdout 只放协议）
   dshd doctor [--home X] [--base URL]        自检：home/会话/写锁/网关/模块，每项给下一步
+  dshd plugins --root <dir> <action> [flags] 管理受限本地插件包；root 必须显式给出
   dshd wasm inspect --module <path>          魔数/sha256/导出函数名（按名字排序）
   dshd wasm call --module <path> --fn <f>    调用导出函数；--args 2,3 --timeout 2s 可选，返回值打成一行（如 = 5）
   dshd version                               版本
 `)
+}
+
+const pluginsUsage = `dshd plugins --root <dir> <action> [flags]
+
+action 与参数：
+  list
+  install --path <本地私有包目录>
+  enable|disable|uninstall --id <插件 id>
+  update --id <插件 id> --path <本地私有包目录>
+  restore --id <插件 id> [--version <保留版本>]
+  reconcile
+
+--root 必须显式给出；不会从真实用户 home 推导。成功在 stdout 输出
+{"result":…}，失败在 stderr 输出四字段 error 并退出 1。
+`
+
+func cmdPlugins(argv []string) int {
+	if len(argv) == 1 && (argv[0] == "--help" || argv[0] == "-h" || argv[0] == "help") {
+		fmt.Fprint(os.Stdout, pluginsUsage)
+		return 0
+	}
+	return runPluginsCLI(argv, os.Stdout, os.Stderr)
 }
 
 // defaultHome 是子命令（modules/tools/exec）用的 home：
@@ -448,7 +483,9 @@ func cmdRun(argv []string) (retErr error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	manifest := fs.String("manifest", "dsh.toml", "manifest 路径")
 	prompt := fs.String("prompt", "", "用户输入")
-	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "模型 id")
+	promptContentFile := fs.String("prompt-content-file", "", "serve 父进程交接的有序 content blocks（内部参数）")
+	turnID := fs.String("turn-id", "", "serve 当前 turn 的宿主身份（steer IPC 内部参数）")
+	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"), "模型 id")
 	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
 	maxSteps := fs.Int("max-steps", 8, "最多几步")
 	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
@@ -462,6 +499,10 @@ func cmdRun(argv []string) (retErr error) {
 	// 而环境变量在 --help 里看不见，等于"藏起来的开关"。
 	reasoningEffort := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
 		"推理强度：空=不要（默认）| xhigh | max。要了才把 reasoning 写进日志与流")
+	// serve 父进程把本轮解析出的 catalog level 与 wire 一起交给真正发请求的
+	// cmdRun。selection 在每个 step/start 处落盘，不能由父进程回合后按 store 补造。
+	recordEffort := fs.Bool("record-effort", false, "serve 内部：逐步记录真实模型请求 selection")
+	effortLevel := fs.String("effort-level", "", "serve 内部：本次请求实际使用的 catalog effort level")
 	toolSchema := fs.String("tool-schema", defaultToolSchema, "工具表形态（旧名，等价 --tools-mode）：compact=压掉参数说明与冗余 schema 骨架 | full=完整")
 	// merged 是第三档：把同族工具（watch/hindsight/schedule/team_task）各合成
 	// 一个工具，多一个 action 参数。只改模型看到的表，执行仍按原工具名走。
@@ -477,7 +518,23 @@ func cmdRun(argv []string) (retErr error) {
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
-	if *prompt == "" {
+	if os.Getenv("DSHD_STEER_STDIO") == "1" && *turnID == "" {
+		return fmt.Errorf("steer IPC 要求显式 --turn-id")
+	}
+	var err error
+	runPrompt := *prompt
+	var runContent []session.ContentBlock
+	var runParts []llm.MessagePart
+	if *promptContentFile != "" {
+		if *prompt != "" {
+			return fmt.Errorf("--prompt 与 --prompt-content-file 不能同时指定")
+		}
+		runContent, runParts, err = loadPromptPartsForRun(*home, *promptContentFile)
+		if err != nil {
+			return err
+		}
+	}
+	if runPrompt == "" && len(runContent) == 0 {
 		return fmt.Errorf("缺 --prompt")
 	}
 	tm, err := resolveToolsMode(*toolsMode, *toolSchema)
@@ -523,7 +580,29 @@ func cmdRun(argv []string) (retErr error) {
 	}
 	k := kernel.New("dshd")
 	root := k.Root()
-	defer root.Dispose()
+	var jobsPersistSession string
+	defer func() {
+		// Provide 的 disposer 会注销 spi.JobKey；必须在 Dispose 前保留实例，
+		// 再等 Close 收工后读最终 done/exit，不能从已撤销的内核重新 Inject。
+		var job spi.Job
+		if jobsPersistSession != "" {
+			injected, err := kernel.Inject(root, spi.JobKey)
+			switch {
+			case err != nil:
+				retErr = errors.Join(retErr, fmt.Errorf("保留任务输出前注入 jobs 能力失败: %w", err))
+			case injected == nil:
+				retErr = errors.Join(retErr, fmt.Errorf("保留任务输出前注入 jobs 能力失败: 服务为 nil"))
+			default:
+				job = injected
+			}
+		}
+		root.Dispose()
+		if job != nil {
+			if err := persistJobOutputs(job, *home, jobsPersistSession); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("保留 cmdRun 任务输出失败: %w", err))
+			}
+		}
+	}()
 	if _, err := kernel.Assemble(root, mods); err != nil {
 		return err
 	}
@@ -572,6 +651,24 @@ func cmdRun(argv []string) (retErr error) {
 		return err
 	}
 	defer logw.Close()
+	jobsStdio := os.Getenv("DSHD_JOBS_STDIO") == "1"
+	steerStdio := os.Getenv("DSHD_STEER_STDIO") == "1"
+	if jobsStdio || steerStdio {
+		// 所有父→子请求共享唯一 stdin 读端，避免 buffered reader 抢读/丢行。
+		startStdinDispatcher()
+	}
+	if jobsStdio {
+		// jobs 通道必须在 agent loop 开始前建立；旧实现到 loop 结束才启动，
+		// 导致真正运行中的任务既查不了输出也停不了。
+		go serveJobsOut(root, *home, sessID)
+		jobsPersistSession = sessID
+	}
+	var steerInbox *agent.SteerInbox
+	if steerStdio {
+		steerInbox = agent.NewSteerInbox()
+		defer steerInbox.Close()
+		go serveSteerIPC(runCtx, steerReqCh, os.Stderr, steerInbox, *home, sessID, *turnID)
+	}
 
 	// 续会话时必须把**已有历史**读进来，否则模型看到的是一张白纸：
 	// 它会在旧日志上追加新消息，却不知道前面聊过什么（实测会回答"这是第一条消息"）。
@@ -664,10 +761,30 @@ func cmdRun(argv []string) (retErr error) {
 			retErr = cerr
 		}
 	}()
-	if err := logw.Append("user/message", session.UserMessage([]spi.Block{{Type: "text", Text: *prompt}})); err != nil {
+	if len(runContent) > 0 {
+		err = logw.Append("user/message", session.UserContentMessage(runContent))
+	} else {
+		err = logw.Append("user/message", session.UserMessage([]spi.Block{{Type: "text", Text: *prompt}}))
+	}
+	if err != nil {
+		return err
+	}
+	if err := captureRewindCheckpointForLog(*home, logw); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+	}
+	// 官方 0.2.2 #78 `llm/stream`：请求前缀先耐久，再派发模型请求。
+	// 与 serve 的四个 prompt 入口同一条判据；失败即 fail-closed（这一轮不派发）。
+	runCheckpoint, err := durableCheckpointRequestForRun(runPrompt, runContent)
+	if err != nil {
+		return err
+	}
+	if err := writeDurableCheckpointForSession(*home, sessID, &runCheckpoint); err != nil {
 		return err
 	}
 	var lastCallSeq int64
+	// delta index 在同一步的 reasoning/text 间共享。
+	deltaIndexes := map[string]int{}
+	stepKey := func(turn, step int) string { return fmt.Sprintf("%d/%d", turn, step) }
 	// 一轮的累计账（给 stats 行用）
 	var toolCalls, inTokens, outTokens int
 
@@ -708,9 +825,12 @@ func cmdRun(argv []string) (retErr error) {
 	subp.Bind(&subRunner{
 		chat: chat, tools: table, runner: loopRunner,
 		model: *model, maxSteps: 8, timeout: 5 * time.Minute,
+		// 可续问子会话的落点。空着会让 Continuable 明确失败——所以必须给。
+		home: *home,
 	})
 	loop := &agent.Loop{
 		Chat:      chat,
+		Steers:    steerInbox,
 		Compact:   runCompactor(chat, logw, *autoCompact, *model, meter),
 		Tools:     table,
 		Runner:    loopRunner,
@@ -718,6 +838,11 @@ func cmdRun(argv []string) (retErr error) {
 		Model:     *model,
 		System:    sys,
 		SessionID: sessID,
+		// 官方 0.2.2 #78 `agent/pre-step`：每一步模型请求之前先让请求前缀耐久。
+		// 第一步与 prompt 侧车同锚点（幂等命中），第二步起各自落一份。
+		PreStep: func(context.Context, int) error {
+			return writeDurableCheckpointForSession(*home, sessID, nil)
+		},
 		// 这里显式关掉循环自带的压表：表在 cmdRun 里已经被 tightenTable 投影过一遍。
 		// 两条路都调用 internal/schema 里同一条判断（区分"注解"与"名叫 description 的参数"），
 		// 但 tightenSchema 还会额外删冗余骨架；同时开会把后一遍的骨架删除覆盖掉，
@@ -728,6 +853,34 @@ func cmdRun(argv []string) (retErr error) {
 		MaxSteps:  *maxSteps,
 		Emit: func(e agent.Event) error {
 			switch e.Kind {
+			case agent.EventStepStart:
+				if *recordEffort {
+					// 这里的 model/level 与下方 loop.Request 使用同一份本轮值；
+					// 每个首步、工具后续步、steer 后续步都在真实调用前各记一次。
+					selection := map[string]any{"model": *model}
+					if *effortLevel != "" {
+						selection["reasoningEffort"] = *effortLevel
+					}
+					if err := logw.Append("model/selection", selection); err != nil {
+						return fmt.Errorf("写第 %d 步真实 effort selection: %w", e.Step, err)
+					}
+				}
+				return logw.Append("step/start", map[string]any{"turn": e.Turn, "step": e.Step})
+			case agent.EventReasoning, agent.EventText:
+				key := stepKey(e.Turn, e.Step)
+				index := deltaIndexes[key]
+				deltaIndexes[key] = index + 1
+				return logw.Append(string(e.Kind), map[string]any{
+					"turn": e.Turn, "step": e.Step, "index": index,
+					"text": e.Text, "model": *model,
+				})
+			case agent.EventStepEnd:
+				return logw.Append("step/end", map[string]any{"turn": e.Turn, "step": e.Step})
+			case agent.EventUserMsg:
+				if e.User == nil {
+					return fmt.Errorf("steer user/message 缺持久数据")
+				}
+				return logw.Append("user/message", e.User.Data)
 			case agent.EventAssistantMsg:
 				a := e.Assistant
 				// 铺块只有一份：serve_turn.assistantBlocksFrom（思考 → 正文 → 调用）。
@@ -786,9 +939,15 @@ func cmdRun(argv []string) (retErr error) {
 				} else {
 					blocks = []spi.Block{{Type: "text", Text: "（无结果）"}}
 				}
-				return logw.Append("tool/result",
-					session.ToolResultEventWithView(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}, viewOf(e.Result)))
+				if err := logw.Append("tool/result",
+					session.ToolResultEventWithView(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}, viewOf(e.Result))); err != nil {
+					return err
+				}
+				emitJobs(root)
+				return nil
 			case agent.EventTurnEnd:
+				// step/end 只消费 agent 在真实完成边界发出的事件；模型错误、
+				// malformed response 等失败路径绝不在这里补造成功 step/end。
 				// 结局写 finish 对应的 kind，不是恒写 completed：
 				// 被 max_tokens 截断的回合要留成 max-tokens，否则客户端会把它当完整回答。
 				//
@@ -811,7 +970,11 @@ func cmdRun(argv []string) (retErr error) {
 			toolCalls, inTokens, outTokens)
 	}()
 
-	hist := append(append([]llm.Message(nil), baseHist...), llm.Message{Role: "user", Content: *prompt})
+	runMessage := llm.Message{Role: "user", Content: runPrompt}
+	if *promptContentFile != "" {
+		runMessage = llm.Message{Role: "user", Parts: runParts}
+	}
+	hist := append(append([]llm.Message(nil), baseHist...), runMessage)
 	hist, err = loop.Run(runCtx, 1, hist)
 	if err != nil {
 		return err
@@ -819,7 +982,6 @@ func cmdRun(argv []string) (retErr error) {
 	// 把后台任务清单推给父进程（serve 的 jobs.list 读它）。
 	// **失败不影响主流程**：这只是给界面看的信息，不是本轮结果。
 	emitJobs(root)
-	go serveJobsOut(root)
 	if err := logw.Close(); err != nil {
 		return err
 	}
@@ -1059,7 +1221,7 @@ func cmdSessionCompact(argv []string) error {
 	auto := fs.Bool("auto", false, "自动选区间并用模型生成摘要")
 	keep := fs.Int("keep", 6, "--auto 时保留最近多少条")
 	maxMessages := fs.Int("max", 0, "--auto 时表面超过多少条才触发（0=不设）")
-	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017"), "摘要模型")
+	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"), "摘要模型")
 	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
 	dryRun := fs.Bool("dry-run", false, "只打印计划，不写盘")
 	force := fs.Bool("force", false, "确认要改动 sessions 目录下的文件")
@@ -1352,6 +1514,57 @@ func checkHome(home string) error {
 	}
 	if !st.IsDir() {
 		return fmt.Errorf("--home %q 是一个文件，不是目录；换一个目录路径（或先删掉它）", home)
+	}
+	return nil
+}
+
+// ---- 官方 0.2.2 #78 `session-checkpoint-policy`：CLI 入口的 durability 侧车 ----
+//
+// 官方原件（asar 只读解出，dsh-session-checkpoint-policy/lib/index.js）：
+//
+//	:26-31  llm/stream 之前 flush；:61-66 tools/execute 之前 flush + aborted 判定；
+//	:67-70  agent/pre-step 每一步之前 flush。
+//
+// serve 那条入口已经由 withDurableCheckpointOptions（serve_checkpoint.go）包住；
+// `dshd run` 与 `dshd acp` 之前**没有**侧车，所以「模型请求发出前前缀已经耐久」
+// 在这两个入口上根本不成立。这里补的就是它们，判据与 serve 完全同源：
+//   - 会话解析不出来 → 不落盘也不报错（内层给出的四字段错误更准确）；
+//   - 落盘失败 → 响亮失败，调用方据此**不派发**；
+//   - 成功 → 同一锚点重复调用是幂等命中（同一轮只落一份）。
+
+// durableCheckpointRequestForRun 把 `dshd run` 的请求压成有界身份。
+//
+// 与 serve 的 checkpointRequestForBlocks 同一形状：有 content blocks 用 blocks
+// 的 canonical JSON，纯文本用 text。两条入口的请求身份必须同源同形，
+// 否则崩溃恢复时「同一轮」在两个入口上对不上。
+func durableCheckpointRequestForRun(prompt string, blocks []session.ContentBlock) (session.CheckpointRequest, error) {
+	if len(blocks) == 0 {
+		return session.NewCheckpointRequest("text", []byte(prompt)), nil
+	}
+	raw, err := json.Marshal(blocks)
+	if err != nil {
+		return session.CheckpointRequest{}, fmt.Errorf("durability checkpoint 序列化内容块: %w", err)
+	}
+	return session.NewCheckpointRequest("blocks", raw), nil
+}
+
+// writeDurableCheckpointForSession 是「按会话 id 找文件再落盘」的唯一实现
+// （run / acp 的 prompt、pre-step、tools/execute 三条时机共用）。
+//
+// req 为 nil 表示这次 flush 没有请求身份（tools/execute 与 agent/pre-step
+// 官方就只是 flush，没有请求载荷）：侧车仍记前缀字节与事件数，
+// 同一锚点先到的身份会赢（重试时文案可能改过，锚点相同就是同一轮）。
+func writeDurableCheckpointForSession(home, sessionID string, req *session.CheckpointRequest) error {
+	if sessionID == "" {
+		return fmt.Errorf("durability checkpoint 需要会话 id")
+	}
+	path, err := newSessionSource(home, "").resolve(sessionID)
+	if err != nil {
+		// 不吞错也不改写语义：会话不存在时内层的错误更准确（ErrNoSuchSession）。
+		return nil
+	}
+	if _, err := session.WriteDurableCheckpoint(home, path, req); err != nil {
+		return fmt.Errorf("durability checkpoint 落盘失败: %w", err)
 	}
 	return nil
 }

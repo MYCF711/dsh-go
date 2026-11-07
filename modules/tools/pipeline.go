@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"dshgo/internal/agent"
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
 )
@@ -21,6 +23,95 @@ import (
 type Options struct {
 	SpillDir string // 外置目录；空 = <temp>/dshd-spill
 	MaxChars int    // 超过就外置；<=0 = 4000
+	// ToolTimeout 是**每一次工具调用**的统一截止时间（timeout-policy）。
+	//
+	// 三值约定（本仓统一）：0 = 未配置，按 DSHD_TOOL_TIMEOUT_SECS → 内置默认；
+	// 负值 = 明确关闭（不装 deadline，行为退回"只看各工具自己"）；正值 = 这个预算。
+	//
+	// 为什么要有这一层：bash/web/MCP 各自有超时，但**流水线这一层没有**。任何一个
+	// 不自带超时的工具（新工具、第三方工具、卡在无 deadline 的网络读上、卡在第三方
+	// 库里的调用）挂住，整个 turn 就跟着挂住——模型在等一个永远不会来的结果，人看到
+	// 的是"卡死了"，而且没有任何一层会说话。这一层是最后一道网。
+	ToolTimeout time.Duration
+	// BeforeDispatch 可选：工具体执行**之前**的最后一道闸（官方 0.2.2 #78
+	// `session-checkpoint-policy` 的 `tools/execute` 钩子）。
+	//
+	// 官方原件（asar 只读解出，dsh-session-checkpoint-policy/lib/index.js:61-66）：
+	//
+	//	ctx.on("tools/execute", async (exec, next) => {
+	//	    if (exec.agent === void 0 || exec.parent !== void 0) return next();
+	//	    await ctx.sessions.flush(exec.agent.session);
+	//	    if (exec.signal.aborted) return abortedBeforeDispatchResult();
+	//	    return next();
+	//	});
+	//
+	// 三条语义，缺一条这个钩子就等于没接：
+	//   - 顶层调用先落盘；返回错误 ⇒ 工具体**零执行**（fail-closed 在副作用边界上）；
+	//   - 落盘成功之后若这一轮已 abort ⇒ 返回 TOOL_ABORTED_BEFORE_DISPATCH，
+	//     工具体同样零执行；
+	//   - 无会话（agent === void 0）与嵌套子调用（parent !== void 0）原样放行，
+	//     嵌套复用外层那次已经耐久的调用，不重复落盘。
+	BeforeDispatch func(ctx context.Context, call *spi.Call) error
+}
+
+// ToolAbortedBeforeDispatch 是官方 #78 在「flush 成功、但这一轮已 abort」时
+// 返回给模型/客户端的错误码（原词来自 @deepseek-ai/dsh-tools）。
+const ToolAbortedBeforeDispatch = "TOOL_ABORTED_BEFORE_DISPATCH"
+
+// ErrToolAbortedBeforeDispatch 是上面那个 code 的错误值形态；
+// 调用方用 errors.Is 认它，用 Result.Data["code"] 拿官方原词。
+var ErrToolAbortedBeforeDispatch = errors.New("tool call aborted before dispatch")
+
+// abortedBeforeDispatchResult 是官方 abortedBeforeDispatchResult 的 Go 投影
+// （lib/index.js:75-84）：模型可见正文、isError、AbortError + 官方 code 三样都要有。
+func abortedBeforeDispatchResult() spi.Result {
+	return spi.Result{
+		Summary: "工具调用在派发前被取消（未执行）",
+		Text:    "Error: tool call aborted before dispatch",
+		Data: map[string]any{
+			"name": "AbortError",
+			"code": ToolAbortedBeforeDispatch,
+		},
+		// R3：失败必须给下一步。取消是"不确定它做没做"里最确定的一种——
+		// 它就是没做，所以下一步是"要看结果就重新发起"。
+		Hint: "这一轮在工具体执行前被取消，它**没有执行过**、没有任何副作用；" +
+			"需要结果就重新发起调用（不是重试一次已完成的调用）",
+	}
+}
+
+// defaultToolTimeout 是统一截止时间的默认预算。
+//
+// 取值不是拍脑袋：本仓里自带超时的工具，最长的一条是 bash 的 idle 预算上限
+// 15 分钟（modules/exec/bash/tools.go:124，默认 10 分钟），execlit/pwsh 的命令
+// 上限也是 10 分钟。统一层必须**明显宽于**这些，否则它就变成了"悄悄改掉各工具
+// 的超时语义"——一条按 15 分钟预算跑的命令会在 10 分钟时被上层掐掉，而工具参数里
+// 仍写着 timeout_seconds=900，模型和人都不明白为什么提前死了。30 分钟 = 最长
+// 自带预算的 2 倍，只对**真正挂死**的调用生效。
+const defaultToolTimeout = 30 * time.Minute
+
+// toolTimeoutEnv 让运维不改代码就能调这一个值（单位：秒）。
+//
+// 空/非法 = 用内置默认；0 = 同上（本仓三值约定：0 是"未定义"）；负值 = 关闭。
+const toolTimeoutEnv = "DSHD_TOOL_TIMEOUT_SECS"
+
+// toolTimeoutFromEnv 解析环境变量；解析不了就当没配（宁可留默认，也不静默关掉
+// 唯一一层兜底——把笔误变成"超时永远不生效"是最坏的失败方式）。
+func toolTimeoutFromEnv() time.Duration {
+	v := strings.TrimSpace(os.Getenv(toolTimeoutEnv))
+	if v == "" {
+		return defaultToolTimeout
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return defaultToolTimeout
+	}
+	switch {
+	case n < 0:
+		return -1 // 明确关闭
+	case n == 0:
+		return defaultToolTimeout
+	}
+	return time.Duration(n) * time.Second
 }
 
 func (o Options) withDefaults() Options {
@@ -29,6 +120,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.MaxChars <= 0 {
 		o.MaxChars = 4000
+	}
+	if o.ToolTimeout == 0 {
+		o.ToolTimeout = toolTimeoutFromEnv()
 	}
 	return o
 }
@@ -45,11 +139,23 @@ type Pipeline struct {
 	mu         sync.Mutex
 	violations []string // R3 违规记录：失败却没给 Hint
 	seq        int
+
+	// repeat 是 repeat-tool-reminder 的计数器（官方 0.2.2 base #83）。
+	//
+	// 为什么挂在 Pipeline 上而不是包级变量：一个进程里可能同时有多个内核、
+	// 多个会话在跑工具。包级计数会让 A 会话的重复把 B 会话的链冲掉。
+	repeat *repeatGuard
 }
 
 // NewPipeline 造一条流水线。opts 会被补默认值。
 func NewPipeline(reg spi.ToolRegistry, bus *kernel.Bus, opts Options) *Pipeline {
-	return &Pipeline{reg: reg, bus: bus, opts: opts.withDefaults(), log: slog.Default()}
+	return &Pipeline{
+		reg:    reg,
+		bus:    bus,
+		opts:   opts.withDefaults(),
+		log:    slog.Default(),
+		repeat: newRepeatGuard(),
+	}
 }
 
 // Violations 返回 R3 违规（失败路径没有 Hint）的快照，供测试与诊断使用。
@@ -59,8 +165,25 @@ func (p *Pipeline) Violations() []string {
 	return append([]string(nil), p.violations...)
 }
 
+// recordR3Violation 记一笔"工具失败却没给 Hint"。
+//
+// 记账点必须跟着**兜底的那个地方**走：统一截止时间那一层（executeWithDeadline）
+// 会给漏 Hint 的失败补一句通用话术，补完之后 Run 里那段 `Hint == ""` 就再也不会
+// 成立——如果只在 Run 里记账，R3 的"哪个工具漏了 Hint"从此永远查不出来。
+func (p *Pipeline) recordR3Violation(name string, cause error) {
+	p.mu.Lock()
+	p.violations = append(p.violations, name)
+	p.mu.Unlock()
+	p.log.Warn("工具失败但没有给 Hint（R3）", "tool", name, "error", cause)
+}
+
 // Run 是唯一执行入口：绕过它直接调 Tool.Exec 会跳过审批、沙箱、截断与提示。
-func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
+//
+// 返回值用具名形式，是为了让收尾那层（repeat-tool-reminder）能覆盖**每一条**
+// 返回路径（包括被 veto、工具名不存在、参数不是 JSON 的那些），同时又不必在每个
+// 分支里各插一行——那样既容易漏，也会把 R3 那套"每个 error 分支紧邻赋 Hint"
+// 的扫描形状改坏。
+func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (res spi.Result, err error) {
 	call := &spi.Call{Name: name, Args: args, Session: spi.SessionFrom(ctx)}
 	// 子调用（workflow 里发的）标出来：宿主据此决定"这条要不要额外落 v4"。
 	call.Nested = spi.SubDispatchFrom(ctx).Depth > 0
@@ -82,6 +205,18 @@ func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (
 		p.log.Info("工具调用", attrs...)
 	}()
 
+	// 6. post-execute 收尾：repeat-tool-reminder（官方 0.2.2 base #83）。
+	//
+	// 为什么用 defer：计数口径是"每一次**尝试**"，不只是成功执行完的那些。官方把
+	// observe 放在 tools/post-execute waterfall 上，被 pre-execute 拒绝的调用同样
+	// 会经过它（lib/index.js:2220-2227）。本仓的 veto / 未知工具 / 参数非法都是
+	// 提前 return，只有 defer 能一次覆盖全部出口。
+	//
+	// 它只往 Hint 上追加提醒，不改 err、不动原始输出——成败语义与 R3 都不受影响。
+	defer func() {
+		p.applyRepeatReminder(ctx, call, &res)
+	}()
+
 	// 1. pre-execute：waterfall，可 veto。
 	if _, err := p.bus.Waterfall(spi.EventToolPreExecute, call); err != nil {
 		call.Err = err
@@ -94,13 +229,14 @@ func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (
 	// 模型偶尔会吐 `{"arguments": "{not json"` 这种。以前直接透传给工具——
 	// 大多数工具自己 Unmarshal 会失败，但**不校验参数的工具会拿着垃圾照跑**。
 	// 在执行前拦一次，比让每个工具各写一遍可靠。
-	if len(call.Args) > 0 {
-		var probe map[string]json.RawMessage
-		if err := json.Unmarshal(call.Args, &probe); err != nil {
-			call.Err = fmt.Errorf("参数不是 JSON 对象: %w", err)
-			call.Result.Hint = "tool_call.arguments 必须是 JSON 对象（键值对）；常见原因是引号没转义或写成了字符串"
-			return call.Result, call.Err
-		}
+	//
+	// 判据只有一份，实现在 agent.ValidateToolCallArguments：agent 循环用它做
+	// 整条响应的预检，这里用它做执行前的深防御。两层各写一遍时已经漂过一次
+	// （循环拒绝 JSON null、这里放行），同一个参数在两处得到两种结论。
+	if err := agent.ValidateToolCallArguments(call.Args); err != nil {
+		call.Err = fmt.Errorf("参数不是 JSON 对象: %w", err)
+		call.Result.Hint = "tool_call.arguments 必须是 JSON 对象（键值对）；常见原因是引号没转义或写成了字符串"
+		return call.Result, call.Err
 	}
 
 	tool, ok := p.reg.Get(call.Name)
@@ -112,9 +248,30 @@ func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (
 		return call.Result, call.Err
 	}
 
-	// 2. execute。
+	// 2. execute。统一截止时间（timeout-policy）装在这一层：工具自己的超时是
+	// "它知道自己该跑多久"，这一层是"它挂死了也得有人拉闸"。
 	p.bus.Emit(spi.EventToolExecute, call)
-	call.Result, call.Err = tool.Exec(ctx, call.Args)
+
+	// 2a. tools/execute：顶层调用的工具体是**副作用边界**。官方在这里先让
+	// 请求前缀耐久，再判 abort；两条失败路径都绝不进入工具体（零执行）。
+	//
+	// 为什么 abort 判定放在落盘之后：官方顺序就是 flush → check aborted。
+	// 反过来会让"已取消"的调用连落盘都不做，崩溃时这一轮在飞什么就无从判断。
+	if p.opts.BeforeDispatch != nil && call.Session != "" && !call.Nested {
+		if err := p.opts.BeforeDispatch(ctx, call); err != nil {
+			call.Err = fmt.Errorf("工具调用前落盘失败，工具体未执行: %w", err)
+			call.Result.Hint = "这次调用没有派发：请求前缀没能耐久落盘。先修好 home/磁盘再重试；" +
+				"不要假设工具体做过任何副作用"
+			return call.Result, call.Err
+		}
+		if err := ctx.Err(); err != nil {
+			// 官方 abortedBeforeDispatchResult()：不是"结果未知"，是"确定没做"。
+			call.Result = abortedBeforeDispatchResult()
+			call.Err = fmt.Errorf("%w: %w", ErrToolAbortedBeforeDispatch, err)
+			return call.Result, call.Err
+		}
+	}
+	call.Result, call.Err = p.executeWithDeadline(ctx, tool, call.Args)
 
 	// 2b. 成功、但什么都没返回 —— 静默成功的工具版。
 	//
@@ -134,10 +291,7 @@ func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (
 	// 3. 提示层：失败必须带下一步。缺失就兜底并记账（CI 应该让这种代码进不来）。
 	if call.Err != nil && call.Result.Hint == "" {
 		call.Result.Hint = fmt.Sprintf("工具 %q 失败了；先确认参数与环境再决定是否重试", call.Name)
-		p.mu.Lock()
-		p.violations = append(p.violations, call.Name)
-		p.mu.Unlock()
-		p.log.Warn("工具失败但没有给 Hint（R3）", "tool", call.Name, "error", call.Err)
+		p.recordR3Violation(call.Name, call.Err)
 	}
 
 	// 4. 序列化层 + 截断层。
@@ -160,6 +314,163 @@ func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (
 	// 6. result：广播，不等待。
 	p.bus.Emit(spi.EventToolResult, call)
 	return call.Result, call.Err
+}
+
+// ToolTimeoutError 是一次工具调用超过统一截止时间的结构化错误。
+//
+// 它**刻意不 wrap context.DeadlineExceeded**：agent 循环把 DeadlineExceeded 归进
+// "这次调用被打断了、结果未知"那一类文案，而超时是个确定结论（工具没在预算内返回，
+// 已经被取消）。两者的下一步不一样——取消是"有人把它停了，先核实现场"，超时是
+// "它太慢，换更小的范围或转后台"。混成一类，模型会照着错的那条走。
+//
+// 调用方用 errors.As 认它；用 errors.Is(err, context.Canceled) 认用户取消。
+type ToolTimeoutError struct {
+	Tool   string        // 工具名（模型看到的名字）
+	Budget time.Duration // 这次的统一预算
+	Waited time.Duration // 实际等到的时长（≈ 预算；诊断用，不进模型文案）
+}
+
+func (e *ToolTimeoutError) Error() string {
+	return fmt.Sprintf("tool call %q timed out after %s (TOOL_TIMEOUT); it was cancelled and its result is unknown",
+		e.Tool, e.Budget)
+}
+
+// execOutcome 是执行 goroutine 交回的结果。
+//
+// 用值传递、不用共享指针：超时之后工具可能还在写自己的字段，任何共享状态都会
+// 变成数据竞争（-race 下最先炸的就是这里）。
+type execOutcome struct {
+	res spi.Result
+	err error
+}
+
+// executeWithDeadline 在统一预算内执行工具；到点立刻返回，**不等**它。
+//
+// 三种结局必须分得开：
+//
+//   - 预算内返回：原样透传。**已完成的调用不受影响**——成功还是成功，失败还是那个
+//     失败，既有行为一条都不改。
+//   - 预算到点：返回 *ToolTimeoutError + 结构化 Result（Summary/Data/Hint）。工具
+//     晚到的结果**绝不复用**：超时就是失败，不能因为它几百毫秒后自己跑完了就改口
+//     说这次成功。
+//   - 父 ctx 结束（用户 cancel / 上游把这轮掐了）：原样返回父 ctx 的错误，
+//     errors.Is(err, context.Canceled) 仍然成立——取消与超时是两件事。
+//
+// 为什么必须起一个 goroutine：协作式取消只对**看 ctx** 的工具有效。卡在无 deadline
+// 的读、卡在 CGO 调用、卡在第三方库里的工具根本不看 ctx。流水线要是同步调 Exec，
+// 就还是得陪着它等——那样"超时"只是写给日志看的一句话，turn 照样死。
+//
+// 代价写在明处：Go 杀不掉 goroutine，挂死的工具那个 goroutine 会一直挂着（它的 ctx
+// 已经结束，能不能退出来取决于工具自己）。这一层能保证的是**流水线不再等它**，
+// 而不是"它一定停止"。
+func (p *Pipeline) executeWithDeadline(ctx context.Context, tool spi.Tool, args json.RawMessage) (spi.Result, error) {
+	budget := p.opts.ToolTimeout
+	if budget <= 0 {
+		// 明确关闭（负值）：行为与加这一层之前逐字节一致，连 panic 也照常上抛。
+		return tool.Exec(ctx, args)
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel() // 超时路径上这一句同样必要：让还在跑的工具看到 ctx 结束
+
+	// 有缓冲 1：超时之后 goroutine 仍能把结果写完并退出，既不泄漏也不永久阻塞。
+	done := make(chan execOutcome, 1)
+	started := time.Now()
+	go func() {
+		out := execOutcome{}
+		defer func() {
+			// 这条 goroutine 没有人替它 recover：工具 panic 会带走整个宿主进程。
+			// 转成错误返回——和超时一样，只是"这次调用失败，turn 继续"。
+			if r := recover(); r != nil {
+				out = execOutcome{err: fmt.Errorf("工具 %q 执行时 panic: %v", tool.Name(), r)}
+			}
+			done <- out
+		}()
+		out.res, out.err = tool.Exec(execCtx, args)
+	}()
+
+	select {
+	case out := <-done:
+		if !cutByDeadline(out, execCtx, ctx) {
+			res, err := out.res, out.err
+			if err != nil && strings.TrimSpace(res.Hint) == "" {
+				// R3：失败必须带一句给模型看的下一步指引。工具自己没给就补一句通用的。
+				res.Hint = "这次调用失败了：先读现场（文件/进程/日志）确认它到底做没做，再决定重试与否"
+				p.recordR3Violation(tool.Name(), err)
+			}
+			return res, err
+		}
+		// 被本层 deadline 叫醒的"假完成"：按超时继续往下走。
+	case <-execCtx.Done():
+		// 工具可能正好在这一刻返回：先收一次，已完成的调用不受影响。
+		select {
+		case out := <-done:
+			if !cutByDeadline(out, execCtx, ctx) {
+				res, err := out.res, out.err
+				if err != nil && strings.TrimSpace(res.Hint) == "" {
+					res.Hint = "这次调用失败了：先读现场（文件/进程/日志）确认它到底做没做，再决定重试与否"
+					p.recordR3Violation(tool.Name(), err)
+				}
+				return res, err
+			}
+		default:
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		// 父 ctx 先结束 = 取消（或上游自己设的 deadline），不是本层的超时。
+		// 原样返回父 ctx 的错误，让上层还能认出"这是取消"。
+		return spi.Result{
+			Hint: "结果未知：先读一下现场（文件/进程/日志）确认它到底做没做，再决定重试与否",
+		}, err
+	}
+	waited := time.Since(started)
+	p.log.Warn("工具调用超时（统一截止时间）", "tool", tool.Name(),
+		"timeout_ms", budget.Milliseconds(), "waited_ms", waited.Milliseconds())
+	timedOut := timeoutResult(tool.Name(), budget, waited)
+	// R3：把 Hint 显式落在紧邻 return 的位置（timeoutResult 已经填了同一句），
+	// 让「每个 error 分支都带 Hint」的守卫能按同一层配对。
+	timedOut.Hint = fmt.Sprintf("这次调用没在 %s 内返回、已被取消，结果未知：别当成没生效——"+
+		"先用只读手段核实现场（读文件/看进程/查状态）；要重试就缩小范围或分步做，"+
+		"预计很久的活改用 run_in_background", budget)
+	return timedOut, &ToolTimeoutError{Tool: tool.Name(), Budget: budget, Waited: waited}
+}
+
+// cutByDeadline 判断一次"刚好卡在截止时间上返回"的结果算不算**被本层掐断**。
+//
+// 为什么需要它：听 ctx 的工具（`<-ctx.Done(); return Result{}, ctx.Err()`）在我们
+// 的 deadline 触发后会被**立刻**唤醒，把 ctx.Err()（DeadlineExceeded）交回来。这
+// 和"工具真的跑完了"在同一时刻抵达，select 会随机挑一个——同一次超时有时报成
+// "超时"，有时报成"被打断/结果未知"，而 agent 循环对这两类文案完全不同。
+//
+// 判据只有一条：父 ctx 还活着，而工具交回的错误就是本层 ctx 的结束原因。
+// 那时它不可能是"完成"，只可能是被我们叫醒的。
+func cutByDeadline(out execOutcome, execCtx, parent context.Context) bool {
+	if parent.Err() != nil || execCtx.Err() == nil {
+		// 父 ctx 结束（取消/上游截止）由调用方单独分派；ctx 还没结束则是真完成。
+		return false
+	}
+	return out.err != nil && errors.Is(out.err, context.DeadlineExceeded)
+}
+
+// timeoutResult 是超时这一刻模型能看到的东西。
+//
+// 三样都要给：Summary 给 TUI 那一行；Data 给模型结构化的事实（哪个工具、多大预算、
+// 能不能原样重试）；Hint 是 R3 要的下一步——没有它，模型唯一会做的就是原样再调一次，
+// 然后再等一个预算。**不复述**：长句只在 Hint 里出现一次，Data 只放事实。
+func timeoutResult(tool string, budget, waited time.Duration) spi.Result {
+	return spi.Result{
+		Summary: fmt.Sprintf("工具 %q 超过 %s 没有返回，已取消", tool, budget),
+		Data: map[string]any{
+			"code":       "tool_timeout",
+			"tool":       tool,
+			"timeout_ms": budget.Milliseconds(),
+			"waited_ms":  waited.Milliseconds(),
+			"retryable":  false,
+		},
+		Hint: fmt.Sprintf("这次调用没在 %s 内返回、已被取消，结果未知：别当成没生效——"+
+			"先用只读手段核实现场（读文件/看进程/查状态）；要重试就缩小范围或分步做，"+
+			"预计很久的活改用 run_in_background", budget),
+	}
 }
 
 // isEmptySuccess 判断一次**成功**的工具调用是不是什么载荷都没留下。

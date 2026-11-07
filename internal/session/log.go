@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -96,8 +97,12 @@ func (l *Log) Append(eventType string, data any) error {
 func (l *Log) Close() error {
 	err := l.w.Close()
 	if l.lockPath != "" {
-		os.Remove(l.lockPath)
-		l.lockPath = ""
+		removeErr := os.Remove(l.lockPath)
+		if removeErr != nil && !os.IsNotExist(removeErr) {
+			err = errors.Join(err, fmt.Errorf("释放会话写锁 %s: %w", l.lockPath, removeErr))
+		} else {
+			l.lockPath = ""
+		}
 	}
 	return err
 }
@@ -138,6 +143,18 @@ func ToolCallBlock(id, name, arguments string) map[string]any {
 
 // UserMessage 构造 user/message 的 data。
 func UserMessage(blocks []spi.Block) map[string]any {
+	return map[string]any{
+		"content":   blocks,
+		"source":    map[string]any{"kind": "user"},
+		"role":      "user",
+		"id":        NewID(),
+		"surfaceOp": "append",
+	}
+}
+
+// UserContentMessage 保留完整有序内容块及附件/引用身份。旧 UserMessage 不改，
+// 因而纯文本 CLI/ACP 的线上字节与调用语义完全不变。
+func UserContentMessage(blocks []ContentBlock) map[string]any {
 	return map[string]any{
 		"content":   blocks,
 		"source":    map[string]any{"kind": "user"},

@@ -26,6 +26,16 @@ type SurfaceMsg struct {
 	// **只加不改**：这是可选字段，既有消费者（compact.Select、History、fork 之外
 	// 的读路径）都不读它；fork 也不用它（那边要从事件搬正文，见 ReasoningBlocksBySeq）。
 	Reasoning []string
+
+	// Images 是这条消息里的图片出现位置（深度优先，模型请求顺序）；纯文本消息为 nil。
+	//
+	// 为什么要有：`Message.Content` 是**文本投影**（joinText 只留 text 块），
+	// 图片本来整块消失。而图片预算（`RequiredImageOffload`）要按每张图的真实
+	// 字节数算、占位文案要带附件 id 供模型取回原件——两者都在这份 durable 块上。
+	//
+	// `Offloaded` 为 true 的出现位置**同时**已经以官方占位文本
+	// （`OffloadedImageText`）原地替换进 `Message.Content`，模型看到的正是那份说明。
+	Images []SurfaceImage
 }
 
 // Surface 把事件日志折叠成 surface。
@@ -97,6 +107,10 @@ func Surface(log *v4.Log) []SurfaceMsg {
 	// 别的类型在那个函数里先按 type 跳过。
 	reasoning := ReasoningBlocksBySeq(log)
 
+	// 官方 image/offload 决策（插件 80）：只改派生投影，v4 日志一个字节都不动。
+	// 先按事件顺序把"哪些出现位置已退役"摊平，再在派生每个节点时原地替换占位。
+	offloads := imageOffloadIndex(log)
+
 	// 先把可见节点按日志顺序铺好（压缩事件本身不出现在这里）。
 	out := make([]SurfaceMsg, 0, len(log.Events))
 	for _, ev := range log.Events {
@@ -109,11 +123,18 @@ func Surface(log *v4.Log) []SurfaceMsg {
 		if m, src, ok := surfaceMessage(ev); ok {
 			// 替身有两种身份：compaction/summary 事件（下面插入），
 			// 或 fork 过来的 source.kind = compact-checkpoint 的 user/message（就在这里）。
-			out = append(out, SurfaceMsg{
+			node := SurfaceMsg{
 				Seq: ev.Seq, Type: ev.Type, Source: src, Message: m,
 				Summary:   src == "compact-checkpoint",
 				Reasoning: reasoning[ev.Seq],
-			})
+			}
+			// 图片出现位置只对 user/message 与 tool/result 存在（assistant 永不被选）；
+			// 纯文本消息这里是 nil，行为与以前逐字节一致。
+			node.Images = surfaceImages(ev)
+			if indexes := offloads[ev.Seq]; len(indexes) > 0 {
+				node = applyImageOffload(node, ev, indexes)
+			}
+			out = append(out, node)
 		}
 	}
 

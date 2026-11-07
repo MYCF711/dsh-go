@@ -87,6 +87,14 @@
         "run_in_background": {
           "type": "boolean",
           "description": "立刻转后台并返回 job_id，不等命令结束（长任务用这个，别去调小 idle_seconds）"
+        },
+        "sandbox_permissions": {
+          "type": "string",
+          "enum": [
+            "workspace-write",
+            "danger-full-access"
+          ],
+          "description": "可选：仅本次调用的 sandbox 请求。danger-full-access 需要先经审批；不会改变会话档位"
         }
       },
       "required": [
@@ -661,6 +669,14 @@
         "timeout_seconds": {
           "type": "integer",
           "description": "可选：超时秒数，默认 120，上限 600"
+        },
+        "sandbox_permissions": {
+          "type": "string",
+          "enum": [
+            "workspace-write",
+            "danger-full-access"
+          ],
+          "description": "可选：仅本次调用的 sandbox 请求。danger-full-access 需要先经审批；不会改变会话档位"
         }
       },
       "required": [
@@ -953,6 +969,10 @@
     "parameters": {
       "type": "object",
       "properties": {
+        "continuable": {
+          "type": "boolean",
+          "description": "true = 留下一条可续问的子会话（父轮结束后可以用 subagents.prompt 续问）；省略 = 不可续问（默认，不写任何额外的东西）"
+        },
         "cwd": {
           "type": "string",
           "description": "子代理的初始工作目录；相对路径按当前目录算，省略表示继承"

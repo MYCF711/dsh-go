@@ -23,6 +23,15 @@ func init() {
 	if err := os.WriteFile(capture, b, 0o644); err != nil {
 		os.Exit(92)
 	}
+	if captureEnv := os.Getenv("DSHD_MODEL_WIRE_ENV"); captureEnv != "" {
+		b, err = json.Marshal(os.Environ())
+		if err != nil {
+			os.Exit(93)
+		}
+		if err := os.WriteFile(captureEnv, b, 0o600); err != nil {
+			os.Exit(94)
+		}
+	}
 	os.Exit(0)
 }
 
@@ -111,6 +120,69 @@ func TestDefaultLoopRunnerSessionModelOverrideLifecycle(t *testing.T) {
 	if got, _ := runLoopAndReadModel(t, restartedRunner, capture, "session-a", "session-a"); got != "model-after-restart" {
 		t.Fatalf("重启 Load 后的下一轮子进程 model = %q", got)
 	}
+}
+
+// 权限覆盖必须进入下一次真实子进程的 --policy，不能只出现在 session.load。
+// 同一个 store 连续切 A/B、清空并模拟重启，顺便钉住 base 不被污染。
+func TestDefaultLoopRunnerSessionPermissionOverrideLifecycle(t *testing.T) {
+	home := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "argv.json")
+	t.Setenv("DSHD_MODEL_WIRE_ARGV", capture)
+	t.Setenv("DSHD_SERVE_NO_FOLLOW", "1")
+	base := &loopRunner{home: home, policy: "deny", maxSteps: 6, model: "default-model"}
+	overrides := newPermissionOverrideStore(home)
+	runner := &modelOverrideLoopRunner{base: base, permissions: overrides}
+	src := newSessionSource(home, "")
+	src.perms = overrides
+
+	assertPolicy := func(sid, want string) {
+		t.Helper()
+		if err := runner.Run(context.Background(), sid, "turn-"+sid, "next-prompt"); err != nil {
+			t.Fatalf("Run(%s): %v", sid, err)
+		}
+		_, args := readLoopModelArg(t, capture)
+		if !containsArgPair(args, "--policy", want) {
+			t.Fatalf("%s 下一轮子进程 --policy 要是 %q，实际 argv=%v", sid, want, args)
+		}
+	}
+
+	if err := overrides.Set("session-a", "allow"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := src.Permission("session-a"); err != nil || got != "allow" {
+		t.Fatalf("session.load 权限投影 = %q, %v；要 allow", got, err)
+	}
+	assertPolicy("session-a", "allow")
+	assertPolicy("session-b", "deny")
+	if base.policy != "deny" {
+		t.Fatalf("A 的覆盖污染了 base.policy：%q", base.policy)
+	}
+
+	if err := overrides.Set("session-a", "ask"); err != nil {
+		t.Fatal(err)
+	}
+	assertPolicy("session-a", "ask")
+	if err := overrides.Set("session-a", ""); err != nil {
+		t.Fatal(err)
+	}
+	assertPolicy("session-a", "deny")
+
+	if err := overrides.Set("session-a", "auto"); err != nil {
+		t.Fatal(err)
+	}
+	restartedStore := newPermissionOverrideStore(home)
+	if err := restartedStore.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := restartedStore.Get("session-a"); got != "auto" {
+		t.Fatalf("重启 Load 后权限覆盖 = %q，要 auto", got)
+	}
+	runner = &modelOverrideLoopRunner{base: base, permissions: restartedStore}
+	src.perms = restartedStore
+	if got, err := src.Permission("session-a"); err != nil || got != "auto" {
+		t.Fatalf("重启后的 session.load 权限投影 = %q, %v；要 auto", got, err)
+	}
+	assertPolicy("session-a", "auto")
 }
 
 func TestDefaultLoopRunnerRejectsCorruptModelOverrideStore(t *testing.T) {

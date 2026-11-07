@@ -72,10 +72,16 @@ type trace struct {
 	// Brief 是一行摘要；MS 是这一步花了多久。
 	// 记时长不是为了好看：编排慢的时候，人第一个问题就是"哪一步慢"。
 	// stop 记这次子调用要不要停（Result.Stop），不对外暴露。
-	stop   bool
-	Brief  string `json:"brief,omitempty"`
-	Detail string `json:"detail,omitempty"`
-	MS     int64  `json:"ms,omitempty"`
+	stop      bool
+	Brief     string         `json:"brief,omitempty"`
+	Detail    string         `json:"detail,omitempty"`
+	MS        int64          `json:"ms,omitempty"`
+	IsError   bool           `json:"isError,omitempty"`
+	Text      string         `json:"text,omitempty"`
+	Data      any            `json:"data,omitempty"`
+	Artifacts []spi.Artifact `json:"artifacts,omitempty"`
+	Hint      string         `json:"hint,omitempty"`
+	View      *spi.ViewSpec  `json:"view,omitempty"`
 }
 
 func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
@@ -126,7 +132,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 			tr, val, hardErr := runOne(ctx, sub.Runner, i, st, st.Args, vars)
 			traces = append(traces, tr)
 			if hardErr != nil {
-				// 只有"通道坏了/被取消"才向上报错；工具自身的失败记进 trace 继续。
+				// 只有通道级 hardErr 才向上报错；工具自身的失败记进 trace 继续。
 				res := buildResult(traces, vars, failed, a.Meta, stop)
 				res.Hint = hardHint(hardErr)
 				return res, hardErr
@@ -178,9 +184,10 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 
 // runOne 执行一步，并把结果折成 trace。
 //
-// 关键：**工具失败不返回 error**。宿主 agent 循环在 error 路径上会丢掉
-// Text/Data/Artifacts，只给模型 Summary+Hint——那样"第 3 步失败了"这个
-// 最有用的信息就没了。单步失败记进 trace，脚本整体仍算跑完。
+// 关键：**工具失败不返回 error**。真实 Text/Data/Artifacts/View/Hint
+// 都留在当前 trace；W22 已修原生 agent 错误投影，不需要把整次 workflow
+// 变成 error。单步失败记进 trace，脚本整体仍算跑完。
+// 取消/超时同样维持原有软失败语义：记 trace，由编排继续处理。
 func runOne(ctx context.Context, r spi.Runner, idx int, st step, callArgs map[string]any, vars map[string]any) (trace, any, error) {
 	rawArgs, err := json.Marshal(expand(callArgs, vars))
 	if err != nil {
@@ -190,7 +197,22 @@ func runOne(ctx context.Context, r spi.Runner, idx int, st step, callArgs map[st
 	res, err := r.Run(ctx, st.Tool, rawArgs)
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
-		return trace{Step: idx, Tool: st.Tool, OK: false, Brief: trunc(err.Error(), 200), MS: ms}, nil, nil
+		tr := trace{
+			Step: idx, Tool: st.Tool, OK: false, Brief: trunc(err.Error(), 200),
+			Detail: err.Error(), MS: ms, IsError: true,
+			// 子调用的真实正文**有界**保留：只留 err.Error() 的话，
+			// "第 N 步失败了"之外的信息（工具到底吐了什么）全丢，而模型
+			// 判断下一步恰恰只能靠它。上界与回给模型的正文同一个预算，
+			// 取回指针仍在 Artifacts 里，不会因为截断就找不到全文。
+			Text: trunc(res.Text, maxTextRunes), Data: res.Data,
+			Artifacts: res.Artifacts, Hint: res.Hint, View: res.View,
+		}
+		if res.Text != "" {
+			tr.Brief = trunc(firstLine(res.Text), 200)
+		} else if res.Summary != "" {
+			tr.Brief = trunc(res.Summary, 200)
+		}
+		return tr, dataOf(res), nil
 	}
 	brief := res.Summary
 	if brief == "" {

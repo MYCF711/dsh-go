@@ -45,7 +45,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE_OLD = os.path.join(ROOT, "tmp", "dshd-baseline.exe")
 EXE_NEW = os.path.join(ROOT, "tmp", "dshd-tight.exe")
 BASE = os.environ.get("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1")
-MODEL = os.environ.get("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash1017")
+MODEL = os.environ.get("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017")
 
 # 每个任务：(名字, 提示词, 允许出现的工具集合, 必须出现且成功的工具, 说明)
 # 提示词分两类：一类点名工具（现实里 AGENTS/文档会点名），一类只说要做的事。

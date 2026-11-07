@@ -20,10 +20,14 @@ type Listing struct {
 	Parent    string    `json:"parentSession,omitempty"`
 	UpdatedAt time.Time `json:"updatedAt"`
 	// Summary 是从日志里摘出来的一句话：优先"最后一条助手消息"，没有再退到第一条用户消息。
-	Summary  string `json:"summary,omitempty"`
-	Events   int    `json:"events"`
-	Created  int64  `json:"createdAt"`
-	Readable bool   `json:"readable"`
+	Summary string `json:"summary,omitempty"`
+	// Title 非 nil 表示显式持久化的标题。指针保留"未设置"与显式空串的区别，
+	// 值不做 trim/截断，session.fork 的逐字 title 因而能跨进程回到 session.list。
+	Title       *string `json:"title,omitempty"`
+	TitleSource string  `json:"titleSource,omitempty"`
+	Events      int     `json:"events"`
+	Created     int64   `json:"createdAt"`
+	Readable    bool    `json:"readable"`
 	// Error 非空表示这份会话读不动（损坏 / 版本不对），面板要能显示出来而不是假装没有。
 	Error string `json:"error,omitempty"`
 	// Copies > 1 表示同一个 session id 在多个项目目录下都有。
@@ -139,7 +143,21 @@ func describe(path string, info os.FileInfo) Listing {
 	if sum, serr := v4.ReadSummary(path, 256<<10, 80); serr == nil {
 		l.Summary = sum
 	}
+	if title, source, present, terr := readExplicitTitle(path); terr != nil {
+		l.Error = "会话 title 索引读不了: " + terr.Error()
+	} else if present {
+		l.Title = title
+		l.TitleSource = source
+	}
 	return l
+}
+
+func readExplicitTitle(sessionPath string) (*string, string, bool, error) {
+	current, present, err := readSessionMetadata(sessionPath, "session/title")
+	if err != nil || !present {
+		return nil, "", false, err
+	}
+	return current.Title, current.Source, true, nil
 }
 
 // summarize 取一句话摘要：最后一条助手消息优先，其次第一条用户消息。

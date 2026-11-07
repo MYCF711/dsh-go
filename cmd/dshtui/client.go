@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,6 +20,11 @@ type client struct {
 	base   string // 形如 http://127.0.0.1:8080
 	hc     *http.Client
 	cookie string
+
+	// 测试注入点；生产为空时使用 dialSub 与 backoff。
+	dialSubscription func(sid string, sinceSeq int) (subscriptionConn, error)
+	reconnectBackoff func(attempt int) time.Duration
+	nextSubscription atomic.Uint64
 }
 
 type envelope struct {
@@ -167,6 +173,13 @@ type stats struct {
 	ContextWindow int // 模型上限；0 = 不知道（不画进度条）
 	OutputTotal   int // 全会话累计输出 token
 	LastSeq       int
+	// Model 是这条会话最近一次请求用的模型 id；空 = 不知道（界面显示 `?`）。
+	Model string
+	// CWD 是这条会话的工作目录（宿主给，**不是**本进程的 cwd）；空 = 不知道。
+	CWD string
+	// Effort 保留线上缺失（nil）与显式空串（非 nil、指向 ""）的区别。
+	// 两种在状态行都显示 `?`，但客户端不能把空值误当成字段存在且为 off。
+	Effort *string
 }
 
 // loadStats 取一次用量。取不到不是致命错误——状态行显示"?"比显示 0 诚实。
@@ -176,9 +189,12 @@ func (c *client) loadStats(sid string) (stats, error) {
 		return stats{}, err
 	}
 	var r struct {
-		ContextTokens int `json:"contextTokens"`
-		ContextWindow int `json:"contextWindow"`
-		LastSeq       int `json:"lastSeq"`
+		ContextTokens int     `json:"contextTokens"`
+		ContextWindow int     `json:"contextWindow"`
+		LastSeq       int     `json:"lastSeq"`
+		Model         string  `json:"model"`
+		CWD           string  `json:"cwd"`
+		Effort        *string `json:"effort"`
 		UsageTotal    *struct {
 			OutputTokens int `json:"outputTokens"`
 		} `json:"usageTotal"`
@@ -186,17 +202,51 @@ func (c *client) loadStats(sid string) (stats, error) {
 	if err := json.Unmarshal(res, &r); err != nil {
 		return stats{}, err
 	}
-	st := stats{ContextTokens: r.ContextTokens, ContextWindow: r.ContextWindow, LastSeq: r.LastSeq}
+	st := stats{
+		ContextTokens: r.ContextTokens,
+		ContextWindow: r.ContextWindow,
+		LastSeq:       r.LastSeq,
+		Model:         r.Model,
+		CWD:           r.CWD,
+		Effort:        r.Effort,
+	}
 	if r.UsageTotal != nil {
 		st.OutputTotal = r.UsageTotal.OutputTokens
 	}
 	return st, nil
 }
 
-// prompt 发一条用户消息（不等回答）。
+// promptAck 是宿主对 session.prompt 的接收确认。
+// accepted=false 与 HTTP 错误是两回事：前者有完整响应信封，界面也必须按失败处理。
+type promptAck struct {
+	Accepted bool   `json:"accepted"`
+	TurnID   string `json:"turnId"`
+	RPCID    string `json:"rpcId"`
+}
+
+// requestPrompt 发一条用户消息并返回宿主的真实接收确认（不等回答）。
+func (c *client) requestPrompt(sid, text string) (promptAck, error) {
+	res, err := c.post("session.prompt", map[string]any{"id": sid, "text": text})
+	if err != nil {
+		return promptAck{}, err
+	}
+	var ack promptAck
+	if err := json.Unmarshal(res, &ack); err != nil {
+		return promptAck{}, fmt.Errorf("session.prompt 的确认不是合法 JSON：%w", err)
+	}
+	return ack, nil
+}
+
+// prompt 保留 --send 的简化入口；全屏界面需要 accepted/turnId，走 requestPrompt。
 func (c *client) prompt(sid, text string) error {
-	_, err := c.post("session.prompt", map[string]any{"id": sid, "text": text})
-	return err
+	ack, err := c.requestPrompt(sid, text)
+	if err != nil {
+		return err
+	}
+	if !ack.Accepted {
+		return fmt.Errorf("session.prompt 未被宿主接受")
+	}
+	return nil
 }
 
 // Subscribe 订阅一个会话的流，**断线会自动重连**。
@@ -210,24 +260,76 @@ func (c *client) prompt(sid, text string) error {
 //
 // 不做重连的后果不是"少几条消息"，是**界面从此不动了**，而人不知道是网断了还是模型卡了。
 func (c *client) Subscribe(sid string, sinceSeq int) (<-chan ServerFrame, func(), error) {
+	return c.subscribe(sid, sinceSeq, nil)
+}
+
+// subscribe 是帧流与连接事件流的唯一重连实现。事件只在真实 dial/read 结果
+// 发生时发出；订阅代际由 client 单调分配，连接代际在每次成功重连后递增。
+func (c *client) subscribe(sid string, sinceSeq int, events chan<- connectionEvent) (<-chan ServerFrame, func(), error) {
 	ch := make(chan ServerFrame, 64)
 	done := make(chan struct{})
-	var once sync.Once
-	stop := func() { once.Do(func() { close(done) }) }
+	subscription := c.nextSubscription.Add(1)
+	dial := c.dialSubscription
+	if dial == nil {
+		dial = func(sid string, sinceSeq int) (subscriptionConn, error) {
+			return c.dialSub(sid, sinceSeq)
+		}
+	}
+	wait := c.reconnectBackoff
+	if wait == nil {
+		wait = backoff
+	}
 
 	// 先同步连一次：连不上要立刻报错，而不是启动一个永远连不上的后台循环。
-	conn, err := c.dialSub(sid, sinceSeq)
+	conn, err := dial(sid, sinceSeq)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	var currentMu sync.Mutex
+	current := conn
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			close(done)
+			// 原实现只关 done，ReadText 可能一直阻塞；切换会话/退出时必须同时
+			// 关当前 socket。由关闭引起的 read error 会看到 done，不报假 down。
+			currentMu.Lock()
+			if current != nil {
+				_ = current.Close()
+			}
+			currentMu.Unlock()
+		})
+	}
+	emit := func(kind connectionEventKind, generation uint64, cause error) {
+		if events == nil {
+			return
+		}
+		select {
+		case events <- connectionEvent{kind: kind, sid: sid, subscription: subscription, generation: generation, err: cause}:
+		case <-done:
+		}
+	}
+	emit(wsOpen, 1, nil)
+
 	go func() {
 		defer close(ch)
+		if events != nil {
+			defer close(events)
+		}
+		defer func() { _ = conn.Close() }()
 		lastSeq := sinceSeq
+		generation := uint64(1)
 		for {
 			for {
 				txt, err := conn.ReadText()
 				if err != nil {
+					select {
+					case <-done:
+						return // 主动切换/退出，不伪装成网络断线
+					default:
+					}
+					emit(wsDown, generation, err)
 					break // 断了或坏了，去重连
 				}
 				var f ServerFrame
@@ -244,24 +346,36 @@ func (c *client) Subscribe(sid string, sinceSeq int) (<-chan ServerFrame, func()
 				select {
 				case ch <- f:
 				case <-done:
-					conn.Close()
 					return
 				}
 			}
-			conn.Close()
+			_ = conn.Close()
 
 			// 重连：退避 0.5s→1s→2s…上限 5s；每轮都带 lastSeq+1，接着上次往下收。
 			for attempt := 0; ; attempt++ {
 				select {
 				case <-done:
 					return
-				case <-time.After(backoff(attempt)):
+				case <-time.After(wait(attempt)):
 				}
-				nc, derr := c.dialSub(sid, lastSeq+1)
+				nc, derr := dial(sid, lastSeq+1)
 				if derr != nil {
+					emit(wsDown, generation, derr)
 					continue // 宿主可能还没起来：继续等，不放弃
 				}
+				currentMu.Lock()
+				select {
+				case <-done:
+					currentMu.Unlock()
+					_ = nc.Close()
+					return
+				default:
+				}
 				conn = nc
+				current = nc
+				currentMu.Unlock()
+				generation++
+				emit(wsOpen, generation, nil)
 				break
 			}
 		}
@@ -269,11 +383,12 @@ func (c *client) Subscribe(sid string, sinceSeq int) (<-chan ServerFrame, func()
 	return ch, stop, nil
 }
 
-// dialSub 建一条 WS 并发出订阅帧。
-func (c *client) dialSub(sid string, sinceSeq int) (*wsConn, error) {
+// dialSub 建一条 WS 并发出订阅帧。默认 offer permessage-deflate；
+// 旧宿主不协商时 dialWSOptionalDeflate 返回原来的 *wsConn。
+func (c *client) dialSub(sid string, sinceSeq int) (subscriptionWriteConn, error) {
 	wsURL := strings.Replace(c.base, "http://", "ws://", 1)
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
-	conn, err := dialWS(wsURL+"/ws", http.Header{"Cookie": []string{c.cookie}})
+	conn, err := dialWSOptionalDeflate(wsURL+"/ws", http.Header{"Cookie": []string{c.cookie}})
 	if err != nil {
 		return nil, err
 	}
