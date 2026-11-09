@@ -4,6 +4,17 @@
 - 主线稳定版为 `0.2.2-go.1`；独立 fork 测试版为 `0.2.2-beta.1`，测试版最终合规后合并主线。
 - 当前最高优先级是 GO 对 dsh-TUI 所需接口的真实兼容：models、placement、trace/export 与完整 TUI capability 矩阵，必须经过真实 dshd + 正式 backend + ConPTY 验收，不把未完成的 TUI 能力写成稳定功能。
 
+### GO.4 工作区考古与收编（2026-11-09，用户指令「那些全是死代码，考古并且用起来」）
+
+工作树曾有 **136 staged + 106 modified + 338 untracked**（452 条变更）、**119 个遗留 worktree**。本轮把它们全部收编或清理，`git status --porcelain` 归零。
+
+- **收编成 4 个本地提交**（未 push；`638b183` + `8314cc0` + `14cf1ce` + `e719147`，522 文件 +107620/−5731）：
+  - `638b183` 宿主实现（`cmd/` + `modules/` + `internal/`，456 文件）；**合并了原定的 cmd/internal 两个提交**——两者是互相依赖的原子特性集（`cmd/` 新代码 import 新 `internal/*` 包，反向顺序又缺 SPI 方法），按目录拆的任何中间提交都无法单独编译，会让 `git bisect` 失效。合并后三个提交每个都能独立构建（`git archive` 隔离副本验证 build/vet = 0）。
+  - `8314cc0` 文档（含 `docs/parameter-register.json`，机器可读总账入库；`tmp/` 是 gitignore 的）；`14cf1ce` 根文件与脚本；`e719147` `.gitignore` 补 `.agent-teams/`、`.dsh-zhuli/`、`.agents/`、`*.orig`、`*.rej`。
+- **清掉确认的死代码 74.8 MB**：6 个 `*.orig`（补丁前快照，174 个函数回查 live 文件 0 缺失）、1 个 `.rej`（hunk 内容已在 live 测试）、`HOST-STREAM-METHODS.patch` 459 KB（点名测试已在 `handlers_session_official_test.go:764`，195 个函数 194 个在树，唯一缺的 501 测试已被支持目录的新测试取代）、`index.js` 21 KB（asar 抽取残留）、`.dsh-zhuli/` 74 MB（2 个 worktree 均干净、零独有提交）。
+- **worktree 清理**：119 → 104。**119/119 的 HEAD 都是当前线的祖先，零独有提交**；A 类 16 个逐个留档后删除（释放 329.2 MB）。判据用「blob sha1 是否在当前线可达历史 + 与主仓工作树逐字节比对」——`git apply --check --reverse` 会因主仓文件更新而误判。
+- **仍待处置**：92 个 B 类 worktree 是「主仓已重构、它们是旧快照」（约 11.7 GB，含 `%TEMP%` 下约 8 GB）；10 个含「主仓不存在文件」的候选（`m0-missing-impl-4`、`m0-slash-aliases-7`、`hs-stream3` 等）正在逐个判定吸收/废弃，结论见 `tmp/GO4-ARCHAEOLOGY/absorb-candidates.md`。
+
 ### 试玩能力三修（2026-11-09，用户实测暴露）
 
 真实试玩（TUI2GO + dsh-go 后端）暴露三处宿主能力缺陷，已修并真实链复验：
