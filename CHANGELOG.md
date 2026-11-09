@@ -13,7 +13,8 @@
   - `8314cc0` 文档（含 `docs/parameter-register.json`，机器可读总账入库；`tmp/` 是 gitignore 的）；`14cf1ce` 根文件与脚本；`e719147` `.gitignore` 补 `.agent-teams/`、`.dsh-zhuli/`、`.agents/`、`*.orig`、`*.rej`。
 - **清掉确认的死代码 74.8 MB**：6 个 `*.orig`（补丁前快照，174 个函数回查 live 文件 0 缺失）、1 个 `.rej`（hunk 内容已在 live 测试）、`HOST-STREAM-METHODS.patch` 459 KB（点名测试已在 `handlers_session_official_test.go:764`，195 个函数 194 个在树，唯一缺的 501 测试已被支持目录的新测试取代）、`index.js` 21 KB（asar 抽取残留）、`.dsh-zhuli/` 74 MB（2 个 worktree 均干净、零独有提交）。
 - **worktree 清理**：119 → 104。**119/119 的 HEAD 都是当前线的祖先，零独有提交**；A 类 16 个逐个留档后删除（释放 329.2 MB）。判据用「blob sha1 是否在当前线可达历史 + 与主仓工作树逐字节比对」——`git apply --check --reverse` 会因主仓文件更新而误判。
-- **仍待处置**：92 个 B 类 worktree 是「主仓已重构、它们是旧快照」（约 11.7 GB，含 `%TEMP%` 下约 8 GB）；10 个含「主仓不存在文件」的候选（`m0-missing-impl-4`、`m0-slash-aliases-7`、`hs-stream3` 等）正在逐个判定吸收/废弃，结论见 `tmp/GO4-ARCHAEOLOGY/absorb-candidates.md`。
+- **worktree 全部收口：119 → 1，累计释放约 9.5 GB**（T2 329 MB + T5 564 MB + T6 8.01 GB + 最后 4 个约 570 MB）。做法固定为「先存档再删」：85 个旧快照的未提交改动压成 **71 MB 补丁**存 `tmp/GO4-ARCHAEOLOGY/deleted-patches/`（每份含 `git diff HEAD` + 未跟踪且与主仓不同的文件），再对每个跑「脏路径 vs 主仓 `ls-files`」差集校验——68 个原始命中里 **64 个是未跟踪目录的聚合假阳性**（展开到文件级后文件全在主仓），真命中 4 个（3 个只差 package 名的 `mcp_process_*.go` + 1 个 34 字节 `NUL` 残留），核实后删除。回滚一条命令：`git worktree add ../restore-<name> -b restore/<name> <sha> && git apply --reject …/deleted-patches/<name>.patch`。
+- **10 个「含主仓不存在文件」的候选只吸收 1 个**：`hs-14-wire` 的 `serve_plugin_hmr_test.go`（171 行纯回归测试，主仓有 `internal/pluginmgr/hmr.go` 却零测试）已合并；其余 9 个判垃圾且有编译级证据——3 个 BUILD FAIL（`Method*` 常量 redeclared，主仓已用另一套实现做完）、2 个文件头自述「临时证据、不进交付」、2 个 md5 相同的 PR 草稿、1 个授权便条、1 个 `m0-slash-aliases-7`（其“5 个端点未绑”经复核是误判：主仓用点号命名，slash 只是别名，挂上去还会被 `officialwire.Handle()` 静默覆盖主仓更新的 `settings/describe` 投影）。
 
 ### 试玩能力三修（2026-11-09，用户实测暴露）
 
