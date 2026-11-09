@@ -648,10 +648,10 @@ func TestOfficialWorkspaceFilesRealFSBoundary(t *testing.T) {
 		"workspaceFileScopeId": id, "path": "../secret.txt", "options": map[string]any{},
 	}, http.StatusBadRequest)
 
-	// 不存在的文件 → 404 workspaceFiles/not-found。
+	// 不存在的文件 → 404 workspace-file/not-found。
 	msg := h.fail(t, "workspaceFiles.stat", map[string]any{"workspaceFileScopeId": id, "path": "missing.txt"}, http.StatusNotFound)
-	if !strings.Contains(msg, "workspaceFiles/not-found") {
-		t.Fatalf("不存在的文件应报 workspaceFiles/not-found：%q", msg)
+	if !strings.Contains(msg, "workspace-file/not-found") {
+		t.Fatalf("不存在的文件应报 workspace-file/not-found：%q", msg)
 	}
 	// 未知会话（scope 不成立）→ 404 session/not-found，不拿进程默认目录顶上。
 	msg = h.fail(t, "workspaceFiles.list", map[string]any{
@@ -1099,7 +1099,7 @@ func TestOfficialWorkspaceChangesDirectoryBoundary(t *testing.T) {
 		if err := os.Symlink(inside, filepath.Join(root, "link-in")); err != nil {
 			t.Logf("跳过工作区内目录符号链接断言：%v", err)
 		} else {
-			mustRefused("link-in", "workspaceFiles/symlink-refused")
+			mustRefused("link-in", "workspace-file/not-regular-file")
 		}
 	}
 }

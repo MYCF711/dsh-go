@@ -45,9 +45,13 @@ func TestW149MCPHelperProcess(t *testing.T) {
 		response := map[string]any{"jsonrpc": "2.0", "id": request.ID}
 		switch request.Method {
 		case "initialize":
+			// 必须**声明 tools 能力**：MCP 规范里"提供工具"是由 capabilities.tools
+			// 声明的，宿主按官方判据（没声明就不聚合工具列表）就不会问 tools/list。
+			// 这条 fixture 早先漏了它——那不是宿主漏抓，是 fixture 不符合规范。
 			response["result"] = map[string]any{
-				"protocolVersion": "2024-11-05", "capabilities": map[string]any{},
-				"serverInfo": map[string]any{"name": "w149-fixture", "version": "1"},
+				"protocolVersion": "2024-11-05",
+				"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+				"serverInfo":      map[string]any{"name": "w149-fixture", "version": "1"},
 			}
 		case "tools/list":
 			if fmt.Sprint(request.Params["cursor"]) == "page-2" {
@@ -232,17 +236,24 @@ func TestW149MCPManagerCloseReclaimsFixture(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].Status != "connected" {
 		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
-	conn := manager.servers["docs"].conn
-	if conn == nil || conn.cmd == nil || conn.cmd.Process == nil {
-		t.Fatal("connected server 没有真实子进程")
+	pid := manager.ServerPID("docs")
+	if pid == 0 {
+		t.Fatal("connected server 没有真实子进程 PID")
+	}
+	if !processAlive(pid) {
+		t.Fatalf("PID %d 在连接期就该是活的", pid)
 	}
 	manager.Close()
-	select {
-	case <-conn.done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("manager.Close 未等待 MCP 子进程退出")
+	// 断言的是"操作系统里的那个进程真的没了"，而不是"某个 Go channel 关了"。
+	// 后者在只 kill 父进程、孙进程变孤儿时仍然成立——那正是要防的泄漏形态。
+	deadline := time.Now().Add(10 * time.Second)
+	for processAlive(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("manager.Close 之后 PID %d 仍存活（子进程泄漏）", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if manager.servers["docs"].conn != nil {
+	if !manager.Disconnected("docs") {
 		t.Fatal("Close 后仍持有连接")
 	}
 }

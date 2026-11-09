@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -9,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -37,6 +39,14 @@ const (
 	// secretBytes 是 launch token 与 cookie 值的随机字节数。
 	// 32 字节 → 64 位 hex，满足「≥32 字符 hex」。
 	secretBytes = 32
+
+	// generic501BodyDrainLimit 是通用 501（未实现/未知方法）分支在写响应前最多
+	// 吞掉的请求体字节数。256 KiB 与 net/http 自身 post-handler 的容忍上限同量级：
+	// 超过就停止读并让连接按 net/http 语义关闭——不为一个未实现的方法无限读大包。
+	generic501BodyDrainLimit int64 = 256 << 10
+
+	// generic501BodyDrainTimeout 是慢客户端上限：拖过它就不再等请求体，直接写 501。
+	generic501BodyDrainTimeout = 2 * time.Second
 )
 
 // Options 起服务要的东西。
@@ -173,6 +183,16 @@ type Options struct {
 	// ModelCatalogHandler 是 additive models.catalog.* 适配器。它在同一
 	// cookie 门后分派，不改变 canonical models.list 的网关语义。
 	ModelCatalogHandler http.Handler
+	// ConfigPatchHandler 是 additive config.patch.* 适配器（HS-14）。nil 时保持 501。
+	// 它在既有 cookie 认证之后按前缀分派；handler 自己限定两个方法，
+	// 这里不复制第二份方法表。
+	ConfigPatchHandler http.Handler
+	// Descriptors 是 typert 描述符注册表（HS-14）。nil = 不做描述符级校验。
+	//
+	// 只有**已注册**的方法才会被校验：未注册的方法保持原有 handler 行为，
+	// 所以打开它不会把既有客户端拦在门外。canonical 25 的 required 一律 false，
+	// 当前只登记 config.patch.*（见 cmd/dshd/serve.go 的装配）。
+	Descriptors *Registry
 	// W149 additive 能力；全部 nil 时保持原有 501 闭合分派。
 	ContextUsage func(sessionID, detail string) (ContextUsageView, error)
 	MCPList      func(sessionID string) ([]MCPServerView, error)
@@ -407,11 +427,54 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	if apiTraceEnabled() {
 		fmt.Fprintf(os.Stderr, "transport: /api/%s\n", name)
 	}
+
+	// typert 描述符校验（HS-14）：只对**已注册**的方法生效。
+	//
+	// 为什么在分派之前做：40 个 handler 各自 `json.Decode` 一遍，就必然有 40 种
+	// "参数写错"的表现（有的 400、有的静默忽略未知字段、有的 500）。这里先按
+	// 描述符拦一次，错误形状只有一个。未注册的方法一个字节都不碰，保持原行为。
+	//
+	// body 读完要放回去：后面的 handler 还要再读一次（它是这次请求的真实主人）。
+	if s.opt.Descriptors != nil {
+		if _, ok := s.opt.Descriptors.Lookup(name); ok && r.Body != nil {
+			raw, readErr := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			if readErr != nil {
+				writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "读请求体失败："+readErr.Error()))
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			if _, err := s.opt.Descriptors.Decode(name, raw); err != nil {
+				writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", err.Error()))
+				return
+			}
+		}
+	}
+
+	// config.patch.* 是 additive 配置树面（HS-14）。必须放在 `switch Method(name)`
+	// **之前**：`config.get` / `config.set` 在 switch 里，而前缀是 `config.patch.`，
+	// 不会误吞它们。nil handler 时不进这个分支——两个方法落回 switch 的
+	// 未接线分支，保持既有 501 语义。
+	if strings.HasPrefix(name, "config.patch.") && s.opt.ConfigPatchHandler != nil {
+		s.opt.ConfigPatchHandler.ServeHTTP(w, r)
+		return
+	}
+
 	// 官方 0.2.2 桌面端方法（L1 语义/字段对齐）。顺序是硬要求：
 	// settings.official 必须排在 `settings.` 前缀分支之前，否则被既有 SettingsFormHandler 接走；
 	// pluginManager.* 虽然以 plugin 开头但下一字符是 'M'，`plugin.` 前缀不会误吞。
 	if IsOfficialSettingsCredentialMethod(name) {
 		s.serveOfficialSettingsCredentialAPI(w, r, name)
+		return
+	}
+	// PARITY-W1-LLM：provider 注册表/可配置 provider 两项。
+	if IsOfficialLLMProviderMethod(name) {
+		s.ServeOfficialLLMProviderAPI(w, r)
+		return
+	}
+	// PARITY-W1-STREAMS：两条 no-param 流不属于既有方法族，必须在
+	// workspace 族前缀之前直通到流面。
+	if Method(name) == MethodWorkspaceFollow || Method(name) == MethodRemoteAccessFollow {
+		s.serveOfficialStream(w, r, name)
 		return
 	}
 	if IsOfficialPluginManagerMethod(name) {
@@ -422,6 +485,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveOfficialAgentAPI(w, r, name)
 		return
 	}
+	// 5 个 Windows 原生方法：真实实现在 internal/native，宿主在 serve_native_api.go。
+	// 必须早于 settings/session/workspace 族，避免旧 501 占位吞掉真实实现。
+	if IsOfficialNativeMethod(name) {
+		s.ServeOfficialNativeAPI(w, r, name)
+		return
+	}
 	if IsOfficialWorkspaceMethod(name) {
 		s.serveOfficialWorkspaceAPI(w, r, name)
 		return
@@ -430,16 +499,69 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveOfficialScheduleAPI(w, r, name)
 		return
 	}
+	// 官方 productAnalytics.* 三个方法（enabled/report/watchPolicy）。
+	// 必须在 account 分支之前：`productAnalytics.report` 在 account 文件里也有
+	// 一个 legacy 入口，但真实管道现在归 analytics API（本地优先 + 可选 exporter）。
+	if IsOfficialAnalyticsMethod(name) {
+		s.serveOfficialAnalyticsAPI(w, r, name)
+		return
+	}
 	// 官方 forge / liveshare 27 个方法：本仓无外部服务，全部返回
 	// 结构化未实现（点名方法 + 缺什么），不返回假数据。
 	// 官方 account / llm.discoverModels / 媒体市场（cotTranslation 等）：
 	// 能本地实现的真实现，其余返回结构化未实现（点名缺什么）。
+	if IsOfficialCordisMethod(name) {
+		s.ServeOfficialCordisAPI(w, r)
+		return
+	}
+	if IsOfficialSpeechMethod(name) {
+		s.ServeOfficialSpeechAPI(w, r)
+		return
+	}
+	// forgePanel git 3 方法：真实 git 在 internal/forge；必须早于 forge 族的旧 501。
+	if IsOfficialForgeGitMethod(name) {
+		s.ServeOfficialForgeGitAPI(w, r)
+		return
+	}
 	if IsOfficialAccountMethod(name) {
 		s.serveOfficialAccountAPI(w, r, name)
 		return
 	}
+	// officeToPdf 两方法：真实渲染器在 internal/officepdf；必须早于 media 的旧 501。
+	if IsOfficialOfficePDFMethod(name) {
+		s.ServeOfficialOfficePDFAPI(w, r, name)
+		return
+	}
+	if IsOfficialPluginMarketAPIMethod(name) {
+		s.ServeOfficialPluginMarketAPI(w, r, name)
+		return
+	}
+	if Method(name) == MethodPluginRegistryProbeFastest {
+		s.ServeOfficialPluginRegistryProbeAPI(w, r)
+		return
+	}
 	if IsOfficialMediaMarketMethod(name) {
 		s.ServeOfficialMediaMarketAPI(w, r)
+		return
+	}
+	// 三个 PARITY-A1-MINIMUM 方法：cotTranslation.limits 与 translate 同源但
+	// 不在 media 21 个方法集合里；permissionPresets/pluginInventory 各自独立。
+	if IsOfficialCotTranslationLimitsMethod(name) {
+		s.ServeOfficialCotTranslationLimitsAPI(w, r)
+		return
+	}
+	if IsOfficialPermissionPresetsMethod(name) {
+		s.ServeOfficialPermissionPresetsAPI(w, r)
+		return
+	}
+	if IsOfficialPluginInventoryMethod(name) {
+		s.ServeOfficialPluginInventoryAPI(w, r)
+		return
+	}
+	// forgePanel worktree 6 方法：真实状态机在 internal/worktree，宿主在
+	// cmd/dshd/serve_worktree_api.go。必须排在 forge 族的旧 501 之前。
+	if IsOfficialForgeWorktreeMethod(name) {
+		s.ServeOfficialForgeWorktreeAPI(w, r, name)
 		return
 	}
 	if IsOfficialForgeLiveshareMethod(name) {
@@ -593,8 +715,38 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	case MethodConfigSet:
 		s.handleConfigSet(w, r)
 	default:
+		// 先有界读完并关闭请求体，再写 501：handler 不读 body 就写响应时，Go 在
+		// 连接收尾可能直接关 socket，客户端还在发 body 时会看到 RST/abort
+		// （T17 §2.2：3000 次通用 501 里 18 次 ConnectionReset 10054）。
+		drainUnreadRequestBody(w, r)
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 	}
+}
+
+// drainUnreadRequestBody 在"未实现/未知方法"的 501 之前，有界地读完并关闭请求体。
+//
+// 为什么需要：handler 不读 body 就写响应时，net/http 在连接收尾可能直接关闭
+// socket；若此时请求体还在客户端→服务端的路上，客户端看到的是 ConnectionReset /
+// ConnectionAborted，而不是一个可解析的 501 四字段错误。
+//
+// 有界（不得无界等待）：
+//   - 最多读 generic501BodyDrainLimit 字节，超过就停止（net/http 会让连接关闭，
+//     RST 风险只留给真正的超大包，不会为一个未实现的方法无限吞数据）；
+//   - 用 ResponseController 设 read deadline（2s），慢客户端拖过它就不再等；
+//     清除 deadline 后再写响应，避免影响后续复用连接。
+//
+// 这个函数只服务"通用 501"分支；已接线的 handler 自己读不读 body 不由这里改变。
+func drainUnreadRequestBody(w http.ResponseWriter, r *http.Request) {
+	if r == nil || r.Body == nil || r.Body == http.NoBody {
+		return
+	}
+	if rc := http.NewResponseController(w); rc != nil {
+		if err := rc.SetReadDeadline(time.Now().Add(generic501BodyDrainTimeout)); err == nil {
+			defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
+		}
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, generic501BodyDrainLimit))
+	_ = r.Body.Close()
 }
 
 // attachmentErrorStatus 让宿主适配器给出精确错误码，同时保持四字段信封唯一构造点。

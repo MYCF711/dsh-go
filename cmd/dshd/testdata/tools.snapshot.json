@@ -653,6 +653,40 @@
     "caps": {}
   },
   {
+    "name": "propose_action",
+    "description": "Show the user one optional action card under this answer. Call only as the skill that names the action instructs.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "Action name from the skill."
+        },
+        "title": {
+          "type": "string",
+          "description": "Card title."
+        },
+        "brief": {
+          "type": "string",
+          "description": "What the action does, in the user's language."
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Fields the skill lists for this action."
+        }
+      },
+      "required": [
+        "action",
+        "title",
+        "brief",
+        "details"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "pwsh",
     "description": "执行 PowerShell 命令（优先 pwsh，退回 powershell）。查系统、跑脚本时用。",
     "parameters": {
@@ -919,6 +953,10 @@
         "name": {
           "type": "string",
           "description": "skill 名。省略则列出本机所有 skill（名字 + 一句话说明）"
+        },
+        "query": {
+          "type": "string",
+          "description": "在 skill 的名字、说明与正文里检索（与 name 二选一）；返回命中的名字与正文片段"
         }
       },
       "additionalProperties": false

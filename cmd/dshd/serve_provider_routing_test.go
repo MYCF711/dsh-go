@@ -399,7 +399,13 @@ func TestProviderRoutingRealDSHDLoopABAndRestart(t *testing.T) {
 	t.Setenv("DSHD_LLM_KEY", providerTestFallback)
 	exe := buildPluginGlueDSHD(t)
 	home := filepath.Join(t.TempDir(), "provider-home")
-	server := startPluginGlueServer(t, exe, home, filepath.Join(t.TempDir(), "decoy-home"))
+	// 沙盒 env 进入子进程后，HOME/USERPROFILE 必须是真实目录（策略 fail-closed）；
+	// decoy 仍不承载状态，只建空目录。
+	decoyHome := filepath.Join(t.TempDir(), "decoy-home")
+	if err := os.MkdirAll(decoyHome, 0o755); err != nil {
+		t.Fatalf("建 decoy home: %v", err)
+	}
+	server := startPluginGlueServer(t, exe, home, decoyHome)
 	client := connectPluginGlueServer(t, server)
 	oldSession := modelCatalogResult(t, postPluginGlue(t, client, server.base, "session.create", map[string]any{}, http.StatusOK))["sessionId"].(string)
 	for _, item := range []struct {
@@ -446,7 +452,11 @@ func TestProviderRoutingRealDSHDLoopABAndRestart(t *testing.T) {
 	prompt(sessionB, "B", "model-b")
 
 	server.stop()
-	server = startPluginGlueServer(t, exe, home, filepath.Join(t.TempDir(), "decoy-home-reopened"))
+	reopenedDecoy := filepath.Join(t.TempDir(), "decoy-home-reopened")
+	if err := os.MkdirAll(reopenedDecoy, 0o755); err != nil {
+		t.Fatalf("建 decoy home: %v", err)
+	}
+	server = startPluginGlueServer(t, exe, home, reopenedDecoy)
 	client = connectPluginGlueServer(t, server)
 	reopenedB := modelCatalogResult(t, postPluginGlue(t, client, server.base, "session.create", map[string]any{}, http.StatusOK))["sessionId"].(string)
 	prompt(sessionA, "A", "model-a")

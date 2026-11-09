@@ -30,8 +30,12 @@ type FS struct {
 	extra    []string // 工作区之外仍然允许读的根（外置结果 artifact）
 	extraCan []string // extra 的 canonical 形式（不存在时保留 Abs 结果）
 	sandbox  *sandbox.Boundary
-	mu       sync.Mutex
-	seen     map[string]stamp
+	// gate 是 per-call 策略闸门（可选）：设置之后，CheckWritableCall/WriteCall
+	// 能把"这一次调用"的会话、权限与一次性审批绑进判定。未设置时旧路径不变，
+	// 但 per-call API fail-loud，不静默降级成"没有策略"。
+	gate *sandbox.Gate
+	mu   sync.Mutex
+	seen map[string]stamp
 }
 
 // Option 是 New 的可选项。
@@ -56,6 +60,18 @@ func WithSandboxBoundary(b *sandbox.Boundary) Option {
 	return func(f *FS) {
 		if b != nil {
 			f.sandbox = b
+		}
+	}
+}
+
+// WithSandboxGate 注入 per-call 策略闸门（与 bash/pwsh 用的是同一个 Gate）。
+//
+// 进程环境的 DSHD_SANDBOX_MODE 存在时 New 会自动装一个（与命令侧同源），
+// 这个选项给宿主把已经构造好的 Gate 传进来（测试与 ACP 用）。
+func WithSandboxGate(g *sandbox.Gate) Option {
+	return func(f *FS) {
+		if g != nil {
+			f.gate = g
 		}
 	}
 }
@@ -107,18 +123,84 @@ func New(root string, opts ...Option) (*FS, error) {
 		}
 		f.sandbox = boundary
 	}
+	if f.gate == nil {
+		// 与 bash/pwsh 同源：环境里没接线就是 nil（旧行为），设了未知值则装配期炸。
+		gate, err := sandbox.GateFromEnv(f.root)
+		if err != nil {
+			return nil, err
+		}
+		f.gate = gate
+	}
 	return f, nil
 }
 
 // SandboxMode 返回 FS 当前生效的真实档位（给工具结果和测试用）。
 func (f *FS) SandboxMode() sandbox.Mode {
-	if f.sandbox == nil {
+	_, boundary, _ := f.snapshot()
+	if boundary == nil {
 		return ""
 	}
-	return f.sandbox.Mode()
+	return boundary.Mode()
 }
 
-func (f *FS) Root() string { return f.root }
+// snapshot 在锁内取一次一致快照：工作区根、写边界、只读额外根。
+// SetRoot/SetSandboxMode/AddExtraReadRoot 会并发替换这些字段，读路径必须走它。
+func (f *FS) snapshot() (string, *sandbox.Boundary, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.root, f.sandbox, append([]string(nil), f.extraCan...)
+}
+
+// SetSandboxMode 把进程级 FS 边界切到另一个档位。
+//
+// 为什么允许切换：ACP 是一个进程多个会话，而 FS 的 Read/Write 没有 ctx，
+// 边界只能是进程级的。调用方（cmd/dshd）必须先证明本进程只有一个档位
+// （见 acpRunner 的进程边界），再在这里落值；档位非法 fail-loud。
+func (f *FS) SetSandboxMode(mode sandbox.Mode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	boundary, err := sandbox.NewBoundary(mode, f.root)
+	if err != nil {
+		return err
+	}
+	f.sandbox = boundary
+	return nil
+}
+
+// AddExtraReadRoot 追加一个**只读**根（工作区之外仍允许读）。
+//
+// 供 ACP additionalDirectories 使用：一个进程只服务一个工作区，所以这里是
+// 进程级追加；写权限不受影响（策略层仍把 extra 判成只读）。
+func (f *FS) AddExtraReadRoot(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return fmt.Errorf("额外只读根为空")
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("解析额外只读根失败: %w", err)
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return fmt.Errorf("额外只读根不可用: %w", err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("额外只读根不是目录: %s", abs)
+	}
+	canonical, err := sandbox.CanonicalPath(abs)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.extra = append(f.extra, filepath.ToSlash(filepath.Clean(abs)))
+	f.extraCan = append(f.extraCan, filepath.ToSlash(canonical))
+	return nil
+}
+
+func (f *FS) Root() string {
+	root, _, _ := f.snapshot()
+	return root
+}
 
 // SetRoot 换工作区根。
 //
@@ -153,12 +235,12 @@ func (f *FS) SetRoot(root string) error {
 // within 判断 canonical 路径是否在允许的根之内（工作区 + 只读额外根）。
 // 传进来的必须是 canonical 路径；字符串前缀比较会把 workspace-evil 放进来，
 // 所以这里用 withinRoot 的 filepath.Rel 规则。
-func (f *FS) within(abs string) bool {
+func withinBoundary(root string, extra []string, abs string) bool {
 	slashed := filepath.ToSlash(abs)
-	if withinRoot(filepath.ToSlash(f.sandbox.WorkspaceRoot()), slashed) {
+	if withinRoot(filepath.ToSlash(root), slashed) {
 		return true
 	}
-	for _, e := range f.extraCan {
+	for _, e := range extra {
 		if withinRoot(e, slashed) {
 			return true
 		}
@@ -189,23 +271,11 @@ func (f *FS) resolveHome() (string, error) {
 	return filepath.ToSlash(filepath.Clean(abs)), nil
 }
 
-// withinHome 是显式 tilde 通道自己的边界；不能因目标同时位于 root/extra
-// 就允许 ~/.. 跳出 home。保留根目录末尾的 /，避免 C:/ 或 / 变成空前缀。
-func withinHome(abs, home string) bool {
-	if abs == home {
-		return true
-	}
-	prefix := home
-	if !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
-	return strings.HasPrefix(abs, prefix)
-}
-
 // Resolve 归一化并做越界检查。
 func (f *FS) Resolve(p string) (string, error) {
+	root, boundary, extra := f.snapshot()
 	if strings.TrimSpace(p) == "" {
-		return "", fmt.Errorf("路径为空；给一个相对工作区根(%s)的路径", f.root)
+		return "", fmt.Errorf("路径为空；给一个相对工作区根(%s)的路径", root)
 	}
 	slashed := strings.ReplaceAll(p, "\\", "/")
 
@@ -219,20 +289,31 @@ func (f *FS) Resolve(p string) (string, error) {
 		rest := strings.TrimLeft(strings.TrimPrefix(slashed, "~"), "/")
 		abs := filepath.Join(filepath.FromSlash(home), filepath.FromSlash(rest))
 		slash := filepath.ToSlash(abs)
-		if withinHome(slash, home) {
+		// home 里可能有一个指向外部的目录联接（reparse point）。读路径必须与写路径
+		// 用同一条 canonical 规则：先解析再判定，不能拿字符串前缀当边界。
+		canonicalTarget, err := sandbox.CanonicalPath(slash)
+		if err != nil {
+			return "", err
+		}
+		canonicalHome, err := sandbox.CanonicalPath(home)
+		if err != nil {
+			return "", err
+		}
+		if withinRoot(filepath.ToSlash(canonicalHome), filepath.ToSlash(canonicalTarget)) {
 			return slash, nil
 		}
-		return "", fmt.Errorf("路径 %q 越出宿主 home %s；显式 ~ 路径只允许操作 home 内的文件", p, home)
+		return "", fmt.Errorf("%w: 路径 %q 越出宿主 home %s（canonical %s）；显式 ~ 路径只允许操作 home 内的文件",
+			sandbox.ErrPathOutsideHome, p, home, filepath.ToSlash(canonicalTarget))
 	}
 
 	var abs string
 	if filepath.IsAbs(filepath.FromSlash(slashed)) {
 		abs = filepath.Clean(filepath.FromSlash(slashed))
 	} else {
-		abs = filepath.Join(filepath.FromSlash(f.root), filepath.FromSlash(slashed))
+		abs = filepath.Join(filepath.FromSlash(root), filepath.FromSlash(slashed))
 	}
 	slash := filepath.ToSlash(abs)
-	if f.sandbox != nil && f.sandbox.Mode() == sandbox.ModeDangerFullAccess {
+	if boundary != nil && boundary.Mode() == sandbox.ModeDangerFullAccess {
 		// danger-full-access 明确不提供路径沙盒：读/写可以越出工作区。
 		return slash, nil
 	}
@@ -241,11 +322,17 @@ func (f *FS) Resolve(p string) (string, error) {
 		return "", err
 	}
 	canonicalSlash := filepath.ToSlash(canonical)
-	if f.within(canonicalSlash) {
+	// boundary.WorkspaceRoot() 已经是 canonical 形式；用非 canonical 的 root
+	// 比较会在 8.3 短名/长名之间误判成"越界"。
+	workspaceRoot := boundary.WorkspaceRoot()
+	if workspaceRoot == "" {
+		workspaceRoot = root
+	}
+	if withinBoundary(workspaceRoot, extra, canonicalSlash) {
 		return slash, nil
 	}
 	return "", fmt.Errorf("%w: 路径 %q 越出工作区 %s（canonical %s）；只允许操作工作区内的文件",
-		sandbox.ErrOutsideReadBoundary, p, f.root, canonicalSlash)
+		sandbox.ErrOutsideReadBoundary, p, root, canonicalSlash)
 }
 
 // Read 先 stat 再读，并用 stat 的结果登记——若读的瞬间文件被改，登记的是旧值，
@@ -270,6 +357,11 @@ func (f *FS) Read(p string) ([]byte, error) {
 		return nil, fmt.Errorf("读 %s 失败: %w", p, err)
 	}
 	f.mark(abs, st.ModTime(), st.Size())
+	// per-call 写路径（CheckWritableCall/WriteCall）拿的是 canonical path；
+	// 这里把同一份观测也登记到 canonical 别名上，避免"读过却报没读过"。
+	if canonical, cerr := sandbox.CanonicalPath(abs); cerr == nil {
+		f.mark(filepath.ToSlash(canonical), st.ModTime(), st.Size())
+	}
 	return data, nil
 }
 
@@ -282,7 +374,8 @@ func (f *FS) CheckWritable(p, op string) error {
 	if err != nil {
 		return f.resolveWriteError(p, err)
 	}
-	if _, err := f.sandbox.CheckWrite(abs); err != nil {
+	_, boundary, _ := f.snapshot()
+	if _, err := boundary.CheckWrite(abs); err != nil {
 		return f.writePolicyError(p, err)
 	}
 	st, err := os.Stat(abs)
@@ -332,7 +425,8 @@ func (f *FS) Write(p string, data []byte) error {
 	if err != nil {
 		return f.resolveWriteError(p, err)
 	}
-	if _, err := f.sandbox.CheckWrite(abs); err != nil {
+	_, boundary, _ := f.snapshot()
+	if _, err := boundary.CheckWrite(abs); err != nil {
 		return f.writePolicyError(p, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -363,7 +457,8 @@ func (f *FS) writePolicyError(p string, err error) error {
 	case errors.Is(err, sandbox.ErrReadOnlyWrite):
 		return fmt.Errorf("路径 %q 写被拒绝：%w；要写文件先把会话档位切到 workspace-write 或 danger-full-access", p, err)
 	case errors.Is(err, sandbox.ErrWriteOutsideWorkspace):
-		return fmt.Errorf("路径 %q 越出工作区 %s；不允许写工作区外的文件（要越界写请显式选择 danger-full-access 档）: %w", p, f.root, err)
+		root, _, _ := f.snapshot()
+		return fmt.Errorf("路径 %q 越出工作区 %s；不允许写工作区外的文件（要越界写请显式选择 danger-full-access 档）: %w", p, root, err)
 	default:
 		return err
 	}

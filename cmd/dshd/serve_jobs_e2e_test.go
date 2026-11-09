@@ -197,7 +197,13 @@ func quoteJobsIntegrationShell(value string) string {
 func startTaskActionDSHD(t *testing.T, exe, home string, extraEnv ...string) *pluginGlueServer {
 	t.Helper()
 	cmd := exec.Command(exe, "serve", "--home", home, "--addr", "127.0.0.1:0")
-	cmd.Env = append(pluginGlueEnvironment(filepath.Join(t.TempDir(), "decoy")), extraEnv...)
+	// 沙盒 env 会随 sandboxPresets/store 进入子进程；子进程策略要求 HOME/USERPROFILE
+	// 存在。decoy 仍不是状态目录，只证明宿主不往里写，但必须存在（fail-closed）。
+	decoy := filepath.Join(t.TempDir(), "decoy")
+	if err := os.MkdirAll(decoy, 0o755); err != nil {
+		t.Fatalf("建 decoy home: %v", err)
+	}
+	cmd.Env = append(pluginGlueEnvironment(decoy), extraEnv...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

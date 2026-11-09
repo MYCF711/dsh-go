@@ -1,6 +1,6 @@
 package transport
 
-// 本文件是官方桌面端 0.2.2-rc.1「pluginManager 侧」12 个 typert 方法的 L1
+// 本文件是官方桌面端 0.2.2-rc.1「pluginManager 侧」15 个 typert 方法的 L1
 // 契约实现（官方源：@deepseek-ai/dsh-plugin-manager/lib/typert.host.js）。
 //
 // 对齐口径与 `handlers_agent_official.go` 一致：
@@ -21,9 +21,10 @@ package transport
 //     `installBundle` 仍接受它——本仓没有第二层可安装单元。
 //   - 本仓一包一插件，因此 `setBundleEnabled` 与 `setPluginEnabled` 写的是
 //     **同一个**持久化启用位（同一 id 空间），不是两个独立开关。
-//   - `application` 只取 applied/cancelled/failed：本仓没有运行时插件加载器，
-//     所以每条 applied 结果都带一条 `warnings` 明确写出"只落了 profile 状态"。
-//     不会报 `restart-required`（重启也不会加载），也不报 `overridden`。
+//   - `application` 只取 applied/cancelled/failed：本仓插件运行时只跑 Go/WASM，
+//     所以每条 applied 结果都带一条 `warnings` 写明 JS/Cordis/process 不支持；
+//     这次是否真的装载由 cmd/dshd 的适配层按 Loader 真实状态追加。不会报
+//     `restart-required`（本仓不需要重启装载 wasm），也不报 `overridden`。
 //   - `waitForInstall` 官方的 `ChangeResult | null` 在本仓写成
 //     `{"active":false}`：本仓 `/api` 出口不允许 `{"result":null}`（会把 null
 //     变成 500），`active` 是客户端可判定、且不会伪装成"有载荷"的写法。
@@ -62,9 +63,15 @@ const (
 	MethodPluginManagerReadBundleDetail      Method = "pluginManager.readBundleDetail"
 	MethodPluginManagerWaitForInstall        Method = "pluginManager.waitForInstall"
 	MethodPluginManagerCancelInstall         Method = "pluginManager.cancelInstall"
+	// 以下三个是 0.2.2-rc.1 的 pluginManager 读方法；旧 handler 只登记了 12 个，
+	// 把三个读方法漏进 server.go 的通用 501，官方插件管理界面拿不到真实清单。
+	MethodPluginManagerListBundles Method = "pluginManager.listBundles"
+	MethodPluginManagerListPlugins Method = "pluginManager.listPlugins"
+	MethodPluginManagerRegistries  Method = "pluginManager.registries"
 )
 
-// OfficialPluginManagerMethods 按固定顺序返回本文件实现的 12 个方法。
+// OfficialPluginManagerMethods 按固定顺序返回官方 pluginManager 命名空间的
+// 15 个 typert 方法。
 //
 // 它给快照/文档/门禁用：新增或删除一个方法必须显式改这里，不能让
 // "方法悄悄多了一个"从路由表里漏过去。
@@ -73,9 +80,12 @@ func OfficialPluginManagerMethods() []Method {
 		MethodPluginManagerCancelInstall,
 		MethodPluginManagerInspect,
 		MethodPluginManagerInstallBundle,
+		MethodPluginManagerListBundles,
+		MethodPluginManagerListPlugins,
 		MethodPluginManagerListVersionExemptions,
 		MethodPluginManagerListVersions,
 		MethodPluginManagerReadBundleDetail,
+		MethodPluginManagerRegistries,
 		MethodPluginManagerRemoveBundle,
 		MethodPluginManagerSetBundleEnabled,
 		MethodPluginManagerSetPluginEnabled,
@@ -85,16 +95,18 @@ func OfficialPluginManagerMethods() []Method {
 	}
 }
 
-// IsOfficialPluginManagerMethod 判断一个 /api 路径名是否属于本文件的 12 个方法。
+// IsOfficialPluginManagerMethod 判断一个 /api 路径名是否属于本文件的 15 个方法。
 //
-// 路由侧只需要这一次判断（**不要**在 server.go 里摊开 12 个 case：那样每加一个
+// 路由侧只需要这一次判断（**不要**在 server.go 里摊开 15 个 case：那样每加一个
 // 官方方法都要动一次早已冻结的路由表）。
 func IsOfficialPluginManagerMethod(name string) bool {
 	switch Method(name) {
 	case MethodPluginManagerCancelInstall, MethodPluginManagerInspect,
-		MethodPluginManagerInstallBundle, MethodPluginManagerListVersionExemptions,
+		MethodPluginManagerInstallBundle, MethodPluginManagerListBundles,
+		MethodPluginManagerListPlugins, MethodPluginManagerListVersionExemptions,
 		MethodPluginManagerListVersions,
-		MethodPluginManagerReadBundleDetail, MethodPluginManagerRemoveBundle,
+		MethodPluginManagerReadBundleDetail, MethodPluginManagerRegistries,
+		MethodPluginManagerRemoveBundle,
 		MethodPluginManagerSetBundleEnabled, MethodPluginManagerSetPluginEnabled,
 		MethodPluginManagerSetVersionExemption, MethodPluginManagerUpdateBundle,
 		MethodPluginManagerWaitForInstall:
@@ -130,6 +142,19 @@ type OfficialPluginManagerAPI struct {
 	ReadBundleDetail      func(OfficialReadBundleDetailParams) (OfficialBundleDetail, error)
 	WaitForInstall        func(OfficialRequestIDParams) (OfficialInstallWait, error)
 	CancelInstall         func(OfficialRequestIDParams) (OfficialInstallCancellation, error)
+	// ListBundles 返回**真实**已安装包清单（profile 状态 + 版本 + 来源）。
+	// 它不是安装动作，读路径不得写盘。
+	ListBundles func() ([]OfficialBundle, error)
+	// ListPlugins 返回当前进程 Loader 的真实条目：enabled 来自持久化状态，
+	// fiberPhase 来自正在运行的加载器（active / null），不是假数据。
+	ListPlugins func() ([]OfficialPluginEntry, error)
+	// Registries 本仓没有 pnpm 集成，永远回结构化未实现；保留字段是为了
+	// 让“未实现”也能点名缺什么，而不是掉进通用 501。
+	Registries func() (OfficialRegistries, error)
+	// PluginInventoryList 是官方 pluginInventory.list 的宿主投影；与
+	// ListPlugins 共用同一份 Manager/Loader，不是第二份运行时状态。
+	// nil = 宿主没有挂接，方法回点名 501。
+	PluginInventoryList func() (OfficialPluginInventory, error)
 }
 
 // officialPluginManagerMissing 是"字段为 nil 时缺的到底是什么"的唯一说法。
@@ -149,6 +174,9 @@ var officialPluginManagerMissing = map[Method]string{
 	MethodPluginManagerReadBundleDetail:      "宿主没有已安装包目录，读不到包内文档",
 	MethodPluginManagerWaitForInstall:        "宿主没有安装作业登记表",
 	MethodPluginManagerCancelInstall:         "宿主没有可取消的安装作业",
+	MethodPluginManagerListBundles:           "宿主没有挂接已安装 bundle 清单（pluginRuntime.ListBundles）",
+	MethodPluginManagerListPlugins:           "宿主没有挂接运行时 Loader 条目（pluginRuntime.ListPlugins）",
+	MethodPluginManagerRegistries:            "宿主没有 pnpm 集成，读不到 registry/fallbackRegistries/resolved",
 }
 
 // officialPluginManagerMount 把一份实现挂到一个 Server 上。
@@ -191,7 +219,7 @@ func (s *Server) officialPluginManagerAPI() (OfficialPluginManagerAPI, bool) {
 	return api, ok
 }
 
-// ServeOfficialPluginManagerAPI 是这 11 个方法在 `/api` 上的唯一入口。
+// ServeOfficialPluginManagerAPI 是这 15 个方法在 `/api` 上的唯一入口。
 //
 // 调用方（server.go 的 handleAPI）只需在既有 switch 之前判断
 // `IsOfficialPluginManagerMethod(name)` 并调用它；认证、`POST` 校验、失败日志
@@ -240,6 +268,12 @@ func routeOfficialPluginManagerMethod(api OfficialPluginManagerAPI, method Metho
 	switch method {
 	case MethodPluginManagerInspect:
 		return officialPluginInspect(api, p)
+	case MethodPluginManagerListBundles:
+		return officialPluginListBundles(api, p)
+	case MethodPluginManagerListPlugins:
+		return officialPluginListPlugins(api, p)
+	case MethodPluginManagerRegistries:
+		return officialPluginRegistries(api, p)
 	case MethodPluginManagerListVersions:
 		return officialPluginListVersions(api, p)
 	case MethodPluginManagerInstallBundle:
@@ -602,6 +636,87 @@ type OfficialVersionExemptions struct {
 	Warnings   []string            `json:"warnings"`
 }
 
+// OfficialBundle 是 `pluginManager.listBundles()` 的行（官方 zod 结果元素）。
+//
+// 本仓的“bundle”就是 `dsh.local-plugin@1` 私有包：没有 patch rows，所以
+// `official=false`、`rows=[]`、`overrides=[]`；`availability` 只能是 profile。
+// 这些不是占位值，而是本仓真实模型（见 internal/pluginmgr/bundles.go）。
+type OfficialBundle struct {
+	Name            string                 `json:"name"`
+	Official        bool                   `json:"official"`
+	Availability    string                 `json:"availability"`
+	InstallTarget   *OfficialBundleInstall `json:"installTarget,omitempty"`
+	Version         string                 `json:"version,omitempty"`
+	Meta            *OfficialBundleMeta    `json:"meta,omitempty"`
+	Description     string                 `json:"description,omitempty"`
+	ListedByDefault *bool                  `json:"listedByDefault,omitempty"`
+	Enabled         bool                   `json:"enabled"`
+	Installed       bool                   `json:"installed"`
+	Source          string                 `json:"source,omitempty"`
+	Optional        bool                   `json:"optional"`
+	Removable       bool                   `json:"removable"`
+	Updatable       bool                   `json:"updatable"`
+	ReadOnlyReason  string                 `json:"readOnlyReason,omitempty"`
+	Error           *OfficialBundleError   `json:"error,omitempty"`
+	// Rows 与 Overrides 在官方 schema 里是必填数组：空也必须是 []。
+	Rows      []OfficialBundleRow `json:"rows"`
+	Overrides []string            `json:"overrides"`
+}
+
+// OfficialBundleInstall 是 `installTarget`（仅 on-demand 目录项有意义）。
+type OfficialBundleInstall struct {
+	Spec    string `json:"spec"`
+	Version string `json:"version"`
+}
+
+// OfficialBundleMeta 是本地显示元数据；本仓 manifest 没有这些字段，
+// 所以通常缺省，而不是编造标题/图标。
+type OfficialBundleMeta struct {
+	Title       any    `json:"title,omitempty"`
+	Description any    `json:"description,omitempty"`
+	Icon        string `json:"icon,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+// OfficialBundleRow 是 bundle patch 插入的行；本仓私有包没有 patch rows。
+type OfficialBundleRow struct {
+	RowID      string              `json:"rowId"`
+	ModuleName string              `json:"moduleName"`
+	Meta       *OfficialBundleMeta `json:"meta,omitempty"`
+	EntryID    string              `json:"entryId,omitempty"`
+}
+
+// OfficialBundleError 是 bundle 行上的管理性错误（官方 enum code）。
+type OfficialBundleError struct {
+	Code         string                        `json:"code"`
+	Diagnostic   string                        `json:"diagnostic,omitempty"`
+	Incompatible []OfficialIncompatiblePackage `json:"incompatible,omitempty"`
+}
+
+// OfficialPluginEntry 是 `pluginManager.listPlugins()` 的运行时条目。
+//
+// `fiberPhase` 在官方是必填（null | failed | active | pending | loading |
+// unloading）：本仓只有“当前进程是否真的装载了这个 wasm”这一份真值，装载了
+// 就是 active，没装载就是 null——不伪造 pending/loading。
+type OfficialPluginEntry struct {
+	EntryID        string              `json:"entryId"`
+	ModuleName     string              `json:"moduleName"`
+	Meta           *OfficialBundleMeta `json:"meta,omitempty"`
+	Enabled        bool                `json:"enabled"`
+	FiberPhase     *string             `json:"fiberPhase"`
+	Diagnostic     string              `json:"diagnostic,omitempty"`
+	PatchID        string              `json:"patchId,omitempty"`
+	ReadOnlyReason string              `json:"readOnlyReason,omitempty"`
+}
+
+// OfficialRegistries 是 `pluginManager.registries()` 的结果。
+// 本仓没有 pnpm 集成，正常不会返回它；保留结构只为将来有真源时能直接接线。
+type OfficialRegistries struct {
+	Registry           json.RawMessage `json:"registry"`
+	FallbackRegistries []string        `json:"fallbackRegistries"`
+	Resolved           json.RawMessage `json:"resolved"`
+}
+
 // ---------------------------------------------------------------------------
 // 结果构造器（形状只在这里拼，方法体里不许手捏 map）
 // ---------------------------------------------------------------------------
@@ -622,18 +737,23 @@ func OfficialConflict(format string, args ...any) error {
 	return officialRevisionConflict(format, args...)
 }
 
-// OfficialNoRuntimeLoaderWarning 是每条 applied 结果都带的真实边界说明。
+// OfficialRuntimeBoundaryWarning 是每条 applied 结果都带的真实边界说明。
 //
-// docs/host-plugin-manager.md §1 写明了本仓不执行也不动态加载包入口；把它写进
-// 结果的 warnings，客户端就不会把 enabled=true 误读成"插件已经在跑"。
-const OfficialNoRuntimeLoaderWarning = "本仓没有运行时插件加载器：本次只持久化了 profile 状态（state.json），包入口不会被加载或执行"
+// HS-07W 之后宿主已有真实 wasm 运行时装载器：这里的边界不再是“没有加载器”，
+// 而是“只支持 Go/WASM；JS/Cordis 与 process 形态明确不加载”。具体这次是否
+// 真的装载了，由 cmd/dshd 的适配层按 Loader 真实状态追加，不能在这里猜。
+const OfficialRuntimeBoundaryWarning = "本仓插件运行时只支持 Go/WASM 包：JS/Cordis 与 process 插件不会加载（AGENTS R6）"
+
+// OfficialNoRuntimeLoaderWarning 是旧名兼容别名：HS-07W 之后本仓已有运行时加载器，
+// 新代码应使用 OfficialRuntimeBoundaryWarning。
+const OfficialNoRuntimeLoaderWarning = OfficialRuntimeBoundaryWarning
 
 // OfficialAppliedChange 造一条"真实状态已改"的结果。
 func OfficialAppliedChange(stage, target string, enabled bool) OfficialChangeResult {
 	value := enabled
 	return OfficialChangeResult{
 		Changed: true, Application: "applied", Stage: stage, Target: target,
-		Enabled: &value, Warnings: []string{OfficialNoRuntimeLoaderWarning},
+		Enabled: &value, Warnings: []string{OfficialRuntimeBoundaryWarning},
 	}
 }
 
@@ -1104,4 +1224,83 @@ func officialPluginCancelInstall(api OfficialPluginManagerAPI, p *officialParams
 		return nil, officialPluginMissing(MethodPluginManagerCancelInstall)
 	}
 	return api.CancelInstall(OfficialRequestIDParams{RequestID: requestID})
+}
+
+// officialPluginListBundles 读**真实**已安装 bundle 清单（零参数）。
+//
+// 它不是“安装动作”：只是 profile 状态与包目录的只读投影。没有挂接实现时
+// 回本方法的四字段 501，而不是让客户端收到通用 404。
+func officialPluginListBundles(api OfficialPluginManagerAPI, p *officialParams) (any, error) {
+	if err := p.finish(); err != nil {
+		return nil, err
+	}
+	if api.ListBundles == nil {
+		return nil, officialPluginMissing(MethodPluginManagerListBundles)
+	}
+	bundles, err := api.ListBundles()
+	if err != nil {
+		return nil, err
+	}
+	return normalizeOfficialBundles(bundles), nil
+}
+
+// normalizeOfficialBundles 把 nil 归一成官方要求的空数组。
+func normalizeOfficialBundles(bundles []OfficialBundle) []OfficialBundle {
+	if bundles == nil {
+		bundles = []OfficialBundle{}
+	}
+	for i := range bundles {
+		if bundles[i].Rows == nil {
+			bundles[i].Rows = []OfficialBundleRow{}
+		}
+		if bundles[i].Overrides == nil {
+			bundles[i].Overrides = []string{}
+		}
+	}
+	return bundles
+}
+
+// officialPluginListPlugins 读当前进程 Loader 的真实条目（零参数）。
+func officialPluginListPlugins(api OfficialPluginManagerAPI, p *officialParams) (any, error) {
+	if err := p.finish(); err != nil {
+		return nil, err
+	}
+	if api.ListPlugins == nil {
+		return nil, officialPluginMissing(MethodPluginManagerListPlugins)
+	}
+	plugins, err := api.ListPlugins()
+	if err != nil {
+		return nil, err
+	}
+	if plugins == nil {
+		plugins = []OfficialPluginEntry{}
+	}
+	return plugins, nil
+}
+
+// officialPluginRegistries 是 pnpm 自己的 registry 配置读取。
+//
+// 本仓没有 pnpm 集成，这个能力**不存在**；回四字段 501 并点名缺 pnpm，
+// 不用 `{registry:null,...}` 冒充“读到了但没有”。
+func officialPluginRegistries(api OfficialPluginManagerAPI, p *officialParams) (any, error) {
+	if err := p.finish(); err != nil {
+		return nil, err
+	}
+	if api.Registries == nil {
+		return nil, officialPluginMissing(MethodPluginManagerRegistries)
+	}
+	registries, err := api.Registries()
+	if err != nil {
+		return nil, err
+	}
+	if registries.FallbackRegistries == nil {
+		registries.FallbackRegistries = []string{}
+	}
+	return registries, nil
+}
+
+// OfficialRegistryUnavailable 是 registry 未配置/不可达时的结构化错误：
+// 503 + 四字段，**不是 501**，也不返回空 registry 数组冒充读到了配置。
+func OfficialRegistryUnavailable(format string, args ...any) error {
+	return &officialError{status: http.StatusServiceUnavailable, code: "registry_unavailable", msg: fmt.Sprintf(format, args...)}
 }

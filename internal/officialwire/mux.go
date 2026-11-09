@@ -248,6 +248,33 @@ func (s *muxSession) handleOpen(frame *clientFrame) bool {
 	state := &streamState{id: frame.StreamID}
 	switch {
 	case frame.Endpoint == EndpointEvents:
+		// `$events` 有两道**必须在 ready 之前**过的门：作答能力与空 args。
+		//
+		// 为什么是 ready 之前：ready（以及紧跟其后的 waterfall）一旦发出去，
+		// 客户端就认为"事件流已就绪"并真的去答；而它如果没有 answer 能力，
+		// `$events/result` 只会回 gateway/interactions-forbidden，客户端
+		// `answer()` 的失败会 abort 整条 generation —— 表现是"事件可见，但
+		// 作答能力并不存在"。官方把这两件事放在同一道门上（api-gateway
+		// lib/index.js:1015 的 openWireStream 与 :995 的 dispatchRpc 都先
+		// requireInteractions，判据 :1484-1486），本宿主照同一判据要求自己。
+		if !s.peer.Answering() {
+			s.sendError(frame.StreamID, &Error{
+				Code:    CodeInteractionsForbidden,
+				Message: "转发事件流需要 interactions=answer（这是本 Peer 的连接交互声明，不是权限判断）",
+				Details: map[string]any{"endpoint": EndpointEvents},
+			})
+			s.markEnded(frame.StreamID)
+			return true
+		}
+		// 官方 openRemoteEvents（:1024-1026）要求 payload 恰好一个键 `args`，
+		// 且 args 是**零键**对象，否则 gateway/arguments-invalid。多收一个键
+		// 就是接受另一套方言：客户端以为订阅带了参数，宿主按"无参数"跑。
+		if !emptyObjectArgs(frame.Args) {
+			s.sendError(frame.StreamID, ArgumentsInvalid(EndpointEvents, "args",
+				"$events 的 open payload.args 必须是空对象（官方 openRemoteEvents 只收零键 args）"))
+			s.markEnded(frame.StreamID)
+			return true
+		}
 		// 打开即释放上行（EVIDENCE §3.2）：后续 item 丢弃、不计数。
 		//
 		// clientId **每次 open 现生成**（官方 lib/index.js:1033 的

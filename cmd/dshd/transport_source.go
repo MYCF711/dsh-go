@@ -37,6 +37,15 @@ type sessionSource struct {
 	efforts *effortOverrideStore
 	// catalog 与生产 serve/runner 共享同一 env fallback，不用新开的空 store 判自定义 level。
 	catalog *llm.ModelCatalogStore
+	// models 是会话级模型覆盖（`<home>/state/session-model.json`）。
+	//
+	// 为什么 ContextWindow 需要它：新会话的 v4 里还没有 request/context 事件，
+	// 但用户可能已经在界面上选过模型——那才是这一轮会用的模型，容量要按它算。
+	// **可以 nil**：不带覆盖的场景（老测试、别的入口）照样 work。
+	models *modelOverrideStore
+	// defaultModel 是宿主默认 `--model`：会话没覆盖、v4 里也还没跑过时，
+	// 这一轮会用的就是它。空串 = 不知道（此时 ContextWindow 回 0）。
+	defaultModel string
 }
 
 func newSessionSource(home, cwd string) *sessionSource {
@@ -324,17 +333,73 @@ func (s *sessionSource) Cwd(sessionID string) (string, error) {
 	return lg.Header.Cwd, nil
 }
 
-// ContextWindow 报这条会话模型的上限（token）。
+// ContextWindow 报这条会话模型的上下文窗口（token）。**0 表示不知道**——界面据此
+// 只报数字、不画进度条。
 //
-// 从哪来：环境变量 DSHD_CONTEXT_WINDOW。**没有就返回 0**——界面据此不画进度条。
-// 不做"按模型名查表猜一个数"：猜错的话百分比是假精确，比不给更糟。
-func (s *sessionSource) ContextWindow(string) int {
+// # 从哪来（按优先级，前一条有真值就不再往下猜）
+//
+//  1. 会话模型在 `<home>/state/model-catalog.json` 里声明的窗口
+//     （`contextWindow` 官方 schema / `context_length` 网关形状）——magpie 网关
+//     `/v1/models` 对 `group/deepseek-v4.1-flash-1017` 实测就是 `context_length:1000000`；
+//     这是**官方主路径**：适配器解析链 `entry.contextWindow ?? base.contextWindow ??
+//     request.defaultContextWindow`（@dsa/dsh-llm-pi-ai/lib/index.js:694），经
+//     `request/context` 进入 contextPressure 投影；
+//  2. `DSHD_CONTEXT_WINDOW`：**兜底**。官方 `DSH_CONTEXT_WINDOW` 只出现在
+//     dsh-sdk-minimal，喂 `defaultContextWindow`（"不在适配器建议目录中的模型的后备容量"，
+//     @dsa/dsh-sdk-minimal/cordis.patch.yml:30 + README.md:35）。以前把它放在第一位，
+//     等于让运维开关压过真实模型元数据，顺序反了；
+//  3. `llm.ResolveModelCapacity` 的内置/未声明默认值；
+//  4. 都没有 → 0。
+//
+// # 会话模型从哪来
+//
+// 先在 v4 里找最近一条 `request/context`（官方客户端写的"实际跑过的模型"），
+// 再退到会话级覆盖 `<home>/state/session-model.json`（用户在这一轮之前选的），
+// 最后退到宿主默认 `--model`（这一轮**会**用的那个）。三者都没有 = 模型未知 → 0。
+//
+// # 以前为什么是 0
+//
+// 旧实现只认环境变量，没设就恒回 0：界面于是永远不画上下文占用，用户看到的是
+// "这个宿主不知道还能装多少"（真实试玩的可见缺陷之一）。而"按模型名查表猜"
+// 之所以以前不做，是因为那时没有**真值来源**；现在 catalog 里的窗口是网关
+// 实测/界面显式声明的，不再是猜。
+func (s *sessionSource) ContextWindow(sessionID string) int {
+	model := s.sessionModel(sessionID)
+	// 1) 模型目录 = 官方主路径：目录声明了就用它，env 不能覆盖。
+	if model != "" && s.catalog != nil {
+		// 目录读失败（损坏）按"没声明"处理：上下文占用是只读展示，不能因为
+		// 一个损坏文件让整个 session.load 失败。真正的失败由目录 API 自己报。
+		if view, err := s.catalog.List(); err == nil {
+			if window := llm.CatalogContextWindow(view, model); window > 0 {
+				return window
+			}
+		}
+	}
+	// 2) env 兜底（官方 sdk-minimal 的 defaultContextWindow 语义）。
 	if v := os.Getenv("DSHD_CONTEXT_WINDOW"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
 	}
-	return 0
+	if model == "" {
+		return 0
+	}
+	// 3) 内置表 / 未声明自定义模型的默认值；4) 仍然没有就 0。
+	return llm.ResolveModelCapacity(model, llm.ModelCapacity{}).ContextWindow
+}
+
+// sessionModel 解析"这条会话现在用哪个模型"，只用于容量投影（不改变
+// `session.load.model` 的既有语义——那个仍是 v4 里实际跑过的模型）。
+func (s *sessionSource) sessionModel(sessionID string) string {
+	if model, err := s.Model(sessionID); err == nil && model != "" {
+		return model
+	}
+	if s.models != nil {
+		if model := s.models.Get(sessionID); model != "" {
+			return model
+		}
+	}
+	return s.defaultModel
 }
 
 func (s *sessionSource) Messages(sessionID string) ([]transport.Message, error) {

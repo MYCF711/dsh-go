@@ -177,6 +177,9 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		"subagent_fork": {},
 		// 只读自己的技能目录，不写盘、不起进程、不联网。
 		"skill": {},
+		// 只把卡片提案交给会话投影；真正的动作要等用户点击后才由 kind 执行，
+		// 工具本身不写盘、不起进程、不联网。
+		"propose_action": {},
 		// 查运行时依赖：**起 python/node 子进程**读版本，所以 Executes 为真。
 		// 不写盘、不联网（子进程只读版本号）。
 		"load_workspace_dependencies": {Executes: true},

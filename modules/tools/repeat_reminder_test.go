@@ -317,6 +317,149 @@ func TestRepeatReminderArgumentPreviewIsCapped(t *testing.T) {
 	}
 }
 
+// 生产形状的一轮 ctx：Loop 放 run id（内层），宿主 guardedRunner 再放受管子调用通道
+// （外层）。两者顺序就是生产顺序，谁都不许把对方挤掉。
+func turnCtx(base context.Context, runID string, runner spi.Runner) context.Context {
+	return spi.WithSubDispatch(spi.WithRunID(base, runID), spi.SubDispatch{Runner: runner})
+}
+
+// 一轮结束 = 一条新链：**下一轮**里同一个调用数到 3 必须重新提醒。
+//
+// 红：run id 与 SubDispatch 共用 ctxKey(1)，guardedRunner 一放通道就把 Loop 放的
+// run id 冲掉；于是 turn 恒为空，链跨轮累计——新的一轮数到第 3 次不提醒
+// （第 5 次才给详细文案，而那一轮根本没有 5 次调用）。
+func TestRepeatReminderResetsEachTurnWithRealRunID(t *testing.T) {
+	p, k := newPipe(t, Options{}, &stubTool{name: "grep", res: spi.Result{Summary: "ok"}})
+	defer k.Root().Dispose()
+
+	base := spi.WithSession(context.Background(), "sess-turn")
+	const args = `{"pattern":"x"}`
+
+	// 第一轮：第 3 次提醒。
+	for i := 1; i <= 3; i++ {
+		res := repeatCall(t, p, turnCtx(base, "sess-turn#turn-1", p), "grep", args)
+		if i < 3 && res.Hint != "" {
+			t.Fatalf("第一轮第 %d 次不该提醒，得到 %q", i, res.Hint)
+		}
+		if i == 3 && res.Hint != officialGentleReminder {
+			t.Fatalf("第一轮第 3 次应提醒，得到 %q", res.Hint)
+		}
+	}
+
+	// 第二轮：计数必须从 1 重新数，第 3 次再提醒一次。
+	for i := 1; i <= 3; i++ {
+		res := repeatCall(t, p, turnCtx(base, "sess-turn#turn-2", p), "grep", args)
+		if i < 3 && res.Hint != "" {
+			t.Fatalf("新一轮第 %d 次不该提醒（上一轮的计数必须清掉），得到 %q", i, res.Hint)
+		}
+		if i == 3 && res.Hint != officialGentleReminder {
+			t.Fatalf("新一轮第 3 次应重新提醒，得到 %q", res.Hint)
+		}
+	}
+}
+
+// 子调用（workflow/team 里发的）不算"和我对话的那个模型"的链——即使这一轮的 ctx
+// 上同时有 run id。
+//
+// 红：run id 绑在后面时把 SubDispatch 冲掉，Depth 归零，子调用被当成顶层调用计数，
+// 数到第 3 次就对着子代理喊"你在重复调用"。
+func TestRepeatReminderSkipsNestedCallsWithRunID(t *testing.T) {
+	p, k := newPipe(t, Options{}, &stubTool{name: "grep", res: spi.Result{Summary: "ok"}})
+	defer k.Root().Dispose()
+
+	base := spi.WithSession(context.Background(), "sess-nested")
+	const args = `{"pattern":"x"}`
+
+	// 子调用 ctx：宿主先放 Depth=1 的通道，子代理的 Loop 再放 run id（后放的那次
+	// 曾经会把通道挤掉）。
+	nested := spi.WithRunID(
+		spi.WithSubDispatch(base, spi.SubDispatch{Runner: p, Depth: 1}),
+		"sess-nested#turn-1")
+
+	for i := 1; i <= 8; i++ {
+		if res := repeatCall(t, p, nested, "grep", args); res.Hint != "" {
+			t.Fatalf("子调用第 %d 次不该提醒（嵌套必须跳过），得到 %q", i, res.Hint)
+		}
+	}
+
+	// 父调用的链仍是干净的：三次就提醒。
+	for i := 1; i <= 3; i++ {
+		res := repeatCall(t, p, turnCtx(base, "sess-nested#turn-1", p), "grep", args)
+		if i < 3 && res.Hint != "" {
+			t.Fatalf("父调用第 %d 次不该提醒（子调用不该累加），得到 %q", i, res.Hint)
+		}
+		if i == 3 && res.Hint != officialGentleReminder {
+			t.Fatalf("父调用第 3 次应提醒，得到 %q", res.Hint)
+		}
+	}
+}
+
+// 换轮之后失败 Hint 仍然不能被挤掉：工具的原始 Hint 在前，提醒追加在后。
+func TestRepeatReminderKeepsFailureHintPerTurn(t *testing.T) {
+	p, k := newPipe(t, Options{}, &stubTool{
+		name: "flaky",
+		res:  spi.Result{Summary: "读取失败", Hint: "先看日志再决定重试"},
+		err:  errTestBoom,
+	})
+	defer k.Root().Dispose()
+
+	base := spi.WithSession(context.Background(), "sess-turn-fail")
+	const args = `{"path":"x"}`
+
+	for turn := 1; turn <= 2; turn++ {
+		runID := "sess-turn-fail#turn-" + itoa(turn)
+		for i := 1; i <= 3; i++ {
+			res, err := p.Run(turnCtx(base, runID, p), "flaky", json.RawMessage(args))
+			if err == nil {
+				t.Fatalf("第 %d 轮第 %d 次应返回错误", turn, i)
+			}
+			if i < 3 {
+				if res.Hint != "先看日志再决定重试" {
+					t.Fatalf("第 %d 轮第 %d 次不该提醒，Hint=%q", turn, i, res.Hint)
+				}
+				continue
+			}
+			if !strings.Contains(res.Hint, "先看日志再决定重试") {
+				t.Fatalf("第 %d 轮：提醒挤掉了工具自己的 Hint：%q", turn, res.Hint)
+			}
+			if !strings.Contains(res.Hint, officialGentleReminder) {
+				t.Fatalf("第 %d 轮第 3 次应带提醒，Hint=%q", turn, res.Hint)
+			}
+		}
+	}
+}
+
+// maxRepeatChainsForTest 是"链表的可接受上限"：生产的 maxRepeatChains 必须 ≤ 它。
+//
+// 为什么要有上限：run id 每轮一个新值，长驻进程里 turn ctx 常常活到进程退出，
+// 只靠 ctx.Done() 回收等于不回收。
+const maxRepeatChainsForTest = 4096
+
+// 链是有界的：每轮一条新链，长驻进程里不能按轮数无限长。
+func TestRepeatReminderChainsStayBoundedAcrossTurns(t *testing.T) {
+	p, k := newPipe(t, Options{}, &stubTool{name: "grep", res: spi.Result{Summary: "ok"}})
+	defer k.Root().Dispose()
+
+	base := spi.WithSession(context.Background(), "sess-bounded")
+	const args = `{"pattern":"x"}`
+
+	// 每轮都用一个**不会结束**的 ctx（真实宿主里 turn ctx 常常活到进程退出）。
+	for turn := 1; turn <= maxRepeatChainsForTest+50; turn++ {
+		runID := "sess-bounded#turn-" + itoa(turn)
+		repeatCall(t, p, turnCtx(base, runID, p), "grep", args)
+	}
+
+	p.repeat.mu.Lock()
+	n := len(p.repeat.chains)
+	p.repeat.mu.Unlock()
+	if n > maxRepeatChainsForTest {
+		t.Fatalf("链表按轮数无限增长：%d 条（上限 %d）", n, maxRepeatChainsForTest)
+	}
+	if n == 0 {
+		t.Fatal("链表被清空了：这一轮的重复检测会失效")
+	}
+}
+
 // 子调用（workflow 里发的）不是"调用模型的链"：官方按 agent 分链，子代理重复
 // 不能算到父代理头上，也不能把父代理的链冲掉。
 func TestRepeatReminderSkipsNestedCalls(t *testing.T) {

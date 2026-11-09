@@ -176,6 +176,41 @@ func TestOfficialMuxStreamUnwiredIsMethodUnavailable(t *testing.T) {
 	}
 }
 
+// TestOfficialMuxStreamControlBaselineThenProjection 钉住官方 SPA 实际走的
+// slash endpoint：item.value 直接是 baseline/projection，不能包 ready 或 NDJSON 壳。
+func TestOfficialMuxStreamControlBaselineThenProjection(t *testing.T) {
+	src := newMutableOfficialSource([]DurableEvent{eventAt(0, "turn/start", `{"turn":1}`)})
+	s := controlTestServer(t, src, "s1")
+	opener := officialMuxStreamOpener{server: s}
+
+	stream, failure := opener.Open(context.Background(), "session/control", json.RawMessage(`{}`))
+	if failure != nil {
+		t.Fatalf("open session/control 失败：%v", failure)
+	}
+	defer stream.Close()
+	item, done, failure := stream.Next(context.Background())
+	if failure != nil || done || !item.HasValue {
+		t.Fatalf("baseline 必须是一个带 value 的 item：done=%v failure=%v", done, failure)
+	}
+	var baseline map[string]any
+	if err := json.Unmarshal(item.Value, &baseline); err != nil || baseline["type"] != "baseline" {
+		t.Fatalf("mux 首帧必须是官方 baseline：%v；err=%v", baseline, err)
+	}
+
+	src.append(eventAt(1, "session/title", `{"title":"mux 真标题"}`))
+	item, done, failure = stream.Next(context.Background())
+	if failure != nil || done {
+		t.Fatalf("projection 必须是一个 item：done=%v failure=%v", done, failure)
+	}
+	var update map[string]any
+	if err := json.Unmarshal(item.Value, &update); err != nil {
+		t.Fatalf("projection 不是 JSON：%v", err)
+	}
+	if update["type"] != "projection" || update["sessionId"] != "s1" || update["seq"] != float64(1) {
+		t.Fatalf("mux projection 形状/序号不对：%v", update)
+	}
+}
+
 // TestOfficialMuxJournalTailSinceSeqSentinel 钉住 `session/events` 尾部流的
 // -1 哨兵（`Window` 的排他判据 + Covered 修正）。
 func TestOfficialMuxJournalTailSinceSeqSentinel(t *testing.T) {

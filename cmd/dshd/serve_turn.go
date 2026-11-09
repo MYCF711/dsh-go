@@ -90,9 +90,9 @@ func (r *modelRunner) runModelTurnWithEffort(ctx context.Context, sessionID, tur
 	if err != nil {
 		return fail(err)
 	}
-	base, credential := r.base, os.Getenv("DSHD_LLM_KEY")
+	base, credential, api := r.base, os.Getenv("DSHD_LLM_KEY"), ""
 	if routed {
-		base, credential = provider.BaseURL, provider.Credential()
+		base, credential, api = provider.BaseURL, provider.Credential(), provider.API
 	}
 
 	src := newSessionSource(r.home, "")
@@ -106,7 +106,7 @@ func (r *modelRunner) runModelTurnWithEffort(ctx context.Context, sessionID, tur
 	// 换掉这一条（见 offloadRetrier.tryOffloadRetry），不是追加一条新消息。
 	initialIndex := len(history)
 	history = append(history, initial.message)
-	retrier := &offloadRetrier{}
+	retrier := &offloadRetrier{access: session.SessionImageAccessAt(path)}
 	step := 0
 	for {
 		// 首步前也是一个 step 边界；首步在飞时收到的项则在下面的响应后边界接管。
@@ -116,6 +116,16 @@ func (r *modelRunner) runModelTurnWithEffort(ctx context.Context, sessionID, tur
 			history = append(history, input.message)
 		}
 		step++
+		// 官方 0.2.2 #78 `agent/pre-step`：每一步模型请求之前先让请求前缀耐久。
+		// 放在 `step/start` 与真实 `Stream` **之前**：这一步里的任何模型请求
+		// （含图片降级重试）都在耐久边界之后；失败即整步不派发（fail-closed，
+		// 见 serve_checkpoint.go 的 checkpointBeforeModelStep）。
+		//
+		// 为什么循环里还需要一次：serve 的 prompt 侧车只看得见第一步，
+		// 第二步起（steer 接管、图片降级重试）在此之前是裸奔的。
+		if err := checkpointBeforeModelStep(r.home, sessionID, step); err != nil {
+			return fail(err)
+		}
 		if r.recordEffort {
 			// selection 与下面 Request.Model/Reasoning 来自同一份本轮解析值；
 			// 首步与 steer 后续步各记录一次，并落在本 step 的真实事件序列里。
@@ -128,7 +138,7 @@ func (r *modelRunner) runModelTurnWithEffort(ctx context.Context, sessionID, tur
 		// attemptMark 是本 step 开始前的事件下标：降级重试要把这一次失败的
 		// 半截流（assistant/text 增量）从**落盘**里退回，否则一次失败会写成两段回答。
 		attemptMark := len(events)
-		resp, streamErr := llm.New(base, credential).Stream(ctx,
+		resp, streamErr := llm.NewWithAPI(base, credential, api).Stream(ctx,
 			llm.Request{Model: model, Messages: history, Stream: true, Reasoning: reasoning}, func(e llm.Event) error {
 				typ := ""
 				switch e.Kind {

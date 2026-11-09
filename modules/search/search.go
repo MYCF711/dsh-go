@@ -1,133 +1,59 @@
-// Package search 提供默认的搜索后端。
+// Package search 是官方 0.2.2 `dsh-web` 能力接缝的宿主默认装配：
+// 把可替换的搜索 provider（SearxNG / DeepSeek 原生搜索）注册进 `spi.WebProviders`。
 //
-// 本机没有可用的公共搜索端点（DSH 自己的 web_search 在这台机器上同样是报错的，
-// 真实会话里子代理被明确告知"web_search 不可用，改用 curl"）。所以这里的默认实现
-// **不假装能搜**：没有配置就直接报错，并说清要配什么。
+// 为什么不是"一个写死的 SearxNG 调用"：搜索没有公认的公共端点，每家请求/响应
+// 形状都不一样；而且**没有配后端时必须明确报错**——不能返回"搜过了，没结果"，
+// 那会让模型以为互联网上真的没有，而不是"这个宿主没接搜索"。
 //
-// 配置方式（环境变量）：
+// 配置方式（环境变量；官方同名变量 `DSH_WEB_SEARCH_PROVIDER` 也认）：
 //
-//	DSHD_SEARCH_URL   搜索端点，SearxNG 风格的 GET，含 {query} 占位
-//	                  例如 http://127.0.0.1:8080/search?q={query}&format=json
-//
-// 响应按 {results:[{title,url,content}], answers?:[...]} 解析（SearxNG 的 json 格式）。
+//	DSHD_SEARCH_URL                SearxNG 端点，含 {query} 占位
+//	DEEPSEEK_API_KEY               DeepSeek 原生搜索凭据（或 DSHD_SEARCH_API_KEY）
+//	DEEPSEEK_SEARCH_BASE_URL       搜索端点（默认 https://api.deepseek.com/anthropic/v1）
+//	DSHD_SEARCH_MODEL              原生搜索用的模型 id（默认 deepseek-v4-flash）
+//	DSHD_WEB_SEARCH_PROVIDER       钉死用哪个 provider（searxng / deepseek-official）
 package search
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
-	"strings"
-	"time"
 
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
 )
 
-// Provider 是按 DSHD_SEARCH_URL 工作的实现。
-type Provider struct {
-	// Endpoint 是带 {query} 占位的 URL；空表示没配置。
-	Endpoint string
-	Client   *http.Client
-}
-
-func (p *Provider) Search(ctx context.Context, queries []string, limit int) (spi.SearchResult, error) {
-	if strings.TrimSpace(p.Endpoint) == "" {
-		return spi.SearchResult{}, fmt.Errorf("没有配置搜索服务")
-	}
-	if len(queries) == 0 {
-		return spi.SearchResult{}, fmt.Errorf("没有查询词")
-	}
-	if limit <= 0 {
-		limit = 8
-	}
-
-	var merged spi.SearchResult
-	seen := map[string]bool{}
-	for _, q := range queries {
-		one, err := p.query(ctx, q)
-		if err != nil {
-			return spi.SearchResult{}, err
-		}
-		if merged.Answer == "" {
-			merged.Answer = one.Answer
-		}
-		for _, s := range one.Sources {
-			if seen[s.URL] {
-				continue
-			}
-			seen[s.URL] = true
-			merged.Sources = append(merged.Sources, s)
-			if len(merged.Sources) >= limit {
-				break
-			}
-		}
-		if len(merged.Sources) >= limit {
-			break
-		}
-	}
-	return merged, nil
-}
-
-func (p *Provider) query(ctx context.Context, q string) (spi.SearchResult, error) {
-	target := strings.ReplaceAll(p.Endpoint, "{query}", url.QueryEscape(q))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return spi.SearchResult{}, fmt.Errorf("搜索请求构造失败: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	c := p.Client
-	if c == nil {
-		c = &http.Client{Timeout: 20 * time.Second}
-	}
-	resp, err := c.Do(req)
-	if err != nil {
-		return spi.SearchResult{}, fmt.Errorf("搜索服务连不上: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return spi.SearchResult{}, fmt.Errorf("读搜索响应失败: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return spi.SearchResult{}, fmt.Errorf("搜索服务返回 %d", resp.StatusCode)
-	}
-
-	var raw struct {
-		Answer  string   `json:"answer"`
-		Answers []string `json:"answers"`
-		Results []struct {
-			Title   string `json:"title"`
-			URL     string `json:"url"`
-			Content string `json:"content"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return spi.SearchResult{}, fmt.Errorf("搜索响应不是预期的 JSON: %w", err)
-	}
-
-	out := spi.SearchResult{Answer: raw.Answer}
-	if out.Answer == "" && len(raw.Answers) > 0 {
-		out.Answer = raw.Answers[0]
-	}
-	for _, r := range raw.Results {
-		out.Sources = append(out.Sources, spi.SearchSource{Title: r.Title, URL: r.URL, Snippet: r.Content})
-	}
-	return out, nil
-}
-
-// Module 装配默认搜索后端。
+// Module 装配默认搜索能力。
+//
+// 它只 provide 一个 `spi.WebProviders`（搜索 + 抓取共用的接缝）；抓取 provider
+// 由 `modules/tool/webfetch` 注册进来，两边不互相 import。
 func Module() kernel.Module {
 	return kernel.Module{
 		ID:       "search",
 		Backend:  kernel.BackendStatic,
-		Provides: []string{"search"},
+		Provides: []string{"web"},
 		Register: func(s *kernel.Scope) error {
-			return kernel.Provide(s, spi.SearchKey, spi.SearchProvider(
-				&Provider{Endpoint: os.Getenv("DSHD_SEARCH_URL")}))
+			seam, err := NewWebProvidersFromEnv(os.Getenv)
+			if err != nil {
+				return err
+			}
+			return kernel.Provide(s, spi.WebKey, seam)
 		},
 	}
+}
+
+// NewWebProvidersFromEnv 按环境装配默认 provider 集合。
+//
+// 生产（Module）与测试走**同一份**代码：provider 集合、钉死规则、可用性判定
+// 都不是测试专用的仿造品。
+func NewWebProvidersFromEnv(getenv func(string) string) (*spi.WebProviders, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	seam := spi.NewWebProviders(spi.WebSearchPinFromEnv(getenv), spi.WebFetchPinFromEnv(getenv))
+	if err := seam.RegisterSearch(&SearxNG{Endpoint: getenv("DSHD_SEARCH_URL")}); err != nil {
+		return nil, err
+	}
+	if err := seam.RegisterSearch(NewDeepSeekFromEnv(getenv)); err != nil {
+		return nil, err
+	}
+	return seam, nil
 }

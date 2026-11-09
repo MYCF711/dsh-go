@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"dshgo/internal/transport"
+	"dshgo/internal/worktree"
 )
 
 var (
@@ -69,6 +70,8 @@ type promptService struct {
 	// interrupt 由 serve 注入 cancelServeTurn，保证 now 也先结算 pending approval。
 	// 测试/无 broker 的调用方留空，直接取消当前 liveTurn。
 	interrupt func(sessionID string) error
+	// worktree 是 serve 注入的进程级单例；消息在真正跑模型前先 hold。
+	worktree *worktree.Service
 }
 
 type queuedTurn struct {
@@ -277,6 +280,19 @@ func (p *promptService) startLocked(sessionID string, item *queuedTurn) *liveTur
 
 func (p *promptService) execute(sessionID string, lt *liveTurn) {
 	defer p.finish(sessionID, lt.id)
+	// 官方：消息进入 inbox 时若 worktree 请求还开着，先 hold（创建完成/撤回才放行）。
+	// 必须在 p.mu 之外等，否则整个会话的队列被一条 hold 卡死。
+	if p.worktree != nil {
+		// serve 的回合就是进程内 loopRunner；pre-step 必须在真正跑回合前执行，
+		// 否则 requestWorktree 只有在子进程 cmdRun 才会被创建（serve 子进程路径
+		// 未触达时会变成"请求 200、目录永远不存在"）。先创建、再 hold。
+		if err := worktreePreStep(p.worktree, sessionID, nil)(lt.ctx, 1); err != nil {
+			return
+		}
+		if err := worktreeHold(lt.ctx, p.worktree, sessionID); err != nil {
+			return
+		}
+	}
 	_ = lt.run(lt.ctx, lt.id)
 }
 

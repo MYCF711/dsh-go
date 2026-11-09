@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package tools
 
 import (
 	"fmt"
@@ -10,9 +10,17 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// mcpProcessTree 用 Windows Job Object 收整棵树。
+//
+// 为什么不是只 Kill 父进程：MCP server 常常自己是 node/python 包装器，
+// 真正的服务是它的孙进程。只杀父进程会留下孤儿继续持有端口与文件锁，
+// 下一次 reconnect 就会撞 "address in use"，而且没人知道是谁占的。
 type mcpProcessTree struct{ job windows.Handle }
 
 func attachMCPProcessTree(cmd *exec.Cmd) (*mcpProcessTree, error) {
+	if cmd == nil || cmd.Process == nil {
+		return nil, fmt.Errorf("MCP 进程树：没有可挂接的进程")
+	}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("MCP CreateJobObject: %w", err)

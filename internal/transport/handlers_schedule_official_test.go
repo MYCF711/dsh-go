@@ -1,13 +1,14 @@
 package transport
 
-// 官方桌面端 0.2.2 的 schedule.create / edit / view / run / history 契约测试。
+// 官方桌面端 0.2.2 的 schedule.create / edit / view / run / history，
+// 以及 catalog / deleteInactive / deliveryLimits（三个无参方法）的契约测试。
 //
 // 这些测试只打本包的 `serveOfficialScheduleAPI`（Lead 接线后由 /api 路由调它），
 // 因此不依赖 server.go 的分发表——**路由接线是 Lead 的验收项**，测试里
 // 用 IsOfficialScheduleMethod 钉住"方法名集合"，避免新增方法从路由漏下去。
 //
 // 与既有 `schedule.list/delete/clear` 的关系：那三个方法名不进本文件的方法集，
-// 也不改任何既有 handler；本文件只覆盖新增的 5 个官方方法。
+// 也不改任何既有 handler；本文件只覆盖新增的 8 个官方方法。
 
 import (
 	"bytes"
@@ -101,14 +102,16 @@ func scheduleErrorMessage(t *testing.T, out map[string]any) string {
 // 方法集合与接线
 // ---------------------------------------------------------------------------
 
-func TestOfficialScheduleMethodsAreTheFiveOfficialOnes(t *testing.T) {
+func TestOfficialScheduleMethodsAreTheEightOfficialOnes(t *testing.T) {
 	want := []Method{
 		MethodScheduleCreate, MethodScheduleEdit, MethodScheduleView,
 		MethodScheduleRun, MethodScheduleHistory,
+		MethodScheduleCatalog, MethodScheduleDeleteInactive, MethodScheduleDeliveryLimits,
 	}
 	wantNames := []string{
 		"schedule.create", "schedule.edit", "schedule.view",
 		"schedule.run", "schedule.history",
+		"schedule.catalog", "schedule.deleteInactive", "schedule.deliveryLimits",
 	}
 	got := OfficialScheduleMethods()
 	if len(got) != len(want) {
@@ -124,8 +127,11 @@ func TestOfficialScheduleMethodsAreTheFiveOfficialOnes(t *testing.T) {
 	}
 }
 
-func TestOfficialSchedulePredicateClaimsOnlyTheFive(t *testing.T) {
-	for _, name := range []string{"schedule.create", "schedule.edit", "schedule.view", "schedule.run", "schedule.history"} {
+func TestOfficialSchedulePredicateClaimsOnlyTheOfficialEight(t *testing.T) {
+	for _, name := range []string{
+		"schedule.create", "schedule.edit", "schedule.view", "schedule.run", "schedule.history",
+		"schedule.catalog", "schedule.deleteInactive", "schedule.deliveryLimits",
+	} {
 		if !IsOfficialScheduleMethod(name) {
 			t.Fatalf("IsOfficialScheduleMethod(%q) = false，want true", name)
 		}
@@ -134,10 +140,9 @@ func TestOfficialSchedulePredicateClaimsOnlyTheFive(t *testing.T) {
 	for _, name := range []string{
 		"schedule.list", "schedule.delete", "schedule.clear",
 		"schedule", "schedule.", "schedule.create ", "Schedules.create",
-		"schedule.catalog", "schedule.deleteInactive", "schedule.deliveryLimits",
 	} {
 		if IsOfficialScheduleMethod(name) {
-			t.Fatalf("IsOfficialScheduleMethod(%q) = true，但它不属于本文件实现的 5 个方法", name)
+			t.Fatalf("IsOfficialScheduleMethod(%q) = true，但它不属于本文件实现的 8 个方法", name)
 		}
 	}
 }
@@ -710,7 +715,10 @@ func TestOfficialScheduleEntryJSONMatchesOfficialShape(t *testing.T) {
 		CreatedAt:          "2026-11-07T00:00:00Z",
 		UpdatedAt:          "2026-11-07T00:00:00Z",
 	}
-	raw, err := json.Marshal(every)
+	// 出口形状由 normalizeScheduleEntry 决定（kind 专属字段按 kind 清空），
+	// 所以这里走**同一条**投影，而不是直接 marshal 结构体字面量——
+	// 直接 marshal 只证明"编码器尊重零值"，不证明"契约按 kind 收敛"。
+	raw, err := json.Marshal(normalizeScheduleEntry(every))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -724,7 +732,12 @@ func TestOfficialScheduleEntryJSONMatchesOfficialShape(t *testing.T) {
 		}
 	}
 	// 与 kind 无关的字段不许出现：官方 union 的关键是"哪个 kind 带哪些键"。
-	for _, key := range []string{"afterSeconds", "time", "timeZone", "weekdays", "expression", "rrule", "executionActive", "lastDelivery"} {
+	//
+	// `timeZone` 是唯一例外：它在 daily/weekly/cron 里是 **required**，而
+	// omitempty 会把零值（这里是空串）编掉，于是同一个字段在"有但为空"和
+	// "这个 kind 没有"两种情况下长得一样。留一个空串比丢掉 required 键安全
+	// （官方 zod 只要求键在），这里显式把它排除出"必须缺席"的集合。
+	for _, key := range []string{"afterSeconds", "time", "weekdays", "expression", "rrule", "executionActive", "lastDelivery"} {
 		if _, ok := obj[key]; ok {
 			t.Fatalf("kind=every 不该带 %q: %s", key, raw)
 		}
@@ -739,7 +752,7 @@ func TestOfficialScheduleEntryJSONMatchesOfficialShape(t *testing.T) {
 		Weekdays: []int{1, 3}, ScheduledAt: "2026-11-09T08:00:00Z", Status: "active",
 		Target: OfficialScheduleTarget{Kind: "session", SessionID: "s1"},
 	}
-	raw, err = json.Marshal(weekly)
+	raw, err = json.Marshal(normalizeScheduleEntry(weekly))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -808,4 +821,179 @@ func TestOfficialScheduleConcurrentCallsDoNotRaceOnMount(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+// C. 三个无参官方方法：catalog / deleteInactive / deliveryLimits
+// ---------------------------------------------------------------------------
+
+// callScheduleOfficialResult 打一次**结果不一定是对象**的方法（catalog 是数组）。
+//
+// 返回 (状态, result 原文解码, 整个信封)。错误时 result 为 nil，调用点用
+// scheduleErrorMessage 从信封里取四字段错误体。
+func callScheduleOfficialResult(t *testing.T, srv *Server, method, body string) (int, any, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/"+method, bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	srv.serveOfficialScheduleAPI(rec, req, method)
+	var envelope map[string]any
+	if rec.Body.Len() > 0 {
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("%s 的响应不是 JSON 对象: %q", method, rec.Body.String())
+		}
+	}
+	return rec.Code, envelope["result"], envelope
+}
+
+// catalog 的结果是**全量数组**：空目录必须是 [] 而不是 null，条目顺序原样保留
+// （排序是宿主的职责，transport 只负责不把 nil 编成 null）。
+func TestOfficialScheduleCatalogIsFullArrayAndEmptyIsNotNull(t *testing.T) {
+	empty := scheduleOfficialServer(t, OfficialScheduleAPI{
+		Catalog: func() ([]OfficialScheduleEntry, error) { return nil, nil },
+	})
+	code, result, out := callScheduleOfficialResult(t, empty, "schedule.catalog", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("空目录 catalog 状态 = %d: %#v", code, out)
+	}
+	arr, ok := result.([]any)
+	if !ok {
+		t.Fatalf("catalog 结果类型 = %T，want JSON 数组: %#v", result, out)
+	}
+	if len(arr) != 0 {
+		t.Fatalf("空目录 catalog = %d 条，want 0: %#v", len(arr), arr)
+	}
+
+	full := scheduleOfficialServer(t, OfficialScheduleAPI{
+		Catalog: func() ([]OfficialScheduleEntry, error) {
+			return []OfficialScheduleEntry{
+				{ID: "a", Kind: "every", Title: "A", Prompt: "pa", EverySeconds: 60,
+					ScheduledAt: "2026-11-08T00:00:00Z", Status: "active",
+					Target: OfficialScheduleTarget{Kind: "session", SessionID: "s1"}},
+				{ID: "b", Kind: "daily", Title: "B", Prompt: "pb", Time: "09:00:00", TimeZone: "UTC",
+					ScheduledAt: "2026-11-09T09:00:00Z", Status: "paused",
+					Target: OfficialScheduleTarget{Kind: "session", SessionID: "s2"}},
+			}, nil
+		},
+	})
+	// 无参方法的官方 parameters 是空列表：空 body 与 `{}` 是同一个意思。
+	code, result, out = callScheduleOfficialResult(t, full, "schedule.catalog", "")
+	if code != http.StatusOK {
+		t.Fatalf("空 body catalog 状态 = %d（无参方法应接受空 body）: %#v", code, out)
+	}
+	arr, ok = result.([]any)
+	if !ok || len(arr) != 2 {
+		t.Fatalf("catalog 结果 = %#v，want 2 条数组", result)
+	}
+	first, _ := arr[0].(map[string]any)
+	second, _ := arr[1].(map[string]any)
+	if first["id"] != "a" || second["id"] != "b" {
+		t.Fatalf("catalog 顺序被改写: %#v", arr)
+	}
+	// involvedSessionIds 是官方 required array：宿主的 nil slice 不许编成 null。
+	ids, ok := second["involvedSessionIds"].([]any)
+	if !ok || len(ids) != 0 {
+		t.Fatalf("involvedSessionIds 必须是数组（nil 不能编成 null）: %#v", second["involvedSessionIds"])
+	}
+}
+
+// 无参方法带任何字段都是拼错请求：strict 契约不许静默忽略。
+func TestOfficialScheduleCatalogRejectsParamsAndUnwired(t *testing.T) {
+	srv := scheduleOfficialServer(t, OfficialScheduleAPI{
+		Catalog: func() ([]OfficialScheduleEntry, error) { return nil, nil },
+	})
+	for _, body := range []string{`{"id":"x"}`, `{"request":{}}`} {
+		code, _, out := callScheduleOfficialResult(t, srv, "schedule.catalog", body)
+		if code != http.StatusBadRequest {
+			t.Fatalf("catalog 带参数 %s 状态 = %d，want 400: %#v", body, code, out)
+		}
+		if got := scheduleErrorCode(t, out); got != "bad_request" {
+			t.Fatalf("catalog 带参数 code = %q，want bad_request", got)
+		}
+	}
+
+	unwired := scheduleOfficialServer(t, OfficialScheduleAPI{})
+	code, _, out := callScheduleOfficialResult(t, unwired, "schedule.catalog", `{}`)
+	if code != http.StatusNotImplemented {
+		t.Fatalf("未接线 catalog 状态 = %d，want 501: %#v", code, out)
+	}
+	if msg := scheduleErrorMessage(t, out); !strings.Contains(msg, "OfficialScheduleAPI.Catalog") {
+		t.Fatalf("未接线消息必须说清缺哪个字段，got %q", msg)
+	}
+}
+
+func TestOfficialScheduleDeleteInactiveResultAndGuards(t *testing.T) {
+	srv := scheduleOfficialServer(t, OfficialScheduleAPI{
+		DeleteInactive: func() (OfficialScheduleDeleteInactiveResult, error) {
+			return OfficialScheduleDeleteInactiveResult{Deleted: 3}, nil
+		},
+	})
+	code, result, out := callScheduleOfficialResult(t, srv, "schedule.deleteInactive", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("deleteInactive 状态 = %d: %#v", code, out)
+	}
+	obj, ok := result.(map[string]any)
+	if !ok || obj["deleted"] != float64(3) {
+		t.Fatalf("deleteInactive 结果 = %#v，want {deleted:3}", result)
+	}
+
+	// 负数删除计数是宿主 bug：不许原样上线。
+	bad := scheduleOfficialServer(t, OfficialScheduleAPI{
+		DeleteInactive: func() (OfficialScheduleDeleteInactiveResult, error) {
+			return OfficialScheduleDeleteInactiveResult{Deleted: -1}, nil
+		},
+	})
+	code, _, out = callScheduleOfficialResult(t, bad, "schedule.deleteInactive", `{}`)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("负 deleted 状态 = %d，want 500: %#v", code, out)
+	}
+
+	unwired := scheduleOfficialServer(t, OfficialScheduleAPI{})
+	code, _, out = callScheduleOfficialResult(t, unwired, "schedule.deleteInactive", `{}`)
+	if code != http.StatusNotImplemented {
+		t.Fatalf("未接线 deleteInactive 状态 = %d，want 501: %#v", code, out)
+	}
+	if msg := scheduleErrorMessage(t, out); !strings.Contains(msg, "OfficialScheduleAPI.DeleteInactive") {
+		t.Fatalf("未接线消息必须说清缺哪个字段，got %q", msg)
+	}
+
+	code, _, out = callScheduleOfficialResult(t, srv, "schedule.deleteInactive", `{"id":"x"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("deleteInactive 带参数状态 = %d，want 400: %#v", code, out)
+	}
+}
+
+func TestOfficialScheduleDeliveryLimitsResultAndGuards(t *testing.T) {
+	srv := scheduleOfficialServer(t, OfficialScheduleAPI{
+		DeliveryLimits: func() (OfficialScheduleDeliveryLimits, error) {
+			return OfficialScheduleDeliveryLimits{NewSessionIntervalSeconds: 60}, nil
+		},
+	})
+	code, result, out := callScheduleOfficialResult(t, srv, "schedule.deliveryLimits", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("deliveryLimits 状态 = %d: %#v", code, out)
+	}
+	obj, ok := result.(map[string]any)
+	if !ok || obj["newSessionIntervalSeconds"] != float64(60) {
+		t.Fatalf("deliveryLimits 结果 = %#v，want {newSessionIntervalSeconds:60}", result)
+	}
+
+	// 非正数是宿主 bug（官方配置下界 60）：不许把编出来的 0 当成功。
+	bad := scheduleOfficialServer(t, OfficialScheduleAPI{
+		DeliveryLimits: func() (OfficialScheduleDeliveryLimits, error) {
+			return OfficialScheduleDeliveryLimits{NewSessionIntervalSeconds: 0}, nil
+		},
+	})
+	code, _, out = callScheduleOfficialResult(t, bad, "schedule.deliveryLimits", `{}`)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("0 间隔状态 = %d，want 500: %#v", code, out)
+	}
+
+	unwired := scheduleOfficialServer(t, OfficialScheduleAPI{})
+	code, _, out = callScheduleOfficialResult(t, unwired, "schedule.deliveryLimits", `{}`)
+	if code != http.StatusNotImplemented {
+		t.Fatalf("未接线 deliveryLimits 状态 = %d，want 501: %#v", code, out)
+	}
+	if msg := scheduleErrorMessage(t, out); !strings.Contains(msg, "OfficialScheduleAPI.DeliveryLimits") {
+		t.Fatalf("未接线消息必须说清缺哪个字段，got %q", msg)
+	}
 }

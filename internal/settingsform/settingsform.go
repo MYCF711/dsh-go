@@ -3,8 +3,10 @@
 package settingsform
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -188,15 +190,49 @@ type MutationResult struct {
 
 type fieldSpec struct {
 	name      string
+	typ       string // 空 = string（既有调用点行为不变）
 	enum      []string
 	minLength *int
 	maxLength *int
+	minimum   *int64
+	maximum   *int64
+	secret    bool
+}
+
+func (f fieldSpec) fieldType() string {
+	if f.typ == "" {
+		return FieldTypeString
+	}
+	return f.typ
 }
 
 type sectionSpec struct {
-	ns     string
-	title  string
-	fields []fieldSpec
+	ns      string
+	title   string
+	applies string
+	fields  []fieldSpec
+}
+
+// sectionSpecFromNamespace 把插件声明转成内部的 section 描述。
+func sectionSpecFromNamespace(spec NamespaceSpec) sectionSpec {
+	applies := spec.Applies
+	if applies == "" {
+		applies = "live"
+	}
+	fields := make([]fieldSpec, 0, len(spec.Fields))
+	for _, field := range spec.Fields {
+		fields = append(fields, fieldSpec{
+			name:      field.Name,
+			typ:       field.Type,
+			enum:      append([]string(nil), field.Enum...),
+			minLength: field.MinLength,
+			maxLength: field.MaxLength,
+			minimum:   field.Minimum,
+			maximum:   field.Maximum,
+			secret:    field.Secret,
+		})
+	}
+	return sectionSpec{ns: spec.NS, title: spec.Title, applies: applies, fields: fields}
 }
 
 // Service 是无网络、无文件系统副作用的 ConfigForm 核心。
@@ -205,13 +241,24 @@ type Service struct {
 	specs []sectionSpec
 }
 
-// New 固定首切的两个真实宿主设置；其它 namespace 不会靠空 schema 假装可用。
+// New 用宿主默认注册表（model / permission）建服务。
+//
+// 保留这个构造器是为了既有装配点与线上形状一字不改；需要插件声明命名空间的
+// 场景用 NewService(store, registry)。
 func New(store Store) *Service {
-	one, max := 1, 256
-	return &Service{store: store, specs: []sectionSpec{
-		{ns: NamespaceModel, title: "Default model", fields: []fieldSpec{{name: FieldDefaultModel, minLength: &one, maxLength: &max}}},
-		{ns: NamespacePermission, title: "Default permission", fields: []fieldSpec{{name: FieldDefaultPreset, enum: []string{"deny", "ask", "allow", "auto"}}}},
-	}}
+	return NewService(store, DefaultRegistry())
+}
+
+// NewService 用显式注册表建服务。registry 为 nil 时用 DefaultRegistry。
+func NewService(store Store, registry *Registry) *Service {
+	if registry == nil {
+		registry = DefaultRegistry()
+	}
+	specs := make([]sectionSpec, 0, len(registry.Specs()))
+	for _, spec := range registry.Specs() {
+		specs = append(specs, sectionSpecFromNamespace(spec))
+	}
+	return &Service{store: store, specs: specs}
 }
 
 func (s *Service) spec(namespace string) (sectionSpec, error) {
@@ -414,6 +461,25 @@ func validateUser(spec sectionSpec, user map[string]any) error {
 		if !ok {
 			continue
 		}
+		switch field.fieldType() {
+		case FieldTypeBoolean:
+			if _, ok := value.(bool); !ok {
+				return &Error{Code: "invalid_type", Message: fmt.Sprintf("%s.%s 必须是 boolean，收到 %T", spec.ns, field.name, value), Hint: "按 field.type 提交 JSON 布尔值", Status: 400}
+			}
+			continue
+		case FieldTypeInteger:
+			integer, ok := integerValue(value)
+			if !ok {
+				return &Error{Code: "invalid_type", Message: fmt.Sprintf("%s.%s 必须是 integer，收到 %T", spec.ns, field.name, value), Hint: "按 field.type 提交 JSON 整数", Status: 400}
+			}
+			if field.minimum != nil && integer < *field.minimum {
+				return &Error{Code: "out_of_range", Message: fmt.Sprintf("%s.%s 的值 %d 小于下限 %d", spec.ns, field.name, integer, *field.minimum), Hint: "按 field 的最小值提交", Status: 400}
+			}
+			if field.maximum != nil && integer > *field.maximum {
+				return &Error{Code: "out_of_range", Message: fmt.Sprintf("%s.%s 的值 %d 大于上限 %d", spec.ns, field.name, integer, *field.maximum), Hint: "按 field 的最大值提交", Status: 400}
+			}
+			continue
+		}
 		text, ok := value.(string)
 		if !ok {
 			return &Error{Code: "invalid_type", Message: fmt.Sprintf("%s.%s 必须是 string，收到 %T", spec.ns, field.name, value), Hint: "按 field.type 提交 JSON 字符串", Status: 400}
@@ -454,7 +520,7 @@ func makeView(spec sectionSpec, doc Document) MutationResult {
 		}
 		value[fieldSpec.name] = current
 		fields = append(fields, Field{
-			Name: fieldSpec.name, Path: []string{fieldSpec.name}, Type: "string",
+			Name: fieldSpec.name, Path: []string{fieldSpec.name}, Type: fieldSpec.fieldType(),
 			Current: current, Default: doc.Base[fieldSpec.name], Overridden: overridden, Writable: true,
 			Enum: append([]string(nil), fieldSpec.enum...), MinLength: fieldSpec.minLength, MaxLength: fieldSpec.maxLength,
 		})
@@ -462,10 +528,14 @@ func makeView(spec sectionSpec, doc Document) MutationResult {
 	if len(user) == 0 {
 		user = nil
 	}
+	applies := spec.applies
+	if applies == "" {
+		applies = "live"
+	}
 	return MutationResult{
 		Namespace: NamespaceView{
 			NS: spec.ns, Schema: schemaFor(spec), Value: value, Base: base, User: user,
-			AutoGenerate: true, Applies: "live", Secrets: []string{}, Revision: doc.Revision,
+			AutoGenerate: true, Applies: applies, Secrets: secretPaths(spec), Revision: doc.Revision,
 		},
 		Section: Section{NS: spec.ns, Title: spec.title, Writable: true, Revision: doc.Revision, Fields: fields, Errors: []Error{}},
 	}
@@ -500,4 +570,57 @@ func clone(input map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+// secretPaths 返回"只报有没有、值从不上线"的字段名（官方 secrets 槽位）。
+func secretPaths(spec sectionSpec) []string {
+	out := make([]string, 0)
+	for _, field := range spec.fields {
+		if field.secret {
+			out = append(out, field.name)
+		}
+	}
+	return out
+}
+
+// integerValue 把 JSON 解码出来的各种数字形状归一成 int64。
+func integerValue(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), true
+	case int8:
+		return int64(typed), true
+	case int16:
+		return int64(typed), true
+	case int32:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case uint:
+		return int64(typed), true
+	case uint8:
+		return int64(typed), true
+	case uint16:
+		return int64(typed), true
+	case uint32:
+		return int64(typed), true
+	case uint64:
+		if typed > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(typed), true
+	case float64:
+		if math.Trunc(typed) != typed {
+			return 0, false
+		}
+		return int64(typed), true
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
 }

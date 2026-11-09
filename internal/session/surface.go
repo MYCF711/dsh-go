@@ -110,6 +110,10 @@ func Surface(log *v4.Log) []SurfaceMsg {
 	// 官方 image/offload 决策（插件 80）：只改派生投影，v4 日志一个字节都不动。
 	// 先按事件顺序把"哪些出现位置已退役"摊平，再在派生每个节点时原地替换占位。
 	offloads := imageOffloadIndex(log)
+	// 只读副本解析器：占位里的路径是模型取回原件的唯一入口（官方
+	// resolveImageAttachmentAccess）。会话不在 <home>/sessions 布局里时是 nil，
+	// 占位退回官方的"没有可读路径"兜底文案。
+	access := SessionImageAccess(log)
 
 	// 先把可见节点按日志顺序铺好（压缩事件本身不出现在这里）。
 	out := make([]SurfaceMsg, 0, len(log.Events))
@@ -132,7 +136,7 @@ func Surface(log *v4.Log) []SurfaceMsg {
 			// 纯文本消息这里是 nil，行为与以前逐字节一致。
 			node.Images = surfaceImages(ev)
 			if indexes := offloads[ev.Seq]; len(indexes) > 0 {
-				node = applyImageOffload(node, ev, indexes)
+				node = applyImageOffload(node, ev, indexes, access)
 			}
 			out = append(out, node)
 		}

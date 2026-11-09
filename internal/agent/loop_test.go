@@ -195,6 +195,12 @@ func TestRegularRequestUsesModelCapacity(t *testing.T) {
 			declared: llm.ModelCapacity{ContextWindow: 32000, MaxOutput: 8000}, wantMaxTokens: 8000,
 		},
 		{name: "内置已知模型保持原行为", model: "group/deepseek-v4.1-flash-1017", wantMaxTokens: 0},
+		{
+			// 真实 TUI 会话持久化的模型 id 没有 `group/` 前缀；它必须归一到内置
+			// 已知模型，常规请求才不会被注入 max_tokens=128000（网关按模型上限
+			// 拒绝或截断）。这里断的是**真实请求字段**，不是常量。
+			name: "无前缀别名不注入max_tokens", model: "deepseek-v4.1-flash-1017", wantMaxTokens: 0,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			chat := &scriptedChat{steps: []*llm.Response{{Content: "好", FinishReason: "stop"}}}
@@ -398,6 +404,49 @@ func TestMaxStepsGuard(t *testing.T) {
 	_, err := l.Run(context.Background(), 1, nil)
 	if err == nil || !strings.Contains(err.Error(), "36") && !strings.Contains(err.Error(), "3") {
 		t.Fatalf("步数用尽必须报错，得到 %v", err)
+	}
+}
+
+// endlessToolChat 永远请求同一个工具：用来证明"不设上限"的循环不会在某个
+// 隐藏兜底步数（曾经的 32）上停下。
+type endlessToolChat struct{ calls int }
+
+func (c *endlessToolChat) Stream(ctx context.Context, _ llm.Request, _ func(llm.Event) error) (*llm.Response, error) {
+	c.calls++
+	call := llm.ToolCall{ID: fmt.Sprintf("c%d", c.calls), Function: llm.Func{Name: "read", Arguments: `{}`}}
+	return &llm.Response{FinishReason: "tool_calls", ToolCalls: []llm.ToolCall{call}}, nil
+}
+
+// 官方 agent loop **没有**内置 turn budget（@dsa/dsh-agent-loop/README.md:220
+// "No built-in turn budget"；全树 maxSteps|stepLimit|maxTurns 0 命中）。
+// 所以 MaxSteps<=0 必须表示"不设上限"，不能被偷偷降级成 32 步：
+// 那会让"调用方没给"变成"跑 32 步就报用满"，而屏幕上查不到原因。
+//
+// 安全阀由调用方显式给（宿主入口统一 defaultTurnMaxSteps=2000），不是循环的隐藏默认。
+func TestMaxStepsZeroMeansUnlimitedUntilCanceled(t *testing.T) {
+	chat := &endlessToolChat{}
+	l, _ := newLoop(t, chat, &fakeTool{name: "read", res: spi.Result{Summary: "x"}})
+	l.MaxSteps = 0 // 调用方明确不设上限
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	steps := 0
+	l.Emit = func(e Event) error {
+		if e.Kind == EventStepStart {
+			steps++
+			if steps > 40 { // 远超旧的 32 步兜底
+				cancel()
+			}
+		}
+		return nil
+	}
+
+	_, err := l.Run(ctx, 1, []llm.Message{{Role: "user", Content: "hi"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("不设上限时必须跑到外部取消（context.Canceled），实际 %v", err)
+	}
+	if steps < 40 {
+		t.Fatalf("只跑了 %d 步就停：隐藏的 32 步兜底没删掉", steps)
 	}
 }
 

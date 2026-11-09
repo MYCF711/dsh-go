@@ -39,6 +39,13 @@ type fakePluginManagerAPI struct {
 	listVersionRet OfficialVersionList
 	// exemptionsRet 是 listVersionExemptions 的回放值。
 	exemptionsRet OfficialVersionExemptions
+	// listBundlesRet / listPluginsRet / registriesRet 是三个读方法的回放值。
+	listBundlesRet  []OfficialBundle
+	listPluginsRet  []OfficialPluginEntry
+	registriesRet   OfficialRegistries
+	listBundlesCall bool
+	listPluginsCall bool
+	registriesCall  bool
 }
 
 func (f *fakePluginManagerAPI) api() OfficialPluginManagerAPI {
@@ -117,6 +124,21 @@ func (f *fakePluginManagerAPI) api() OfficialPluginManagerAPI {
 			record("cancelInstall", p)
 			return OfficialInstallCancellation{Status: "not-running"}, nil
 		},
+		ListBundles: func() ([]OfficialBundle, error) {
+			f.listBundlesCall = true
+			record("listBundles", nil)
+			return f.listBundlesRet, nil
+		},
+		ListPlugins: func() ([]OfficialPluginEntry, error) {
+			f.listPluginsCall = true
+			record("listPlugins", nil)
+			return f.listPluginsRet, nil
+		},
+		Registries: func() (OfficialRegistries, error) {
+			f.registriesCall = true
+			record("registries", nil)
+			return f.registriesRet, nil
+		},
 	}
 }
 
@@ -191,15 +213,23 @@ func officialPluginManagerMinimalBodies() map[Method]any {
 		MethodPluginManagerReadBundleDetail:      map[string]any{"name": "acme.audit", "language": "zh-CN"},
 		MethodPluginManagerWaitForInstall:        map[string]any{"requestId": "req-1"},
 		MethodPluginManagerCancelInstall:         map[string]any{"requestId": "req-1"},
+		// 三个零参数读方法：空对象即最小合法体。
+		MethodPluginManagerListBundles: map[string]any{},
+		MethodPluginManagerListPlugins: map[string]any{},
+		MethodPluginManagerRegistries:  map[string]any{},
 	}
 }
 
 func TestOfficialPluginManagerMethodsAreStable(t *testing.T) {
 	methods := OfficialPluginManagerMethods()
+	// 官方 0.2.2-rc.1 `@deepseek-ai/dsh-plugin-manager` typert.host.js 的
+	// pluginManager 命名空间共 15 个方法；旧 12 个漏了三个读方法。
 	want := []string{
 		"pluginManager.cancelInstall", "pluginManager.inspect", "pluginManager.installBundle",
+		"pluginManager.listBundles", "pluginManager.listPlugins",
 		"pluginManager.listVersionExemptions", "pluginManager.listVersions",
-		"pluginManager.readBundleDetail", "pluginManager.removeBundle",
+		"pluginManager.readBundleDetail", "pluginManager.registries",
+		"pluginManager.removeBundle",
 		"pluginManager.setBundleEnabled", "pluginManager.setPluginEnabled",
 		"pluginManager.setVersionExemption", "pluginManager.updateBundle",
 		"pluginManager.waitForInstall",
@@ -229,8 +259,7 @@ func TestOfficialPluginManagerMethodsAreStable(t *testing.T) {
 	}
 	for _, other := range []string{
 		"plugin.list", "pluginManager", "pluginmanager.inspect",
-		"pluginManager.listBundles", "pluginManager.listPlugins",
-		"pluginManager.registries", "pluginManager.listVersionExemption", "",
+		"pluginManager.listVersionExemption", "pluginManager.ListBundles", "",
 	} {
 		if IsOfficialPluginManagerMethod(other) {
 			t.Fatalf("%q 不该被当成官方 pluginManager 方法", other)

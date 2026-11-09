@@ -1,6 +1,6 @@
 package main
 
-// 官方桌面端 0.2.2-rc.1 的 workspace / workspaceFiles / directoryPicker 16 个方法的
+// 官方桌面端 0.2.2-rc.1 的 workspace / workspaceFiles / directoryPicker 17 个方法的
 // **宿主侧真实实现**。
 //
 // # 分工
@@ -87,15 +87,22 @@ type officialWorkspaceRecord struct {
 //
 // `Order` 是**唯一**的顺序真相（官方 registry 的显示顺序）；`Workspaces` 是
 // id → 记录。archived/pinned 是 registry-global 集合，跨工作区共享。
+//
+// `DefaultWorkspaceID` 对应官方 workspace registry 的 `defaultWorkspaceId`：
+// `workspace/initializeDefault` 首次创建后记住这条身份，之后永远复用同一个
+// id；用户删除该注册后指针仍保留（记录已不存在），于是自动创建被**永久禁用**
+// ——与官方 "deleting that registration permanently disables automatic creation"
+// 一致。旧 registry 文件没有这个键，omitempty 保证向后兼容。
 type officialWorkspaceDocument struct {
 	Version            int                                 `json:"version"`
 	Order              []string                            `json:"order"`
-	Workspaces         map[string]*officialWorkspaceRecord  `json:"workspaces"`
+	Workspaces         map[string]*officialWorkspaceRecord `json:"workspaces"`
 	ArchivedSessionIDs []string                            `json:"archivedSessionIds"`
 	PinnedSessionIDs   []string                            `json:"pinnedSessionIds"`
+	DefaultWorkspaceID string                              `json:"defaultWorkspaceId,omitempty"`
 }
 
-// officialWorkspaceHost 是 workspace 族 16 个方法的真实宿主实现。
+// officialWorkspaceHost 是 workspace 族 17 个方法的真实宿主实现。
 //
 // 一把锁管 registry 的"读-改-写-落盘"整段：官方 controller 用 `enqueue` 把变更
 // 串行化，这里用互斥锁达到同样效果（不会有两次 create 同时落盘互相覆盖）。
@@ -113,6 +120,9 @@ type officialWorkspaceHost struct {
 	lineCap    int
 	byteCap    int64
 	pickerHome string
+	// documentsDir 解析宿主账户的 Documents 目录（workspace/initializeDefault
+	// 的默认根）。生产实现按平台解析已知文件夹；测试注入临时目录。
+	documentsDir func() (string, error)
 
 	mu     sync.Mutex
 	path   string
@@ -137,7 +147,8 @@ func newOfficialWorkspaceHost(home string, src *sessionSource, prompts *promptSe
 			}
 			return "ws-" + id, nil
 		},
-		path: filepath.Join(home, "state", "workspaces.json"),
+		documentsDir: officialDocumentsDirectory,
+		path:         filepath.Join(home, "state", "workspaces.json"),
 	}
 	if h.src == nil {
 		h.src = newSessionSource(home, "")
@@ -254,6 +265,15 @@ func (h *officialWorkspaceHost) withDocument(fn func() error) error {
 
 // withDocumentWrite 在锁内加载、执行、落盘。fn 返回错误时**不落盘**。
 func (h *officialWorkspaceHost) withDocumentWrite(fn func() error) error {
+	return h.withDocumentWriteWhen(func() (bool, error) {
+		return true, fn()
+	})
+}
+
+// withDocumentWriteWhen 与 withDocumentWrite 相同，但允许 fn 报告"这次没有变更"。
+// 只有 dirty=true 才落盘：只读判定（例如 initializeDefault 发现首次初始化不适用）
+// 不得在磁盘上留下一个空 registry 文件。
+func (h *officialWorkspaceHost) withDocumentWriteWhen(fn func() (bool, error)) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if err := h.ensureLoadedLocked(); err != nil {
@@ -261,9 +281,13 @@ func (h *officialWorkspaceHost) withDocumentWrite(fn func() error) error {
 	}
 	// 变更前的快照：落盘失败要能回滚内存，否则内存与磁盘从此不一致。
 	backup := h.cloneDocumentLocked()
-	if err := fn(); err != nil {
+	dirty, err := fn()
+	if err != nil {
 		h.doc = backup
 		return err
+	}
+	if !dirty {
+		return nil
 	}
 	if err := h.saveLocked(); err != nil {
 		h.doc = backup
@@ -280,6 +304,7 @@ func (h *officialWorkspaceHost) cloneDocumentLocked() officialWorkspaceDocument 
 		Workspaces:         make(map[string]*officialWorkspaceRecord, len(h.doc.Workspaces)),
 		ArchivedSessionIDs: append([]string(nil), h.doc.ArchivedSessionIDs...),
 		PinnedSessionIDs:   append([]string(nil), h.doc.PinnedSessionIDs...),
+		DefaultWorkspaceID: h.doc.DefaultWorkspaceID,
 	}
 	for id, rec := range h.doc.Workspaces {
 		if rec == nil {
@@ -471,6 +496,32 @@ func officialResolveWithin(root, path, base string, allowEmpty bool) (string, st
 	return target, filepath.ToSlash(rel), nil
 }
 
+// officialHasSchemePrefix 是官方 `relativePath` 里那条正则的逐字搬运：
+// `/^[a-z][a-z\d+.-]*:/iu`，用来拒掉 `C:/x`、`file:/x`、`http://…` 这类"看起来
+// 像相对路径、其实是另一个地址空间"的值。
+func officialHasSchemePrefix(path string) bool {
+	if path == "" {
+		return false
+	}
+	first := path[0]
+	if !(first >= 'a' && first <= 'z') && !(first >= 'A' && first <= 'Z') {
+		return false
+	}
+	for i := 1; i < len(path); i++ {
+		c := path[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '+', c == '.', c == '-':
+			continue
+		case c == ':':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 // officialResolvedAbsolute 给出"官方 absolutePath"：符号链接解析后的绝对路径。
 func officialResolvedAbsolute(path string) string {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
@@ -502,6 +553,7 @@ func officialSplitLines(content []byte) []string {
 func (h *officialWorkspaceHost) workspaceAPI() transport.OfficialWorkspaceAPI {
 	return transport.OfficialWorkspaceAPI{
 		Create:              h.createWorkspace,
+		InitializeDefault:   h.initializeDefault,
 		Rename:              h.renameWorkspace,
 		Delete:              h.deleteWorkspace,
 		InsertBefore:        h.insertWorkspaceBefore,
@@ -515,6 +567,13 @@ func (h *officialWorkspaceHost) workspaceAPI() transport.OfficialWorkspaceAPI {
 		FilesRead:      h.filesRead,
 		FilesReadBytes: h.filesReadBytes,
 		FilesStat:      h.filesStat,
+
+		// 宿主扩展动词（PLAY-WORKSPACE-HOST）：同一份 registry，无平行账本。
+		Registry: h.registry,
+		Resolve:  h.resolveWorkspaceRef,
+		Switch:   h.switchWorkspace,
+		Remove:   h.removeWorkspace,
+		Commands: h.workspaceCommands,
 	}
 }
 
@@ -524,6 +583,143 @@ func (h *officialWorkspaceHost) directoryPickerAPI() transport.OfficialDirectory
 		List:            h.pickerList,
 		CreateDirectory: h.pickerCreateDirectory,
 	}
+}
+
+// initializeDefault 实现官方 `workspace/initializeDefault` 的宿主语义（对齐
+// `@deepseek-ai/dsh-workspace` 的 `initializeDefault(resolveDirectory)`）：
+//
+//  1. 已有 `defaultWorkspaceId` → 复用那条记录（即使后来有了别的会话/工作区）；
+//     记录已被用户删除 → 返回"不适用"，自动创建**永久禁用**（不重建）。
+//  2. registry 与真实会话历史都为空时才有资格：任何既有工作区、归档会话或
+//     磁盘上的会话头都会让本次调用回"不适用"（官方 undefined）。
+//  3. 解析 `<Documents>/deepseek-harness/default-workspace`，`MkdirAll` 后取真实
+//     规范路径；解析期间若出现会话，再查一次并放弃。
+//  4. 记录标题取**请求路径**的末段（`default-workspace`，不是 canonical 的），
+//     与官方 `defaultWorkspaceTitle(path)` 一致；新记录前插到顺序最前。
+//
+// 返回的 `created` 是宿主侧事实（官方 result 不暴露它，测试用它验收首次/复用）。
+// 返回零值表示官方 `undefined`。
+func (h *officialWorkspaceHost) initializeDefault() (transport.OfficialWorkspaceValue, bool, error) {
+	var out transport.OfficialWorkspaceValue
+	var created bool
+	err := h.withDocumentWriteWhen(func() (bool, error) {
+		// 1) 已有默认工作区身份：只复用，不再看 registry 里有没有别的工作区。
+		if h.doc.DefaultWorkspaceID != "" {
+			rec := h.doc.Workspaces[h.doc.DefaultWorkspaceID]
+			if rec == nil {
+				return false, nil
+			}
+			out = transport.OfficialWorkspaceValue{Workspace: h.viewLocked(rec)}
+			return false, nil
+		}
+		// 2) 只有"全新安装"才允许自动创建。
+		if len(h.doc.Order) > 0 || len(h.doc.ArchivedSessionIDs) > 0 {
+			return false, nil
+		}
+		hasSessions, err := h.hasAnySessions()
+		if err != nil {
+			return false, err
+		}
+		if hasSessions {
+			return false, nil
+		}
+		// 3) 解析 Documents 目录（只在有资格创建时调用；失败=不适用，不猜目录）。
+		if h.documentsDir == nil {
+			return false, transport.OfficialWorkspaceError(
+				"workspace/internal", "首次使用初始化默认工作区不可用：宿主没有 Documents 解析器")
+		}
+		documents, err := h.documentsDir()
+		if err != nil {
+			return false, transport.OfficialWorkspaceError(
+				"workspace/internal", "首次使用初始化默认工作区不可用：%v", err)
+		}
+		documents = strings.TrimSpace(documents)
+		if documents == "" || !filepath.IsAbs(documents) {
+			return false, transport.OfficialWorkspaceError(
+				"workspace/internal", "首次使用初始化默认工作区不可用：Documents 目录 %q 不是绝对路径", documents)
+		}
+		// 官方 DEFAULT_WORKSPACE_DIRECTORY = 'default-workspace'，固定落点
+		// `<Documents>/deepseek-harness/default-workspace`；跨语言不换路径。
+		target := filepath.Join(documents, "deepseek-harness", "default-workspace")
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return false, transport.OfficialWorkspaceError(
+				"workspace/internal", "建默认工作区目录 %q 失败: %v", target, err)
+		}
+		canonical := officialCanonicalPath(target)
+		if resolved, rerr := filepath.EvalSymlinks(canonical); rerr == nil {
+			canonical = filepath.Clean(resolved)
+		}
+		// 目录解析是异步窗口：官方在创建前再查一次会话历史。
+		if hasSessions, err = h.hasAnySessions(); err != nil {
+			return false, err
+		}
+		if hasSessions {
+			return false, nil
+		}
+		// 4) 建真实记录（与 workspace.create 同一条持久化路径，额外置默认指针）。
+		id, iderr := h.newID()
+		if iderr != nil {
+			return false, transport.OfficialWorkspaceError("workspace/internal", "生成 workspaceId 失败: %v", iderr)
+		}
+		now := h.now().UnixMilli()
+		rec := &officialWorkspaceRecord{
+			WorkspaceID: id,
+			Path:        canonical,
+			Title:       officialWorkspaceTitle(target),
+			CreatedAtMS: now,
+			UpdatedAtMS: now,
+		}
+		h.doc.Workspaces[id] = rec
+		h.doc.Order = append([]string{id}, h.doc.Order...)
+		h.doc.DefaultWorkspaceID = id
+		out = transport.OfficialWorkspaceValue{Workspace: h.viewLocked(rec)}
+		created = true
+		return true, nil
+	})
+	if err != nil {
+		return transport.OfficialWorkspaceValue{}, false, err
+	}
+	return out, created, nil
+}
+
+// hasAnySessions 报告真实 v4 会话存储里是否已有任何会话（跨项目）。
+//
+// 官方同时看 live sessions 与 stored headers；本仓的会话就是磁盘上的 v4 日志
+// （`<home>/sessions/<projectKey>/<segment>/session.v4.jsonl.zstd`），所以只做
+// **目录项存在性**扫描：不读整份日志（ListSessions 会为了摘要读完整日志，首屏
+// 初始化不该付这个代价）。读不动时返回错误（不把损坏/不可读的会话存储当成
+// "没有会话"，否则会误建默认工作区）。
+func (h *officialWorkspaceHost) hasAnySessions() (bool, error) {
+	if strings.TrimSpace(h.home) == "" {
+		return false, nil
+	}
+	root := filepath.Join(h.home, "sessions")
+	projects, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, transport.OfficialWorkspaceError("workspace/internal", "读会话存储 %q 失败: %v", root, err)
+	}
+	for _, project := range projects {
+		if !project.IsDir() {
+			continue
+		}
+		segments, serr := os.ReadDir(filepath.Join(root, project.Name()))
+		if serr != nil {
+			return false, transport.OfficialWorkspaceError("workspace/internal", "读会话存储 %q 失败: %v", project.Name(), serr)
+		}
+		for _, segment := range segments {
+			if !segment.IsDir() {
+				continue
+			}
+			path := filepath.Join(root, project.Name(), segment.Name(), "session.v4.jsonl.zstd")
+			if st, statErr := os.Stat(path); statErr == nil && !st.IsDir() {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (h *officialWorkspaceHost) createWorkspace(path string) (transport.OfficialWorkspaceCreateValue, error) {
@@ -893,19 +1089,19 @@ func (h *officialWorkspaceHost) filesList(sessionID, path string) (transport.Off
 	if err != nil {
 		if os.IsNotExist(err) {
 			return transport.OfficialWorkspaceDirectoryListing{}, transport.OfficialWorkspaceError(
-				"workspaceFiles/not-found", "目录不存在：%q", path)
+				"workspace-file/not-found", "目录不存在：%q", path)
 		}
 		return transport.OfficialWorkspaceDirectoryListing{}, transport.OfficialWorkspaceError(
-			"workspaceFiles/unreadable", "读不了 %q：%v", path, err)
+			"workspace-file/unreadable", "读不了 %q：%v", path, err)
 	}
 	if !st.IsDir() {
 		return transport.OfficialWorkspaceDirectoryListing{}, transport.OfficialWorkspaceError(
-			"workspaceFiles/not-a-directory", "%q 不是目录", path)
+			"workspace-file/not-directory", "%q 不是目录", path)
 	}
 	entries, err := os.ReadDir(abs)
 	if err != nil {
 		return transport.OfficialWorkspaceDirectoryListing{}, transport.OfficialWorkspaceError(
-			"workspaceFiles/unreadable", "列不动 %q：%v", path, err)
+			"workspace-file/unreadable", "列不动 %q：%v", path, err)
 	}
 	capN := h.entryCap()
 	out := make([]transport.OfficialWorkspaceDirectoryEntry, 0, len(entries))
@@ -951,12 +1147,12 @@ func (h *officialWorkspaceHost) filesRead(sessionID, path string, r transport.Of
 	}
 	if st.Size() > h.byteCapValue() {
 		return transport.OfficialWorkspaceFileText{}, transport.OfficialWorkspaceError(
-			"workspaceFiles/too-large", "文件 %d 字节超过一页读的上限 %d；用 workspaceFiles.readBytes 的 range 分窗读", st.Size(), h.byteCapValue())
+			"workspace-file/too-large", "文件 %d 字节超过一页读的上限 %d；用 workspaceFiles.readBytes 的 range 分窗读", st.Size(), h.byteCapValue())
 	}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return transport.OfficialWorkspaceFileText{}, transport.OfficialWorkspaceError(
-			"workspaceFiles/unreadable", "读不了 %q：%v", path, err)
+			"workspace-file/unreadable", "读不了 %q：%v", path, err)
 	}
 	offset := int64(1)
 	if r.HasOffset {
@@ -966,7 +1162,7 @@ func (h *officialWorkspaceHost) filesRead(sessionID, path string, r transport.Of
 	if r.HasLimit {
 		if r.Limit > int64(h.lineCapValue()) {
 			return transport.OfficialWorkspaceFileText{}, transport.OfficialWorkspaceError(
-				"workspaceFiles/too-large", "range.limit=%d 超过一页上限 %d", r.Limit, h.lineCapValue())
+				"workspace-file/too-large", "range.limit=%d 超过一页上限 %d", r.Limit, h.lineCapValue())
 		}
 		limit = r.Limit
 	}
@@ -981,12 +1177,25 @@ func (h *officialWorkspaceHost) filesRead(sessionID, path string, r transport.Of
 		end = total
 	}
 	page := lines[start:end]
+	text := strings.Join(page, "\n")
+	// 官方 read()（`dsh-api-workspace-files/lib/index.js:430`）：页面文本含 NUL
+	// 就是 `workspace-file/not-text`。不把二进制当文本发出去——客户端会把它当
+	// 可编辑文本渲染，那是最坏的一种"看起来能用"。
+	if strings.ContainsRune(text, 0) {
+		return transport.OfficialWorkspaceFileText{}, transport.OfficialWorkspaceError(
+			"workspace-file/not-text", "%q 含 NUL 字节，不是文本（用 workspaceFiles.readBytes 读字节）", path)
+	}
+	// 官方 cutPage 的 eof：页满即停（`lineNumber > last` 直接 return eof:false）。
+	// 只有"这一页真的排到了文件的最后一行"才算读到末行；`offset` 落在末行之后
+	// 是空页（lines=0）且**不是** eof（官方 result 注释：`lines` is `0` when
+	// `offset` lies past the file's last line）。
+	eof := int64(len(page)) > 0 && end >= total
 	size := st.Size()
 	return transport.OfficialWorkspaceFileText{
 		Offset:       offset,
-		Text:         strings.Join(page, "\n"),
+		Text:         text,
 		Lines:        int64(len(page)),
-		EOF:          end >= total,
+		EOF:          eof,
 		AbsolutePath: officialResolvedAbsolute(abs),
 		Version:      officialVersionOf(st),
 		Bytes:        &size,
@@ -1001,6 +1210,24 @@ func (h *officialWorkspaceHost) filesReadBytes(sessionID, path string, o transpo
 	}
 	base := root
 	if o.BaseFile != nil {
+		// 官方 relativePath（`dsh-api-workspace-files/lib/index.js:524`）：baseFile
+		// 给出时 `path` 必须是**相对路径**——空串、绝对路径、`scheme:` 前缀或含 NUL
+		// 一律 `gateway/bad-request`。这里先照官方拒，再解析 baseFile 自身。
+		rel := strings.ReplaceAll(path, "\\", "/")
+		switch {
+		case rel == "":
+			return transport.OfficialWorkspaceFileBytes{}, transport.OfficialWorkspaceError(
+				"gateway/bad-request", "给了 options.baseFile 时 path 必须是相对路径（空串不是路径）")
+		case strings.HasPrefix(rel, "/") || filepath.IsAbs(filepath.FromSlash(path)):
+			return transport.OfficialWorkspaceFileBytes{}, transport.OfficialWorkspaceError(
+				"gateway/bad-request", "给了 options.baseFile 时 path 必须是相对路径（%q 是绝对路径）", path)
+		case officialHasSchemePrefix(rel):
+			return transport.OfficialWorkspaceFileBytes{}, transport.OfficialWorkspaceError(
+				"gateway/bad-request", "给了 options.baseFile 时 path 必须是相对路径（%q 带 scheme 前缀）", path)
+		case strings.ContainsRune(path, 0):
+			return transport.OfficialWorkspaceFileBytes{}, transport.OfficialWorkspaceError(
+				"gateway/bad-request", "path 含 NUL")
+		}
 		// baseFile 本身也必须落在工作区内，否则它会把相对路径指向外面。
 		baseAbs, _, berr := officialResolveWithin(root, *o.BaseFile, root, false)
 		if berr != nil {
@@ -1030,15 +1257,15 @@ func (h *officialWorkspaceHost) filesReadBytes(sessionID, path string, o transpo
 			hasWindow = true
 			if length > h.byteCapValue() {
 				return transport.OfficialWorkspaceFileBytes{}, transport.OfficialWorkspaceError(
-					"workspaceFiles/too-large", "options.range.length=%d 超过一次读的上限 %d", length, h.byteCapValue())
+					"workspace-file/too-large", "options.range.length=%d 超过一次读的上限 %d", length, h.byteCapValue())
 			}
 		} else if size > h.byteCapValue() {
 			return transport.OfficialWorkspaceFileBytes{}, transport.OfficialWorkspaceError(
-				"workspaceFiles/too-large", "文件 %d 字节超过一次读的上限 %d；给 options.range 分窗读", size, h.byteCapValue())
+				"workspace-file/too-large", "文件 %d 字节超过一次读的上限 %d；给 options.range 分窗读", size, h.byteCapValue())
 		}
 	} else if size > h.byteCapValue() {
 		return transport.OfficialWorkspaceFileBytes{}, transport.OfficialWorkspaceError(
-			"workspaceFiles/too-large", "文件 %d 字节超过一次读的上限 %d；给 options.range 分窗读", size, h.byteCapValue())
+			"workspace-file/too-large", "文件 %d 字节超过一次读的上限 %d；给 options.range 分窗读", size, h.byteCapValue())
 	}
 	if offset > size {
 		offset = size
@@ -1052,18 +1279,18 @@ func (h *officialWorkspaceHost) filesReadBytes(sessionID, path string, o transpo
 	f, err := os.Open(abs)
 	if err != nil {
 		return transport.OfficialWorkspaceFileBytes{}, transport.OfficialWorkspaceError(
-			"workspaceFiles/unreadable", "打不开 %q：%v", path, err)
+			"workspace-file/unreadable", "打不开 %q：%v", path, err)
 	}
 	defer func() { _ = f.Close() }()
 	if _, serr := f.Seek(offset, io.SeekStart); serr != nil {
 		return transport.OfficialWorkspaceFileBytes{}, transport.OfficialWorkspaceError(
-			"workspaceFiles/unreadable", "定位 %q 失败：%v", path, serr)
+			"workspace-file/unreadable", "定位 %q 失败：%v", path, serr)
 	}
 	buf := make([]byte, length)
 	read, rerr := io.ReadFull(f, buf)
 	if rerr != nil && rerr != io.ErrUnexpectedEOF && rerr != io.EOF {
 		return transport.OfficialWorkspaceFileBytes{}, transport.OfficialWorkspaceError(
-			"workspaceFiles/unreadable", "读 %q 失败：%v", path, rerr)
+			"workspace-file/unreadable", "读 %q 失败：%v", path, rerr)
 	}
 	buf = buf[:read]
 	_ = hasWindow
@@ -1117,7 +1344,7 @@ func (h *officialWorkspaceHost) filesStat(sessionID, path string) (transport.Off
 	}
 	if !lst.Mode().IsRegular() {
 		return transport.OfficialWorkspaceFileStat{}, transport.OfficialWorkspaceError(
-			"workspaceFiles/not-a-file", "%q 不是普通文件", path)
+			"workspace-file/not-regular-file", "%q 不是普通文件", path)
 	}
 	size := lst.Size()
 	return transport.OfficialWorkspaceFileStat{
@@ -1133,13 +1360,17 @@ func (h *officialWorkspaceHost) statEntry(abs, path string) (os.FileInfo, error)
 	lst, err := os.Lstat(abs)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, transport.OfficialWorkspaceError("workspaceFiles/not-found", "文件不存在：%q", path)
+			return nil, transport.OfficialWorkspaceError("workspace-file/not-found", "文件不存在：%q", path)
 		}
-		return nil, transport.OfficialWorkspaceError("workspaceFiles/unreadable", "读不了 %q：%v", path, err)
+		return nil, transport.OfficialWorkspaceError("workspace-file/unreadable", "读不了 %q：%v", path, err)
 	}
 	if lst.Mode()&os.ModeSymlink != 0 {
-		return nil, transport.OfficialWorkspaceError("workspaceFiles/symlink-refused",
-			"%q 是符号链接：官方 read 不用链接冒充文件内容", path)
+		// 官方 locateFile（`dsh-api-workspace-files/lib/index.js:591`）只认
+		// `entry.type === "file"`：symlink 从 lstat 起就不是 file，所以 read 家族
+		// 一律 `workspace-file/not-regular-file`——**没有**专门的 symlink 码。
+		// 不跟随链接的理由是官方的同一句：`read` still refuses a symlink。
+		return nil, transport.OfficialWorkspaceError("workspace-file/not-regular-file",
+			"%q 是符号链接，不是普通文件（read 家族不跟随链接）", path)
 	}
 	return lst, nil
 }
@@ -1152,10 +1383,12 @@ func (h *officialWorkspaceHost) statRegularFile(abs, path string) (os.FileInfo, 
 		return nil, err
 	}
 	if lst.IsDir() {
-		return nil, transport.OfficialWorkspaceError("workspaceFiles/not-a-file", "%q 是目录，不是文件", path)
+		return nil, transport.OfficialWorkspaceError("workspace-file/not-regular-file",
+			"%q 是目录，不是普通文件", path)
 	}
 	if !lst.Mode().IsRegular() {
-		return nil, transport.OfficialWorkspaceError("workspaceFiles/not-a-file", "%q 不是普通文件", path)
+		return nil, transport.OfficialWorkspaceError("workspace-file/not-regular-file",
+			"%q 不是普通文件", path)
 	}
 	return lst, nil
 }

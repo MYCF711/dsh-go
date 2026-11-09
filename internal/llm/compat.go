@@ -300,8 +300,16 @@ func resetCapabilityCache() {
 	capabilityCache.entries = map[string]capabilityEntry{}
 }
 
-// requestProfile 是这条请求的起始形状：先看学过什么，再看官方静态表，最后默认。
-func (c *Client) requestProfile(model string) wireProfile {
+// requestProfile 是这条请求的起始形状：先看协议是否**钉死**了输出上限字段，
+// 再看学过什么、官方静态表，最后默认。
+func (c *Client) requestProfile(model string, adapter ProviderAdapter) wireProfile {
+	// 协议钉死拼写时（如 DeepSeek 只认 max_tokens），协商与记忆都不参与：
+	// 换成另一个拼写对它只会多打一轮必失败的请求。
+	if pinned := adapter.MaxTokensField(); pinned != "" {
+		profile := defaultWireProfile()
+		profile.maxTokensField = pinned
+		return profile
+	}
 	if profile, ok := cachedCapability(c.BaseURL, model); ok {
 		return profile
 	}

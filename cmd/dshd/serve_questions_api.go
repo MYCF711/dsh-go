@@ -87,7 +87,19 @@ func (a *agentOfficialAPI) userQuestionsAttachWaitHost(sessionID, callID string)
 	if err != nil {
 		return nil, err
 	}
-	remaining, live := a.ensureQuestionWaits().Arm(sessionID, callID, askedAt)
+	// 先问"这个问题还开着吗"：官方 attachWait 只在 wait **还在**时 yield 一帧，
+	// 被回答/关掉之后一帧都不发。只看时钟会让一个已经答完的问题继续按 120 s
+	// 窗口回剩余时长——界面就会对着早已结束的提问转圈。
+	open, err := a.agentOpenQuestionCall(sessionID, callID)
+	if err != nil {
+		return nil, err
+	}
+	waits := a.ensureQuestionWaits()
+	if !open {
+		waits.Settle(sessionID, callID)
+		return nil, nil
+	}
+	remaining, live := waits.Arm(sessionID, callID, askedAt)
 	if !live {
 		return nil, nil
 	}

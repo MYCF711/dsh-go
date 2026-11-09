@@ -33,6 +33,19 @@ package main
 // durable 块一个字节都不改——v4 是 append-only，重新 Surface 之后最旧的几张
 // 已经是占位文本，模型仍然能按附件 id 取回原件。
 //
+// # 占位里的只读路径（"重放能找到原图"）
+//
+// 官方 `offloadedImageText`（dsh-llm/lib/types/content.js:73-79）的占位带一段
+// `Normalized copy (read-only; ...): "<path>"`——模型靠它 `read` 原件、再拷到
+// 可写路径继续编辑。只给附件 id 是不够的：模型没有"按 id 取附件"的工具，那句
+// "ask the user to attach it again" 等于告诉用户"你的图没了，重发一次"。
+//
+// 解析器是 `session.ImageAccessResolver`（本仓 `SessionImageAccess` 由会话文件
+// 推同一 home 下的 `state/attachments/objects/<id>/blob`，形状对不上就返回 nil）。
+// **请求侧与重放侧必须用同一份**：`offloadRetrier.access` 由装配期注入
+// （serve_turn.go 一行，见 WIRING.md），`session.Surface` 自己解析。两边都拿到
+// 时文案逐字节一致；尚未注入时请求侧退回官方兜底文案，重放侧已能取到原图。
+//
 // # compaction/summary-error 为什么没有对应接线
 //
 // 本宿主摘要请求是**纯文本**的（`internal/compact/compact.go:163-168` 只拼
@@ -130,8 +143,15 @@ func explicitOffloadCount(body string) (int, bool) {
 // offloadRetrier 是"一次 turn 一次降级"的防抖开关。
 //
 // 它不是并发结构：一个 turn 的 step 循环本来就是串行的。
+//
+// access 是退役占位的"只读副本"解析器（官方 `resolveImageAttachmentAccess`）：
+// 请求侧（本次重试的图片段）与重放侧（`session.Surface`）必须用同一份解析器，
+// 否则模型这次被告知"没有可读路径、请用户重发"，下一轮又能 read 到原图——
+// 同一张图两段互相矛盾的说明。装配点见 WIRING.md（serve_turn.go 一行）：
+// `&offloadRetrier{access: session.SessionImageAccessAt(path)}`。
 type offloadRetrier struct {
-	used bool
+	used   bool
+	access session.ImageAccessResolver
 }
 
 // tryOffloadRetry 在请求失败后决定是否降级重试。
@@ -153,7 +173,7 @@ func (r *offloadRetrier) tryOffloadRetry(err error, initial modelTurnInput, hist
 	if !required {
 		return initial, nil, false
 	}
-	degraded, indexes := degradePromptImages(initial, count)
+	degraded, indexes := degradePromptImages(initial, count, r.access)
 	if len(indexes) == 0 {
 		// 这一轮没有可降级的图片：把原始失败原样交回去，不假装能自愈。
 		return initial, nil, false
@@ -170,7 +190,10 @@ func (r *offloadRetrier) tryOffloadRetry(err error, initial modelTurnInput, hist
 // 只动 `message.Parts`（有序段）：图片按出现顺序与 durable 块里的图片一一对应，
 // 所以第 k 个图片段就是第 k 张 durable 图片——占位文案要的附件 id 直接从它取。
 // count<=0 时按本仓预算算；算出来还是 0 就降 1 张（上游已经说超预算了）。
-func degradePromptImages(initial modelTurnInput, count int) (modelTurnInput, []int) {
+//
+// access 与重放侧（`session.Surface`）用的是同一个解析器：占位里的只读路径就是
+// 模型取回原件的入口，两侧必须逐字节一致（见 offloadRetrier.access）。
+func degradePromptImages(initial modelTurnInput, count int, access session.ImageAccessResolver) (modelTurnInput, []int) {
 	images := make([]session.ContentBlock, 0, 4)
 	for _, block := range initial.durable {
 		if session.IsImageBlock(block) {
@@ -200,7 +223,11 @@ func degradePromptImages(initial modelTurnInput, count int) (modelTurnInput, []i
 		if imageIndex >= count {
 			break
 		}
-		parts[i] = llm.TextPart(session.OffloadedImageText(images[imageIndex], nil))
+		var imageAccess *session.ImageAccess
+		if access != nil {
+			imageAccess = access(images[imageIndex])
+		}
+		parts[i] = llm.TextPart(session.OffloadedImageText(images[imageIndex], imageAccess))
 		imageIndex++
 		degradedCount++
 	}

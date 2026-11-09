@@ -19,9 +19,51 @@ import (
 
 var pluginIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
+// jsEntryExtensions 是本仓**明确不支持**的入口后缀。
+//
+// 为什么要在 manifest 层就拒：宿主不嵌 JS 运行时（AGENTS R6），一个 .js/.ts
+// 入口永远不可能被装载。今天它会被原样复制、install 返回成功——"装上了"被当成
+// 成功，而它一次都跑不起来。这类静默成功比报错难查得多（docs/architect-
+// official-sync-taskbooks.md HS-07 先红第 3 条）。
+var jsEntryExtensions = []string{".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"}
+
 func manifestError(format string, args ...any) *Error {
 	return errorf("invalid_manifest", http.StatusUnprocessableEntity, false,
 		"修正私有 plugin.json、相对路径与 SHA-256 后重试", format, args...)
+}
+
+// unsupportedPluginError 是"合法的插件形态，但本仓不支持"的四字段错误。
+//
+// 为什么与 invalid_manifest 分开：坏 manifest 是**你写错了**（改文件就能过），
+// 而 JS/Cordis/process 插件是**宿主没有对应运行时**（改文件没用，要么换插件，
+// 要么等宿主支持）。两件事的下一步完全不同，错误码不能塌成一个。
+func unsupportedPluginError(hint, format string, args ...any) *Error {
+	return errorf("unsupported_plugin", http.StatusUnprocessableEntity, false, hint, format, args...)
+}
+
+// isJSEntry 判断入口是不是 JS/TS 文件（大小写不敏感：Windows 上 .JS 一样是 JS）。
+func isJSEntry(entry string) bool {
+	lower := strings.ToLower(strings.TrimSpace(entry))
+	for _, ext := range jsEntryExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeCordisPackage 判断目录是不是官方 Cordis/npm 插件形态。
+//
+// 判据只有两条，都来自官方包结构本身：根上有 package.json（npm 包），
+// 或者有 cordis.patch.yml（Cordis 热重载补丁）。本仓的私有包唯一 manifest 是
+// plugin.json，所以"没有 plugin.json 但有这两样"就一定是另一种生态的插件。
+func looksLikeCordisPackage(dir string) bool {
+	for _, name := range []string{"package.json", "cordis.patch.yml", "cordis.yml"} {
+		if info, err := os.Lstat(filepath.Join(dir, name)); err == nil && info.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
 }
 
 // decodeStrict rejects duplicate keys, unknown fields, trailing values and wrong shapes.
@@ -135,6 +177,17 @@ func readAndValidatePackage(source string) (Manifest, error) {
 	manifestPath := filepath.Join(absolute, "plugin.json")
 	manifestInfo, err := os.Lstat(manifestPath)
 	if err != nil {
+		// 另一套生态的插件目录（Cordis/npm）：本仓不嵌 JS 运行时（R6）。
+		// 必须点名"不支持 JS 插件"，而不是报"读不到 plugin.json"——
+		// 后者读起来像文件放错了，会让人一直去找那个不存在的文件。
+		if os.IsNotExist(err) && looksLikeCordisPackage(absolute) {
+			return manifest, unsupportedPluginError(
+				"本仓不嵌 JS 运行时（AGENTS R6）：受支持的是 Go/WASM 工具插件"+
+					"（GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared）；"+
+					"要跑 Cordis/JS 插件请用官方桌面端，或把插件改写成 wasm 工具",
+				"包 %s 是 Cordis/npm 形态（package.json 或 cordis.patch.yml + JS 入口），"+
+					"不是本仓的 dsh.local-plugin@1 私有包；JS/Cordis 插件明确不支持", absolute)
+		}
 		return manifest, manifestError("读取 plugin.json 失败: %v", err)
 	}
 	if !manifestInfo.Mode().IsRegular() || manifestInfo.Size() > 1<<20 {
@@ -159,8 +212,28 @@ func readAndValidatePackage(source string) (Manifest, error) {
 	if manifest.Kind != "wasm" && manifest.Kind != "process" {
 		return manifest, manifestError("非法 kind %q；只接受 wasm/process", manifest.Kind)
 	}
+	// process 后端没有实现（internal/kernel/module.go 的 implementedBackends 只有
+	// static/wasm）。装上一个永远跑不起来的包就是静默成功，必须在安装边界上炸。
+	if manifest.Kind == "process" {
+		return manifest, unsupportedPluginError(
+			"本仓没有 process 插件后端（internal/kernel/module.go 的 implementedBackends 只有 static/wasm）；"+
+				"受支持的是 wasm 工具插件：GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared",
+			"插件 %s 声明 kind = \"process\"：process 后端未实现，装上也永远跑不起来", manifest.ID)
+	}
 	if err := safePackagePath(manifest.Entry); err != nil {
 		return manifest, manifestError("entry 越界: %v", err)
+	}
+	// 入口是 JS/TS：合法路径，但本仓没有 JS 运行时。原样收下就是"装上了"
+	// 却一次都跑不起来——静默成功，必须显式拒绝。
+	if isJSEntry(manifest.Entry) {
+		return manifest, unsupportedPluginError(
+			"本仓不嵌 JS 运行时（AGENTS R6）：受支持的是 Go/WASM 工具插件"+
+				"（GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared）；"+
+				"JS/Cordis 插件请用官方桌面端，或改写成 wasm 工具",
+			"插件 %s 的入口 %q 是 JavaScript/TypeScript 文件：JS/Cordis 插件明确不支持", manifest.ID, manifest.Entry)
+	}
+	if err := validateToolDeclarations(manifest.Tools); err != nil {
+		return manifest, manifestError("工具声明非法: %v", err)
 	}
 	if len(manifest.Files) == 0 {
 		return manifest, manifestError("files 不能为空，且必须包含 entry")

@@ -1210,6 +1210,120 @@ func TestOfficialCredentialsWriteFailureLeavesNoHalf(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// 官方 settings/describe 投影（L2 `settings/describe`）
+// ---------------------------------------------------------------------------
+
+// TestOfficialSettingsDescribeProjectionShape 钉住官方 SettingsDescribeValue：
+// 顶层只有 writable/hasDocument/namespaces；namespace 的 secrets 必须是
+// []{path,set} 而不是 L1 的 []string。
+func TestOfficialSettingsDescribeProjectionShape(t *testing.T) {
+	described := settingsform.DescribeResult{
+		Writable:    true,
+		HasDocument: false,
+		Namespaces: []settingsform.NamespaceView{
+			{
+				NS:           "model",
+				Schema:       map[string]any{"type": "object"},
+				Value:        map[string]any{"defaultModel": "base-model"},
+				Base:         map[string]any{"defaultModel": "base-model"},
+				AutoGenerate: true,
+				Applies:      "live",
+				Secrets:      []string{},
+				Revision:     2,
+			},
+		},
+		Sections: []settingsform.Section{{NS: "model", Title: "Default model"}},
+		Errors:   []settingsform.Error{},
+	}
+	projected := OfficialSettingsDescribeResultOf(described)
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatalf("序列化官方 describe 投影: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		t.Fatalf("投影不是 JSON 对象: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("官方 SettingsDescribeValue 顶层只有三键，实际：%s", encoded)
+	}
+	if out["writable"] != true || out["hasDocument"] != false {
+		t.Fatalf("writable/hasDocument 透传错：%v", out)
+	}
+	namespaces := out["namespaces"].([]any)
+	if len(namespaces) != 1 {
+		t.Fatalf("namespaces 数量错：%v", namespaces)
+	}
+	namespace := namespaces[0].(map[string]any)
+	secrets, ok := namespace["secrets"].([]any)
+	if !ok || len(secrets) != 0 {
+		t.Fatalf("没有 secret 槽位时 secrets 必须是空数组（不能 null）：%v", namespace["secrets"])
+	}
+	if namespace["applies"] != "live" {
+		t.Fatalf("applies 必须是 live：%v", namespace["applies"])
+	}
+	if namespace["revision"] != float64(2) {
+		t.Fatalf("revision 必须透传：%v", namespace["revision"])
+	}
+}
+
+// TestOfficialSettingsDescribeProjectionRedactsSecrets 钉住官方 describe 的
+// 密钥剥离语义：secrets 只给 {path,set} sidecar；value/base/user 里一律不许
+// 出现密钥值（官方 zod 称这三个字段是 redacted 的）。
+func TestOfficialSettingsDescribeProjectionRedactsSecrets(t *testing.T) {
+	described := settingsform.DescribeResult{
+		Writable:    true,
+		HasDocument: false,
+		Namespaces: []settingsform.NamespaceView{
+			{
+				NS:           "llm-deepseek",
+				Schema:       map[string]any{"type": "object"},
+				Value:        map[string]any{"apiKey": "sk-value-leak-0ac1", "model": "deepseek-chat"},
+				Base:         map[string]any{"apiKey": "sk-base-leak-0ac1", "model": "deepseek-chat"},
+				User:         map[string]any{"apiKey": "sk-user-leak-0ac1"},
+				AutoGenerate: true,
+				Applies:      "live",
+				Secrets:      []string{"apiKey"},
+				Revision:     9,
+			},
+		},
+		Errors: []settingsform.Error{},
+	}
+	projected := OfficialSettingsDescribeResultOf(described)
+	if len(projected.Namespaces) != 1 {
+		t.Fatalf("namespace 数错：%v", projected.Namespaces)
+	}
+	namespace := projected.Namespaces[0]
+	if len(namespace.Secrets) != 1 {
+		t.Fatalf("secret 槽位数错：%v", namespace.Secrets)
+	}
+	if len(namespace.Secrets[0].Path) != 1 || namespace.Secrets[0].Path[0] != "apiKey" || !namespace.Secrets[0].Set {
+		t.Fatalf("secret sidecar 应为 {path:[apiKey], set:true}：%+v", namespace.Secrets[0])
+	}
+	for name, section := range map[string]map[string]any{"value": namespace.Value, "base": namespace.Base, "user": namespace.User} {
+		if _, leaked := section["apiKey"]; leaked {
+			t.Fatalf("%s 里必须剥掉 apiKey：%v", name, section)
+		}
+	}
+	if namespace.Value["model"] != "deepseek-chat" {
+		t.Fatalf("非 secret 字段必须保留：%v", namespace.Value)
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatalf("序列化: %v", err)
+	}
+	for _, fragment := range []string{"sk-value-leak-0ac1", "sk-base-leak-0ac1", "sk-user-leak-0ac1"} {
+		if strings.Contains(string(encoded), fragment) {
+			t.Fatalf("官方 describe 泄漏密钥片段 %q：%s", fragment, encoded)
+		}
+	}
+
+	// 投影不许改输入 map（NamespaceView 的 value/base/user 可能与他处共享引用）。
+	if described.Namespaces[0].Value["apiKey"] != "sk-value-leak-0ac1" {
+		t.Fatalf("投影修改了输入 Value：%v", described.Namespaces[0].Value)
+	}
+}
+
 // 错误路径零泄漏
 // ---------------------------------------------------------------------------
 

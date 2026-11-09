@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -197,6 +198,20 @@ func runPluginsCLI(argv []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writePluginCLIError(stderr, err)
 	}
+	// enable 必须**真的装载**（disable/uninstall 必须真的卸载）。
+	//
+	// 不挂运行时的话，`plugins enable` 只改 state.json 里的一个布尔位：
+	// 命令返回成功、包其实一次都没被编译过。这正是本任务要消灭的那类静默成功
+	// ——"装上了/启用了"曾经就等于"成功了"。挂上之后同步逻辑在 Manager 里走：
+	// enable 先装载再提交（装载失败则状态一步不动），disable 提交后卸载。
+	//
+	// 生命周期：CLI 是一次性进程，动作做完就把运行时关掉（wasm 实例与线性内存
+	// 立刻还回去，不等进程退出）；deferred close 可重复调用。
+	rt, err := newPluginRuntime(manager)
+	if err != nil {
+		return writePluginCLIError(stderr, err)
+	}
+	defer func() { _ = rt.Close(context.Background()) }()
 	result, err := callPluginMethod(manager, method, pluginParams{ID: *id, Path: *path, Version: *version})
 	if err != nil {
 		return writePluginCLIError(stderr, err)

@@ -27,7 +27,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 	"unicode"
 
 	"dshgo/internal/officialwire"
@@ -44,14 +43,6 @@ const (
 	// officialWireSecretEnv 可指定 HMAC 密钥（hex）。不给则每进程随机生成，
 	// 因为 cookie 只在**本进程**签发与校验，不跨重启。
 	officialWireSecretEnv = "DSHD_OFFICIAL_WIRE_SECRET"
-	// officialWireStreamInterval 是 journal 流的轮询间隔。
-	//
-	// 这不是"随便挑的数"：本仓 journal 没有订阅回调（只有 Append + Window），
-	// 而官方 mux 要的是"有事件就推"。100ms 轮询在单机上是可接受的近似，
-	// 一旦 journal 加上订阅就会被替换掉——注释写在这里，免得以后被当成设计。
-	officialWireStreamInterval = 100 * time.Millisecond
-	// officialWireStreamPage 是一次 Window 最多取多少帧（不是总量上限）。
-	officialWireStreamPage = 256
 )
 
 // officialWireDeps 是官方 wire 需要的宿主能力。
@@ -142,6 +133,13 @@ func newOfficialWireServer(legacy http.Handler, deps officialWireDeps) (*officia
 	// 当 legacy handler 传进来，这里统一取一次，避免两处漂移成 nil。
 	if srv, ok := legacy.(*transport.Server); ok {
 		deps.Server = srv
+		// follow 的 `snapshot.header` 必须是**真实**的 v4 会话头
+		// （见 serve_official_wire_follow.go）。挂在挂载点这里有两个理由：
+		// ① 它晚于 transport.NewServer、早于任何请求；
+		// ② follow 的 501 判据查的就是这份注册，放到别处就会"开关开了但 follow 仍 501"。
+		if strings.TrimSpace(deps.Home) != "" {
+			srv.AttachOfficialSessionHeaderSource(officialWireSessionHeaderSource{home: deps.Home})
+		}
 	}
 	secret, err := officialWireSecret()
 	if err != nil {
@@ -240,7 +238,124 @@ func newOfficialWireServer(legacy http.Handler, deps officialWireDeps) (*officia
 	if err := server.Handle(officialwire.EndpointEventResult, eventsResult); err != nil {
 		return nil, err
 	}
+
+	// 4.5) pluginMarket / pluginManager / pluginRegistryProbe 的官方 unary 面。
+	//
+	// 这些方法在 L1 已有真实实现（internal/market + pluginmgr），但官方 wire
+	// 此前没有绑定：官方客户端调 `POST /api/pluginMarket/listIndexes` 会落到
+	// unknown-method/method-unavailable，看起来像"宿主没做"，实际是分派漏接。
+	// 未配置索引时 L1 返回 503 registry_unavailable，这里按 503 原样保留。
+	for _, b := range []struct {
+		endpoint string
+		l1       string
+		optional []string
+	}{
+		{"pluginMarket/listIndexes", "pluginMarket.listIndexes", nil},
+		{"pluginMarket/setIndexes", "pluginMarket.setIndexes", []string{"urls"}},
+		{"pluginMarket/search", "pluginMarket.search", []string{"url", "query"}},
+		{"pluginMarket/readEntryDetail", "pluginMarket.readEntryDetail", []string{"url", "name", "version", "language"}},
+		{"pluginRegistryProbe/fastest", "pluginRegistryProbe.fastest", []string{"urls"}},
+		{"pluginManager/registries", "pluginManager.registries", nil},
+		{"pluginManager/listVersions", "pluginManager.listVersions", []string{"name"}},
+	} {
+		desc := &officialwire.Descriptor{Optional: b.optional}
+		if err := server.Handle(b.endpoint, client.Binding(b.l1, desc, nil)); err != nil {
+			return nil, err
+		}
+	}
+
+	// 5) settings/describe → L1 settings.describe + 官方投影。
+	//
+	// L1 的 `secrets` 是 []string（58 方法快照，冻结不改）；官方 zod 要
+	// `[{path,set}]`，且 value/base/user 是 redacted。投影在
+	// officialSettingsDescribeBinding → transport.OfficialSettingsDescribeResultOf
+	// 里完成，业务读取仍是同一份 settingsform.Service；L1 形状一个字节不动。
+	if err := server.Handle("settings/describe", officialSettingsDescribeBinding(client)); err != nil {
+		return nil, err
+	}
+
+	// 6) 官方 job.*/terminal.* 的 unary 面（T05 WIRING §4；此前是
+	// gateway/unknown-method 的 BLOCKER）。
+	//
+	// 只注册 unary 七个：job/list、job/follow、terminal/attach、terminal/retain
+	// 官方是 mode:'stream'，走 remote.mux 的 open 帧（T05 的
+	// OpenFrameStream），**不能**在这里重复注册成 unary。
+	//
+	// args 形状按官方 typert 校过（app.asar 0.2.2-rc.1 的
+	// terminal-controller/job-controller lib/typert.host.js）：
+	//   terminal/create     {agentId, request:{shellPath?, id, cols, rows}}
+	//   terminal/close      {agentId, id}
+	//   terminal/environment{agentId}
+	//   terminal/shells     {agentId}
+	//   terminal/rename     {agentId, id, title}
+	//   terminal/list       {sessionId}
+	//   job/kill            {request:{sessionId, jobId}}  ← 需扁平化（见下）
+	//
+	// L1 的 terminal.* 已经接受 agentId 与嵌套 request（handlers_job_terminal_official.go
+	// 的 officialIdentity/HandleTerminalCreate），所以除 job/kill 外都直接透传。
+	for _, reg := range []struct {
+		endpoint   string
+		dotted     string
+		descriptor *officialwire.Descriptor
+	}{
+		{"terminal/create", "terminal.create", &officialwire.Descriptor{Required: []string{"agentId", "request"}}},
+		{"terminal/close", "terminal.close", &officialwire.Descriptor{Required: []string{"agentId", "id"}}},
+		{"terminal/environment", "terminal.environment", &officialwire.Descriptor{Required: []string{"agentId"}}},
+		{"terminal/shells", "terminal.shells", &officialwire.Descriptor{Required: []string{"agentId"}}},
+		{"terminal/rename", "terminal.rename", &officialwire.Descriptor{Required: []string{"agentId", "id", "title"}}},
+		{"terminal/list", "terminal.list", &officialwire.Descriptor{Required: []string{"sessionId"}}},
+	} {
+		if err := server.Handle(reg.endpoint, client.Binding(reg.dotted, reg.descriptor, nil)); err != nil {
+			return nil, err
+		}
+	}
+	if err := server.Handle("job/kill", officialJobKillBinding(client)); err != nil {
+		return nil, err
+	}
+	if err := registerOfficialAnalyticsWire(server, client); err != nil {
+		return nil, err
+	}
 	return server, nil
+}
+
+// officialJobKillBinding 把官方 `{request:{sessionId, jobId}}` 翻成本仓 L1 的扁平
+// `{sessionId, jobId}`（job-controller/lib/typert.host.js:150-181 的 JobKillRequest）。
+//
+// 为什么不能直接 client.Binding：L1 的 job.kill 收扁平字段（handlers_job_terminal_official.go
+// 的 officialJobParams），而官方 wire 的 json 参数名是 request；嵌套原样下行会 400。
+func officialJobKillBinding(client *officialwire.LegacyClient) officialwire.Binding {
+	return officialwire.Binding{
+		Descriptor: &officialwire.Descriptor{Required: []string{"request"}},
+		Handle: func(ctx context.Context, args map[string]json.RawMessage) (any, *officialwire.Error) {
+			raw, ok := args["request"]
+			if !ok {
+				return nil, officialwire.ArgumentsInvalid("job/kill", "request", "缺 request（官方 json 参数名）")
+			}
+			var request struct {
+				SessionID string `json:"sessionId"`
+				JobID     string `json:"jobId"`
+			}
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return nil, officialwire.ArgumentsInvalid("job/kill", "request", "request 必须是 {sessionId, jobId}")
+			}
+			if request.SessionID == "" || request.JobID == "" {
+				return nil, officialwire.ArgumentsInvalid("job/kill", "request", "request 需要非空 sessionId 与 jobId")
+			}
+			flat, err := json.Marshal(map[string]string{"sessionId": request.SessionID, "jobId": request.JobID})
+			if err != nil {
+				return nil, officialwire.Errorf(officialwire.CodeInternal, "job/kill 参数序列化失败：%v", err)
+			}
+			result, failure := client.Call(ctx, "job.kill", flat)
+			if failure != nil {
+				return nil, failure
+			}
+			var value any
+			if err := json.Unmarshal(result, &value); err != nil {
+				return nil, officialwire.Errorf(officialwire.CodeInternal, "job/kill 的 L1 结果不是 JSON：%v", err)
+			}
+			return value, nil
+		},
+	}
 }
 
 // officialWireSecret 取（或生成）cookie 的 HMAC 密钥。
@@ -321,107 +436,14 @@ func decodeReadBytesResult(result json.RawMessage) (any, *officialwire.Error) {
 	return value, nil
 }
 
-// newJournalStreamOpener 造 mux 的流工厂。
-func newJournalStreamOpener(journals *transport.Journals) officialwire.StreamOpener {
-	return journalStreamOpener{journals: journals, interval: officialWireStreamInterval}
-}
-
-// journalStreamOpener 把官方 mux 的 endpoint 映射成本仓真实数据源。
+// 为什么这里**没有**另一套 journal 尾流实现：
 //
-// 只有一条：`session/events` → 每会话 Transport journal。
-// 官方同名方法是 unary 事件页；这里的 mux 流是"尾部跟随"（任务书指定），
-// 两层不冲突：unary 走 binding 表，mux open 走这里。
-type journalStreamOpener struct {
-	journals *transport.Journals
-	interval time.Duration
-}
-
-var _ officialwire.StreamOpener = journalStreamOpener{}
-
-// Open 打开一条流。
-func (o journalStreamOpener) Open(_ context.Context, endpoint string, args json.RawMessage) (officialwire.Stream, *officialwire.Error) {
-	if endpoint != "session/events" {
-		return nil, officialwire.MethodUnavailable(endpoint,
-			"本宿主没有这条 mux 流（已接入的流只有 session/events）")
-	}
-	if o.journals == nil {
-		return nil, officialwire.MethodUnavailable(endpoint,
-			"session/events 未接线：宿主没有每会话 journal")
-	}
-	var request struct {
-		SessionID string `json:"sessionId"`
-		SinceSeq  *int   `json:"sinceSeq"`
-		Limit     *int   `json:"limit"`
-	}
-	if err := json.Unmarshal(args, &request); err != nil {
-		return nil, officialwire.ArgumentsInvalid(endpoint, "args",
-			"session/events 的 args 必须是对象：sessionId + 可选 sinceSeq/limit")
-	}
-	if strings.TrimSpace(request.SessionID) == "" {
-		return nil, officialwire.ArgumentsInvalid(endpoint, "sessionId",
-			"session/events 需要 sessionId（本宿主没有「当前会话」这种全局概念）")
-	}
-	next := 0
-	if request.SinceSeq != nil {
-		if *request.SinceSeq < 0 {
-			return nil, officialwire.ArgumentsInvalid(endpoint, "sinceSeq", "sinceSeq 必须 >= 0")
-		}
-		next = *request.SinceSeq
-	}
-	limit := officialWireStreamPage
-	if request.Limit != nil {
-		if *request.Limit <= 0 || *request.Limit > officialWireStreamPage {
-			return nil, officialwire.ArgumentsInvalid(endpoint, "limit",
-				fmt.Sprintf("limit 必须在 1..%d 之间", officialWireStreamPage))
-		}
-		limit = *request.Limit
-	}
-	return &journalStream{
-		journal:  o.journals.Get(request.SessionID),
-		next:     next,
-		limit:    limit,
-		interval: o.interval,
-	}, nil
-}
-
-// journalStream 是"按 seq 跟随一条 journal"的流。
-//
-// 它**只读**：不 Append、不 Reset、不碰 hub —— 因此不会产生第二个 seq 域，
-// 也不会让官方 mux 的连接影响既有 /ws 的推送。客户端看到的 seq 就是
-// L1 journal 的 seq（同一套），这正是"不串 seq 域"的含义。
-type journalStream struct {
-	journal  *transport.Journal
-	next     int
-	limit    int
-	interval time.Duration
-}
-
-var _ officialwire.Stream = (*journalStream)(nil)
-
-// Next 取下一帧；没有新帧就等一个轮询间隔。
-func (s *journalStream) Next(ctx context.Context) (officialwire.StreamItem, bool, *officialwire.Error) {
-	for {
-		window := s.journal.Window(s.next, s.limit)
-		if len(window.Frames) > 0 {
-			frame := window.Frames[0]
-			s.next = frame.Seq
-			payload, err := json.Marshal(frame)
-			if err != nil {
-				return officialwire.StreamItem{}, true, officialwire.Errorf(officialwire.CodeInternal,
-					"journal 帧序列化失败：%v", err)
-			}
-			return officialwire.StreamItem{Value: payload, HasValue: true}, false, nil
-		}
-		select {
-		case <-ctx.Done():
-			return officialwire.StreamItem{}, true, nil
-		case <-time.After(s.interval):
-		}
-	}
-}
-
-// Close 是空操作：这里没有需要释放的资源（journal 归宿主所有）。
-func (s *journalStream) Close() {}
+// 曾经有一个 `journalStreamOpener`（按 100ms 轮询 `Journal.Window` 跟随），但它
+// 从未被挂载（生产 Opener 一直是 `officialMuxStreamOpener`），而且它的默认游标是
+// `next = 0` + 拒绝负 sinceSeq —— 也就是"我已有第 0 帧"的语义，接上去就会**丢第一帧**。
+// 尾流只有一条实现（`internal/transport` 的 `OpenOfficialJournalTail`，
+// `sinceSeq=-1` = 从头），留着第二份只会等某天有人把它接上去。
+// 删除而不是保留：死代码不会被测试覆盖，接上它的那一刻没人会知道它少了第一帧。
 
 // attachmentUploadSink 把上行裸字节落盘后登记进既有 attachment store。
 //

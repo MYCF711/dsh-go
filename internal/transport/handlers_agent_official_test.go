@@ -1,6 +1,6 @@
 package transport
 
-// 官方桌面端 agent 侧 24 个方法的契约测试。
+// 官方桌面端 agent 侧 25 个方法的契约测试。
 //
 // 这些测试只打本包的 `serveOfficialAgentAPI`（Lead 接线后由 /api 路由调它），
 // 因此不依赖 server.go 的分发表——**路由接线是 Lead 的验收项**，测试里
@@ -86,8 +86,8 @@ func assertFourFieldError(t *testing.T, code int, out map[string]any, wantStatus
 
 func TestOfficialAgentMethodsAreStable(t *testing.T) {
 	methods := OfficialAgentMethods()
-	if len(methods) != 24 {
-		t.Fatalf("官方 agent 方法应是 24 个，实际 %d", len(methods))
+	if len(methods) != 25 {
+		t.Fatalf("官方 agent 方法应是 25 个，实际 %d", len(methods))
 	}
 	seen := map[Method]bool{}
 	for _, m := range methods {
@@ -109,7 +109,7 @@ func TestOfficialAgentMethodsAreStable(t *testing.T) {
 		"commands.list", "commands.execute",
 		"subagents.prompt", "subagents.interruptByParent",
 		"userQuestions.answer", "userQuestions.attachWait",
-		"agentPresets.read", "agentPresets.select",
+		"agentPresets.list", "agentPresets.read", "agentPresets.select",
 		"skills.list", "fileReferences.list", "fileUploads.upload",
 		"messageFeedback.list", "messageFeedback.put", "messageFeedback.delete",
 		"sessionFeedback.record", "sessionReferenceResolver.candidates",
@@ -188,10 +188,12 @@ func officialMinimalBodies() map[Method]any {
 			}},
 		},
 		MethodUserQuestionsAttachWait: map[string]any{"agentId": "s1", "callId": "call-1"},
-		MethodAgentPresetsRead:        map[string]any{"agentPreset": "default"},
-		MethodAgentPresetsSelect:      map[string]any{"agentId": "s1", "agentPreset": "default"},
-		MethodSkillsList:              map[string]any{"request": map[string]any{"sessionId": "s1"}},
-		MethodFileReferencesList:      map[string]any{"agentId": "s1", "query": ""},
+		// agentPresets.list 是**零参数**方法：官方 parameters 是空数组。
+		MethodAgentPresetsList:   map[string]any{},
+		MethodAgentPresetsRead:   map[string]any{"agentPreset": "default"},
+		MethodAgentPresetsSelect: map[string]any{"agentId": "s1", "agentPreset": "default"},
+		MethodSkillsList:         map[string]any{"request": map[string]any{"sessionId": "s1"}},
+		MethodFileReferencesList: map[string]any{"agentId": "s1", "query": ""},
 		MethodFileUploadsUpload: map[string]any{
 			"agentId": "s1", "request": map[string]any{"data": "aGk=", "name": "hi.txt"},
 		},
@@ -658,4 +660,123 @@ func TestOfficialAgentToolResultsWatchShape(t *testing.T) {
 	if code := rec2.waitStatus(t); code != http.StatusBadRequest {
 		t.Fatalf("包壳 args 应 400（官方 wire 是 flat），实际 %d", code)
 	}
+}
+
+// HS-16A 先红：`agentPresets.list` 在 HS-00 里是 **DEFERRED（无路由）**——
+// 官方 `@deepseek-ai/dsh-agent-preset-registry` 的 list 是零参数方法，宿主侧
+// 真实名册（`agentPresetRoster()`：内置 modes + `<home>/modes/*.toml`）早就存在，
+// 缺的只是这条路由。基线调用会落 `routeOfficialAgentMethod` 的 default 501，
+// 官方客户端因此永远拿不到 preset 名册。
+//
+// 这个测试**只用基线已存在的标识符**，所以在实现之前就能真实跑红（不是编译红）。
+func TestOfficialAgentPresetsListIsRouted(t *testing.T) {
+	if !IsOfficialAgentMethod("agentPresets.list") {
+		t.Fatal("agentPresets.list 没有被 IsOfficialAgentMethod 认出来：/api 路由会落到 default 501")
+	}
+	srv := officialTestServer(t, OfficialAgentAPI{})
+	code, out := callOfficial(t, srv, "agentPresets.list", map[string]any{})
+	if code != http.StatusNotImplemented {
+		t.Fatalf("宿主没接实现时应是 501，实际 %d: %v", code, out)
+	}
+	errObj, _ := out["error"].(map[string]any)
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "agentPresets.list") {
+		t.Fatalf("未实现的错误没点出方法名（路由存在但实现缺失才该这样）：%q", msg)
+	}
+}
+
+// agentPresets.list 的真实结果形状：官方 `AgentPresetRoster`
+// `{presets:[{id, isDefault, name?, description?, broken?}]}`（逐字段严格）。
+func TestOfficialAgentPresetsListShape(t *testing.T) {
+	roster := OfficialAgentPresetRoster{Presets: []OfficialAgentPreset{
+		{ID: "default", IsDefault: true, Name: "Default", Description: "默认模式"},
+		{ID: "read-only"},
+	}}
+	var calls int
+	srv := officialTestServer(t, OfficialAgentAPI{
+		AgentPresetsList: func() (OfficialAgentPresetRoster, error) {
+			calls++
+			return roster, nil
+		},
+	})
+	code, out := callOfficial(t, srv, "agentPresets.list", map[string]any{})
+	if code != http.StatusOK {
+		t.Fatalf("状态 %d: %v", code, out)
+	}
+	if calls != 1 {
+		t.Fatalf("宿主实现被调用 %d 次，期望 1", calls)
+	}
+	result, ok := out["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("result 不是对象：%v", out["result"])
+	}
+	items, ok := result["presets"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("presets 应为 2 项数组，实际 %v", result["presets"])
+	}
+	first := items[0].(map[string]any)
+	if first["id"] != "default" || first["isDefault"] != true {
+		t.Fatalf("默认 preset 行不对：%v", first)
+	}
+	if first["name"] != "Default" || first["description"] != "默认模式" {
+		t.Fatalf("name/description 没透传：%v", first)
+	}
+	second := items[1].(map[string]any)
+	if second["id"] != "read-only" || second["isDefault"] != false {
+		t.Fatalf("非默认 preset 行不对：%v", second)
+	}
+	// name/description/broken 都是 optional：没有就不出现（不是空串）。
+	for _, key := range []string{"name", "description", "broken"} {
+		if _, has := second[key]; has {
+			t.Fatalf("optional 字段 %s 没值时不该出现：%v", key, second)
+		}
+	}
+
+	// 零参数是硬形状：多给任何键都必须 400 并点出字段名（官方 strictCodec）。
+	code, out = callOfficial(t, srv, "agentPresets.list", map[string]any{"sessionId": "s1"})
+	assertFourFieldError(t, code, out, http.StatusBadRequest, "bad_request")
+	badMsg := out["error"].(map[string]any)["message"].(string)
+	if !strings.Contains(badMsg, "sessionId") {
+		t.Fatalf("未知参数错误没点出字段名：%q", badMsg)
+	}
+
+	// 空名册：presets 必须是 []，不能是 null（官方 required array）。
+	srvEmpty := officialTestServer(t, OfficialAgentAPI{
+		AgentPresetsList: func() (OfficialAgentPresetRoster, error) { return OfficialAgentPresetRoster{}, nil },
+	})
+	code, out = callOfficial(t, srvEmpty, "agentPresets.list", map[string]any{})
+	if code != http.StatusOK {
+		t.Fatalf("空名册状态 %d: %v", code, out)
+	}
+	emptyPresets, ok := out["result"].(map[string]any)["presets"].([]any)
+	if !ok || len(emptyPresets) != 0 {
+		t.Fatalf("空名册的 presets 应为 []，实际 %v", out["result"])
+	}
+
+	// A/B：两个 Server 各挂各的名册，互不可见。
+	srvB := officialTestServer(t, OfficialAgentAPI{
+		AgentPresetsList: func() (OfficialAgentPresetRoster, error) {
+			return OfficialAgentPresetRoster{Presets: []OfficialAgentPreset{{ID: "b-only"}}}, nil
+		},
+	})
+	code, outB := callOfficial(t, srvB, "agentPresets.list", map[string]any{})
+	if code != http.StatusOK {
+		t.Fatalf("B 状态 %d: %v", code, outB)
+	}
+	bItems := outB["result"].(map[string]any)["presets"].([]any)
+	if len(bItems) != 1 || bItems[0].(map[string]any)["id"] != "b-only" {
+		t.Fatalf("B 名册串了 A：%v", bItems)
+	}
+}
+
+// 宿主名册读不出来时必须是四字段错误，不许吞成空名册（空名册 = "没有 preset"，
+// 那是另一条语义）。
+func TestOfficialAgentPresetsListErrorIsLoud(t *testing.T) {
+	srv := officialTestServer(t, OfficialAgentAPI{
+		AgentPresetsList: func() (OfficialAgentPresetRoster, error) {
+			return OfficialAgentPresetRoster{}, ErrOfficialBadInput
+		},
+	})
+	code, out := callOfficial(t, srv, "agentPresets.list", map[string]any{})
+	assertFourFieldError(t, code, out, http.StatusBadRequest, "bad_request")
 }

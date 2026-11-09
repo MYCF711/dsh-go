@@ -15,6 +15,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -231,13 +232,23 @@ func TestInspectAndInstallRefuseUnsupportedSpecForms(t *testing.T) {
 		"git+https://example.com/acme.git",
 		"https://example.com/acme-1.0.0.tgz",
 	} {
-		obj := f.fourField(t, "pluginManager.inspect", map[string]any{"spec": spec},
-			http.StatusNotImplemented, "not_implemented")
-		if msg, _ := obj["message"].(string); !strings.Contains(msg, "registry") && !strings.Contains(msg, "pnpm") {
-			t.Fatalf("%q 的 501 没说清缺哪个能力：%q", spec, msg)
+		// 没有配置 registry 时：inspect 真实 refused（不是 501），install
+		// 真实 ManagementFailure（application=failed），都不装东西。
+		result := f.result(t, "pluginManager.inspect", map[string]any{"spec": spec})
+		if result["status"] != "refused" {
+			t.Fatalf("%q 的 inspect 必须是结构化 refused：%v", spec, result)
 		}
-		f.fourField(t, "pluginManager.installBundle", map[string]any{"spec": spec},
-			http.StatusNotImplemented, "not_implemented")
+		if strings.HasPrefix(spec, "git+") {
+			// git 形态仍明确 501（不冒充已支持）；registry/tarball 才走
+			// 结构化 refused/failed。
+			f.fourField(t, "pluginManager.installBundle", map[string]any{"spec": spec},
+				http.StatusNotImplemented, "not_implemented")
+			continue
+		}
+		change := f.result(t, "pluginManager.installBundle", map[string]any{"spec": spec})
+		if change["application"] != "failed" {
+			t.Fatalf("%q 的 install 必须是结构化 failed：%v", spec, change)
+		}
 	}
 	if got := installedIDs(t, f.manager); len(got) != 0 {
 		t.Fatalf("被拒的 spec 居然装了东西：%+v", got)
@@ -452,10 +463,14 @@ func TestUpdateBundleToRetainedVersionOnly(t *testing.T) {
 		t.Fatalf("更新没持久化：%+v", info)
 	}
 
-	// 本机没有这个版本 → 无下载源，必须 501，且状态不变。
-	f.fourField(t, "pluginManager.updateBundle", map[string]any{
+	// 本机没有这个版本 → 结构化 not-updatable（不是 501），且状态不变。
+	result = reopened.result(t, "pluginManager.updateBundle", map[string]any{
 		"name": "acme.audit", "version": "9.9.9",
-	}, http.StatusNotImplemented, "not_implemented")
+	})
+	inner, _ = result["result"].(map[string]any)
+	if inner == nil || inner["application"] != "failed" {
+		t.Fatalf("缺失版本的 update 必须结构化失败：%v", result)
+	}
 	if info := installedIDs(t, reopened.manager)["acme.audit"]; info.Version != "3.0.0" {
 		t.Fatalf("失败的更新改了状态：%+v", info)
 	}
@@ -506,10 +521,10 @@ func TestListVersionsRefusesNotUpdatable(t *testing.T) {
 	if result["status"] != "refused" || result["problem"] != "not-updatable" {
 		t.Fatalf("未知包的 listVersions 结果不对：%v", result)
 	}
-	// 指定 registry = 要问网络 → 501（本仓没有 registry 客户端）。
+	// 指定 registry = 真实网络请求；不可达时是结构化 503 registry_unavailable（不是 501）。
 	f.fourField(t, "pluginManager.listVersions", map[string]any{
 		"name": "acme.audit", "options": map[string]any{"registry": "https://registry.example"},
-	}, http.StatusNotImplemented, "not_implemented")
+	}, http.StatusServiceUnavailable, "registry_unavailable")
 }
 
 // readBundleDetail 读的是已安装包里的真实 README.md。
@@ -718,17 +733,42 @@ func TestInstallBundleRefusesPnpmOnlyOptions(t *testing.T) {
 	f := newFixture(t, "")
 	pkg := packageFixture(t, filepath.Join(f.home, "private", "v1"), "acme.audit", "1.0.0", nil)
 
-	f.fourField(t, "pluginManager.installBundle", map[string]any{
-		"spec": pkg, "options": map[string]any{"approvedBuilds": []string{"esbuild"}},
-	}, http.StatusNotImplemented, "not_implemented")
-	f.fourField(t, "pluginManager.installBundle", map[string]any{
-		"spec": pkg, "options": map[string]any{"registry": "https://registry.example"},
-	}, http.StatusNotImplemented, "not_implemented")
-	if got := installedIDs(t, f.manager); len(got) != 0 {
-		t.Fatalf("被拒的选项居然装了东西：%+v", got)
-	}
-	// saveExact 在本仓是"本来就满足"的语义（状态里记的就是精确版本目录），接受。
+	// approvedBuilds 是 pnpm 构建审批；本仓没有 package.json 构建脚本，
+	// 不执行构建，但真实安装并返回 warning（不再 501）。
 	result := f.result(t, "pluginManager.installBundle", map[string]any{
+		"spec": pkg, "options": map[string]any{"approvedBuilds": []string{"esbuild"}},
+	})
+	if result["application"] != "applied" {
+		t.Fatalf("approvedBuilds 安装结果不对：%v", result)
+	}
+	warnings, _ := result["warnings"].([]any)
+	found := false
+	for _, warning := range warnings {
+		if strings.Contains(fmt.Sprint(warning), "approvedBuilds") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("approvedBuilds 必须带真实 warning：%v", result)
+	}
+	if err := f.manager.Uninstall("acme.audit"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 未配置 registry 时，registry 选项必须是结构化 failed/not-a-package，
+	// 不是 501，也不装东西。
+	result = f.result(t, "pluginManager.installBundle", map[string]any{
+		"spec": "acme.audit@1.0.0", "options": map[string]any{"registry": "http://127.0.0.1:1"},
+	})
+	if result["application"] != "failed" {
+		t.Fatalf("registry 失败必须结构化：%v", result)
+	}
+	if got := installedIDs(t, f.manager); len(got) != 0 {
+		t.Fatalf("registry 失败居然装了东西：%+v", got)
+	}
+
+	// saveExact 在本仓是"本来就满足"的语义，接受。
+	result = f.result(t, "pluginManager.installBundle", map[string]any{
 		"spec": pkg, "options": map[string]any{"saveExact": true},
 	})
 	if result["changed"] != true {
@@ -736,8 +776,6 @@ func TestInstallBundleRefusesPnpmOnlyOptions(t *testing.T) {
 	}
 }
 
-// 版本豁免的**读侧**：读真实 compatibility.json、重开可读、撤销后消失。
-// 两个键在官方契约里都是必填，所以没有文件时也必须回 `{}` / `[]`。
 func TestListVersionExemptionsReadsRealFileAndReopens(t *testing.T) {
 	f := newFixture(t, "")
 

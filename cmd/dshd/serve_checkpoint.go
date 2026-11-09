@@ -91,6 +91,33 @@ func checkpointRequestForBlocks(blocks []transport.ContentBlock) (session.Checkp
 	return session.NewCheckpointRequest("blocks", raw), nil
 }
 
+// checkpointBeforeModelStep 是官方 #78 `agent/pre-step` 在 serve **内建 runner**
+// （`modelRunner`，也就是 `DSHD_SERVE_MODEL_RUNNER=1` 那条路）上的落点。
+//
+// 官方原件（同文件 :67-70）：`agent/pre-step` 就是一次 flush ——
+//
+//	ctx.on("agent/pre-step", async ({ agent }, next) => {
+//	    await ctx.sessions.flush(agent.session);
+//	    return next();
+//	});
+//
+// 所以它**没有请求载荷**，req 传 nil；同一锚点先到的身份会赢（第一步通常已经
+// 由 prompt 侧车记过请求身份，`WriteDurableCheckpoint` 会原样返回那一份）。
+//
+// 为什么必须挂在 runner 里而不是 Options 上：Options 的 prompt 包装只看得见
+// **第一步**；`runModelTurnWithEffort` 自建的步进循环里，第二步起（steer 接管、
+// 图片降级重试）在此之前是裸奔的。而“每一步都要”这件事只有循环知道
+// ——这与 `internal/agent/loop.go` 的 `Loop.PreStep` 是同一条判据。
+//
+// 与 run / acp 共用 `writeDurableCheckpointForSession` 这一份落盘实现（放在
+// main.go，三条入口同源），失败语义也照抄：**响亮失败**，调用方据此不派发。
+func checkpointBeforeModelStep(home, sessionID string, step int) error {
+	if err := writeDurableCheckpointForSession(home, sessionID, nil); err != nil {
+		return fmt.Errorf("第 %d 步请求前落盘失败，模型请求未派发: %w", step, err)
+	}
+	return nil
+}
+
 // checkpointBeforeModelRequest 是“请求前落盘”的唯一实现。
 //
 // 判定顺序有意如此：

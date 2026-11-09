@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 本文件钉住官方 0.2.2-rc.1 的 job.*（3）与 terminal.*（8）共 11 个方法。
@@ -39,20 +40,32 @@ type fakeOfficialJobTerminal struct {
 	listErr      error
 	listSessions []string
 
-	killValue    OfficialJobKillValue
-	killErr      error
-	killCalls    []string
-	killCtxSeen  bool
-	followFrame  OfficialJobFollowFrame
+	killValue   OfficialJobKillValue
+	killErr     error
+	killCalls   []string
+	killCtxSeen bool
+
+	// 流能力（OfficialJobTerminalStreams）：脚本里的帧按顺序发出。
+	jobListScript   []any
+	jobListErr      error
+	jobListSessions []string
+
+	followScript []any
 	followErr    error
 	followFrom   []int64
 	followScopes []string
+
+	attachScript []any
+	attachErr    error
+	attachOpens  []string
+	retainOpen   any
+	retainErr    error
+	retainOpens  []string
 
 	createInfo  OfficialWebTerminalInfo
 	createErr   error
 	createReqs  []OfficialTerminalCreateRequest
 	attachSnap  OfficialTerminalSnapshot
-	attachErr   error
 	terminals   []OfficialWebTerminalInfo
 	listTErr    error
 	closeErr    error
@@ -63,13 +76,35 @@ type fakeOfficialJobTerminal struct {
 	shellsErr   error
 	renameErr   error
 	renameCalls []string
-	retainErr   error
 	retainIDs   []string
 }
 
 func (f *fakeOfficialJobTerminal) JobList(sessionID string) (OfficialJobListFrame, error) {
 	f.listSessions = append(f.listSessions, sessionID)
 	return f.listFrame, f.listErr
+}
+
+// OpenJobList 返回 whole-set rows 流：首帧来自 listFrame，之后按 jobListScript 发。
+//
+// 首帧之后脚本发完就结束——真实实现**不会**自然结束（载体关闭才结束），
+// 那一层由 cmd/dshd 的帧机与真实宿主证明；这里只验协议搬运。
+func (f *fakeOfficialJobTerminal) OpenJobList(ctx context.Context, sessionID string) (OfficialFrameStream, error) {
+	if ctx == nil {
+		panic("handler 必须传非 nil ctx")
+	}
+	f.jobListSessions = append(f.jobListSessions, sessionID)
+	if f.jobListErr != nil {
+		return nil, f.jobListErr
+	}
+	opening := f.listFrame
+	if opening.Type == "" {
+		opening.Type = "rows"
+	}
+	if opening.Jobs == nil {
+		opening.Jobs = []OfficialJobView{}
+	}
+	frames := append([]any{opening}, f.jobListScript...)
+	return &frameScript{frames: frames}, nil
 }
 
 func (f *fakeOfficialJobTerminal) JobKill(ctx context.Context, sessionID, jobID string) (OfficialJobKillValue, error) {
@@ -81,10 +116,30 @@ func (f *fakeOfficialJobTerminal) JobKill(ctx context.Context, sessionID, jobID 
 	return f.killValue, f.killErr
 }
 
-func (f *fakeOfficialJobTerminal) JobFollow(ctx context.Context, sessionID, jobID string, from int64) (OfficialJobFollowFrame, error) {
+// JobFollow 是**遗留**一次性读取（接口兼容用）：wire 不许再走到它。
+// 真流走 OpenJobFollow；这里被调用即说明 handler 退回了旧残口。
+func (f *fakeOfficialJobTerminal) JobFollow(ctx context.Context, sessionID, jobID string, from int64) (OfficialJobFollowPage, error) {
+	panic("handler 不许再走一次性 JobFollow（OfficialJobTerminalStreams.OpenJobFollow 才是 wire 路径）")
+}
+
+// OpenJobFollow 返回脚本流：opened → （脚本里的 output/status 帧）→ 结束。
+func (f *fakeOfficialJobTerminal) OpenJobFollow(ctx context.Context, sessionID, jobID string, from int64) (OfficialFrameStream, error) {
+	if ctx == nil {
+		panic("handler 必须传非 nil ctx")
+	}
 	f.followScopes = append(f.followScopes, sessionID+"/"+jobID)
 	f.followFrom = append(f.followFrom, from)
-	return f.followFrame, f.followErr
+	if f.followErr != nil {
+		return nil, f.followErr
+	}
+	opened := OfficialJobFollowOpened{
+		Type: "opened",
+		Job: OfficialJobView{ID: jobID, Kind: "shell", Label: "npm test",
+			Status: "running", StartedAt: 1730000000000, Output: OfficialJobOutput{Total: 30, Earliest: 0}},
+		From: from,
+	}
+	frames := append([]any{opened}, f.followScript...)
+	return &frameScript{frames: frames}, nil
 }
 
 func (f *fakeOfficialJobTerminal) TerminalCreate(ctx context.Context, sessionID string, req OfficialTerminalCreateRequest) (OfficialWebTerminalInfo, error) {
@@ -92,8 +147,27 @@ func (f *fakeOfficialJobTerminal) TerminalCreate(ctx context.Context, sessionID 
 	return f.createInfo, f.createErr
 }
 
+// TerminalAttach 是**遗留**一次性快照（接口兼容用）：wire 走 OpenTerminalAttach。
 func (f *fakeOfficialJobTerminal) TerminalAttach(ctx context.Context, sessionID, id string) (OfficialTerminalSnapshot, error) {
-	return f.attachSnap, f.attachErr
+	panic("handler 不许再走一次性 TerminalAttach（OfficialJobTerminalStreams.OpenTerminalAttach 才是 wire 路径）")
+}
+
+// OpenTerminalAttach 返回脚本流：snapshot → （脚本里的 output 帧）→ state。
+func (f *fakeOfficialJobTerminal) OpenTerminalAttach(ctx context.Context, sessionID, id string) (OfficialFrameStream, error) {
+	f.attachOpens = append(f.attachOpens, sessionID+"/"+id)
+	if f.attachErr != nil {
+		return nil, f.attachErr
+	}
+	snapshot := any(OfficialTerminalSnapshotFrame{
+		Type:     "snapshot",
+		Sequence: 128,
+		Screen:   "$ echo hi\nhi\n",
+		Info: OfficialWebTerminalInfo{ID: id, Title: "bash", State: "running",
+			Shell: OfficialTerminalShell{Path: "x", Args: []string{}, Name: "x"}},
+		Writable: true,
+	})
+	frames := append([]any{snapshot}, f.attachScript...)
+	return &frameScript{frames: frames}, nil
 }
 
 func (f *fakeOfficialJobTerminal) TerminalList(sessionID string) ([]OfficialWebTerminalInfo, error) {
@@ -118,10 +192,71 @@ func (f *fakeOfficialJobTerminal) TerminalRename(ctx context.Context, sessionID,
 	return f.renameErr
 }
 
+// TerminalRetain 是**遗留**一次性确认（接口兼容用）：wire 走 OpenTerminalRetain。
 func (f *fakeOfficialJobTerminal) TerminalRetain(ctx context.Context, sessionID, id string) error {
-	f.retainIDs = append(f.retainIDs, sessionID+"/"+id)
-	return f.retainErr
+	panic("handler 不许再走一次性 TerminalRetain（OfficialJobTerminalStreams.OpenTerminalRetain 才是 wire 路径）")
 }
+
+// OpenTerminalRetain 返回一条**保持打开**的寿命流：retained 一帧，然后等取消。
+func (f *fakeOfficialJobTerminal) OpenTerminalRetain(ctx context.Context, sessionID, id string) (OfficialFrameStream, error) {
+	f.retainOpens = append(f.retainOpens, sessionID+"/"+id)
+	if f.retainErr != nil {
+		return nil, f.retainErr
+	}
+	first := any(OfficialTerminalRetentionFrame{Type: "retained"})
+	if f.retainOpen != nil {
+		first = f.retainOpen
+	}
+	return &holdOpenStream{first: first}, nil
+}
+
+// frameScript 是"已经算好的帧序列"流（一行一帧，发完即正常结束）。
+type frameScript struct {
+	frames []any
+	i      int
+}
+
+func (s *frameScript) Next(ctx context.Context) (json.RawMessage, bool, *OfficialStreamFault) {
+	if s.i >= len(s.frames) {
+		return nil, true, nil
+	}
+	frame := s.frames[s.i]
+	s.i++
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		return nil, false, &OfficialStreamFault{
+			Code: "gateway/internal", Status: http.StatusInternalServerError,
+			Message: "测试帧序列化失败：" + err.Error(),
+		}
+	}
+	return raw, false, nil
+}
+
+func (s *frameScript) Close() {}
+
+// holdOpenStream 发一帧后一直挂着，直到 ctx 取消（官方 retain 的寿命流形状）。
+type holdOpenStream struct {
+	first any
+	sent  bool
+}
+
+func (s *holdOpenStream) Next(ctx context.Context) (json.RawMessage, bool, *OfficialStreamFault) {
+	if !s.sent {
+		s.sent = true
+		raw, err := json.Marshal(s.first)
+		if err != nil {
+			return nil, false, &OfficialStreamFault{
+				Code: "gateway/internal", Status: http.StatusInternalServerError,
+				Message: "测试帧序列化失败：" + err.Error(),
+			}
+		}
+		return raw, false, nil
+	}
+	<-ctx.Done()
+	return nil, true, nil
+}
+
+func (s *holdOpenStream) Close() {}
 
 func newFakeOfficialJobTerminal() *fakeOfficialJobTerminal {
 	return &fakeOfficialJobTerminal{}
@@ -221,10 +356,10 @@ func TestExistingJobsListShapeUntouched(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// job.list
+// job.list（官方 mode:'stream'：whole-set rows 帧，没有自然结束）
 // ---------------------------------------------------------------------------
 
-func TestOfficialJobTerminal_JobListFrameShape(t *testing.T) {
+func TestOfficialJobTerminal_JobListStreamsRowsFrames(t *testing.T) {
 	f := newFakeOfficialJobTerminal()
 	f.listFrame = OfficialJobListFrame{
 		Type: "rows",
@@ -250,46 +385,60 @@ func TestOfficialJobTerminal_JobListFrameShape(t *testing.T) {
 			},
 		},
 	}
-	h := (&OfficialJobTerminal{Svc: f}).HandleJobList
+	// 生命周期提交后的第二份 whole-set：job-7 结算、job-9 出现。
+	f.jobListScript = []any{OfficialJobListFrame{
+		Type: "rows",
+		Jobs: []OfficialJobView{{
+			ID: "job-9", Kind: "shell", Label: "go test", Status: "running",
+			StartedAt: 1730000000002, Output: OfficialJobOutput{Total: 0},
+		}},
+	}}
 
-	rec := officialPost(t, h, `{"sessionId":"s1"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("要 200，拿到 %d：%s", rec.Code, rec.Body.String())
+	resp, _ := startOfficialStreamServer(t, (&OfficialJobTerminal{Svc: f}).HandleJobList, `{"sessionId":"s1"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("job.list 是流式方法，打开成功要 200，拿到 %d", resp.StatusCode)
 	}
-	if len(f.listSessions) != 1 || f.listSessions[0] != "s1" {
-		t.Fatalf("sessionId 没传到底：%v", f.listSessions)
+	if len(f.jobListSessions) != 1 || f.jobListSessions[0] != "s1" {
+		t.Fatalf("sessionId 没传到底层流能力：%v", f.jobListSessions)
 	}
-	var env struct {
-		Result struct {
-			Type string `json:"type"`
-			Jobs []map[string]any
-		} `json:"result"`
+	if len(f.listSessions) != 0 {
+		t.Fatalf("wire 不许再走一次性 JobList（旧残口）：%v", f.listSessions)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatal(err)
+	frames := ndjsonLines(t, resp)
+	if len(frames) != 2 {
+		t.Fatalf("要收到打开帧 + 变更帧共 2 帧，拿到 %d：%v", len(frames), frames)
 	}
-	if env.Result.Type != "rows" {
-		t.Fatalf("type 必须是 rows，拿到 %q", env.Result.Type)
-	}
-	if len(env.Result.Jobs) != 2 {
-		t.Fatalf("要回 2 行，拿到 %d", len(env.Result.Jobs))
-	}
-	for _, k := range []string{"id", "kind", "label", "status", "startedAt", "output"} {
-		if _, ok := env.Result.Jobs[0][k]; !ok {
-			t.Fatalf("JobView 缺必填字段 %q：%v", k, env.Result.Jobs[0])
+	for i, frame := range frames {
+		if frame["type"] != "rows" {
+			t.Fatalf("job.list 的每一帧 type 都必须是 rows，第 %d 帧是 %v", i, frame["type"])
 		}
 	}
-	out, _ := env.Result.Jobs[0]["output"].(map[string]any)
+
+	jobs, _ := frames[0]["jobs"].([]any)
+	if len(jobs) != 2 {
+		t.Fatalf("首帧要整份清单 2 行，拿到 %d：%v", len(jobs), frames[0])
+	}
+	first, _ := jobs[0].(map[string]any)
+	for _, k := range []string{"id", "kind", "label", "status", "startedAt", "output"} {
+		if _, ok := first[k]; !ok {
+			t.Fatalf("JobView 缺必填字段 %q：%v", k, first)
+		}
+	}
+	out, _ := first["output"].(map[string]any)
 	if out == nil {
-		t.Fatalf("output 必须是对象：%v", env.Result.Jobs[0])
+		t.Fatalf("output 必须是对象：%v", first)
 	}
 	for _, k := range []string{"total", "earliest"} {
 		if _, ok := out[k]; !ok {
 			t.Fatalf("output 缺必填字段 %q：%v", k, out)
 		}
 	}
-	if _, ok := env.Result.Jobs[1]["owner"]; ok {
-		t.Fatalf("未归属的 job 不许带 owner：%v", env.Result.Jobs[1])
+	second, _ := jobs[1].(map[string]any)
+	if _, ok := second["owner"]; ok {
+		t.Fatalf("未归属的 job 不许带 owner：%v", second)
+	}
+	if jobs2, _ := frames[1]["jobs"].([]any); len(jobs2) != 1 {
+		t.Fatalf("变更帧要整份替换（不是增量）：%v", frames[1])
 	}
 }
 
@@ -297,12 +446,17 @@ func TestOfficialJobTerminal_JobListFrameShape(t *testing.T) {
 func TestOfficialJobTerminal_JobListEmptyIsArray(t *testing.T) {
 	f := newFakeOfficialJobTerminal()
 	f.listFrame = OfficialJobListFrame{Type: "rows"}
-	rec := officialPost(t, (&OfficialJobTerminal{Svc: f}).HandleJobList, `{"sessionId":"s1"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("要 200，拿到 %d", rec.Code)
+	resp, _ := startOfficialStreamServer(t, (&OfficialJobTerminal{Svc: f}).HandleJobList, `{"sessionId":"s1"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("要 200，拿到 %d", resp.StatusCode)
 	}
-	if !strings.Contains(rec.Body.String(), `"jobs":[]`) {
-		t.Fatalf("空清单必须编成 []：%s", rec.Body.String())
+	frames := ndjsonLines(t, resp)
+	if len(frames) != 1 {
+		t.Fatalf("要 1 帧，拿到 %d", len(frames))
+	}
+	jobs, ok := frames[0]["jobs"].([]any)
+	if !ok || jobs == nil {
+		t.Fatalf("空清单必须编成 []（不是 null）：%v", frames[0])
 	}
 }
 
@@ -328,10 +482,107 @@ func TestOfficialJobTerminal_JobListParamErrors(t *testing.T) {
 			if code, _ := errEnvelope(t, rec)["code"].(string); code != "bad_request" {
 				t.Fatalf("code 要是 bad_request，拿到 %q", code)
 			}
-			if len(f.listSessions) != 0 {
-				t.Fatalf("参数不合法时不许打到底层服务：%v", f.listSessions)
+			if len(f.jobListSessions) != 0 {
+				t.Fatalf("参数不合法时不许打到底层流能力：%v", f.jobListSessions)
 			}
 		})
+	}
+}
+
+// unaryOnlyOfficialJobTerminal 只转发 unary 接口：用来证明"没有流能力就 501"，
+// 不是回一帧冒充流（实现上通过接口字段嵌入，方法集正好是 unary 11 个）。
+type unaryOnlyOfficialJobTerminal struct {
+	OfficialJobTerminalService
+}
+
+func TestOfficialJobTerminal_JobListWithoutStreamCapabilityIs501(t *testing.T) {
+	h := &OfficialJobTerminal{Svc: &unaryOnlyOfficialJobTerminal{OfficialJobTerminalService: newFakeOfficialJobTerminal()}}
+	rec := officialPost(t, h.HandleJobList, `{"sessionId":"s1"}`)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("没有流能力要 501，拿到 %d：%s", rec.Code, rec.Body.String())
+	}
+	err := errEnvelope(t, rec)
+	if err["code"] != "not_implemented" {
+		t.Fatalf("code 要是 not_implemented，拿到 %v", err["code"])
+	}
+	if msg, _ := err["message"].(string); !strings.Contains(msg, "job.list") {
+		t.Fatalf("501 要点名缺的是 job.list 流能力，现在 %q", msg)
+	}
+}
+
+// OpenFrameStream 是 mux 的打开入口：四条流方法必须共用同一台帧机，
+// 且 opening 帧在返回前预取（错误才能变成 open 错误，而不是 ready 后的第一帧）。
+func TestOfficialJobTerminal_OpenFrameStreamRoutesStreamMethods(t *testing.T) {
+	f := newFakeOfficialJobTerminal()
+	f.listFrame = OfficialJobListFrame{Type: "rows", Jobs: []OfficialJobView{
+		{ID: "job-7", Kind: "shell", Label: "npm test", Status: "running", StartedAt: 1, Output: OfficialJobOutput{Total: 0}},
+	}}
+	f.jobListScript = []any{OfficialJobListFrame{Type: "rows", Jobs: []OfficialJobView{}}}
+	f.followScript = []any{OfficialJobFollowOutput{Type: "output", Chunks: []OfficialJobChunk{}, Next: 0}}
+	f.retainOpen = OfficialTerminalRetentionFrame{Type: "retained"}
+	h := &OfficialJobTerminal{Svc: f}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// job/list：mux 的端点是官方斜杠形式。
+	stream, fault := h.OpenFrameStream(ctx, "job/list", json.RawMessage(`{"sessionId":"s1"}`))
+	if fault != nil {
+		t.Fatalf("job/list 的 mux open 不许 501：%s", fault.Message)
+	}
+	if stream == nil {
+		t.Fatal("job/list 必须返回帧机")
+	}
+	// opening 帧已被预取，这里拿到的应是脚本里的第二帧（整份空清单）。
+	raw, done, fault := stream.Next(ctx)
+	if fault != nil || done {
+		t.Fatalf("预取后应能取到变更帧：done=%v fault=%v", done, fault)
+	}
+	var frame map[string]any
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		t.Fatal(err)
+	}
+	if frame["type"] != "rows" {
+		t.Fatalf("变更帧 type 要是 rows：%v", frame)
+	}
+	stream.Close()
+
+	// 三个既有流方法也要能从 mux 面打开（失败时是结构化 gateway 错误）。
+	for _, c := range []struct {
+		endpoint string
+		body     string
+	}{
+		{"job/follow", `{"sessionId":"s1","jobId":"job-7"}`},
+		{"terminal/attach", `{"sessionId":"s1","id":"term-a"}`},
+		{"terminal/retain", `{"sessionId":"s1","id":"term-a"}`},
+	} {
+		stream, fault := h.OpenFrameStream(ctx, c.endpoint, json.RawMessage(c.body))
+		if fault != nil {
+			t.Fatalf("%s 的 mux open 不许 501：%s", c.endpoint, fault.Message)
+		}
+		if stream == nil {
+			t.Fatalf("%s 必须返回帧机", c.endpoint)
+		}
+		// opening 帧已预取；这里只需要证明帧机可用。
+		stream.Close()
+	}
+
+	// unary 方法不是流：mux open 必须给出结构化 501，而不是假流。
+	if _, fault := h.OpenFrameStream(ctx, "job/kill", json.RawMessage(`{"sessionId":"s1","jobId":"job-7"}`)); fault == nil {
+		t.Fatal("job/kill 不是流式方法，mux open 必须报错")
+	} else if fault.Code != "gateway/method-unavailable" || fault.Status != http.StatusNotImplemented {
+		t.Fatalf("unary 方法的 mux open 要 gateway/method-unavailable + 501，拿到 %s/%d", fault.Code, fault.Status)
+	}
+	// 未知端点同理。
+	if _, fault := h.OpenFrameStream(ctx, "nope/nothing", json.RawMessage(`{}`)); fault == nil {
+		t.Fatal("未知端点必须报错")
+	}
+	// 没有流能力时 mux open 也要明确 501（不许空流）。
+	unwired := &OfficialJobTerminal{Svc: &unaryOnlyOfficialJobTerminal{OfficialJobTerminalService: newFakeOfficialJobTerminal()}}
+	if _, fault := unwired.OpenFrameStream(ctx, "job/list", json.RawMessage(`{"sessionId":"s1"}`)); fault == nil {
+		t.Fatal("没有流能力时 mux open 必须报错")
+	} else if fault.Status != http.StatusNotImplemented {
+		t.Fatalf("没有流能力要 501，拿到 %d", fault.Status)
 	}
 }
 
@@ -430,101 +681,32 @@ func TestOfficialJobTerminal_JobKillAcceptsIDAlias(t *testing.T) {
 // job.follow
 // ---------------------------------------------------------------------------
 
-// 官方 job.follow 是流；本宿主 HTTP 侧**只做一次性读取**。
-// 断言点：一帧、带 oneShot 标记、不出现任何流式头（SSE/chunked 伪装）。
-func TestOfficialJobTerminal_JobFollowIsOneShotNotFakeStream(t *testing.T) {
-	f := newFakeOfficialJobTerminal()
-	f.followFrame = OfficialJobFollowFrame{
-		Type: "output",
-		Chunks: []OfficialJobChunk{
-			{At: 16, Text: "line-2\n"},
-			{At: 23, Text: "line-3\n", GapBefore: true},
-		},
-		Next: int64Ptr(30),
-	}
-	rec := officialPost(t, (&OfficialJobTerminal{Svc: f}).HandleJobFollow, `{"sessionId":"s1","jobId":"job-7","from":16}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("要 200，拿到 %d：%s", rec.Code, rec.Body.String())
-	}
-	if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "event-stream") {
-		t.Fatalf("HTTP 侧不许假装流式（Content-Type=%q）", ct)
-	}
-	if len(f.followFrom) != 1 || f.followFrom[0] != 16 {
-		t.Fatalf("from 没传到底：%v", f.followFrom)
-	}
-	var env struct {
-		Result struct {
-			Type    string `json:"type"`
-			Chunks  []map[string]any
-			Next    *int64 `json:"next"`
-			OneShot bool   `json:"oneShot"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatal(err)
-	}
-	if env.Result.Type != "output" {
-		t.Fatalf("type 要是 output，拿到 %q", env.Result.Type)
-	}
-	if len(env.Result.Chunks) != 2 {
-		t.Fatalf("要 2 个 chunk，拿到 %d", len(env.Result.Chunks))
-	}
-	for _, k := range []string{"at", "text"} {
-		if _, ok := env.Result.Chunks[0][k]; !ok {
-			t.Fatalf("chunk 缺必填 %q：%v", k, env.Result.Chunks[0])
-		}
-	}
-	if _, ok := env.Result.Chunks[1]["gapBefore"]; !ok {
-		t.Fatalf("gapBefore=true 必须出现：%v", env.Result.Chunks[1])
-	}
-	if env.Result.Next == nil || *env.Result.Next != 30 {
-		t.Fatalf("next 必须是 30，拿到 %v", env.Result.Next)
-	}
-	if !env.Result.OneShot {
-		t.Fatal("一次性读取必须显式标 oneShot=true：不许冒充流")
-	}
-}
-
-// 已结算且排干 → status 帧（终态投影）。
+// 已结算且排干 → 流以 status 帧结束（终态投影）。
 func TestOfficialJobTerminal_JobFollowStatusFrame(t *testing.T) {
 	f := newFakeOfficialJobTerminal()
-	f.followFrame = OfficialJobFollowFrame{
-		Type: "status",
-		Job: &OfficialJobView{ID: "job-7", Kind: "shell", Label: "npm test",
+	f.followScript = []any{OfficialJobFollowStatus{Type: "status",
+		Job: OfficialJobView{ID: "job-7", Kind: "shell", Label: "npm test",
 			Status: "completed", StartedAt: 1730000000000,
-			Output: OfficialJobOutput{Total: 30}},
+			Output: OfficialJobOutput{Total: 30}}}}
+	resp, _ := startOfficialStreamServer(t, (&OfficialJobTerminal{Svc: f}).HandleJobFollow,
+		`{"sessionId":"s1","jobId":"job-7"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("要 200，拿到 %d", resp.StatusCode)
 	}
-	rec := officialPost(t, (&OfficialJobTerminal{Svc: f}).HandleJobFollow, `{"sessionId":"s1","jobId":"job-7"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("要 200，拿到 %d：%s", rec.Code, rec.Body.String())
+	frames := ndjsonLines(t, resp)
+	if len(frames) != 2 {
+		t.Fatalf("opened + status 恰好两帧，拿到 %d：%v", len(frames), frames)
 	}
-	var env struct {
-		Result struct {
-			Type string         `json:"type"`
-			Job  map[string]any `json:"job"`
-		} `json:"result"`
+	if frames[0]["type"] != "opened" {
+		t.Fatalf("第一帧必须是 opened，拿到 %v", frames[0])
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatal(err)
+	last := frames[len(frames)-1]
+	if last["type"] != "status" {
+		t.Fatalf("终态帧必须是 status，拿到 %v", last)
 	}
-	if env.Result.Type != "status" || env.Result.Job == nil {
-		t.Fatalf("要 status 帧且带 job：%s", rec.Body.String())
-	}
-}
-
-// from 带负数或非数字 → 400；jobId 缺失 → 400。
-func TestOfficialJobTerminal_JobFollowParamErrors(t *testing.T) {
-	for _, body := range []string{`{}`, `{"jobId":"j"}`, `{"sessionId":"s1","jobId":"j","from":-1}`,
-		`{"sessionId":"s1","jobId":"j","from":"x"}`, `{"sessionId":"s1","jobId":"j","zzz":1}`} {
-		f := newFakeOfficialJobTerminal()
-		rec := officialPost(t, (&OfficialJobTerminal{Svc: f}).HandleJobFollow, body)
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("%s 要 400，拿到 %d：%s", body, rec.Code, rec.Body.String())
-		}
-		errEnvelope(t, rec)
-		if len(f.followScopes) != 0 {
-			t.Fatalf("参数不合法时不许打到底层：%v", f.followScopes)
-		}
+	job, ok := last["job"].(map[string]any)
+	if !ok || job["status"] != "completed" {
+		t.Fatalf("status 帧必须带已完成 job：%v", last)
 	}
 }
 
@@ -636,49 +818,62 @@ func TestOfficialJobTerminal_TerminalListIsArray(t *testing.T) {
 	}
 }
 
-func TestOfficialJobTerminal_TerminalAttachSnapshotShape(t *testing.T) {
+func TestOfficialJobTerminal_TerminalAttachStreamShape(t *testing.T) {
 	f := newFakeOfficialJobTerminal()
-	f.attachSnap = OfficialTerminalSnapshot{
-		Type: "snapshot", Sequence: 128, Screen: "$ echo hi\nhi\n",
-		Info:     OfficialWebTerminalInfo{ID: "term-a", Title: "bash", State: "running", Shell: OfficialTerminalShell{Path: "x", Args: []string{}, Name: "x"}},
-		Writable: true,
+	f.attachScript = []any{
+		OfficialTerminalOutputFrame{Type: "output", Sequence: 200, Data: "hi" + "\r\n"},
+		OfficialTerminalStateFrame{Type: "state",
+			Info: OfficialWebTerminalInfo{ID: "term-a", Title: "bash", State: "exited",
+				Shell: OfficialTerminalShell{Path: "x", Args: []string{}, Name: "x"}},
+			Writable: false},
 	}
-	rec := officialPost(t, (&OfficialJobTerminal{Svc: f}).HandleTerminalAttach, `{"sessionId":"s1","id":"term-a"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("要 200，拿到 %d：%s", rec.Code, rec.Body.String())
+	resp, _ := startOfficialStreamServer(t, (&OfficialJobTerminal{Svc: f}).HandleTerminalAttach,
+		`{"sessionId":"s1","id":"term-a"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("要 200，拿到 %d", resp.StatusCode)
 	}
-	var env struct {
-		Result struct {
-			Type     string         `json:"type"`
-			Sequence int64          `json:"sequence"`
-			Screen   string         `json:"screen"`
-			Writable bool           `json:"writable"`
-			Info     map[string]any `json:"info"`
-			OneShot  bool           `json:"oneShot"`
-		} `json:"result"`
+	if len(f.attachOpens) != 1 || f.attachOpens[0] != "s1/term-a" {
+		t.Fatalf("attach 参数没传到底层：%v", f.attachOpens)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatal(err)
+	frames := ndjsonLines(t, resp)
+	if len(frames) != 3 {
+		t.Fatalf("snapshot + output + state 恰好三帧，拿到 %d：%v", len(frames), frames)
 	}
-	if env.Result.Type != "snapshot" || env.Result.Sequence != 128 || env.Result.Info == nil || !env.Result.Writable {
-		t.Fatalf("snapshot 帧字段不对：%s", rec.Body.String())
+	if frames[0]["type"] != "snapshot" {
+		t.Fatalf("第一帧必须是 snapshot，拿到 %v", frames[0])
 	}
-	if !env.Result.OneShot {
-		t.Fatal("attach 是一次性快照，必须标 oneShot=true")
+	if _, has := frames[0]["oneShot"]; has {
+		t.Fatalf("snapshot 帧不许带 oneShot（旧残口）：%v", frames[0])
+	}
+	if _, ok := frames[0]["sequence"].(float64); !ok {
+		t.Fatalf("snapshot.sequence 必须是数字：%v", frames[0])
+	}
+	if frames[1]["type"] != "output" {
+		t.Fatalf("第二帧必须是 output，拿到 %v", frames[1])
+	}
+	if data, _ := frames[1]["data"].(string); data == "" {
+		t.Fatalf("output 帧必须带真实字节：%v", frames[1])
+	}
+	if frames[2]["type"] != "state" {
+		t.Fatalf("终态帧必须是 state，拿到 %v", frames[2])
 	}
 
+	// 参数错误在**写响应头之前**：仍是四字段 + 400（不是 200 之后才报错）。
 	for _, body := range []string{`{}`, `{"id":"term-a"}`, `{"sessionId":"s1","id":""}`} {
 		rec := officialPost(t, (&OfficialJobTerminal{Svc: newFakeOfficialJobTerminal()}).HandleTerminalAttach, body)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s 要 400，拿到 %d", body, rec.Code)
 		}
+		errEnvelope(t, rec)
 	}
+	// 终端不存在 → 404 四字段（同样在写头之前）。
 	fErr := newFakeOfficialJobTerminal()
 	fErr.attachErr = fmt.Errorf("%w: term-a", ErrJTOfficialTerminalGone)
-	rec = officialPost(t, (&OfficialJobTerminal{Svc: fErr}).HandleTerminalAttach, `{"sessionId":"s1","id":"term-a"}`)
+	rec := officialPost(t, (&OfficialJobTerminal{Svc: fErr}).HandleTerminalAttach, `{"sessionId":"s1","id":"term-a"}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("终端不在了要 404，拿到 %d：%s", rec.Code, rec.Body.String())
 	}
+	errEnvelope(t, rec)
 }
 
 func TestOfficialJobTerminal_TerminalCloseResultAndGone(t *testing.T) {
@@ -798,29 +993,25 @@ func TestOfficialJobTerminal_TerminalRenameValidation(t *testing.T) {
 	}
 }
 
-func TestOfficialJobTerminal_TerminalRetainFrame(t *testing.T) {
-	f := newFakeOfficialJobTerminal()
-	rec := officialPost(t, (&OfficialJobTerminal{Svc: f}).HandleTerminalRetain, `{"sessionId":"s1","id":"term-a"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("要 200，拿到 %d：%s", rec.Code, rec.Body.String())
+// retain 的参数围栏在**写响应头之前**：缺 id → 400，跨会话 → 403（四字段）。
+// 帧语义（retained 之后保持打开）由 handlers_job_terminal_official_stream_test.go
+// 的 TestOfficialTerminalRetainStreamHoldsOpenUntilCancel 钉住。
+func TestOfficialJobTerminal_TerminalRetainParamErrors(t *testing.T) {
+	for _, body := range []string{`{}`, `{"id":"term-a"}`, `{"sessionId":"s1","id":""}`} {
+		rec := officialPost(t, (&OfficialJobTerminal{Svc: newFakeOfficialJobTerminal()}).HandleTerminalRetain, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s 要 400，拿到 %d：%s", body, rec.Code, rec.Body.String())
+		}
+		errEnvelope(t, rec)
 	}
-	var env struct {
-		Result struct {
-			Type    string `json:"type"`
-			OneShot bool   `json:"oneShot"`
-		} `json:"result"`
+	fCross := newFakeOfficialJobTerminal()
+	fCross.retainErr = fmt.Errorf("%w: 别的会话", ErrCrossSession)
+	rec := officialPost(t, (&OfficialJobTerminal{Svc: fCross}).HandleTerminalRetain, `{"sessionId":"s1","id":"term-a"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("跨会话 retain 要 403，拿到 %d：%s", rec.Code, rec.Body.String())
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatal(err)
-	}
-	if env.Result.Type != "retained" {
-		t.Fatalf("retain 的帧 type 必须是 retained，拿到 %q", env.Result.Type)
-	}
-	if !env.Result.OneShot {
-		t.Fatal("retain 是一次性确认，必须标 oneShot=true（本宿主没有保留池流）")
-	}
-	if len(f.retainIDs) != 1 || f.retainIDs[0] != "s1/term-a" {
-		t.Fatalf("retain 参数没传对：%v", f.retainIDs)
+	if code, _ := errEnvelope(t, rec)["code"].(string); code != "cross_session" {
+		t.Fatalf("403 的 code 要是 cross_session，拿到 %q", code)
 	}
 }
 

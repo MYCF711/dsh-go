@@ -34,13 +34,29 @@ func TestResolveModelCapacity(t *testing.T) {
 			want:     ModelCapacity{ContextWindow: 32000, MaxOutput: 128000},
 		},
 		{
-			name:    "内置已知模型保持原容量",
+			// 网关 /v1/models 对 group/deepseek-v4.1-flash-1017 实测 context_length=1000000：
+			// 内置兜底必须是实测值，128000 会让界面把 1M 窗口画成快撑爆。
+			name:    "内置已知模型使用网关实测的1M窗口",
 			modelID: known,
-			want:    ModelCapacity{ContextWindow: 128000, MaxOutput: 0},
+			want:    ModelCapacity{ContextWindow: 1000000, MaxOutput: 0},
 		},
 		{
 			name:     "已知模型也尊重显式覆盖",
 			modelID:  known,
+			declared: ModelCapacity{ContextWindow: 32000, MaxOutput: 8000},
+			want:     ModelCapacity{ContextWindow: 32000, MaxOutput: 8000},
+		},
+		{
+			// 真实会话里持久化的模型 id（TUI2GO launcher / session-model.json）没有
+			// `group/` 前缀。它必须归一到内置已知模型：否则会落进"未声明自定义模型"
+			// 分支，每轮请求都被注入 max_tokens=128000。
+			name:    "无前缀别名归一到内置已知模型",
+			modelID: "deepseek-v4.1-flash-1017",
+			want:    ModelCapacity{ContextWindow: 1000000, MaxOutput: 0},
+		},
+		{
+			name:     "别名归一时也尊重显式覆盖",
+			modelID:  "deepseek-v4.1-flash-1017",
 			declared: ModelCapacity{ContextWindow: 32000, MaxOutput: 8000},
 			want:     ModelCapacity{ContextWindow: 32000, MaxOutput: 8000},
 		},
@@ -68,7 +84,7 @@ func TestResolveModelCapacityDoesNotLeakAcrossModels(t *testing.T) {
 	}{
 		{modelID: "custom/a", want: ModelCapacity{ContextWindow: 1000000, MaxOutput: 128000}},
 		{modelID: "custom/b", declared: ModelCapacity{ContextWindow: 32000, MaxOutput: 8000}, want: ModelCapacity{ContextWindow: 32000, MaxOutput: 8000}},
-		{modelID: known, want: ModelCapacity{ContextWindow: 128000, MaxOutput: 0}},
+		{modelID: known, want: ModelCapacity{ContextWindow: 1000000, MaxOutput: 0}},
 		{modelID: "custom/a", want: ModelCapacity{ContextWindow: 1000000, MaxOutput: 128000}},
 	}
 	for i, step := range sequence {

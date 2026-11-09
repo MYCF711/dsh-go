@@ -23,10 +23,13 @@
 package official
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"dshgo/internal/pluginmgr"
@@ -61,6 +64,7 @@ func New(manager *pluginmgr.Manager) transport.OfficialPluginManagerAPI {
 		// 读与写是同一份 compatibility.json：listVersionExemptions 是
 		// setVersionExemption 的读侧，不是另一份状态。
 		ListVersionExemptions: a.listVersionExemptions,
+		Registries:            a.registries,
 		ReadBundleDetail:      a.readBundleDetail,
 		WaitForInstall:        a.waitForInstall,
 		CancelInstall:         a.cancelInstall,
@@ -76,67 +80,127 @@ var docCandidates = []string{"README.md", "readme.md", "Readme.md", "README.mark
 
 func (a *adapter) inspect(p transport.OfficialInspectParams) (transport.OfficialPluginSpecInspection, error) {
 	spec := strings.TrimSpace(p.Spec)
-	if p.Registry != nil {
-		return transport.OfficialPluginSpecInspection{}, registryUnsupported()
-	}
 	kind := pluginmgr.SourceKind(spec)
-	if kind != "path" {
-		return transport.OfficialPluginSpecInspection{}, formUnsupported(kind)
+	switch kind {
+	case "path":
+		if _, err := os.Stat(spec); err != nil {
+			return transport.OfficialInspectionRefused("not-a-package", fmt.Sprintf("路径不存在或不可读: %v", err)), nil
+		}
+		manifest, err := pluginmgr.ValidateSource(spec)
+		if err != nil {
+			return transport.OfficialInspectionRefused("not-a-package", err.Error()), nil
+		}
+		return a.inspectManifest(manifest, "path")
+	case "registry", "tarball":
+		local, resolved, err := a.materializeRegistrySpec(spec, p.Registry)
+		if err != nil {
+			return registryInspectionRefused(spec, err), nil
+		}
+		manifest, err := pluginmgr.ValidateSource(local)
+		if err != nil {
+			return transport.OfficialInspectionRefused("not-a-package", err.Error()), nil
+		}
+		// registry 的精确版本必须与 packument 一致；不一致是协议失败，不能
+		// 把 tarball 内容当成另一个版本。
+		if kind == "registry" && resolved.Version != "" && manifest.Version != resolved.Version {
+			return transport.OfficialInspectionRefused("not-a-package",
+				fmt.Sprintf("tarball manifest 版本 %s 与 registry 解析版本 %s 不一致", manifest.Version, resolved.Version)), nil
+		}
+		return a.inspectManifest(manifest, kind)
+	default:
+		return transport.OfficialInspectionRefused("not-a-package",
+			fmt.Sprintf("%s 规格不是可安装的包（本仓支持 path/registry/tarball）", kind)), nil
 	}
-	if _, err := os.Stat(spec); err != nil {
-		return transport.OfficialInspectionRefused("not-a-package", fmt.Sprintf("路径不存在或不可读: %v", err)), nil
-	}
-	manifest, err := pluginmgr.ValidateSource(spec)
-	if err != nil {
-		// 校验理由来自真实的 manifest/路径/hash 检查，原样带给界面。
-		return transport.OfficialInspectionRefused("not-a-package", err.Error()), nil
-	}
+}
+
+func (a *adapter) inspectManifest(manifest pluginmgr.Manifest, sourceKind string) (transport.OfficialPluginSpecInspection, error) {
 	if _, installed, err := a.manager.Bundle(manifest.ID); err != nil {
 		return transport.OfficialPluginSpecInspection{}, hostError(err)
 	} else if installed {
 		return transport.OfficialInspectionRefused("already-installed",
 			fmt.Sprintf("%s 已经装过了", manifest.ID)), nil
 	}
-	// 本仓包没有 `dsh.bundle` patch rows，所以 bundle 如实报 false。
-	return transport.OfficialInspectionAccepted("path", manifest.ID, manifest.Version, false), nil
+	return transport.OfficialInspectionAccepted(sourceKind, manifest.ID, manifest.Version, false), nil
 }
 
 func (a *adapter) listVersions(p transport.OfficialListVersionsParams) (transport.OfficialVersionList, error) {
-	if p.Registry != nil {
-		return transport.OfficialVersionList{}, registryUnsupported()
-	}
 	state, ok, err := a.manager.Bundle(p.Name)
 	if err != nil {
 		return transport.OfficialVersionList{}, hostError(err)
 	}
 	if !ok {
-		// 没装就没有"已安装版本"可作基准；本仓也没有 registry 可问。
 		return transport.OfficialVersionsRefused("not-updatable",
-			fmt.Sprintf("%s 不是已安装的 profile 依赖（本仓的包只从本地目录安装）", p.Name)), nil
+			fmt.Sprintf("%s 不是已安装的 profile 依赖", p.Name)), nil
 	}
-	if pluginmgr.SourceIsRegistrySpec(state.Source) {
-		// 数据模型上不该出现；真出现了也不能假装查了 registry。
-		return transport.OfficialVersionList{}, registryUnsupported()
+	// 从 registry 装的包，Manager 落盘的是本地缓存目录；和 updateBundle 一样
+	// 用缓存根识别，继续问同一个 registry。
+	fromRegistry := pluginmgr.SourceIsRegistrySpec(state.Source) ||
+		strings.HasPrefix(filepath.Clean(state.Source), filepath.Clean(pluginmgr.CacheDir())+string(os.PathSeparator))
+	if p.Registry == nil && !fromRegistry {
+		return transport.OfficialVersionsRefused("not-updatable",
+			fmt.Sprintf("%s@%s 来自%s，不是 registry 依赖", state.Name, state.Version,
+				pluginmgr.DescribeSource(state.Source))), nil
 	}
-	return transport.OfficialVersionsRefused("not-updatable",
-		fmt.Sprintf("%s@%s 来自%s，不是 registry 依赖；本仓没有 registry 客户端，也没有本地发布版本源",
-			state.Name, state.Version, pluginmgr.DescribeSource(state.Source))), nil
+	client := pluginmgr.RegistryFromEnv(p.Registry)
+	if client == nil {
+		return transport.OfficialVersionList{}, transport.OfficialRegistryUnavailable(
+			"pluginManager.listVersions 没有配置 registry：设置 DSHD_PLUGIN_REGISTRY 或 options.registry")
+	}
+	published, err := client.Versions(context.Background(), p.Name)
+	if err != nil {
+		return transport.OfficialVersionList{}, transport.OfficialRegistryUnavailable(
+			"pluginManager.listVersions 读取 registry 失败：%v", err)
+	}
+	registry, _ := json.Marshal(client.Base())
+	versions := make([]transport.OfficialPublishedVersion, 0, len(published))
+	for _, v := range published {
+		tags := v.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		versions = append(versions, transport.OfficialPublishedVersion{
+			Version: v.Version, PublishedAt: v.PublishedAt, Tags: tags,
+			Prerelease: v.Prerelease, Deprecated: v.Deprecated,
+		})
+	}
+	return transport.OfficialVersionList{
+		Status: "ok", Installed: state.Version, Registry: registry,
+		Attempts: []transport.OfficialRegistryAttempt{{Registry: registry}},
+		Versions: versions,
+	}, nil
+}
+
+func (a *adapter) registries() (transport.OfficialRegistries, error) {
+	client := pluginmgr.RegistryFromEnv(nil)
+	if client == nil {
+		return transport.OfficialRegistries{}, transport.OfficialRegistryUnavailable(
+			"pluginManager.registries 没有配置 registry：设置 DSHD_PLUGIN_REGISTRY")
+	}
+	raw, _ := json.Marshal(client.Base())
+	return transport.OfficialRegistries{
+		Registry: raw, FallbackRegistries: []string{}, Resolved: raw,
+	}, nil
 }
 
 func (a *adapter) installBundle(p transport.OfficialInstallBundleParams) (transport.OfficialChangeResult, error) {
-	if p.Registry != nil {
-		return transport.OfficialChangeResult{}, registryUnsupported()
-	}
-	if len(p.ApprovedBuilds) > 0 {
-		return transport.OfficialChangeResult{}, fmt.Errorf(
-			"%w: approvedBuilds 需要 pnpm 的构建脚本审批；本仓不跑 pnpm，也没有 allowBuilds 设置可写",
-			transport.ErrOfficialNotImplemented)
-	}
 	spec := strings.TrimSpace(p.Spec)
-	if kind := pluginmgr.SourceKind(spec); kind != "path" {
+	kind := pluginmgr.SourceKind(spec)
+	local := spec
+	var approvedWarning string
+	if len(p.ApprovedBuilds) > 0 {
+		approvedWarning = "approvedBuilds 已收到，但本仓插件包没有 package.json 构建脚本；未执行任何构建"
+	}
+	switch kind {
+	case "path":
+	case "registry", "tarball":
+		downloaded, _, err := a.materializeRegistrySpec(spec, p.Registry)
+		if err != nil {
+			return registryChangeRefused(spec, "not-a-package", err), nil
+		}
+		local = downloaded
+	default:
 		return transport.OfficialChangeResult{}, formUnsupported(kind)
 	}
-	// 官方默认 enabled=true（`options?.enabled !== false`）。
 	enable := true
 	if p.Enabled != nil {
 		enable = *p.Enabled
@@ -145,7 +209,7 @@ func (a *adapter) installBundle(p transport.OfficialInstallBundleParams) (transp
 	if p.RequestID != nil {
 		requests.RequestID = *p.RequestID
 	}
-	job, err := a.manager.StartInstall(spec, requests)
+	job, err := a.manager.StartInstall(local, requests)
 	if err != nil {
 		return transport.OfficialChangeResult{}, hostError(err)
 	}
@@ -158,13 +222,13 @@ func (a *adapter) installBundle(p transport.OfficialInstallBundleParams) (transp
 			result.Warnings = append(result.Warnings, warning)
 		}
 	}
+	if approvedWarning != "" {
+		result.Warnings = append(result.Warnings, approvedWarning)
+	}
 	return result, nil
 }
 
 func (a *adapter) updateBundle(p transport.OfficialUpdateBundleParams) (transport.OfficialUpdateResult, error) {
-	if p.Registry != nil {
-		return transport.OfficialUpdateResult{}, registryUnsupported()
-	}
 	state, ok, err := a.manager.Bundle(p.Name)
 	if err != nil {
 		return transport.OfficialUpdateResult{}, hostError(err)
@@ -174,9 +238,44 @@ func (a *adapter) updateBundle(p transport.OfficialUpdateBundleParams) (transpor
 			fmt.Sprintf("%s 不是已安装的 profile 依赖", p.Name)), nil
 	}
 	from := state.Version
+	sourceKind := pluginmgr.SourceKind(state.Source)
+	// 从 registry/tarball 装的包，Manager 落盘的是本地缓存目录（真实来源
+	// 已下载）；用缓存根识别它，才能继续从同一 registry 解析新版本。
+	fromRegistryCache := strings.HasPrefix(filepath.Clean(state.Source), filepath.Clean(pluginmgr.CacheDir())+string(os.PathSeparator))
+	if sourceKind == "registry" || sourceKind == "tarball" || p.Registry != nil || fromRegistryCache {
+		target := strings.TrimSpace(p.Version)
+		spec := p.Name
+		if target != "" && target != "latest" {
+			spec = p.Name + "@" + target
+		} else {
+			spec = p.Name + "@latest"
+		}
+		local, resolved, err := a.materializeRegistrySpec(spec, p.Registry)
+		if err != nil {
+			return updateRefused(from, p.Name, p.Version, "not-updatable", err.Error()), nil
+		}
+		if target != "" && target != "latest" && resolved.Version != target {
+			return updateRefused(from, p.Name, p.Version, "invalid-spec",
+				fmt.Sprintf("registry 解析到 %s，但请求的是 %s", resolved.Version, target)), nil
+		}
+		info, err := a.manager.Update(p.Name, local)
+		if err != nil {
+			var apiErr *pluginmgr.Error
+			if errors.As(err, &apiErr) {
+				return updateRefused(from, p.Name, resolved.Version, mapChangeCode(apiErr.Code), apiErr.Message), nil
+			}
+			return transport.OfficialUpdateResult{}, hostError(err)
+		}
+		result := transport.OfficialAppliedChange("install", p.Name, info.Enabled)
+		result.Bundle = info.ID
+		result.Version = info.Version
+		if warning := a.exemptionWarningFor(info.ID + "@" + info.Version); warning != "" {
+			result.Warnings = append(result.Warnings, warning)
+		}
+		return transport.OfficialUpdateResult{From: from, To: info.Version, Step: "install", Result: result}, nil
+	}
 	compare, err := pluginmgr.CompareVersions(p.Version, from)
 	if err != nil {
-		// 版本串本身不是 SemVer：官方的 check 阶段就拒，什么都不改。
 		return updateRefused(from, p.Name, p.Version, "invalid-spec",
 			fmt.Sprintf("%q 不是 SemVer 版本", p.Version)), nil
 	}
@@ -185,10 +284,8 @@ func (a *adapter) updateBundle(p transport.OfficialUpdateBundleParams) (transpor
 			fmt.Sprintf("%s 不新于已安装的 %s", p.Version, from)), nil
 	}
 	if _, ok := state.VersionSources[p.Version]; !ok {
-		// 目标版本不在本机 store：下载它需要 registry/pnpm，本仓没有。
-		return transport.OfficialUpdateResult{}, fmt.Errorf(
-			"%w: 本机 store 里没有 %s@%s，下载它需要 registry/pnpm 客户端",
-			transport.ErrOfficialNotImplemented, p.Name, p.Version)
+		return updateRefused(from, p.Name, p.Version, "not-updatable",
+			fmt.Sprintf("本机 store 里没有 %s@%s；本地目录包请用 plugin.update 指定目录", p.Name, p.Version)), nil
 	}
 	requests := pluginmgr.InstallOptions{}
 	if p.RequestID != nil {
@@ -203,12 +300,7 @@ func (a *adapter) updateBundle(p transport.OfficialUpdateBundleParams) (transpor
 	if warning := a.exemptionWarningFor(p.Name + "@" + p.Version); warning != "" {
 		result.Warnings = append(result.Warnings, warning)
 	}
-	return transport.OfficialUpdateResult{
-		From:   from,
-		To:     p.Version,
-		Step:   "install",
-		Result: result,
-	}, nil
+	return transport.OfficialUpdateResult{From: from, To: p.Version, Step: "install", Result: result}, nil
 }
 
 func updateRefused(from, name, version, code, diagnostic string) transport.OfficialUpdateResult {

@@ -29,6 +29,15 @@ type Manager struct {
 	// compatMu 守卫 compatibility.json（版本豁免）的读-改-写。它与 mu 分开：
 	// 安装闸门在持 mu 时读豁免，而 setVersionExemption 只碰文件，不需要等安装。
 	compatMu sync.Mutex
+
+	// runtime 是**可选**的运行时装载器（见 loader.go）。它由 NewLoader 挂上，
+	// 之后每次状态变更都会同步装载集合：enable 先装载再提交、disable/uninstall
+	// 提交后卸载。没有挂载器时（纯存储用法）行为与原来完全一致。
+	//
+	// 为什么把它做成管理器的钩子而不是让调用方自己记得调：状态与运行时一旦能
+	// 各走各的，就会出现"enabled=true 但没跑起来"和"disabled 但还能调"两种
+	// 静默不一致，而这两种都只能靠人记得去对账。
+	runtime *Loader
 }
 
 // Open loads only the explicitly supplied root and reconciles interrupted work.

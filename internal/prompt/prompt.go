@@ -39,20 +39,32 @@ type Provider interface {
 	Build(Context) string
 }
 
-// defaultMaxWorkspaceBytes 是实测选出来的：带上 14 KB 的 AGENTS.md 会让一次
-// 很小的提问从 1,909 input token 涨到 6,248（+4,339）。8000 字节 ≈ 2.5k token，
-// 是「规则基本还在、每轮不心疼」的折中；要全量传用 MaxWorkspaceBytes 或 CLI 参数。
-const defaultMaxWorkspaceBytes = 8000
-const defaultMaxGlobalBytes = 8000
+// defaultMaxWorkspaceBytes 与 defaultMaxGlobalBytes 是官方 dsh-base 给**每条指令链**
+// 的预算。官方原件（asar 只读解出，@deepseek-ai/dsh-agent-instructions/README.md）：
+//
+//	"dsh-base already includes it with a 65,536-byte budget for each instruction
+//	 chain ... a message that holds both chains is at most twice maxBytes."
+//
+// 以前这里写的是 8000（一次 14 KB AGENTS.md 的旧实测折中），比官方小 8 倍：
+// 40 KiB 的 home/AGENTS.md 会被截掉 80%，模型看不到后半本手册。两条链各自
+// 65,536、互不争用；要更小/更大用 --workspace-bytes（0=不传）。
+const defaultMaxWorkspaceBytes = 65536
+const defaultMaxGlobalBytes = 65536
 
 // Assemble 按顺序拼接所有非空段。
+//
+// 预算三值约定（与 --workspace-bytes 的帮助文案一致）：
+//   - 0（零值/未设置）= 用官方默认预算（每条链 65,536 字节）；
+//   - 负值 = 这条链**不注入**（`--workspace-bytes=0` 的「不传」由入口映射成 -1）；
+//   - 正数 = 这条链的正文字节上限。
 func Assemble(ctx Context, providers ...Provider) string {
-	if ctx.MaxGlobalBytes <= 0 {
+	if ctx.MaxGlobalBytes == 0 {
 		ctx.MaxGlobalBytes = defaultMaxGlobalBytes
 	}
-	if ctx.MaxWorkspaceBytes <= 0 {
+	if ctx.MaxWorkspaceBytes == 0 {
 		ctx.MaxWorkspaceBytes = defaultMaxWorkspaceBytes
 	}
+
 	var parts []string
 	for _, p := range providers {
 		s := strings.TrimSpace(p.Build(ctx))
@@ -164,7 +176,11 @@ func (WorkspaceRules) Build(c Context) string {
 }
 
 // rulesFromFile 的 limit 只限制文件正文，不包含段标题和截断说明。
+// limit 为负 = 这条指令链关闭（`--workspace-bytes=0` 的「不传」语义）。
 func rulesFromFile(title, path string, limit int) string {
+	if limit < 0 {
+		return ""
+	}
 	b, err := os.ReadFile(path)
 	if err != nil || len(b) == 0 {
 		return ""

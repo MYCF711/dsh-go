@@ -20,7 +20,7 @@ import (
 // 连上了但列表是空的，是上游没挂模型——两件事的下一步完全不同。
 func cmdModels(argv []string) error {
 	fs := flag.NewFlagSet("models", flag.ContinueOnError)
-	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
+	base := fs.String("base", envOr("DSHD_LLM_BASE", defaultLLMBase), "OpenAI 兼容端点")
 	timeout := fs.Duration("timeout", 15*time.Second, "等多久算超时")
 	if err := fs.Parse(argv); err != nil {
 		return err

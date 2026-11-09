@@ -30,12 +30,23 @@ package main
 //
 //  1. 只有"首轮已正常收口 + 当前没有任何标题"才生成；用户显式标题永远优先
 //     （写前在会话写锁内**重读**，用户标题在场就放弃）；
-//  2. 失败/超时/空标题一律**不写**、不重试、不阻塞主 turn（Kick 是后台 goroutine，
+//  2. 失败/超时/空标题一律**不写标题**、不重试、不阻塞主 turn（Kick 是后台 goroutine，
 //     本函数的 Run 只被测试与它同步调用）；
 //  3. 标题调用不写任何 user/assistant/turn 事件，因此不进模型历史、不进 token 计量；
-//     v4 只多一条 `session/title`。
+//     v4 只多两条：`session/title-llm-request`（这次请求的完整审计，流式前落盘）
+//     与 `session/title`（标题本身）。
+//
+// # 与官方的逐字对齐点（HS-03 收口的五项 KNOWN-DELTA）
+//
+//   - `messageSeqs` 记录来源消息的真实 seq（官方 first-prompt provider `[first.seq]`）；
+//   - `source` 用官方 provider 闭集 `{kind:"provider",provider,model}`（`auto` 不在闭集里）；
+//     读索引 `session-title.json` 仍是本宿主的 `user|auto` 契约，两侧各司其职；
+//   - 标题调用发官方默认 effort = 模型声明顺序里的第一档（`efforts[0].id`）；
+//   - 流式前先落 `session/title-llm-request`，它记录的就是真实发出的那次请求；
+//   - 输入超过 `maxInputBytes` **整次拒绝**，绝不截断（截断会让审计帧与真实请求不一致）。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -70,6 +81,18 @@ const (
 	autoTitleTargetWords     = 5
 	autoTitleTargetCJK       = 10
 	autoTitleTimeout         = 20 * time.Second
+
+	// autoTitleProviderID 是官方 first-prompt provider 的注册 id（包里的 `name`）。
+	// 它同时是 `session/title.source.provider`（谁产出了这个标题）与
+	// `session/title-llm-request.titleProvider`（这次请求是哪个 provider 发的）。
+	autoTitleProviderID = "session-title-first-prompt-llm"
+	// autoTitleMessageSource 是官方给标题请求那条 user 消息打的 source.kind
+	// （`createUserMessage({content, source:{kind:"dsh-session-title-llm"}})`）。
+	autoTitleMessageSource = "dsh-session-title-llm"
+	// autoTitleIndexSource 是本宿主 `session-title.json` 读索引里"自动标题"的取值。
+	// 它是 Go 侧契约（`internal/session/metadata.go` 只认 user|auto），**不是** v4 事件的
+	// `source.kind`：v4 走官方闭集 provider/fallback/user。
+	autoTitleIndexSource = "auto"
 )
 
 // autoTitleSysPrompt 逐字来自官方 first-prompt provider 的 systemPrompt()。
@@ -85,8 +108,8 @@ func autoTitleSysPrompt() string {
 
 // autoTitleMessage 是官方 `collectSessionTitleMessages` 的元素形状：`{seq, text}`。
 //
-// seq 留着是**官方帧输入的一部分**（用户文本进 JSON，不拼进结构分隔符）；
-// 写进 `session/title` 的 messageSeqs 按本任务契约固定为 `[]`，见 commit()。
+// seq 是**官方帧输入的一部分**（用户文本进 JSON，不拼进结构分隔符），也是写进
+// `session/title` 的 `messageSeqs` 的唯一来源（官方 first-prompt：`[first.seq]`）。
 type autoTitleMessage struct {
 	Seq  int64  `json:"seq"`
 	Text string `json:"text"`
@@ -100,6 +123,18 @@ func autoTitleInput(messages []autoTitleMessage) string {
 		raw = []byte("[]")
 	}
 	return "Generate the session title from this JSON array of human messages:\n" + string(raw)
+}
+
+// checkAutoTitleInput 是官方 `executeSessionTitleLlm()` 的输入上界检查：
+// `Buffer.byteLength(input,"utf8") > maxInputBytes` 就抛错，**整次拒绝**。
+//
+// 这里不做"截断到 4096 再发"：截断会让审计帧记录的不是真实请求，也会让一段
+// 粘贴的长消息得到基于半截文本的标题。宁可这一格没有标题，并留下可读的报错。
+func checkAutoTitleInput(input string) error {
+	if size := len(input); size > autoTitleMaxInputBytes {
+		return fmt.Errorf("session-title-llm: input is %d bytes, exceeding maxInputBytes %d", size, autoTitleMaxInputBytes)
+	}
+	return nil
 }
 
 // ---------- 官方 normalize 的移植 ----------
@@ -289,6 +324,184 @@ func autoTitlePrompt(log *v4.Log) (autoTitleMessage, bool) {
 	return first, true
 }
 
+// ---------- 官方 route / 默认 effort / 审计帧 ----------
+
+// autoTitleRouteData 是官方 `route` 与 `source.model` 共用的形状：`{provider, model}`。
+type autoTitleRouteData struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+// autoTitleEffortLevel 是模型目录里一个 reasoning level 的 (key, wire) 对。
+type autoTitleEffortLevel struct {
+	Level string
+	Wire  string
+}
+
+// autoTitleCallRoute 是这一格标题调用的真实路由，以及官方 `selectReasoningEffort` 选中的 effort。
+type autoTitleCallRoute struct {
+	// Provider 是本宿主的 provider 身份：目录 entry 的 `owned_by`。
+	// 官方有 provider-adapter id；本宿主没有这一层，`owned_by` 是唯一可核对的真值。
+	Provider string
+	Model    string
+	// Effort 是官方 `model.reasoning?.efforts[0]?.id`（目录声明顺序里的第一档）；
+	// Wire 是它的线上取值（`off:null` 表示不发 reasoning_effort，Wire 为空）。
+	Effort string
+	Wire   string
+}
+
+// sourceModel 是官方 `session/title.source.model`；目录里没有该模型时返回 nil
+// （官方该字段可选），避免写出 `{"provider":"","model":"…"}` 这种半真半假的形状。
+func (r autoTitleCallRoute) sourceModel() *autoTitleRouteData {
+	if r.Provider == "" {
+		return nil
+	}
+	return &autoTitleRouteData{Provider: r.Provider, Model: r.Model}
+}
+
+// resolveAutoTitleCallRoute 读一次模型目录，取 (owned_by, 声明顺序里的第一档 reasoning level)。
+//
+// 为什么是"第一档"：官方 `selectReasoningEffort = (model) => model.reasoning?.efforts[0]?.id`
+// —— 标题调用固定用该模型支持的最小一档。本宿主的 `reasoningEfforts` 对象保留网关的
+// 声明顺序（env catalog 就是按 `supported_reasoning_levels` 的顺序写的），所以第一个
+// key 就是官方 `efforts[0]`。目录里没有这个模型（legacy 路由）时返回空 provider 且不声明 effort。
+func resolveAutoTitleCallRoute(home, modelID string, catalog *llm.ModelCatalogStore) (autoTitleCallRoute, error) {
+	route := autoTitleCallRoute{Model: modelID}
+	if catalog == nil {
+		catalog = llm.OpenModelCatalog(home)
+	}
+	view, err := catalog.List()
+	if err != nil {
+		return route, fmt.Errorf("session-title: 读模型目录: %w", err)
+	}
+	for _, raw := range view.Models {
+		var model struct {
+			ID               string          `json:"id"`
+			OwnedBy          string          `json:"owned_by"`
+			ReasoningEfforts json.RawMessage `json:"reasoningEfforts"`
+		}
+		if err := json.Unmarshal(raw, &model); err != nil {
+			return route, fmt.Errorf("session-title: 解析模型目录行: %w", err)
+		}
+		if model.ID != modelID {
+			continue
+		}
+		route.Provider = model.OwnedBy
+		levels, err := autoTitleEffortLevels(model.ReasoningEfforts)
+		if err != nil {
+			return route, fmt.Errorf("session-title: 模型 %q 的 reasoningEfforts: %w", modelID, err)
+		}
+		if len(levels) > 0 {
+			route.Effort, route.Wire = levels[0].Level, levels[0].Wire
+		}
+		return route, nil
+	}
+	return route, nil
+}
+
+// autoTitleEffortLevels 按**声明顺序**解析 `reasoningEfforts`。
+//
+// 不能用 map[string]…：Go 这样解 JSON 会丢顺序，而"最小一档"正是靠顺序定义的。
+// 形状与 `internal/llm` 的校验一致：`false`/缺失 = 不支持 reasoning；`off:null` 合法；
+// 其余 level 的 wire 必须是非空 string。
+func autoTitleEffortLevels(raw json.RawMessage) ([]autoTitleEffortLevel, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("false")) || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("不是合法 JSON: %w", err)
+	}
+	if delim, ok := token.(json.Delim); !ok || delim != '{' {
+		return nil, errors.New("不是 object")
+	}
+	var levels []autoTitleEffortLevel
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		level, ok := keyToken.(string)
+		if !ok || level == "" {
+			return nil, errors.New("含空 level")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			if level != "off" {
+				return nil, fmt.Errorf("level %q 不是 off 却是 null wire", level)
+			}
+			levels = append(levels, autoTitleEffortLevel{Level: level})
+			continue
+		}
+		var wire string
+		if err := json.Unmarshal(value, &wire); err != nil || wire == "" {
+			return nil, fmt.Errorf("level %q 的 wire 不是非空 string", level)
+		}
+		levels = append(levels, autoTitleEffortLevel{Level: level, Wire: wire})
+	}
+	return levels, nil
+}
+
+// autoTitleTextBlock 是官方 `{type:"text",text}` 的内容块。
+type autoTitleTextBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// autoTitleRequestMessage 是官方 `createUserMessage()` 的消息形状：
+// content → source → role → id（官方 createMessage 的字段顺序，id 是新生成的稳定身份）。
+type autoTitleRequestMessage struct {
+	Content []autoTitleTextBlock `json:"content"`
+	Source  struct {
+		Kind string `json:"kind"`
+	} `json:"source"`
+	Role string `json:"role"`
+	ID   string `json:"id"`
+}
+
+// autoTitleLLMRequest 是官方 `session/title-llm-request` 的载荷，字段顺序同官方 append。
+//
+// 它是**审计帧**：记录这次标题调用真实发出去的 (route,system,messages,maxTokens,reasoningEffort)，
+// 可据此逐字重建那次请求；它本身不产生任何 message、不进模型历史。
+type autoTitleLLMRequest struct {
+	TitleProvider   string                    `json:"titleProvider"`
+	MessageSeqs     []int64                   `json:"messageSeqs"`
+	Route           autoTitleRouteData        `json:"route"`
+	System          string                    `json:"system"`
+	Messages        []autoTitleRequestMessage `json:"messages"`
+	MaxTokens       int                       `json:"maxTokens"`
+	ReasoningEffort string                    `json:"reasoningEffort,omitempty"`
+}
+
+// newAutoTitleLLMRequest 把这次标题请求整理成官方审计帧载荷。
+//
+// 传进来的 input/system 必须就是**马上要发出去**的那份；只要它们一致，
+// "审计帧 == 真实请求" 就是可逐字节核对的。
+func newAutoTitleLLMRequest(system, input string, messageSeqs []int64, route autoTitleCallRoute) autoTitleLLMRequest {
+	message := autoTitleRequestMessage{
+		Content: []autoTitleTextBlock{{Type: "text", Text: input}},
+		Role:    "user",
+		ID:      session.NewID(),
+	}
+	message.Source.Kind = autoTitleMessageSource
+	segs := make([]int64, len(messageSeqs))
+	copy(segs, messageSeqs)
+	return autoTitleLLMRequest{
+		TitleProvider:   autoTitleProviderID,
+		MessageSeqs:     segs,
+		Route:           autoTitleRouteData{Provider: route.Provider, Model: route.Model},
+		System:          system,
+		Messages:        []autoTitleRequestMessage{message},
+		MaxTokens:       autoTitleMaxOutputTokens,
+		ReasoningEffort: route.Effort,
+	}
+}
+
 // ---------- 独立模型调用 ----------
 
 // autoTitleCall 是一次性的标题请求。没有任何工具、没有主 turn 的身份、
@@ -297,14 +510,21 @@ type autoTitleCall struct {
 	model      string
 	base       string
 	credential string
+	api        string
 	input      string
+	// reasoning 是官方默认 effort 的**线上取值**（catalog level → wire）；
+	// 空串表示该模型没有声明 reasoning，或者最小一档就是 off。
+	reasoning string
 }
 
 func (c autoTitleCall) generate(ctx context.Context) (string, error) {
+	if strings.TrimSpace(c.model) == "" {
+		return "", errors.New("session-title: 没有可用的标题模型（模型 id 为空）")
+	}
 	if strings.TrimSpace(c.input) == "" {
 		return "", errors.New("session-title: 标题输入为空")
 	}
-	chat := llm.New(c.base, c.credential)
+	chat := llm.NewWithAPI(c.base, c.credential, c.api)
 	chat.UserAgent = "dshd/" + version + " session-title"
 	resp, err := chat.Stream(ctx, llm.Request{
 		Model: c.model,
@@ -314,6 +534,8 @@ func (c autoTitleCall) generate(ctx context.Context) (string, error) {
 		},
 		// 独立上限：不继承主对话的 max tokens（官方同款约束）。
 		MaxTokens: autoTitleMaxOutputTokens,
+		// 官方 `selectReasoningEffort` 的结果：最小一档，不是本轮主对话的 effort。
+		Reasoning: c.reasoning,
 	}, nil)
 	if err != nil {
 		return "", redactServeProviderError(err, c.credential)
@@ -414,16 +636,30 @@ type autoTitleService struct {
 	journals *transport.Journals
 	pub      func(topic string, f transport.ServerFrame)
 	timeout  time.Duration
+	// catalog 是生产 serve 的同一目录视图（runner.catalog）。nil 时按 home 现开一份：
+	// 它只用于取"官方默认 effort"与 provider 身份，不改变任何写入路径。
+	catalog *llm.ModelCatalogStore
 
 	mu     sync.Mutex
 	busy   map[string]bool
 	closed map[string]bool // 已判定"这一格不会再有标题"（有界，见 markDone）
+	// stopping 是 stop() 之后的闸门：Kick 不再启动新 goroutine。
+	stopping bool
+	// ctx/cancel 是后台标题调用的父上下文：stop() 取消它，让 in-flight 的
+	// 标题调用在写审计/标题/索引之前就看到 ctx.Err 并退出。
+	ctx    context.Context
+	cancel context.CancelFunc
+	// wg 是后台标题 goroutine 的 quiescence 计数：测试清理与优雅停止必须
+	// 能确定地等到它们退出，而不是靠 sleep 猜。
+	wg sync.WaitGroup
 }
 
 func newAutoTitleService(home string, journals *transport.Journals, pub func(string, transport.ServerFrame)) *autoTitleService {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &autoTitleService{
 		home: home, journals: journals, pub: pub, timeout: autoTitleTimeout,
 		busy: map[string]bool{}, closed: map[string]bool{},
+		ctx: ctx, cancel: cancel,
 	}
 }
 
@@ -462,9 +698,38 @@ func (s *autoTitleService) end(sessionID string) {
 	delete(s.busy, sessionID)
 }
 
+// wait 等待所有已启动的后台标题 goroutine 退出。
+//
+// 测试在 TempDir 清理前、优雅停在退出前都必须走到这里：标题 goroutine 会写
+// 审计帧/标题/索引，**不能**让清理与它并发（I04 三次里两次的 TempDir 竞态）。
+func (s *autoTitleService) wait() {
+	if s != nil {
+		s.wg.Wait()
+	}
+}
+
+// stop 取消并等待所有后台标题调用，之后不再接受新的 Kick。
+//
+// 取消语义：`Run` 在写审计之前与写标题/index 之前都检查 `ctx.Err()`，所以
+// stop 之后不会再有新的审计/title/index 落盘；已在写盘中的调用由 wg.Wait
+// 保证在 stop 返回前收尾。主 turn 的非阻塞语义不变（Kick 仍是后台 goroutine，
+// stop 只由测试/优雅停止显式调用）。
+func (s *autoTitleService) stop() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.stopping = true
+	s.mu.Unlock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.wg.Wait()
+}
+
 // Kick 起一个后台 goroutine：主 turn 已经把 turn/done 推出去了，标题调用
 // 绝不能挡在它前面。失败只留一行可读的宿主 stderr（凭据已脱敏），不重试。
-func (s *autoTitleService) Kick(sessionID, model, base, credential string) {
+func (s *autoTitleService) Kick(sessionID, model, base, credential string, api ...string) {
 	if s == nil || s.home == "" || sessionID == "" {
 		return
 	}
@@ -472,10 +737,19 @@ func (s *autoTitleService) Kick(sessionID, model, base, credential string) {
 	if timeout <= 0 {
 		timeout = autoTitleTimeout
 	}
+	s.mu.Lock()
+	if s.stopping || s.ctx == nil {
+		s.mu.Unlock()
+		return
+	}
+	parent := s.ctx
+	s.wg.Add(1)
+	s.mu.Unlock()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer s.wg.Done()
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
-		if _, err := s.Run(ctx, sessionID, model, base, credential); err != nil {
+		if _, err := s.Run(ctx, sessionID, model, base, credential, api...); err != nil {
 			fmt.Fprintf(os.Stderr, "自动标题未写入（会话 %s）：%v\n", sessionID, err)
 		}
 	}()
@@ -484,7 +758,17 @@ func (s *autoTitleService) Kick(sessionID, model, base, credential string) {
 // Run 是同步入口（测试与 Kick 共用）。返回 (标题, nil) 表示写成功；
 // ("", nil) 表示"这一格按规则不生成"（已有标题 / 不是首轮收口 / 并发中）；
 // ("", err) 表示真实失败，调用方只记日志、不重试。
-func (s *autoTitleService) Run(ctx context.Context, sessionID, model, base, credential string) (string, error) {
+func (s *autoTitleService) Run(ctx context.Context, sessionID, model, base, credential string, api ...string) (string, error) {
+	apiValue := ""
+	if len(api) > 0 {
+		apiValue = api[0]
+	}
+	// 已取消（stop/调用方取消）就什么都不写：连审计帧都不落。
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
 	if s == nil || s.home == "" {
 		return "", errors.New("session-title: 服务未接线")
 	}
@@ -526,14 +810,40 @@ func (s *autoTitleService) Run(ctx context.Context, sessionID, model, base, cred
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	// 输入上界：超了按码点截断，而不是整次放弃——官方在超限时直接拒绝，
-	// 那会让"首条消息是一大段粘贴"的会话永远没有标题。
-	input := autoTitleTruncateUTF8(autoTitleInput([]autoTitleMessage{first}), autoTitleMaxInputBytes)
-	title, err := autoTitleCall{model: model, base: base, credential: credential, input: input}.generate(ctx)
+	// 没有模型 id 就没有可发的标题请求：明确降级，不伪装成功、不写任何帧。
+	if strings.TrimSpace(model) == "" {
+		return "", errors.New("session-title: 没有可用的标题模型（模型 id 为空）")
+	}
+	// ⑤ 输入上界：超了整次拒绝（官方 `executeSessionTitleLlm` 同款），不截断。
+	input := autoTitleInput([]autoTitleMessage{first})
+	if err := checkAutoTitleInput(input); err != nil {
+		return "", err
+	}
+	// ③ 官方默认 effort：该模型声明顺序里的第一档（`selectReasoningEffort`）。
+	route, err := resolveAutoTitleCallRoute(s.home, model, s.catalog)
 	if err != nil {
 		return "", err
 	}
-	written, err := s.commit(sessionID, path, title)
+	// ④ 官方在流式前落审计帧：它记录的就是这次真实请求（system/input/maxTokens/route/effort）。
+	request := newAutoTitleLLMRequest(autoTitleSysPrompt(), input, []int64{first.Seq}, route)
+	if err := s.recordRequest(sessionID, path, request); err != nil {
+		return "", err
+	}
+	title, err := autoTitleCall{
+		model: model, base: base, credential: credential, api: apiValue,
+		input: input, reasoning: route.Wire,
+	}.generate(ctx)
+	if err != nil {
+		return "", err
+	}
+	// 模型调用期间被取消（stop/调用方）：审计帧已按官方顺序留下，但标题与
+	// index 一律不写——"取消后不再写 title/index"的边界就在这里。
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
+	written, err := s.commit(sessionID, path, title, first.Seq, route)
 	if err != nil {
 		return "", err
 	}
@@ -545,13 +855,58 @@ func (s *autoTitleService) Run(ctx context.Context, sessionID, model, base, cred
 	return title, nil
 }
 
+// recordRequest 在模型调用**之前**把这次标题请求写成 `session/title-llm-request`。
+//
+// 官方 `executeSessionTitleLlm()` 的顺序就是"输入/路由校验 → append 审计帧 → 流式"：
+// 于是即使模型调用随后失败，日志里也留下了"当时到底请求了什么"。这条事件不产生
+// message，也不进模型历史（v4 的派生投影只认 system/developer/user/assistant/tool）。
+//
+// 帧必须在 v4 里真正落盘之后才镜像到 journal：客户端看到的永远等于重启后读到的。
+func (s *autoTitleService) recordRequest(sessionID, sessionPath string, request autoTitleLLMRequest) error {
+	logw, err := session.OpenSessionAt(sessionPath)
+	if err != nil {
+		return fmt.Errorf("session-title: 打开会话 %s 的审计写口: %w", sessionID, err)
+	}
+	appendErr := logw.Append("session/title-llm-request", request)
+	closeErr := logw.Close()
+	if appendErr != nil {
+		return fmt.Errorf("session-title: 写 session/title-llm-request 失败: %w", appendErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("session-title: 落盘 session/title-llm-request 失败: %w", closeErr)
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("session-title: 序列化审计帧: %w", err)
+	}
+	if s.journals != nil {
+		emitFrameAt(s.journals, s.pub, sessionID, "session/title-llm-request", raw, time.Now().UnixMilli())
+	}
+	return nil
+}
+
+// autoTitleTitleSource 是官方 `SessionTitleSource` 闭集里的 provider 分支：
+// `{kind:"provider",provider,model?}`（fallback/user 由别的写者产出）。
+type autoTitleTitleSource struct {
+	Kind     string              `json:"kind"`
+	Provider string              `json:"provider"`
+	Model    *autoTitleRouteData `json:"model,omitempty"`
+}
+
+// autoTitleTitleEvent 是官方 `session/title` 的 provider 形状（字段顺序同官方 append）。
+type autoTitleTitleEvent struct {
+	Title       string               `json:"title"`
+	MessageSeqs []int64              `json:"messageSeqs"`
+	Source      autoTitleTitleSource `json:"source"`
+}
+
 // commit 在会话写锁内做"重读 → 判定 → intent → v4 → 索引 → 发布"。
 //
 // 为什么必须在写锁里重读：用户 `session.rename` 走的是同一把 `session.Log` 写锁
 // （`sessionMetadataService.mutate` 先 AppendSessionTitle 再提交 journal）。
 // 于是两种顺序都只有一种结局——用户标题先落盘，我重读时看到它就放弃；
 // 用户标题后到，它无条件追加并成为最新值（auto 永远不覆盖 user）。
-func (s *autoTitleService) commit(sessionID, sessionPath, title string) (written bool, retErr error) {
+func (s *autoTitleService) commit(sessionID, sessionPath, title string, sourceSeq int64, route autoTitleCallRoute) (written bool, retErr error) {
 	logw, err := session.OpenSessionAt(sessionPath)
 	if err != nil {
 		return false, fmt.Errorf("session-title: 打开会话 %s 的写入: %w", sessionID, err)
@@ -576,17 +931,37 @@ func (s *autoTitleService) commit(sessionID, sessionPath, title string) (written
 		return false, nil
 	}
 
-	data := map[string]any{
-		"title":       title,
-		"messageSeqs": []int64{},
-		"source":      map[string]any{"kind": "auto"},
+	// ① 来源消息的真实 seq（官方 first-prompt：`[first.seq]`）。
+	// ② 官方 provider 来源：`{kind:"provider",provider:<titleProvider>,model:{provider,model}}`。
+	//    官方闭集是 provider/fallback/user，`auto` 不在其中（旧版写它是 KNOWN-DELTA）。
+	event := autoTitleTitleEvent{
+		Title:       title,
+		MessageSeqs: []int64{sourceSeq},
+		Source: autoTitleTitleSource{
+			Kind:     "provider",
+			Provider: autoTitleProviderID,
+			Model:    route.sourceModel(),
+		},
 	}
-	raw, err := json.Marshal(data)
+	raw, err := json.Marshal(event)
 	if err != nil {
 		return false, fmt.Errorf("session-title: 序列化标题: %w", err)
 	}
 	seq := logw.Seq()
-	transaction := autoTitleTransaction{Version: 1, EventSeq: seq, Type: "session/title", Data: raw}
+	// intent 用的仍是**读索引形状**（source.kind=auto），不是 v4 事件的官方形状：
+	// `internal/session/metadata.go` 的 intent 恢复只接受 user|auto（本任务写作用域不含
+	// 该文件）。正常读路径只比对 title/source/eventSeq，两侧仍是同一份事实；差别只在
+	// "v4 已写、索引未写"的崩溃窗口少一次自动恢复 —— 已在 WIRING.md 登记给 Lead。
+	intent := map[string]any{
+		"title":       title,
+		"messageSeqs": []int64{sourceSeq},
+		"source":      map[string]any{"kind": autoTitleIndexSource},
+	}
+	intentRaw, err := json.Marshal(intent)
+	if err != nil {
+		return false, fmt.Errorf("session-title: 序列化标题 intent: %w", err)
+	}
+	transaction := autoTitleTransaction{Version: 1, EventSeq: seq, Type: "session/title", Data: intentRaw}
 	transactionPath := autoTitleTransactionPath(sessionPath)
 	if err := writeAutoTitleIndex(transactionPath, transaction); err != nil {
 		return false, fmt.Errorf("session-title: 写 intent 失败（v4 尚未追加）: %w", err)
@@ -597,7 +972,7 @@ func (s *autoTitleService) commit(sessionID, sessionPath, title string) (written
 		return false, fmt.Errorf("session-title: 写 session/title 失败: %w", err)
 	}
 	indexSeq, indexTitle := seq, title
-	index := autoTitleIndex{Version: 1, EventSeq: &indexSeq, Title: &indexTitle, Source: "auto"}
+	index := autoTitleIndex{Version: 1, EventSeq: &indexSeq, Title: &indexTitle, Source: autoTitleIndexSource}
 	if err := writeAutoTitleIndex(autoTitleIndexPath(sessionPath), index); err != nil {
 		return false, fmt.Errorf("session-title: 提交标题索引失败（intent 已保留，可从 v4 恢复）: %w", err)
 	}
@@ -627,17 +1002,19 @@ func (r *modelOverrideLoopRunner) autoTitleService() *autoTitleService {
 	defer r.titlesMu.Unlock()
 	if r.titles == nil {
 		r.titles = newAutoTitleService(r.base.home, r.base.journals, r.base.pub)
+		// 生产路径带上 serve 的同一份目录视图（官方默认 effort / provider 身份都从这里取）。
+		r.titles.catalog = r.catalog
 	}
 	return r.titles
 }
 
 // autoTitleRoute 与这一轮同一条路由：会话走 provider 覆盖时，标题调用也必须
 // 打到同一个网关/凭据；否则会出现"回答在 A 网关、标题打到默认地址"的错位。
-func autoTitleRoute(provider llm.ModelProviderConfig, routed bool) (base, credential string) {
+func autoTitleRoute(provider llm.ModelProviderConfig, routed bool) (base, credential, api string) {
 	if routed {
-		return provider.BaseURL, provider.Credential()
+		return provider.BaseURL, provider.Credential(), provider.API
 	}
-	return envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), os.Getenv("DSHD_LLM_KEY")
+	return envOr("DSHD_LLM_BASE", defaultLLMBase), os.Getenv("DSHD_LLM_KEY"), os.Getenv("DSHD_LLM_API")
 }
 
 // kickAutoTitle 是 Run/RunContent 唯一的收尾钩子：只有**这一轮正常收工**才触发，
@@ -647,6 +1024,6 @@ func (r *modelOverrideLoopRunner) kickAutoTitle(sessionID, model string, provide
 	if service == nil {
 		return
 	}
-	base, credential := autoTitleRoute(provider, routed)
-	service.Kick(sessionID, model, base, credential)
+	base, credential, api := autoTitleRoute(provider, routed)
+	service.Kick(sessionID, model, base, credential, api)
 }

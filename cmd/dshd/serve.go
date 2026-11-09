@@ -17,10 +17,11 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 
+	"dshgo/internal/config"
 	"dshgo/internal/llm"
 	"dshgo/internal/modes"
+	"dshgo/internal/native"
 	"dshgo/internal/pluginmgr"
-	officialpluginmgr "dshgo/internal/pluginmgr/official"
 	"dshgo/internal/session"
 	"dshgo/internal/settingsform"
 	"dshgo/internal/transport"
@@ -132,11 +133,30 @@ func newEpochFunc() func() int64 {
 	return func() int64 { n++; return base + n }
 }
 
+// defaultTurnMaxSteps 是**每轮步数上限**的唯一默认值：run / serve / acp / schedule
+// 四个入口共用同一个数，不留第二套默认。
+//
+// # 为什么是 2000，不是 8/12
+//
+// 官方 40 个真实会话 3060 轮里，**1519 轮**的最大 step ≥ 9；全体 assistant step
+// 分位是 p50=13 / p90=90 / p95=174 / p99=938 / max=1318，>200 的样本 11507 个。
+// 也就是说"8 步"会砍掉一半以上的真实轮次——用户看到的是
+// `turn 用满了 8 步仍未收敛（模型一直在请求工具）`，而那一轮本来能跑完。
+//
+// 步数是**安全阀**，不是预算：正常情况下模型自己会在没有工具调用时收敛
+// （loop 里 `len(resp.ToolCalls)==0` 就结束并写 turn/end）。只有模型真的陷入
+// 循环时才需要这个上限把人从死循环里救出来，所以它必须显著高于真实分布的
+// p99，而不是刚好卡在分布中间。2000 仍远低于"无限"：一次真死循环会在 2000 步
+// 内被截断，且错误文案照旧是"用满仍未收敛"（不吞错、不改结局语义）。
+//
+// 能力下限规则（AGENTS.md）：只能比官方宿主更多、更强，不能更少、更弱。
+const defaultTurnMaxSteps = 2000
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	home := fs.String("home", envOr("DSHD_HOME", ""), "会话根目录（必填）")
 	// 留空 = 让 transport 用 127.0.0.1:0，端口由 OS 分配。
-	serveSteps := fs.Int("max-steps", 6, "每轮最多几步（子进程 run 的上限）")
+	serveSteps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步（子进程 run 的上限）")
 	// H12：会话内容列宽（逻辑像素）。0 = 不知道，界面自己算。
 	// 为什么不给默认值：官方是 min(748*0.702, 82%)，直接抄 748 会让别的窗口尺寸下偏宽/偏窄。
 	serveWidth := fs.Int("content-width", 0, "会话内容列宽（逻辑像素）；0 = 不知道，界面自己算")
@@ -153,6 +173,11 @@ func cmdServe(args []string) error {
 		"工具表形态：compact（默认）| full | merged | lazy（只常驻最常用的 30 个，其余先用 tool_load 取；装载集按会话从 v4 日志回放，默认关闭）")
 	// 模型必须能选：serve 起子进程跑真模型，用户换模型却只能去改环境变量，
 	// 那是"藏起来的开关"。默认值和 run 保持一致。
+	// 宿主旋钮：自动压缩阈值 / 工具输出外置阈值 / AGENTS.md 字节上限 /
+	// 显式容量 / 规则文件。以前 serve 侧连这些旗标都没有，于是生产链上它们
+	// 恒为子进程 run 的写死默认值（40000 / 4000 / 65536 / 0 / 0），
+	// **从 serve 侧根本调不了**。默认值与 run 同源（见 host_run_options.go）。
+	serveRunOpts := addHostRunFlags(fs)
 	serveModel := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"), "模型 id（透传给子进程）")
 	// 推理强度透传给子进程；空 = 不要。界面线要能看到 reasoning 就得从这里打开。
 	serveReasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
@@ -177,6 +202,12 @@ func cmdServe(args []string) error {
 	if err := checkHome(*home); err != nil {
 		return err
 	}
+	// 沙盒 extra read root 是 <home>/artifacts；它在全新 home 上还不存在，
+	// 而 sandbox 对不存在的 root fail-closed。serve 必须自举自己的 SpillDir，
+	// 否则第一条 prompt 就会因为"还没外置过文件"而失败。
+	if err := ensureSpillDir(*home); err != nil {
+		return err
+	}
 	// 看门狗要**尽早**起：启动阶段也算数。父进程在 serve 还没 ready 之前就死了，
 	// 否则会留下一个"起来得正好、但没人要"的服务。
 	watch := pw.start(os.Stderr)
@@ -199,6 +230,36 @@ func cmdServe(args []string) error {
 	pluginManager, err := pluginmgr.Open(filepath.Join(*home, "plugins"))
 	if err != nil {
 		return fmt.Errorf("插件管理器启动 reconcile 失败: %w", err)
+	}
+	// 给 serve 的管理器挂上运行时装载器：`plugin.enable` / `plugin.disable`
+	// 经 HTTP（GUI 的插件管理面）真的装载/卸载，而不是只改一个布尔位。
+	//
+	// 为什么 serve 也要挂（serve 自己并不执行工具）：
+	//   - 不挂的话，坏插件在 HTTP 上会返回"启用成功"，用户要到下一轮才发现
+	//     模型看不见它——这正是本任务要消灭的静默成功；
+	//   - 挂上之后 enable 先装载再提交（失败则状态不动、四字段错误带原因）。
+	//
+	// 为什么**不**在这里 Sync：serve 不跑工具，把 enabled 的 wasm 全编译一遍
+	// 只是为了占内存。真正把工具交到模型手上的那一侧是每轮的 `dshd run`
+	// 子进程，它在启动时 Sync（见 cmd/dshd/main.go 的 syncPlugins）。
+	pluginRT, err := newPluginRuntimeWithHMR(pluginManager, pluginHMRConfig(filepath.Join(*home, "plugins")))
+	if err != nil {
+		return fmt.Errorf("插件运行时挂载失败: %w", err)
+	}
+	defer func() { _ = pluginRT.Close(context.Background()) }()
+
+	// 插件热重载（HS-14）：**默认关闭**。pluginHMRConfig 的零值就是 disabled，
+	// 只有显式 `DSHD_PLUGIN_HMR=1` 才走这个分支；关闭时连 Run 都不调用
+	// （Run 对关闭状态直接回 ErrHMROff，那是调用方的 bug 而不是"空转成功"）。
+	//
+	// HMR 只读 `packages/*/*/plugin.json` 并调 Loader.Reload，没有任何写文件
+	// 的代码路径；宿主的整树热重载（profiles/*/cordis.patch.yml）不归它管。
+	if pluginRT.HMR().Enabled() {
+		hmrCtx, hmrCancel := context.WithCancel(context.Background())
+		defer hmrCancel()
+		defer pluginRT.HMR().Stop()
+		go func() { _ = pluginRT.HMR().Run(hmrCtx) }()
+		fmt.Fprintf(os.Stderr, "插件热重载已开启（DSHD_PLUGIN_HMR=1，根 %s，周期 2s）\n", filepath.Join(*home, "plugins"))
 	}
 
 	// 终端服务：serve 模式不装配模块，所以单独建一份（和 run/acp 那边各自一份同构）。
@@ -231,7 +292,7 @@ func cmdServe(args []string) error {
 	if modelCatalog.Missing() && explicitServeModel {
 		discoveryCtx, cancelDiscovery := context.WithTimeout(context.Background(), 3*time.Second)
 		applied, discoveryErr := configureEnvModelCatalog(discoveryCtx, modelCatalog, *serveModel,
-			envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), os.Getenv("DSHD_LLM_KEY"))
+			envOr("DSHD_LLM_BASE", defaultLLMBase), os.Getenv("DSHD_LLM_KEY"))
 		cancelDiscovery()
 		if discoveryErr != nil {
 			fmt.Fprintf(os.Stderr, "env 模型元数据发现失败（%v）；catalog/effort 能力保持未知\n", llm.RedactCredential(discoveryErr.Error(), os.Getenv("DSHD_LLM_KEY")))
@@ -261,11 +322,15 @@ func cmdServe(args []string) error {
 	src.goals = goalOverrides
 	src.efforts = effortOverrides
 	src.catalog = modelCatalog
+	// session.load 的 contextWindow 要按"这一轮会用的模型"解析：新会话的 v4 里
+	// 还没有 request/context 事件，得靠会话覆盖或宿主默认 --model 才画得出上下文占用。
+	src.models = modelOverrides
+	src.defaultModel = *serveModel
 	attachments := newAttachmentStore(*home)
 	mcpServers := openMCPManager(*home)
 	mcpServers.StartAll()
 	defer mcpServers.Close()
-	sideQueries := newSideQueryService(*home, *serveModel, envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), *serveReasoning, src)
+	sideQueries := newSideQueryService(*home, *serveModel, envOr("DSHD_LLM_BASE", defaultLLMBase), envOr("DSHD_LLM_API", ""), *serveReasoning, src)
 	defer sideQueries.Close()
 
 	// Prompt / Cancel 走同一个服务，busy 的唯一结束点由它保证。
@@ -276,6 +341,8 @@ func cmdServe(args []string) error {
 	// DSHD_SERVE_MODEL_RUNNER=1 时走"不起子进程"的 runner。
 	// 只为二分长跑时的内存增长：增长到底来自"跑一轮"，还是"子进程 + follow"。
 	var runner turnRunner
+	// 优雅退出时要停的自动标题服务（只有 modelOverride 路径有）。
+	var moRunner *modelOverrideLoopRunner
 	useModelRunner := os.Getenv("DSHD_SERVE_MODEL_RUNNER") == "1"
 	// 一个 serve 进程内所有会话共用一张 journal 表：里面按 sessionID 分域，
 	// 所以"共用表"不等于"共用序号"（H14）。
@@ -313,9 +380,10 @@ func cmdServe(args []string) error {
 	lr := &loopRunner{home: *home, policy: *servePolicy, maxSteps: *serveSteps,
 		journals: journals, reasoning: *serveReasoning, model: *serveModel,
 		toolsMode: toolsMode, jobActions: jobActions,
+		runOpts:        serveRunOpts,
 		sandboxPresets: sandboxPresets, sandboxStore: sandboxStore}
 	mr := &modelRunner{home: *home, journals: journals, model: *serveModel, reasoning: *serveReasoning, recordEffort: true,
-		base: envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), catalog: modelCatalog}
+		base: envOr("DSHD_LLM_BASE", defaultLLMBase), catalog: modelCatalog}
 
 	// 审批的父进程半边（H13）：整进程一个 broker，每轮换 stdin。
 	// emit 用 lr 的方法，所以帧一样进 journal、一样可重放。
@@ -341,7 +409,8 @@ func cmdServe(args []string) error {
 	if useModelRunner {
 		runner = mr
 	} else {
-		runner = &modelOverrideLoopRunner{base: lr, permissions: permissionOverrides, recordEffort: true, catalog: modelCatalog}
+		moRunner = &modelOverrideLoopRunner{base: lr, permissions: permissionOverrides, recordEffort: true, catalog: modelCatalog}
+		runner = moRunner
 	}
 	// 官方 goal-round-driver（官方插件 #60）：真实 turn 正常收工后按 active goal 推进轮次。
 	// 只包一层 turnRunner（Run/RunContent/Steer/SteerContent 原样透传），不新建 turn、
@@ -368,32 +437,52 @@ func cmdServe(args []string) error {
 	}
 
 	// 官方 0.2.2 job.*/terminal.* 需要在 Options 里注入，所以要在 NewServer 之前造好。
-	officialJT, err := newOfficialJobTerminalService(*home, bashSvc, jobActions, func(string) []transport.JobInfo {
+	officialJT, err := newOfficialPTYJobTerminalService(*home, bashSvc, jobActions, func(string) []transport.JobInfo {
 		lr.jobsMu.Lock()
 		defer lr.jobsMu.Unlock()
 		return lr.jobs
-	}, src.Cwd)
+	}, src.Cwd, officialPTYScrollbackRowsFromEnv())
 	if err != nil {
 		return err
 	}
 	defer officialJT.Close()
 
+	// 配置树（HS-14）：`config.patch.*` 的唯一真值。启动即打开，损坏 fail-loud。
+	configTree, err := config.OpenStore(filepath.Join(*home, "state", "config-tree.json"))
+	if err != nil {
+		return fmt.Errorf("配置树打开失败: %w", err)
+	}
+	configDescriptors := transport.NewRegistry()
+	if err := configDescriptors.RegisterAll(transport.ConfigPatchDescriptors()); err != nil {
+		return fmt.Errorf("config.patch 描述符注册失败: %w", err)
+	}
+
+	front, err := newFrontend()
+	if err != nil {
+		return err
+	}
+
 	srv, err := transport.NewServer(withOfficialSessionOptions(*home, withSessionOperationOptions(*home, transport.Options{
 		Source: src,
 		// 只把适配器交给 Transport；它们在既有 cookie 认证之后才会被调用。
 		PluginHandler:       newPluginHTTPHandler(pluginManager),
+		ConfigPatchHandler:  transport.NewConfigPatchHandler(configTree, nil),
+		Descriptors:         configDescriptors,
 		SettingsFormHandler: newSettingsFormHTTPHandler(settingsStore),
 		ModelCatalogHandler: newModelCatalogHTTPHandler(modelCatalog, settingsStore),
 		Attachments:         attachments,
 		// 官方 0.2.2 wire（M1）：默认关，DSHD_OFFICIAL_WIRE=1 才挂载。
 		// 返回 nil 时 transport 一个字节都不变（见 Options.HandlerWrap）。
-		HandlerWrap: officialWireMount(officialWireDeps{
+		// 静态前端必须在**最外层**：GET /?token= 要先到前端，再到 wire。
+		// 未设置 DSHD_FRONTEND_DIR（或目录不存在）时 front == nil，包装退化成
+		// 原样，既有行为逐字节不变。
+		HandlerWrap: frontendMount(front, officialWireMount(officialWireDeps{
 			Home:        *home,
 			Journals:    journals,
 			Attachments: attachments,
 			Events:      approvalEvents,
-		}),
-		ContextUsage:        src.ContextUsage,
+		})),
+		ContextUsage: src.ContextUsage,
 		MCPList: func(sessionID string) ([]transport.MCPServerView, error) {
 			if _, err := src.resolve(sessionID); err != nil {
 				return nil, err
@@ -475,13 +564,7 @@ func cmdServe(args []string) error {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{
-				"ok":          true,
-				"permission":  res.Mode,
-				"mode":        res.Effective,
-				"preset":      res.Preset,
-				"enforcement": res.Enforcement,
-			}, nil
+			return permissionModeResponse(res), nil
 		},
 		SetSessionPermission: func(sessionID, perm string) error {
 			_, err := sandboxSetPermission(*home, sessionID, perm, sandboxPresets, sandboxStore, permissionOverrides)
@@ -490,7 +573,7 @@ func cmdServe(args []string) error {
 		// 模型列表：由宿主转发（网关地址与凭据只在这一侧，R7 界面不直连）。
 		// 和 `run`/`acp` 用同一组环境变量，免得界面看到的模型和实际能跑的不是一套。
 		ModelsList: func(ctx context.Context) ([]transport.ModelEntry, error) {
-			cli := llm.New(envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"),
+			cli := llm.New(envOr("DSHD_LLM_BASE", defaultLLMBase),
 				envOr("DSHD_LLM_KEY", ""))
 			cli.UserAgent = "dshd/" + version
 			models, err := cli.ListModels(ctx)
@@ -523,7 +606,19 @@ func cmdServe(args []string) error {
 			}
 			return t.ID(), nil
 		},
+		// 官方 terminal.create 的 PTY 终端按 id 唯一命中时优先；跨会话撞名 →
+		// ErrJTOfficialBadParam（400，不猜）；没有该 id → ErrJTOfficialTerminalGone
+		// → 回落既有管道终端。其它错误不吞（写失败必须 400/500，不是 not_found）。
 		TerminalInput: func(id, data string) error {
+			if officialJT != nil {
+				err := officialJT.InputByID(id, data)
+				if err == nil {
+					return nil
+				}
+				if !errors.Is(err, transport.ErrJTOfficialTerminalGone) {
+					return err
+				}
+			}
 			t := bashSvc.Terminal(id)
 			if t == nil {
 				return fmt.Errorf("没有这个终端: %s", id)
@@ -531,6 +626,15 @@ func cmdServe(args []string) error {
 			return t.Input(data)
 		},
 		TerminalOutput: func(id string, since int) (transport.TerminalOutput, error) {
+			if officialJT != nil {
+				out, err := officialJT.OutputByID(id, since)
+				if err == nil {
+					return out, nil
+				}
+				if !errors.Is(err, transport.ErrJTOfficialTerminalGone) {
+					return transport.TerminalOutput{}, err
+				}
+			}
 			t := bashSvc.Terminal(id)
 			if t == nil {
 				return transport.TerminalOutput{}, fmt.Errorf("没有这个终端: %s", id)
@@ -586,7 +690,7 @@ func cmdServe(args []string) error {
 			}
 			res, err := autoCompact(context.Background(), path, keep, 0,
 				envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"),
-				envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"))
+				envOr("DSHD_LLM_BASE", defaultLLMBase))
 			if err != nil {
 				return transport.CompactResult{}, err
 			}
@@ -644,7 +748,7 @@ func cmdServe(args []string) error {
 		Create: createWithSettingsDefaults(create, settingsStore),
 		// 官方 job.*/terminal.*（11 个方法）的路由层。
 		OfficialJobTerminal: officialJT.Handler(),
-	}), prompts))
+	}), prompts, settingsStore))
 	if err != nil {
 		return err
 	}
@@ -652,6 +756,7 @@ func cmdServe(args []string) error {
 	// internal/pluginmgr/official，Transport 只做协议翻译）。
 	srv.AttachOfficialAgentAPI(newAgentOfficialAPI(agentOfficialDeps{
 		home: *home, goals: goalOverrides, journals: journals, src: src,
+		sandboxPresets: sandboxPresets, sandboxStore: sandboxStore,
 		submit: func(sessionID, text string) (transport.PromptResult, error) {
 			return prompts.Submit(context.Background(), sessionID, text)
 		},
@@ -671,12 +776,53 @@ func cmdServe(args []string) error {
 		Settings:    settingsform.New(settingsStore),
 		Credentials: transport.NewCatalogCredentialStore(modelCatalog),
 	})
-	attachOfficialWorkspace(srv, *home, src, prompts)
+	wsHost := attachOfficialWorkspace(srv, *home, src, prompts)
+	attachOfficialWorkspaceFollow(srv, wsHost)
+	worktreeSvc := attachOfficialWorktree(srv, src)
+	prompts.worktree = worktreeSvc
+	nativeSvc := attachOfficialNative(srv, native.NewService(), func() (string, error) {
+		return ensureSettingsDocument(*home, settingsStore)
+	})
+	_ = nativeSvc
+	attachOfficialRemoteAccessFollow(srv)
 	attachOfficialSchedule(srv, *home, func(sessionID, text string) (transport.PromptResult, error) {
 		return prompts.Submit(context.Background(), sessionID, text)
 	})
-	srv.AttachOfficialPluginManagerAPI(officialpluginmgr.New(pluginManager))
-	srv.AttachOfficialAccountAPI(newAccountOfficialAPI(accountOfficialDeps{home: *home}))
+	// 官方 liveshareShares 12 方法：owner 状态在 <home>/liveshare/owner-shares.json；
+	// relay 地址/凭据来自 DSH_LIVESHARE_RELAY / DSH_LIVESHARE_OWNER_TOKEN(_FILE)。
+	liveshareSvc, err := attachOfficialLiveshare(srv, *home)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "liveshare: 12 个方法已挂上，但 owner 状态不可用: %v\n", err)
+	}
+	_ = liveshareSvc
+	srv.AttachOfficialPluginManagerAPI(newOfficialPluginManagerAPI(pluginRT))
+	marketAPI := newPluginMarketAPI(*home, pluginRT.Manager())
+	srv.AttachOfficialPluginMarketAPI(marketAPI)
+	srv.AttachOfficialPluginRegistryProbeAPI(marketAPI)
+	if recommendationsAPI, recErr := newPluginRecommendationsAPI(*home, pluginManager); recErr != nil {
+		fmt.Fprintf(os.Stderr, "recommendations: %v", recErr)
+	} else {
+		srv.AttachOfficialPluginRecommendationsAPI(recommendationsAPI)
+	}
+	srv.AttachOfficialForgeWriteAPI(newForgeWriteAPI(*home))
+	srv.AttachOfficialForgeChangeRequestAPI(newForgeChangeRequestAPI())
+	srv.AttachOfficialForgeGitAPI(newForgeGitAPI(func(sessionID string) (string, error) {
+		return src.Cwd(sessionID)
+	}))
+	if forgeHost, ferr := newForgePanelHost(*home); ferr == nil && forgeHost != nil {
+		srv.AttachOfficialForgePanelAPI(forgeHost.api())
+	}
+	srv.AttachOfficialLLMProviderAPI(newLLMProviderAPI(modelCatalog))
+	accountAPI := newAccountOfficialAPI(accountOfficialDeps{home: *home, catalog: modelCatalog})
+	accountAPI.ActionCardAct = actionCardAct(*home)
+	srv.AttachOfficialAccountAPI(accountAPI)
+	srv.AttachOfficialOfficePDFAPI(newOfficePDFAPI(*home))
+	srv.AttachOfficialSpeechAPI(newSpeechAPI())
+	attachActionCardsView(srv, *home)
+	if err := attachOfficialAnalytics(srv, *home); err != nil {
+		fmt.Fprintf(os.Stderr, "analytics: %v\n", err)
+	}
+	srv.AttachOfficialCordisAPI(newCordisService(*home))
 	if useModelRunner {
 		mr.pub = srv.Publish
 	} else {
@@ -720,9 +866,38 @@ func cmdServe(args []string) error {
 	}
 	signal.Stop(stop)
 
+	// 优雅退出：取消并等待在途的自动标题后台写（stop 幂等；主 turn 仍非阻塞，
+	// Kick 从不等待）。必须在 srv.Close() 之前收口：标题 goroutine 可能正在写
+	// 会话审计，若晚于 Close/会话清理才落笔，会变成 "session.v4.jsonl.zstd:
+	// The system cannot find the file specified" / TempDir 非空一类竞态。
+	if moRunner != nil {
+		if titles := moRunner.autoTitleService(); titles != nil {
+			titles.stop()
+		}
+	}
+
 	if err := srv.Close(); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "serve 已关闭（%v）\n", by)
 	return nil
+}
+
+// permissionModeResponse 是 session.setPermission 的唯一响应映射。
+// 审批输入（deny/ask/allow/auto）回显审批值；sandbox 三档输入才回真实
+// sandbox mode。mode/effective_mode 永远是真实 sandbox，不能与 permission 混用
+// （t165：deny 被回成 workspace-write）。
+func permissionModeResponse(res sandboxPermissionResult) map[string]any {
+	permission := string(res.Mode)
+	if res.Approval != "" {
+		permission = res.Approval
+	}
+	return map[string]any{
+		"ok":             true,
+		"permission":     permission,
+		"mode":           res.Effective,
+		"effective_mode": res.Effective,
+		"preset":         res.Preset,
+		"enforcement":    res.Enforcement,
+	}
 }

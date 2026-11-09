@@ -53,7 +53,9 @@ func (o officialMuxStreamOpener) Open(ctx context.Context, endpoint string, args
 	if fault != nil {
 		return nil, officialwire.NewError(fault.Code, fault.Message, map[string]any{"endpoint": endpoint})
 	}
-	return &officialMuxStream{stream: stream}, nil
+	// T05 WIRING §2：只有实现 transport.OfficialTerminalUplink 的流（terminal/attach）
+	// 才套上行外壳；其它流保持"这条流不接受上行数据"的既有语义。
+	return wrapOfficialMuxUplinkStream(&officialMuxStream{stream: stream}), nil
 }
 
 // officialMuxStream 把 OfficialFrameStream 接成 officialwire.Stream。

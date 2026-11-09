@@ -140,16 +140,20 @@ type Call struct {
 }
 
 // ApprovalRequest 是 ActionNeedsApproval 时返回的结构化一次性审批需求。
-// 它绑定会话、调用、操作和 canonical path，防止授权漂移到另一处。
+// 它绑定会话、调用、操作和 canonical path，防止授权漂移到另一处；
+// execute 还绑定命令原文（Subject），防止"同一目录、另一条命令"的漂移。
 type ApprovalRequest struct {
-	Kind       ApprovalKind `json:"kind"`
-	OneShot    bool         `json:"one_shot"`
-	SessionID  string       `json:"session_id"`
-	CallID     string       `json:"call_id"`
-	Permission Permission   `json:"permission"`
-	Operation  Operation    `json:"operation"`
-	Path       string       `json:"path"`
-	Reason     Reason       `json:"reason"`
+	Kind      ApprovalKind `json:"kind"`
+	OneShot   bool         `json:"one_shot"`
+	SessionID string       `json:"session_id"`
+	CallID    string       `json:"call_id"`
+	// Subject 是这次调用真正被批准的对象：execute 为命令原文；
+	// 文件读写为空（路径已由 Path 绑定）。审批只对完全相同的一条命令有效。
+	Subject    string     `json:"subject,omitempty"`
+	Permission Permission `json:"permission"`
+	Operation  Operation  `json:"operation"`
+	Path       string     `json:"path"`
+	Reason     Reason     `json:"reason"`
 }
 
 // EscalationApproval 是审批管线对特定 ApprovalRequest 的答复。
@@ -184,7 +188,7 @@ type Decision struct {
 	Enforcement               Enforcement `json:"enforcement"`
 }
 
-func (p *Policy) evaluate(call Call, operation Operation, rawPath string) (Decision, error) {
+func (p *Policy) evaluate(call Call, operation Operation, rawPath, subject string) (Decision, error) {
 	if p == nil {
 		return Decision{}, fmt.Errorf("%w: nil policy", ErrMissingContext)
 	}
@@ -241,13 +245,13 @@ func (p *Policy) evaluate(call Call, operation Operation, rawPath string) (Decis
 			d.EscalationEligible = true
 			d.Approval = &ApprovalRequest{
 				Kind: ApprovalKindSandboxUpgrade, OneShot: true,
-				SessionID: call.SessionID, CallID: call.CallID,
+				SessionID: call.SessionID, CallID: call.CallID, Subject: subject,
 				Permission: PermissionDangerFullAccess, Operation: operation,
 				Path: canonical, Reason: ReasonEscalationRequired,
 			}
 			return d, nil
 		}
-		if err := validateEscalation(call.Escalation, call, operation, canonical); err != nil {
+		if err := validateEscalation(call.Escalation, call, operation, canonical, subject); err != nil {
 			return Decision{}, err
 		}
 		if !call.Escalation.Approved {
@@ -319,7 +323,7 @@ func (p *Policy) evaluate(call Call, operation Operation, rawPath string) (Decis
 	return d, nil
 }
 
-func validateEscalation(got *EscalationApproval, call Call, operation Operation, canonical string) error {
+func validateEscalation(got *EscalationApproval, call Call, operation Operation, canonical, subject string) error {
 	if got == nil {
 		return fmt.Errorf("%w: nil approval", ErrApprovalBinding)
 	}
@@ -327,8 +331,8 @@ func validateEscalation(got *EscalationApproval, call Call, operation Operation,
 	if a.Kind != ApprovalKindSandboxUpgrade || !a.OneShot ||
 		a.SessionID != call.SessionID || a.CallID != call.CallID ||
 		a.Permission != PermissionDangerFullAccess || a.Operation != operation ||
-		a.Path != canonical || a.Reason != ReasonEscalationRequired {
-		return fmt.Errorf("%w: session/call/permission/operation/path 必须与原审批需求完全一致", ErrApprovalBinding)
+		a.Path != canonical || a.Subject != subject || a.Reason != ReasonEscalationRequired {
+		return fmt.Errorf("%w: session/call/permission/operation/path/subject 必须与原审批需求完全一致", ErrApprovalBinding)
 	}
 	return nil
 }

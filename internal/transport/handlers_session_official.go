@@ -67,7 +67,30 @@ const (
 	MethodSessionSelectModel        Method = "session.selectModel"
 	MethodSessionOpenWorkspacePath  Method = "session.openWorkspacePath"
 	MethodSessionWorkspacePathApps  Method = "session.workspacePathApplications"
+
+	// GO.2 T04：HS-00 登记为 DEFERRED（无路由）的三条 session 方法。契约来自
+	// `@deepseek-ai/dsh-api-session-controller/lib/typert.host.js`：
+	//   'session/modelCatalog'          L2166-2191  零参数 → 厂商分组目录
+	//   'session/initializeDefaultModel' L2118-2131 零参数 → void
+	//   'session/control'               L1970-1986 零参数 stream → 全宿主控制面
+	MethodSessionControl                Method = "session.control"
+	MethodSessionInitializeDefaultModel Method = "session.initializeDefaultModel"
+	MethodSessionModelCatalog           Method = "session.modelCatalog"
 )
+
+// OfficialSessionResidualMethods 是 GO.2 T04 新收口的三条 session 方法。
+//
+// 它们的分派入口**不在** server.go 的 switch 里（那是 Lead 独占的路由表），
+// 而是借 handlers_agent_official.go 那次 `IsOfficialAgentMethod(name)` 判断
+// 进入官方分派面；接线口径见 tmp/GO2-TEAM/T04/WIRING.md。这份清单给快照/
+// 门禁用，新增或删除必须显式改这里。
+func OfficialSessionResidualMethods() []Method {
+	return []Method{
+		MethodSessionControl,
+		MethodSessionInitializeDefaultModel,
+		MethodSessionModelCatalog,
+	}
+}
 
 // OfficialSessionMethods 是官方 session 对齐面，**绝不加入 canonical 25**。
 func OfficialSessionMethods() []Method {
@@ -312,6 +335,135 @@ type OfficialSessionHost interface {
 	RemoveQueueItem(sessionID, itemID string) error
 }
 
+// OfficialProjectionHost 是"事件与 load 投影都推不出来、只能由宿主给"的官方
+// 投影键。官方 `SessionProjectionMap` 的这些键来自宿主自己的状态机（模型选择
+// 覆盖、preset 覆盖、子代理目录），不是 v4 事件能折叠出来的。
+//
+// 只声明**真有真值**的那几个键：宿主不实现/返回 nil 时，该键整个不出现——
+// 官方对"键缺失"的定义就是"该能力不存在"，正好是本宿主的真实情况。
+type OfficialProjectionHost interface {
+	// ModelSelection 返回 {lastUsed,next}；nil 一侧表示该侧没有真值（官方 null）。
+	ModelSelection(sessionID string) (lastUsed, next *OfficialModelSelection, err error)
+	// AgentPreset 返回该会话运行的 preset；nil = 部署没有 preset 概念。
+	AgentPreset(sessionID string) (*string, error)
+	// SubagentCatalog 返回该会话的直接子代理（官方 subagentCatalog 的行形状）。
+	SubagentCatalog(sessionID string) ([]OfficialSubagentCatalogEntry, error)
+}
+
+// OfficialSubagentCatalogEntry 是官方 `subagentCatalog` 的一项。
+//
+// 形状照 typert.host.js:3891 的四种 mode；本宿主真实创建的子代理是
+// **可续问**（internal/agent.ChildSpawn 的 durable `subagent/spawn` 帧），
+// 所以 mode 只可能是 continuable——不编 one-shot/external/unknown。
+type OfficialSubagentCatalogEntry struct {
+	ID        string `json:"id"`
+	CreatedAt int64  `json:"createdAt"`
+	Mode      string `json:"mode"`
+	// Label 在官方 schema 里对 continuable **必填**（one-shot/unknown 可选）。
+	// 本宿主的 `subagent/spawn` descriptor 没有 durable 创建标签，所以给空串
+	// （"没有标签"），不编造一段文本。
+	Label string `json:"label"`
+}
+
+// OfficialSubagentIdentity 是官方 `subagent` 投影（子会话自己的身份）。
+//
+// seq 是 `subagent/spawn` 帧在**该子会话自己日志**里的 seq；label 本宿主没有
+// durable 创建标签，整个省略（官方 optional）。
+type OfficialSubagentIdentity struct {
+	Mode string `json:"mode"`
+	// continuable 身份的 label 在官方 schema 里必填；本宿主 descriptor 无标签 → 空串。
+	Label string `json:"label"`
+	Seq   int64  `json:"seq"`
+}
+
+// OfficialSubagentTiming 是官方 `subagentTiming` 投影。
+type OfficialSubagentTiming struct {
+	SettledMs         int64                   `json:"settledMs"`
+	Active            *OfficialSubagentActive `json:"active,omitempty"`
+	LastTurnCompleted *bool                   `json:"lastTurnCompleted,omitempty"`
+}
+
+// OfficialSubagentActive 是"当前未闭合轮"的时间界（官方 {since,through}）。
+type OfficialSubagentActive struct {
+	Since   int64 `json:"since"`
+	Through int64 `json:"through"`
+}
+
+// OfficialModelCatalog 是官方 `session.modelCatalog` 的结果（L2166-2191）。
+type OfficialModelCatalog struct {
+	Default           OfficialModelSelection  `json:"default"`
+	RoutableProviders []string                `json:"routableProviders"`
+	Groups            []OfficialModelProvider `json:"groups"`
+	Failures          []OfficialModelFailure  `json:"failures"`
+}
+
+// OfficialModelProvider 是官方厂商分组（{id,name,models[]}）。
+type OfficialModelProvider struct {
+	ID     string               `json:"id"`
+	Name   string               `json:"name"`
+	Models []OfficialModelEntry `json:"models"`
+}
+
+// OfficialModelEntry 是官方模型行（id/name 必填，其余 optional）。
+type OfficialModelEntry struct {
+	ID          string             `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description,omitempty"`
+	Reasoning   *OfficialReasoning `json:"reasoning,omitempty"`
+}
+
+// OfficialReasoning 是官方模型行的推理档声明。
+type OfficialReasoning struct {
+	Efforts       []OfficialReasoningEffort `json:"efforts"`
+	DefaultEffort string                    `json:"defaultEffort,omitempty"`
+}
+
+// OfficialReasoningEffort 是官方推理档（id/name 必填）。
+type OfficialReasoningEffort struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// OfficialModelFailure 是官方"某个厂商加载失败"的行（不阻断其它厂商）。
+type OfficialModelFailure struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Message string `json:"message"`
+}
+
+// OfficialModelSelectionHost 是 `session.selectModel` 的真实 provider 面。
+//
+// 为什么需要它：`Options.SetSessionModel` 只收 model（既有 58 方法的形状），
+// 而官方 selectModel 的 provider 是**要校验、要持久化**的一半。把 provider
+// 面做成宿主能力，既不动既有 Options，也不把 provider 变成"回显"。
+type OfficialModelSelectionHost interface {
+	// ResolveModelSelection 校验 (provider, model, effort) 并**先**持久化
+	// provider/effort 元数据；model 本身仍由 Options.SetSessionModel 落盘。
+	// provider/model 不可路由时返回 ErrOfficialBadInput（→ 400）。
+	ResolveModelSelection(sessionID, provider, model, effort string) (OfficialModelSelection, error)
+	// ClearModelSelection 在 model 落盘失败时回滚已写的 provider 元数据。
+	ClearModelSelection(sessionID string) error
+}
+
+// OfficialModelCatalogHost 是 `session.modelCatalog` 与
+// `session.initializeDefaultModel` 的真实宿主面。
+type OfficialModelCatalogHost interface {
+	// ModelCatalog 返回官方形状的厂商分组目录（本地模型目录 + 默认模型）。
+	ModelCatalog() (OfficialModelCatalog, error)
+	// InitializeDefaultModel 复刻官方"登录后选第一个可用账号模型、已有默认就
+	// 不动"的语义；返回 (changed, error)。changed=false 是官方 void 的 no-op。
+	InitializeDefaultModel() (bool, error)
+}
+
+// OfficialSessionControlHost 是 `session.control` 的宿主面：全宿主会话清单。
+//
+// 它刻意只回 id：每个会话的投影仍走 OfficialProjectionHost/DurableEvents 的
+// 同一份真值，控制面不另开一条"快照来自别处"的路径。
+type OfficialSessionControlHost interface {
+	SessionIDs() ([]string, error)
+}
+
 // officialHost 取这一 Server 上的官方宿主能力；没有就是 nil（→ 501）。
 func (s *Server) officialHost() OfficialSessionHost {
 	if s == nil {
@@ -368,6 +520,9 @@ func writeSessionOfficialError(w http.ResponseWriter, err error, prefix string) 
 		writeJSON(w, http.StatusConflict, errorBodyFor("conflict", prefix+err.Error()))
 	case errors.Is(err, ErrSessionOfficialUnsupported), errors.Is(err, ErrNotImplemented):
 		writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented", prefix+err.Error()))
+	case errors.Is(err, ErrOfficialBadInput):
+		// 参数形状合法、取值不可路由（未知 provider/model/effort）：400，不是 500。
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", prefix+err.Error()))
 	case errors.Is(err, ErrInvalidCursor):
 		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", prefix+err.Error()))
 	case errors.Is(err, ErrPlacementInvalid), errors.Is(err, ErrPlacementUnsupported):
@@ -716,16 +871,28 @@ func (s *Server) serveOfficialState(w http.ResponseWriter, r *http.Request, meth
 // 官方结果要么是 null 要么是 {asOfSeq, values}。本宿主**永远能给出真实 baseline**
 // （v4 事件 + load 投影），所以 null 分支不可达——空会话给 asOfSeq=-1 与最小 values。
 //
-// values 里只放本宿主**能如实推出**的键（官方这些键都是 optional，
-// 键缺失的官方含义是"该能力不存在"，正好是这里的真实情况）：
+// GO.2 T04 把原先只折出 4 个键的 values 补到**本宿主真有真值**的那批：
 //
 //	sessionListMetadata  {blank, lastPromptAt}      来自 v4 事件折叠
 //	title               最新 session/title 的 text   来自 v4 事件
+//	todos               最新 todo_write 的真实参数   来自 v4 tool/call（整份替换）
 //	workingDirectory    会话记录的工作目录           来自 load 投影
 //	permissions         {currentValue}               来自 load 投影
+//	subagent            子会话自己的 subagent/spawn  来自 v4（seq 是 own-suffix 证据）
+//	subagentTiming      轮时长与最近闭合轮的完成性   来自该子会话 v4 的 turn/start|end
+//	modelSelection      {lastUsed,next}             宿主覆盖存储 + v4 model/selection
+//	agentPreset         会话运行的 preset           宿主 state/session-preset.json
+//	subagentCatalog     直接子代理清单               宿主扫描 durable 子会话
 //
-// modelSelection / todos / inbox / actionCards / agentPreset / subagent /
-// imageLimits / subagentCatalog / subagentTiming 一律不出现：本宿主没有对应真值。
+// **仍然不出现**的三个键（官方 values 里都是 optional，缺失 = 该能力不存在）：
+//
+//	inbox       本宿主没有 durable `agent/inbox/spliced` 事件（agent 收件箱是
+//	            进程内 inbox，见 internal/agent；没有可折叠的日志事实）
+//	actionCards 本宿主没有 action card 运行时（没有 propose_action 工具，
+//	            见 handlers_account_official.go 的 actionCards.act 同一判据）
+//	imageLimits 宿主有 4 类媒体、8 MiB/张、64M 像素、50 张/20 MiB 的真实上限，
+//	            但官方 schema **必填** maxImageDimension，而宿主没有任何单边
+//	            尺寸上限——编一个数字就是假数据，所以整个键不出现。
 func (s *Server) handleSessionProjections(w http.ResponseWriter, r *http.Request) {
 	host, ok := s.requireOfficialHost(w, string(MethodSessionProjections))
 	if !ok {
@@ -744,15 +911,51 @@ func (s *Server) handleSessionProjections(w http.ResponseWriter, r *http.Request
 		writeSessionOfficialError(w, err, string(MethodSessionProjections)+" 失败：")
 		return
 	}
+	projections, err := s.officialProjectionValues(host, req.SessionID, events, logEnd)
+	if err != nil {
+		writeSessionOfficialError(w, err, string(MethodSessionProjections)+" 失败：")
+		return
+	}
+	writeJSON(w, http.StatusOK, projections)
+}
+
+// officialProjectionValues 是 `session.projections` 与 `session.control` 共用的
+// "此刻投影"计算。
+//
+// 为什么单独一个函数：控制面的 baseline 与 replacement 帧必须与 unary 的
+// session.projections **同一份值**，否则两个方法会对同一个会话说出两种事实
+// （这正是 HS-16A 当时不改 HTTP 面、只登记差异的原因）。现在两条路径共用它。
+func (s *Server) officialProjectionValues(host OfficialSessionHost, sessionID string, events []DurableEvent, asOfSeq int64) (OfficialProjections, error) {
 	values := map[string]any{
 		"sessionListMetadata": officialSessionListMetadata(events),
 	}
 	if title, ok := officialLatestTitle(events); ok {
 		values["title"] = title
 	}
+	if view, ok, viewErr := s.officialActionCardsView(sessionID); ok {
+		if viewErr != nil {
+			return OfficialProjections{}, viewErr
+		}
+		values["actionCards"] = view
+	}
+
+	// todos 是**整份替换**语义：只认最后一次 todo_write 的参数，之前的全部作废。
+	if todos, found := officialTodosFold(events); found {
+		values["todos"] = todos
+	} else {
+		// 官方：第一次 write 之前是 null（不是"没有这个能力"）。
+		values["todos"] = nil
+	}
+	// 子代理身份与计时只对**本会话自己**的 durable `subagent/spawn` 成立。
+	if identity, spawnSeq, ok := officialSubagentIdentity(events, sessionID); ok {
+		values["subagent"] = identity
+		if timing, ok := officialSubagentTiming(events, spawnSeq); ok {
+			values["subagentTiming"] = timing
+		}
+	}
 	// load 是首屏投影，只用来取它真有的那两个字段。
 	if s.opt.Load != nil {
-		if res, lerr := s.opt.Load(req.SessionID, 1); lerr == nil {
+		if res, lerr := s.opt.Load(sessionID, 1); lerr == nil {
 			if res.CWD != "" {
 				values["workingDirectory"] = res.CWD
 			}
@@ -761,7 +964,172 @@ func (s *Server) handleSessionProjections(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, OfficialProjections{AsOfSeq: logEnd, Values: values})
+	if ph, ok := host.(OfficialProjectionHost); ok {
+		lastUsed, next, err := ph.ModelSelection(sessionID)
+		if err != nil {
+			return OfficialProjections{}, err
+		}
+		// 官方 modelSelection 是 {lastUsed,next}，两侧都允许 null；宿主没给真值
+		// 的那一侧就是 null（不是"没这个能力"——键本身仍然出现）。
+		values["modelSelection"] = map[string]any{"lastUsed": lastUsed, "next": next}
+		if preset, err := ph.AgentPreset(sessionID); err != nil {
+			return OfficialProjections{}, err
+		} else if preset != nil {
+			values["agentPreset"] = *preset
+		}
+		if catalog, err := ph.SubagentCatalog(sessionID); err != nil {
+			return OfficialProjections{}, err
+		} else {
+			if catalog == nil {
+				catalog = []OfficialSubagentCatalogEntry{}
+			}
+			values["subagentCatalog"] = catalog
+		}
+	}
+	return OfficialProjections{AsOfSeq: asOfSeq, Values: values}, nil
+}
+
+// officialTodosFold 折叠最后一次真实 `todo_write` 工具调用。
+//
+// 为什么不折 `todo/write` 事件：本宿主没有那个事件类型（todo 工具把**完整清单**
+// 作为 tool/call 的 arguments 落盘，整份替换语义与官方 todo/write 完全一致）。
+// 参数解析不出来就**当作没折到**：宁可回 null，也不把一条坏参数编成清单。
+func officialTodosFold(events []DurableEvent) ([]any, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.Type != "tool/call" || !isOfficialAppendSurface(ev) {
+			continue
+		}
+		var data struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}
+		if json.Unmarshal(ev.Data, &data) != nil || data.Name != "todo_write" || data.Arguments == "" {
+			continue
+		}
+		var args struct {
+			Todos []struct {
+				Content string `json:"content"`
+				Status  string `json:"status"`
+			} `json:"todos"`
+		}
+		if json.Unmarshal([]byte(data.Arguments), &args) != nil || args.Todos == nil {
+			continue
+		}
+		out := make([]any, 0, len(args.Todos))
+		valid := true
+		for _, item := range args.Todos {
+			switch item.Status {
+			case "pending", "in_progress", "completed":
+			default:
+				valid = false
+			}
+			if valid {
+				out = append(out, map[string]any{"content": item.Content, "status": item.Status})
+			}
+		}
+		if valid {
+			return out, true
+		}
+	}
+	return nil, false
+}
+
+// officialSubagentIdentity 从**本会话自己**的日志里认子代理身份。
+//
+// 唯一判据是 durable `subagent/spawn` 的 `childSessionId` 等于本会话 id——
+// 官方 `session.isOwnSeq(seq)` 的等价物：fork 继承来的祖先 descriptor 带的是
+// 祖先自己的 child id，会在这里被排除，不会把 fork 出来的普通会话认成子代理。
+func officialSubagentIdentity(events []DurableEvent, sessionID string) (OfficialSubagentIdentity, int64, bool) {
+	for _, ev := range events {
+		if ev.Type != "subagent/spawn" || !isOfficialAppendSurface(ev) {
+			continue
+		}
+		var data struct {
+			ChildSessionID  string `json:"childSessionId"`
+			ParentSessionID string `json:"parentSessionId"`
+		}
+		if json.Unmarshal(ev.Data, &data) != nil {
+			continue
+		}
+		if data.ChildSessionID != sessionID || data.ParentSessionID == "" {
+			continue
+		}
+		// 本宿主真实创建的子代理都是**可续问**的（internal/agent.ChildSpawn 的
+		// 唯一调用方是 subagents.prompt/可续问委派），没有 one-shot/external 的来源。
+		return OfficialSubagentIdentity{Mode: "continuable", Seq: ev.Seq}, ev.Seq, true
+	}
+	return OfficialSubagentIdentity{}, 0, false
+}
+
+// officialSubagentTiming 折出子代理的轮计时（官方 subagentTiming）。
+//
+// settledMs = descriptor 之后**已闭合**轮的时长之和；
+// active    = 尚未闭合那一轮的 {since,through}；
+// lastTurnCompleted = 最近闭合轮的 reason.kind 是否为 completed。
+// 三个值都来自 v4 的 turn/start|turn/end 时间，不猜。
+func officialSubagentTiming(events []DurableEvent, spawnSeq int64) (OfficialSubagentTiming, bool) {
+	started := map[int]int64{}
+	var settledMs int64
+	var lastCompleted *bool
+	var active *OfficialSubagentActive
+	lastTime := int64(0)
+	closed := 0
+	for _, ev := range events {
+		if ev.Seq <= spawnSeq {
+			continue
+		}
+		if ev.Time > lastTime {
+			lastTime = ev.Time
+		}
+		switch ev.Type {
+		case "turn/start":
+			var data struct {
+				Turn int `json:"turn"`
+			}
+			if json.Unmarshal(ev.Data, &data) != nil {
+				continue
+			}
+			if _, dup := started[data.Turn]; !dup {
+				started[data.Turn] = ev.Time
+			}
+		case "turn/end":
+			var data struct {
+				Turn   int `json:"turn"`
+				Reason struct {
+					Kind string `json:"kind"`
+				} `json:"reason"`
+			}
+			if json.Unmarshal(ev.Data, &data) != nil {
+				continue
+			}
+			begin, ok := started[data.Turn]
+			if !ok {
+				continue
+			}
+			delete(started, data.Turn)
+			if ev.Time > begin {
+				settledMs += ev.Time - begin
+			}
+			done := data.Reason.Kind == "completed"
+			lastCompleted = &done
+			closed++
+		}
+	}
+	// 还没闭合的那一轮：官方给 {since,through}，through 是最新事件时间。
+	for _, begin := range started {
+		active = &OfficialSubagentActive{Since: begin, Through: lastTime}
+	}
+	if closed == 0 && active == nil {
+		// 只有 descriptor、没有真实轮：官方三个字段里 settledMs 仍可给 0，
+		// 但 lastTurnCompleted 必须在"还没有闭合轮"时缺席。
+		return OfficialSubagentTiming{SettledMs: 0}, true
+	}
+	return OfficialSubagentTiming{
+		SettledMs:         settledMs,
+		Active:            active,
+		LastTurnCompleted: lastCompleted,
+	}, true
 }
 
 // officialSessionListMetadata 复刻官方 applySessionListMetadata（list.js:128-134）。
@@ -1196,9 +1564,15 @@ func quoteOrUnknown(value string) string {
 // 带 reasoningEffort 时走既有 effort override 存储（同一个 model catalog 校验）。
 // **不写 v4**（R5：读路径不写盘；模型选择是界面状态）。
 //
-// 契约差异（如实登记）：provider 只回显、不持久化——本宿主没有 provider 维度的
-// 覆盖存储，模型 id 已经唯一到一个网关路由。所以本方法**不校验 provider 是否可用**
-// （官方 requireModel 会），校验的是 model/effort 在本机 catalog 里真实存在。
+// GO.2 T04 把 provider 从"只回显"补成**校验 + 持久化**的一半：
+//
+//   - 宿主实现 OfficialModelSelectionHost 时，先由宿主把 (provider,model,effort)
+//     对着真实模型目录校验（官方 requireModel 同一语义），再落 provider/effort
+//     元数据；不可路由 → 400（不是"改了但没生效"）。
+//   - model 本身仍走既有 Options.SetSessionModel——那是既有 58 方法共用的唯一
+//     真值，这条路径不另立第二份 model 覆盖。
+//   - 第三方宿主没实现该接口时保持旧行为（provider 回显），但不再是**静默**的：
+//     RESULT/WIRING 里登记了它。
 func (s *Server) handleSessionSelectModel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SessionID       string  `json:"sessionId"`
@@ -1226,11 +1600,7 @@ func (s *Server) handleSessionSelectModel(w http.ResponseWriter, r *http.Request
 			errorBodyFor("not_implemented", "session.selectModel 未接线：宿主没有 model override 存储"))
 		return
 	}
-	if err := s.opt.SetSessionModel(req.SessionID, req.Model); err != nil {
-		writeSessionOfficialError(w, err, "session.selectModel 失败：")
-		return
-	}
-	selected := OfficialModelSelection{Provider: req.Provider, Model: req.Model}
+	effort := ""
 	if req.ReasoningEffort != nil {
 		if *req.ReasoningEffort == "" {
 			writeJSON(w, http.StatusBadRequest,
@@ -1242,11 +1612,37 @@ func (s *Server) handleSessionSelectModel(w http.ResponseWriter, r *http.Request
 				errorBodyFor("not_implemented", "session.selectModel 带 reasoningEffort 时需要 effort override 存储，宿主没接线"))
 			return
 		}
-		if err := s.opt.SetSessionEffort(req.SessionID, *req.ReasoningEffort); err != nil {
+		effort = *req.ReasoningEffort
+	}
+	selected := OfficialModelSelection{Provider: req.Provider, Model: req.Model, ReasoningEffort: effort}
+	var selectionHost OfficialModelSelectionHost
+	if h, ok := s.opt.Source.(OfficialModelSelectionHost); ok {
+		selectionHost = h
+	}
+	if selectionHost != nil {
+		resolved, err := selectionHost.ResolveModelSelection(req.SessionID, req.Provider, req.Model, effort)
+		if err != nil {
+			writeSessionOfficialError(w, err, "session.selectModel 失败：")
+			return
+		}
+		// 宿主可以把 provider 规范成目录里的真实路由（owned_by 口径）。
+		selected = resolved
+	}
+	if err := s.opt.SetSessionModel(req.SessionID, req.Model); err != nil {
+		if selectionHost != nil {
+			// model 没落盘：把刚写的 provider 元数据回滚，避免"选择器显示新
+			// provider、实际跑的还是旧 model"这种半成功。
+			_ = selectionHost.ClearModelSelection(req.SessionID)
+		}
+		writeSessionOfficialError(w, err, "session.selectModel 失败：")
+		return
+	}
+	if effort != "" {
+		if err := s.opt.SetSessionEffort(req.SessionID, effort); err != nil {
 			writeSessionOfficialError(w, err, "session.selectModel 的 reasoningEffort 失败：")
 			return
 		}
-		selected.ReasoningEffort = *req.ReasoningEffort
+		selected.ReasoningEffort = effort
 	}
 	writeJSON(w, http.StatusOK, OfficialSelectModelResult{Selected: selected})
 }
@@ -1404,4 +1800,286 @@ func (s *Server) handleSessionWorkspacePathApplications(w http.ResponseWriter, r
 	writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented",
 		"session.workspacePathApplications 未实现：本宿主没有桌面文件关联查询通道；"+
 			"官方对无桌面能力的部署回 []，本宿主不拿空数组冒充这个结论"))
+}
+
+// ---------------------------------------------------------------------------
+// session.modelCatalog / session.initializeDefaultModel / session.control
+// （GO.2 T04：HS-00 登记为 DEFERRED 的三条 session 方法）
+// ---------------------------------------------------------------------------
+
+// decodeOfficialZeroParams 解"零参数"官方方法（官方 parameters 是空数组）。
+//
+// 空 body 等价 `{}`（官方 strictCodec 对无参数方法就是这么发的）；给了任何
+// 键都是 400——多给字段必须是错误，不能静默忽略。
+func decodeOfficialZeroParams(w http.ResponseWriter, r *http.Request, method string) bool {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "读请求体失败："+err.Error()))
+		return false
+	}
+	if len(raw) == 0 {
+		return true
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", method+" 的参数必须是一个 JSON 对象"))
+		return false
+	}
+	if len(fields) != 0 {
+		keys := make([]string, 0, len(fields))
+		for key := range fields {
+			keys = append(keys, key)
+		}
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request",
+			method+" 是零参数方法（官方 parameters: []），不接受字段："+strings.Join(keys, ",")))
+		return false
+	}
+	return true
+}
+
+// handleSessionModelCatalog 是 /api/session.modelCatalog。
+//
+// 官方结果 ModelCatalog：{default, routableProviders, groups[], failures[]}。
+// 真实来源是本宿主模型目录（`<home>/state/model-catalog.json`）+ 默认模型
+// （settings 的 defaultModel）；厂商路由沿用本仓既有口径 `owned_by`
+// （serve_title_auto.go:343-344 已把这定为"本宿主唯一可核对的 provider 身份"）。
+func (s *Server) handleSessionModelCatalog(w http.ResponseWriter, r *http.Request) {
+	if !decodeOfficialZeroParams(w, r, string(MethodSessionModelCatalog)) {
+		return
+	}
+	host, ok := s.optionalModelCatalogHost()
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented",
+			"session.modelCatalog 未接线：宿主没有提供真实模型目录（OfficialModelCatalogHost）"))
+		return
+	}
+	catalog, err := host.ModelCatalog()
+	if err != nil {
+		writeSessionOfficialError(w, err, string(MethodSessionModelCatalog)+" 失败：")
+		return
+	}
+	if catalog.Groups == nil {
+		catalog.Groups = []OfficialModelProvider{}
+	}
+	if catalog.RoutableProviders == nil {
+		catalog.RoutableProviders = []string{}
+	}
+	if catalog.Failures == nil {
+		catalog.Failures = []OfficialModelFailure{}
+	}
+	writeJSON(w, http.StatusOK, catalog)
+}
+
+// optionalModelCatalogHost 取模型目录能力（挂在 Source 上的可选接口）。
+func (s *Server) optionalModelCatalogHost() (OfficialModelCatalogHost, bool) {
+	if s == nil || s.opt.Source == nil {
+		return nil, false
+	}
+	host, ok := s.opt.Source.(OfficialModelCatalogHost)
+	return host, ok
+}
+
+// handleSessionInitializeDefaultModel 是 /api/session.initializeDefaultModel。
+//
+// 官方语义（index.js:3935-3946）：如果已经配置了 provider API key 就**不动**；
+// 否则把"第一个可用账号模型"存成默认模型。结果是无载荷（void）。
+//
+// 本宿主的账号/凭据边界不同：没有 deepseek-account 登录 provider，默认模型落在
+// settings 的 defaultModel。宿主实现必须自己判定"已有可用 provider"并只做真实
+// 可做的选择；做不了就响亮失败（官方 provider-models-unavailable 同义）。
+func (s *Server) handleSessionInitializeDefaultModel(w http.ResponseWriter, r *http.Request) {
+	if !decodeOfficialZeroParams(w, r, string(MethodSessionInitializeDefaultModel)) {
+		return
+	}
+	host, ok := s.optionalModelCatalogHost()
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented",
+			"session.initializeDefaultModel 未接线：宿主没有提供真实模型目录（OfficialModelCatalogHost）"))
+		return
+	}
+	if _, err := host.InitializeDefaultModel(); err != nil {
+		writeSessionOfficialError(w, err, string(MethodSessionInitializeDefaultModel)+" 失败：")
+		return
+	}
+	// 官方结果是 void；本仓出口不接受 nil（会变成 500），用空 result 对象表达
+	// "这次调用没有载荷"（与 handlers_account_official.go 的 void 同一条约定）。
+	writeJSON(w, http.StatusOK, map[string]any{})
+}
+
+// sessionControlBaselineFrame / sessionControlProjectionFrame 是官方
+// SessionControlFrame 的两帧（typert.host.js:1970-1986 与 control.js）。
+type sessionControlBaselineFrame struct {
+	Type  string `json:"type"`
+	Value struct {
+		Projections map[string]OfficialProjections `json:"projections"`
+	} `json:"value"`
+}
+
+type sessionControlProjectionFrame struct {
+	Type      string                     `json:"type"`
+	SessionID string                     `json:"sessionId"`
+	Seq       int64                      `json:"seq"`
+	Changes   []officialProjectionChange `json:"changes"`
+}
+
+// handleSessionControl 是 /api/session.control（官方 mode:'stream'）。
+//
+// 官方 control 是**全宿主**控制面：一帧 baseline（每个会话的 {asOfSeq, values}）
+// 随后是对变化键的 replacement 帧 {type:"projection", sessionId, seq, changes}。
+// 本宿主用真实 durable 事件算同一份值（officialProjectionValues），按 500ms
+// 采样把**真的变了**的键推出去；没有变化时不发帧（不假 ready、不重放历史）。
+//
+// HTTP 面沿用本仓官方流方法已有的 NDJSON 长连接约定（official_stream_face.go
+// 顶部"HTTP 面的选择"）：一行一帧，没有额外包壳；参数/能力错误在写响应头之前
+// 仍是普通四字段 JSON。
+func (s *Server) handleSessionControl(w http.ResponseWriter, r *http.Request) {
+	if !decodeOfficialZeroParams(w, r, string(MethodSessionControl)) {
+		return
+	}
+	host, ok := s.requireOfficialHost(w, string(MethodSessionControl))
+	if !ok {
+		return
+	}
+	controlHost, ok := host.(OfficialSessionControlHost)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented",
+			"session.control 未接线：宿主没有全宿主会话清单（OfficialSessionControlHost）"))
+		return
+	}
+	ids, err := controlHost.SessionIDs()
+	if err != nil {
+		writeSessionOfficialError(w, err, string(MethodSessionControl)+" 失败：")
+		return
+	}
+
+	// baseline：先把每个会话的真实投影算出来。任何一个会话算不出来都在**写头
+	// 之前**失败（这不是"流中途断"，而是控制面一开始就不可信）。
+	baseline := sessionControlBaselineFrame{Type: "baseline"}
+	baseline.Value.Projections = make(map[string]OfficialProjections, len(ids))
+	for _, id := range ids {
+		events, seq, err := host.DurableEvents(id)
+		if err != nil {
+			writeSessionOfficialError(w, err, string(MethodSessionControl)+" 失败：")
+			return
+		}
+		projections, err := s.officialProjectionValues(host, id, events, seq)
+		if err != nil {
+			writeSessionOfficialError(w, err, string(MethodSessionControl)+" 失败：")
+			return
+		}
+		baseline.Value.Projections[id] = projections
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	writeLine := func(frame any) bool {
+		raw, merr := json.Marshal(frame)
+		if merr != nil {
+			return false
+		}
+		if _, werr := w.Write(append(raw, '\n')); werr != nil {
+			return false
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return true
+	}
+	if !writeLine(baseline) {
+		return
+	}
+	ticker := time.NewTicker(officialControlPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
+		// 会话集合本身会变（新建/删除）：每次采样取一次真实 id 清单。
+		current, err := controlHost.SessionIDs()
+		if err != nil {
+			return
+		}
+		for _, id := range current {
+			events, seq, err := host.DurableEvents(id)
+			if err != nil {
+				// 会话刚被删/盘上不可读：该会话的投影保留在 baseline 里，
+				// 不伪造一帧"清空"；下一轮清单自然不再含它。
+				continue
+			}
+			projections, err := s.officialProjectionValues(host, id, events, seq)
+			if err != nil {
+				return
+			}
+			previous, had := baseline.Value.Projections[id]
+			if !had {
+				// 新会话：官方用一帧完整 baseline 语义表达"它出现了"；控制面的
+				// changes 只承载 changed key，所以这里把所有键作为 changes 发一次。
+				changes := officialProjectionChanges(nil, projections.Values)
+				if len(changes) == 0 {
+					continue
+				}
+				if !writeLine(sessionControlProjectionFrame{Type: "projection", SessionID: id, Seq: seq, Changes: changes}) {
+					return
+				}
+				baseline.Value.Projections[id] = projections
+				continue
+			}
+			changes := officialProjectionChanges(previous.Values, projections.Values)
+			if len(changes) == 0 {
+				continue
+			}
+			if !writeLine(sessionControlProjectionFrame{Type: "projection", SessionID: id, Seq: seq, Changes: changes}) {
+				return
+			}
+			baseline.Value.Projections[id] = projections
+		}
+		// 已从清单消失的会话：删掉基线，避免它下次出现时被当成"没变"。
+		for id := range baseline.Value.Projections {
+			present := false
+			for _, currentID := range current {
+				if currentID == id {
+					present = true
+					break
+				}
+			}
+			if !present {
+				delete(baseline.Value.Projections, id)
+			}
+		}
+	}
+}
+
+// officialControlPollInterval 是控制面采样间隔。
+//
+// 官方是通知驱动；本宿主没有全宿主投影变更通知源，只能采样。500ms 足够让
+// 界面跟上"轮开始/结束、标题、todo、模型选择"这类变化，又不会把一次空闲连接
+// 变成忙等。它只影响**推送延迟**，不影响值本身（值每次都从 durable 重算）。
+const officialControlPollInterval = 500 * time.Millisecond
+
+// officialProjectionChanges 比较两份投影值，返回真正变化的键（官方 changes）。
+func officialProjectionChanges(before, after map[string]any) []officialProjectionChange {
+	changes := make([]officialProjectionChange, 0, len(after))
+	for key, value := range after {
+		if prev, ok := before[key]; ok {
+			prevRaw, perr := json.Marshal(prev)
+			curRaw, cerr := json.Marshal(value)
+			if perr == nil && cerr == nil && string(prevRaw) == string(curRaw) {
+				continue
+			}
+		}
+		changes = append(changes, officialProjectionChange{Key: key, Val: value})
+	}
+	// 键消失也要如实说（官方 replacement 帧里 val 为 null 即"未知/没了"）。
+	for key := range before {
+		if _, ok := after[key]; ok {
+			continue
+		}
+		changes = append(changes, officialProjectionChange{Key: key, Val: nil})
+	}
+	return changes
 }

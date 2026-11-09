@@ -125,13 +125,16 @@ func TestSandboxApprovedOneShotOnlyAppliesToThatCall(t *testing.T) {
 	first := filepath.Join(outside, "approved.txt")
 	second := filepath.Join(outside, "second.txt")
 
-	pending, err := gate.EvaluateCommand(ctx, command, outside, sandbox.PermissionDangerFullAccess)
+	// 审批绑定的是命令原文：先定下完整命令，再用**同一条**命令求值/执行。
+	fullFirst := command + strings.ReplaceAll(first, `\`, "/") + "'"
+	pending, err := gate.EvaluateCommand(ctx, fullFirst, outside, sandbox.PermissionDangerFullAccess)
 	if err != nil || pending.Action != sandbox.ActionNeedsApproval || pending.Approval == nil {
 		t.Fatalf("未审批判定 = %+v, %v", pending, err)
 	}
-	approvedCtx := sandbox.WithEscalation(ctx, pending.Approval.Decide(true))
+	// 批准绑定的是这一次调用：重试时把同一个 call id 带回去。
+	approvedCtx := sandbox.WithCallID(sandbox.WithEscalation(ctx, pending.Approval.Decide(true)), pending.CallID)
 
-	if _, err := tool.Exec(approvedCtx, sessionArgs(t, command+strings.ReplaceAll(first, `\`, "/")+"'",
+	if _, err := tool.Exec(approvedCtx, sessionArgs(t, fullFirst,
 		map[string]any{"sandbox_permissions": "danger-full-access"})); err != nil {
 		t.Fatalf("已批准的一次性升级应执行: %v", err)
 	}
@@ -147,6 +150,17 @@ func TestSandboxApprovedOneShotOnlyAppliesToThatCall(t *testing.T) {
 	}
 	if _, statErr := os.Stat(second); statErr == nil {
 		t.Fatal("一次性批准漂移到了后续调用")
+	}
+
+	// 同一份批准套到**另一条命令**上：绑定不一致，必须拒绝且零进程。
+	drifted := filepath.Join(outside, "drifted.txt")
+	_, err = tool.Exec(approvedCtx, sessionArgs(t, command+strings.ReplaceAll(drifted, `\`, "/")+"'",
+		map[string]any{"sandbox_permissions": "danger-full-access"}))
+	if !errors.Is(err, sandbox.ErrApprovalBinding) {
+		t.Fatalf("批准漂到另一条命令必须 ErrApprovalBinding，得到 %v", err)
+	}
+	if _, statErr := os.Stat(drifted); statErr == nil {
+		t.Fatal("批准被另一条命令继承了")
 	}
 }
 

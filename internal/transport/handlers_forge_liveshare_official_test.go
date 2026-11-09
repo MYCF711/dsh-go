@@ -1,14 +1,17 @@
 package transport
 
-// 官方 0.2.2 桌面端 forgePanel.*（19）与 liveshareShares.*（8）共 27 个方法的契约测试。
+// 官方 0.2.2 桌面端 forgePanel.*（19）与 liveshareShares.*（12）共 31 个方法的契约测试。
+//
+// liveshare 的 12 个方法在 handlers_liveshare_official.go 里（真实现可注入）；
+// 本文件在没有注入实现时验证它们的"未接线 → 501 + 说清缺什么"与参数校验。
 //
 // 这些测试只打本包的 `serveOfficialForgeLiveshareAPI`（Lead 接线后由 /api 路由调它），
 // 因此不依赖 server.go 的分发表——**路由接线是 Lead 的验收项**；测试里用
 // IsOfficialForgeLiveshareMethod 钉住"方法名集合"，避免新增方法从路由漏下去。
 //
-// 另外有一条 HTTP 级用例（走 s.ServeHTTP）证明这 27 个名字**当前就能调**：
-// 未接线时它们落到 handleAPI 的 default（501 通用未实现），接线后落在本文件
-// （501 逐方法 + 参数 400）。两种都不是 404，也都不会 panic。
+// 另外有一条 HTTP 级用例（走 s.ServeHTTP）证明这 31 个名字**当前就能调**：
+// 未接线时它们落在本族分支（501 逐方法 + 参数 400）；接线后 liveshare 12 个
+// 会走真实实现。两种都不是 404，也都不会 panic。
 
 import (
 	"bytes"
@@ -47,7 +50,7 @@ func callForgeOfficial(t *testing.T, srv *Server, method string, body string) (i
 	return rec.Code, out
 }
 
-// forgeGoodBodies 是 27 个方法**按官方 wire 名**写的最小合法请求体。
+// forgeGoodBodies 是 31 个方法**按官方 wire 名**写的最小合法请求体。
 //
 // 故意不按本文件的参数表生成：那样"表写错了"和"测试写错了"会一起错，
 // 测试就只剩自我一致。这里的键名逐条抄自官方 typert 的 parameters[].wire。
@@ -81,14 +84,18 @@ func forgeGoodBodies() map[Method]string {
 		MethodLiveshareSharesStop:              `{"request":{"shareId":"sh-1"}}`,
 		MethodLiveshareSharesTestPublish:       `{"request":{"sessionId":"s-1"}}`,
 		MethodLiveshareSharesUpdatePermissions: `{"request":{"shareId":"sh-1","sessionMode":"view"}}`,
+		MethodLiveshareSharesCapabilities:      `{}`,
+		MethodLiveshareSharesList:              `{}`,
+		MethodLiveshareSharesRelay:             `{}`,
+		MethodLiveshareSharesTestRelay:         `{}`,
 	}
 }
 
-// TestOfficialForgeLiveshareMethodsAreStable 钉住 27 个方法名本身。
+// TestOfficialForgeLiveshareMethodsAreStable 钉住 31 个方法名本身。
 func TestOfficialForgeLiveshareMethodsAreStable(t *testing.T) {
 	methods := OfficialForgeLiveshareMethods()
-	if len(methods) != 27 {
-		t.Fatalf("官方 forgePanel/liveshareShares 方法应是 27 个，实际 %d", len(methods))
+	if len(methods) != 31 {
+		t.Fatalf("官方 forgePanel/liveshareShares 方法应是 31 个（19+12），实际 %d", len(methods))
 	}
 	seen := map[Method]bool{}
 	for _, m := range methods {
@@ -113,9 +120,10 @@ func TestOfficialForgeLiveshareMethodsAreStable(t *testing.T) {
 		"forgePanel.markReady", "forgePanel.merge", "forgePanel.refresh",
 		"forgePanel.requestWorktree", "forgePanel.restoreWorktree", "forgePanel.retryWorktree",
 		"forgePanel.stopCreation", "forgePanel.submitReview", "forgePanel.track",
-		"liveshareShares.audit", "liveshareShares.create", "liveshareShares.identity",
+		"liveshareShares.audit", "liveshareShares.capabilities", "liveshareShares.create",
+		"liveshareShares.identity", "liveshareShares.list", "liveshareShares.relay",
 		"liveshareShares.setCapabilities", "liveshareShares.setRelay", "liveshareShares.stop",
-		"liveshareShares.testPublish", "liveshareShares.updatePermissions",
+		"liveshareShares.testPublish", "liveshareShares.testRelay", "liveshareShares.updatePermissions",
 	}
 	got := make([]string, 0, len(methods))
 	for _, m := range methods {
@@ -131,29 +139,28 @@ func TestOfficialForgeLiveshareMethodsAreStable(t *testing.T) {
 	// 不在本组口径里的官方名字必须**不被**本族认领：它们各自有别的归属，
 	// 认领了会把一条本该回"未实现"的流式方法伪装成本族的一条。
 	for _, out := range []string{
-		"forgePanel.changeRequestStates", // 官方 stream，本组 19 条不含
-		"liveshareShares.list",           // 官方 list，本组 8 条不含
-		"liveshareShares.relay",
-		"liveshareShares.capabilities",
-		"liveshareShares.testRelay",
+		"liveshareShares.unknown", // 不存在的 liveshare 方法
 		"forgePanel.unknown",
 		"",
 	} {
 		if IsOfficialForgeLiveshareMethod(out) {
-			t.Fatalf("%q 不属于本文件的 27 个方法，却被认领了", out)
+			t.Fatalf("%q 不属于本族的 31 个方法，却被认领了", out)
 		}
 	}
 }
 
-// TestOfficialForgeLiveshareAllReturnNotImplemented 是这 27 个方法的主判据：
+// TestOfficialForgeLiveshareAllReturnNotImplemented 是这 31 个方法的主判据：
 // 合法参数 → 501 + not_implemented + 四字段 + 说清缺什么；没有 result。
 func TestOfficialForgeLiveshareAllReturnNotImplemented(t *testing.T) {
 	bodies := forgeGoodBodies()
-	if len(bodies) != 27 {
-		t.Fatalf("测试数据应覆盖 27 个方法，实际 %d", len(bodies))
+	if len(bodies) != 31 {
+		t.Fatalf("测试数据应覆盖 31 个方法，实际 %d", len(bodies))
 	}
 	srv := forgeOfficialTestServer(t)
 	for _, method := range OfficialForgeLiveshareMethods() {
+		if IsOfficialForgeChangeRequestMethod(string(method)) {
+			continue // 四个 Change Request 读取由专用 API 测试
+		}
 		body, ok := bodies[method]
 		if !ok {
 			t.Fatalf("%s 没有合法的测试请求体", method)
@@ -269,7 +276,7 @@ func TestOfficialForgeLiveshareAcceptableVariants(t *testing.T) {
 	}
 }
 
-// TestOfficialForgeLiveshareCallableThroughHTTP 证明这 27 个名字**走真实路由也能调**。
+// TestOfficialForgeLiveshareCallableThroughHTTP 证明这 31 个名字**走真实路由也能调**。
 //
 // 未接线时它们落到 handleAPI 的 default（501 通用未实现），接线后落本文件
 // （501 逐方法）。两条路都不是 404、都不是 panic，所以这条用例在接线前后都成立。
@@ -281,6 +288,9 @@ func TestOfficialForgeLiveshareCallableThroughHTTP(t *testing.T) {
 	}
 	bodies := forgeGoodBodies()
 	for _, method := range OfficialForgeLiveshareMethods() {
+		if IsOfficialForgeChangeRequestMethod(string(method)) {
+			continue
+		}
 		req := httptest.NewRequest(http.MethodPost, "/api/"+string(method),
 			strings.NewReader(bodies[method]))
 		req.AddCookie(&http.Cookie{Name: cookieName, Value: cookie})
@@ -310,9 +320,10 @@ func TestOfficialForgeLiveshareCallableThroughHTTP(t *testing.T) {
 }
 
 // TestOfficialForgeLiveshareHomeIsolation 钉住 A/B home 隔离：
-// 这 27 个方法不读盘、不落盘，两个不同 home 的响应必须逐字节一致。
+// 未注入实现时这 31 个方法不读盘、不落盘，两个不同 home 的响应必须逐字节一致。
 //
-// 它们将来接上真服务时，这条用例就是"别把 A home 的 share/绑定串到 B home"的基线。
+// 接上真服务后，liveshare 的隔离由 attach 时传入的 home 决定；本用例继续守住
+// "未接线时的响应不依赖 home"。
 func TestOfficialForgeLiveshareHomeIsolation(t *testing.T) {
 	run := func(home string) map[string]string {
 		t.Helper()
@@ -321,6 +332,9 @@ func TestOfficialForgeLiveshareHomeIsolation(t *testing.T) {
 		bodies := forgeGoodBodies()
 		got := make(map[string]string, len(bodies))
 		for _, method := range OfficialForgeLiveshareMethods() {
+			if IsOfficialForgeChangeRequestMethod(string(method)) {
+				continue
+			}
 			status, out := callForgeOfficial(t, srv, string(method), bodies[method])
 			if status != http.StatusNotImplemented {
 				t.Fatalf("%s 状态码 %d，期望 501", method, status)
@@ -376,10 +390,10 @@ func TestOfficialForgeLiveshareDeterministic(t *testing.T) {
 func TestOfficialForgeLiveshareNotFamilyNameRejected(t *testing.T) {
 	srv := forgeOfficialTestServer(t)
 	status, out := callForgeOfficial(t, srv, "forgePanel.changeRequestStates", `[]`)
-	assertFourFieldError(t, status, out, http.StatusNotImplemented, "not_implemented")
+	assertFourFieldError(t, status, out, http.StatusBadRequest, "bad_request")
 	obj := out["error"].(map[string]any)
 	msg, _ := obj["message"].(string)
-	if !strings.Contains(msg, "不是官方 forgePanel/liveshareShares 族") {
-		t.Fatalf("错误正文没说明这一族不认领：%q", msg)
+	if !strings.Contains(msg, "JSON 对象") {
+		t.Fatalf("错误正文没说明请求体形状：%q", msg)
 	}
 }

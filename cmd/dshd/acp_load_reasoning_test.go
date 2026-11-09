@@ -11,6 +11,7 @@ import (
 
 	"dshgo/internal/acp"
 	"dshgo/internal/agent"
+	"dshgo/internal/modes"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 )
@@ -30,7 +31,9 @@ const acpLoadCwd = "/tmp/acp-load"
 // 思考 → 正文 → 调用，第二条**只有思考**（正是会整条消失的那种）。
 func buildACPLoadSession(t *testing.T, home, id string) {
 	t.Helper()
-	l, err := session.CreateSession(home, acpLoadCwd, id, "standard")
+	// header 里的 mode 现在会被 resume 严格解析：用真实的内置 id，
+	// 否则"未知 mode"会按 fail-loud 拒绝载入（见 acpRunner.Resume）。
+	l, err := session.CreateSession(home, acpLoadCwd, id, modes.DefaultID)
 	if err != nil {
 		t.Fatalf("建会话失败: %v", err)
 	}
@@ -124,7 +127,7 @@ func TestACPLoadReplaysReasoningOnlyAssistant(t *testing.T) {
 // 日志里没有思考块时，重放一条 reasoning 都不许凭空多出来，其余顺序照旧。
 func TestACPLoadWithoutReasoningReplaysNoThoughts(t *testing.T) {
 	home := t.TempDir()
-	l, err := session.CreateSession(home, acpLoadCwd, "s-acp-plain", "standard")
+	l, err := session.CreateSession(home, acpLoadCwd, "s-acp-plain", modes.DefaultID)
 	if err != nil {
 		t.Fatalf("建会话失败: %v", err)
 	}

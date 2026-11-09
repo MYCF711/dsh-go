@@ -7,24 +7,24 @@ package main
 //   - job.*：既有 jobs 服务（`jobActionBroker`）——它已经有会话围栏（跨会话 403）、
 //     实例/PID 映像校验、"已结束 409"、保留输出目录 `<home>/state/jobs/<sid>/<id>.json`，
 //     以及子进程 IPC（本文一个字都不重写那套判断）。
-//   - terminal.*：既有 `terminal.open/input/output` 背后的 `*bash.Service` 持久 shell 会话
-//     （同一时刻一条命令、Windows Job Object / Unix 进程组归属、CloseTerminal 回收整棵树）。
-//     本文件只是在它上面加"身份/标题/尺寸/保留"这层官方元数据。
+//   - terminal.*：HS-08 的**真 ConPTY** 后端（`terminal_pty.go` 的
+//     `officialPTYTerminalAPI`）——`internal/terminal` 的 ConPTY 会话、真实窗口
+//     尺寸、真实退出码、有界滚动缓冲。本文件只做两件它不做的事：
+//     **流式帧机**与**组装**。
 //
-// # 为什么不是 PTY
+// # 为什么不再有管道式终端
 //
-// 官方 terminal 是 PTY（有屏幕模型、cols/rows 真正生效、attach 有 snapshot.screen 渲染）。
-// 本仓 `modules/exec/bash` 的 terminal 是**管道式持久 shell**（stdin/stdout 管道），
-// 没有 PTY，因此：
-//   - cols/rows 只作为会话元数据记录，不做真实窗口尺寸（没有 SIGWINCH）；
-//   - attach 的 screen 是**原始输出尾部**，不是 ANSI 渲染后的屏幕；
-//   - environment.scrollback 如实报 0（没有行滚动缓冲）。
-// 这三条都登记在 RESULT 的未验/未实现清单里，不假装成 PTY。
+// 历史实现（本文件里的 `officialTerminalAPI`）包在 `modules/exec/bash` 的
+// 管道式持久 shell 之上：cols/rows 只是元数据（没有 SIGWINCH）、attach 的
+// screen 是原始输出尾部（没有屏幕模型）、environment.scrollback 恒为 0。
+// 那是"不是 PTY"的临时态。HS-16D 把它**接上真 PTY**并删掉旧实现：
+// 两套后端并存会让"官方 API 到底跑在哪个之上"没法回答。
 //
 // # 缺能力怎么办
 //
 // 返回 transport.ErrJTOfficialUnsupported（→ 501 not_implemented）+ 说清缺什么。
-// 例如 `terminal.create` 指定了本宿主起不来的 shell（底层模块写死 bash 引导）。
+// 例如非 Windows 平台上 `terminal.create` 起不了 ConPTY（`internal/terminal`
+// 如实回 ErrUnsupported），这里原样上抛，**不降级成管道冒充**。
 
 import (
 	"context"
@@ -35,20 +35,33 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
 
+	"dshgo/internal/officialwire"
 	"dshgo/internal/transport"
 	"dshgo/modules/exec/bash"
 )
 
 const (
 	// officialTerminalMaxInputBytes 是**本层 Input 强制**的单次写入上限。
-	// 它同时也是 environment.maxInputBytes 的真实来源（不是编出来的数）。
+	//
+	// 注意：单次**上限**（64 KiB，协议层声明）不等于单次**成功写入**（见
+	// officialTerminalInputChunkBytes，ConPTY 的输入批次有一个小得多的硬限）。
 	officialTerminalMaxInputBytes = 64 * 1024
+	// officialTerminalInputChunkBytes 是写 ConPTY 输入管道的**单片**字节上限。
+	//
+	// 实测（Windows ConPTY，T05 证据）：一次写入超过约 50 字节时，conhost 会把
+	// 整批输入丢掉——不是部分写、也不返回错误：50 字符的命令能跑，60 字符的命令
+	// 连回显都没有，且之后同一终端的输入也会被带坏。官方 uplink 的 write 帧是
+	// 任意长度字符串（粘贴、多行），所以本层必须切片转发。
+	//
+	// 根因在 internal/terminal 的 ConPTY 写入路径（HS-08 的交付面，T05 不越界修；
+	// 已登记在 RESULT 的"交给后续任务的发现"）。这里 32 字节留出余量，保证官方
+	// terminal.attach 的 uplink 与既有 terminal.input 回落不会静默丢字。
+	officialTerminalInputChunkBytes = 32
 	// officialTerminalMaxScreenBytes 是快照/保留文本的上限（有界输出）。
 	officialTerminalMaxScreenBytes = 256 * 1024
 	// officialTerminalMaxCols / MaxRows 是 create 接受的尺寸上限（超出即截断，不报错）。
@@ -66,6 +79,12 @@ const (
 	officialRetainedPerSession = 16
 	// officialLabelMaxRunes 是 job 标签（命令首行）的字符上限。
 	officialLabelMaxRunes = 200
+	// officialFollowPollInterval 是帧机的**兜底**轮询间隔。
+	//
+	// 为什么是轮询：job.follow 的数据源是执行层的保留输出（子进程 IPC），
+	// 不是本进程的 Transport journal——没有可等的广播。100ms 与既有
+	// session.wait 的采样间隔同档：界面上看不出来，又不会把一次订阅变成忙等。
+	officialFollowPollInterval = 100 * time.Millisecond
 )
 
 // ---------------------------------------------------------------------------
@@ -100,6 +119,18 @@ func (s *officialJobService) JobList(sessionID string) (transport.OfficialJobLis
 		views = append(views, officialJobView(info))
 	}
 	return transport.OfficialJobListFrame{Type: "rows", Jobs: views}, nil
+}
+
+// JobFollow 是**遗留**的一页读取入口，只为满足接口签名（HS-08 的 PTY 适配层
+// 与既有测试按它编译）。wire **不会**走到它：job.follow 由
+// `OfficialJobTerminalStreams.OpenJobFollow` 提供真流。
+//
+// Deprecated: 用 OpenJobFollow。这里明确拒绝而不是回一页，避免有人把
+// "读一页"当成"实现过 follow"（那正是 HS-09 指出的残口）。
+func (s *officialJobService) JobFollow(ctx context.Context, sessionID, jobID string, from int64) (transport.OfficialJobFollowPage, error) {
+	return transport.OfficialJobFollowPage{}, fmt.Errorf(
+		"%w: job.follow 是 typert mode:'stream'，wire 走 OpenJobFollow（一次性一页不算实现）",
+		transport.ErrJTOfficialUnsupported)
 }
 
 // officialJobView 是 JobInfo → JobView 的唯一换算点。
@@ -165,77 +196,47 @@ func (s *officialJobService) JobKill(ctx context.Context, sessionID, jobID strin
 	return transport.OfficialJobKillValue{Outcome: "requested"}, nil
 }
 
-// JobFollow 是官方 job/follow 的**一次性读取**：一页字节窗口，或一个终态投影。
-//
-// 偏移是**绝对字节**（官方语义）。绝对总量的锚点是既有 jobs 服务报的
-// JobInfo.Bytes（写出的总字节），保留窗口的起点由这次读取的真实字节数反推：
-// earliest = max(0, 锚点 - 本次读到的字节数)。
-func (s *officialJobService) JobFollow(ctx context.Context, sessionID, jobID string, from int64) (transport.OfficialJobFollowFrame, error) {
-	if s == nil || s.output == nil {
-		return transport.OfficialJobFollowFrame{}, fmt.Errorf("%w: 这个宿主没有接 jobs 输出", transport.ErrJTOfficialUnsupported)
-	}
-	if !validJobActionPart(sessionID) || !validJobActionPart(jobID) {
-		return transport.OfficialJobFollowFrame{}, fmt.Errorf("%w: 非法 sessionId/jobId", transport.ErrJTOfficialBadParam)
-	}
+// jobReadState 是"从保留输出读一页真值"的结果。
+type jobReadState struct {
+	info     transport.JobInfo
+	text     string
+	done     bool
+	exitCode int
+	// anchor 是"总字节数"（绝对偏移的锚点）；earliest 是仍保留的最旧字节。
+	anchor   int64
+	earliest int64
+}
 
-	// 不等待：官方是"有新输出就推"，一次性读取没有等待窗口。
-	// 客户端按 next 轮询（这条路径不会假装在推）。
+// readState 按既有分页把保留输出读回来（有界：最多 1 MiB / 64 页）。
+//
+// 绝对总量的锚点优先用清单里的 JobInfo.Bytes（写出的总字节），
+// 清单没有这一行时退化成"本次读到的字节数"——**不编造**更大的总量。
+func (s *officialJobService) readState(ctx context.Context, sessionID, jobID string) (jobReadState, error) {
 	text, done, exitCode, truncated, err := s.readAll(ctx, sessionID, jobID)
 	if err != nil {
-		return transport.OfficialJobFollowFrame{}, err
+		return jobReadState{}, err
 	}
-
-	anchor := int64(len(text)) // 兜底：清单里没有这一行时，锚点就是本次读到的字节数
+	info := transport.JobInfo{ID: jobID, SessionID: sessionID, Done: done, ExitCode: exitCode, Bytes: len(text)}
 	if s.roster != nil {
-		for _, info := range s.roster(sessionID) {
-			if info.ID == jobID && (info.SessionID == "" || info.SessionID == sessionID) {
-				if int64(info.Bytes) > anchor {
-					anchor = int64(info.Bytes)
-				}
+		for _, candidate := range s.roster(sessionID) {
+			if candidate.ID == jobID && (candidate.SessionID == "" || candidate.SessionID == sessionID) {
+				info = candidate
+				info.Done, info.ExitCode = done, exitCode
 				break
 			}
 		}
+	}
+	anchor := int64(len(text))
+	if int64(info.Bytes) > anchor {
+		anchor = int64(info.Bytes)
 	}
 	earliest := anchor - int64(len(text))
 	if earliest < 0 {
 		earliest = 0
 	}
-
-	// 已经排干且已结算 → 终态投影（官方 status 帧）。
-	if from >= anchor {
-		if done {
-			info := transport.JobInfo{ID: jobID, SessionID: sessionID, Done: true, ExitCode: exitCode, Bytes: int(anchor)}
-			view := officialJobView(info)
-			return transport.OfficialJobFollowFrame{Type: "status", Job: &view}, nil
-		}
-		// 还没新输出：回一帧空 chunks（合法帧），客户端按 next 继续轮询。
-		next := anchor
-		return transport.OfficialJobFollowFrame{Type: "output", Chunks: []transport.OfficialJobChunk{}, Next: &next}, nil
-	}
-
-	frame := transport.OfficialJobFollowFrame{Type: "output"}
-	if from < earliest {
-		// 请求的位置已经被保留窗口淘汰：如实标 lossy + gapBefore。
-		frame.Lossy = true
-		from = earliest
-	}
-	offset := int(from - earliest)
-	if offset > len(text) {
-		offset = len(text)
-	}
-	end := offset + officialFollowPageBytes
-	if end > len(text) {
-		end = len(text)
-	}
-	chunk := transport.OfficialJobChunk{At: from, Text: text[offset:end]}
-	if frame.Lossy {
-		chunk.GapBefore = true
-	}
-	next := from + int64(len(chunk.Text))
-	frame.Chunks = []transport.OfficialJobChunk{chunk}
-	frame.Next = &next
 	_ = truncated
-	return frame, nil
+	return jobReadState{info: info, text: text, done: done, exitCode: exitCode,
+		anchor: anchor, earliest: earliest}, nil
 }
 
 // readAll 按既有分页把保留输出读回来（有界：最多 1 MiB / 64 页）。
@@ -267,643 +268,904 @@ func (s *officialJobService) readAll(ctx context.Context, sessionID, jobID strin
 }
 
 // ---------------------------------------------------------------------------
-// terminal.*：包在真实持久 shell 会话之上
+// job.follow 帧机：opened → output* → status
 // ---------------------------------------------------------------------------
 
-// officialTerminalEntry 是一条官方终端身份。
+// officialJobFollowStream 是 job/follow 的**拉模式帧机**。
 //
-// term 是真实会话（nil = 已关闭/已随宿主重启消失）；retained + screen 是
-// `terminal.retain` 的**真实效果**：身份与屏幕尾部落盘，宿主重启后 list 仍能看到。
-type officialTerminalEntry struct {
-	id        string
+// 每一帧都是"此刻的真实保留窗口"算出来的：offset 是**绝对字节**游标，
+// 帧里的 at/next 就是它的坐标。慢客户端只会让自己这条流落后，不会让宿主的
+// 保留输出无界增长（读的是既有 1 MiB 有界窗口）。
+type officialJobFollowStream struct {
+	svc       *officialJobService
 	sessionID string
-	title     string
-	shell     transport.OfficialTerminalShell
-	cwd       string
-	cols      int
-	rows      int
-
-	term     *bash.Terminal
-	state    string
-	exitCode *int
-	errMsg   string
-
-	closed   bool
-	retained bool
-	screen   string
-	sequence int64
-	holders  int
-
-	createdAt time.Time
-	lastUsed  time.Time
-}
-
-func (e *officialTerminalEntry) key() string { return e.sessionID + "\x00" + e.id }
-
-// officialTerminalAPI 是 terminal.* 的唯一实现。
-//
-// 状态分成两处，各管一件事：
-//   - 内存 entries：进程内的真实会话与元数据；
-//   - `<home>/state/terminals/<sessionId>.json`：布局（id/标题/shell/尺寸）+
-//     **被 retain 的那几条的屏幕尾部**。没有 retain 的条目重启后不落盘：
-//     进程已经不存在，留一个点不开的空壳只会骗人。
-type officialTerminalAPI struct {
-	mu       sync.Mutex
-	home     string
-	bash     *bash.Service
-	cwdOf    func(sessionID string) (string, error)
-	stateDir string
-
-	entries   map[string]*officialTerminalEntry
-	closedIDs map[string]bool
-
-	// unattended 是"没人挂着就回收"的阈值（官方 TerminalRetention.unattendedTimeoutMs）。
-	// 0 = 不回收；retain 的持有者（holders>0）或 retained 的身份永不被回收。
-	unattended time.Duration
-	now        func() time.Time
-
+	jobID     string
+	// offset 是下一个要交付的绝对字节偏移（-1 = 还没定开场锚点）。
+	offset   int64
+	opened   bool
+	finished bool
+	ticker   *time.Ticker
+	// closed 是 Close 唤醒 Next 的通道（Close 可能在另一个 goroutine 调用）。
+	closed   chan struct{}
 	stopOnce sync.Once
-	stop     chan struct{}
-	done     chan struct{}
 }
 
-// newOfficialTerminalAPI 起终端层。svc 必须是 terminal.open 用的**同一个** Service
-// （否则 official 列表与既有终端是两套实例）。
-func newOfficialTerminalAPI(home string, svc *bash.Service, cwdOf func(string) (string, error), unattended time.Duration) (*officialTerminalAPI, error) {
-	if svc == nil {
-		return nil, fmt.Errorf("official terminal：必须复用 terminal.open 的 bash.Service")
-	}
-	if cwdOf == nil {
-		cwdOf = func(string) (string, error) { return "", nil }
-	}
-	a := &officialTerminalAPI{
-		home:       home,
-		bash:       svc,
-		cwdOf:      cwdOf,
-		stateDir:   filepath.Join(home, "state", "terminals"),
-		entries:    map[string]*officialTerminalEntry{},
-		closedIDs:  map[string]bool{},
-		unattended: unattended,
-		now:        time.Now,
-		stop:       make(chan struct{}),
-		done:       make(chan struct{}),
-	}
-	if err := os.MkdirAll(a.stateDir, 0o755); err != nil {
-		return nil, fmt.Errorf("建终端状态目录失败: %w", err)
-	}
-	a.loadLayouts()
-	if unattended > 0 {
-		go a.reclaimLoop()
-	} else {
-		close(a.done)
-	}
-	return a, nil
-}
+var _ transport.OfficialFrameStream = (*officialJobFollowStream)(nil)
 
-// Close 停掉回收协程并关掉本层启动的**全部**终端（只关自己记录的，不扫别人的）。
-func (a *officialTerminalAPI) Close() {
-	a.stopOnce.Do(func() {
-		close(a.stop)
-		if a.unattended > 0 {
-			<-a.done
-		}
+// Close 停掉兜底 ticker 并唤醒正在等待的 Next（幂等）。
+func (s *officialJobFollowStream) Close() {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() {
+		close(s.closed)
 	})
-	a.mu.Lock()
-	targets := make([]*officialTerminalEntry, 0, len(a.entries))
-	for _, e := range a.entries {
-		targets = append(targets, e)
-	}
-	a.mu.Unlock()
-	for _, e := range targets {
-		a.closeEntry(e)
+	if s.ticker != nil {
+		s.ticker.Stop()
 	}
 }
 
-// envInt 读整型环境变量（负/非法值走默认）。
-func officialUnattendedFromEnv() time.Duration {
-	raw := strings.TrimSpace(os.Getenv("DSHD_TERMINAL_UNATTENDED_IDLE"))
-	if raw == "" {
-		return 30 * time.Minute
+// Next 取下一帧：开场 opened、增量 output、终态 status，之后 done。
+func (s *officialJobFollowStream) Next(ctx context.Context) (json.RawMessage, bool, *transport.OfficialStreamFault) {
+	if s.finished {
+		return nil, true, nil
 	}
-	if raw == "0" {
-		return 0
+	if !s.opened {
+		return s.open(ctx)
 	}
-	d, err := time.ParseDuration(raw)
-	if err != nil || d < 0 {
-		return 30 * time.Minute
+	for {
+		state, err := s.svc.readState(ctx, s.sessionID, s.jobID)
+		if err != nil {
+			return nil, false, transport.OfficialJobTerminalStreamFault("job.follow", err)
+		}
+		lossy := false
+		if s.offset < state.earliest {
+			// 请求的位置已被保留窗口淘汰：如实标 lossy + gapBefore。
+			lossy = true
+			s.offset = state.earliest
+		}
+		if s.offset < state.anchor {
+			start := int(s.offset - state.earliest)
+			if start < 0 {
+				start = 0
+			}
+			if start > len(state.text) {
+				start = len(state.text)
+			}
+			end := start + officialFollowPageBytes
+			if end > len(state.text) {
+				end = len(state.text)
+			}
+			chunk := transport.OfficialJobChunk{At: s.offset, Text: state.text[start:end]}
+			if lossy {
+				chunk.GapBefore = true
+			}
+			next := s.offset + int64(len(chunk.Text))
+			s.offset = next
+			raw, merr := json.Marshal(transport.OfficialJobFollowOutput{
+				Type:   "output",
+				Chunks: []transport.OfficialJobChunk{chunk},
+				Next:   next,
+				Lossy:  lossy,
+			})
+			if merr != nil {
+				return nil, false, &transport.OfficialStreamFault{
+					Code: "gateway/internal", Status: 500,
+					Message: "job.follow：序列化 output 帧失败：" + merr.Error(),
+				}
+			}
+			return raw, false, nil
+		}
+		if state.done {
+			view := officialJobView(state.info)
+			view.Output = transport.OfficialJobOutput{Total: state.anchor, Earliest: state.earliest}
+			s.finished = true
+			raw, merr := json.Marshal(transport.OfficialJobFollowStatus{Type: "status", Job: view})
+			if merr != nil {
+				return nil, false, &transport.OfficialStreamFault{
+					Code: "gateway/internal", Status: 500,
+					Message: "job.follow：序列化 status 帧失败：" + merr.Error(),
+				}
+			}
+			return raw, false, nil
+		}
+		select {
+		case <-ctx.Done():
+			s.finished = true
+			return nil, true, nil
+		case <-s.closed:
+			s.finished = true
+			return nil, true, nil
+		case <-s.ticker.C:
+		}
 	}
-	return d
 }
 
-// reclaimLoop 是无人值守回收：没人挂着（holders==0）、没被 retain、且空闲超过阈值的
-// 终端会被真正关掉（回收进程树）。这正是官方 retain 要保护的东西——
-// 没有这条循环，retain 就成了不产生任何效果的空动作。
-func (a *officialTerminalAPI) reclaimLoop() {
-	defer close(a.done)
-	interval := a.unattended / 4
-	if interval < 100*time.Millisecond {
-		interval = 100 * time.Millisecond
+// open 发开场帧（opened）：它把 from 锚点钉死，之后每一帧都从 offset 继续。
+func (s *officialJobFollowStream) open(ctx context.Context) (json.RawMessage, bool, *transport.OfficialStreamFault) {
+	state, err := s.svc.readState(ctx, s.sessionID, s.jobID)
+	if err != nil {
+		return nil, false, transport.OfficialJobTerminalStreamFault("job.follow", err)
 	}
-	if interval > time.Minute {
-		interval = time.Minute
+	from := s.offset // -1 = 请求没给 from
+	if from < 0 || from < state.earliest {
+		from = state.earliest
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	s.offset = from
+	s.opened = true
+	view := officialJobView(state.info)
+	view.Output = transport.OfficialJobOutput{Total: state.anchor, Earliest: state.earliest}
+	raw, merr := json.Marshal(transport.OfficialJobFollowOpened{Type: "opened", Job: view, From: from})
+	if merr != nil {
+		return nil, false, &transport.OfficialStreamFault{
+			Code: "gateway/internal", Status: 500,
+			Message: "job.follow：序列化 opened 帧失败：" + merr.Error(),
+		}
+	}
+	return raw, false, nil
+}
+
+// ---------------------------------------------------------------------------
+// job.list 帧机：whole-set rows 帧
+// ---------------------------------------------------------------------------
+
+// officialJobListPollInterval 是 whole-set 帧的兜底轮询间隔。
+//
+// 为什么轮询：既有 jobs 注册表（serve.go 里的 lr.jobs）没有订阅回调，只有一个
+// 按会话过滤的 roster 快照。官方语义是「打开一帧，之后每次（合并后的）生命周期
+// 提交再发一整份」；在只有拉取快照的数据源上，最诚实的投影就是**轮询 + 内容
+// 比对**：只有可见集合真的变了才发帧，不会定时重复同一份冒充"更新"。
+const officialJobListPollInterval = 100 * time.Millisecond
+
+// officialJobListStream 是 job/list 的**拉模式帧机**。
+//
+// 首帧在 Open 时算好并预取（参数/围栏/能力错误因此在写响应头之前暴露）；
+// 之后只在 roster 的 JSON 表示变化时发帧。**没有自然结束**：ctx 取消或 Close
+// 才结束（官方："The stream has no natural end; the carrier closes it."）。
+type officialJobListStream struct {
+	svc       *officialJobService
+	sessionID string
+	ticker    *time.Ticker
+	closed    chan struct{}
+	stopOnce  sync.Once
+	// opening 是首帧（Open 时算好；取走后为 nil）。
+	opening []byte
+	// last 是上一次已发出的整帧；只用于变更检测，不发给客户端。
+	last []byte
+}
+
+var _ transport.OfficialFrameStream = (*officialJobListStream)(nil)
+
+// Close 停掉兜底 ticker 并唤醒正在等待的 Next（幂等）。
+func (s *officialJobListStream) Close() {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() { close(s.closed) })
+	if s.ticker != nil {
+		s.ticker.Stop()
+	}
+}
+
+// Next 首帧返回 opening，之后只在可见集合真的变化时返回新帧。
+func (s *officialJobListStream) Next(ctx context.Context) (json.RawMessage, bool, *transport.OfficialStreamFault) {
+	if s.opening != nil {
+		frame := s.opening
+		s.opening = nil
+		return frame, false, nil
+	}
 	for {
 		select {
-		case <-a.stop:
-			return
-		case <-ticker.C:
-			a.reclaimOnce()
+		case <-ctx.Done():
+			return nil, true, nil
+		case <-s.closed:
+			return nil, true, nil
+		case <-s.ticker.C:
 		}
-	}
-}
-
-func (a *officialTerminalAPI) reclaimOnce() {
-	a.mu.Lock()
-	var victims []*officialTerminalEntry
-	for _, e := range a.entries {
-		if e.closed || e.retained || e.holders > 0 || e.state != "running" || e.term == nil {
+		raw, err := s.frame()
+		if err != nil {
+			return nil, false, transport.OfficialJobTerminalStreamFault("job.list", err)
+		}
+		if string(raw) == string(s.last) {
 			continue
 		}
-		if a.now().Sub(e.lastUsed) >= a.unattended {
-			victims = append(victims, e)
-		}
-	}
-	a.mu.Unlock()
-	for _, e := range victims {
-		e.closed = true
-		e.retained = false
-		a.closeEntry(e)
+		s.last = raw
+		return raw, false, nil
 	}
 }
 
-// TerminalCreate 起一条**真实** shell 会话并登记官方身份。
-//
-// 官方幂等：同一会话里同一 id 再 create，参数一致就回同一条（不新起进程）；
-// 参数不一致即 400——静默忽略差异会让界面以为尺寸/ shell 已生效。
-func (a *officialTerminalAPI) TerminalCreate(ctx context.Context, sessionID string, req transport.OfficialTerminalCreateRequest) (transport.OfficialWebTerminalInfo, error) {
+// frame 按当前 roster 生成一整帧 whole-set rows（官方 JobListFrame）。
+func (s *officialJobListStream) frame() (json.RawMessage, error) {
+	frame, err := s.svc.JobList(s.sessionID)
+	if err != nil {
+		return nil, err
+	}
+	// 官方 JobListFrame 的 type 只有 'rows'；实现没填就补上，填错就是实现 bug。
+	if frame.Type == "" {
+		frame.Type = "rows"
+	}
+	if frame.Type != "rows" {
+		return nil, fmt.Errorf("job.list：结果帧 type 只能是 rows，实现给了 %q", frame.Type)
+	}
+	if frame.Jobs == nil {
+		frame.Jobs = []transport.OfficialJobView{}
+	}
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		return nil, fmt.Errorf("job.list：序列化 rows 帧失败：%w", err)
+	}
+	return raw, nil
+}
+
+// openOfficialJobListStream 是 job.list 帧机的唯一构造点（HTTP 与 mux 共用）。
+func openOfficialJobListStream(svc *officialJobService, sessionID string) (transport.OfficialFrameStream, error) {
+	if svc == nil || svc.roster == nil {
+		return nil, fmt.Errorf("%w: 这个宿主没有接 jobs 清单", transport.ErrJTOfficialUnsupported)
+	}
 	if !validJobActionPart(sessionID) {
-		return transport.OfficialWebTerminalInfo{}, fmt.Errorf("%w: 非法 sessionId", transport.ErrJTOfficialBadParam)
+		return nil, fmt.Errorf("%w: 非法 sessionId", transport.ErrJTOfficialBadParam)
 	}
-	id := strings.TrimSpace(req.ID)
-	switch {
-	case id == "":
-		return transport.OfficialWebTerminalInfo{}, fmt.Errorf("%w: 缺 id", transport.ErrJTOfficialBadParam)
-	case utf8.RuneCountInString(id) > officialTerminalMaxIDRunes:
-		return transport.OfficialWebTerminalInfo{}, fmt.Errorf("%w: id 最多 %d 个字符",
-			transport.ErrJTOfficialBadParam, officialTerminalMaxIDRunes)
-	case !validJobActionPart(id):
-		return transport.OfficialWebTerminalInfo{}, fmt.Errorf("%w: id 含非法字符（路径分隔符/控制字符）",
-			transport.ErrJTOfficialBadParam)
+	stream := &officialJobListStream{
+		svc: svc, sessionID: sessionID,
+		ticker: time.NewTicker(officialJobListPollInterval),
+		closed: make(chan struct{}),
 	}
-	cols, rows := clampTerminalSize(req.Cols, req.Rows)
-	if cols <= 0 || rows <= 0 {
-		return transport.OfficialWebTerminalInfo{}, fmt.Errorf("%w: cols/rows 必须是正整数", transport.ErrJTOfficialBadParam)
+	raw, err := stream.frame()
+	if err != nil {
+		stream.Close()
+		return nil, err
 	}
-	shell, err := resolveOfficialShell(req.ShellPath)
+	stream.opening = raw
+	stream.last = raw
+	return stream, nil
+}
+
+// ---------------------------------------------------------------------------
+// terminal.attach 帧机：snapshot → output* → state
+// ---------------------------------------------------------------------------
+
+// officialTerminalAttachStream 是 attach 的**拉模式帧机**。
+//
+// 首帧是真实快照（官方 `snapshot`），之后每次从真 PTY 的滚动缓冲按**绝对
+// 字节游标**取增量；进程退出后发 `state` 终态帧并结束。
+//
+// 上行（官方 uplink 的 write/resize）不在 HTTP 面：写入走既有 terminal.input，
+// resize 走 `officialPTYTerminalAPI.Resize`（见 WIRING.md）。所以 snapshot 的
+// `writable` 描述的是**终端本身可写**，不是"这条连接接受上行"。
+type officialTerminalAttachStream struct {
+	api       *officialPTYTerminalAPI
+	sessionID string
+	id        string
+
+	mu       sync.Mutex
+	offset   int64
+	opened   bool
+	finished bool
+	// pending 是上行帧处理完后要**先于**输出帧下发的 ack 帧（官方 result 的
+	// `{type:'ack', sequence, refusal?}`）。
+	pending  []json.RawMessage
+	ticker   *time.Ticker
+	closed   chan struct{}
+	stopOnce sync.Once
+}
+
+var (
+	_ transport.OfficialFrameStream    = (*officialTerminalAttachStream)(nil)
+	_ transport.OfficialTerminalUplink = (*officialTerminalAttachStream)(nil)
+)
+
+// Close 停掉兜底 ticker 并唤醒正在等待的 Next（幂等）。
+func (s *officialTerminalAttachStream) Close() {
+	if s == nil {
+		return
+	}
+	s.stopOnce.Do(func() {
+		close(s.closed)
+	})
+	if s.ticker != nil {
+		s.ticker.Stop()
+	}
+}
+
+// Push 应用一帧官方 uplink（`write` / `resize`），并把 ack 排进下行队列。
+//
+// 官方 uplink 只在 mux 面存在（HTTP 一条请求一条响应，没有上行通道）。
+// 参数错误必须**拒绝**（不静默丢输入）：返回 error，由 mux 适配层翻成
+// gateway/bad-request 错误帧。
+func (s *officialTerminalAttachStream) Push(raw json.RawMessage) error {
+	var frame struct {
+		Type     string `json:"type"`
+		Sequence *int64 `json:"sequence"`
+		Data     string `json:"data"`
+		Cols     int    `json:"cols"`
+		Rows     int    `json:"rows"`
+	}
+	if err := json.Unmarshal(raw, &frame); err != nil {
+		return fmt.Errorf("%w: uplink 帧不是 JSON 对象：%v", transport.ErrJTOfficialBadParam, err)
+	}
+	switch frame.Type {
+	case "write":
+		if frame.Sequence == nil {
+			return fmt.Errorf("%w: write 帧需要 sequence（客户端已消费到的绝对偏移）", transport.ErrJTOfficialBadParam)
+		}
+		if err := inputOfficialTerminal(s.api, s.sessionID, s.id, frame.Data); err != nil {
+			s.enqueueAck(*frame.Sequence, refusalOf(err))
+			return err
+		}
+		// ack.sequence 回显**上行帧自己的序号**（官方客户端按
+		// `ack.sequence == acknowledged+1` 逐帧推进），不是输出字节偏移。
+		s.enqueueAck(*frame.Sequence, "")
+		return nil
+	case "resize":
+		if frame.Sequence == nil {
+			return fmt.Errorf("%w: resize 帧需要 sequence", transport.ErrJTOfficialBadParam)
+		}
+		if frame.Cols <= 0 || frame.Rows <= 0 {
+			return fmt.Errorf("%w: resize 的 cols/rows 必须是正整数（收到 %dx%d）",
+				transport.ErrJTOfficialBadParam, frame.Cols, frame.Rows)
+		}
+		if err := s.api.Resize(s.sessionID, s.id, frame.Cols, frame.Rows); err != nil {
+			s.enqueueAck(*frame.Sequence, refusalOf(err))
+			return err
+		}
+		s.enqueueAck(*frame.Sequence, "")
+		return nil
+	}
+	return fmt.Errorf("%w: uplink 帧 type 只能是 write/resize，收到 %q",
+		transport.ErrJTOfficialBadParam, frame.Type)
+}
+
+// refusalOf 把写失败翻成官方 refusal 词（read-only / not-running）。
+func refusalOf(err error) string {
+	if errors.Is(err, transport.ErrJTOfficialTerminalGone) {
+		return "not-running"
+	}
+	return "read-only"
+}
+
+// enqueueAck 排一帧 ack（refusal 为空 = 接受）。
+func (s *officialTerminalAttachStream) enqueueAck(sequence int64, refusal string) {
+	frame := transport.OfficialTerminalAckFrame{Type: "ack", Sequence: sequence, Refusal: refusal}
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	s.pending = append(s.pending, raw)
+	s.mu.Unlock()
+}
+
+// takePending 取走一帧待发 ack（没有就返回 nil）。
+func (s *officialTerminalAttachStream) takePending() json.RawMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pending) == 0 {
+		return nil
+	}
+	frame := s.pending[0]
+	s.pending = s.pending[1:]
+	return frame
+}
+
+// Next 取下一帧：snapshot → output* → state，之后 done。
+func (s *officialTerminalAttachStream) Next(ctx context.Context) (json.RawMessage, bool, *transport.OfficialStreamFault) {
+	if s.finished {
+		return nil, true, nil
+	}
+	// 上行处理完的 ack 先于输出帧下发（官方：ack 确认提供方已接受）。
+	if ack := s.takePending(); ack != nil {
+		return ack, false, nil
+	}
+	if !s.opened {
+		snap, err := s.api.TerminalAttach(ctx, s.sessionID, s.id)
+		if err != nil {
+			return nil, false, transport.OfficialJobTerminalStreamFault("terminal.attach", err)
+		}
+		s.offset = snap.Sequence
+		s.opened = true
+		raw, merr := json.Marshal(transport.OfficialTerminalSnapshotFrame{
+			Type: "snapshot", Sequence: snap.Sequence, Screen: snap.Screen,
+			Info: snap.Info, Writable: snap.Writable,
+		})
+		if merr != nil {
+			return nil, false, &transport.OfficialStreamFault{
+				Code: "gateway/internal", Status: 500,
+				Message: "terminal.attach：序列化 snapshot 帧失败：" + merr.Error(),
+			}
+		}
+		return raw, false, nil
+	}
+	for {
+		out, err := s.api.Output(s.sessionID, s.id, int(s.offset))
+		if err != nil {
+			return nil, false, transport.OfficialJobTerminalStreamFault("terminal.attach", err)
+		}
+		if out.Output != "" {
+			s.offset = int64(out.Next)
+			raw, merr := json.Marshal(transport.OfficialTerminalOutputFrame{
+				Type: "output", Sequence: int64(out.Next), Data: out.Output,
+			})
+			if merr != nil {
+				return nil, false, &transport.OfficialStreamFault{
+					Code: "gateway/internal", Status: 500,
+					Message: "terminal.attach：序列化 output 帧失败：" + merr.Error(),
+				}
+			}
+			return raw, false, nil
+		}
+		if out.Dead {
+			info, ierr := s.terminalInfo()
+			if ierr != nil {
+				return nil, false, transport.OfficialJobTerminalStreamFault("terminal.attach", ierr)
+			}
+			s.finished = true
+			raw, merr := json.Marshal(transport.OfficialTerminalStateFrame{
+				Type: "state", Info: info, Writable: false,
+			})
+			if merr != nil {
+				return nil, false, &transport.OfficialStreamFault{
+					Code: "gateway/internal", Status: 500,
+					Message: "terminal.attach：序列化 state 帧失败：" + merr.Error(),
+				}
+			}
+			return raw, false, nil
+		}
+		select {
+		case <-ctx.Done():
+			s.finished = true
+			return nil, true, nil
+		case <-s.closed:
+			s.finished = true
+			return nil, true, nil
+		case <-s.ticker.C:
+		}
+	}
+}
+
+// terminalInfo 取终态帧要的 WebTerminalInfo（已退出的身份仍在表里）。
+//
+// 必须先进 screenOf：它把**真实退出码**与 state 同步进 entry（Output 只报
+// Dead，不改元数据）。不同步就会出现"进程已退出、state 还是 running"这种
+// 自相矛盾的终态帧。
+func (s *officialTerminalAttachStream) terminalInfo() (transport.OfficialWebTerminalInfo, error) {
+	entry, err := s.api.lookup(s.sessionID, s.id, "terminal.attach")
 	if err != nil {
 		return transport.OfficialWebTerminalInfo{}, err
 	}
-	cwd := a.sessionCwd(sessionID)
-
-	key := sessionID + "\x00" + id
-	a.mu.Lock()
-	if a.closedIDs[key] {
-		a.mu.Unlock()
-		// 官方：closed identity 不再可用（terminal/unavailable）。
-		return transport.OfficialWebTerminalInfo{}, fmt.Errorf("%w: %s 已在本会话关闭", transport.ErrJTOfficialTerminalGone, id)
-	}
-	if existing := a.entries[key]; existing != nil && !existing.closed {
-		info := existing.info()
-		sameShape := existing.cols == cols && existing.rows == rows &&
-			strings.EqualFold(existing.shell.Path, shell.Path)
-		a.mu.Unlock()
-		if !sameShape {
-			return transport.OfficialWebTerminalInfo{}, fmt.Errorf(
-				"%w: 终端 %s 已存在且参数不同（现在 %d×%d %s），要换参数请先 terminal.close",
-				transport.ErrJTOfficialBadParam, id, existing.cols, existing.rows, existing.shell.Path)
-		}
-		return info, nil
-	}
-	a.mu.Unlock()
-
-	term, err := a.bash.OpenTerminal(cwd)
-	if err != nil {
-		return transport.OfficialWebTerminalInfo{}, fmt.Errorf("起终端失败：%w", err)
-	}
-	if !shell.isDefault {
-		if err := a.execIntoTargetShell(term, shell); err != nil {
-			_ = a.bash.CloseTerminal(term.ID())
-			return transport.OfficialWebTerminalInfo{}, err
-		}
-	}
-
-	now := a.now()
-	entry := &officialTerminalEntry{
-		id: id, sessionID: sessionID,
-		title: defaultTerminalTitle(shell, id),
-		shell: transport.OfficialTerminalShell{Path: shell.Path, Args: shell.Args, Name: shell.Name},
-		cwd:   cwd, cols: cols, rows: rows,
-		term: term, state: "running",
-		createdAt: now, lastUsed: now,
-	}
-	a.mu.Lock()
-	a.entries[entry.key()] = entry
-	a.mu.Unlock()
-	a.persistSession(sessionID)
+	s.api.screenOf(entry)
 	return entry.info(), nil
 }
 
-// TerminalAttach 回一帧真实快照（官方首帧）。
-func (a *officialTerminalAPI) TerminalAttach(ctx context.Context, sessionID, id string) (transport.OfficialTerminalSnapshot, error) {
-	entry, err := a.lookup(sessionID, id, "terminal.attach")
-	if err != nil {
-		return transport.OfficialTerminalSnapshot{}, err
+// ---------------------------------------------------------------------------
+// terminal.retain 帧机：retained 一帧，然后保持打开直到取消
+// ---------------------------------------------------------------------------
+
+// officialTerminalRetainStream 是 retain 的**寿命流**。
+//
+// 官方 result 描述：「a hold acknowledgement followed by an open lifetime
+// stream」。所以这里发完 `{type:'retained'}` 之后**保持打开**，直到调用方取消；
+// 取消即释放保留窗口。
+//
+// 保留效果本身（布局 + 屏幕尾部落盘、不被无人值守回收）由
+// `officialPTYTerminalAPI.TerminalRetain` 负责，不靠这条 HTTP 连接活着：
+// 连接断了不撤销已经写下的保留产物（那是客户端的持有凭证，不是租约）。
+type officialTerminalRetainStream struct {
+	api       *officialPTYTerminalAPI
+	sessionID string
+	id        string
+	sent      bool
+	finished  bool
+	closed    chan struct{}
+	stopOnce  sync.Once
+}
+
+var _ transport.OfficialFrameStream = (*officialTerminalRetainStream)(nil)
+
+// Close 唤醒正在等待的 Next（幂等）。
+func (s *officialTerminalRetainStream) Close() {
+	if s == nil {
+		return
 	}
-	screen, sequence, dead := a.screenOf(entry)
-	writable := entry.state == "running" && !dead
-	if dead {
-		a.markExited(entry)
+	s.stopOnce.Do(func() { close(s.closed) })
+}
+
+// Next 首帧 retained，之后阻塞到 ctx 取消再正常结束。
+func (s *officialTerminalRetainStream) Next(ctx context.Context) (json.RawMessage, bool, *transport.OfficialStreamFault) {
+	if s.finished {
+		return nil, true, nil
 	}
-	return transport.OfficialTerminalSnapshot{
-		Type:     "snapshot",
-		Sequence: sequence,
-		Screen:   screen,
-		Info:     entry.info(),
-		Writable: writable,
-		OneShot:  true,
+	if !s.sent {
+		if err := s.api.TerminalRetain(ctx, s.sessionID, s.id); err != nil {
+			return nil, false, transport.OfficialJobTerminalStreamFault("terminal.retain", err)
+		}
+		s.sent = true
+		raw, merr := json.Marshal(transport.OfficialTerminalRetentionFrame{Type: "retained"})
+		if merr != nil {
+			return nil, false, &transport.OfficialStreamFault{
+				Code: "gateway/internal", Status: 500,
+				Message: "terminal.retain：序列化 retained 帧失败：" + merr.Error(),
+			}
+		}
+		return raw, false, nil
+	}
+	select {
+	case <-ctx.Done():
+	case <-s.closed:
+	}
+	s.finished = true
+	return nil, true, nil
+}
+
+// ---------------------------------------------------------------------------
+// 组装：给 Lead 的一行接线入口
+// ---------------------------------------------------------------------------
+
+// officialJobTerminalService 把 job.* 与 terminal.* 两半合成 transport 要的服务面。
+//
+//   - 内嵌 `*officialJobService`：unary 方法（JobList/JobKill/JobFollow 一页读取）。
+//   - 内嵌 `*officialPTYTerminalAPI`：terminal.* 的 unary 方法（HS-08 的真 ConPTY 后端）。
+//   - 本类型显式实现 `transport.OfficialJobTerminalStreams`：四个流式方法的帧机。
+//
+// 为什么流式方法要显式写在**本类型**上：HS-08 的 `officialPTYTerminalAPI`
+// 提供的是 unary 快照/保留原语；wire 需要的是流。把两者分开，
+// "有没有流能力"就是一个可测试的类型断言（没有就 501），而不是靠实现里猜。
+type officialJobTerminalService struct {
+	*officialJobService
+	*officialPTYTerminalAPI
+}
+
+// 编译期证明：组装出来的服务面同时满足 unary 接口与流能力接口。
+var (
+	_ transport.OfficialJobTerminalService = (*officialJobTerminalService)(nil)
+	_ transport.OfficialJobTerminalStreams = (*officialJobTerminalService)(nil)
+)
+
+// Close 释放终端层（关掉本层起的会话）。
+func (s *officialJobTerminalService) Close() {
+	if s != nil && s.officialPTYTerminalAPI != nil {
+		s.officialPTYTerminalAPI.Close()
+	}
+}
+
+// Handler 返回可以直接挂到 transport.Options 上的路由对象。
+//
+// Lead 的接线只需要三行：构造 → Options 上挂 Handler() → defer Close()。
+func (s *officialJobTerminalService) Handler() *transport.OfficialJobTerminal {
+	return &transport.OfficialJobTerminal{Svc: s}
+}
+
+// OpenJobList 打开 job/list 的帧机（whole-set rows；没有自然结束）。
+func (s *officialJobTerminalService) OpenJobList(ctx context.Context, sessionID string) (transport.OfficialFrameStream, error) {
+	if s == nil {
+		return nil, fmt.Errorf("%w: 官方 job/terminal 服务面是 nil", transport.ErrJTOfficialUnsupported)
+	}
+	return openOfficialJobListStream(s.officialJobService, sessionID)
+}
+
+// OpenJobFollow 打开 job/follow 的帧机（from < 0 = 从仍保留的最旧字节起）。
+func (s *officialJobTerminalService) OpenJobFollow(ctx context.Context, sessionID, jobID string, from int64) (transport.OfficialFrameStream, error) {
+	if s == nil {
+		return nil, fmt.Errorf("%w: 官方 job/terminal 服务面是 nil", transport.ErrJTOfficialUnsupported)
+	}
+	return openOfficialJobFollowStream(s.officialJobService, sessionID, jobID, from)
+}
+
+// OpenTerminalAttach 打开 attach 的帧机（snapshot → output* → state）。
+func (s *officialJobTerminalService) OpenTerminalAttach(ctx context.Context, sessionID, id string) (transport.OfficialFrameStream, error) {
+	if s == nil {
+		return nil, fmt.Errorf("%w: 官方 job/terminal 服务面是 nil", transport.ErrJTOfficialUnsupported)
+	}
+	return openOfficialTerminalAttachStream(s.officialPTYTerminalAPI, sessionID, id)
+}
+
+// OpenTerminalRetain 打开 retain 的寿命流（retained 一帧后保持打开）。
+func (s *officialJobTerminalService) OpenTerminalRetain(ctx context.Context, sessionID, id string) (transport.OfficialFrameStream, error) {
+	if s == nil {
+		return nil, fmt.Errorf("%w: 官方 job/terminal 服务面是 nil", transport.ErrJTOfficialUnsupported)
+	}
+	return openOfficialTerminalRetainStream(s.officialPTYTerminalAPI, sessionID, id)
+}
+
+// ---------------------------------------------------------------------------
+// 生产接线类型（`newOfficialPTYJobTerminalService`）的同一份流能力
+// ---------------------------------------------------------------------------
+//
+// 为什么方法写在本文件而不是 terminal_pty.go：terminal_pty.go 属于 HS-08 的
+// 交付面，T05 的写作用域只到 serve_terminal_api*.go；Go 允许在同一个包的
+// 另一个文件里给类型补方法。这样 **serve.go 当前的构造一行都不用改**，
+// 生产装配就不会再出现"服务面有真流、Options 挂的却是没有流能力的类型"的
+// 静默 501（HS-16D 集成后实际就是这个状态，见 RESULT 的发现记录）。
+
+var _ transport.OfficialJobTerminalStreams = (*officialPTYJobTerminalService)(nil)
+
+// OpenJobList 打开 job/list 的 whole-set rows 帧机。
+func (s *officialPTYJobTerminalService) OpenJobList(ctx context.Context, sessionID string) (transport.OfficialFrameStream, error) {
+	if s == nil {
+		return nil, fmt.Errorf("%w: 官方 job/terminal 服务面是 nil", transport.ErrJTOfficialUnsupported)
+	}
+	return openOfficialJobListStream(s.officialJobService, sessionID)
+}
+
+// OpenJobFollow 打开 job/follow 的帧机（opened → output* → status）。
+func (s *officialPTYJobTerminalService) OpenJobFollow(ctx context.Context, sessionID, jobID string, from int64) (transport.OfficialFrameStream, error) {
+	if s == nil {
+		return nil, fmt.Errorf("%w: 官方 job/terminal 服务面是 nil", transport.ErrJTOfficialUnsupported)
+	}
+	return openOfficialJobFollowStream(s.officialJobService, sessionID, jobID, from)
+}
+
+// OpenTerminalAttach 打开 attach 的帧机（snapshot → output* → state）。
+func (s *officialPTYJobTerminalService) OpenTerminalAttach(ctx context.Context, sessionID, id string) (transport.OfficialFrameStream, error) {
+	if s == nil {
+		return nil, fmt.Errorf("%w: 官方 job/terminal 服务面是 nil", transport.ErrJTOfficialUnsupported)
+	}
+	return openOfficialTerminalAttachStream(s.officialPTYTerminalAPI, sessionID, id)
+}
+
+// OpenTerminalRetain 打开 retain 的寿命流（retained 一帧后保持打开）。
+func (s *officialPTYJobTerminalService) OpenTerminalRetain(ctx context.Context, sessionID, id string) (transport.OfficialFrameStream, error) {
+	if s == nil {
+		return nil, fmt.Errorf("%w: 官方 job/terminal 服务面是 nil", transport.ErrJTOfficialUnsupported)
+	}
+	return openOfficialTerminalRetainStream(s.officialPTYTerminalAPI, sessionID, id)
+}
+
+// openOfficialJobFollowStream 是 job/follow 帧机的唯一构造点。
+func openOfficialJobFollowStream(svc *officialJobService, sessionID, jobID string, from int64) (transport.OfficialFrameStream, error) {
+	if svc == nil {
+		return nil, fmt.Errorf("%w: 这个宿主没有接 jobs 输出", transport.ErrJTOfficialUnsupported)
+	}
+	if !validJobActionPart(sessionID) || !validJobActionPart(jobID) {
+		return nil, fmt.Errorf("%w: 非法 sessionId/jobId", transport.ErrJTOfficialBadParam)
+	}
+	if from < -1 {
+		return nil, fmt.Errorf("%w: from 必须 >= 0（-1 = 未给，从最旧保留字节起）", transport.ErrJTOfficialBadParam)
+	}
+	return &officialJobFollowStream{
+		svc: svc, sessionID: sessionID, jobID: jobID, offset: from,
+		ticker: time.NewTicker(officialFollowPollInterval),
+		closed: make(chan struct{}),
 	}, nil
 }
 
-// TerminalList 列这条会话的**真实存活**终端 + 被 retain 的（含重启后恢复的布局）。
-func (a *officialTerminalAPI) TerminalList(sessionID string) ([]transport.OfficialWebTerminalInfo, error) {
+// openOfficialTerminalAttachStream 是 attach 帧机的唯一构造点。
+func openOfficialTerminalAttachStream(api *officialPTYTerminalAPI, sessionID, id string) (transport.OfficialFrameStream, error) {
+	if api == nil {
+		return nil, fmt.Errorf("%w: 这个宿主没有接真 PTY 终端", transport.ErrJTOfficialUnsupported)
+	}
 	if !validJobActionPart(sessionID) {
 		return nil, fmt.Errorf("%w: 非法 sessionId", transport.ErrJTOfficialBadParam)
 	}
-	a.mu.Lock()
-	entries := make([]*officialTerminalEntry, 0, len(a.entries))
-	for _, e := range a.entries {
-		if e.sessionID == sessionID && !e.closed {
-			entries = append(entries, e)
-		}
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("%w: terminal.attach 缺 id", transport.ErrJTOfficialBadParam)
 	}
-	a.mu.Unlock()
-	// 顺手把已经退出的标出来（真实状态，不是猜的）。
-	for _, e := range entries {
-		if e.state == "running" && e.term != nil {
-			a.screenOf(e) // 内部会把 dead 标进 state
-		}
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].createdAt.Equal(entries[j].createdAt) {
-			return entries[i].id < entries[j].id
-		}
-		return entries[i].createdAt.Before(entries[j].createdAt)
-	})
-	out := make([]transport.OfficialWebTerminalInfo, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, e.info())
-	}
-	return out, nil
+	return &officialTerminalAttachStream{
+		api: api, sessionID: sessionID, id: id,
+		ticker: time.NewTicker(officialFollowPollInterval),
+		closed: make(chan struct{}),
+	}, nil
 }
 
-// TerminalClose 真关：关会话 → 回收整棵进程树；重复 close 成功（官方语义）。
-func (a *officialTerminalAPI) TerminalClose(ctx context.Context, sessionID, id string) error {
+// openOfficialTerminalRetainStream 是 retain 寿命流的唯一构造点。
+func openOfficialTerminalRetainStream(api *officialPTYTerminalAPI, sessionID, id string) (transport.OfficialFrameStream, error) {
+	if api == nil {
+		return nil, fmt.Errorf("%w: 这个宿主没有接真 PTY 终端", transport.ErrJTOfficialUnsupported)
+	}
 	if !validJobActionPart(sessionID) {
-		return fmt.Errorf("%w: 非法 sessionId", transport.ErrJTOfficialBadParam)
+		return nil, fmt.Errorf("%w: 非法 sessionId", transport.ErrJTOfficialBadParam)
 	}
-	key := sessionID + "\x00" + id
-	a.mu.Lock()
-	if a.closedIDs[key] {
-		a.mu.Unlock()
-		return nil // 官方：repeated closes succeed
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("%w: terminal.retain 缺 id", transport.ErrJTOfficialBadParam)
 	}
-	entry := a.entries[key]
-	if entry == nil {
-		a.mu.Unlock()
-		// 不是本会话的终端要报 403 而不是 404：既不能操作，也不该被当成"没有"。
-		if _, err := a.lookup(sessionID, id, "terminal.close"); err != nil {
-			return err
-		}
+	return &officialTerminalRetainStream{
+		api: api, sessionID: sessionID, id: id,
+		closed: make(chan struct{}),
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// 既有 terminal.input/output 的官方 PTY 回落（上行）
+// ---------------------------------------------------------------------------
+//
+// 官方 wire 的上行只在 mux 面（attach 的 write/resize）；本仓 HTTP 面的一问一答
+// 没有上行通道，但既有 additive 的 `terminal.input`/`terminal.output` 只认
+// 管道式 `bash.Service` 的终端，官方 `terminal.create` 起的 PTY 终端它看不见。
+// 这里给宿主一个**按 id 回落**的入口：serve.go 的 Options 闭包先试官方 PTY，
+// 只有"没有这个 id"才回落既有管道终端（接线见 WIRING.md §3）。
+//
+// 官方 id 是调用方给的、按会话作用域，跨会话可能撞名。所以按 id 查找时：
+//   - 唯一命中 → 用它；
+//   - 多会话撞名 → 400（**不猜**；猜错就是往别人会话的终端里打字）；
+//   - 没有 → ErrJTOfficialTerminalGone（调用方据此回落，而不是当成 500）。
+
+// inputOfficialTerminal 按片写 ConPTY 输入（原因见 officialTerminalInputChunkBytes）。
+//
+// 单次**总量**仍受 officialTerminalMaxInputBytes（environment.maxInputBytes）约束：
+// 分片只改变"怎么写"，不放宽协议声明的上限。
+func inputOfficialTerminal(api *officialPTYTerminalAPI, sessionID, id, data string) error {
+	if api == nil {
 		return fmt.Errorf("%w: %s", transport.ErrJTOfficialTerminalGone, id)
-	}
-	entry.closed = true
-	delete(a.entries, key)
-	a.closedIDs[key] = true
-	a.mu.Unlock()
-
-	a.closeEntry(entry)
-	a.persistSession(sessionID)
-	return nil
-}
-
-// closeEntry 关掉真实会话（回收进程树）并把状态落成终态。
-func (a *officialTerminalAPI) closeEntry(entry *officialTerminalEntry) {
-	entry.closed = true
-	if entry.term != nil {
-		native := entry.term.ID()
-		if err := a.bash.CloseTerminal(native); err != nil {
-			// 已经没了不算失败；记下来供排障。
-			entry.errMsg = err.Error()
-		}
-		entry.term = nil
-	}
-	if entry.state == "running" {
-		entry.state = "exited"
-	}
-	if entry.retained {
-		a.persistSession(entry.sessionID)
-	}
-}
-
-// TerminalEnvironment 报**本层真实生效**的限制（每个数都能在代码里找到强制点）。
-func (a *officialTerminalAPI) TerminalEnvironment(ctx context.Context, sessionID string) (transport.OfficialTerminalEnvironment, error) {
-	if !validJobActionPart(sessionID) {
-		return transport.OfficialTerminalEnvironment{}, fmt.Errorf("%w: 非法 sessionId", transport.ErrJTOfficialBadParam)
-	}
-	return transport.OfficialTerminalEnvironment{
-		Cwd:              a.sessionCwd(sessionID),
-		MaxInputBytes:    officialTerminalMaxInputBytes,
-		MaxBufferedBytes: officialTerminalMaxScreenBytes,
-		MaxCols:          officialTerminalMaxCols,
-		MaxRows:          officialTerminalMaxRows,
-		// 没有 PTY 也就没有行滚动缓冲：如实报 0，不编一个 1000。
-		Scrollback: 0,
-	}, nil
-}
-
-// TerminalShells 是**真实探测**：默认 shell 排第一，其余按可执行名去重。
-//
-// 每一项带 supported：只有默认 shell 能真正起（底层模块写死 bash 引导），
-// 其余装了也起不来——给客户端一个可灰掉的标记，比让用户点了报错好。
-func (a *officialTerminalAPI) TerminalShells(ctx context.Context, sessionID string) ([]transport.OfficialTerminalShell, error) {
-	if !validJobActionPart(sessionID) {
-		return nil, fmt.Errorf("%w: 非法 sessionId", transport.ErrJTOfficialBadParam)
-	}
-	return discoverOfficialShells()
-}
-
-// TerminalRename 改标题并落盘（真实持久化：宿主重启后 list 仍是新标题）。
-func (a *officialTerminalAPI) TerminalRename(ctx context.Context, sessionID, id, title string) error {
-	entry, err := a.lookup(sessionID, id, "terminal.rename")
-	if err != nil {
-		return err
-	}
-	title = strings.TrimSpace(title)
-	if title == "" {
-		return fmt.Errorf("%w: title 不能为空", transport.ErrJTOfficialBadParam)
-	}
-	a.mu.Lock()
-	entry.title = title
-	entry.lastUsed = a.now()
-	a.mu.Unlock()
-	a.persistSession(sessionID)
-	return nil
-}
-
-// TerminalRetain 让身份"被保留"：持有期间不被无人值守回收，屏幕尾部与布局落盘。
-func (a *officialTerminalAPI) TerminalRetain(ctx context.Context, sessionID, id string) error {
-	entry, err := a.lookup(sessionID, id, "terminal.retain")
-	if err != nil {
-		return err
-	}
-	screen, sequence, _ := a.screenOf(entry)
-	a.mu.Lock()
-	entry.holders++
-	entry.retained = true
-	if sequence > entry.sequence {
-		entry.sequence = sequence
-	}
-	if screen != "" {
-		entry.screen = screen
-	}
-	entry.lastUsed = a.now()
-	a.mu.Unlock()
-	a.persistSession(sessionID)
-	return nil
-}
-
-// Input 是本层对既有 terminal.input 的等价实现（若 Lead 接线，写入就有上限）。
-//
-// 它把 environment.maxInputBytes 变成真的强制点：超限直接拒绝，不静默截断。
-func (a *officialTerminalAPI) Input(sessionID, id, data string) error {
-	entry, err := a.lookup(sessionID, id, "terminal.input")
-	if err != nil {
-		return err
 	}
 	if len(data) > officialTerminalMaxInputBytes {
 		return fmt.Errorf("%w: 单次写入 %d 字节超过上限 %d",
 			transport.ErrJTOfficialBadParam, len(data), officialTerminalMaxInputBytes)
 	}
-	a.mu.Lock()
-	term := entry.term
-	state := entry.state
-	entry.lastUsed = a.now()
-	a.mu.Unlock()
-	if term == nil || state != "running" {
-		return fmt.Errorf("%w: %s 已不在运行", transport.ErrJTOfficialTerminalGone, id)
-	}
-	if err := term.Input(data); err != nil {
-		a.markExited(entry)
-		return fmt.Errorf("%w: %v", transport.ErrJTOfficialTerminalGone, err)
+	for len(data) > 0 {
+		n := officialTerminalInputChunkBytes
+		if n > len(data) {
+			n = len(data)
+		}
+		if err := api.Input(sessionID, id, data[:n]); err != nil {
+			return err
+		}
+		data = data[n:]
 	}
 	return nil
 }
 
-// Output 是本层对既有 terminal.output 的等价实现（增量读，游标是字节）。
-func (a *officialTerminalAPI) Output(sessionID, id string, since int) (transport.TerminalOutput, error) {
-	entry, err := a.lookup(sessionID, id, "terminal.output")
-	if err != nil {
-		return transport.TerminalOutput{}, err
-	}
-	a.mu.Lock()
-	term := entry.term
-	if term != nil {
-		entry.lastUsed = a.now()
-	}
-	a.mu.Unlock()
-	if term == nil {
-		return transport.TerminalOutput{Output: "", Next: since, Dead: true}, nil
-	}
-	out, next, dead := term.Output(since)
-	if dead {
-		a.markExited(entry)
-	}
-	return transport.TerminalOutput{Output: string(out), Next: next, Dead: dead}, nil
-}
-
-// lookup 取一条属于该会话的终端；不是本会话的一律 403，不泄漏存在性。
-func (a *officialTerminalAPI) lookup(sessionID, id, method string) (*officialTerminalEntry, error) {
-	if !validJobActionPart(sessionID) {
-		return nil, fmt.Errorf("%w: 非法 sessionId", transport.ErrJTOfficialBadParam)
-	}
+// lookupTerminalByID 按只有 id 的口径找官方 PTY 终端。
+func (a *officialPTYTerminalAPI) lookupTerminalByID(id, method string) (*officialPTYEntry, error) {
 	if strings.TrimSpace(id) == "" {
 		return nil, fmt.Errorf("%w: %s 缺 id", transport.ErrJTOfficialBadParam, method)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	entry := a.entries[sessionID+"\x00"+id]
-	if entry == nil || entry.closed {
-		// 别人的终端：先看它在不在别的会话里。
-		for _, other := range a.entries {
-			if other.id == id && other.sessionID != sessionID && !other.closed {
-				return nil, fmt.Errorf("%w: 终端 %s 属于另一个会话", transport.ErrCrossSession, id)
-			}
+	var hit *officialPTYEntry
+	for _, entry := range a.entries {
+		if entry.id != id || entry.closed {
+			continue
 		}
+		if hit != nil && hit.sessionID != entry.sessionID {
+			return nil, fmt.Errorf("%w: 终端 id %q 在多个会话里存在（%s 只给 id，无法判定会话）",
+				transport.ErrJTOfficialBadParam, id, method)
+		}
+		hit = entry
+	}
+	if hit == nil {
 		return nil, fmt.Errorf("%w: %s", transport.ErrJTOfficialTerminalGone, id)
 	}
-	return entry, nil
+	return hit, nil
 }
 
-// screenOf 取有界输出尾部与真实序号（已写出的字节数，单调）。
-func (a *officialTerminalAPI) screenOf(entry *officialTerminalEntry) (string, int64, bool) {
-	a.mu.Lock()
-	term := entry.term
-	a.mu.Unlock()
-	if term == nil {
-		return entry.screen, entry.sequence, entry.state != "running"
-	}
-	// since = 尾部窗口起点：一次只取有界的一段，不把整段历史搬进来。
-	_, total, dead := term.Output(1 << 30)
-	start := 0
-	if total > officialTerminalMaxScreenBytes {
-		start = total - officialTerminalMaxScreenBytes
-	}
-	raw, next, dead2 := term.Output(start)
-	dead = dead || dead2
-	a.mu.Lock()
-	if int64(next) > entry.sequence {
-		entry.sequence = int64(next)
-	}
-	if dead {
-		entry.state = "exited"
-	}
-	a.mu.Unlock()
-	return string(raw), int64(next), dead
-}
-
-// markExited 记下真实退出（退出码拿不到：bash 模块不导出，官方允许 null）。
-func (a *officialTerminalAPI) markExited(entry *officialTerminalEntry) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if entry.state == "running" {
-		entry.state = "exited"
-	}
-}
-
-// info 是 entry → 官方 WebTerminalInfo 的唯一换算点。
-func (e *officialTerminalEntry) info() transport.OfficialWebTerminalInfo {
-	info := transport.OfficialWebTerminalInfo{
-		ID:       e.id,
-		Title:    e.title,
-		Shell:    e.shell,
-		Cwd:      e.cwd,
-		Cols:     e.cols,
-		Rows:     e.rows,
-		State:    e.state,
-		ExitCode: e.exitCode,
-		Error:    e.errMsg,
-	}
-	if info.Shell.Args == nil {
-		info.Shell.Args = []string{}
-	}
-	return info
-}
-
-// sessionCwd 取会话工作目录（v4 头部记的那个）；不知道就回空串，不猜。
-func (a *officialTerminalAPI) sessionCwd(sessionID string) string {
-	if a.cwdOf == nil {
-		return ""
-	}
-	cwd, err := a.cwdOf(sessionID)
-	if err != nil {
-		return ""
-	}
-	return cwd
-}
-
-// clampTerminalSize 把尺寸夹进 environment 报的 maxCols/maxRows。
-func clampTerminalSize(cols, rows int) (int, int) {
-	if cols > officialTerminalMaxCols {
-		cols = officialTerminalMaxCols
-	}
-	if rows > officialTerminalMaxRows {
-		rows = officialTerminalMaxRows
-	}
-	return cols, rows
-}
-
-func defaultTerminalTitle(shell officialShell, id string) string {
-	if name := shell.Name; name != "" {
-		return name
-	}
-	return id
-}
-
-// execIntoTargetShell 让会话真正变成**用户选的那个 shell**。
-//
-// 底层 Service 只会起 bash（写死），但它起的 bash 继承了 stdin/stdout 管道与
-// Job Object 归属。往它的 stdin 写一条 `exec <目标>`，bash 会被目标进程替换：
-// PID 不变、管道不变、进程树归属不变，后续输入由目标 shell 自己解释。
-//
-// 静默失败的风险由调用方兜住：写完等一小会，会话死了就说明 exec 失败（起不来）。
-func (a *officialTerminalAPI) execIntoTargetShell(term *bash.Terminal, shell officialShell) error {
-	if runtime.GOOS != "windows" {
-		return fmt.Errorf("%w: 本宿主只支持默认 shell（%s）；指定其它 shell 的引导只在 Windows 上实现",
-			transport.ErrJTOfficialUnsupported, shell.Path)
-	}
-	line, err := shellExecLine(shell)
+// InputByID 按 id 写官方 PTY 终端（既有 terminal.input 的回落入口）。
+func (a *officialPTYTerminalAPI) InputByID(id, data string) error {
+	entry, err := a.lookupTerminalByID(id, "terminal.input")
 	if err != nil {
 		return err
 	}
-	if err := term.Input(line); err != nil {
-		return fmt.Errorf("把会话切到 %s 失败：%w", shell.Path, err)
+	return inputOfficialTerminal(a, entry.sessionID, id, data)
+}
+
+// OutputByID 按 id 读官方 PTY 终端的增量输出（既有 terminal.output 的回落入口）。
+func (a *officialPTYTerminalAPI) OutputByID(id string, since int) (transport.TerminalOutput, error) {
+	entry, err := a.lookupTerminalByID(id, "terminal.output")
+	if err != nil {
+		return transport.TerminalOutput{}, err
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-		if _, _, dead := term.Output(1 << 30); dead {
-			return fmt.Errorf("%w: 指定的 shell 起不来（%s）：会话已退出", transport.ErrJTOfficialBadParam, shell.Path)
-		}
+	return a.Output(entry.sessionID, id, since)
+}
+
+// InputByID 是官方服务面对既有 terminal.input 的回落入口。
+func (s *officialJobTerminalService) InputByID(id, data string) error {
+	if s == nil || s.officialPTYTerminalAPI == nil {
+		return fmt.Errorf("%w: %s", transport.ErrJTOfficialTerminalGone, id)
+	}
+	return s.officialPTYTerminalAPI.InputByID(id, data)
+}
+
+// OutputByID 是官方服务面对既有 terminal.output 的回落入口。
+func (s *officialJobTerminalService) OutputByID(id string, since int) (transport.TerminalOutput, error) {
+	if s == nil || s.officialPTYTerminalAPI == nil {
+		return transport.TerminalOutput{}, fmt.Errorf("%w: %s", transport.ErrJTOfficialTerminalGone, id)
+	}
+	return s.officialPTYTerminalAPI.OutputByID(id, since)
+}
+
+// InputByID 是生产接线类型对既有 terminal.input 的回落入口。
+func (s *officialPTYJobTerminalService) InputByID(id, data string) error {
+	if s == nil || s.officialPTYTerminalAPI == nil {
+		return fmt.Errorf("%w: %s", transport.ErrJTOfficialTerminalGone, id)
+	}
+	return s.officialPTYTerminalAPI.InputByID(id, data)
+}
+
+// Input 是官方服务面的写入入口：与 InputByID 一样按片写（原因见
+// officialTerminalInputChunkBytes）。声明在外层类型上，调用方（测试、宿主适配、
+// 官方 attach 帧机）都不会绕过分片——绕过去的表现就是长粘贴静默丢字。
+func (s *officialJobTerminalService) Input(sessionID, id, data string) error {
+	if s == nil {
+		return fmt.Errorf("%w: 官方 job/terminal 服务面是 nil", transport.ErrJTOfficialUnsupported)
+	}
+	return inputOfficialTerminal(s.officialPTYTerminalAPI, sessionID, id, data)
+}
+
+// Input 是生产接线类型的写入入口（同上，按片写）。
+func (s *officialPTYJobTerminalService) Input(sessionID, id, data string) error {
+	if s == nil {
+		return fmt.Errorf("%w: 官方 job/terminal 服务面是 nil", transport.ErrJTOfficialUnsupported)
+	}
+	return inputOfficialTerminal(s.officialPTYTerminalAPI, sessionID, id, data)
+}
+
+// OutputByID 是生产接线类型对既有 terminal.output 的回落入口。
+func (s *officialPTYJobTerminalService) OutputByID(id string, since int) (transport.TerminalOutput, error) {
+	if s == nil || s.officialPTYTerminalAPI == nil {
+		return transport.TerminalOutput{}, fmt.Errorf("%w: %s", transport.ErrJTOfficialTerminalGone, id)
+	}
+	return s.officialPTYTerminalAPI.OutputByID(id, since)
+}
+
+// ---------------------------------------------------------------------------
+// mux 上行适配（officialwire.UplinkStream）
+// ---------------------------------------------------------------------------
+
+// officialUplinkStream 把 mux 的上行 item 转给 transport 的 attach 上行能力。
+//
+// 官方 uplink 只在 `/api/remote.mux` 的 open 流上存在：客户端发 write/resize，
+// 宿主处理后回 ack（帧机已实现），拒绝时返回错误帧——**不静默丢输入**。
+// Lead 只需在 serve_official_wire_stream.go 的 Open 返回处把
+// `&officialMuxStream{stream: stream}` 换成 `wrapOfficialMuxUplinkStream(...)`
+// （见 WIRING.md §2）；适配器放在本文件是为了与帧机共用同一份错误翻译。
+type officialUplinkStream struct {
+	officialwire.Stream
+	uplink transport.OfficialTerminalUplink
+}
+
+// Push 把一帧上行转给 attach 帧机；拒绝要变成错误帧，不能吞掉。
+func (s *officialUplinkStream) Push(value json.RawMessage) *officialwire.Error {
+	if s == nil || s.uplink == nil {
+		return officialwire.NewError("gateway/method-unavailable", "这条流不接受上行数据", nil)
+	}
+	if err := s.uplink.Push(value); err != nil {
+		return officialwire.NewError("gateway/bad-request", err.Error(),
+			map[string]any{"reason": "uplink-rejected"})
 	}
 	return nil
 }
 
-// shellExecLine 造 "exec '<msys path>' <args>\n"。
-func shellExecLine(shell officialShell) (string, error) {
-	path := msysPath(shell.Path)
-	if path == "" {
-		return "", fmt.Errorf("%w: shellPath 为空", transport.ErrJTOfficialBadParam)
+// wrapOfficialMuxUplinkStream 只给真正实现上行能力的流加 Push。
+// 其它流原样返回：mux 对它们仍回"这条流不接受上行数据"，行为不变。
+func wrapOfficialMuxUplinkStream(stream *officialMuxStream) officialwire.Stream {
+	if stream == nil {
+		return nil
 	}
-	quoted := "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
-	parts := []string{"exec", quoted}
-	for _, arg := range shell.Args {
-		parts = append(parts, "'"+strings.ReplaceAll(arg, "'", `'\''`)+"'")
+	if uplink, ok := stream.stream.(transport.OfficialTerminalUplink); ok {
+		return &officialUplinkStream{Stream: stream, uplink: uplink}
 	}
-	return strings.Join(parts, " ") + "\n", nil
+	return stream
 }
 
-// msysPath 把 Windows 路径转成 MSYS bash 认的形式（C:\x\y.exe → /c/x/y.exe）。
-func msysPath(p string) string {
-	p = strings.TrimSpace(p)
-	if p == "" {
-		return ""
+// newOfficialJobTerminalService 组装官方 11 个方法的服务面（**真 PTY 后端**）。
+//
+// 参数全部来自既有 serve() 里的对象，本函数不新建任何执行层：
+//   - svc：terminal.open 用的那个 *bash.Service（必须同一个）；
+//   - jobs：既有 jobActionBroker（围栏/映像校验/409 都在里面）；
+//   - roster：按会话给后台任务清单（serve.go 里从 lr.jobs 过滤）；
+//   - cwdOf：会话工作目录（serve.go 里是 src.Cwd）。
+//
+// serve.go 那一行**不用改**：它一直调本函数，本任务把实现从管道式换成真 PTY。
+func newOfficialJobTerminalService(
+	home string,
+	svc *bash.Service,
+	jobs *jobActionBroker,
+	roster func(sessionID string) []transport.JobInfo,
+	cwdOf func(sessionID string) (string, error),
+) (*officialJobTerminalService, error) {
+	terminals, err := newOfficialPTYTerminalAPI(home, svc, cwdOf, officialPTYScrollbackRowsFromEnv())
+	if err != nil {
+		return nil, err
 	}
-	p = strings.ReplaceAll(p, `\`, "/")
-	if len(p) >= 2 && p[1] == ':' {
-		drive := strings.ToLower(p[:1])
-		rest := p[2:]
-		if rest == "" {
-			rest = "/"
-		}
-		if !strings.HasPrefix(rest, "/") {
-			rest = "/" + rest
-		}
-		return "/" + drive + rest
+	jobsSide := &officialJobService{roster: roster}
+	if jobs != nil {
+		jobsSide.output = jobs.Output
+		jobsSide.stop = jobs.Stop
 	}
-	return p
+	return &officialJobTerminalService{officialJobService: jobsSide, officialPTYTerminalAPI: terminals}, nil
 }
+
+// ---------------------------------------------------------------------------
+// 终端 shell 探测（PTY 后端与既有 unary 方法共用同一份判据）
+// ---------------------------------------------------------------------------
 
 // officialShell 是探测结果 + 它是不是本宿主真正能起的那个。
 type officialShell struct {
@@ -929,7 +1191,7 @@ func resolveOfficialShell(raw string) (officialShell, error) {
 		return def, nil
 	}
 	// 能探测到但起不来：底层模块写死 bash 引导，这里如实回 501。
-	// （Windows 上 execIntoTargetShell 会真的切过去；这条分支留给非 Windows。）
+	// （Windows 上 PTY 后端会真的起目标 shell；这条分支留给非 Windows。）
 	if runtime.GOOS != "windows" {
 		return officialShell{}, fmt.Errorf("%w: 本宿主只支持默认 shell（%s），收到 %s",
 			transport.ErrJTOfficialUnsupported, def.Path, abs)
@@ -1011,8 +1273,9 @@ func resolveShellPath(raw string) (string, error) {
 // shellArgsFor 与官方 shells.js 的 profile() 对齐：
 // cmd → []；pwsh/powershell → ["-NoLogo"]；其余 → ["-i"]。
 //
-// 本宿主的默认 shell 是 bash，但**不能**给它 -i：底层会话是 `bash --noprofile
-// --norc -s`（非交互读 stdin），加 -i 会让提示符与作业控制进到输出里。
+// 本宿主的默认 shell 是 bash，但**不能**给它 -i：PTY 的交互性来自 tty 本身，
+// 加 -i 会让提示符与作业控制进到输出里（官方 profile() 的意图是"别让 shell
+// 读 profile"，不是"强行交互"）。
 func shellArgsFor(path string) []string {
 	kind := strings.ToLower(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
 	switch kind {
@@ -1033,7 +1296,7 @@ func discoverOfficialShells() ([]transport.OfficialTerminalShell, error) {
 		return nil, fmt.Errorf("%w: %v", transport.ErrJTOfficialUnsupported, err)
 	}
 	// supported 的判据与 create 完全一致：默认 shell 永远可起；非默认只在
-	// Windows 上可起（用 bash 的 exec 引导切换），其它平台 create 会明确 501。
+	// Windows 上可起（PTY 直接起目标 shell），其它平台 create 会明确 501。
 	// 两处判据必须同源，否则界面会把"点了必报错"的项画成可用。
 	supportedFor := func(isDefault bool) bool { return isDefault || runtime.GOOS == "windows" }
 	supported := supportedFor(true)
@@ -1064,6 +1327,25 @@ func discoverOfficialShells() ([]transport.OfficialTerminalShell, error) {
 	return out, nil
 }
 
+// defaultTerminalTitle 是 create 没给标题时的默认值（官方是 shell 名）。
+func defaultTerminalTitle(shell officialShell, id string) string {
+	if name := shell.Name; name != "" {
+		return name
+	}
+	return id
+}
+
+// clampTerminalSize 把尺寸夹进 environment 报的 maxCols/maxRows。
+func clampTerminalSize(cols, rows int) (int, int) {
+	if cols > officialTerminalMaxCols {
+		cols = officialTerminalMaxCols
+	}
+	if rows > officialTerminalMaxRows {
+		rows = officialTerminalMaxRows
+	}
+	return cols, rows
+}
+
 // ---------------------------------------------------------------------------
 // 布局落盘（rename/retain 的"真持久化"）
 // ---------------------------------------------------------------------------
@@ -1089,150 +1371,6 @@ type persistedTerminalIdentity struct {
 	SavedAt int64  `json:"savedAt"`
 }
 
-func (a *officialTerminalAPI) layoutPath(sessionID string) string {
-	return filepath.Join(a.stateDir, sessionID+".json")
-}
-
-// persistSession 写这条会话的布局：只写**值得保留**的条目。
-//
-// 规则（为什么不是全写）：
-//   - retained：写（含屏幕尾部）——这就是 retain 的意义；
-//   - 运行中但没 retain：不写。宿主重启后进程一定没了，写下来只会在列表里
-//     留一个点不开的空壳；
-//   - 已关闭：不写。
-func (a *officialTerminalAPI) persistSession(sessionID string) {
-	if !validJobActionPart(sessionID) {
-		return
-	}
-	a.mu.Lock()
-	layout := persistedTerminalLayout{Version: 1, SessionID: sessionID}
-	for _, e := range a.entries {
-		if e.sessionID != sessionID || e.closed || !e.retained {
-			continue
-		}
-		layout.Terminals = append(layout.Terminals, persistedTerminalIdentity{
-			ID: e.id, Title: e.title,
-			ShellPath: e.shell.Path, ShellName: e.shell.Name, ShellArgs: e.shell.Args,
-			Cwd: e.cwd, Cols: e.cols, Rows: e.rows,
-			Retained: true, Screen: e.screen, SavedAt: a.now().UnixMilli(),
-		})
-	}
-	path := a.layoutPath(sessionID)
-	a.mu.Unlock()
-
-	if len(layout.Terminals) == 0 {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(os.Stderr, "transport: 删终端布局 %s 失败: %v\n", path, err)
-		}
-		return
-	}
-	sort.Slice(layout.Terminals, func(i, j int) bool { return layout.Terminals[i].ID < layout.Terminals[j].ID })
-	if len(layout.Terminals) > officialRetainedPerSession {
-		// 有界池：留最近保存的那些（SavedAt 大的在前）。
-		sort.Slice(layout.Terminals, func(i, j int) bool { return layout.Terminals[i].SavedAt > layout.Terminals[j].SavedAt })
-		layout.Terminals = layout.Terminals[:officialRetainedPerSession]
-	}
-	raw, err := json.MarshalIndent(layout, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "transport: 编终端布局失败: %v\n", err)
-		return
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "transport: 写终端布局 %s 失败: %v\n", tmp, err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		fmt.Fprintf(os.Stderr, "transport: 提交终端布局 %s 失败: %v\n", path, err)
-	}
-}
-
-// loadLayouts 恢复被 retain 过的身份：进程已经不在（宿主重启过），
-// 所以状态如实是 exited、writable=false、exitCode=null，屏幕尾部就是当时留下的那份。
-func (a *officialTerminalAPI) loadLayouts() {
-	entries, err := os.ReadDir(a.stateDir)
-	if err != nil {
-		return
-	}
-	for _, de := range entries {
-		if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(a.stateDir, de.Name()))
-		if err != nil {
-			continue
-		}
-		var layout persistedTerminalLayout
-		if err := json.Unmarshal(raw, &layout); err != nil {
-			fmt.Fprintf(os.Stderr, "transport: 终端布局 %s 损坏，忽略: %v\n", de.Name(), err)
-			continue
-		}
-		if !validJobActionPart(layout.SessionID) {
-			continue
-		}
-		for _, t := range layout.Terminals {
-			if !t.Retained || !validJobActionPart(t.ID) {
-				continue
-			}
-			entry := &officialTerminalEntry{
-				id: t.ID, sessionID: layout.SessionID, title: t.Title,
-				shell: transport.OfficialTerminalShell{Path: t.ShellPath, Args: t.ShellArgs, Name: t.ShellName},
-				cwd:   t.Cwd, cols: t.Cols, rows: t.Rows,
-				state: "exited", retained: true, screen: t.Screen,
-				errMsg:    "宿主重启：终端进程已不存在（保留的是布局与屏幕尾部）",
-				createdAt: time.UnixMilli(t.SavedAt), lastUsed: time.UnixMilli(t.SavedAt),
-			}
-			a.entries[entry.key()] = entry
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 组装：给 Lead 的一行接线入口
-// ---------------------------------------------------------------------------
-
-// officialJobTerminalService 把 job.* 与 terminal.* 两半合成 transport 要的服务面。
-type officialJobTerminalService struct {
-	*officialJobService
-	*officialTerminalAPI
-}
-
-// Close 释放终端层（关掉本层起的会话 + 停回收协程）。
-func (s *officialJobTerminalService) Close() {
-	if s != nil && s.officialTerminalAPI != nil {
-		s.officialTerminalAPI.Close()
-	}
-}
-
-// Handler 返回可以直接挂到 transport.Options 上的路由对象。
-//
-// Lead 的接线只需要三行：构造 → Options 上挂 Handler() → defer Close()。
-func (s *officialJobTerminalService) Handler() *transport.OfficialJobTerminal {
-	return &transport.OfficialJobTerminal{Svc: s}
-}
-
-// newOfficialJobTerminalService 组装官方 11 个方法的服务面。
-//
-// 参数全部来自既有 serve() 里的对象，本函数不新建任何执行层：
-//   - svc：terminal.open 用的那个 *bash.Service（必须同一个）；
-//   - jobs：既有 jobActionBroker（围栏/映像校验/409 都在里面）；
-//   - roster：按会话给后台任务清单（serve.go 里从 lr.jobs 过滤）；
-//   - cwdOf：会话工作目录（serve.go 里是 src.Cwd）。
-func newOfficialJobTerminalService(
-	home string,
-	svc *bash.Service,
-	jobs *jobActionBroker,
-	roster func(sessionID string) []transport.JobInfo,
-	cwdOf func(sessionID string) (string, error),
-) (*officialJobTerminalService, error) {
-	terminals, err := newOfficialTerminalAPI(home, svc, cwdOf, officialUnattendedFromEnv())
-	if err != nil {
-		return nil, err
-	}
-	jobsSide := &officialJobService{roster: roster}
-	if jobs != nil {
-		jobsSide.output = jobs.Output
-		jobsSide.stop = jobs.Stop
-	}
-	return &officialJobTerminalService{officialJobService: jobsSide, officialTerminalAPI: terminals}, nil
-}
+// 说明：布局的编解码类型在这里，读写由 `officialPTYTerminalAPI` 的
+// persistSession/loadLayouts 负责（terminal_pty.go）。以前管道式后端也有一份
+// 同名的 persist/load，HS-16D 删掉了它——两套后端写同一份布局会互相覆盖。

@@ -16,6 +16,7 @@ package pluginmgr
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 )
 
 // errInstallCancelled 是取消的哨兵错误：安装路径见到它就回滚并把它翻译成
@@ -228,16 +229,34 @@ func (m *Manager) registerJob(requestID string) (*InstallJob, error) {
 }
 
 func (m *Manager) finishJob(requestID string, job *InstallJob, outcome InstallOutcome) {
-	job.finish(outcome)
 	if requestID == "" {
+		// 空 id 不登记，也就没有注销动作；结果仍要发布给 job.Wait。
+		job.finish(outcome)
 		return
 	}
+	// 完成发布与注销必须在**同一个 jobsMu 临界区**：先 close(done) 再删 map
+	// 会让"installBundle 返回后立刻 WaitInstall"看到 active:true + 已完成结果。
+	// 反过来先删再 finish 又会在真正完成前暴露 not-running。锁内一次做完，
+	// WaitInstall 的 map 查询要么在完成前拿到 job 并等结果（在飞语义），
+	// 要么在释放锁后拿不到 job（not-running）；没有中间态。
 	m.jobsMu.Lock()
+	defer m.jobsMu.Unlock()
+	job.finish(outcome)
+	if hook := finishJobPublishedHook.Load(); hook != nil {
+		(*hook)(requestID)
+	}
 	if m.jobs[requestID] == job {
 		delete(m.jobs, requestID)
 	}
-	m.jobsMu.Unlock()
 }
+
+// finishJobPublishedHook 是**仅供确定性并发测试**的观察点：在 jobsMu 内、
+// job.finish(outcome) 之后、注销 map 之前调用。生产路径恒为 nil。
+//
+// 有了它，测试可以在"结果已发布"这一刻停住并证明此时 jobsMu 仍被持有：
+// 任何 WaitInstall 都不可能越过临界区看到 active:true；去掉它测试仍然
+// 语义正确（只是无法稳定复现旧实现的窗口）。
+var finishJobPublishedHook atomic.Pointer[func(requestID string)]
 
 func (m *Manager) runInstallJob(control *installControl, source string, enable bool, target string) InstallOutcome {
 	m.mu.Lock()

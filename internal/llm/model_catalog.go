@@ -112,6 +112,14 @@ type ModelProviderConfig struct {
 // Credential 返回 stored credential 或 apiKeyEnv 同名环境变量的解析结果。
 func (c ModelProviderConfig) Credential() string { return c.credential }
 
+// Client 用这份 provider 配置造一个带协议的客户端。
+//
+// 轮次的真实接线应走这里（而不是 llm.New）：API 决定输出上限拼写与
+// provider 扩展字段归属；漏掉它会把 catalog 里写的 api 静默退化成默认协议。
+func (c ModelProviderConfig) Client() *Client {
+	return NewWithAPI(c.BaseURL, c.credential, c.API)
+}
+
 type modelCatalogDocument struct {
 	Version     int               `json:"version"`
 	Revision    int64             `json:"revision"`
@@ -717,10 +725,10 @@ func (s *ModelCatalogStore) ResolveProvider(id string) (ModelProviderConfig, err
 		return ModelProviderConfig{}, nil
 	}
 	if info.API == "" {
-		info.API = "openai-completions"
+		info.API = ProviderAPIOpenAICompletions
 	}
-	if info.API != "openai-completions" {
-		return ModelProviderConfig{}, modelCatalogError("invalid_config", "模型 %q 的 api=%q 不受 runner 支持", id, info.API)
+	if _, err := LookupProviderAdapter(info.API); err != nil {
+		return ModelProviderConfig{}, modelCatalogError("invalid_config", "模型 %q 的 api=%q 不受 runner 支持：%v", id, info.API, err)
 	}
 	if err := validateCatalogBaseURL(info.BaseURL); err != nil {
 		return ModelProviderConfig{}, modelCatalogError("invalid_config", "模型 %q 缺合法 baseURL: %v", id, err)
@@ -751,10 +759,11 @@ func (s *ModelCatalogStore) Test(ctx context.Context, id string, override ModelT
 		credential = strings.TrimSpace(*override.Credential)
 	}
 	if info.API == "" {
-		info.API = "openai-completions"
+		info.API = ProviderAPIOpenAICompletions
 	}
-	if info.API != "openai-completions" {
-		return ModelTestResult{}, modelCatalogError("invalid_config", "模型 %q 的 api=%q 不受当前测试端支持", id, info.API)
+	adapter, err := LookupProviderAdapter(info.API)
+	if err != nil {
+		return ModelTestResult{}, modelCatalogError("invalid_config", "模型 %q 的 api=%q 不受当前测试端支持：%v", id, info.API, err)
 	}
 	if err := validateCatalogBaseURL(info.BaseURL); err != nil {
 		return ModelTestResult{}, modelCatalogError("invalid_config", "模型 %q 缺合法 baseURL: %v", id, err)
@@ -766,7 +775,9 @@ func (s *ModelCatalogStore) Test(ctx context.Context, id string, override ModelT
 	// 这条诊断请求同样只发标准字段；唯一要谈的可选字段是限制输出的那个
 	// （max_tokens / max_completion_tokens），协商规则与真实会话请求完全一致。
 	profile := defaultWireProfile()
-	if known, ok := knownEndpointCompat(info.BaseURL); ok {
+	if pinned := adapter.MaxTokensField(); pinned != "" {
+		profile.maxTokensField = pinned
+	} else if known, ok := knownEndpointCompat(info.BaseURL); ok {
 		profile = known
 	}
 	testCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -799,7 +810,8 @@ func (s *ModelCatalogStore) Test(ctx context.Context, id string, override ModelT
 		}
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		_ = resp.Body.Close()
-		if next, _, ok := negotiateWire(profile, wireSent{maxTokens: true}, resp.StatusCode, string(responseBody)); ok && attempt < maxWireAttempts {
+		if next, _, ok := negotiateWire(profile, wireSent{maxTokens: true}, resp.StatusCode, string(responseBody)); ok &&
+			attempt < maxWireAttempts && wireChangeAllowed(adapter, next) {
 			profile = next
 			continue
 		}
@@ -1027,8 +1039,12 @@ func validateCatalogFields(fields []catalogObjectField) (catalogModelInfo, error
 			}
 		case "api":
 			var value string
-			if err := json.Unmarshal(field.value, &value); err != nil || value != "openai-completions" {
-				return catalogModelInfo{}, modelCatalogError("invalid_field", "model.api 只支持 openai-completions")
+			if err := json.Unmarshal(field.value, &value); err != nil {
+				return catalogModelInfo{}, modelCatalogError("invalid_field", "model.api 必须是 string")
+			}
+			if _, err := LookupProviderAdapter(value); err != nil {
+				return catalogModelInfo{}, modelCatalogError("invalid_field",
+					"model.api=%q 未注册；已注册的 provider 协议: %s", value, strings.Join(ProviderAdapterAPIs(), ", "))
 			}
 		case "baseURL":
 			var value string

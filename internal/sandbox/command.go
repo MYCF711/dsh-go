@@ -24,5 +24,5 @@ func (p *Policy) EvaluateCommand(req CommandRequest) (Decision, error) {
 	if strings.TrimSpace(req.Cwd) == "" {
 		return Decision{}, fmt.Errorf("%w: cwd 为空", ErrMissingContext)
 	}
-	return p.evaluate(req.Call, OperationExecute, req.Cwd)
+	return p.evaluate(req.Call, OperationExecute, req.Cwd, req.Command)
 }

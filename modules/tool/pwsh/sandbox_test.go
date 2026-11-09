@@ -107,16 +107,20 @@ func TestSandboxApprovedOneShotOnlyAppliesToThatCall(t *testing.T) {
 	gate := gateFor(t, sandbox.ModeWorkspaceWrite, ws)
 	tool := &Tool{gate: gate}
 	ctx := ctxWithSession("session-ww")
+	spawns := countSpawns(t)
 
 	first := filepath.Join(outside, "pwsh-approved.txt")
 	second := filepath.Join(outside, "pwsh-second.txt")
 	command := "Set-Content -Path '"
-	pending, err := gate.EvaluateCommand(ctx, command, outside, sandbox.PermissionDangerFullAccess)
+	// 审批绑定的是命令原文：先定下完整命令，再用**同一条**命令求值/执行。
+	fullFirst := command + strings.ReplaceAll(first, `\`, "/") + "' -Value ok"
+	pending, err := gate.EvaluateCommand(ctx, fullFirst, outside, sandbox.PermissionDangerFullAccess)
 	if err != nil || pending.Action != sandbox.ActionNeedsApproval || pending.Approval == nil {
 		t.Fatalf("未审批判定 = %+v, %v", pending, err)
 	}
-	approvedCtx := sandbox.WithEscalation(ctx, pending.Approval.Decide(true))
-	if _, err := tool.Exec(approvedCtx, pwshArgs(t, command+strings.ReplaceAll(first, `\`, "/")+"' -Value ok",
+	// 批准绑定的是这一次调用：重试时把同一个 call id 带回去。
+	approvedCtx := sandbox.WithCallID(sandbox.WithEscalation(ctx, pending.Approval.Decide(true)), pending.CallID)
+	if _, err := tool.Exec(approvedCtx, pwshArgs(t, fullFirst,
 		outside, map[string]any{"sandbox_permissions": "danger-full-access"})); err != nil {
 		t.Fatalf("已批准的一次性升级应执行: %v", err)
 	}
@@ -130,6 +134,20 @@ func TestSandboxApprovedOneShotOnlyAppliesToThatCall(t *testing.T) {
 	}
 	if _, statErr := os.Stat(second); statErr == nil {
 		t.Fatal("一次性批准漂移到了后续调用")
+	}
+	// 同一份批准套到另一条命令：绑定不一致，拒绝且零进程。
+	drifted := filepath.Join(outside, "pwsh-drifted.txt")
+	spawnsBefore := *spawns
+	_, err = tool.Exec(approvedCtx, pwshArgs(t, command+strings.ReplaceAll(drifted, `\`, "/")+"' -Value no",
+		outside, map[string]any{"sandbox_permissions": "danger-full-access"}))
+	if !errors.Is(err, sandbox.ErrApprovalBinding) {
+		t.Fatalf("批准漂到另一条命令必须 ErrApprovalBinding，得到 %v", err)
+	}
+	if *spawns != spawnsBefore {
+		t.Fatal("绑定失败时仍然构造了进程")
+	}
+	if _, statErr := os.Stat(drifted); statErr == nil {
+		t.Fatal("批准被另一条命令继承了")
 	}
 }
 

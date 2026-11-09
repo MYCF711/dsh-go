@@ -223,6 +223,10 @@ type Gate struct {
 
 	mu       sync.Mutex
 	policies map[string]*Policy
+	// 每会话覆盖：ACP 的 session/set_mode 与 additionalDirectories 落在这里。
+	// 未设置的会话沿用进程档位；覆盖只影响那一个会话，A/B 之间没有共享状态。
+	modes  map[string]Mode
+	extras map[string][]string
 }
 
 // NewGate 校验进程策略上下文。未知档位、空/无效根都 fail-loud。
@@ -241,7 +245,10 @@ func NewGate(cfg ProcessConfig) (*Gate, error) {
 			return nil, err
 		}
 	}
-	return &Gate{cfg: cfg, policies: make(map[string]*Policy)}, nil
+	return &Gate{
+		cfg: cfg, policies: make(map[string]*Policy),
+		modes: make(map[string]Mode), extras: make(map[string][]string),
+	}, nil
 }
 
 // Mode 返回闸门的进程级档位。
@@ -258,11 +265,19 @@ func (g *Gate) policyFor(sessionID string) (*Policy, error) {
 	if p, ok := g.policies[sessionID]; ok {
 		return p, nil
 	}
+	mode := g.cfg.Mode
+	if override, ok := g.modes[sessionID]; ok {
+		mode = override
+	}
+	extra := append([]string(nil), g.cfg.ExtraReadRoots...)
+	if override, ok := g.extras[sessionID]; ok {
+		extra = append(extra, override...)
+	}
 	p, err := New(Config{
 		SessionID:      sessionID,
-		Mode:           g.cfg.Mode,
+		Mode:           mode,
 		WorkspaceRoot:  g.cfg.WorkspaceRoot,
-		ExtraReadRoots: append([]string(nil), g.cfg.ExtraReadRoots...),
+		ExtraReadRoots: extra,
 		HomeDir:        g.cfg.HomeDir,
 	})
 	if err != nil {
@@ -270,6 +285,103 @@ func (g *Gate) policyFor(sessionID string) (*Policy, error) {
 	}
 	g.policies[sessionID] = p
 	return p, nil
+}
+
+// WorkspaceRoot 返回进程级 canonical 工作区根。
+func (g *Gate) WorkspaceRoot() string {
+	if g == nil {
+		return ""
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.cfg.WorkspaceRoot
+}
+
+// SetWorkspaceRoot 重设进程级工作区根（ACP 在首个会话 adoptWorkspace 时用）。
+//
+// 一个进程只服务一个工作区：这是 ACP 的既有约束（见 adoptWorkspace），
+// 所以这里不是"改某个会话的根"，而是重建整张表；旧 Policy 的缓存必须清空。
+func (g *Gate) SetWorkspaceRoot(root string) error {
+	if g == nil {
+		return fmt.Errorf("%w: nil gate", ErrMissingContext)
+	}
+	canonical, err := canonicalRoot("workspace", root)
+	if err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cfg.WorkspaceRoot = canonical
+	g.policies = make(map[string]*Policy)
+	return nil
+}
+
+// SetSessionMode 给一个会话设定 sandbox 档位（未设置时沿用进程档位）。
+// 它只影响这一个会话；不同会话的 Policy 不共享任何可变状态。
+func (g *Gate) SetSessionMode(sessionID string, mode Mode) error {
+	if g == nil {
+		return fmt.Errorf("%w: nil gate", ErrMissingContext)
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("%w: session id 为空", ErrMissingContext)
+	}
+	if err := ValidateMode(mode); err != nil {
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.modes[sessionID] = mode
+	delete(g.policies, sessionID)
+	return nil
+}
+
+// SessionMode 返回会话当前生效的档位（显式覆盖优先）。
+func (g *Gate) SessionMode(sessionID string) Mode {
+	if g == nil {
+		return ""
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if override, ok := g.modes[sessionID]; ok {
+		return override
+	}
+	return g.cfg.Mode
+}
+
+// SetSessionExtraReadRoots 给一个会话追加只读根（ACP additionalDirectories）。
+// 每个根都必须已经是存在的目录；未知形态 fail-loud，不静默丢弃。
+func (g *Gate) SetSessionExtraReadRoots(sessionID string, dirs []string) error {
+	if g == nil {
+		return fmt.Errorf("%w: nil gate", ErrMissingContext)
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("%w: session id 为空", ErrMissingContext)
+	}
+	canonical := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		root, err := canonicalRoot("extra read", dir)
+		if err != nil {
+			return err
+		}
+		canonical = append(canonical, root)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.extras[sessionID] = canonical
+	delete(g.policies, sessionID)
+	return nil
+}
+
+// ForgetSession 清掉一个会话的全部覆盖与缓存（会话关闭/删除时调用）。
+func (g *Gate) ForgetSession(sessionID string) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.policies, sessionID)
+	delete(g.modes, sessionID)
+	delete(g.extras, sessionID)
 }
 
 // NextCallID 生成一次工具调用的稳定身份。
@@ -284,6 +396,48 @@ func NextCallID(prefix string) string {
 		prefix = "call"
 	}
 	return fmt.Sprintf("%s-%d-%d", prefix, os.Getpid(), callSeq.Add(1))
+}
+
+type callIDCtxKey struct{}
+
+// WithCallID 把"这一次调用"的身份绑到 ctx 上。
+//
+// 一次性升级的批准绑定 call id：审批通过后，调用方用**同一个** call id 重新求值，
+// 批准才生效；换一个 call id（后续调用）拿到同一份批准必须失败。
+func WithCallID(ctx context.Context, id string) context.Context {
+	if ctx == nil || strings.TrimSpace(id) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, callIDCtxKey{}, id)
+}
+
+// CallIDFrom 返回 ctx 上绑定的调用身份；没有返回空。
+func CallIDFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(callIDCtxKey{}).(string)
+	return id
+}
+
+type permissionCtxKey struct{}
+
+// WithPermission 把一次工具调用请求的 sandbox_permissions 绑到 ctx 上。
+// 只有真实工具参数解析出来的值才允许写入；这不是审批凭证。
+func WithPermission(ctx context.Context, permission Permission) context.Context {
+	if ctx == nil || permission == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, permissionCtxKey{}, permission)
+}
+
+// PermissionFrom 返回 ctx 上绑定的一次性权限请求；没有返回空。
+func PermissionFrom(ctx context.Context) Permission {
+	if ctx == nil {
+		return ""
+	}
+	p, _ := ctx.Value(permissionCtxKey{}).(Permission)
+	return p
 }
 
 type escalationCtxKey struct{}
@@ -311,16 +465,21 @@ func callFromContext(ctx context.Context, prefix string, permission Permission) 
 	if sessionID == "" {
 		return Call{}, fmt.Errorf("%w: 工具调用缺少会话上下文（spi.WithSession）", ErrMissingContext)
 	}
+	callID := strings.TrimSpace(CallIDFrom(ctx))
+	if callID == "" {
+		callID = NextCallID(prefix)
+	}
 	call := Call{
 		SessionID:          sessionID,
-		CallID:             NextCallID(prefix),
+		CallID:             callID,
 		SandboxPermissions: permission,
 		Escalation:         EscalationFrom(ctx),
 	}
-	if call.Escalation != nil {
-		// 重试的是一次已审批调用：把绑定参数对齐到审批需求本身，
-		// 由 validateEscalation 逐项核对（session/call/permission/operation/path）。
-		call.CallID = call.Escalation.CallID
+	if call.Escalation != nil && call.Escalation.CallID != call.CallID {
+		// 批准绑定的是那一次调用。拿一份旧批准套在新调用上不是"重试"，
+		// 是继承——这里 fail-loud，不做 call id 覆盖。
+		return Call{}, fmt.Errorf("%w: 调用 %q 与批准 %q 不是同一次调用；审批通过后请用 WithCallID 传回同一个 id",
+			ErrApprovalBinding, call.CallID, call.Escalation.CallID)
 	}
 	return call, nil
 }

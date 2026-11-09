@@ -9,26 +9,13 @@ package main
 // Transport 拿不到的真实数据（红线 R7：Transport 不读盘、不碰凭据、不知道
 // 账号服务长什么样）。
 //
-// # 只绑定**真有支撑**的能力
+// # 绑定面
 //
 // `OfficialAccountAPI` 的每个回调为 nil 表示"当前宿主没有这个能力"，Transport
-// 会回官方形状的四字段 501 并说清缺什么。本文件**故意**只绑四个：
-//
-//	account.getUnnotifiedBonuses  读本地账号授权里的赠送记录（见下）
-//	account.ackBonusNotified      把"已读"写进本地账号授权
-//	account.signOut               删掉本地账号授权，回真实状态
-//	llm.discoverModels            真实探测 `GET <baseURL>/models`
-//
-// 其余六个**必须是 nil**，理由写在这里而不是编一个成功回包：
-//
-//	account.getProfile            要官方 DeepSeek Platform 账号服务；伪造 profile
-//	                              （哪怕是空对象）就是让界面显示一个不存在的账号
-//	account.getBalance            同上；余额是钱，编不得
-//	account.startSignIn           要官方授权端点 + code 交换；假装成功等于骗用户"登上了"
-//	account.cancelSignIn          同上；本宿主没有在跑的登录尝试
-//	productAnalytics.report       **产品决策**：本仓明确不上报（DSH GO 是本地宿主）
-//	actionCards.act               本仓没有 action card 运行时（没有 propose_action 工具、
-//	                              没有 kind 注册表、没有卡片的 Session 投影）
+// 会回官方形状的四字段 501 并说清缺什么。PARITY-ACCOUNT 之后，account 的
+// 8 个方法全部由 provider 状态机绑定（默认 Local；Official / self-hosted OIDC
+// 由 DSHD_ACCOUNT_PROVIDER 选择）。只有 productAnalytics.report 与
+// actionCards.act 仍为 nil（产品决策/无运行时，不属于本任务）。
 //
 // # 本地账号授权存储（`<home>/state/account-grant.json`）
 //
@@ -62,6 +49,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"dshgo/internal/account"
 	"dshgo/internal/llm"
 	"dshgo/internal/transport"
 )
@@ -80,6 +68,11 @@ const accountGrantFileName = "account-grant.json"
 type accountOfficialDeps struct {
 	// home 是宿主 home（账号授权落在 `<home>/state/account-grant.json`）。
 	home string
+	// provider 仅在测试里显式注入；生产按 DSHD_ACCOUNT_PROVIDER 选择
+	// local/official/self-hosted。
+	provider account.Provider
+	// catalog 是 llm.discoverModels 的 provider 回退来源。
+	catalog *llm.ModelCatalogStore
 }
 
 // accountGrantDocument 是本地账号授权的持久形状。
@@ -100,15 +93,49 @@ type accountOfficialAPI struct {
 
 // newAccountOfficialAPI 把真实依赖装配成 Transport 要的账号组回调。
 //
-// **只绑真有支撑的四个**；其余留 nil，让 Transport 回官方形状的 501
-// 并说清缺哪个外部服务（见文件头的清单）。
+// account 方法全部绑定到 provider；配置错误也不会塌成永久 501。
 func newAccountOfficialAPI(deps accountOfficialDeps) transport.OfficialAccountAPI {
-	api := &accountOfficialAPI{deps: deps}
+	legacy := &accountOfficialAPI{deps: deps}
+	provider, err := accountProviderFromDeps(deps)
+	if err != nil {
+		return accountErrorAPI(err, legacy.discoverModels)
+	}
+	api := bindAccountProvider(provider)
+	api.LLMDiscoverModels = legacy.discoverModels
+	return api
+}
+
+// accountErrorAPI 让配置错误以结构化错误返回，而不是永久 501。
+func accountErrorAPI(err error, discover func(context.Context, string, transport.OfficialModelDiscoveryRequest) ([]transport.OfficialDiscoveredModel, error)) transport.OfficialAccountAPI {
 	return transport.OfficialAccountAPI{
-		AccountGetUnnotifiedBonuses: api.getUnnotifiedBonuses,
-		AccountAckBonusNotified:     api.ackBonusNotified,
-		AccountSignOut:              api.signOut,
-		LLMDiscoverModels:           api.discoverModels,
+		LLMDiscoverModels: discover,
+		AccountGetState: func(context.Context) (transport.OfficialAccountView, error) {
+			return transport.OfficialAccountView{}, err
+		},
+		AccountGetProfile: func(context.Context, transport.OfficialAccountClientMetadata) (*transport.OfficialAccountProfile, error) {
+			return nil, err
+		},
+		AccountGetBalance: func(context.Context, transport.OfficialAccountClientMetadata) (*transport.OfficialAccountBalance, error) {
+			return nil, err
+		},
+		AccountGetUnnotifiedBonuses: func(context.Context, transport.OfficialAccountClientMetadata) (*transport.OfficialAccountBonusList, error) {
+			return nil, err
+		},
+		AccountAckBonusNotified: func(context.Context, string, string, transport.OfficialAccountClientMetadata) (bool, error) {
+			return false, err
+		},
+		AccountStartSignIn: func(context.Context, transport.OfficialAccountClientMetadata, string, string) (transport.OfficialAccountView, error) {
+			return transport.OfficialAccountView{}, err
+		},
+		AccountCancelSignIn: func(context.Context, string) (transport.OfficialAccountView, error) {
+			return transport.OfficialAccountView{}, err
+		},
+		AccountSignOut: func(context.Context, transport.OfficialAccountClientMetadata) (transport.OfficialAccountView, error) {
+			return transport.OfficialAccountView{}, err
+		},
+		AccountHasRunningTasks: func(context.Context) (bool, error) { return false, err },
+		AccountWatch:           func(context.Context) (<-chan transport.OfficialAccountView, error) { return nil, err },
+		AccountWatchExpiry:     func(context.Context) (<-chan string, error) { return nil, err },
 	}
 }
 
@@ -311,18 +338,23 @@ func (a *accountOfficialAPI) discoverModels(
 	ctx context.Context, _ string, req transport.OfficialModelDiscoveryRequest,
 ) ([]transport.OfficialDiscoveredModel, error) {
 	baseURL := strings.TrimSpace(req.BaseURL)
-	if baseURL == "" {
-		provider := strings.TrimSpace(req.Provider)
-		if provider == "" {
-			return nil, fmt.Errorf(
-				"%w: llm.discoverModels 缺 request.baseURL——本仓没有 provider 注册表，"+
-					"无法从 provider 推出端点；请直接给 request.baseURL",
-				transport.ErrOfficialBadInput)
+	if baseURL == "" && strings.TrimSpace(req.Provider) != "" {
+		models, err := llm.DiscoverModelsForProvider(ctx, a.deps.catalog, req.Provider, req.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", transport.ErrStatePersistence, err)
 		}
+		out := make([]transport.OfficialDiscoveredModel, 0, len(models))
+		for _, m := range models {
+			out = append(out, transport.OfficialDiscoveredModel{ID: m.ID, Name: m.Name,
+				ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens, InputModalities: m.InputModalities})
+		}
+		return out, nil
+	}
+	if baseURL == "" {
 		return nil, fmt.Errorf(
-			"%w: llm.discoverModels 无法解析 provider %q——本仓没有 provider 注册表"+
-				"（只有模型目录，且它按模型 id 而不是 provider 名索引）；请直接给 request.baseURL",
-			transport.ErrOfficialBadInput, provider)
+			"%w: llm.discoverModels 缺 request.baseURL——本仓没有 provider 注册表，"+
+				"无法从 provider 推出端点；请直接给 request.baseURL",
+			transport.ErrOfficialBadInput)
 	}
 	client := llm.New(baseURL, req.APIKey)
 	models, err := client.DiscoverModels(ctx)

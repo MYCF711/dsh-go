@@ -1,6 +1,7 @@
 package transport
 
-// 官方桌面端 0.2.2 的 schedule.create / edit / view / run / history。
+// 官方桌面端 0.2.2 的 schedule.create / edit / view / run / history，
+// 以及只读/批处理三兄弟 schedule.catalog / schedule.deleteInactive / schedule.deliveryLimits。
 //
 // # 契约来源（只读镜像，未改安装目录）
 //
@@ -19,11 +20,21 @@ package transport
 //	typert.host.js:2105  'schedule/view'    参数 request（id）
 //	                      结果 ScheduleCatalogEntry | {id,code:'schedule_not_found'}
 //
+//	typert.host.js:1893  'schedule/catalog'        参数 无（parameters: []）
+//	                      结果 ScheduleCatalogEntry[]（active first，排序见 compareEntries）
+//	typert.host.js:1942  'schedule/deleteInactive' 参数 无（parameters: []）
+//	                      结果 {deleted:number}（只删 status=ended；paused 保留）
+//	typert.host.js:1957  'schedule/deliveryLimits' 参数 无（parameters: []）
+//	                      结果 {newSessionIntervalSeconds:number}
+//
 // 结果的 zod 原文（同一文件）：
 //
 //	typert.host.js:321   create 结果 union（jsonSchema 可读，7 个 kind 分支）
 //	typert.host.js:653   edit 结果 union（7 个 kind 分支 + not_found + deleted + conflict）
 //	typert.host.js:925   history 结果 union（page + not_found/cursor_not_found）
+//	typert.host.js:577   deleteInactive 结果 {deleted:number}
+//	typert.host.js:581   deliveryLimits 结果 {newSessionIntervalSeconds:number}
+//	                     catalog 的结果复用 create 的 7 分支 union（:321），外层是数组
 //	typert.host.js:1219/1486  run / view 结果 union（typert 自己的 jsonSchemaError 说
 //	                     "selected union branches overlap"，所以 jsonSchema 是空的——
 //	                     分支形状取自同一行的 zod 源码，不是我们编的）
@@ -62,13 +73,17 @@ import (
 	"unicode/utf8"
 )
 
-// 官方 5 个方法名。既有 schedule.list/delete/clear 不在这里（它们是宿主 additive 面）。
+// 官方 8 个方法名。既有 schedule.list/delete/clear 不在这里（它们是宿主 additive 面）。
 const (
 	MethodScheduleCreate  Method = "schedule.create"
 	MethodScheduleEdit    Method = "schedule.edit"
 	MethodScheduleView    Method = "schedule.view"
 	MethodScheduleRun     Method = "schedule.run"
 	MethodScheduleHistory Method = "schedule.history"
+	// 三个无参方法：官方 parameters 都是空列表（typert.host.js:1893/1942/1957）。
+	MethodScheduleCatalog        Method = "schedule.catalog"
+	MethodScheduleDeleteInactive Method = "schedule.deleteInactive"
+	MethodScheduleDeliveryLimits Method = "schedule.deliveryLimits"
 )
 
 const (
@@ -89,7 +104,10 @@ const (
 // 这里给出的就是 Transport 入口拒掉的那条线。
 func MinScheduleEverySeconds() int { return scheduleMinEverySeconds }
 
-// OfficialScheduleMethods 返回本层负责的 5 个方法（顺序固定，快照按它排）。
+// OfficialScheduleMethods 返回本层负责的 8 个方法（顺序固定，快照按它排）。
+//
+// 前 5 个保序：它们已经在 HS-16 的契约快照里按这个顺序落盘，新增的三个一律
+// 追加在末尾——重排等于让旧快照对不上，而方法集只是 additive 扩展。
 //
 // **additive 扩展**：不得加入 SessionMethods 的 canonical 25，
 // 也不得进 TaskActionMethods（那是 jobs.stop 与既有 schedule.delete/clear 的扩展面）。
@@ -97,18 +115,20 @@ func OfficialScheduleMethods() []Method {
 	return []Method{
 		MethodScheduleCreate, MethodScheduleEdit, MethodScheduleView,
 		MethodScheduleRun, MethodScheduleHistory,
+		MethodScheduleCatalog, MethodScheduleDeleteInactive, MethodScheduleDeliveryLimits,
 	}
 }
 
-// IsOfficialScheduleMethod 判断一个 /api 路径名是否属于本文件的 5 个方法。
+// IsOfficialScheduleMethod 判断一个 /api 路径名是否属于本文件的 8 个方法。
 //
-// 路由侧只需要这一次判断（**不要**在 server.go 的 switch 里摊开 5 个 case：
+// 路由侧只需要这一次判断（**不要**在 server.go 的 switch 里摊开 8 个 case：
 // 那是冻结的路由表）。既有 schedule.list/delete/clear **必须**返回 false：
 // 它们由 handlers_jobs.go 处理，被这里认领会等于悄悄换掉它们的读语义。
 func IsOfficialScheduleMethod(name string) bool {
 	switch Method(name) {
 	case MethodScheduleCreate, MethodScheduleEdit, MethodScheduleView,
-		MethodScheduleRun, MethodScheduleHistory:
+		MethodScheduleRun, MethodScheduleHistory,
+		MethodScheduleCatalog, MethodScheduleDeleteInactive, MethodScheduleDeliveryLimits:
 		return true
 	}
 	return false
@@ -199,10 +219,24 @@ type OfficialScheduleEntry struct {
 	Prompt string `json:"prompt"`
 
 	// 各 kind 专属字段（同一条记录只会有其中一组）。
+	//
+	// 编码规则（两个方向都不能懒省事）：
+	//
+	//   - kind 专属的**数值/字符串**字段保留 `omitempty`：它们是 kind 判别的一部分，
+	//     "这个 kind 没有它"就绝不能出现（`afterSeconds:0` 会让客户端以为这是
+	//     after 分支）。数值字段在两个 kind 里都不可能取零值（官方要求
+	//     `afterSeconds`/`everySeconds` 是正整数），空串也不是合法的墙钟/rrule。
+	//   - `timeZone` 与 `weekdays` **不能**用 omitempty：官方 daily/weekly/cron
+	//     分支把 `timeZone`、weekly 把 `weekdays` 列为 required，而它们的合法值
+	//     可能是空串/空数组（宿主解析出来的 zone 名理论上可能为空）。丢一个
+	//     required 键就是形状错误，官方 zod 直接解析失败。
+	//
+	// 另外 `normalizeScheduleEntry` 会按 kind 把不属于它的那组字段显式清零，
+	// 保证"同一份记录不会同时是 after 又是 cron"。
 	AfterSeconds int64  `json:"afterSeconds,omitempty"`
 	EverySeconds int64  `json:"everySeconds,omitempty"`
 	Time         string `json:"time,omitempty"`
-	TimeZone     string `json:"timeZone,omitempty"`
+	TimeZone     string `json:"timeZone"`
 	Weekdays     []int  `json:"weekdays,omitempty"`
 	Expression   string `json:"expression,omitempty"`
 	RRule        string `json:"rrule,omitempty"`
@@ -260,6 +294,32 @@ type OfficialScheduleHistoryPage struct {
 	NextBefore                string                          `json:"nextBefore,omitempty"`
 }
 
+// OfficialScheduleCatalog 是 schedule.catalog 的结果：**全量**目录（无分页上限）。
+//
+// 官方 typert.host.js:1893 的结果是 `ScheduleCatalogEntry[]`：元素形状与
+// create/edit 的单条结果逐字相同，所以这里直接复用 OfficialScheduleEntry。
+// 官方 catalog 还规定顺序（compareEntries）：active 在前；同为 active 时按
+// scheduledAt 升序、id 升序；非 active 在后，按"最近一次投递/更新/创建/计划"
+// 倒序、id 升序。排序是宿主的活（宿主才知道 lastDelivery），本层只保形状。
+type OfficialScheduleCatalog []OfficialScheduleEntry
+
+// OfficialScheduleDeleteInactiveResult 是 schedule.deleteInactive 的结果。
+//
+// 官方 zod（typert.host.js:577）只有 `deleted` 一个字段：本次真正删掉的
+// ended 行数，没有 ended 时为 0（0 是成功，不是错误）。
+type OfficialScheduleDeleteInactiveResult struct {
+	Deleted int `json:"deleted"`
+}
+
+// OfficialScheduleDeliveryLimits 是 schedule.deliveryLimits 的结果。
+//
+// 官方 zod（typert.host.js:581）只有 `newSessionIntervalSeconds`：Host 当前
+// 生效的"每次都新建会话的投递"之间的最小间隔（秒）。本层只透传宿主的真实值，
+// 不自己定一个数——否则就是编配置。
+type OfficialScheduleDeliveryLimits struct {
+	NewSessionIntervalSeconds int64 `json:"newSessionIntervalSeconds"`
+}
+
 // ---------------------------------------------------------------------------
 // 请求形状（transport 解析 → 宿主执行）
 // ---------------------------------------------------------------------------
@@ -309,12 +369,21 @@ type OfficialScheduleHistoryRequest struct {
 // 返回类型是 any 的那几个对应官方 union：宿主必须返回本文件里的
 // OfficialScheduleEntry / OfficialScheduleMiss / OfficialScheduleDeleted /
 // OfficialScheduleHistoryPage 之一；别的类型会被当成宿主 bug 报 500。
+//
+// Catalog / DeleteInactive / DeliveryLimits 是**强类型**的：官方结果形状只有
+// 一种，没有 union 分支，宿主给不出别的形状。
 type OfficialScheduleAPI struct {
 	Create  func(req OfficialScheduleCreateRequest) (OfficialScheduleEntry, error)
 	Edit    func(req OfficialScheduleEditRequest) (any, error)
 	View    func(id string) (any, error)
 	Run     func(id string) (any, error)
 	History func(req OfficialScheduleHistoryRequest) (any, error)
+
+	// 以下三个是官方无参方法。为 nil = 宿主没有全量目录 / 批量清理 / 限额口径
+	// 的真实支撑，调用回 501。
+	Catalog        func() ([]OfficialScheduleEntry, error)
+	DeleteInactive func() (OfficialScheduleDeleteInactiveResult, error)
+	DeliveryLimits func() (OfficialScheduleDeliveryLimits, error)
 }
 
 // officialScheduleMount 把一份实现挂到一个 Server 上。
@@ -383,7 +452,7 @@ func ServeOfficialSchedule(w http.ResponseWriter, r *http.Request, name string, 
 			fmt.Sprintf("不是官方 schedule 族的方法：%q", name)))
 		return
 	}
-	params, err := decodeOfficialParams(r)
+	params, err := decodeOfficialScheduleParams(r, Method(name))
 	if err != nil {
 		writeOfficialError(w, err)
 		return
@@ -415,8 +484,38 @@ func routeOfficialScheduleMethod(api OfficialScheduleAPI, method Method, p *offi
 		return officialScheduleRun(api, p)
 	case MethodScheduleHistory:
 		return officialScheduleHistory(api, p)
+	case MethodScheduleCatalog:
+		return officialScheduleCatalog(api, p)
+	case MethodScheduleDeleteInactive:
+		return officialScheduleDeleteInactive(api, p)
+	case MethodScheduleDeliveryLimits:
+		return officialScheduleDeliveryLimits(api, p)
 	}
 	return nil, officialNotImplemented("未知的官方 schedule 方法 %q", method)
+}
+
+// scheduleMethodTakesNoParams 判断官方这个方法的 parameters 是不是空列表。
+//
+// 只有下面三个是（typert.host.js:1893/1942/1957），其余都要求一个 request。
+func scheduleMethodTakesNoParams(method Method) bool {
+	switch method {
+	case MethodScheduleCatalog, MethodScheduleDeleteInactive, MethodScheduleDeliveryLimits:
+		return true
+	}
+	return false
+}
+
+// decodeOfficialScheduleParams 是 schedule 族统一的参数入口。
+//
+// 无参方法的官方形状是"没有参数"：HTTP 上 `{}` 与**空 body**是同一个意思，
+// 两种都收（否则客户端要为一个没有参数的方法塞一个空对象）。
+// 只要带了任何字段就 400——strict 契约不接受 additionalProperties；
+// 有参方法维持 `decodeOfficialParams` 的原行为。
+func decodeOfficialScheduleParams(r *http.Request, method Method) (*officialParams, error) {
+	if scheduleMethodTakesNoParams(method) && r.ContentLength == 0 {
+		return &officialParams{m: map[string]json.RawMessage{}, used: map[string]bool{}}, nil
+	}
+	return decodeOfficialParams(r)
 }
 
 // normalizeScheduleEntry 保证官方必填的数组字段不是 null。
@@ -427,8 +526,38 @@ func normalizeScheduleEntry(entry OfficialScheduleEntry) OfficialScheduleEntry {
 	if entry.InvolvedSessionIDs == nil {
 		entry.InvolvedSessionIDs = []string{}
 	}
-	if entry.Weekdays == nil && entry.Kind == "weekly" {
+	if entry.Kind == "weekly" && entry.Weekdays == nil {
 		entry.Weekdays = []int{}
+	}
+	if entry.Kind == "weekly" && len(entry.Weekdays) == 0 {
+		// 官方 weekly 的 `weekdays` 是 required 的**非空**集合；空数组虽然键在，
+		// 但语义上仍然是"这条 weekly 没有星期"。这里不编造星期，只保留空数组
+		// 让形状合法——真正的拦截在宿主的 schedule.create（weekdays 非空）。
+		entry.Weekdays = []int{}
+	}
+	// 每个 kind 只留自己那组字段：官方 7 个分支的 required 列表互不相同，
+	// 多出来的字段虽然 zod 的 `additionalProperties` 允许，但那不是官方形状
+	// （客户端按分支取字段时会看到"这份记录同时是 after 又是 cron"）。
+	keepAfter, keepEvery := entry.Kind == "after", entry.Kind == "every"
+	keepClock := entry.Kind == "daily" || entry.Kind == "weekly" || entry.Kind == "cron"
+	keepWeekly, keepCron := entry.Kind == "weekly", entry.Kind == "cron"
+	if !keepAfter {
+		entry.AfterSeconds = 0
+	}
+	if !keepEvery {
+		entry.EverySeconds = 0
+	}
+	if !keepClock {
+		entry.Time, entry.TimeZone = "", ""
+	}
+	if !keepWeekly {
+		entry.Weekdays = nil
+	}
+	if !keepCron {
+		entry.Expression = ""
+	}
+	if entry.Kind != "rrule" {
+		entry.RRule = ""
 	}
 	return entry
 }
@@ -447,11 +576,56 @@ func checkScheduleResultType(result any) (any, error) {
 			return map[string]any{}, nil
 		}
 		return normalizeScheduleEntry(*v), nil
-	case OfficialScheduleMiss, OfficialScheduleDeleted, OfficialScheduleHistoryPage, *OfficialScheduleHistoryPage:
+	case OfficialScheduleMiss:
+		if err := checkScheduleMissCode(v); err != nil {
+			return nil, err
+		}
+		return v, nil
+	case *OfficialScheduleMiss:
+		if v == nil {
+			return map[string]any{}, nil
+		}
+		if err := checkScheduleMissCode(*v); err != nil {
+			return nil, err
+		}
+		return *v, nil
+	case OfficialScheduleDeleted, OfficialScheduleHistoryPage, *OfficialScheduleHistoryPage:
 		return v, nil
 	default:
 		return nil, officialInternal("schedule 宿主返回了不认识的载荷类型 %T", result)
 	}
+}
+
+// officialScheduleMissCodes 是官方 union 里出现过的每一个 miss 判别式，逐字摘自
+// `dsh-schedule/lib/typert.host.js`（edit / history / run / view 四个结果 union）：
+//
+//	schedule_not_found           —— 任务不存在（edit/view/run/history 都有）
+//	schedule_conflict            —— expectedUpdatedAt 不匹配（edit）
+//	schedule_execution_pending   —— 已有一次执行排队或在跑（run）
+//	delivery_cursor_not_found    —— history 的 `before` 不是这条任务的记录（history）
+//
+// 这四个码对客户端是**四种不同处置**：重新读任务 / 重新读后重提交 / 稍后再试 /
+// 翻到第一页。宿主返回第五个码（或拼错一个字）绝不能原样上线——那会让客户端
+// 落进 default 分支，把"游标不存在"当成"任务不存在"。
+var officialScheduleMissCodes = map[string]bool{
+	"schedule_not_found":         true,
+	"schedule_conflict":          true,
+	"schedule_execution_pending": true,
+	"delivery_cursor_not_found":  true,
+}
+
+func checkScheduleMissCode(miss OfficialScheduleMiss) error {
+	if miss.ID == "" {
+		return officialInternal("schedule miss 缺 id（官方 union 每条都是 {id, code}）")
+	}
+	if !officialScheduleMissCodes[miss.Code] {
+		return officialInternal("schedule 宿主返回了不认识的 miss code %q（官方只有 %s）",
+			miss.Code, strings.Join([]string{
+				"schedule_not_found", "schedule_conflict",
+				"schedule_execution_pending", "delivery_cursor_not_found",
+			}, " / "))
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -814,6 +988,89 @@ func scheduleHistoryRequest(p *officialParams) (OfficialScheduleHistoryRequest, 
 		return req, err
 	}
 	return req, nil
+}
+
+// ---------------------------------------------------------------------------
+// schedule.catalog / schedule.deleteInactive / schedule.deliveryLimits
+//
+// 三个都**没有参数**（官方 parameters: []），结果形状各自只有一种：
+//
+//	catalog        → ScheduleCatalogEntry[]
+//	deleteInactive → {deleted:number}
+//	deliveryLimits → {newSessionIntervalSeconds:number}
+// ---------------------------------------------------------------------------
+
+// scheduleNoParams 拒掉无参方法收到的任何字段。
+//
+// 官方 strict 契约没有 additionalProperties：给 `{}` 是"没有参数"，
+// 给 `{"id":"x"}` 是拼错了请求——静默忽略等于让客户端以为参数生效了。
+func scheduleNoParams(p *officialParams, method Method) error {
+	if len(p.m) == 0 {
+		return nil
+	}
+	return officialBadRequest("%s 没有参数（官方 parameters 是空列表），却收到 %d 个字段", method, len(p.m))
+}
+
+func officialScheduleCatalog(api OfficialScheduleAPI, p *officialParams) (any, error) {
+	if err := scheduleNoParams(p, MethodScheduleCatalog); err != nil {
+		return nil, err
+	}
+	if api.Catalog == nil {
+		return nil, officialNotImplemented("schedule.catalog 未接线：宿主没有 OfficialScheduleAPI.Catalog")
+	}
+	entries, err := api.Catalog()
+	if err != nil {
+		return nil, err
+	}
+	return normalizeScheduleCatalog(entries), nil
+}
+
+// normalizeScheduleCatalog 保证外层不是 null、元素都过一遍 entry 投影。
+//
+// 官方结果是 `type:array`：空目录必须编成 `[]`，Go 的 nil slice 会编成
+// `null`——那是形状错误（客户端会把 null 当"没有结果"而不是"没有任务"）。
+func normalizeScheduleCatalog(entries []OfficialScheduleEntry) OfficialScheduleCatalog {
+	out := make(OfficialScheduleCatalog, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, normalizeScheduleEntry(entry))
+	}
+	return out
+}
+
+func officialScheduleDeleteInactive(api OfficialScheduleAPI, p *officialParams) (any, error) {
+	if err := scheduleNoParams(p, MethodScheduleDeleteInactive); err != nil {
+		return nil, err
+	}
+	if api.DeleteInactive == nil {
+		return nil, officialNotImplemented("schedule.deleteInactive 未接线：宿主没有 OfficialScheduleAPI.DeleteInactive")
+	}
+	result, err := api.DeleteInactive()
+	if err != nil {
+		return nil, err
+	}
+	if result.Deleted < 0 {
+		return nil, officialInternal("schedule.deleteInactive 返回了负数 deleted=%d（删除计数不可能是负的）", result.Deleted)
+	}
+	return result, nil
+}
+
+func officialScheduleDeliveryLimits(api OfficialScheduleAPI, p *officialParams) (any, error) {
+	if err := scheduleNoParams(p, MethodScheduleDeliveryLimits); err != nil {
+		return nil, err
+	}
+	if api.DeliveryLimits == nil {
+		return nil, officialNotImplemented("schedule.deliveryLimits 未接线：宿主没有 OfficialScheduleAPI.DeliveryLimits")
+	}
+	result, err := api.DeliveryLimits()
+	if err != nil {
+		return nil, err
+	}
+	if result.NewSessionIntervalSeconds <= 0 {
+		return nil, officialInternal(
+			"schedule.deliveryLimits 返回了非正数 newSessionIntervalSeconds=%d（官方配置下界是 60 秒）",
+			result.NewSessionIntervalSeconds)
+	}
+	return result, nil
 }
 
 // ---------------------------------------------------------------------------

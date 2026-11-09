@@ -226,9 +226,9 @@ func (r *modelRunner) runModelTurn(ctx context.Context, sessionID, turnID string
 	if err != nil {
 		return fail(err)
 	}
-	base, credential := r.base, os.Getenv("DSHD_LLM_KEY")
+	base, credential, api := r.base, os.Getenv("DSHD_LLM_KEY"), ""
 	if routed {
-		base, credential = provider.BaseURL, provider.Credential()
+		base, credential, api = provider.BaseURL, provider.Credential(), provider.API
 	}
 
 	events := []modelTurnEvent{{input: &initial}}
@@ -240,7 +240,7 @@ func (r *modelRunner) runModelTurn(ctx context.Context, sessionID, turnID string
 			events = append(events, modelTurnEvent{input: input})
 			history = append(history, input.message)
 		}
-		resp, streamErr := llm.New(base, credential).Stream(ctx,
+		resp, streamErr := llm.NewWithAPI(base, credential, api).Stream(ctx,
 			llm.Request{Model: model, Messages: history, Stream: true}, nil)
 		if streamErr != nil {
 			streamErr = redactServeProviderError(streamErr, credential)

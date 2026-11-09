@@ -4,9 +4,10 @@ package transport
 //
 // # 这份文件解决什么
 //
-// 官方清单里有 6 个 `mode:'stream'` 方法（`session.events` **不在其中**：
+// 官方清单里有 7 个 `mode:'stream'` 方法（`session.events` **不在其中**：
 // 官方它是 `Promise<SessionEventsPage>`，一次性读，本仓早已是真实现）：
 //
+//	session.control             typert.host.js:1970  signature L2880
 //	session.follow              typert.host.js:2019  signature L2866
 //	session.observeEvent        typert.host.js:2184  signature L2831
 //	session.observeProjections  typert.host.js:2055  signature L2838
@@ -168,6 +169,8 @@ type officialStreamRequest struct {
 	Path string
 	// ToolSeq 只在 toolResults.watch 上使用（durable 工具结果事件 seq）。
 	ToolSeq int64
+	// CallID 只在 userQuestions.attachWait 的 **mux 流**上使用（前台等待的 call id）。
+	CallID string
 }
 
 // parseOfficialStreamRequest 把两种面的 args（mux 的 open args / HTTP 的 body）
@@ -186,6 +189,23 @@ func parseOfficialStreamRequest(method Method, raw json.RawMessage) (officialStr
 	}
 
 	switch method {
+	case methodSessionControl, MethodProductAnalyticsWatchPolicy:
+		// 官方 control(signal)/watchPolicy(signal) 没有 request 参数；mux 仍携带一个空 args 对象。
+		// strict 解码保证 sinceSeq/sessionId 等其它方法的字段不会被错收进来。
+		var req struct{}
+		if fault := decodeOfficialStreamArgs(method, raw, &req); fault != nil {
+			return officialStreamRequest{}, fault
+		}
+		return officialStreamRequest{Method: method}, nil
+
+	case MethodSpeechFollow:
+		// 官方 speech.follow 没有 request 参数；mux 仍携带空 args 对象。
+		var req struct{}
+		if fault := decodeOfficialStreamArgs(method, raw, &req); fault != nil {
+			return officialStreamRequest{}, fault
+		}
+		return officialStreamRequest{Method: method}, nil
+
 	case MethodSessionFollow:
 		var req officialFollowRequest
 		if fault := decodeOfficialStreamArgs(method, raw, &req); fault != nil {
@@ -226,6 +246,35 @@ func parseOfficialStreamRequest(method Method, raw json.RawMessage) (officialStr
 				"%s 需要 path（工作区内的目标路径；根目录给空串）", method)
 		}
 		return officialStreamRequest{Method: method, SessionID: scope, Path: *req.Path}, nil
+
+	case MethodUserQuestionsAttachWait:
+		// 官方 typert 流；mux 的 args 用官方字段名。agentId 是本仓会话身份的
+		// 官方别名（unary 的 sessionRef 同一套别名），sessionId/id 兼容。
+		var req struct {
+			AgentID   *string `json:"agentId"`
+			SessionID *string `json:"sessionId"`
+			ID        *string `json:"id"`
+			CallID    *string `json:"callId"`
+		}
+		if fault := decodeOfficialStreamArgs(method, raw, &req); fault != nil {
+			return officialStreamRequest{}, fault
+		}
+		sessionID := ""
+		for _, candidate := range []*string{req.AgentID, req.SessionID, req.ID} {
+			if candidate != nil {
+				sessionID = *candidate
+				break
+			}
+		}
+		if sessionID == "" {
+			return officialStreamRequest{}, officialStreamBadRequest("agentId",
+				"%s 需要非空 agentId（会话身份；sessionId/id 也可）", method)
+		}
+		if req.CallID == nil || *req.CallID == "" {
+			return officialStreamRequest{}, officialStreamBadRequest("callId",
+				"%s 需要非空 callId（前台等待的调用 id）", method)
+		}
+		return officialStreamRequest{Method: method, SessionID: sessionID, CallID: *req.CallID}, nil
 
 	case MethodToolResultsWatch:
 		var req struct {
@@ -309,11 +358,13 @@ func (s officialServerStreamSource) liveState(sessionID string) (OfficialLiveSta
 }
 
 func (s officialServerStreamSource) header(sessionID string) (OfficialSessionHeader, bool, error) {
-	src, ok := s.host.(OfficialSessionHeaderSource)
-	if !ok {
+	// 来源可以是 Server 构造之后挂上来的（见 official_stream_header.go），
+	// 所以这里统一问 Server 要，而不是只看 host 有没有实现接口。
+	source := s.server.officialSessionHeaderSource()
+	if source == nil {
 		return OfficialSessionHeader{}, false, nil
 	}
-	header, err := src.SessionHeader(sessionID)
+	header, err := source.SessionHeader(sessionID)
 	return header, true, err
 }
 
@@ -371,12 +422,12 @@ type officialProjectionFrame struct {
 //
 // 字段顺序照官方：type / header / projections / cursor / records / hasMore。
 type officialFollowSnapshot struct {
-	Type        string            `json:"type"`
+	Type        string                `json:"type"`
 	Header      OfficialSessionHeader `json:"header"`
 	Projections OfficialProjections   `json:"projections"`
-	Cursor      int64             `json:"cursor"`
-	Records     []OfficialRecord  `json:"records"`
-	HasMore     bool              `json:"hasMore"`
+	Cursor      int64                 `json:"cursor"`
+	Records     []OfficialRecord      `json:"records"`
+	HasMore     bool                  `json:"hasMore"`
 }
 
 // officialSessionStream 是 follow / observeEvent / observeProjections / observeState
@@ -466,11 +517,15 @@ func (s *officialSessionStream) open() (json.RawMessage, bool, *OfficialStreamFa
 		if fault != nil {
 			return nil, false, fault
 		}
+		projections, projFault := s.projectionsBaseline(events, throughSeq)
+		if projFault != nil {
+			return nil, false, projFault
+		}
 		s.cursor = throughSeq
 		snapshot := officialFollowSnapshot{
 			Type:        "snapshot",
 			Header:      header,
-			Projections: s.projectionsBaseline(events, throughSeq),
+			Projections: projections,
 			Cursor:      throughSeq,
 			Records:     officialPageRecords(page),
 			HasMore:     hasMore,
@@ -489,7 +544,7 @@ func (s *officialSessionStream) open() (json.RawMessage, bool, *OfficialStreamFa
 
 	case MethodSessionObserveProjections:
 		s.cursor = logEnd
-		s.fold = newOfficialProjectionFold()
+		s.fold = newOfficialProjectionFoldFor(s.sessionID)
 		for _, ev := range events {
 			s.fold.Apply(ev)
 		}
@@ -653,12 +708,40 @@ func (s *officialSessionStream) state(cursor int64) (json.RawMessage, *OfficialS
 }
 
 // projectionsBaseline 是 follow snapshot 里的 projections（与 session.projections 同一份）。
-func (s *officialSessionStream) projectionsBaseline(events []DurableEvent, asOfSeq int64) OfficialProjections {
-	fold := newOfficialProjectionFold()
+//
+// 对齐口径（T04 WIRING §3）：宿主实现了 OfficialSessionHost 时，直接复用
+// `Server.officialProjectionValues`——它与 HTTP `session.projections` 是**同一个
+// 函数**，所以 follow snapshot / control baseline / HTTP 三处 values 键同名同值。
+// 测试假源（没有 OfficialSessionHost）退回旧的官方投影折叠，**不伪造宿主键**。
+func (s *officialSessionStream) projectionsBaseline(events []DurableEvent, asOfSeq int64) (OfficialProjections, *OfficialStreamFault) {
+	projections, fault := s.server.officialStreamProjectionValues(s.sessionID, events, asOfSeq)
+	if fault != nil {
+		return OfficialProjections{}, officialStreamFaultOf(s.kind, fault)
+	}
+	return projections, nil
+}
+
+// officialStreamProjectionValues 是流面（follow / control）取 baseline 的统一入口。
+//
+// host 非 nil：走 `officialProjectionValues`（与 HTTP session.projections 同源，
+// 含宿主的 modelSelection / agentPreset / subagentCatalog 三键）。
+// host 为 nil：退回本文件的逐事件折叠（只有事件可推的键），不编宿主键。
+func (s *Server) officialStreamProjectionValues(sessionID string, events []DurableEvent, asOfSeq int64) (OfficialProjections, *OfficialStreamFault) {
+	if host := s.officialHost(); host != nil {
+		projections, err := s.officialProjectionValues(host, sessionID, events, asOfSeq)
+		if err != nil {
+			return OfficialProjections{}, &OfficialStreamFault{
+				Code: "gateway/internal", Status: 500,
+				Message: "session.projections：" + err.Error(),
+			}
+		}
+		return projections, nil
+	}
+	fold := newOfficialProjectionFoldFor(sessionID)
 	for _, ev := range events {
 		fold.Apply(ev)
 	}
-	return fold.Values(asOfSeq, s.server.loadProjectionExtras(s.sessionID))
+	return fold.Values(asOfSeq, s.loadProjectionExtras(sessionID)), nil
 }
 
 func officialReady(method Method) (json.RawMessage, bool, *OfficialStreamFault) {
@@ -707,14 +790,34 @@ type officialProjectionFold struct {
 	lastPromptAt int64 // -1 = 还没有人类 prompt
 	title        string
 	hasTitle     bool
+
+	// sessionID 用于识别"本会话自己的" subagent/spawn（fork 继承的祖先不算）。
+	sessionID string
+	// events 是已经折叠过的全部事件（新键的语义是"对全量事件做一次折叠"，
+	// 与 HTTP 的 officialProjectionValues 同一实现，所以这里保留全量）。
+	events []DurableEvent
+
+	todos       []any
+	hasTodos    bool
+	subagent    OfficialSubagentIdentity
+	hasSubagent bool
+	spawnSeq    int64
+	lastTiming  *OfficialSubagentTiming
 }
 
 func newOfficialProjectionFold() *officialProjectionFold {
-	return &officialProjectionFold{blank: true, lastPromptAt: -1}
+	return newOfficialProjectionFoldFor("")
+}
+
+// newOfficialProjectionFoldFor 带会话身份构造折叠器：`subagent` / `subagentTiming`
+// 只对**本会话自己**的 `subagent/spawn` 成立，没身份就折不出这两个键。
+func newOfficialProjectionFoldFor(sessionID string) *officialProjectionFold {
+	return &officialProjectionFold{blank: true, lastPromptAt: -1, sessionID: sessionID}
 }
 
 // Apply 折叠一个事件，返回它改动的键（按官方语义：没改任何键就是空数组）。
 func (f *officialProjectionFold) Apply(ev DurableEvent) []officialProjectionChange {
+	f.events = append(f.events, ev)
 	changes := make([]officialProjectionChange, 0, 2)
 	switch ev.Type {
 	case "turn/start":
@@ -723,6 +826,13 @@ func (f *officialProjectionFold) Apply(ev DurableEvent) []officialProjectionChan
 			changes = append(changes, officialProjectionChange{
 				Key: "sessionListMetadata", Val: f.sessionListMetadata(),
 			})
+		}
+		// 子代理计时只对 spawn 之后的轮成立：没有身份时这个键根本不存在。
+		if f.hasSubagent {
+			if timing, ok := officialSubagentTiming(f.events, f.spawnSeq); ok {
+				f.lastTiming = &timing
+				changes = append(changes, officialProjectionChange{Key: "subagentTiming", Val: timing})
+			}
 		}
 	case "session/title":
 		var data struct {
@@ -757,6 +867,42 @@ func (f *officialProjectionFold) Apply(ev DurableEvent) []officialProjectionChan
 		changes = append(changes, officialProjectionChange{
 			Key: "sessionListMetadata", Val: f.sessionListMetadata(),
 		})
+	case "tool/call":
+		// todos 与 HTTP 的 officialProjectionValues 同源：最后一次真实
+		// `todo_write` 的 arguments 即完整清单（整份替换）。
+		if !isOfficialAppendSurface(ev) {
+			return changes
+		}
+		var data struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		}
+		if json.Unmarshal(ev.Data, &data) != nil || data.Name != "todo_write" || data.Arguments == "" {
+			return changes
+		}
+		if todos, found := officialTodosFold(f.events); found {
+			f.todos, f.hasTodos = todos, true
+			changes = append(changes, officialProjectionChange{Key: "todos", Val: todos})
+		}
+	case "subagent/spawn":
+		if identity, spawnSeq, ok := officialSubagentIdentity(f.events, f.sessionID); ok {
+			f.hasSubagent, f.spawnSeq, f.subagent = true, spawnSeq, identity
+			changes = append(changes, officialProjectionChange{Key: "subagent", Val: identity})
+			if timing, ok := officialSubagentTiming(f.events, spawnSeq); ok {
+				f.lastTiming = &timing
+				changes = append(changes, officialProjectionChange{Key: "subagentTiming", Val: timing})
+			}
+		}
+	case "turn/end":
+		// 子代理计时只对 spawn 之后的轮成立（WIRING §3）。没有子代理身份时
+		// 不是"0 毫秒"，而是这个键根本不存在——所以不发变化帧。
+		if !f.hasSubagent {
+			return changes
+		}
+		if timing, ok := officialSubagentTiming(f.events, f.spawnSeq); ok {
+			f.lastTiming = &timing
+			changes = append(changes, officialProjectionChange{Key: "subagentTiming", Val: timing})
+		}
 	}
 	return changes
 }
@@ -790,6 +936,19 @@ func (f *officialProjectionFold) Values(asOfSeq int64, extras officialProjection
 	}
 	if extras.Permission != "" {
 		values["permissions"] = map[string]any{"currentValue": extras.Permission}
+	}
+	// 与 HTTP officialProjectionValues 对齐：todos 键始终出现（首次写入前 null）；
+	// subagent / subagentTiming 只在真有本会话子代理身份时出现，不伪造。
+	if f.hasTodos {
+		values["todos"] = f.todos
+	} else {
+		values["todos"] = nil
+	}
+	if f.hasSubagent {
+		values["subagent"] = f.subagent
+		if f.lastTiming != nil {
+			values["subagentTiming"] = *f.lastTiming
+		}
 	}
 	return OfficialProjections{AsOfSeq: asOfSeq, Values: values}
 }

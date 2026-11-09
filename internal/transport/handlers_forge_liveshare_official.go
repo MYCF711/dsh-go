@@ -1,6 +1,9 @@
 package transport
 
-// 官方桌面端 0.2.2 的 forgePanel.*（19）与 liveshareShares.*（8）：共 27 个方法。
+// 官方桌面端 0.2.2 的 forgePanel.* 19 个方法（结构���未实现）。
+//
+// 注意：liveshareShares.* 的 12 个方法已迁到 handlers_liveshare_official.go
+// （真契约层，可接宿主实现）；本文件只保留 forgePanel 的参数/缺口表。
 //
 // # 契约来源（只读镜像，未改安装目录）
 //
@@ -34,14 +37,6 @@ package transport
 //	forgePanel/submitReview      1415 / …/index.ts:368
 //	forgePanel/track             1484 / …/index.ts:201
 //
-//	liveshareShares/audit            232 / …/liveshare/src/host/share-remote.ts:132
-//	liveshareShares/create           279 / …/share-remote.ts:57
-//	liveshareShares/identity         311 / …/share-remote.ts:122
-//	liveshareShares/setCapabilities  373 / …/share-remote.ts:90
-//	liveshareShares/setRelay         405 / …/share-remote.ts:114
-//	liveshareShares/stop             437 / …/share-remote.ts:72
-//	liveshareShares/testPublish      469 / …/share-remote.ts:147
-//	liveshareShares/updatePermissions 516 / …/share-remote.ts:80
 //
 // 官方 wire 名与参数（typert 的 `parameters[].wire`，**位置参数**；本仓 L1 收成
 // 一个裸 JSON 对象，键就是 wire 名）：
@@ -56,9 +51,8 @@ package transport
 //	merge                                                  → sessionId, url, method, headSha
 //	requestWorktree                                        → sessionId, from（string|null）
 //	submitReview                                           → sessionId, url, request（union）
-//	liveshareShares.*                                      → request（对象，字段见下表）
 //
-// # 为什么这 27 个全部是"结构化未实现"，而不是本地实现
+// # 为什么 forgePanel 这 19 个全部是"结构化未实现"，而不是本地实现
 //
 // 官方把这些能力放在两个**独立部署面**上，本仓没有任何一份真值：
 //
@@ -69,11 +63,7 @@ package transport
 //     modules/tool/repohere（工具层），Transport 按红线 R7 不 import modules、
 //     也不在本层 fork git；`s.opt` 里没有注入 git/sandbox/worktree 服务的字段，
 //     而 server.go 不在本任务可写范围。硬做只能自造"分支列表/补丁文本"。
-//   - liveshareShares 的每一条都要连 Liveshare relay：owner 凭据
-//     （owner-credential.json / LIVESHARE_OWNER_CREDENTIAL_FILE）、relay 地址
-//     （owner-shares.json）、OIDC 身份（LIVESHARE_OWNER_PROVIDER_ID/TENANT_ID/
-//     SUBJECT_ID）与 relay 侧的审计/注销接口。这些服务"separately owned"
-//     （官方 README §Boundaries），本仓没有 relay 端口，也没有 owner 状态文件。
+//（liveshare 部分已实现，见 handlers_liveshare_official.go；本文件只保留 forge 的口径。）
 //
 // 所以按任务口径第 3 条：**分不清"真没有"和"没后端"时，返回未实现**，
 // 不用空数组/空对象冒充"没有数据"，也不返回假的 void 成功。
@@ -94,7 +84,7 @@ package transport
 //		return
 //	}
 //
-// 加之前这 27 个名字落到 switch 的 default：501 + 通用 "not implemented"
+// 加之前这 31 个名字落到 switch 的 default：501 + 通用 "not implemented"
 // （能调，但既不说缺什么、也不校验参数）。加之后回逐方法的 501/400。
 
 import (
@@ -105,7 +95,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// 27 个方法
+// 19 个 forgePanel 方法
 // ---------------------------------------------------------------------------
 
 const (
@@ -128,23 +118,15 @@ const (
 	MethodForgePanelStopCreation        Method = "forgePanel.stopCreation"
 	MethodForgePanelSubmitReview        Method = "forgePanel.submitReview"
 	MethodForgePanelTrack               Method = "forgePanel.track"
-
-	MethodLiveshareSharesAudit             Method = "liveshareShares.audit"
-	MethodLiveshareSharesCreate            Method = "liveshareShares.create"
-	MethodLiveshareSharesIdentity          Method = "liveshareShares.identity"
-	MethodLiveshareSharesSetCapabilities   Method = "liveshareShares.setCapabilities"
-	MethodLiveshareSharesSetRelay          Method = "liveshareShares.setRelay"
-	MethodLiveshareSharesStop              Method = "liveshareShares.stop"
-	MethodLiveshareSharesTestPublish       Method = "liveshareShares.testPublish"
-	MethodLiveshareSharesUpdatePermissions Method = "liveshareShares.updatePermissions"
 )
 
-// OfficialForgeLiveshareMethods 按官方命名空间分组返回这 27 个方法（顺序固定，
-// 与 docs/evidence/official-desktop-api-methods-0.2.2-rc.1.txt 的字母序一致）。
+// OfficialForgeLiveshareMethods 返回这两个官方命名空间的全部方法
+// （19 个 forgePanel + 12 个 liveshareShares = 31，顺序固定）。
 //
-// 它给快照/文档/门禁用：新增或删除一个方法必须显式改这里。
+// 它给快照/文档/门禁用：新增或删除一个方法必须显式改这里。liveshare 的
+// 12 个在 handlers_liveshare_official.go 里，本函数只做拼装。
 func OfficialForgeLiveshareMethods() []Method {
-	return []Method{
+	forge := []Method{
 		MethodForgePanelBranches, MethodForgePanelCancelWorktree,
 		MethodForgePanelChangeRequestChecks, MethodForgePanelChangeRequestDiff,
 		MethodForgePanelChangeRequestText, MethodForgePanelContinueInProject,
@@ -155,17 +137,18 @@ func OfficialForgeLiveshareMethods() []Method {
 		MethodForgePanelRestoreWorktree, MethodForgePanelRetryWorktree,
 		MethodForgePanelStopCreation, MethodForgePanelSubmitReview,
 		MethodForgePanelTrack,
-		MethodLiveshareSharesAudit, MethodLiveshareSharesCreate,
-		MethodLiveshareSharesIdentity, MethodLiveshareSharesSetCapabilities,
-		MethodLiveshareSharesSetRelay, MethodLiveshareSharesStop,
-		MethodLiveshareSharesTestPublish, MethodLiveshareSharesUpdatePermissions,
 	}
+	return append(forge, OfficialLiveshareMethods()...)
 }
 
-// IsOfficialForgeLiveshareMethod 判断一个 /api 路径名是否属于本文件的 27 个方法。
+// IsOfficialForgeLiveshareMethod 判断一个 /api 路径名是否属于本族的 31 个方法
+// （19 forgePanel + 12 liveshareShares）。
 //
-// 路由侧只需要这一次判断（不要在 server.go 里摊开 27 个 case）。
+// 路由侧只需要这一次判断（不要在 server.go 里摊开 31 个 case）。
 func IsOfficialForgeLiveshareMethod(name string) bool {
+	if IsOfficialLiveshareMethod(name) || IsOfficialForgeChangeRequestMethod(name) {
+		return true
+	}
 	_, ok := forgeLiveshareSpecOf(Method(name))
 	return ok
 }
@@ -176,7 +159,7 @@ func IsOfficialForgeLiveshareMethod(name string) bool {
 
 // forgeParamKind 是参数校验需要区分的几种形状。
 //
-// 只列这几种：其余形状（数组、数字）这 27 个方法根本不收；多一种就多一处
+// 只列这几种：其余形状（数组、数字）forgePanel 这 19 个方法根本不收；多一种就多一处
 // "看起来校验了"的空转。
 type forgeParamKind int
 
@@ -206,7 +189,7 @@ type forgeParam struct {
 
 // forgeMethodSpec 是一个方法"要什么参数"与"缺什么服务"的静态描述。
 //
-// 它同时是：参数校验的输入、未实现错误的正文来源、报告里那 27 行的数据源。
+// 它同时是：参数校验的输入、未实现错误的正文来源、报告里那 19 行的数据源。
 // 三者用同一份表，避免文档说需要 A、代码说需要 B。
 type forgeMethodSpec struct {
 	method Method
@@ -219,14 +202,12 @@ type forgeMethodSpec struct {
 	note string
 }
 
-// forgeLiveshareSpecs 是这 27 个方法的唯一参数/缺口表。
+// forgeLiveshareSpecs 是 forgePanel 19 个方法的唯一参数/缺口表。
 func forgeLiveshareSpecs() []forgeMethodSpec {
 	const github = "GitHub provider（官方 dsh-experimental-forge 的 github 实现）与 gh 登录态（`gh auth login` 或 GITHUB_TOKEN）"
 	const worktree = "官方 worktrees 服务（@deepseek-ai/dsh-worktree）与 worktree 请求投影 forgeWorktree"
 	const binding = "forgeSession 绑定存储（Session ↔ change request URL）"
 	const localGit = "本机 git 读取服务（Session 的 cwd + sandbox 模式 + 受控 git 调用），本仓只在 modules/tool/repohere 里有 git，Transport 按 R7 不 import modules"
-	const relay = "Liveshare relay 地址（owner-shares.json 里保存的地址）+ owner 凭据（owner-credential.json / LIVESHARE_OWNER_CREDENTIAL_FILE）+ OIDC 身份（LIVESHARE_OWNER_PROVIDER_ID / TENANT_ID / SUBJECT_ID）"
-	const relayOwned = "relay 与它的审计/注销接口属于单独部署的 Liveshare server，不在本仓"
 
 	sessionOnly := []forgeParam{{wire: "sessionId", kind: forgeParamString}}
 	withURL := []forgeParam{
@@ -247,12 +228,6 @@ func forgeLiveshareSpecs() []forgeMethodSpec {
 		{wire: "scope", kind: forgeParamScope},
 		{wire: "path", kind: forgeParamString},
 	}
-	shareID := []forgeParam{{wire: "request", kind: forgeParamObject, inner: []forgeParam{
-		{wire: "shareId", kind: forgeParamString},
-	}}}
-	shareSession := []forgeParam{{wire: "request", kind: forgeParamObject, inner: []forgeParam{
-		{wire: "sessionId", kind: forgeParamString},
-	}}}
 
 	return []forgeMethodSpec{
 		{
@@ -363,8 +338,8 @@ func forgeLiveshareSpecs() []forgeMethodSpec {
 				{wire: "sessionId", kind: forgeParamString},
 				{wire: "from", kind: forgeParamNullableString},
 			},
-			need:     worktree + "（分支命名 dsh-<session 前 8 位>-<4 位随机>，建在仓库 .agents/worktrees/ 下）",
-			note:     "本仓没有 worktree 服务，也没有\"下一轮首步创建\"的 pre-step 钩子",
+			need: worktree + "（分支命名 dsh-<session 前 8 位>-<4 位随机>，建在仓库 .agents/worktrees/ 下）",
+			note: "本仓没有 worktree 服务，也没有\"下一轮首步创建\"的 pre-step 钩子",
 		},
 		{
 			method:   MethodForgePanelRestoreWorktree,
@@ -405,73 +380,10 @@ func forgeLiveshareSpecs() []forgeMethodSpec {
 			need:     "forge registry（识别 URL 属于哪个 code host）+ " + binding,
 			note:     "本仓没有 registry，认不出 URL 就没法建立绑定；可识别子集不能冒充全部",
 		},
-
-		{
-			method:   MethodLiveshareSharesAudit,
-			official: "typert.host.js:232 / liveshare/src/host/share-remote.ts:132",
-			params:   shareID,
-			need:     relay + "；审计记录本身由 Liveshare server 持久化，" + relayOwned,
-			note:     "没有 relay 就没有审计源；返回空数组会被读成\"没有审计事件\"",
-		},
-		{
-			method:   MethodLiveshareSharesCreate,
-			official: "typert.host.js:279 / liveshare/src/host/share-remote.ts:57",
-			params:   shareSession,
-			need:     relay + "；还要 owner 状态文件（默认 $DSH_HOME/liveshare/owner-shares.json）做注册与记录",
-			note:     "没有 relay 注册就没有 shareId 与链接；本地编一个 shareId 就是假数据",
-		},
-		{
-			method:   MethodLiveshareSharesIdentity,
-			official: "typert.host.js:311 / liveshare/src/host/share-remote.ts:122",
-			params: []forgeParam{{wire: "request", kind: forgeParamObject}},
-			need:     relay + "（Relay-verified 身份；显示名由凭据给出，本地配置不能覆盖）",
-			note:     "身份来自 relay 验证，本仓没有该凭据，返回任何 login 都是伪造",
-		},
-		{
-			method:   MethodLiveshareSharesSetCapabilities,
-			official: "typert.host.js:373 / liveshare/src/host/share-remote.ts:90",
-			params: []forgeParam{{wire: "request", kind: forgeParamObject, inner: []forgeParam{
-				{wire: "shareId", kind: forgeParamString},
-			}}},
-			need:     relay + " 的端点授权写回（插件声明 readable/writable）",
-			note:     "没有 share 记录与 relay，写授权无处落盘；回 success 会让 owner 以为已收窄暴露面",
-		},
-		{
-			method:   MethodLiveshareSharesSetRelay,
-			official: "typert.host.js:405 / liveshare/src/host/share-remote.ts:114",
-			params: []forgeParam{{wire: "request", kind: forgeParamObject, inner: []forgeParam{
-				{wire: "relayUrl", kind: forgeParamNullableString},
-			}}},
-			need:     relay + " 的持久化（owner-shares.json 里的 relay 地址）",
-			note:     "本仓没有 owner 状态文件；回 success 等于假装地址已保存",
-		},
-		{
-			method:   MethodLiveshareSharesStop,
-			official: "typert.host.js:437 / liveshare/src/host/share-remote.ts:72",
-			params:   shareID,
-			need:     relay + " 上的 share 注销与 fork 撤销",
-			note:     "没有 relay 就无法注销；本地\"忘了这条\"会让 viewer 仍连得上",
-		},
-		{
-			method:   MethodLiveshareSharesTestPublish,
-			official: "typert.host.js:469 / liveshare/src/host/share-remote.ts:147",
-			params:   shareSession,
-			need:     relay + "（注册一个 throwaway share 来验证本机是否有发布权）",
-			note:     "无 relay 时\"能发布\"只能是编的；任务口径明确禁止 testPublish 不发就报成功",
-		},
-		{
-			method:   MethodLiveshareSharesUpdatePermissions,
-			official: "typert.host.js:516 / liveshare/src/host/share-remote.ts:80",
-			params: []forgeParam{{wire: "request", kind: forgeParamObject, inner: []forgeParam{
-				{wire: "shareId", kind: forgeParamString},
-			}}},
-			need:     relay + " 的权限写回（tier write/view、allowsFork、ttlMinutes）",
-			note:     "本仓没有 share 记录；回 success 会让 owner 以为只读已生效，实际没有分享层",
-		},
 	}
 }
 
-// forgeLiveshareSpecOf 在表里查一个方法。27 条线性扫，比多一张 map 好维护。
+// forgeLiveshareSpecOf 在表里查一个方法。19 条线性扫，比多一张 map 好维护。
 func forgeLiveshareSpecOf(m Method) (forgeMethodSpec, bool) {
 	for _, spec := range forgeLiveshareSpecs() {
 		if spec.method == m {
@@ -485,12 +397,38 @@ func forgeLiveshareSpecOf(m Method) (forgeMethodSpec, bool) {
 // 分发
 // ---------------------------------------------------------------------------
 
-// serveOfficialForgeLiveshareAPI 处理本文件的 27 个方法（Lead 的接线入口）。
+// serveOfficialForgeLiveshareAPI 处理本族的 31 个方法（Lead 的接线入口）。
 //
-// 调用方（server.go 的 /api 路由）只需在既有 family 判断之后判断
-// `IsOfficialForgeLiveshareMethod(name)` 并调用它；认证、POST 校验、失败日志
-// 都已经在 handleAPI 里做过了。
+// 19 个 forgePanel 仍在 handlers_forge_liveshare_official.go 里回结构化未实现；
+// 12 个 liveshareShares 交给 handlers_liveshare_official.go 的真实契约层。
 func (s *Server) serveOfficialForgeLiveshareAPI(w http.ResponseWriter, r *http.Request, name string) {
+	// PARITY-W2-WRITE：merge/markReady/submitReview 有 provider 写实现时
+	// 先走受控写层；未接线（全 nil）保持旧 501。
+	if IsOfficialForgeWriteMethod(name) && s.hasOfficialForgeWriteAPI() {
+		s.serveOfficialForgeWriteAPI(w, r, name)
+		return
+	}
+	if IsOfficialForgeChangeRequestMethod(name) {
+		s.ServeOfficialForgeChangeRequestAPI(w, r, name)
+		return
+	}
+	if IsOfficialLiveshareMethod(name) {
+		s.serveOfficialLiveshareAPI(w, r, name)
+		return
+	}
+	// PARITY-W2-STATE：forgePanel 的 track/dismiss/refresh/follow 有真实绑定
+	// 存储时走真实现；没接线（api 全 nil）仍落下面的 501，语义不变。
+	if IsOfficialForgePanelStateMethod(name) {
+		if api := s.officialForgePanelAPI(); api.Track != nil || api.Dismiss != nil ||
+			api.Refresh != nil || api.Snapshot != nil {
+			if Method(name) == MethodForgePanelFollow {
+				s.ServeOfficialForgePanelFollowHTTP(w, r)
+				return
+			}
+			ServeOfficialForgePanel(w, r, name, api)
+			return
+		}
+	}
 	ServeOfficialForgeLiveshare(w, r, name)
 }
 

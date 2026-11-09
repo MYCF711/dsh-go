@@ -3,8 +3,19 @@
 // 三个工具共用一个文件、一个 Tool 类型：它们操作的是**同一份**按会话划分的状态。
 // 拆开只会把存储与编解码抄三遍，并且多出三个互不知道对方改了什么的写入口。
 //
-// 为什么落盘而不是放内存：目标必须**跨会话存活**——进程重启、会话恢复之后，
-// 模型还得能接着干。每个会话一个文件，没有文件就是这个会话没有目标。
+// # 真值（HS-GOAL-TRUTH）
+//
+// 工具写的**就是**宿主 goal 域的规范文档 `<home>/state/session-goal.json`
+// （`internal/goal` 的 `Document`），与 serve 的 `goalOverrideStore`、
+// 官方 `goals.*`、`/goal` 命令、goal-round 驱动同一份。过去这里写
+// `state/goals/<session>.json`，于是模型建的目标驱动永远看不到、也不会自动续轮。
+//
+// 旧目录只在 `internal/goal.MigrateLegacy` 里被导入一次，随后归档到
+// `state/goals.migrated/`，不再参与读写。
+//
+// # 为什么落盘而不是放内存
+//
+// 目标必须**跨会话存活**——进程重启、会话恢复之后，模型还得能接着干。
 package goal
 
 import (
@@ -14,14 +25,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	goaldomain "dshgo/internal/goal"
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
+	"dshgo/internal/transport"
 )
 
 // 三个工具的 kind，同时也是模型看到的工具名。
@@ -82,17 +94,19 @@ var (
 }`)
 )
 
-// Goal 是一个会话的目标。字段顺序与落盘形状一致，方便人直接看文件。
+// Goal 是模型看到的目标形状（工具回包）。
+//
+// 它是**投影**，不是存储：存储是 `internal/goal.Record`（官方 snapshot 形状）。
+// 官方 snapshot 没有 createdAt/updatedAt，这里也不编——时间线的真值在
+// `goal/change` journal 里（`goals.*` 从那里还原），工具回包不重复一份可能过期的。
 type Goal struct {
 	ID            string `json:"id"`
 	Objective     string `json:"objective"`
 	Phase         string `json:"phase"` // active | complete | blocked | paused
 	RoundsStarted int    `json:"rounds_started"`
 	MaxGoalRounds int    `json:"max_goal_rounds"`
-	Revision      int    `json:"revision"`
-	BlockedReason string `json:"blocked_reason"`
-	CreatedAt     string `json:"created_at"` // RFC3339
-	UpdatedAt     string `json:"updated_at"`
+	Revision      int64  `json:"revision"`
+	BlockedReason string `json:"blocked_reason,omitempty"`
 }
 
 type createArgs struct {
@@ -102,69 +116,136 @@ type createArgs struct {
 
 type updateArgs struct {
 	GoalID        string  `json:"goal_id"`
-	Revision      int     `json:"revision"`
+	Revision      int64   `json:"revision"`
 	Action        string  `json:"action"`
 	Objective     *string `json:"objective"`
 	MaxGoalRounds *int    `json:"max_goal_rounds"`
 	BlockedReason *string `json:"blocked_reason"`
 }
 
-// store 是三个工具共享的存储句柄。Mutex 串行化整个读-改-写，
-// 因为 revision 是"比较后写"的乐观锁，中间被插一刀就等于没有校验。
-type store struct {
-	mu  sync.Mutex
-	dir string
-}
+// 工具层的两类业务错误：它们各自对应一条不同的下一步提示，不能混成一句。
+var (
+	errNoGoal    = errors.New("当前会话没有目标")
+	errGoalExist = errors.New("当前会话已有目标")
+)
 
-func (s *store) path(session string) string { return filepath.Join(s.dir, session+".json") }
+// store 是三个工具共享的存储句柄。
+//
+// 状态机、文档编解码、CAS、迁移全在 `internal/goal`；这里只负责"取锁 →
+// 读 → 交给状态机 → 落盘"。Mutex 串行化整个读-改-写，因为 revision 是
+// "比较后写"的乐观锁，中间被插一刀就等于没有校验。
+type store struct {
+	mu   sync.Mutex
+	path string // 规范文档：<home>/state/session-goal.json
+	// newID 可注入（测试用它钉住 id 分配可重放）。
+	newID func() (string, error)
+}
 
 // display 只用于提示：对外一律正斜杠，Windows 的反斜杠不喂给模型。
-func (s *store) display() string { return strings.ReplaceAll(s.dir, `\`, "/") }
+func (s *store) display() string { return strings.ReplaceAll(filepath.Dir(s.path), `\`, "/") }
 
 func (s *store) ready() error {
-	if strings.TrimSpace(s.dir) == "" {
+	if strings.TrimSpace(s.path) == "" {
 		return fmt.Errorf("目标存储没有配置数据目录")
 	}
+	if s.newID == nil {
+		s.newID = newID
+	}
 	return nil
 }
 
-// load 读当前会话的目标；没有文件就是没有目标，不算错误。
-// 调用方必须已持锁。
-func (s *store) load(session string) (*Goal, error) {
-	buf, err := os.ReadFile(s.path(session))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+// locked 在**跨进程锁**内加载规范文档（含旧格式迁移），交给 fn。
+//
+// fn 返回非 nil 的 next 时才落盘：只读路径（get_goal）不产生写入。
+// 为什么要跨进程锁：serve 模式下工具跑在子进程，宿主 store 在父进程，
+// 两边读写同一份文档；没有文件锁就是两条 read-modify-write 互相覆盖。
+func (s *store) locked(fn func(doc goaldomain.Document) (*goaldomain.Document, error)) (goaldomain.Document, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := goaldomain.Lock(s.path)
 	if err != nil {
-		return nil, fmt.Errorf("读目标文件 %s 失败: %w", s.display(), err)
+		return goaldomain.Document{}, err
 	}
-	var g Goal
-	if err := json.Unmarshal(buf, &g); err != nil {
-		return nil, fmt.Errorf("目标文件 %s 不是合法 JSON: %w", s.display(), err)
+	defer unlock()
+	doc, flatMigrated, err := goaldomain.LoadOrMigrate(s.path, s.newID)
+	if err != nil {
+		return goaldomain.Document{}, err
 	}
-	return &g, nil
+	if flatMigrated {
+		if err := goaldomain.Save(s.path, doc); err != nil {
+			return goaldomain.Document{}, err
+		}
+	}
+	migrated, imported, err := goaldomain.MigrateLegacy(filepath.Dir(s.path), doc, s.newID)
+	if err != nil {
+		return goaldomain.Document{}, err
+	}
+	if imported > 0 {
+		if err := goaldomain.Save(s.path, migrated); err != nil {
+			return goaldomain.Document{}, err
+		}
+		doc = migrated
+	}
+	next, err := fn(doc)
+	if err != nil {
+		return doc, err
+	}
+	if next != nil {
+		if err := goaldomain.Save(s.path, *next); err != nil {
+			return goaldomain.Document{}, err
+		}
+		doc = *next
+	}
+	return doc, nil
 }
 
-// save 先写 .tmp 再 rename：崩在中间时旧文件仍然完整，不会留下半截 JSON。
-// 调用方必须已持锁。
-func (s *store) save(session string, g *Goal) error {
-	buf, err := json.MarshalIndent(g, "", "  ")
-	if err != nil {
-		return fmt.Errorf("序列化目标失败: %w", err)
-	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
-		return fmt.Errorf("建状态目录 %s 失败: %w", s.display(), err)
-	}
-	dst := s.path(session)
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0o644); err != nil {
-		return fmt.Errorf("写临时文件失败: %w", err)
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		os.Remove(tmp) // 留个 .tmp 会让人以为还有一次没跑完的写
-		return fmt.Errorf("替换目标文件失败: %w", err)
-	}
-	return nil
+// createRecord 建目标：**已在跨进程锁内**，冲突/落盘错误原样返回给工具层。
+//
+// 为什么不写成闭包：R3 守卫（`cmd/dshd/r3_hint_test.go`）扫的是"返回
+// (spi.Result, error) 的函数体里每个带 error 的 return"，闭包也在扫描范围内；
+// 把状态迁移拆成独立方法，守卫看到的就是"这个函数不返回 spi.Result"，
+// 而错误到 Hint 的映射留在工具层一处做。
+func (s *store) createRecord(sessionID, objective string, rounds int) (goaldomain.Record, error) {
+	var created goaldomain.Record
+	_, err := s.locked(func(doc goaldomain.Document) (*goaldomain.Document, error) {
+		if current := doc.Goals[sessionID]; current.Goal != nil {
+			return nil, fmt.Errorf("%w: 当前会话已有目标 %s（%s）", errGoalExist, current.Goal.ID, current.Goal.Phase)
+		}
+		next, record, err := goaldomain.Apply(doc.Goals, sessionID, goaldomain.Intent{
+			Kind: "create", Objective: &objective, MaxRounds: &rounds,
+		}, s.newID)
+		if err != nil {
+			return nil, err
+		}
+		created = record
+		return &goaldomain.Document{Version: goaldomain.Version, Goals: next}, nil
+	})
+	return created, err
+}
+
+// updateRecord 按 CAS 迁移目标（revision 必须匹配），返回迁移后的记录。
+func (s *store) updateRecord(sessionID, goalID string, revision int64, intent goaldomain.Intent) (goaldomain.Record, error) {
+	var updated goaldomain.Record
+	_, err := s.locked(func(doc goaldomain.Document) (*goaldomain.Document, error) {
+		current, exists := doc.Goals[sessionID]
+		if !exists || current.Goal == nil {
+			return nil, errNoGoal
+		}
+		// goal_id 不填就用当前会话的目标：一个会话只有一个目标，
+		// 让模型抄一遍 id 只是多一次被拒的机会。填了就必须对上（防串目标）。
+		if goalID == "" {
+			goalID = current.Goal.ID
+		}
+		// revision 是 CAS：拿旧值来改必须被拒，否则两个调用会互相覆盖。
+		intent.Expect = &goaldomain.Ref{ID: goalID, Revision: revision}
+		next, record, err := goaldomain.Apply(doc.Goals, sessionID, intent, s.newID)
+		if err != nil {
+			return nil, err
+		}
+		updated = record
+		return &goaldomain.Document{Version: goaldomain.Version, Goals: next}, nil
+	})
+	return updated, err
 }
 
 // Tool 的三个形态共用一个 struct，靠 kind 分派；这样 Module() 只需注册三次。
@@ -233,6 +314,22 @@ func session(ctx context.Context) (string, error) {
 	return id, nil
 }
 
+// project 把存储记录投影成模型看到的目标形状。
+func project(record goaldomain.Record) *Goal {
+	if record.Goal == nil {
+		return nil
+	}
+	goal := &Goal{
+		ID: record.Goal.ID, Objective: record.Goal.Objective, Phase: record.Goal.Phase,
+		RoundsStarted: goaldomain.Rounds(record), MaxGoalRounds: record.Goal.MaxGoalRounds,
+		Revision: record.Goal.Revision,
+	}
+	if record.Goal.BlockedReason != nil {
+		goal.BlockedReason = record.Goal.BlockedReason.Message
+	}
+	return goal
+}
+
 // ---- get_goal ----
 
 func (t *Tool) get(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
@@ -246,14 +343,13 @@ func (t *Tool) get(ctx context.Context, raw json.RawMessage) (spi.Result, error)
 			fmt.Errorf("get_goal: %w", err)
 	}
 
-	t.st.mu.Lock()
-	defer t.st.mu.Unlock()
-	g, err := t.st.load(id)
+	doc, err := t.st.locked(func(goaldomain.Document) (*goaldomain.Document, error) { return nil, nil })
 	if err != nil {
 		return spi.Result{Hint: "目标文件读不出来或已损坏：先让人看一眼 " + t.st.display() + " 下的文件，别覆盖它"},
 			fmt.Errorf("get_goal: %w", err)
 	}
-	if g == nil {
+	goal := project(doc.Goals[id])
+	if goal == nil {
 		return spi.Result{
 			Summary: "当前会话没有目标",
 			Data:    map[string]any{"goal": nil},
@@ -262,15 +358,15 @@ func (t *Tool) get(ctx context.Context, raw json.RawMessage) (spi.Result, error)
 	}
 
 	hint := ""
-	switch g.Phase {
+	switch goal.Phase {
 	case phaseBlocked:
 		hint = "目标是 blocked：条件解除后用 update_goal action resume 恢复；确实做完了就 action complete，先 get_goal 拿最新 revision"
 	case phasePaused:
 		hint = "目标是 paused：要接着干就 update_goal action resume（带 goal_id 与 revision）"
 	}
 	return spi.Result{
-		Summary: fmt.Sprintf("目标 %s · %s · revision %d", g.ID, g.Phase, g.Revision),
-		Data:    map[string]any{"goal": g},
+		Summary: fmt.Sprintf("目标 %s · %s · revision %d", goal.ID, goal.Phase, goal.Revision),
+		Data:    map[string]any{"goal": goal},
 		Hint:    hint,
 	}, nil
 }
@@ -311,36 +407,19 @@ func (t *Tool) create(ctx context.Context, raw json.RawMessage) (spi.Result, err
 			fmt.Errorf("create_goal: %w", err)
 	}
 
-	t.st.mu.Lock()
-	defer t.st.mu.Unlock()
-	cur, err := t.st.load(id)
+	created, err := t.st.createRecord(id, objective, rounds)
 	if err != nil {
-		return spi.Result{Hint: "目标文件读不出来或已损坏：先让人看一眼 " + t.st.display() + " 下的文件，别覆盖它"},
-			fmt.Errorf("create_goal: %w", err)
-	}
-	if cur != nil {
-		return spi.Result{Hint: "先 get_goal 看现状，要改就 update_goal"},
-			fmt.Errorf("create_goal: 当前会话已有目标 %s（%s）", cur.ID, cur.Phase)
-	}
-
-	now := now()
-	g := &Goal{
-		ID:            newID(),
-		Objective:     objective,
-		Phase:         phaseActive,
-		RoundsStarted: 0,
-		MaxGoalRounds: rounds,
-		Revision:      1,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-	}
-	if err := t.st.save(id, g); err != nil {
+		if errors.Is(err, errGoalExist) {
+			return spi.Result{Hint: "先 get_goal 看现状，要改就 update_goal"},
+				fmt.Errorf("create_goal: %v", err)
+		}
 		return spi.Result{Hint: "目标没落盘：检查状态目录权限与磁盘空间，重试一次；别当作已建成"},
 			fmt.Errorf("create_goal: %w", err)
 	}
+	goal := project(created)
 	return spi.Result{
-		Summary: fmt.Sprintf("已建目标 %s（revision %d，上限 %d 轮）", g.ID, g.Revision, g.MaxGoalRounds),
-		Data:    map[string]any{"goal": g, "id": g.ID, "revision": g.Revision},
+		Summary: fmt.Sprintf("已建目标 %s（revision %d，上限 %d 轮）", goal.ID, goal.Revision, goal.MaxGoalRounds),
+		Data:    map[string]any{"goal": goal, "id": goal.ID, "revision": goal.Revision},
 		Hint:    "记住这个 id 与 revision：以后每次 update_goal 都要带上，改之前先 get_goal 核对",
 	}, nil
 }
@@ -372,31 +451,14 @@ func (t *Tool) update(ctx context.Context, raw json.RawMessage) (spi.Result, err
 			fmt.Errorf("update_goal: %w", err)
 	}
 
-	t.st.mu.Lock()
-	defer t.st.mu.Unlock()
-	g, err := t.st.load(id)
-	if err != nil {
-		return spi.Result{Hint: "目标文件读不出来或已损坏：先让人看一眼 " + t.st.display() + " 下的文件，别覆盖它"},
-			fmt.Errorf("update_goal: %w", err)
+	// 参数级校验先做完：它们与存储状态无关，失败不该占着跨进程锁。
+	//
+	// 工具词表用 `blocked`（模型侧既有契约），goal 域的操作名是 `block`
+	// （与 goal/change 帧一致）：只在这里翻译一次，存储里只有一种拼法。
+	intent := goaldomain.Intent{Kind: a.Action}
+	if a.Action == "blocked" {
+		intent.Kind = "block"
 	}
-	if g == nil {
-		return spi.Result{Hint: "当前会话没有目标：先 create_goal 建一个，再改"},
-			fmt.Errorf("update_goal: 当前会话没有目标")
-	}
-	// goal_id 不填就用当前会话的目标：一个会话只有一个目标，
-	// 让模型抄一遍 id 只是多一次被拒的机会。填了就必须对上（防串目标）。
-	if strings.TrimSpace(a.GoalID) == "" {
-		a.GoalID = g.ID
-	}
-	if g.ID != a.GoalID {
-		return spi.Result{Hint: "goal_id 和当前会话的目标对不上（可能抄错了）：先 get_goal 拿准确 id"},
-			fmt.Errorf("update_goal: goal_id %q 与当前目标 %q 不符", a.GoalID, g.ID)
-	}
-	if g.Revision != a.Revision {
-		return spi.Result{Hint: "你先 get_goal 拿最新 revision 再改"},
-			fmt.Errorf("update_goal: revision 过期（盘上 %d，传来 %d）", g.Revision, a.Revision)
-	}
-
 	switch a.Action {
 	case "edit":
 		changed := false
@@ -410,7 +472,7 @@ func (t *Tool) update(ctx context.Context, raw json.RawMessage) (spi.Result, err
 				return spi.Result{Hint: fmt.Sprintf("objective 有 %d 字，超过 %d 上界：压缩成一句话再改", n, maxObjectiveRunes)},
 					fmt.Errorf("update_goal: objective 过长")
 			}
-			g.Objective = obj
+			intent.Objective = &obj
 			changed = true
 		}
 		if a.MaxGoalRounds != nil {
@@ -418,19 +480,13 @@ func (t *Tool) update(ctx context.Context, raw json.RawMessage) (spi.Result, err
 				return spi.Result{Hint: fmt.Sprintf("max_goal_rounds 要在 %d..%d 之间", minRounds, maxRounds)},
 					fmt.Errorf("update_goal: max_goal_rounds 越界 %d", *a.MaxGoalRounds)
 			}
-			g.MaxGoalRounds = *a.MaxGoalRounds
+			intent.MaxRounds = a.MaxGoalRounds
 			changed = true
 		}
 		if !changed {
 			return spi.Result{Hint: "edit 至少要传 objective 或 max_goal_rounds 之一；只改阶段就用 pause/resume/complete/blocked"},
 				fmt.Errorf("update_goal: edit 没有任何可改字段")
 		}
-	case "pause":
-		g.Phase = phasePaused
-	case "resume":
-		g.Phase = phaseActive
-	case "complete":
-		g.Phase = phaseComplete
 	case "blocked":
 		reason := ""
 		if a.BlockedReason != nil {
@@ -444,27 +500,35 @@ func (t *Tool) update(ctx context.Context, raw json.RawMessage) (spi.Result, err
 			return spi.Result{Hint: fmt.Sprintf("blocked_reason 有 %d 字，超过 %d 上界：只留那一条具体障碍", n, maxReasonRunes)},
 				fmt.Errorf("update_goal: blocked_reason 过长")
 		}
-		g.Phase = phaseBlocked
-		g.BlockedReason = reason
+		intent.Reason = &transport.GoalBlockedReason{Code: "model-blocked", Message: reason}
 	}
 
-	g.Revision++
-	g.UpdatedAt = now()
-	if err := t.st.save(id, g); err != nil {
-		return spi.Result{Hint: "改动没落盘：检查状态目录权限与磁盘空间，重试一次；别当作已生效"},
-			fmt.Errorf("update_goal: %w", err)
+	updated, err := t.st.updateRecord(id, strings.TrimSpace(a.GoalID), a.Revision, intent)
+	if err != nil {
+		switch {
+		case errors.Is(err, errNoGoal):
+			return spi.Result{Hint: "当前会话没有目标：先 create_goal 建一个，再改"},
+				fmt.Errorf("update_goal: %v", err)
+		case errors.Is(err, goaldomain.ErrTransition):
+			// 状态迁移错误（revision 过期 / 阶段不对）：要人先 get_goal 再决定。
+			return spi.Result{Hint: "状态迁移被拒（revision 过期或目标阶段不允许这个 action）：先 get_goal 拿最新 revision，再按当前 phase 选 action"},
+				fmt.Errorf("update_goal: %w", err)
+		default:
+			return spi.Result{Hint: "改动没落盘：检查状态目录权限与磁盘空间，重试一次；别当作已生效"},
+				fmt.Errorf("update_goal: %w", err)
+		}
 	}
-
+	goal := project(updated)
 	hint := ""
-	switch g.Phase {
+	switch goal.Phase {
 	case phaseComplete:
 		hint = "目标已 complete：别再自动接着干；还有新活就另建目标"
 	case phaseBlocked:
 		hint = "已标记 blocked：把 blocked_reason 里那条障碍告诉人，等它解除后 resume"
 	}
 	return spi.Result{
-		Summary: fmt.Sprintf("%s %s → %s（revision %d）", a.Action, g.ID, g.Phase, g.Revision),
-		Data:    map[string]any{"goal": g, "action": a.Action, "revision": g.Revision},
+		Summary: fmt.Sprintf("%s %s → %s（revision %d）", a.Action, goal.ID, goal.Phase, goal.Revision),
+		Data:    map[string]any{"goal": goal, "action": a.Action, "revision": goal.Revision},
 		Hint:    hint,
 	}, nil
 }
@@ -481,20 +545,27 @@ func validAction(a string) bool {
 }
 
 // newID 生成 goal-<8 位十六进制>：够短、够唯一，且不泄漏时间。
-func newID() string {
+func newID() (string, error) {
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		// 拿不到随机源时退回时间戳；id 只要在本会话内唯一即可。
-		return fmt.Sprintf("goal-%08x", time.Now().UnixNano()&0xffffffff)
+		return fmt.Sprintf("goal-%08x", time.Now().UnixNano()&0xffffffff), nil
 	}
-	return "goal-" + hex.EncodeToString(b[:])
+	return "goal-" + hex.EncodeToString(b[:]), nil
 }
 
-func now() string { return time.Now().Format(time.RFC3339) }
-
-// Module 返回装配用的模块描述。dir 是目标目录（接线时传 <home>/state/goals）。
+// Module 返回装配用的模块描述。
+//
+// dir 是**旧**按会话拆分目录（接线时传 `<home>/state/goals`）。规范文档是
+// 同一个 state 目录下的 `session-goal.json`——也就是 serve 的
+// `newGoalOverrideStore(home)` 读写的那一份。这样两个进程（serve 父进程与
+// 跑工具的 `dshd run` 子进程）天然同一份真值，不需要第三份同步。
 func Module(dir string) kernel.Module {
-	st := &store{dir: dir}
+	path := ""
+	if strings.TrimSpace(dir) != "" {
+		path = filepath.Join(filepath.Dir(dir), "session-goal.json")
+	}
+	st := &store{path: path, newID: newID}
 	return kernel.Module{
 		ID:       "tool-goal",
 		Backend:  kernel.BackendStatic,

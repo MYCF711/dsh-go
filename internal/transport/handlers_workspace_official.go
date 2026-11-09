@@ -1,7 +1,7 @@
 package transport
 
 // 本文件是官方桌面端 0.2.2-rc.1「workspace / workspaceFiles / directoryPicker」
-// 16 个 typert 方法的 L1 语义实现。
+// 17 个 typert 方法的 L1 语义实现。
 //
 // 对齐口径（见 docs/official-desktop-api-parity.md §2）：
 //   - **L1**：参数与结果**字段**按官方 zod 契约；wire 仍走本仓既有的
@@ -11,8 +11,8 @@ package transport
 //
 // 契约原件：
 //   - `@deepseek-ai/dsh-api-workspace-controller/lib/typert.host.js:32-240`（参数/结果 zod）
-//     与 `:245-665`（descriptor：`workspace/create`、`rename`、`delete`、
-//     `insertBefore`、`insertSessionBefore`、`pinSession`、`unpinSession`、
+//     与 `:245-665`（descriptor：`workspace/create`、`initializeDefault`、`rename`、
+//     `delete`、`insertBefore`、`insertSessionBefore`、`pinSession`、`unpinSession`、
 //     `archiveSession`、`unarchiveSession`、`directoryPicker/list`、
 //     `directoryPicker/createDirectory`）
 //   - `@deepseek-ai/dsh-api-workspace-files/lib/typert.host.js:23-155`（参数/结果 zod）
@@ -34,8 +34,11 @@ package transport
 //     二进制 encode）。本仓 L1 的 JSON 只能表达字符串，因此 `data` 是 **base64**，
 //     并额外给 `encoding:"base64"` 明确标注——不把 base64 冒充成官方原地字节。
 //  2. `workspaceFiles/changes`：官方是 `mode:'stream'`（typert.host.js:157-164）。
-//     HTTP 一次性响应无法承载持续 watch，因此如实回 501 并说明实时面只能走
-//     每会话 WS journal；**不返回假的 `ready` 帧**。
+//     本仓以 NDJSON 长连接承载（`official_stream_face.go`）：首帧 `{kind:"ready"}`，
+//     之后每次失效一帧 `{kind:"change",change:{absolutePath,version|absent}}`，
+//     文件与**目录**目标都支持（目录帧带的是解析后的绝对路径）。它与官方内核
+//     fs watch 的差别是"轮询 stat 比对版本"，延迟一个轮询间隔——这条差异由
+//     `official_stream_sources.go` 自己登记，不是未实现。
 
 import (
 	"encoding/json"
@@ -51,6 +54,7 @@ import (
 // 这类键逐字对应（本仓把 `/` 换成 `.`，与既有 58 个方法同形）。
 const (
 	MethodWorkspaceCreate              Method = "workspace.create"
+	MethodWorkspaceInitializeDefault   Method = "workspace.initializeDefault"
 	MethodWorkspaceRename              Method = "workspace.rename"
 	MethodWorkspaceDelete              Method = "workspace.delete"
 	MethodWorkspaceInsertBefore        Method = "workspace.insertBefore"
@@ -70,13 +74,13 @@ const (
 	MethodDirectoryPickerCreateDirectory Method = "directoryPicker.createDirectory"
 )
 
-// OfficialWorkspaceMethods 按命名空间分组返回本文件实现的 16 个方法（顺序固定）。
+// OfficialWorkspaceMethods 按命名空间分组返回本文件实现的 17 个方法（顺序固定）。
 //
 // 它给快照/文档/门禁用：新增或删除一个方法必须显式改这里，不能让
 // "方法悄悄多了一个"从路由表里漏过去。
 func OfficialWorkspaceMethods() []Method {
 	return []Method{
-		MethodWorkspaceCreate, MethodWorkspaceRename, MethodWorkspaceDelete,
+		MethodWorkspaceCreate, MethodWorkspaceInitializeDefault, MethodWorkspaceRename, MethodWorkspaceDelete,
 		MethodWorkspaceInsertBefore, MethodWorkspaceInsertSessionBefore,
 		MethodWorkspacePinSession, MethodWorkspaceUnpinSession,
 		MethodWorkspaceArchiveSession, MethodWorkspaceUnarchiveSession,
@@ -86,19 +90,22 @@ func OfficialWorkspaceMethods() []Method {
 	}
 }
 
-// IsOfficialWorkspaceMethod 判断一个 /api 路径名是否属于本文件的 16 个方法。
+// IsOfficialWorkspaceMethod 判断一个 /api 路径名是否属于本文件的 17 个方法。
 //
 // 注意 `workspace.list` / `workspace.init` 是**宿主独有**面（canonical 25 与
 // metadata init 扩展），不属于官方 workspace 族，这里必须认领不到。
 func IsOfficialWorkspaceMethod(name string) bool {
 	switch Method(name) {
-	case MethodWorkspaceCreate, MethodWorkspaceRename, MethodWorkspaceDelete,
+	case MethodWorkspaceCreate, MethodWorkspaceInitializeDefault, MethodWorkspaceRename, MethodWorkspaceDelete,
 		MethodWorkspaceInsertBefore, MethodWorkspaceInsertSessionBefore,
 		MethodWorkspacePinSession, MethodWorkspaceUnpinSession,
 		MethodWorkspaceArchiveSession, MethodWorkspaceUnarchiveSession,
 		MethodWorkspaceFilesList, MethodWorkspaceFilesRead, MethodWorkspaceFilesReadBytes,
 		MethodWorkspaceFilesStat, MethodWorkspaceFilesChanges,
-		MethodDirectoryPickerList, MethodDirectoryPickerCreateDirectory:
+		MethodDirectoryPickerList, MethodDirectoryPickerCreateDirectory,
+		// 宿主扩展（见 handlers_workspace_registry.go）
+		MethodWorkspaceRegistry, MethodWorkspaceResolve, MethodWorkspaceSwitch,
+		MethodWorkspaceRemove, MethodWorkspaceCommands:
 		return true
 	}
 	return false
@@ -165,9 +172,9 @@ type OfficialWorkspaceDirectoryEntry struct {
 //
 // `Path` 是**工作区相对路径**（根是空串），子项路径 = 它 + `/` + name。
 type OfficialWorkspaceDirectoryListing struct {
-	Path      string                          `json:"path"`
+	Path      string                            `json:"path"`
 	Entries   []OfficialWorkspaceDirectoryEntry `json:"entries"`
-	Truncated bool                            `json:"truncated"`
+	Truncated bool                              `json:"truncated"`
 }
 
 // OfficialWorkspaceFileStat 是 stat/read/readBytes 共同的头部字段。
@@ -246,11 +253,11 @@ type OfficialDirectoryItem struct {
 
 // OfficialDirectoryListing 是 `directoryPicker/list` 的结果。
 type OfficialDirectoryListing struct {
-	Path      string                `json:"path"`
-	Home      string                `json:"home"`
+	Path      string                  `json:"path"`
+	Home      string                  `json:"home"`
 	Crumbs    []OfficialDirectoryItem `json:"crumbs"`
 	Entries   []OfficialDirectoryItem `json:"entries"`
-	Truncated bool                  `json:"truncated"`
+	Truncated bool                    `json:"truncated"`
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +272,11 @@ type OfficialDirectoryListing struct {
 // （workspace-controller / workspace-files），真实来源也不同（registry 文件 /
 // v4 会话存储 / 真实文件系统），硬塞进一个 interface 只会逼调用方写空实现。
 type OfficialWorkspaceAPI struct {
-	Create              func(path string) (OfficialWorkspaceCreateValue, error)
+	Create func(path string) (OfficialWorkspaceCreateValue, error)
+	// InitializeDefault 初始化/复用"首次使用默认工作区"。第二个返回值是宿主侧
+	// 事实"这次真的创建了"（官方 result 不暴露 created，只有验收需要它）；
+	// 返回零值表示官方语义的 `undefined`（首次初始化不适用）。
+	InitializeDefault   func() (OfficialWorkspaceValue, bool, error)
 	Rename              func(workspaceID, title string) (OfficialWorkspace, error)
 	Delete              func(workspaceID string) error
 	InsertBefore        func(workspaceID, beforeWorkspaceID string) ([]string, error)
@@ -283,6 +294,14 @@ type OfficialWorkspaceAPI struct {
 	// IsDirectory（目录目标只在 changes 里合法，unary stat 由 transport 层拒绝）。
 	// 目标不存在时回 workspaceFiles/not-found（changes 据此发 absent 帧）。
 	FilesStat func(sessionID, path string) (OfficialWorkspaceFileStat, error)
+
+	// ---- 宿主扩展动词（PLAY-WORKSPACE-HOST）：不在官方 193 个方法里，
+	// 但走同一套 dispatch / 四字段错误 / 参数校验。nil 时回 501，与同族一致。
+	Registry func() (OfficialWorkspaceRegistry, error)
+	Resolve  func(ref string) (OfficialWorkspace, error)
+	Switch   func(ref string) (OfficialWorkspaceSwitchValue, error)
+	Remove   func(ref string) (OfficialWorkspaceRemoveValue, error)
+	Commands func() (OfficialWorkspaceCommandList, error)
 }
 
 // OfficialDirectoryPickerAPI 是官方 `directoryPicker` 的浏览后端
@@ -400,17 +419,21 @@ func OfficialWorkspaceError(code, format string, args ...any) error {
 //   - 其它（宿主自己的 bug）                                    → 500 internal
 func officialWorkspaceFaultStatus(code string) (status int, fourcode string) {
 	switch code {
-	case "workspace/not-found", "session/not-found", "workspaceFiles/not-found":
+	case "workspace/not-found", "session/not-found",
+		"workspaceFiles/not-found", "workspace-file/not-found":
 		return http.StatusNotFound, "not_found"
 	case "workspace/session-active":
 		return http.StatusConflict, "revision_conflict"
-	case "workspace/unsupported", "not_implemented":
+	case "workspace/unsupported", "not_implemented",
+		"workspace-file/watch-unsupported", "workspace-file/not-watchable":
 		return http.StatusNotImplemented, "not_implemented"
 	case "workspace/internal", "gateway/internal", "internal":
 		return http.StatusInternalServerError, "internal"
 	}
 	// 其余官方码（invalid-path / name-conflict / move-invalid / gateway/bad-request /
-	// directory-picker/* / workspaceFiles/outside-workspace …）都是**输入问题**。
+	// directory-picker/* / workspaceFiles|workspace-file 的 outside-workspace /
+	// not-regular-file / not-directory / too-large / not-text / unreadable …）
+	// 都是**输入问题**：客户端改路径或改读法就能过。
 	return http.StatusBadRequest, "bad_request"
 }
 
@@ -449,7 +472,7 @@ func officialWorkspaceFault(err error) error {
 // 分发
 // ---------------------------------------------------------------------------
 
-// ServeOfficialWorkspace 处理本文件的 16 个方法。
+// ServeOfficialWorkspace 处理本文件的 17 个方法。
 //
 // 它是纯函数（实现从参数进来，不从 *Server 上取），因此宿主侧测试可以直接打它，
 // 而 `(*Server).serveOfficialWorkspaceAPI` 只是"取挂载 + 调它"的一层壳。
@@ -477,7 +500,7 @@ func ServeOfficialWorkspace(w http.ResponseWriter, r *http.Request, name string,
 	writeJSON(w, http.StatusOK, result)
 }
 
-// serveOfficialWorkspaceAPI 处理本文件的 16 个方法（Lead 接线入口）。
+// serveOfficialWorkspaceAPI 处理本文件的 17 个方法（Lead 接线入口）。
 //
 // 调用方（server.go 的 /api 路由）只需在既有 switch 之前判断
 // `IsOfficialWorkspaceMethod(name)` 并调用它。
@@ -499,6 +522,8 @@ func routeOfficialWorkspaceMethod(api OfficialWorkspaceAPI, picker OfficialDirec
 	switch method {
 	case MethodWorkspaceCreate:
 		return officialWorkspaceCreate(api, p)
+	case MethodWorkspaceInitializeDefault:
+		return officialWorkspaceInitializeDefault(api, p)
 	case MethodWorkspaceRename:
 		return officialWorkspaceRename(api, p)
 	case MethodWorkspaceDelete:
@@ -527,6 +552,17 @@ func routeOfficialWorkspaceMethod(api OfficialWorkspaceAPI, picker OfficialDirec
 		return officialDirectoryPickerList(picker, p)
 	case MethodDirectoryPickerCreateDirectory:
 		return officialDirectoryPickerCreateDirectory(picker, p)
+	// 宿主扩展（见 handlers_workspace_registry.go）
+	case MethodWorkspaceRegistry:
+		return officialWorkspaceRegistryMethod(api, p)
+	case MethodWorkspaceResolve:
+		return officialWorkspaceResolveMethod(api, p)
+	case MethodWorkspaceSwitch:
+		return officialWorkspaceSwitchMethod(api, p)
+	case MethodWorkspaceRemove:
+		return officialWorkspaceRemoveMethod(api, p)
+	case MethodWorkspaceCommands:
+		return officialWorkspaceCommandsMethod(api, p)
 	}
 	return nil, officialNotImplemented("未知的官方 workspace 方法 %q", method)
 }
@@ -623,6 +659,35 @@ func officialFilePath(p *officialParams) (string, error) {
 // ---------------------------------------------------------------------------
 // workspace.*
 // ---------------------------------------------------------------------------
+
+// officialWorkspaceInitializeDefault 处理官方 `workspace/initializeDefault`。
+//
+// 官方契约（typert.host.js `workspace/initializeDefault`）：
+//   - 无参数（`parameters: []`）；
+//   - result 是 `WorkspaceValue | undefined`：首次初始化不适用时回 **undefined**，
+//     不是错误、更不是假造一个工作区。
+//
+// 本仓成功信封不接受 `{"result":null}`（出口会变 500），所以 undefined 用**空
+// result 对象** `{}` 表达——与 `handlers_agent_official.go` 对官方 undefined 的
+// 既有处理同形。客户端判 `result.workspace` 是否出现即可。
+func officialWorkspaceInitializeDefault(api OfficialWorkspaceAPI, p *officialParams) (any, error) {
+	// 官方参数表为空：出现任何字段都是 additionalProperties 违约。
+	if err := p.finish(); err != nil {
+		return nil, err
+	}
+	if api.InitializeDefault == nil {
+		return nil, officialNotImplemented("workspace.initializeDefault 未接线：宿主没有默认工作区初始化能力")
+	}
+	value, _, err := api.InitializeDefault()
+	if err != nil {
+		return nil, err
+	}
+	if value.Workspace.WorkspaceID == "" {
+		// 官方 undefined：首次初始化不适用（registry/会话历史非空或目录不可用）。
+		return nil, nil
+	}
+	return value, nil
+}
 
 func officialWorkspaceCreate(api OfficialWorkspaceAPI, p *officialParams) (any, error) {
 	o, err := officialPickObject(p, "request", []string{"path"})
@@ -913,8 +978,10 @@ func officialWorkspaceFilesRead(api OfficialWorkspaceAPI, p *officialParams) (an
 	if err != nil {
 		return nil, err
 	}
-	// 官方 `range` 是**必填**对象参数（typert `z.object({...})`，无 acceptsUndefined）。
-	rng, err := officialFileRange(p, "range", true)
+	// 官方 `range` 的**字段**都可选，`range` 本身也允许缺省（缺省 = `{}`）：
+	// `resolvePage` 里三次解构都是 `range.X === void 0 ? 默认值 : integerAtLeast(...)`，
+	// 所以省略一个可选对象不是错误——本层按官方默认值填好再交给宿主。
+	rng, err := officialFileRange(p, "range", false)
 	if err != nil {
 		return nil, err
 	}
@@ -981,8 +1048,8 @@ func officialWorkspaceFilesStat(api OfficialWorkspaceAPI, p *officialParams) (an
 	// FilesStat 之所以能给出目录 stat，是给 `workspaceFiles.changes` 的目录目标
 	// 用的；这条 unary 方法必须继续拒目录，不能把目录当文件报给客户端。
 	if stat.IsDirectory {
-		return nil, OfficialWorkspaceError("workspaceFiles/not-a-file",
-			"%q 是目录，不是文件（workspaceFiles.stat 只 stat 普通文件；目录 watch 走 workspaceFiles.changes）", path)
+		return nil, OfficialWorkspaceError("workspace-file/not-regular-file",
+			"%q 是目录，不是普通文件（workspaceFiles.stat 只 stat 普通文件；目录 watch 走 workspaceFiles.changes）", path)
 	}
 	return stat, nil
 }
@@ -1000,21 +1067,38 @@ func officialWorkspaceFilesChanges(p *officialParams) (any, error) {
 }
 
 // officialFileRange 解析 read 的行窗口 `range`（`{offset?, limit?}`）。
+//
+// 官方 resolvePage（`dsh-api-workspace-files/lib/index.js:236`）：
+//
+//	offset 缺省 **1**（首页）；limit 缺省部署上限 maxLines。
+//
+// 这两个默认值在**本层**就填进解析结果（`Offset`/`Limit`），而不是留给宿主：
+// 结构是公开契约，宿主直接读 `r.Offset` 时必须已经是 1，否则 `start=offset-1`
+// 会变成 -1、整页错位一行。`HasOffset`/`HasLimit` 仍然保留"客户端到底给没给"，
+// 供宿主区分"用默认"与"显式给了同一个值"（例如显式 limit 与上限比较时要报 400）。
 func officialFileRange(p *officialParams, name string, required bool) (OfficialWorkspaceFileRange, error) {
+	out := OfficialWorkspaceFileRange{Offset: 1}
 	raw, has := p.take(name)
 	if !has {
 		if required {
 			return OfficialWorkspaceFileRange{}, officialBadRequest(
 				"缺 %s（官方的 %s 参数必填；没有窗口就给 {}）", name, name)
 		}
-		return OfficialWorkspaceFileRange{}, nil
+		return out, nil
+	}
+	// 显式 null 不是"给了一个空对象"：官方 zod 里 `range` 是 object 或
+	// undefined，null 两者都不是。
+	if strings.TrimSpace(string(raw)) == "null" {
+		return OfficialWorkspaceFileRange{}, officialBadRequest("%s 不能是 null（省略它或给 {}）", name)
 	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return OfficialWorkspaceFileRange{}, officialBadRequest("%s 必须是 JSON 对象", name)
 	}
+	if obj == nil {
+		return out, nil
+	}
 	o := newOfficialObject(name, obj)
-	out := OfficialWorkspaceFileRange{}
 	offset, hasOffset, err := o.number("offset")
 	if err != nil {
 		return OfficialWorkspaceFileRange{}, err

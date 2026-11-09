@@ -176,10 +176,19 @@ type Request struct {
 }
 
 // Usage 是 token 用量。
+//
+// 三个标准计数是 required 字段；各 provider 在同一个 usage 对象里还会回
+// 自己的扩展计数（DeepSeek 的 prompt_cache_hit_tokens/miss、OpenAI/网关的
+// prompt_tokens_details.cached_tokens、completion_tokens_details.reasoning_tokens）。
+// 扩展统一收在 Extensions（点号路径 → 整数），JSON 编解码在 usage_ext.go：
+// 没有扩展时 marshal 结果与历史实现逐字节一致。
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// Extensions 是 provider 扩展计数，键是 wire 上的路径（如
+	// "prompt_cache_hit_tokens"、"prompt_tokens_details.cached_tokens"）。
+	Extensions map[string]int64 `json:"-"`
 }
 
 // Response 是一次流式调用的最终结果。

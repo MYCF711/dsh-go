@@ -216,7 +216,16 @@ var settingsMethodParams = map[string][]string{
 }
 
 func newSettingsFormHTTPHandler(store *serveSettingsStore) http.Handler {
-	service := settingsform.New(store)
+	return newSettingsFormHTTPHandlerWithService(settingsform.New(store))
+}
+
+// newSettingsFormHTTPHandlerWithService 用显式 Service 构造 handler。
+//
+// 保留 newSettingsFormHTTPHandler(store) 作为生产默认入口（DefaultRegistry，
+// 行为不变）；这个构造器给"插件声明 namespace 的 Registry"和测试用：
+// 它们需要 settingsform.NewService(store, registry) 造出的 Service，而
+// newSettingsFormHTTPHandler 只知道 store。
+func newSettingsFormHTTPHandlerWithService(service *settingsform.Service) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method := strings.TrimPrefix(r.URL.Path, "/api/")
 		allowed, ok := settingsMethodParams[method]
@@ -237,21 +246,40 @@ func newSettingsFormHTTPHandler(store *serveSettingsStore) http.Handler {
 		var err error
 		switch method {
 		case "settings.describe", "settings.form.describe":
-			result, err = service.Describe()
+			var described settingsform.DescribeResult
+			described, err = service.Describe()
+			result = redactSettingsDescribe(described)
 		case "settings.form.get":
-			result, err = service.Get(params.NS)
+			var section settingsform.Section
+			section, err = service.Get(params.NS)
+			if err == nil {
+				var secrets []string
+				secrets, err = settingsSecretPaths(service, params.NS)
+				if err == nil {
+					result = redactSettingsSection(section, secrets)
+				}
+			}
 		case "settings.mutate":
+			secretValues := settingsSecretInputValues(service, params.NS, params.Ops)
 			var mutation settingsform.MutationResult
 			mutation, err = service.Mutate(params.NS, params.Ops, params.ExpectedRevision)
-			result = mutation.Namespace
+			if err != nil {
+				err = redactSettingsErrorValues(err, secretValues)
+			}
+			result = redactSettingsNamespace(mutation.Namespace)
 		case "settings.form.set":
 			if params.Path == nil {
 				err = &settingsform.Error{Code: "invalid_path", Message: "settings.form.set 缺 path", Hint: "path 必须是 [field]", Status: http.StatusBadRequest}
 				break
 			}
+			ops := []settingsform.PathOp{{Op: "set", Path: *params.Path, Value: params.Value}}
+			secretValues := settingsSecretInputValues(service, params.NS, ops)
 			var mutation settingsform.MutationResult
-			mutation, err = service.Mutate(params.NS, []settingsform.PathOp{{Op: "set", Path: *params.Path, Value: params.Value}}, params.ExpectedRevision)
-			result = mutation.Section
+			mutation, err = service.Mutate(params.NS, ops, params.ExpectedRevision)
+			if err != nil {
+				err = redactSettingsErrorValues(err, secretValues)
+			}
+			result = redactSettingsSection(mutation.Section, mutation.Namespace.Secrets)
 		case "settings.form.reset":
 			var path []string
 			if params.Path != nil {
@@ -259,7 +287,7 @@ func newSettingsFormHTTPHandler(store *serveSettingsStore) http.Handler {
 			}
 			var mutation settingsform.MutationResult
 			mutation, err = service.Reset(params.NS, path, params.ExpectedRevision)
-			result = mutation.Section
+			result = redactSettingsSection(mutation.Section, mutation.Namespace.Secrets)
 		}
 		if err != nil {
 			writeSettingsFormError(w, err)
@@ -271,6 +299,164 @@ func newSettingsFormHTTPHandler(store *serveSettingsStore) http.Handler {
 		}
 		writeSettingsFormJSON(w, http.StatusOK, settingsEnvelope{Result: result})
 	})
+}
+
+// ---------------------------------------------------------------------------
+// L1 secret 值剥离（T09 / R4 安全行为审查）
+// ---------------------------------------------------------------------------
+//
+// R4 冻结的是**形状**：方法名、字段名、NamespaceView.Secrets 仍是 []string、
+// sections/errors 与非 secret 值的行为不变。安全要求是另一条：任何经本文件
+// 返回的 value/base/user（以及 Section.Fields 的 current/default）都不许携带
+// namespace 声明的 secret 槽位值。这里只做值剥离，不删字段、不改 secrets 列表。
+//
+// 所有 L1 出口都走下面三个函数：settings.describe / settings.form.describe
+// （redactSettingsDescribe）、settings.mutate（redactSettingsNamespace）、
+// settings.form.get/set/reset（redactSettingsSection）。新增方法时必须复用，
+// 否则就是给密钥开了一条新出口。
+
+// redactSettingsDescribe 剥离整个 DescribeResult 的 secret 值。
+//
+// NamespaceView.Secrets 是 []string（L1 冻结形状），它同时是"哪些字段是 secret"
+// 的唯一公开来源；secrets 列表本身原样保留，只把 value/base/user 里的同名键删掉。
+// Sections 没有 Secrets 字段，因此按 ns 从 Namespaces 取同一份列表再剥
+// Field.Current / Field.Default。
+func redactSettingsDescribe(described settingsform.DescribeResult) settingsform.DescribeResult {
+	if len(described.Namespaces) == 0 && len(described.Sections) == 0 {
+		return described
+	}
+	secretByNS := make(map[string][]string, len(described.Namespaces))
+	namespaces := make([]settingsform.NamespaceView, len(described.Namespaces))
+	for index, namespace := range described.Namespaces {
+		secretByNS[namespace.NS] = append([]string(nil), namespace.Secrets...)
+		namespaces[index] = redactSettingsNamespace(namespace)
+	}
+	sections := make([]settingsform.Section, len(described.Sections))
+	for index, section := range described.Sections {
+		sections[index] = redactSettingsSection(section, secretByNS[section.NS])
+	}
+	described.Namespaces = namespaces
+	described.Sections = sections
+	return described
+}
+
+// redactSettingsNamespace 返回一个副本：Value/Base/User 中删除 Secrets 列出的键。
+// 输入 map 不修改（NamespaceView 的 map 可能仍与 DescribeResult/存储快照共享）。
+func redactSettingsNamespace(namespace settingsform.NamespaceView) settingsform.NamespaceView {
+	if len(namespace.Secrets) == 0 {
+		return namespace
+	}
+	namespace.Value = redactSettingsSecretMap(namespace.Value, namespace.Secrets)
+	namespace.Base = redactSettingsSecretMap(namespace.Base, namespace.Secrets)
+	namespace.User = redactSettingsSecretMap(namespace.User, namespace.Secrets)
+	return namespace
+}
+
+// redactSettingsSection 返回一个副本：secret 字段的 current/default 置 nil。
+//
+// 为什么保留 Field 条目而不是整条删除：Section.Fields 是 L1 的字段描述列表，
+// 删条目会让客户端以为字段不存在；保留 name/path/type/writable，只把值置 nil，
+// 形状与非 secret 字段的行为保持不变。Overridden 仍能表达"用户是否覆盖过"，
+// 与 NamespaceView.Secrets 的 set 语义一致（只报有没有，不报值）。
+func redactSettingsSection(section settingsform.Section, secrets []string) settingsform.Section {
+	if len(secrets) == 0 {
+		return section
+	}
+	secretNames := make(map[string]struct{}, len(secrets))
+	for _, name := range secrets {
+		secretNames[name] = struct{}{}
+	}
+	fields := make([]settingsform.Field, len(section.Fields))
+	copy(fields, section.Fields)
+	for index := range fields {
+		if _, secret := secretNames[fields[index].Name]; secret {
+			fields[index].Current = nil
+			fields[index].Default = nil
+		}
+	}
+	section.Fields = fields
+	return section
+}
+
+func redactSettingsSecretMap(values map[string]any, secrets []string) map[string]any {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	for _, name := range secrets {
+		delete(out, name)
+	}
+	return out
+}
+
+// settingsSecretPaths 返回一个 namespace 的 secret 字段列表。
+//
+// settingsform.Section 不带 Secrets 元数据，settings.form.get 只能从同一次
+// Service 的公开 describe 描述符取；settings.describe/mutate/form.set/reset 都
+// 已经天然带 Secrets/可由 MutationResult.Namespace 取到，不需要这次额外读取。
+// Describe 失败必须 fail-loud：静默返回空列表等于让 form.get 绕过剥离。
+func settingsSecretPaths(service *settingsform.Service, namespace string) ([]string, error) {
+	described, err := service.Describe()
+	if err != nil {
+		return nil, err
+	}
+	for _, view := range described.Namespaces {
+		if view.NS == namespace {
+			return append([]string(nil), view.Secrets...), nil
+		}
+	}
+	return nil, nil
+}
+
+// settingsSecretInputValues 从一次写请求的 PathOp 里取 secret 字段的字符串值。
+// 只用于错误信息回抹：settingsform 的 invalid_enum 会把提交值 %q 写进 message；
+// 如果 secret 字段同时声明了 enum，不在错误路径回抹就等于把密钥写进响应。
+func settingsSecretInputValues(service *settingsform.Service, namespace string, ops []settingsform.PathOp) []string {
+	secretNames, err := settingsSecretPaths(service, namespace)
+	if err != nil {
+		return nil
+	}
+	secretSet := make(map[string]struct{}, len(secretNames))
+	for _, name := range secretNames {
+		secretSet[name] = struct{}{}
+	}
+	var values []string
+	for _, op := range ops {
+		if op.Op != "set" || len(op.Path) != 1 {
+			continue
+		}
+		if _, secret := secretSet[op.Path[0]]; !secret {
+			continue
+		}
+		if text, ok := op.Value.(string); ok && text != "" {
+			values = append(values, text)
+		}
+	}
+	return values
+}
+
+// redactSettingsErrorValues 把本次请求里确认属于 secret 字段的原文从错误信息里
+// 替换掉；非 secret 字段的错误文案保持原样（R4 非 secret 行为冻结）。
+func redactSettingsErrorValues(err error, secretValues []string) error {
+	if err == nil || len(secretValues) == 0 {
+		return err
+	}
+	apiErr := settingsform.AsError(err)
+	if apiErr == nil {
+		return err
+	}
+	redacted := *apiErr
+	for _, value := range secretValues {
+		if value == "" {
+			continue
+		}
+		redacted.Message = strings.ReplaceAll(redacted.Message, value, "[redacted]")
+		redacted.Hint = strings.ReplaceAll(redacted.Hint, value, "[redacted]")
+	}
+	return &redacted
 }
 
 func decodeSettingsParams(r *http.Request, method string, allowed []string, target *settingsParams) error {

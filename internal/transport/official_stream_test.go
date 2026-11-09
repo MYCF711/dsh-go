@@ -521,7 +521,7 @@ func (f *fakeWatchFiles) stat(string, string) (OfficialWorkspaceFileStat, error)
 	defer f.mu.Unlock()
 	f.calls++
 	if f.absent {
-		return OfficialWorkspaceFileStat{}, OfficialWorkspaceError("workspaceFiles/not-found",
+		return OfficialWorkspaceFileStat{}, OfficialWorkspaceError("workspace-file/not-found",
 			"文件不存在：a.txt")
 	}
 	return OfficialWorkspaceFileStat{AbsolutePath: "/work/a.txt", Version: f.version}, nil
@@ -570,25 +570,61 @@ func TestOfficialStreamWorkspaceFileChanges(t *testing.T) {
 	}
 }
 
-// TestOfficialStreamWorkspaceDirectoryIsExplicitlyUnsupported 钉住"目录目标"的
-// 诚实分支：官方要求目录帧带 absolutePath，本宿主 FilesList 只给工作区相对路径。
-func TestOfficialStreamWorkspaceDirectoryIsExplicitlyUnsupported(t *testing.T) {
-	srv := officialWorkspaceTestServer(t, OfficialWorkspaceAPI{
-		FilesStat: func(string, string) (OfficialWorkspaceFileStat, error) {
-			return OfficialWorkspaceFileStat{}, OfficialWorkspaceError("workspaceFiles/not-a-file",
-				"是目录，不是文件")
-		},
-	}, OfficialDirectoryPickerAPI{})
+// TestOfficialStreamWorkspaceDirectoryIsSupportedByHostStat 钉住"目录目标"的真实分支：
+//
+// 宿主 `FilesStat` 对目录返回 `{absolutePath, version}` 并置 `IsDirectory`
+// （`cmd/dshd/serve_workspace_api.go` 的 filesStat），目录帧因此走的是与文件帧
+// 同一套 `ready + change{absolutePath, version}` 形状。这里用一台假 FilesStat
+// 证明 transport 层**不**拦截目录目标，也不再回 501。
+func TestOfficialStreamWorkspaceDirectoryIsSupportedByHostStat(t *testing.T) {
+	var mu sync.Mutex
+	version := "d1"
+	dirStat := func(string, string) (OfficialWorkspaceFileStat, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return OfficialWorkspaceFileStat{AbsolutePath: "/work/dir", Version: version, IsDirectory: true}, nil
+	}
+	srv := officialWorkspaceTestServer(t, OfficialWorkspaceAPI{FilesStat: dirStat}, OfficialDirectoryPickerAPI{})
 
 	rec, _ := runStream(t, func(w http.ResponseWriter, r *http.Request) {
 		srv.serveOfficialWorkspaceAPI(w, r, "workspaceFiles.changes")
 	}, `{"workspaceFileScopeId":"s1","path":"dir"}`)
 
-	if code := rec.waitStatus(t); code != http.StatusNotImplemented {
-		t.Fatalf("目录目标应明确 501（不是假 ready）：%d body=%s", code, rawBody(rec))
+	frames := rec.waitFrames(t, 1)
+	if frames[0]["kind"] != "ready" {
+		t.Fatalf("目录目标的流第一帧必须是 ready（不是 501、也不是假数据）：%v", frames[0])
+	}
+	mu.Lock()
+	version = "d2"
+	mu.Unlock()
+	frames = rec.waitFrames(t, 2)
+	change, _ := frames[1]["change"].(map[string]any)
+	if change["absolutePath"] != "/work/dir" || change["version"] != "d2" {
+		t.Fatalf("目录帧必须带绝对路径与目录版本令牌：%v", frames[1])
+	}
+}
+
+// TestOfficialStreamWorkspaceNonWatchableTargetIsBadRequest 真正不能 watch 的目标
+// （symlink / 设备节点）回官方码 `workspace-file/watch-unsupported` + **400**：
+// 那是"这个目标不行"，不是"宿主没这个能力"，所以不是 501。
+func TestOfficialStreamWorkspaceNonWatchableTargetIsBadRequest(t *testing.T) {
+	srv := officialWorkspaceTestServer(t, OfficialWorkspaceAPI{
+		FilesStat: func(string, string) (OfficialWorkspaceFileStat, error) {
+			return OfficialWorkspaceFileStat{}, OfficialWorkspaceError("workspace-file/not-regular-file",
+				"是符号链接，不是普通文件")
+		},
+	}, OfficialDirectoryPickerAPI{})
+
+	rec, _ := runStream(t, func(w http.ResponseWriter, r *http.Request) {
+		srv.serveOfficialWorkspaceAPI(w, r, "workspaceFiles.changes")
+	}, `{"workspaceFileScopeId":"s1","path":"link"}`)
+
+	if code := rec.waitStatus(t); code != http.StatusBadRequest {
+		t.Fatalf("不可 watch 的目标应 400（官方 watch-unsupported 是输入问题），实际 %d：%s",
+			code, rawBody(rec))
 	}
 	if got := rec.Header().Get("Content-Type"); strings.HasPrefix(got, "application/x-ndjson") {
-		t.Fatalf("未实现不该开长连接：%q", got)
+		t.Fatalf("被拒的目标不该开长连接：%q", got)
 	}
 }
 

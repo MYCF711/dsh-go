@@ -23,19 +23,20 @@ type sideQueryService struct {
 	home      string
 	model     string
 	base      string
+	api       string
 	reasoning string
 	src       *sessionSource
 
-	newRunner func(model, base, credential string) independentSideRunner
+	newRunner func(model, base, credential, api string) independentSideRunner
 	mu        sync.Mutex
 	active    map[string]map[string]context.CancelFunc
 	closed    bool
 }
 
-func newSideQueryService(home, model, base, reasoning string, src *sessionSource) *sideQueryService {
-	service := &sideQueryService{home: home, model: model, base: base, reasoning: reasoning, src: src, active: map[string]map[string]context.CancelFunc{}}
-	service.newRunner = func(model, base, credential string) independentSideRunner {
-		chat := llm.New(base, credential)
+func newSideQueryService(home, model, base, api, reasoning string, src *sessionSource) *sideQueryService {
+	service := &sideQueryService{home: home, model: model, base: base, api: api, reasoning: reasoning, src: src, active: map[string]map[string]context.CancelFunc{}}
+	service.newRunner = func(model, base, credential, api string) independentSideRunner {
+		chat := llm.NewWithAPI(base, credential, api)
 		chat.UserAgent = "dshd/" + version + " side-query"
 		return &agent.SideQueryRunner{Chat: chat, Model: model, Reasoning: reasoning}
 	}
@@ -90,11 +91,11 @@ func (s *sideQueryService) Run(ctx context.Context, sessionID, requestID, prompt
 	if err != nil {
 		return "", err
 	}
-	base, credential := s.base, envOr("DSHD_LLM_KEY", "")
+	base, credential, api := s.base, envOr("DSHD_LLM_KEY", ""), s.api
 	if routed {
-		base, credential = provider.BaseURL, provider.Credential()
+		base, credential, api = provider.BaseURL, provider.Credential(), provider.API
 	}
-	runner := s.newRunner(model, base, credential)
+	runner := s.newRunner(model, base, credential, api)
 	if runner == nil {
 		return "", errors.New("sideQuery runner factory 返回 nil")
 	}

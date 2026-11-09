@@ -139,18 +139,21 @@ func TestACPModelAndSessionCapacityIsolation(t *testing.T) {
 	}
 }
 
+// 内置已知模型的容量来自网关实测：/v1/models 对 group/deepseek-v4.1-flash-1017
+// 返回 context_length=1000000。早期写的 128000 是没实测时的猜测，会把 1M 窗口的
+// 会话画成"上下文快撑爆"；max_tokens 仍保持缺省 0（常规请求不新增该参数）。
 func TestACPKnownModelKeepsExistingCapacity(t *testing.T) {
 	base, reqs := capacityPromptServer(t)
 	r := newCapacityPromptRunner(t, base, "group/deepseek-v4.1-flash-1017")
-	if got := r.ctxWindow; got != 128000 {
-		t.Errorf("内置已知模型 context = %d，期望保持 128000", got)
+	if got := r.ctxWindow; got != 1000000 {
+		t.Errorf("内置已知模型 context = %d，期望网关实测 1000000", got)
 	}
 	events := promptOnce(t, r, "known-session")
 	req := onlyCapacityRequest(t, reqs)
 	if got := req.MaxTokens; got != 0 {
 		t.Errorf("内置已知模型新增了 max_tokens=%d，期望保持缺省 0", got)
 	}
-	if got := usageSize(events); got != 128000 {
-		t.Errorf("已知模型 usage_update size = %d，期望保持 128000", got)
+	if got := usageSize(events); got != 1000000 {
+		t.Errorf("已知模型 usage_update size = %d，期望 1000000", got)
 	}
 }

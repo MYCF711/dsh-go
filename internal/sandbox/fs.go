@@ -16,5 +16,6 @@ func (p *Policy) EvaluateFS(req FSRequest) (Decision, error) {
 	if req.Operation != OperationRead && req.Operation != OperationWrite {
 		return Decision{}, fmt.Errorf("%w: FS 只接受 read/write，实际为 %q", ErrInvalidOperation, req.Operation)
 	}
-	return p.evaluate(req.Call, req.Operation, req.Path)
+	// 文件读写的批准对象是 canonical path 本身，不需要额外的 Subject。
+	return p.evaluate(req.Call, req.Operation, req.Path, "")
 }

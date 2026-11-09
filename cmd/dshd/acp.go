@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -21,9 +22,21 @@ import (
 	"dshgo/internal/llm"
 	"dshgo/internal/modes"
 	"dshgo/internal/prompt"
+	"dshgo/internal/sandbox"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 )
+
+// fsSandboxModeSetter 是 FS 的可选能力：把进程级 FS 边界切到会话档位。
+// 由 modules/fs/local 实现；ACP 一个进程一个档位，所以切换是安全的。
+type fsSandboxModeSetter interface {
+	SetSandboxMode(sandbox.Mode) error
+}
+
+// fsExtraReadRooter 是 FS 的可选能力：追加一个只读根（additionalDirectories）。
+type fsExtraReadRooter interface {
+	AddExtraReadRoot(dir string) error
+}
 
 // acpRunner 把 ACP 的 prompt 接到真实的 agent 循环与会话日志上。
 type acpRunner struct {
@@ -67,6 +80,22 @@ type acpRunner struct {
 	sessionModes map[string]string
 	modeReg      *modes.Registry
 
+	// sandbox 是 ACP 的策略闸门：会话档位 → 执行口（bash/pwsh/FS 同一个引擎）。
+	// nil = 未接线（旧行为）；生产入口在 cmdACP 里 fail-loud 地装上。
+	sandbox *sandbox.Gate
+	// sandboxFS 把进程级 FS 边界切到会话档位（modules/fs/local 的可选能力）。
+	sandboxFS fsSandboxModeSetter
+	// fsExtra 把 additionalDirectories 变成 FS 只读根（可选能力）。
+	fsExtra fsExtraReadRooter
+	// sandboxMode 是**进程级**边界；"" = 还没有会话登记过档位。
+	sandboxMode sandbox.Mode
+	// sandboxCeiling 是进程上限（DSHD_SANDBOX_MODE）；会话档位不得比它更宽。
+	sandboxCeiling sandbox.Mode
+	// sandboxSessions 记录已登记会话的档位：A/B 两个会话不允许静默共享一个边界。
+	sandboxSessions map[string]sandbox.Mode
+	// additionalDirs 是每会话的 additionalDirectories（canonical，只读）。
+	additionalDirs map[string][]string
+
 	mu    sync.Mutex
 	logs  map[string]*session.Log
 	turns map[string]int
@@ -79,8 +108,9 @@ func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home str
 	r := &acpRunner{
 		reg: reg, runner: runner, base: base, model: model, home: home, steps: steps,
 		logs: map[string]*session.Log{}, turns: map[string]int{}, hist: map[string][]llm.Message{},
-		used: map[string]int{}, meter: map[string]*session.Meter{}, keepRecent: 8,
+		used: map[string]int{}, meter: map[string]*session.Meter{}, keepRecent: defaultACPKeepRecent,
 		approvals: approval.New(), sessionModes: map[string]string{}, modeID: modes.DefaultID,
+		sandboxSessions: map[string]sandbox.Mode{}, additionalDirs: map[string][]string{},
 	}
 	r.setModelCapacity(llm.ModelCapacity{})
 	return r
@@ -91,6 +121,177 @@ func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home str
 func (r *acpRunner) setModelCapacity(declared llm.ModelCapacity) {
 	r.capacity = llm.ResolveModelCapacity(r.model, declared)
 	r.ctxWindow = r.capacity.ContextWindow
+}
+
+// initSandbox 装上 ACP 的 sandbox 闸门（会话档位 → 执行口）。
+//
+// 生产入口只在 cmdACP 里调用：装不上就等于没有策略，所以错误必须往上抛。
+// ceiling 非空时（进程环境显式给了 DSHD_SANDBOX_MODE）它同时是会话档位的上限。
+func (r *acpRunner) initSandbox(workspace, home string, ceiling sandbox.Mode) error {
+	if strings.TrimSpace(workspace) == "" {
+		return fmt.Errorf("%w: 工作区为空", sandbox.ErrMissingContext)
+	}
+	if strings.TrimSpace(home) == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("%w: 解析宿主 home: %v", sandbox.ErrMissingContext, err)
+		}
+		home = h
+	}
+	base := sandbox.ModeWorkspaceWrite
+	if ceiling != "" {
+		base = ceiling
+	}
+	gate, err := sandbox.NewGate(sandbox.ProcessConfig{
+		Mode: base, WorkspaceRoot: workspace, HomeDir: home,
+	})
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.sandbox = gate
+	r.sandboxCeiling = ceiling
+	r.mu.Unlock()
+	return nil
+}
+
+// sandboxModeFor 把会话当前的 mode 映射成真实 runtime 档位。
+func (r *acpRunner) sandboxModeFor(sessionID string) (sandbox.Mode, error) {
+	m := r.modeOf(sessionID)
+	mode, err := m.SandboxMode()
+	if err != nil {
+		return "", fmt.Errorf("会话 %s 的 mode %q: %w", sessionID, m.ID, err)
+	}
+	return mode, nil
+}
+
+// registerSandbox 把一个会话的档位登记到进程边界上。
+//
+// ACP 是一个进程多个会话，而 FS 的读写没有 ctx、边界只能是进程级的：
+// 所以这里显式规定**一个进程只服务一个 sandbox 档位**。出现第二个档位就
+// fail-loud，由客户端另起 dshd——不静默共用一个"当前权限"（那正是串扰）。
+func (r *acpRunner) registerSandbox(sessionID string) error {
+	r.mu.Lock()
+	gate := r.sandbox
+	r.mu.Unlock()
+	if gate == nil {
+		return nil
+	}
+	mode, err := r.sandboxModeFor(sessionID)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if r.sandboxCeiling != "" {
+		cmp, cerr := sandbox.CompareModes(mode, r.sandboxCeiling)
+		if cerr != nil {
+			r.mu.Unlock()
+			return cerr
+		}
+		if cmp > 0 {
+			ceiling := r.sandboxCeiling
+			r.mu.Unlock()
+			return fmt.Errorf("%w: 会话 %s 的 sandbox 档位 %s 比进程上限 %s 更宽",
+				sandbox.ErrWidenDenied, sessionID, mode, ceiling)
+		}
+	}
+	if r.sandboxMode != "" && r.sandboxMode != mode {
+		_, registered := r.sandboxSessions[sessionID]
+		sole := registered && len(r.sandboxSessions) == 1
+		if !sole {
+			current := r.sandboxMode
+			r.mu.Unlock()
+			return fmt.Errorf(
+				"ACP 一个进程只能服务一个 sandbox 档位：进程边界已是 %s，而会话 %s 需要 %s；"+
+					"请为 %s 另起一个 dshd（同一个进程里静默共享一个边界就是 A/B 权限串扰）",
+				current, sessionID, mode, mode)
+		}
+	}
+	r.sandboxMode = mode
+	r.sandboxSessions[sessionID] = mode
+	fs := r.sandboxFS
+	r.mu.Unlock()
+	if err := gate.SetSessionMode(sessionID, mode); err != nil {
+		return err
+	}
+	if fs != nil {
+		return fs.SetSandboxMode(mode)
+	}
+	return nil
+}
+
+// forgetSandbox 清掉一个会话的档位与缓存（关闭/删除时调用）。
+func (r *acpRunner) forgetSandbox(sessionID string) {
+	r.mu.Lock()
+	gate := r.sandbox
+	delete(r.sandboxSessions, sessionID)
+	delete(r.additionalDirs, sessionID)
+	if len(r.sandboxSessions) == 0 {
+		r.sandboxMode = ""
+	}
+	r.mu.Unlock()
+	if gate != nil {
+		gate.ForgetSession(sessionID)
+	}
+}
+
+// SetAdditionalDirectories 把一个会话的 additionalDirectories 变成**只读**根。
+//
+// 语义：读放行（工作区之外）、写一律拒绝（策略层判 extra-read-only）；
+// 目录必须是已存在的绝对目录，未知形态 fail-loud。ACP 服务端把它从
+// session/new 接到这里的最后一段在 internal/acp（不在本任务写作用域），
+// 见 $S/WIRING.md。
+func (r *acpRunner) SetAdditionalDirectories(sessionID string, dirs []string) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("%w: session id 为空", sandbox.ErrMissingContext)
+	}
+	canonical := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		clean := strings.TrimSpace(dir)
+		if clean == "" {
+			continue
+		}
+		abs, err := filepath.Abs(clean)
+		if err != nil {
+			return fmt.Errorf("additionalDirectories %q: %w", dir, err)
+		}
+		st, err := os.Stat(abs)
+		if err != nil {
+			return fmt.Errorf("additionalDirectories %q 不可用: %w", dir, err)
+		}
+		if !st.IsDir() {
+			return fmt.Errorf("additionalDirectories %q 不是目录", dir)
+		}
+		c, err := sandbox.CanonicalPath(abs)
+		if err != nil {
+			return err
+		}
+		canonical = append(canonical, c)
+	}
+	if len(canonical) == 0 {
+		return nil
+	}
+	r.mu.Lock()
+	gate := r.sandbox
+	extra := r.fsExtra
+	r.mu.Unlock()
+	if gate == nil {
+		return fmt.Errorf("%w: sandbox 未接线", sandbox.ErrPolicyUnwired)
+	}
+	if err := gate.SetSessionExtraReadRoots(sessionID, canonical); err != nil {
+		return err
+	}
+	if extra != nil {
+		for _, dir := range canonical {
+			if err := extra.AddExtraReadRoot(dir); err != nil {
+				return err
+			}
+		}
+	}
+	r.mu.Lock()
+	r.additionalDirs[sessionID] = canonical
+	r.mu.Unlock()
+	return nil
 }
 
 // Prompt 的返回值是**命名**的，因为出口兜底要看见最终的错误：
@@ -172,13 +373,10 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 			// 思考正文取自 `a.Reasoning`：它就是 `llm.Response.Reasoning`，也即
 			// 事件流里那些 `agent.EventReasoning` 增量拼起来的那段（同一次快照的两面）。
 			blocks := assistantBlocksFrom(a.Content, a.Reasoning, a.ToolCalls)
-			var usage map[string]any
+			// v4 usage 与 run 那条路**同一份**投影（assistantUsageFrom）：键名、
+			// input 是否含缓存命中、什么时候不写键，都只有一处判断。
+			usage := assistantUsageFrom(a.Usage)
 			if a.Usage != nil {
-				usage = map[string]any{
-					"inputTokens":  a.Usage.PromptTokens,
-					"outputTokens": a.Usage.CompletionTokens,
-					"totalTokens":  a.Usage.TotalTokens,
-				}
 				usageOut = map[string]any{"inputTokens": a.Usage.PromptTokens, "outputTokens": a.Usage.CompletionTokens}
 			}
 			if err := logw.Append("assistant/message",
@@ -239,10 +437,16 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	// 模型或直接调用方仍能点名隐藏工具，执行入口必须再拒绝一次。
 	mode := r.modeOf(sessionID)
 	view := modes.Filter(r.reg, mode)
+	r.mu.Lock()
+	sandboxGate := r.sandbox
+	workspace := r.workspace
+	r.mu.Unlock()
 	var runner spi.Runner = &guardedRunner{
 		inner: r.runner, reg: r.reg, view: view, ask: r.ask,
 		sessionID: sessionID, approvals: r.approvals,
 		modeApproval: mode.Approval,
+		sandbox:      sandboxGate, workspace: workspace,
+		stripSandboxArg: !acpToolsHaveOwnSandboxGate(),
 	}
 
 	loop := &agent.Loop{
@@ -260,9 +464,9 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		// 官方 0.2.2 #78 `agent/pre-step`：每一步模型请求之前先让请求前缀耐久。
 		// ACP 的 v4 不落 step/start，所以每一步的锚点就是该步请求前的事件数；
 		// 第一步与 prompt 侧车同锚点（幂等命中）。
-		PreStep: func(context.Context, int) error {
+		PreStep: worktreePreStep(newWorktreeService(newSessionSource(r.home, "")), sessionID, func(context.Context, int) error {
 			return writeDurableCheckpointForSession(r.home, sessionID, nil)
-		},
+		}),
 	}
 
 	// hist 必须在压缩**之后**取：autoCompactNow 会把 r.hist 换成压缩后的历史，
@@ -304,6 +508,14 @@ type guardedRunner struct {
 	// policyDeniesUnattended 表示"策略在无人值守时不问、直接拒"（--policy deny 或非终端 auto）。
 	// 它与"人看了之后说不"要分开说——对模型来说前者换问法没用，后者可以再来一次。
 	policyDeniesUnattended bool
+	// sandbox 是会话级 sandbox 闸门；nil = 未接线（旧行为，不做 per-call 判定）。
+	sandbox *sandbox.Gate
+	// workspace 是 ACP 进程的 canonical 工作区，给不实现 spi.SandboxScope 的执行类工具兜底。
+	workspace string
+	// stripSandboxArg 表示工具自己的 sandbox 闸门没有接线（进程环境未设
+	// DSHD_SANDBOX_MODE）：这时 sandbox_permissions 由本闸门消费，不能再交给
+	// 工具——否则工具会按"策略层未接线"的防降级规则 fail-loud。
+	stripSandboxArg bool
 }
 
 func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
@@ -348,6 +560,20 @@ func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessa
 			fmt.Errorf("当前模式未声明工具 %q", name)
 	}
 
+	// sandbox 策略先于任何进程/写盘动作：deny 在这里返回，执行器一次都不会被调用。
+	pending, err := g.evaluateSandbox(ctx, known, tool, name, args)
+	if err != nil {
+		return spi.Result{Hint: sandboxRejectHint(err)}, err
+	}
+	if pending != nil {
+		if g.ask == nil {
+			// 需要一次性审批却没有审批通道：fail-closed，不许静默按 allow 执行。
+			return spi.Result{Hint: "这次调用请求了更宽的 sandbox 权限，但当前没有审批通道；去掉 sandbox_permissions 后重试"},
+				fmt.Errorf("%w: 没有审批通道", sandbox.ErrNeedsApproval)
+		}
+		needAsk = true
+	}
+
 	// 给"工具里再调工具"留一条**同样受管**的通道：放进去的是 g 自己，
 	// 所以子调用照样过可见性准入、审批、计划模式闸门和 spill。
 	// ask=nil 原来没有 guardedRunner，也没有 SubDispatch；保持这条行为不变。
@@ -356,9 +582,9 @@ func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessa
 	}
 
 	if needAsk {
-		ok, err := g.ask(ctx, g.sessionID, name, string(args))
-		if err != nil {
-			return spi.Result{Hint: "审批失败：客户端可能断开了；重试或改用只读工具"}, fmt.Errorf("审批失败: %w", err)
+		ok, aerr := g.ask(ctx, g.sessionID, name, string(args))
+		if aerr != nil {
+			return spi.Result{Hint: "审批失败：客户端可能断开了；重试或改用只读工具"}, fmt.Errorf("审批失败: %w", aerr)
 		}
 		if !ok {
 			// 拒绝可能是"人说不"，也可能是"策略不让人被问到"（--policy deny / 非终端 auto）。
@@ -371,7 +597,151 @@ func (g *guardedRunner) Run(ctx context.Context, name string, args json.RawMessa
 				fmt.Errorf("用户拒绝了 %s", name)
 		}
 	}
+	if pending != nil {
+		// 批准只属于**这一次调用**：call id 与批准一起放回 ctx，再用同一个策略引擎复核。
+		// 复核必须 allow；这一步同时证明绑定没有漂（命令/路径/会话/操作）。
+		ctx = sandbox.WithCallID(sandbox.WithEscalation(ctx, pending.Approval.Decide(true)), pending.CallID)
+		confirmed, cerr := g.evaluateSandbox(ctx, known, tool, name, args)
+		if cerr != nil {
+			return spi.Result{Hint: sandboxRejectHint(cerr)}, cerr
+		}
+		if confirmed != nil {
+			return spi.Result{Hint: "一次性审批没有通过策略复核（命令/路径/调用对不上）；重新请求审批，不要复用旧批准"},
+				fmt.Errorf("%w: 批准后复核仍未放行", sandbox.ErrApprovalBinding)
+		}
+	}
+	if g.stripSandboxArg {
+		args = stripSandboxPermissions(args)
+	}
 	return g.inner.Run(ctx, name, args)
+}
+
+// acpToolsHaveOwnSandboxGate 报告 ACP 进程里的工具是否自带 sandbox 闸门。
+// bash/pwsh 的闸门是装配期从进程环境解析的；环境没设就是 nil。
+func acpToolsHaveOwnSandboxGate() bool {
+	return strings.TrimSpace(os.Getenv(sandbox.EnvMode)) != ""
+}
+
+// stripSandboxPermissions 把已由宿主消费掉的 sandbox_permissions 从工具参数里去掉。
+//
+// 只在工具自己没有闸门时调用：那时把请求字段交给它只会得到"策略层未接线"的
+// fail-loud，而这次调用已经由 guardedRunner 用同一个策略引擎判定过。
+func stripSandboxPermissions(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return raw
+	}
+	if _, ok := obj["sandbox_permissions"]; !ok {
+		return raw
+	}
+	delete(obj, "sandbox_permissions")
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return raw
+	}
+	return b
+}
+
+// evaluateSandbox 做一次 per-call 判定：返回非 nil 表示"待审批"。
+// allow 返回 (nil,nil)，deny 返回 ErrDenied，输入不合法返回原始错误。
+func (g *guardedRunner) evaluateSandbox(ctx context.Context, known bool, tool spi.Tool, name string, args json.RawMessage) (*sandbox.Decision, error) {
+	if g.sandbox == nil || !known || tool == nil {
+		return nil, nil
+	}
+	var (
+		op         sandbox.Operation
+		path       string
+		command    string
+		permission sandbox.Permission
+	)
+	if scope, ok := tool.(spi.SandboxScope); ok {
+		sc, err := scope.SandboxCall(args)
+		if err != nil {
+			return nil, err
+		}
+		op = sandbox.Operation(sc.Operation)
+		path = sc.Path
+		command = sc.Command
+		permission = sandbox.Permission(sc.Permission)
+	} else {
+		// 兼容路径：只按 Caps 分类，路径取官方工具参数名 file_path；
+		// 认不出来就不参与闸门（由工具/FS 自己兜底），绝不按工具名猜权限。
+		permission = sandboxPermissionFromArgs(args)
+		switch {
+		case tool.Caps().Executes:
+			op = sandbox.OperationExecute
+			path = g.workspace
+			command = string(args)
+		case tool.Caps().Writes:
+			if p := sandboxPathFromArgs(args); p != "" {
+				op = sandbox.OperationWrite
+				path = p
+			}
+		}
+	}
+	var d sandbox.Decision
+	var err error
+	switch op {
+	case sandbox.OperationExecute:
+		d, err = g.sandbox.EvaluateCommand(ctx, command, path, permission)
+	case sandbox.OperationWrite, sandbox.OperationRead:
+		d, err = g.sandbox.EvaluateFS(ctx, op, path, permission)
+	default:
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch d.Action {
+	case sandbox.ActionAllow:
+		return nil, nil
+	case sandbox.ActionNeedsApproval:
+		return &d, nil
+	default:
+		return nil, d.Error()
+	}
+}
+
+// sandboxPermissionFromArgs 读工具参数里的 sandbox_permissions。
+// 未知值原样交给策略层报错（fail-loud），不在这里静默丢弃。
+func sandboxPermissionFromArgs(raw json.RawMessage) sandbox.Permission {
+	var a struct {
+		SandboxPermissions string `json:"sandbox_permissions"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return ""
+	}
+	return sandbox.Permission(a.SandboxPermissions)
+}
+
+// sandboxPathFromArgs 取官方文件工具的路径参数（write/edit 的 file_path）。
+func sandboxPathFromArgs(raw json.RawMessage) string {
+	var a struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(a.FilePath)
+}
+
+// sandboxRejectHint 把策略错误翻成模型能照做的下一步。
+func sandboxRejectHint(err error) string {
+	switch {
+	case errors.Is(err, sandbox.ErrDenied):
+		return "当前会话的 sandbox 档位拒绝了这次调用（read-only 不能写/执行，workspace-write 只能碰工作区）；改到工作区内，或让用户显式切到更宽的档位"
+	case errors.Is(err, sandbox.ErrNeedsApproval):
+		return "这次调用请求了更宽的 sandbox 权限，但审批没有完成；不要原样重试"
+	case errors.Is(err, sandbox.ErrApprovalBinding):
+		return "一次性审批与这次调用不匹配（换过命令/路径/调用）；重新请求审批，不要复用旧批准"
+	case errors.Is(err, sandbox.ErrPolicyUnwired), errors.Is(err, sandbox.ErrMissingContext):
+		return "宿主没有把 sandbox 策略接进这次调用；报告宿主，不要重试"
+	default:
+		return "sandbox 策略拒绝了这次调用；按错误里的原因调整后再试"
+	}
 }
 
 // Resume 从 v4 文件恢复历史，并以 append 模式续写同一个文件。
@@ -386,20 +756,29 @@ func (r *acpRunner) Resume(ctx context.Context, sessionID, cwd string) error {
 	if err != nil {
 		return fmt.Errorf("读会话失败（%s）: %w", path, err)
 	}
-	logw, err := session.OpenSessionAt(path)
-	if err != nil {
-		return err
-	}
 	hist := session.History(back)
 
 	// 会话里记着当初用的模式（header.agentPreset）。恢复它——
 	// 否则一个 read-only 会话 resume 之后会悄悄变成 default，权限反而更大。
+	//
+	// 解析不出来必须响亮失败：静默回落到默认模式就是一次权限放大。
 	if p := back.Header.AgentPreset; p != "" {
-		if m, err := r.registry().Resolve(p); err == nil {
-			r.mu.Lock()
-			r.sessionModes[sessionID] = m.ID
-			r.mu.Unlock()
+		m, rerr := r.registry().Resolve(p)
+		if rerr != nil {
+			return fmt.Errorf("会话 %s 记录的 mode %q 现在解析不了（%v）；不能回落到默认模式（那会放大权限），请把它改成存在的 mode id",
+				sessionID, p, rerr)
 		}
+		r.mu.Lock()
+		r.sessionModes[sessionID] = m.ID
+		r.mu.Unlock()
+	}
+	// 档位检查必须在打开写端之前：错误路径不能把一个还持着写锁的 Log 留在外面。
+	if err := r.registerSandbox(sessionID); err != nil {
+		return err
+	}
+	logw, err := session.OpenSessionAt(path)
+	if err != nil {
+		return err
 	}
 
 	r.mu.Lock()
@@ -462,10 +841,15 @@ func (r *acpRunner) Fork(ctx context.Context, sessionID, cwd string) (string, er
 	r.turns[newID] = 0
 	r.sessionModes[newID] = parentMode.ID
 	r.mu.Unlock()
+	// fork 出来的会话继承父会话**当前**档位；registerSandbox 会拒绝任何放大。
+	if err := r.registerSandbox(newID); err != nil {
+		return "", err
+	}
 	return newID, nil
 }
 
 func (r *acpRunner) Close(sessionID string) error {
+	r.forgetSandbox(sessionID)
 	if r.approvals != nil {
 		r.approvals.Forget(sessionID)
 	}
@@ -490,13 +874,16 @@ func cmdACP(argv []string) error {
 	// 这里缺了就意味着"同一个模型，换个客户端就没有 reasoning"——那种差异最难解释。
 	reasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
 		"推理强度：空=不要（默认）| xhigh | max")
-	base := fs.String("base", envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1"), "OpenAI 兼容端点")
-	maxChars := fs.Int("max-chars", 4000, "工具输出外置阈值（字符）")
-	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
-	steps := fs.Int("max-steps", 8, "每轮最多几步")
-	workspaceBytes := fs.Int("workspace-bytes", 8000, "AGENTS.md 进系统提示的字节上限（0=不传）")
+	base := fs.String("base", envOr("DSHD_LLM_BASE", defaultLLMBase), "OpenAI 兼容端点")
+	maxChars := fs.Int("max-chars", defaultMaxChars, "工具输出外置阈值（字符）")
+	home := fs.String("home", defaultHome(), "会话根目录")
+	steps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步")
+	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
-	autoCompact := fs.Int("auto-compact", 40000, "surface 估算超过多少 token 就自动压缩（0=关闭）")
+	// 与 run/serve 同一份默认值与同一套写法（整数或 true/false），见 host_run_options.go。
+	autoCompact := defaultAutoCompact
+	fs.Var(autoCompactValue{target: &autoCompact}, "auto-compact",
+		"surface 估算超过多少 token 就自动压缩（0/false=关闭，true=默认 40000）")
 	ctxWindow := fs.Int("context-window", 0, "显式上下文窗口（usage_update 分母）；0=按模型容量解析")
 	maxOutput := fs.Int("max-output", 0, "显式单次最大输出 token；0=按模型容量解析")
 	modeID := fs.String("mode", modes.DefaultID, "启动模式 id（见 --modes-dir 与内置）")
@@ -545,7 +932,7 @@ func cmdACP(argv []string) error {
 	assembled := buildSystemPromptWithHome(reg, *model, mustGetwd(), acpRunner.home, *workspaceBytes)
 	acpRunner.reasoning = *reasoning
 	acpRunner.system = assembled
-	acpRunner.autoCompact = *autoCompact
+	acpRunner.autoCompact = autoCompact
 	acpRunner.setModelCapacity(llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput})
 	dir := *modesDir
 	if dir == "" {
@@ -563,11 +950,29 @@ func cmdACP(argv []string) error {
 	if err != nil {
 		return err
 	}
-	// FS 若支持换根，就把"客户端 cwd"接进来。
+	// FS 若支持换根/切档位/追加只读根，就把 ACP 的会话语义接进来。
 	if fs, err := kernel.Inject(root, spi.FSKey); err == nil {
 		if rf, ok := fs.(spi.RootFollower); ok {
 			acpRunner.fsRoot = rf
 		}
+		if setter, ok := fs.(fsSandboxModeSetter); ok {
+			acpRunner.sandboxFS = setter
+		}
+		if extra, ok := fs.(fsExtraReadRooter); ok {
+			acpRunner.fsExtra = extra
+		}
+	}
+	// sandbox 闸门：装不上就是没有策略，所以这里 fail-loud。
+	ceiling := sandbox.Mode("")
+	if raw := strings.TrimSpace(os.Getenv(sandbox.EnvMode)); raw != "" {
+		parsed, err := sandbox.ParseMode(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", sandbox.EnvMode, err)
+		}
+		ceiling = parsed
+	}
+	if err := acpRunner.initSandbox(mustGetwd(), "", ceiling); err != nil {
+		return fmt.Errorf("ACP sandbox 装配失败: %w", err)
 	}
 	if ex, err := kernel.Inject(root, spi.ExecKey); err == nil {
 		if cf, ok := ex.(spi.CwdFollower); ok {
@@ -743,6 +1148,25 @@ func (r *acpRunner) meterOf(sessionID string) *session.Meter {
 	return r.meter[sessionID]
 }
 
+// defaultACPKeepRecent 是自动压缩时至少保留的最近消息数。
+//
+// 与改动前**实际生效**的值一致（旧代码在 Select 里写死 2，而结构体字段
+// keepRecent 赋的 8 从未被读取）。改成常量 + 字段之后，默认行为一字不变，
+// 但"这个数从哪来"只有一个答案。
+const defaultACPKeepRecent = 2
+
+// compactSelectOptions 是 autoCompactNow 选区间用的参数（唯一一份）。
+//
+// 抽出来是为了让 keepRecent 真的有使用点：字段被赋值、被读取、被测试看见，
+// 才不会退化成一个"看起来可调"的死字段。
+func (r *acpRunner) compactSelectOptions() compact.Options {
+	return compact.Options{
+		KeepRecent:   r.keepRecent,
+		KeepTokens:   2000,
+		MinToCompact: 2,
+	}
+}
+
 // autoCompactNow 是"每轮前的自检"：估算超阈值就压缩并落事件。
 func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error {
 	path := ""
@@ -767,10 +1191,10 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 		return nil
 	}
 
-	items, span, ok := compact.Select(surface, compact.Options{
-		// 下限给 2：压缩的收益来自"按体积留"，条数下限只保证模型眼前不是空的。
-		KeepRecent: 2, KeepTokens: 2000, MinToCompact: 2,
-	})
+	// 下限给 2（defaultACPKeepRecent）：压缩的收益来自"按体积留"，条数下限只
+	// 保证模型眼前不是空的。这个值读 r.keepRecent，不再是一份孤立字面量——
+	// 以前字段赋了 8 却没人读，等于一个假装可调的旋钮。
+	items, span, ok := compact.Select(surface, r.compactSelectOptions())
 	if !ok {
 		// 已经超预算了，但"保留最近 N 条"把可压区间挤没了——这时必须让步：
 		// 压掉较早的一半。宁可摘要粗一点，也不能让这一轮超窗。
@@ -915,14 +1339,23 @@ func (r *acpRunner) Delete(ctx context.Context, sessionID, cwd string) error {
 }
 
 // SetMode 切换会话模式。未知模式明确报错，不静默接受。
+//
+// 解析走会话的 registry（内置 + 用户自建）：sandbox 档位是 mode 的一部分，
+// 用户自建模式也必须能在这里选中，否则它的 sandbox 语义永远落不到执行口。
 func (r *acpRunner) SetMode(ctx context.Context, sessionID, modeID string) (string, error) {
-	m, err := modes.Resolve(modeID)
+	m, err := r.registry().Resolve(modeID)
 	if err != nil {
+		return "", err
+	}
+	if _, err := m.SandboxMode(); err != nil {
 		return "", err
 	}
 	r.mu.Lock()
 	r.sessionModes[sessionID] = m.ID
 	r.mu.Unlock()
+	if err := r.registerSandbox(sessionID); err != nil {
+		return "", err
+	}
 	return m.ID, nil
 }
 
@@ -1006,6 +1439,12 @@ func (r *acpRunner) adoptWorkspace(want string) error {
 			return fmt.Errorf("工作区不可用: %w", err)
 		}
 	}
+	if r.sandbox != nil {
+		// 策略层的工作区根必须和 FS 的根是同一条 canonical 路径。
+		if err := r.sandbox.SetWorkspaceRoot(want); err != nil {
+			return fmt.Errorf("工作区不可用: %w", err)
+		}
+	}
 	if r.execCwd != nil {
 		_ = r.execCwd.SetCwd(want)
 	}
@@ -1033,6 +1472,11 @@ func (r *acpRunner) ensureSession(sessionID, cwd string) (*session.Log, error) {
 		if err := r.adoptWorkspace(want); err != nil {
 			return nil, err
 		}
+	}
+	// 建会话之前就把档位钉到进程边界上：文件一存在，"这个会话是什么档位"
+	// 就必须已经是确定的，不能留一个"先建完全权限、再切只读"的窗口。
+	if err := r.registerSandbox(sessionID); err != nil {
+		return nil, err
 	}
 	p, err := session.SessionPath(r.home, cwd, sessionID)
 	if err != nil {

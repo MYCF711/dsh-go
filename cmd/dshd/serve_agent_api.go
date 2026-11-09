@@ -1,6 +1,6 @@
 package main
 
-// 官方桌面端 agent 侧 24 个方法在**宿主机**这一侧的真实实现。
+// 官方桌面端 agent 侧 25 个方法在**宿主机**这一侧的真实实现。
 //
 // 规矩（与 internal/transport/handlers_agent_official.go 的分工）：
 //   - Transport 只做协议与形状；本文件才碰真实状态（goal 存储、modes、
@@ -79,6 +79,10 @@ type agentOfficialDeps struct {
 	// 为 nil 时 interruptByParent 回**响亮 501**并说清缺哪一行接线，
 	// 绝不假装取消信号被接受。
 	interrupt func(sessionID string) error
+	// sandboxPresets/sandboxStore 是进程内同一份 sandbox 真值。preset 切换
+	// 必须清 **这份实例** 的覆盖，只清盘上新 store 不会生效（t143）。
+	sandboxPresets *modes.Registry
+	sandboxStore   *sandboxModeStore
 }
 
 // agentOfficialAPI 持有进程内（**不持久化**）的 goal activation。
@@ -91,6 +95,10 @@ type agentOfficialAPI struct {
 	mu         sync.Mutex
 	activation map[string]string // sessionID → armed|disarmed
 	goalTimes  map[string]agentGoalTimes
+
+	// questionClaims 记录"哪些 (session,callId) 正被 attachWait 流持有"。
+	// 官方 claim 语义：持有期间宿主不启动超时；关流只释放 claim，不结算问题。
+	questionClaims map[string]struct{}
 
 	// 下面三项是**真实**能力对象，懒建（第一次用到时装配）：
 	//   commandsRegistry  commands.list / commands.execute 的真注册表
@@ -108,7 +116,7 @@ type agentGoalTimes struct {
 	UpdatedAt int64
 }
 
-// newAgentOfficialAPI 把真实依赖装配成 Transport 要的 24 个回调。
+// newAgentOfficialAPI 把真实依赖装配成 Transport 要的 25 个回调。
 func newAgentOfficialAPI(deps agentOfficialDeps) transport.OfficialAgentAPI {
 	return newAgentOfficialAPICore(deps).bind()
 }
@@ -116,14 +124,15 @@ func newAgentOfficialAPI(deps agentOfficialDeps) transport.OfficialAgentAPI {
 // newAgentOfficialAPICore 造出持有进程内状态的那个对象（测试要拿它看 activation）。
 func newAgentOfficialAPICore(deps agentOfficialDeps) *agentOfficialAPI {
 	return &agentOfficialAPI{
-		deps:       deps,
-		activation: map[string]string{},
-		goalTimes:  map[string]agentGoalTimes{},
+		deps:           deps,
+		activation:     map[string]string{},
+		goalTimes:      map[string]agentGoalTimes{},
+		questionClaims: map[string]struct{}{},
 	}
 }
 
 // bind 把方法表交给 Transport。每个方法都绑定到同一个宿主对象，所以
-// activation / 时间缓存这类进程内状态在 24 个方法之间是共享的。
+// activation / 时间缓存这类进程内状态在 25 个方法之间是共享的。
 func (a *agentOfficialAPI) bind() transport.OfficialAgentAPI {
 	return transport.OfficialAgentAPI{
 		GoalGet:      a.goalGet,
@@ -142,8 +151,10 @@ func (a *agentOfficialAPI) bind() transport.OfficialAgentAPI {
 
 		UserQuestionsAnswer:     a.userQuestionsAnswer,
 		UserQuestionsAttachWait: a.userQuestionsAttachWait,
+		UserQuestionsClaimed:    a.userQuestionsClaimed,
 
-		AgentPresetRead:   a.agentPresetRead,
+		AgentPresetsList:  a.agentPresetsList,
+		AgentPresetRead:   a.agentPresetReadYAML,
 		AgentPresetSelect: a.agentPresetSelect,
 
 		SkillsList:         a.skillsList,
@@ -914,8 +925,42 @@ func agentRenderQuestionAnswer(answer transport.OfficialQuestionAnswer) string {
 //
 // 真实来源见 `serve_questions_api.go`：deadline = durable `tool/result` 帧时间
 // + 宿主前台等待窗口。返回 (nil, nil) 表示"不发帧"（wait 已结束）。
+//
+// GO.2 T04：当有 attachWait 流持有 claim 时，改用**只读** Remaining（不 Arm），
+// 否则流自己的轮询会在 deadline 那一刻把等待结算掉——官方 claim 的语义正是
+// "客户端持有期间不走宿主超时"。关流后 claim 释放，下次 Arm 仍按原 deadline 继续。
 func (a *agentOfficialAPI) userQuestionsAttachWait(sessionID, callID string) (*transport.OfficialQuestionWait, error) {
+	if a.questionClaimHeld(sessionID, callID) {
+		remaining, live := a.ensureQuestionWaits().Remaining(sessionID, callID)
+		if !live {
+			return nil, nil
+		}
+		return &transport.OfficialQuestionWait{RemainingMs: remaining}, nil
+	}
 	return a.userQuestionsAttachWaitHost(sessionID, callID)
+}
+
+// userQuestionsClaimed 登记/释放一个 attachWait 流的 claim。
+func (a *agentOfficialAPI) userQuestionsClaimed(sessionID, callID string, claimed bool) {
+	key := sessionID + "\x00" + callID
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.questionClaims == nil {
+		a.questionClaims = map[string]struct{}{}
+	}
+	if claimed {
+		a.questionClaims[key] = struct{}{}
+	} else {
+		delete(a.questionClaims, key)
+	}
+}
+
+func (a *agentOfficialAPI) questionClaimHeld(sessionID, callID string) bool {
+	key := sessionID + "\x00" + callID
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, held := a.questionClaims[key]
+	return held
 }
 
 // ---------------------------------------------------------------------------
@@ -933,6 +978,41 @@ func (a *agentOfficialAPI) agentPresetRoster() ([]modes.Mode, error) {
 		out = append(out, user...)
 	}
 	return out, nil
+}
+
+// agentPresetsList 是官方 `agentPresets.list` 的宿主实现（零参数）。
+//
+// 真值来源就是 `agentPresetRoster()`：内置 modes（编译期声明）+ 用户
+// `<home>/modes/*.toml`（磁盘原文解析后）。`isDefault` 不是猜的——本宿主
+// "会话不点名 preset 时"用的就是 `modes.DefaultID`（`agentSessionPreset`
+// 的回落值），所以只有它有 isDefault=true。
+//
+// `broken` 字段（官方用于"声明存在但装不起来"）本宿主暂不产生：
+// `modes.LoadDir` 对坏文件是 fail-loud（整份名册报错），不会静默跳过；
+// 宁可让 list 响亮失败，也不把一份读不懂的 TOML 编成 broken 行。
+func (a *agentOfficialAPI) agentPresetsList() (transport.OfficialAgentPresetRoster, error) {
+	roster, err := a.agentPresetRoster()
+	if err != nil {
+		return transport.OfficialAgentPresetRoster{}, err
+	}
+	out := make([]transport.OfficialAgentPreset, 0, len(roster))
+	seen := make(map[string]struct{}, len(roster))
+	for _, mode := range roster {
+		if _, dup := seen[mode.ID]; dup {
+			// 名册里同一个 id 出现两次是宿主 bug（LoadDir 已查重）：不许
+			// 让客户端看到两行同名 preset。
+			return transport.OfficialAgentPresetRoster{}, fmt.Errorf(
+				"%w: preset 名册里 id=%q 重复", transport.ErrStatePersistence, mode.ID)
+		}
+		seen[mode.ID] = struct{}{}
+		out = append(out, transport.OfficialAgentPreset{
+			ID:          mode.ID,
+			IsDefault:   mode.ID == modes.DefaultID,
+			Name:        mode.Name,
+			Description: mode.Description,
+		})
+	}
+	return transport.OfficialAgentPresetRoster{Presets: out}, nil
 }
 
 // agentPresetRead 返回一个 preset 的真实声明正文。
@@ -1084,9 +1164,25 @@ func (a *agentOfficialAPI) agentPresetSelect(sessionID, presetID string) (string
 	if err != nil {
 		return "", err
 	}
+	if _, err := mode.SandboxMode(); err != nil {
+		return "", fmt.Errorf("%w: preset %q 的 sandbox 非法: %v", transport.ErrOfficialBadInput, presetID, err)
+	}
 	doc.Sessions[sessionID] = mode.ID
 	if err := agentWriteDoc(a.agentPresetStatePath(), doc); err != nil {
 		return "", fmt.Errorf("%w: 写 %s: %v", transport.ErrStatePersistence, a.agentPresetStatePath(), err)
+	}
+	// 换 preset = 重新定 sandbox 基线：旧的 session-sandbox 覆盖是相对旧 preset 的
+	// 收窄，必须清掉；否则 danger-full-access 会被旧的 read-only 覆盖压住，
+	// 下一轮子进程拿不到正确的 DSHD_SANDBOX_MODE（t143）。
+	if a.deps.sandboxStore != nil {
+		store := a.deps.sandboxStore
+		if a.deps.sandboxPresets != nil {
+			if err := sandboxOnPresetSelected(sessionID, mode.ID, a.deps.sandboxPresets, store); err != nil {
+				return "", fmt.Errorf("%w: 清 sandbox 覆盖: %v", transport.ErrStatePersistence, err)
+			}
+		} else if err := store.Clear(sessionID); err != nil {
+			return "", fmt.Errorf("%w: 清 sandbox 覆盖: %v", transport.ErrStatePersistence, err)
+		}
 	}
 	return mode.ID, nil
 }

@@ -34,12 +34,27 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/agent"
 	"dshgo/internal/transport"
 )
 
 const goalRoundStoreVersion = 1
+
+// goalRoundPromptTemplate 是官方 `renderGoalRoundPrompt`（`dsh-goal-round-driver`
+// 的 `lib/types/prompt.js`）的逐字翻译：**一个字都不能改**。
+//
+// 为什么：这段提示词会作为一条 user/message 进入会话历史，后续每一轮都要重发
+// 它（直到压缩遮蔽）。改一个字，等于让模型对"这是官方自动续轮"的判据失真，
+// 也让 app.asar 里的官方证据与宿主行为对不上。
+const goalRoundPromptTemplate = `<goal_round>
+Objective: %s
+Round: %d/%d
+
+Continue working toward the objective in this same session. Treat the current workspace, tool results, and durable session state as authoritative; inspect them instead of assuming earlier narration is still current. Make concrete progress and verify the result. Before claiming completion, gather evidence that the whole objective is achieved, read the current goal, and mark it complete. If work remains, leave the goal active for the next round. Follow the configured goal-tool policy before reporting a blocker.
+</goal_round>`
 
 // goalRoundCursor 是"这个 goal 已经消化到哪"的持久游标。
 //
@@ -68,10 +83,37 @@ type goalRoundDriver struct {
 	home  string
 	path  string
 
-	// mu 只保护游标；store 自己的锁在它外层（先 goals.mu 再 mu，绝不反向）。
+	// agents 是活体 agent 状态（官方 `ctx.agents` 的落点）：只有 whole-agent
+	// idle 才允许排下一轮。它是**进程内**状态，重启即空——与官方
+	// "activation is process-local, never persisted" 同一口径。
+	agents *agent.Registry
+
+	// mu 只保护游标与进程内续轮资格；store 自己的锁在它外层
+	// （先 goals.mu 再 mu，绝不反向）。
 	mu      sync.Mutex
 	cursors map[string]goalRoundCursor
+	// arms 是"这个会话当前的目标还允不允许自动续轮"的**推导**结果。
+	//
+	// 为什么是推导而不是直接读某个 activation 字段：官方把 activation 定义成
+	// 进程内资格、永不持久化；本宿主里 goal 的迁移有两条真实写入口
+	// （goalOverrideStore.transition 与官方 goals.* 的 agentGoalTransact），
+	// 两处都不归本任务写。于是驱动只认**可观测的 durable 事实**：
+	// goal id 换了 = 新建，phase 变了 = 一次迁移。这样"重启后不自动复活"
+	// 与"resume 之后继续"都能由日志本身推出来，不需要第三个真值。
+	arms    map[string]goalArm
 	loadErr error
+}
+
+// goalArm 是一次观测到的目标身份 + 它当前是否允许自动续轮。
+type goalArm struct {
+	GoalID   string
+	Revision int64
+	Phase    string
+	// LastOp 是**上一次观测到的**迁移操作（goal/change 帧上的 operation，
+	// 续轮帧 round 不算迁移）。它是唯一能区分"编辑"与"暂停后恢复"的
+	// durable 证据——这两者都只让 phase 保持 active、只让 revision 增加。
+	LastOp string
+	Armed  bool
 }
 
 func newGoalRoundDriver(goals *goalOverrideStore, home string) *goalRoundDriver {
@@ -79,7 +121,9 @@ func newGoalRoundDriver(goals *goalOverrideStore, home string) *goalRoundDriver 
 		goals:   goals,
 		home:    home,
 		path:    filepath.Join(home, "state", "session-goal-rounds.json"),
+		agents:  agent.NewRegistry(agent.RegistryOptions{}),
 		cursors: map[string]goalRoundCursor{},
+		arms:    map[string]goalArm{},
 	}
 }
 
@@ -132,11 +176,16 @@ type goalRoundRunner struct {
 }
 
 func (r *goalRoundRunner) Run(ctx context.Context, sessionID, turnID, text string) error {
+	r.driver.agentStarted(sessionID)
 	err := r.next.Run(ctx, sessionID, turnID, text)
-	if err == nil {
-		r.driver.afterTurn(sessionID)
+	r.driver.agentSettled(sessionID)
+	if err != nil {
+		// 失败不空转：这一轮没成，就不排下一轮，并撤掉进程内续轮资格
+		// （官方 `agent/error` → disarm）。
+		r.driver.disarm(sessionID)
+		return err
 	}
-	return err
+	return r.continueRounds(ctx, sessionID, turnID)
 }
 
 func (r *goalRoundRunner) RunContent(ctx context.Context, sessionID, turnID string, blocks []transport.ContentBlock) error {
@@ -145,11 +194,202 @@ func (r *goalRoundRunner) RunContent(ctx context.Context, sessionID, turnID stri
 		// 与 promptService 的判据保持同一句话：包装层不许把"不支持"变成"先接受再失败"。
 		return fmt.Errorf("%w: 当前 runner 未实现有序 content blocks", transport.ErrPlacementUnsupported)
 	}
+	r.driver.agentStarted(sessionID)
 	err := next.RunContent(ctx, sessionID, turnID, blocks)
-	if err == nil {
-		r.driver.afterTurn(sessionID)
+	r.driver.agentSettled(sessionID)
+	if err != nil {
+		r.driver.disarm(sessionID)
+		return err
 	}
-	return err
+	return r.continueRounds(ctx, sessionID, turnID)
+}
+
+// continueRounds 在**一轮已经正常收工之后**按官方 goal-round-driver 的判据
+// 自动排下一轮，直到：目标不再可驱动、轮次用尽（写 round-limit blocker）、
+// 被取消、或自动轮自己失败。
+//
+// 为什么在这里循环而不是去 promptService 排一条新 prompt：`serve.go` 的接线
+// 不归本任务（外部写者串行），驱动只能包在 turnRunner 外面；而 promptService
+// 本来就是 `go execute(...)` 跑 runner 的，所以这个循环天然不在 HTTP 请求路径上。
+// 代价与收益都写在 RESULT 的"显式差异"里：**整段自动续轮期间会话一直是 busy**，
+// 官方是每轮之间回到 idle 再排下一轮。
+func (r *goalRoundRunner) continueRounds(ctx context.Context, sessionID, turnID string) error {
+	lastRound := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			// 取消：不再续轮（官方 aborted 不自动重启）。
+			return nil
+		}
+		if err := r.driver.Advance(sessionID); err != nil {
+			// 记账失败：响亮 + 停。不能拿"没记上"的轮次继续跑。
+			fmt.Fprintf(os.Stderr, "goal 自动续轮记账失败（session=%s）：%v\n", sessionID, err)
+			return nil
+		}
+		decision, cont, err := r.driver.decideAfterTurn(sessionID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "goal 自动续轮判定失败（session=%s）：%v\n", sessionID, err)
+			return nil
+		}
+		switch decision {
+		case goalStop:
+			return nil
+		case goalRoundLimit:
+			if err := r.driver.blockRoundLimit(sessionID); err != nil {
+				fmt.Fprintf(os.Stderr, "goal 轮次用尽后写 blocker 失败（session=%s）：%v\n", sessionID, err)
+			}
+			return nil
+		}
+		if cont.Round <= lastRound {
+			// 轮次没有前进（日志里那一轮没落成 completed）：拒绝空转。
+			// 没有这一格，一个只返回 nil、不写 turn/end 的 runner 会让宿主
+			// 对同一轮无限重跑——这正是"失败不空转"要挡住的东西。
+			fmt.Fprintf(os.Stderr,
+				"goal 自动续轮停止：round=%d 没有前进（last=%d，session=%s）\n",
+				cont.Round, lastRound, sessionID)
+			return nil
+		}
+		lastRound = cont.Round
+
+		nextTurnID := goalRoundTurnID(turnID, cont.Round)
+		// 上一轮 writer（serve 收尾的标题/摘要 goroutine 或残留的子进程）
+		// 可能还持着会话写锁；先做有界等待，别让自动轮一 spawn 就撞锁失败。
+		// 只观察、不删锁；等待超时也交给子进程按原有错误上报。
+		r.waitSessionWriteReleased(sessionID)
+		r.driver.agentStarted(sessionID)
+		runErr := r.next.Run(ctx, sessionID, nextTurnID, cont.Prompt)
+		r.driver.agentSettled(sessionID)
+		if runErr != nil {
+			// 自动轮失败：停 + 撤资格。**不**把错误回传给第一轮调用方——
+			// turn/done 已经发出去了，这时改返回值只会得到"客户端看到成功、
+			// 宿主内部报失败"的更糟状态（与 afterTurn 的取舍同源）。
+			fmt.Fprintf(os.Stderr, "goal 自动续轮第 %d 轮失败（session=%s）：%v\n", cont.Round, sessionID, runErr)
+			// 只写 stderr 等于静默：补一帧 transport 错误帧，界面/日志才看得到。
+			r.driver.reportAutoRoundFailure(sessionID, nextTurnID, runErr)
+			r.driver.disarm(sessionID)
+			return nil
+		}
+	}
+}
+
+// waitSessionWriteReleased 在自动续轮 spawn 前做有界等待：上一轮 writer
+// （serve 收尾的标题/摘要 goroutine、或刚退出子进程留下的锁）释放
+// `session.v4.jsonl.zstd.lock` 后再起下一轮。
+//
+// 只观察、不删除、不按 PID 强清：未知锁留在盘上，让子进程按原有错误上报；
+// 等待超时也不改变失败语义（只是少一次本可避免的"会话正被另一个进程写入"）。
+// 真正的兜底是 `internal/session.claimWriter` 对**其他进程**的锁做同样的
+// 有界等待——这里先等一轮，减少自动轮白跑。
+const (
+	autoRoundSessionLockWait = 2 * time.Second
+	autoRoundSessionLockPoll = 10 * time.Millisecond
+)
+
+func (r *goalRoundRunner) waitSessionWriteReleased(sessionID string) {
+	if r.driver == nil || r.driver.home == "" {
+		return
+	}
+	path, err := newSessionSource(r.driver.home, "").resolve(sessionID)
+	if err != nil {
+		return
+	}
+	lock := path + ".lock"
+	deadline := time.Now().Add(autoRoundSessionLockWait)
+	for {
+		if _, statErr := os.Stat(lock); os.IsNotExist(statErr) {
+			return
+		} else if statErr != nil {
+			return // 权限/IO 异常：交给子进程按原错误上报，不吞
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(os.Stderr,
+				"goal 自动续轮等待会话写锁超时（session=%s lock=%s），交给子进程按原有错误上报\n",
+				sessionID, lock)
+			return
+		}
+		time.Sleep(autoRoundSessionLockPoll)
+	}
+}
+
+// reportAutoRoundFailure 把自动续轮失败变成**可观察**的一帧 turn/error。
+//
+// 为什么必须有：旧的唯一出口是 stderr。用户/界面看到的就是"目标自己不跑了"：
+// journal 没有帧、API 没有错误、界面上什么都没有（T06 F4 的第二个半场）。
+// 复用既有的 turn/error（普通 prompt 轮失败同形），不新造帧类型；客户端
+// 现有的"这一轮失败了"处理路径直接生效。
+//
+// 帧写不进去（journal 未接线/写盘失败）时退回 stderr，并且**不**假装成功：
+// 这是接线缺失或持久化故障，不是"失败已经可见"。
+func (d *goalRoundDriver) reportAutoRoundFailure(sessionID, turnID string, runErr error) {
+	if d.goals == nil || d.goals.journal == nil || d.goals.journal.journals == nil {
+		fmt.Fprintf(os.Stderr,
+			"goal 自动续轮失败：goal/change journal 未接线，无法产生 turn/error 帧（session=%s）\n", sessionID)
+		return
+	}
+	// 子进程自己的失败路径（loopRunner）可能已经写同 turnID 的 turn/error；
+	// 已经可观察时不再补第二帧，避免客户端收到重复失败。
+	if d.autoRoundTurnErrorReported(sessionID, turnID) {
+		return
+	}
+	data, err := json.Marshal(turnErrorData{TurnID: turnID, Error: runErr.Error()})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "goal 自动续轮失败帧序列化失败（session=%s）：%v\n", sessionID, err)
+		return
+	}
+	if _, emitErr := emitFrameResult(
+		d.goals.journal.journals, d.goals.journal.pub,
+		sessionID, TurnError, data); emitErr != nil {
+		fmt.Fprintf(os.Stderr, "goal 自动续轮失败帧写入失败（session=%s）：%v\n", sessionID, emitErr)
+	}
+}
+
+// autoRoundTurnErrorReported 报告这个 turnID 是否已有一帧 turn/error。
+//
+// 只用来看"失败是否已经可观察"：有就跳过补帧，没有才补。读的是与
+// goal/change 同一份 Transport journal，不新增第二份状态。
+func (d *goalRoundDriver) autoRoundTurnErrorReported(sessionID, turnID string) bool {
+	if d.goals == nil || d.goals.journal == nil || d.goals.journal.journals == nil {
+		return false
+	}
+	journal := d.goals.journal.journals.Get(sessionID)
+	if journal == nil {
+		return false
+	}
+	frames, _, _ := journal.Since(0, 0)
+	for _, frame := range frames {
+		if frame.Type != TurnError {
+			continue
+		}
+		var data turnErrorData
+		if json.Unmarshal(frame.Data, &data) == nil && data.TurnID == turnID {
+			return true
+		}
+	}
+	return false
+}
+
+// goalRoundTurnID 给自动续轮造一个**会话内唯一**的 turn id。
+//
+// 不能复用上一轮的 id：`liveTurn`/`registerModelSteer` 都按 (session, turnID)
+// 建索引，复用会让两轮互相认领。带上原 id 是为了让人在日志/帧里看得出
+// "这一轮是从哪一轮自动接出来的"。
+func goalRoundTurnID(turnID string, round int) string {
+	if turnID == "" {
+		return fmt.Sprintf("goal-round-%d", round)
+	}
+	return fmt.Sprintf("%s-goal-%d", turnID, round)
+}
+
+// renderGoalRoundPrompt 渲染官方那一段续轮提示词。
+//
+// objective 走 JSON 引号（官方 `JSON.stringify(goal.objective)`）：目标里可能有
+// 换行、引号、反斜杠，直接拼进提示词会让模型看到一条断开的指令。
+func renderGoalRoundPrompt(goal *transport.GoalSnapshot, round int) string {
+	objective, err := json.Marshal(goal.Objective)
+	if err != nil {
+		// 字符串序列化实际不可能失败；真失败了也不能编一个目标，退回原文。
+		objective = []byte(`"` + goal.Objective + `"`)
+	}
+	return fmt.Sprintf(goalRoundPromptTemplate, objective, round, goal.MaxGoalRounds)
 }
 
 // Steer 只是往**当前**轮里注入，不结束 turn，所以不推进轮次。
@@ -169,17 +409,216 @@ func (r *goalRoundRunner) SteerContent(ctx context.Context, sessionID, turnID st
 	return next.SteerContent(ctx, sessionID, turnID, blocks)
 }
 
-// afterTurn 在 turn 已经成功收工之后跑：推进失败只能打到 stderr。
-//
-// 为什么不能把错误回传给 promptService：turn/done 在这一步之前就已经推给客户端了，
-// 这时把 runner 的返回值改成错误，只会得到一个"客户端看到成功、宿主内部报失败"的
-// 更糟状态；而 promptService 本来也会丢弃 runner 的返回值（`_ = lt.run(...)`）。
-// 所以响亮 = 真实 stderr + 后续每次推进继续失败（store/cursor 的 loadErr 不会自愈），
-// 不是假装成功。
-func (d *goalRoundDriver) afterTurn(sessionID string) {
-	if err := d.Advance(sessionID); err != nil {
-		fmt.Fprintf(os.Stderr, "goal 轮次推进失败（session=%s）：%v\n", sessionID, err)
+// ---------------------------------------------------------------------------
+// 进程内续轮资格（activation）与活体状态
+// ---------------------------------------------------------------------------
+
+// disarm 撤掉一个会话的自动续轮资格（官方 `ctx.goals.disarm`）。
+func (d *goalRoundDriver) disarm(sessionID string) {
+	if d == nil {
+		return
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if arm, ok := d.arms[sessionID]; ok && arm.Armed {
+		arm.Armed = false
+		d.arms[sessionID] = arm
+	}
+}
+
+func (d *goalRoundDriver) arm(sessionID string) (goalArm, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	arm, ok := d.arms[sessionID]
+	return arm, ok
+}
+
+// nextArm 由**可观测的 durable 事实**推导进程内资格（见 goalRoundDriver.arms 的注释）。
+//
+//	mount         = true → 启动重算/挂载：历史目标一律 disarmed（官方 mount 从不 arm）
+//	新 goal id           → 本进程第一次看到的新目标 = create → armed
+//	迁移操作变了         → 按操作语义：resume/create 重新 arm，
+//	                      pause/complete/block/clear 一律 disarm，edit 保持
+//	都没变               → 保持原来的资格
+//
+// 为什么必须看 operation 而不是只看 phase：pause 与 resume 都只把 phase 在
+// active/paused 之间搬，而**两次迁移可能都发生在两轮之间**（用户暂停又恢复，
+// 然后才发下一条消息）。只比 phase 会把"暂停过"完全抹掉，于是人明明暂停了
+// 一次，驱动器却继续自动跑——这正是"armed 语义"要挡住的东西。
+func nextArm(previous goalArm, seen bool, goal *transport.GoalSnapshot, lastOp string, mount bool) goalArm {
+	arm := goalArm{GoalID: goal.ID, Revision: goal.Revision, Phase: goal.Phase, LastOp: lastOp}
+	switch {
+	case mount:
+		arm.Armed = false
+	case !seen || previous.GoalID != goal.ID:
+		arm.Armed = true
+	case previous.LastOp != lastOp:
+		switch lastOp {
+		case "create", "resume":
+			arm.Armed = true
+		case "pause", "complete", "block", "clear":
+			arm.Armed = false
+		default:
+			// edit 或未知操作：官方 edit 不动资格。
+			arm.Armed = previous.Armed
+		}
+	default:
+		arm.Armed = previous.Armed
+	}
+	return arm
+}
+
+// agentStarted / agentSettled 把"一轮开始/收工"登记进活体注册表。
+//
+// 失败只打日志：状态登记失败不该让一轮 turn 失败（那是可观测性问题，
+// 不是执行问题），但也不能静默——静默会让"状态没有真值"永远查不出来。
+func (d *goalRoundDriver) agentStarted(sessionID string) {
+	if d == nil || d.agents == nil {
+		return
+	}
+	if _, err := d.agents.Start(sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "agent 状态登记失败（session=%s）：%v\n", sessionID, err)
+	}
+}
+
+func (d *goalRoundDriver) agentSettled(sessionID string) {
+	if d == nil || d.agents == nil {
+		return
+	}
+	if _, err := d.agents.Stop(sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "agent 状态收工失败（session=%s）：%v\n", sessionID, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 续轮判据
+// ---------------------------------------------------------------------------
+
+type goalDecision int
+
+const (
+	// goalStop 表示不再排下一轮（目标不存在/暂停/完成/阻塞/未配置上限/非 idle）。
+	goalStop goalDecision = iota
+	// goalContinue 表示排下一轮。
+	goalContinue
+	// goalRoundLimit 表示轮次预算用尽：写 round-limit blocker 并停。
+	goalRoundLimit
+)
+
+// goalContinuation 是一轮续行的全部内容。
+type goalContinuation struct {
+	Round  int
+	Prompt string
+}
+
+// decideAfterTurn 是"这一轮收工后要不要自动排下一轮"的**唯一**判据。
+//
+// 逐条对齐官方 `drive()`：
+//   - 只有 whole-agent idle 才排（活体注册表是唯一真值）；
+//   - goal 必须存在、phase=active、activation=armed；
+//   - 轮次预算用尽 → 写 `round-limit` blocker，不排；
+//   - 模型被 max tokens 截断 → disarm + 不排（半截回答不接）；
+//   - 未配置上限（MaxGoalRounds<=0）→ 不排：本宿主 legacy setGoal 落 0 表示
+//     "没有上限"，而"没有上限"在这里等于无限自动跑，两者都不可接受。
+func (d *goalRoundDriver) decideAfterTurn(sessionID string) (goalDecision, goalContinuation, error) {
+	if d.goals == nil {
+		return goalStop, goalContinuation{}, fmt.Errorf("%w: goal store 未接线", transport.ErrStatePersistence)
+	}
+	if d.agents != nil && !d.agents.Idle(sessionID) {
+		return goalStop, goalContinuation{}, nil
+	}
+	kind, err := d.lastTurnKind(sessionID)
+	if err != nil {
+		return goalStop, goalContinuation{}, err
+	}
+	if kind == "max-tokens" {
+		d.disarm(sessionID)
+		return goalStop, goalContinuation{}, nil
+	}
+
+	g := d.goals
+	g.mu.Lock()
+	loadErr := g.loadErr
+	record, exists := g.m[sessionID]
+	g.mu.Unlock()
+	if loadErr != nil {
+		return goalStop, goalContinuation{}, fmt.Errorf("%w: %v", transport.ErrStatePersistence, loadErr)
+	}
+	if !exists || record.Goal == nil {
+		return goalStop, goalContinuation{}, nil
+	}
+	goal := record.Goal
+	arm, seen := d.arm(sessionID)
+	if !seen || arm.GoalID != goal.ID || !arm.Armed {
+		return goalStop, goalContinuation{}, nil
+	}
+	if goal.Phase != "active" {
+		return goalStop, goalContinuation{}, nil
+	}
+	rounds := goalRoundsStarted(record)
+	if goal.MaxGoalRounds <= 0 {
+		return goalStop, goalContinuation{}, nil
+	}
+	if rounds >= goal.MaxGoalRounds {
+		return goalRoundLimit, goalContinuation{Round: rounds}, nil
+	}
+	round := rounds + 1
+	return goalContinue, goalContinuation{Round: round, Prompt: renderGoalRoundPrompt(goal, round)}, nil
+}
+
+// blockRoundLimit 在轮次预算用尽时写一条稳定的 `round-limit` blocker。
+//
+// 官方文案逐字：`Goal reached its configured limit of N rounds.`
+func (d *goalRoundDriver) blockRoundLimit(sessionID string) error {
+	if d.goals == nil {
+		return fmt.Errorf("%w: goal store 未接线", transport.ErrStatePersistence)
+	}
+	g := d.goals
+	g.mu.Lock()
+	record, exists := g.m[sessionID]
+	g.mu.Unlock()
+	if !exists || record.Goal == nil {
+		return nil
+	}
+	limit := record.Goal.MaxGoalRounds
+	err := g.Block(sessionID, "round-limit",
+		fmt.Sprintf("Goal reached its configured limit of %d rounds.", limit))
+	d.disarm(sessionID)
+	return err
+}
+
+// lastTurnKind 读这份会话**最后一条** turn/end 的 reason.kind。
+//
+// 为什么不用 completedTurns：那个只数"正常收工"，而这里要区分"正常"
+// 与"被 max tokens 截断"——两者都不该继续续轮，但后者要先 disarm。
+func (d *goalRoundDriver) lastTurnKind(sessionID string) (string, error) {
+	path, err := newSessionSource(d.home, "").resolve(sessionID)
+	if err != nil {
+		if errors.Is(err, transport.ErrNoSuchSession) {
+			return "", nil // 会话文件还没建：没有轮次，不是失败
+		}
+		return "", fmt.Errorf("goal 续轮读会话 %s: %v", sessionID, err)
+	}
+	log, err := v4.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("goal 续轮读 v4 %s: %v", path, err)
+	}
+	kind := ""
+	for _, event := range log.Events {
+		if event.Type != "turn/end" {
+			continue
+		}
+		var data struct {
+			Reason struct {
+				Kind string `json:"kind"`
+			} `json:"reason"`
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return "", fmt.Errorf("解析 %s seq=%d 的 turn/end: %v", path, event.Seq, err)
+		}
+		kind = data.Reason.Kind
+	}
+	return kind, nil
 }
 
 // Reconcile 在 serve 启动时把"上次进程结束前已经完成、但没来得及记账"的轮次补上。
@@ -256,6 +695,8 @@ func (d *goalRoundDriver) advance(sessionID string, countCurrentTurn bool) error
 	record, exists := g.m[sessionID]
 	if !exists || record.Goal == nil {
 		// clear-missing 幂等：没有 goal 就没有轮次。不写盘、不发事件。
+		// 续轮资格随之消失：没有目标就没有"下一轮"。
+		d.clearArm(sessionID)
 		return nil
 	}
 	goal := record.Goal
@@ -298,14 +739,14 @@ func (d *goalRoundDriver) advance(sessionID string, countCurrentTurn bool) error
 		nextRecord.RoundsStarted = &advanced
 		nextGoals := cloneGoalMap(g.m)
 		nextGoals[sessionID] = nextRecord
-		if err := writeGoalDocument(g.path, goalDocument{Version: goalStoreVersion, Goals: nextGoals}); err != nil {
-			return fmt.Errorf("%w: 写 goal store %s: %v", transport.ErrStatePersistence, g.path, err)
+		if err := g.persistLocked(goalDocument{Version: goalStoreVersion, Goals: nextGoals}); err != nil {
+			return err
 		}
 		previousGoals := cloneGoalMap(g.m)
 		g.m = nextGoals
 		if err := d.appendRoundFrame(sessionID, advanced); err != nil {
 			// state 已写、帧没提交：回滚 state，不留"没有事件的成功计数"。
-			if rollbackErr := writeGoalDocument(g.path, goalDocument{Version: goalStoreVersion, Goals: previousGoals}); rollbackErr != nil {
+			if rollbackErr := g.persistLocked(goalDocument{Version: goalStoreVersion, Goals: previousGoals}); rollbackErr != nil {
 				g.loadErr = fmt.Errorf("goal round 帧提交失败 %v；roundsStarted 回滚也失败 %v", err, rollbackErr)
 				return fmt.Errorf("%w: %v", transport.ErrStatePersistence, g.loadErr)
 			}
@@ -319,7 +760,64 @@ func (d *goalRoundDriver) advance(sessionID string, countCurrentTurn bool) error
 			return err
 		}
 	}
+	// 资格推导放在**记账之后**：这一轮已经算进 roundsStarted，下一轮的编号
+	// 必须从新的计数上数（官方"only an entered goal message consumes the cap"）。
+	lastOp, opErr := d.lastGoalOperation(sessionID)
+	if opErr != nil {
+		return opErr
+	}
+	previousArm, hasArm := d.arm(sessionID)
+	d.setArm(sessionID, nextArm(previousArm, hasArm, goal, lastOp, !countCurrentTurn))
 	return nil
+}
+
+// lastGoalOperation 读这份会话**最后一条真实迁移**的 operation。
+//
+// 为什么走 journal 而不是 goal 存储：goal 的迁移有两条真实写入口
+// （`goalOverrideStore.transition` 与官方 `goals.*` 的 `agentGoalTransact`），
+// 它们唯一的共同产物就是同一份 Transport journal 里的 `goal/change` 帧。
+// 读帧是**不新增真值**的推导；把它塞进存储则会有第三份状态要同步。
+//
+// 续轮帧（operation=round）不是迁移，跳过——它由本驱动自己写，把它当迁移
+// 会让"暂停过"在第一次续轮之后被抹掉。
+func (d *goalRoundDriver) lastGoalOperation(sessionID string) (string, error) {
+	if d.goals == nil || d.goals.journal == nil || d.goals.journal.journals == nil {
+		return "", nil // 没接线：没有可观测迁移（测试里可能没挂 journal）
+	}
+	journal := d.goals.journal.journals.Get(sessionID)
+	if journal == nil {
+		return "", nil
+	}
+	frames, _, _ := journal.Since(0, 0)
+	op := ""
+	for _, frame := range frames {
+		if frame.Type != "goal/change" {
+			continue
+		}
+		var change transport.GoalChange
+		if err := json.Unmarshal(frame.Data, &change); err != nil {
+			return "", fmt.Errorf("解析 goal/change seq=%d: %w", frame.Seq, err)
+		}
+		if change.Operation == "round" {
+			continue
+		}
+		op = change.Operation
+	}
+	return op, nil
+}
+
+// setArm 写一次资格推导结果。
+func (d *goalRoundDriver) setArm(sessionID string, arm goalArm) {
+	d.mu.Lock()
+	d.arms[sessionID] = arm
+	d.mu.Unlock()
+}
+
+// clearArm 在目标消失（clear）时把资格一并删掉：留着会让"清掉再建"复用旧资格。
+func (d *goalRoundDriver) clearArm(sessionID string) {
+	d.mu.Lock()
+	delete(d.arms, sessionID)
+	d.mu.Unlock()
 }
 
 // cursorLoadError 把"游标文件坏了"变成每次推进都失败的明确错误。

@@ -1,9 +1,31 @@
 package spi
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 )
+
+// SandboxScope 是工具的可选能力：把一次调用的 sandbox 语义显式交给宿主。
+//
+// 宿主据此做 per-call 判定，**不按工具名或参数名猜权限**：Operation 为空表示
+// 这次调用不参与路径/执行闸门。工具可以选择不实现它（旧行为不变），但实现了
+// 就必须如实报告自己会碰什么。
+type SandboxScope interface {
+	SandboxCall(args json.RawMessage) (SandboxCall, error)
+}
+
+// SandboxCall 是一次工具调用的 sandbox 语义。
+type SandboxCall struct {
+	// Operation 是 "read" / "write" / "execute"；空 = 不参与闸门。
+	Operation string
+	// Path：read/write 是目标路径；execute 是起进程的 cwd。
+	Path string
+	// Command：execute 的命令原文（一次性审批按它绑定，防止批准漂到另一条命令）。
+	Command string
+	// Permission 是这次调用请求的 sandbox_permissions（空 = 不请求变化）。
+	Permission string
+}
 
 // Exec 是命令执行接缝。按 R6：**真实 shell 进程**，不做进程内解释。
 // CwdFollower 是 Exec 的可选能力：换掉"新会话的默认工作目录"。

@@ -1,6 +1,7 @@
 package pluginmgr
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -271,6 +272,14 @@ func (m *Manager) installVersionLocked(operation string, sourceManifest Manifest
 	if err := control.checkpoint(); err != nil {
 		return err
 	}
+	// 安装即装载（仅当启用位为真）：装载点在**状态提交之前**。
+	// 装载失败时走事务回滚（新版本目录删掉、state.json 一步不动），
+	// 所以"enabled=true 但没跑起来"这种记录根本落不了盘。
+	if after != nil && after.Enabled && m.runtime != nil {
+		if _, err := m.runtime.loadRecord(context.Background(), sourceManifest.ID, sourceManifest.Version); err != nil {
+			return err
+		}
+	}
 	next := cloneState(m.state)
 	next.Plugins[sourceManifest.ID] = after
 	// committing 是"太晚"的边界：从这里开始，取消不再回滚已就位的版本目录，
@@ -280,6 +289,14 @@ func (m *Manager) installVersionLocked(operation string, sourceManifest Manifest
 		return err
 	}
 	if err := m.saveStateLocked(next); err != nil {
+		// 状态没落盘：把刚装好的运行时收回去（update 还要把旧版本装回来），
+		// 让回滚之后的 state.json 与装载集合一致。
+		if after != nil && after.Enabled && m.runtime != nil {
+			_ = m.runtime.Unload(context.Background(), sourceManifest.ID)
+			if before != nil && before.Enabled {
+				_, _ = m.runtime.loadRecord(context.Background(), sourceManifest.ID, before.Version)
+			}
+		}
 		return err
 	}
 	m.state = next
@@ -363,12 +380,25 @@ func (m *Manager) setEnabled(id string, enabled bool) (PluginInfo, error) {
 	if record.Enabled == enabled {
 		return m.pluginInfoLocked(id)
 	}
+	// 启用**先装载**：装载失败时状态一步都不动——"enabled 但跑不起来"不存在。
+	if enabled && m.runtime != nil {
+		if _, err := m.runtime.loadRecord(context.Background(), id, record.Version); err != nil {
+			return PluginInfo{}, err
+		}
+	}
 	next := cloneState(m.state)
 	next.Plugins[id].Enabled = enabled
 	if err := m.saveStateLocked(next); err != nil {
+		if enabled && m.runtime != nil {
+			_ = m.runtime.Unload(context.Background(), id)
+		}
 		return PluginInfo{}, err
 	}
 	m.state = next
+	// 停用**后卸载**：状态落盘之后工具就不该再执行（禁用即撤销，不是标记一下）。
+	if !enabled && m.runtime != nil {
+		_ = m.runtime.Unload(context.Background(), id)
+	}
 	return m.pluginInfoLocked(id)
 }
 
@@ -426,7 +456,21 @@ func (m *Manager) restoreLocked(id, version string, control *installControl) (Pl
 		_ = os.RemoveAll(m.txDir(tx.ID))
 		return PluginInfo{}, err
 	}
+	// 切版同样先装载：loadRecord 见到版本变了会先关旧实例再装新的。
+	// 装载失败时 state.json 一步不动，事务目录删掉即可。
+	if after.Enabled && m.runtime != nil {
+		if _, err := m.runtime.loadRecord(context.Background(), id, version); err != nil {
+			_ = os.RemoveAll(m.txDir(tx.ID))
+			return PluginInfo{}, err
+		}
+	}
 	if err := m.saveStateLocked(next); err != nil {
+		if after.Enabled && m.runtime != nil {
+			_ = m.runtime.Unload(context.Background(), id)
+			if before.Enabled {
+				_, _ = m.runtime.loadRecord(context.Background(), id, before.Version)
+			}
+		}
 		_ = os.RemoveAll(m.txDir(tx.ID))
 		return PluginInfo{}, err
 	}
@@ -490,6 +534,10 @@ func (m *Manager) Uninstall(id string) (retErr error) {
 		return err
 	}
 	m.state = next
+	// 卸载即回收：包目录已经进事务区，实例也不该再活着（内存与运行时都还回去）。
+	if m.runtime != nil {
+		_ = m.runtime.Unload(context.Background(), id)
+	}
 	if m.afterPhase != nil {
 		if err := m.afterPhase("state_committed"); err != nil {
 			return internalError(err)

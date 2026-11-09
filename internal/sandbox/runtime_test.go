@@ -216,7 +216,8 @@ func TestGateOneShotApprovalBinding(t *testing.T) {
 	}
 	approval := d.Approval.Decide(true)
 
-	approved, err := g.EvaluateCommand(WithEscalation(ctx, approval), "true", f.outside, PermissionDangerFullAccess)
+	// 审批通过后的重试必须**显式**带回同一 call id：批准属于那一次调用。
+	approved, err := g.EvaluateCommand(WithCallID(WithEscalation(ctx, approval), d.CallID), "true", f.outside, PermissionDangerFullAccess)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,11 +226,11 @@ func TestGateOneShotApprovalBinding(t *testing.T) {
 	}
 
 	// 同一份批准不能漂到另一个 cwd：绑定 canonical path。
-	if _, err := g.EvaluateCommand(WithEscalation(ctx, approval), "true", filepath.Join(f.outside, "other"), PermissionDangerFullAccess); !errors.Is(err, ErrApprovalBinding) {
+	if _, err := g.EvaluateCommand(WithCallID(WithEscalation(ctx, approval), d.CallID), "true", filepath.Join(f.outside, "other"), PermissionDangerFullAccess); !errors.Is(err, ErrApprovalBinding) {
 		t.Fatalf("批准绑定到别的路径必须报 ErrApprovalBinding: %v", err)
 	}
 	// 也不能漂到另一个会话。
-	if _, err := g.EvaluateCommand(spi.WithSession(WithEscalation(ctx, approval), "session-B"), "true", f.outside, PermissionDangerFullAccess); !errors.Is(err, ErrApprovalBinding) && !errors.Is(err, ErrSessionMismatch) {
+	if _, err := g.EvaluateCommand(WithCallID(WithEscalation(spi.WithSession(ctx, "session-B"), approval), d.CallID), "true", f.outside, PermissionDangerFullAccess); !errors.Is(err, ErrApprovalBinding) && !errors.Is(err, ErrSessionMismatch) {
 		t.Fatalf("批准绑定到别的会话必须失败: %v", err)
 	}
 	// 后续调用不带批准 = 重新 needs-approval，证明没有跨调用记忆。
@@ -238,7 +239,7 @@ func TestGateOneShotApprovalBinding(t *testing.T) {
 		t.Fatalf("一次批准不得污染后续调用: %+v %v", again, err)
 	}
 	// 未批准的显式拒绝。
-	denied, err := g.EvaluateCommand(WithEscalation(ctx, d.Approval.Decide(false)), "true", f.outside, PermissionDangerFullAccess)
+	denied, err := g.EvaluateCommand(WithCallID(WithEscalation(ctx, d.Approval.Decide(false)), d.CallID), "true", f.outside, PermissionDangerFullAccess)
 	if err != nil {
 		t.Fatal(err)
 	}

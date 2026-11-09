@@ -1,8 +1,18 @@
 // Package pluginmgr manages the task-scoped dsh.local-plugin@1 directory format.
-// It copies and verifies packages only; it never loads or executes plugin code.
+//
+// 两层，职责不混：
+//   - `Manager` 是**存储**：复制、校验、事务、`state.json`。它自己从不执行插件代码。
+//   - `Loader`（loader.go）是**运行时**：把已安装的包真的装载成工具、执行、卸载；
+//     它由 `NewLoader` 挂到管理器上，之后 enable/disable/uninstall/update/restore
+//     会自动同步装载集合——"enabled 但没跑起来"与"disabled 但还能调"因此不可能出现。
+//
+// 受支持的是 **Go/WASM** 插件（`kind = "wasm"`，GOOS=wasip1 GOARCH=wasm
+// -buildmode=c-shared）。JS/Cordis 与 process 形态在安装边界上显式拒绝
+// （`unsupported_plugin`）——本仓不嵌 JS 运行时（AGENTS R6），也没有 process 后端。
 package pluginmgr
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -95,6 +105,28 @@ type Manifest struct {
 	Files            map[string]string `json:"files"`
 	Engines          *Engines          `json:"engines,omitempty"`
 	PeerDependencies map[string]string `json:"peerDependencies,omitempty"`
+	// Tools 是这个包提供、并且**真的能被模型调用**的工具声明（可选）。
+	//
+	// 为什么工具元数据必须写在 manifest 里：Name/Description/Schema/Caps 是
+	// 稳定性契约（R4），审批与沙箱也靠 Caps 判定（AGENTS §2）——让 wasm 客人
+	// 自己声明"我只会读"，等于让它自己给自己发许可证。客人只负责执行，
+	// 身份与能力由包自己声明、由宿主校验。
+	//
+	// 没有这个字段的包（既有全部包）行为不变：装载后不提供任何能力，
+	// 只能经 `dshd wasm call` 手动调。
+	Tools []ToolDeclaration `json:"tools,omitempty"`
+}
+
+// ToolDeclaration 是包内一个可执行工具的声明。
+//
+// 与 dsh.toml 的 `[[module.tool]]` 同义，区别只是**随包一起走**：
+// dsh.toml 是宿主侧白名单，plugin.json 是包自己的身份。
+type ToolDeclaration struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Schema      json.RawMessage `json:"schema"`
+	Caps        []string        `json:"caps,omitempty"`
+	TimeoutMS   int             `json:"timeout_ms,omitempty"`
 }
 
 type versionSource struct {

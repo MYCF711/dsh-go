@@ -659,11 +659,101 @@ func TestOfficialSessionProjectionsCarryOnlyRealKeys(t *testing.T) {
 	if meta["lastPromptAt"] != float64(1005) {
 		t.Fatalf("lastPromptAt 必须是最新人类 prompt 的时间 1005：%v", meta["lastPromptAt"])
 	}
-	// 没有真值的键必须整个不出现（官方 optional = 该能力不存在）。
-	for _, key := range []string{"modelSelection", "todos", "inbox", "actionCards", "agentPreset", "subagent", "imageLimits"} {
+	// todos 是**真实**键：这个 fixture 里没有 todo_write 调用 → 官方语义是 null
+	// （"第一次 write 之前"），不是"没有这个能力"。
+	if todos, has := values["todos"]; !has || todos != nil {
+		t.Fatalf("没有 todo_write 时 todos 必须是 null：%v", values["todos"])
+	}
+	// 仍然没有真值的键必须整个不出现（官方 optional = 该能力不存在）：
+	//   inbox      —— 没有 durable agent/inbox/spliced 事件
+	//   actionCards—— 没有 action card 运行时
+	//   imageLimits—— 官方必填 maxImageDimension，宿主没有单边尺寸上限
+	//   modelSelection/agentPreset/subagent/subagent* —— 这个假源没有实现
+	//   OfficialProjectionHost，宿主能力缺失时不许编。
+	for _, key := range []string{"modelSelection", "inbox", "actionCards", "agentPreset", "subagent", "imageLimits", "subagentCatalog", "subagentTiming"} {
 		if _, has := values[key]; has {
 			t.Fatalf("%q 本宿主没有真值，不许编：%v", key, values)
 		}
+	}
+}
+
+// TestOfficialSessionProjectionsTodosFold 钉住 todos 的真实来源：
+// 最新一次 todo_write 的**完整替换**参数（v4 tool/call），不是增量拼装。
+func TestOfficialSessionProjectionsTodosFold(t *testing.T) {
+	src := &fakeOfficialSource{
+		logEnd: 5,
+		events: []DurableEvent{
+			{Type: "tool/call", Seq: 1, Time: 1000, Data: json.RawMessage(
+				`{"turn":1,"step":1,"callId":"c1","name":"todo_write","arguments":"{\"todos\":[{\"content\":\"旧项\",\"status\":\"pending\"}]}"}`)},
+			{Type: "tool/call", Seq: 3, Time: 2000, Data: json.RawMessage(
+				`{"turn":2,"step":1,"callId":"c2","name":"todo_write","arguments":"{\"todos\":[{\"content\":\"新项\",\"status\":\"in_progress\"},{\"content\":\"收尾\",\"status\":\"completed\"}]}"}`)},
+		},
+	}
+	s := officialServerWith(t, src, Options{})
+	rec := postOfficial(t, s.handleSessionProjections, `{"sessionId":"s1"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	values := unwrapResult(t, rec.Body.Bytes())["values"].(map[string]any)
+	todos, ok := values["todos"].([]any)
+	if !ok || len(todos) != 2 {
+		t.Fatalf("todos 必须是最新一次 write 的两项：%v", values["todos"])
+	}
+	first := todos[0].(map[string]any)
+	if first["content"] != "新项" || first["status"] != "in_progress" {
+		t.Fatalf("第一次 write 必须被整份替换：%v", todos)
+	}
+	// 清空清单是合法的 []，不是 null（null 只表示"还没写过"）。
+	src.events = append(src.events, DurableEvent{Type: "tool/call", Seq: 5, Time: 3000,
+		Data: json.RawMessage(`{"turn":3,"step":1,"callId":"c3","name":"todo_write","arguments":"{\"todos\":[]}"}`)})
+	rec = postOfficial(t, s.handleSessionProjections, `{"sessionId":"s1"}`)
+	values = unwrapResult(t, rec.Body.Bytes())["values"].(map[string]any)
+	empty, ok := values["todos"].([]any)
+	if !ok || len(empty) != 0 {
+		t.Fatalf("清空后 todos 必须是 []：%v", values["todos"])
+	}
+}
+
+// TestOfficialSessionProjectionsSubagentIdentity 钉住子代理身份/计时的真值来源：
+// 子会话自己日志里的 subagent/spawn + 之后的 turn/start|turn/end。
+func TestOfficialSessionProjectionsSubagentIdentity(t *testing.T) {
+	events := []DurableEvent{
+		{Type: "subagent/spawn", Seq: 0, Time: 1000, Data: json.RawMessage(
+			`{"childSessionId":"kid","parentSessionId":"parent","spawnedAt":1000}`)},
+		{Type: "turn/start", Seq: 1, Time: 1100, Data: json.RawMessage(`{"turn":1}`)},
+		{Type: "turn/end", Seq: 2, Time: 1600, Data: json.RawMessage(`{"turn":1,"reason":{"kind":"completed"}}`)},
+		{Type: "turn/start", Seq: 3, Time: 1700, Data: json.RawMessage(`{"turn":2}`)},
+		{Type: "assistant/text", Seq: 4, Time: 1900, Data: json.RawMessage(`{"turn":2,"step":1,"text":"hi"}`)},
+	}
+	src := &fakeOfficialSource{events: events, logEnd: 4}
+	s := officialServerWith(t, src, Options{})
+	values := unwrapResult(t, postOfficial(t, s.handleSessionProjections, `{"sessionId":"kid"}`).Body.Bytes())["values"].(map[string]any)
+	identity, ok := values["subagent"].(map[string]any)
+	if !ok || identity["mode"] != "continuable" || identity["seq"] != float64(0) {
+		t.Fatalf("subagent 身份必须来自自己的 spawn 帧：%v", values["subagent"])
+	}
+	// 官方 continuable 身份的 label 必填；本宿主 descriptor 没有创建标签 → 空串。
+	if label, has := identity["label"]; !has || label != "" {
+		t.Fatalf("continuable 身份的 label 必填（本宿主是空串）：%v", identity)
+	}
+	timing, ok := values["subagentTiming"].(map[string]any)
+	if !ok {
+		t.Fatalf("subagentTiming 必须有真值：%v", values)
+	}
+	if timing["settledMs"] != float64(500) {
+		t.Fatalf("settledMs 必须是闭合轮时长之和 500：%v", timing)
+	}
+	if timing["lastTurnCompleted"] != true {
+		t.Fatalf("最近闭合轮 completed：%v", timing)
+	}
+	active, ok := timing["active"].(map[string]any)
+	if !ok || active["since"] != float64(1700) || active["through"] != float64(1900) {
+		t.Fatalf("未闭合轮的 active 必须来自真实时间：%v", timing["active"])
+	}
+	// 祖先的 spawn（childSessionId != 本会话）不能被认成本会话的身份。
+	values = unwrapResult(t, postOfficial(t, s.handleSessionProjections, `{"sessionId":"other"}`).Body.Bytes())["values"].(map[string]any)
+	if _, has := values["subagent"]; has {
+		t.Fatalf("别的会话不能继承这个身份：%v", values)
 	}
 }
 

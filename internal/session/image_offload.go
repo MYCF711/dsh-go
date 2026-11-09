@@ -3,6 +3,9 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -37,6 +40,11 @@ import (
 //  2. 官方在 Session 提交前就把非法 target 拒掉（抛错）；本仓读路径不写盘、
 //     也不能因为一条脏事件让整份历史读不出来，所以 `Surface` 侧整条丢弃，
 //     `ParseImageOffloadTargets` 保留严格校验给写入端与测试。
+//  3. 官方的只读副本路径由**注入的 provider** 给（`resolveImageAttachmentAccess`，
+//     dsh-llm/lib/types/content.js:13-19）；本仓 `Surface` 是日志的纯函数，改由
+//     `SessionImageAccess` 从会话文件自己的位置推同一个 home 下的
+//     `state/attachments/objects/<id>/blob`（形状对不上就退回官方的"没有可读路径"
+//     兜底文案）。取不到路径时文案与官方逐字节一致，取到时也逐字节一致。
 
 // ImageOffloadEventType 是官方插件写下的决策事件类型。
 //
@@ -104,10 +112,88 @@ type ImageOffloadData struct {
 //
 // 对应官方 `resolveImageAttachmentAccess` 的返回值：拿不到（provider 没暴露映射）
 // 就传 nil，占位文案走"没有可读路径"那一支。本仓的 attachment store 在
-// cmd/dshd 侧，session 包不认识它，所以这两者之间只有这一个字段的契约。
+// cmd/dshd 侧，session 包不 import 它，所以这两者之间只有这一个字段的契约。
 type ImageAccess struct {
 	// ReadonlyPath 是只读副本的绝对路径（模型可以自己 read 它）。
 	ReadonlyPath string
+}
+
+// ImageAccessResolver 把一张 durable 图片块解析成"模型可读的只读副本"。
+//
+// 官方把这件事做成注入的 provider（`resolveImageAttachmentAccess(attachments,
+// mapHostPath, ref)`，dsh-llm/lib/types/content.js:13-19）：附件 provider 给出
+// 归一化副本的 host 路径，文件系统 provider 再把它映进当前工具执行世界。
+// 本宿主的 `Surface` 是**日志的纯函数**（读路径不写盘、也不 import attachment
+// store），所以这一层只留一个函数类型：谁有 store 谁提供解析器，拿不到返回 nil
+// （官方 `undefined` 那一支，占位文案走"没有可读路径"的兜底）。
+type ImageAccessResolver func(ContentBlock) *ImageAccess
+
+// SessionImageAccess 由**会话文件自己的位置**推附件归一化副本的只读路径。
+//
+// 为什么从路径推、而不是像官方那样在装配期注入 provider：`Surface(log *v4.Log)`
+// 的入参只有日志，而日志自带 `Path`——会话与附件共用同一个 home，所以"同一份 home
+// 里的归一化副本"这条事实**可以从入参推出来**，不必再加一个调用点参数（`Surface`
+// 的调用方有历史派生、fork、压缩、界面投影等多条读路径，加参数会要求它们全都改）。
+//
+// 形状是固定的两段：
+//
+//	<home>/sessions/<projectKey>/<segment>/session.v4.jsonl.zstd
+//	<home>/state/attachments/objects/<att-id>/blob
+//
+// 任何一步对不上（`OpenSessionAt` 打开的是仓外文件、附件 id 不是 att- 形状、
+// blob 不是普通文件）都返回 nil：宁可回到"没有可读路径"的官方兜底文案，
+// 也不能把一条**读不到**的路径塞给模型——那比不写更糟，模型会照着去 read 然后失败。
+func SessionImageAccess(log *v4.Log) ImageAccessResolver {
+	if log == nil {
+		return nil
+	}
+	return SessionImageAccessAt(log.Path)
+}
+
+// SessionImageAccessAt 是 SessionImageAccess 的路径版本（调用方手里只有会话路径时用）。
+func SessionImageAccessAt(sessionPath string) ImageAccessResolver {
+	home, ok := sessionHome(sessionPath)
+	if !ok {
+		return nil
+	}
+	objects := filepath.Join(home, "state", "attachments", "objects")
+	return func(block ContentBlock) *ImageAccess {
+		// id 会直接拼进磁盘路径：形状不对就当成"拿不到"，顺手挡住路径穿越。
+		if !attachmentIDShape.MatchString(block.AttachmentID) {
+			return nil
+		}
+		blob := filepath.Join(objects, block.AttachmentID, "blob")
+		info, err := os.Stat(blob)
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		return &ImageAccess{ReadonlyPath: blob}
+	}
+}
+
+// attachmentIDShape 与 attachment store 的 id 形状同一份（att- + 128 位 hex）。
+// 两份形状必须一致：这里放宽或收紧都会让"路径存在但模型取不到"重新出现。
+var attachmentIDShape = regexp.MustCompile(`^att-[0-9a-f]{32}$`)
+
+// sessionHome 从 <home>/sessions/<projectKey>/<segment>/session.v4.jsonl.zstd 取回 home。
+//
+// 再多做一步形状校验（第三层目录必须叫 sessions）：`OpenSessionAt` 允许打开任意
+// 路径的文件，那种会话不在 home 布局里，这里必须拒绝而不是算出半截路径。
+func sessionHome(sessionPath string) (string, bool) {
+	if sessionPath == "" {
+		return "", false
+	}
+	segment := filepath.Dir(sessionPath)
+	projectKey := filepath.Dir(segment)
+	sessions := filepath.Dir(projectKey)
+	home := filepath.Dir(sessions)
+	if filepath.Base(sessions) != "sessions" {
+		return "", false
+	}
+	if home == "" || home == sessions {
+		return "", false
+	}
+	return home, true
 }
 
 // ImageOffloadBudget 是官方 `budget` 结构（count/byte 双预算 + 两个退役量子）。
@@ -562,7 +648,10 @@ func markOffloadedImages(images []SurfaceImage, indexes []int) []SurfaceImage {
 //
 // 为什么不是"把占位追加到末尾"：那会让模型以为占位是最后发生的事，
 // 与 compaction 替身必须插回被遮蔽起点是同一个道理（surface.go:120-122）。
-func joinTextWithPlaceholders(blocks []ContentBlock, images []SurfaceImage) string {
+//
+// access 是只读副本解析器（nil = 拿不到）：占位里的路径是模型取回原件的唯一入口，
+// 所以这里必须把解析结果原样交给 `OffloadedImageText`，不能自己拼。
+func joinTextWithPlaceholders(blocks []ContentBlock, images []SurfaceImage, access ImageAccessResolver) string {
 	byBlock := make(map[int]SurfaceImage, len(images))
 	for _, img := range images {
 		byBlock[img.BlockIndex] = img
@@ -577,7 +666,11 @@ func joinTextWithPlaceholders(blocks []ContentBlock, images []SurfaceImage) stri
 	for i, block := range blocks {
 		if img, ok := byBlock[i]; ok {
 			if img.Offloaded {
-				add(OffloadedImageText(img.Block, nil))
+				var imageAccess *ImageAccess
+				if access != nil {
+					imageAccess = access(img.Block)
+				}
+				add(OffloadedImageText(img.Block, imageAccess))
 			}
 			continue
 		}
@@ -593,7 +686,7 @@ func joinTextWithPlaceholders(blocks []ContentBlock, images []SurfaceImage) stri
 //
 // 官方两处「需要 surface 上下文」的校验在这里：target 必须指向**当前** surface
 // 节点，且源事件必须是 `user/message` 或 `tool/result`（projection.js:29-33）。
-func applyImageOffload(node SurfaceMsg, ev v4.Event, indexes []int) SurfaceMsg {
+func applyImageOffload(node SurfaceMsg, ev v4.Event, indexes []int, access ImageAccessResolver) SurfaceMsg {
 	if len(indexes) == 0 || len(node.Images) == 0 {
 		return node
 	}
@@ -611,7 +704,7 @@ func applyImageOffload(node SurfaceMsg, ev v4.Event, indexes []int) SurfaceMsg {
 		return node
 	}
 	node.Images = marked
-	node.Message.Content = joinTextWithPlaceholders(blocks, marked)
+	node.Message.Content = joinTextWithPlaceholders(blocks, marked, access)
 	return node
 }
 

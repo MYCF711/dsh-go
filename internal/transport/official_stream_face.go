@@ -49,9 +49,11 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // officialStreamBodyLimit 是流方法请求体的上限（参数对象，不是数据）。
@@ -102,19 +104,37 @@ func normalizeOfficialEndpoint(endpoint string) Method {
 //
 // 注意 `session.events` **不在**其中：官方它是 `Promise<SessionEventsPage>`
 // （typert.host.js:2019 没有 `mode` 键），一次性读，本仓早就是真实现。
-// 所以"官方流式方法"是 **6 个**，不是 7 个——任务书里的 7 个包含它，
-// 这里按官方 schema 决策，并在 RESULT 里写明差异。
+// `session/control` 在其中（typert.host.js:1970-1985），所以官方流式方法共 7 个。
+// 同时接受 mux 的 slash 名与 L1 的 dotted 名，避免只在入口归一化之前误判。
 func IsOfficialStreamMethod(name string) bool {
-	switch Method(name) {
-	case MethodSessionFollow,
+	switch normalizeOfficialEndpoint(name) {
+	case methodSessionControl,
+		MethodSessionFollow,
 		MethodSessionObserveEvent,
 		MethodSessionObserveProjections,
 		MethodSessionObserveState,
 		MethodWorkspaceFilesChanges,
-		MethodToolResultsWatch:
+		MethodToolResultsWatch,
+		MethodProductAnalyticsWatchPolicy,
+		MethodWorkspaceFollow,
+		MethodRemoteAccessFollow,
+		MethodSpeechFollow:
 		return true
 	}
 	return false
+}
+
+// IsOfficialMuxStreamMethod 报告一个官方方法是否有 **mux 流入口**。
+//
+// 与 IsOfficialStreamMethod 刻意分开：`userQuestions.attachWait` 的 HTTP 面
+// 必须保留既有 unary L1（58 方法快照，`Accept` 不带 NDJSON 时走 unary handler），
+// 所以它**不能**进 IsOfficialStreamMethod（那会让 HTTP unary 请求被改写成流）。
+// 官方的真载体是 mux 的 open 帧——本函数只用于 mux 侧口径与测试断言。
+func IsOfficialMuxStreamMethod(name string) bool {
+	if IsOfficialStreamMethod(name) {
+		return true
+	}
+	return normalizeOfficialEndpoint(name) == MethodUserQuestionsAttachWait
 }
 
 // OpenOfficialFrameStream 校验参数、接通数据源、预取 opening 帧。
@@ -122,11 +142,63 @@ func IsOfficialStreamMethod(name string) bool {
 // 为什么预取：参数/能力错误必须在**写响应头之前**暴露（HTTP 面），也必须以
 // 错误帧而不是"空 end"出现（mux 面）。一手交帧、一手交流，两条面都说得清。
 func (s *Server) OpenOfficialFrameStream(ctx context.Context, method string, args json.RawMessage) (OfficialFrameStream, *OfficialStreamFault) {
-	stream, head, fault := s.startOfficialStream(normalizeOfficialEndpoint(method), args)
+	normalized := normalizeOfficialEndpoint(method)
+	// PARITY-W1-STREAMS：两条 no-param 流在 startOfficialStream 之前直通；
+	// remoteAccess.follow 需要 ctx 里的 mux Peer 身份，startOfficialStream
+	// 没有 ctx 参数。
+	switch normalized {
+	case MethodWorkspaceFollow:
+		return s.OpenOfficialWorkspaceFollowStream()
+	case MethodRemoteAccessFollow:
+		return s.OpenOfficialRemoteAccessFollowStream(ctx)
+	}
+	// 官方 job.*/terminal.* 的 `mode:'stream'` 方法真流挂在
+	// Options.OfficialJobTerminal（T05 WIRING §1）。open args 是官方 wire 形状；
+	// job/list、job/follow 的字段包在嵌套 `request` 里，先归一成本层扁平形状。
+	// 首帧预取与 attach 的上行包装由 OpenFrameStream 自己做，这里**不再**套
+	// officialHeadStream（那会丢掉 OfficialTerminalUplink）。
+	if s != nil && s.opt.OfficialJobTerminal != nil && s.opt.OfficialJobTerminal.Handles(string(normalized)) {
+		converted, argvFault := normalizeOfficialJobTerminalStreamArgs(normalized, args)
+		if argvFault != nil {
+			return nil, argvFault
+		}
+		return s.opt.OfficialJobTerminal.OpenFrameStream(ctx, string(normalized), converted)
+	}
+	stream, head, fault := s.startOfficialStream(normalized, args)
 	if fault != nil {
 		return nil, fault
 	}
 	return &officialHeadStream{stream: stream, head: head, ctx: ctx}, nil
+}
+
+// normalizeOfficialJobTerminalStreamArgs 把官方 job/* 的嵌套 request 形状翻成
+// 本层帧机的扁平形状（terminal/* 的官方 args 本来就是扁平的，原样返回）。
+//
+// 官方 typert：job/list → `{request:{sessionId}}`；job/follow →
+// `{request:{sessionId?, jobId, from?}}`；本层帧机（T05）收 `{sessionId, jobId, from?}`。
+// **只删不改**：request 里的未知字段仍由帧机的 strict 解码拒绝，不在这里放宽。
+func normalizeOfficialJobTerminalStreamArgs(method Method, raw json.RawMessage) (json.RawMessage, *OfficialStreamFault) {
+	if method != MethodJobList && method != MethodJobFollow {
+		return raw, nil
+	}
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &outer); err != nil {
+		return nil, officialStreamBadRequest("", "%s 的 args 必须是 JSON 对象", method)
+	}
+	request, ok := outer["request"]
+	if !ok || len(request) == 0 {
+		return nil, officialStreamBadRequest("request",
+			"%s 的 args 缺 request（官方 json 参数名就是 request）", method)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(request, &fields); err != nil {
+		return nil, officialStreamBadRequest("request", "%s 的 request 必须是 JSON 对象", method)
+	}
+	converted, err := json.Marshal(fields)
+	if err != nil {
+		return nil, officialStreamInternal(method, "重写 %s 的 args 失败：%v", method, err)
+	}
+	return converted, nil
 }
 
 // officialHeadStream 把预取的 opening 帧接回流里（只允许取一次）。
@@ -232,6 +304,21 @@ func (s *Server) startOfficialStream(method Method, raw json.RawMessage) (Offici
 
 	var stream OfficialFrameStream
 	switch method {
+	case methodSessionControl:
+		host := s.officialHost()
+		if host == nil {
+			return nil, nil, officialStreamNotImplemented(method,
+				"宿主没有提供官方会话数据源（OfficialSessionHost）")
+		}
+		if s.opt.List == nil {
+			return nil, nil, officialStreamNotImplemented(method,
+				"宿主没有真实会话清单（Options.List 未接线），不能生成空 baseline")
+		}
+		stream = &officialControlStream{
+			server: s,
+			source: officialServerStreamSource{server: s, host: host},
+		}
+
 	case MethodSessionFollow, MethodSessionObserveEvent, MethodSessionObserveProjections, MethodSessionObserveState:
 		host := s.officialHost()
 		if host == nil {
@@ -258,7 +345,9 @@ func (s *Server) startOfficialStream(method Method, raw json.RawMessage) (Offici
 		}
 		if method == MethodSessionFollow {
 			// follow 还需要 header 来源：没有就**现在**报，不等 opening 时才发现。
-			if _, ok := host.(OfficialSessionHeaderSource); !ok {
+			// 来源既可能是 host 自己实现的接口，也可能是构造后挂上来的实现
+			// （official_stream_header.go），所以统一走 Server 的查找。
+			if s.officialSessionHeaderSource() == nil {
 				return nil, nil, officialStreamNotImplemented(method,
 					"宿主没有提供 follow snapshot 的 header 来源（OfficialSessionHeaderSource）")
 			}
@@ -284,6 +373,20 @@ func (s *Server) startOfficialStream(method Method, raw json.RawMessage) (Offici
 			path:      request.Path,
 		}
 
+	case MethodUserQuestionsAttachWait:
+		// 官方 mode:'stream' 的 mux 载体（T04 WIRING §4）。HTTP 面仍由
+		// serveOfficialQuestionAttachWaitStream 走 NDJSON marker，互不覆盖。
+		api, ok := s.officialAgentAPI()
+		if !ok || api.UserQuestionsAttachWait == nil {
+			return nil, nil, officialStreamNotImplemented(method,
+				"宿主没有定时等待通道（OfficialAgentAPI.UserQuestionsAttachWait 未接线）")
+		}
+		stream = &officialQuestionAttachWaitStream{
+			api:       api,
+			sessionID: request.SessionID,
+			callID:    request.CallID,
+		}
+
 	case MethodToolResultsWatch:
 		api, ok := s.officialAgentAPI()
 		if !ok || api.ToolResultsWatch == nil {
@@ -294,6 +397,20 @@ func (s *Server) startOfficialStream(method Method, raw json.RawMessage) (Offici
 			api:       api,
 			sessionID: request.SessionID,
 			seq:       request.ToolSeq,
+		}
+
+	case MethodSpeechFollow:
+		var fault *OfficialStreamFault
+		stream, fault = s.startOfficialSpeechFollowStream()
+		if fault != nil {
+			return nil, nil, fault
+		}
+
+	case MethodProductAnalyticsWatchPolicy:
+		var fault *OfficialStreamFault
+		stream, fault = s.startOfficialAnalyticsPolicyStream()
+		if fault != nil {
+			return nil, nil, fault
 		}
 
 	default:
@@ -307,6 +424,11 @@ func (s *Server) startOfficialStream(method Method, raw json.RawMessage) (Offici
 	}
 	if done {
 		stream.Close()
+		if method == MethodUserQuestionsAttachWait {
+			// 官方 attachWait：wait 已经结束 → 一帧都不发，流正常结束。
+			// 这不是"帧机实现错误"，是官方语义里的合法零帧流。
+			return stream, nil, nil
+		}
 		return nil, nil, officialStreamInternal(method, "流在 opening 帧之前就结束了（帧机实现错误）")
 	}
 	return stream, head, nil
@@ -456,4 +578,103 @@ func (s *Server) handleSessionObserveProjections(w http.ResponseWriter, r *http.
 
 func (s *Server) handleSessionObserveState(w http.ResponseWriter, r *http.Request) {
 	s.serveOfficialStream(w, r, string(MethodSessionObserveState))
+}
+
+// ---------------------------------------------------------------------------
+// userQuestions.attachWait 的 mux 流（官方 mode:'stream'）
+// ---------------------------------------------------------------------------
+
+// officialQuestionAttachWaitStream 是 `userQuestions/attachWait` 的 mux 帧机。
+//
+// 官方语义（dsh-user-questions 的 TimedQuestionWait.attach）：
+//
+//	wait 还活着 → yield **一帧** {remainingMs}，然后**持有 claim** 直到 wait
+//	              结算或调用方关流；关流只释放 claim，**不结算问题**（答案仍可投递）；
+//	wait 已经结束 → 零帧结束。
+//
+// 与 HTTP 面（serveOfficialQuestionAttachWaitStream）共用同一份宿主能力与同一条
+// 语义；区别只在载体：mux 这里不写 NDJSON 头、不重复发剩余时长。
+type officialQuestionAttachWaitStream struct {
+	api       OfficialAgentAPI
+	sessionID string
+	callID    string
+
+	started bool
+	done    bool
+	claimed bool
+}
+
+var _ OfficialFrameStream = (*officialQuestionAttachWaitStream)(nil)
+
+func (s *officialQuestionAttachWaitStream) Next(ctx context.Context) (json.RawMessage, bool, *OfficialStreamFault) {
+	if s.done {
+		return nil, true, nil
+	}
+	if !s.started {
+		s.started = true
+		wait, err := s.api.UserQuestionsAttachWait(s.sessionID, s.callID)
+		if err != nil {
+			s.done = true
+			return nil, false, officialAttachWaitFault(err)
+		}
+		if wait == nil {
+			// 官方：wait 已结束 → 零帧结束（不是错误）。
+			s.done = true
+			return nil, true, nil
+		}
+		if s.api.UserQuestionsClaimed != nil {
+			s.api.UserQuestionsClaimed(s.sessionID, s.callID, true)
+			s.claimed = true
+		}
+		raw, merr := json.Marshal(wait)
+		if merr != nil {
+			s.done = true
+			return nil, false, officialStreamInternal(MethodUserQuestionsAttachWait,
+				"序列化 {remainingMs} 帧失败：%v", merr)
+		}
+		// 只 yield 这一帧；之后是"持有 claim 等结算"，不再产生帧。
+		return raw, false, nil
+	}
+	// 一帧之后：持有 claim 轮询 wait 是否结束；不结算、不投递。
+	for {
+		wait, err := s.api.UserQuestionsAttachWait(s.sessionID, s.callID)
+		if err != nil {
+			s.done = true
+			s.release()
+			return nil, false, officialAttachWaitFault(err)
+		}
+		if wait == nil {
+			s.done = true
+			s.release()
+			return nil, true, nil
+		}
+		select {
+		case <-ctx.Done():
+			s.done = true
+			s.release()
+			return nil, true, nil
+		case <-time.After(officialQuestionClaimPollInterval):
+		}
+	}
+}
+
+// Close 只释放 claim（官方：关流不结算问题）。
+func (s *officialQuestionAttachWaitStream) Close() {
+	s.done = true
+	s.release()
+}
+
+func (s *officialQuestionAttachWaitStream) release() {
+	if s.claimed && s.api.UserQuestionsClaimed != nil {
+		s.api.UserQuestionsClaimed(s.sessionID, s.callID, false)
+	}
+	s.claimed = false
+}
+
+// officialAttachWaitFault 把 attachWait 的宿主错误翻成 mux 的 gateway 故障。
+func officialAttachWaitFault(err error) *OfficialStreamFault {
+	if errors.Is(err, ErrOfficialBadInput) {
+		return officialStreamBadRequest("", "%v", err)
+	}
+	return officialStreamFaultOf(MethodUserQuestionsAttachWait, err)
 }

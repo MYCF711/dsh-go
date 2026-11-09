@@ -8,12 +8,14 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/modes"
+	"dshgo/internal/sandbox"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
 )
@@ -68,7 +70,39 @@ type loopRunner struct {
 	// 于是 lazy 的会话隔离也是免费的：每轮一个新进程、一份新表，回放的输入
 	// 只有 `--session` 指的那份日志。父进程**不留**任何装载集状态，
 	// 也就没有"A 会话的装载集漏到 B"的载体。
+	// runOpts 是"每轮透传给子进程"的宿主旋钮（自动压缩阈值、外置阈值、
+	// AGENTS.md 字节上限、显式容量、规则文件）。nil = 老调用者（测试直接构造），
+	// 此时 childArgs 不带这几个参数——生产 serve 一定会给。
+	//
+	// 为什么整块传而不逐字段散在结构体上：childArgs 是逐字段拷贝，散着就一定会
+	// 在 `modelOverrideLoopRunner` 的每轮副本里漏掉某一个（漏一个的表现是那一轮
+	// 静默退回子进程默认值，界面上看不出来）。
+	runOpts *hostRunOptions
 	toolsMode string
+}
+
+// sandboxChildRoots 固定子进程的策略根（workspace / home / 只读额外根）。
+//
+// 不固定会怎样：`cmd.Env = append(os.Environ(), ...)` 把父进程里的
+// DSHD_SANDBOX_WORKSPACE 等原样带下去；那个值可能来自外层启动器或上一次运行，
+// 于是子进程 fs/bash 判定的 canonical 工作区与这一轮真正的工作区不是同一条路径。
+func sandboxChildRoots(workspace, home, userHome string) ([]string, error) {
+	if strings.TrimSpace(workspace) == "" {
+		return nil, fmt.Errorf("sandbox 子进程工作区为空")
+	}
+	if strings.TrimSpace(home) == "" {
+		return nil, fmt.Errorf("sandbox 子进程 home 为空")
+	}
+	if strings.TrimSpace(userHome) == "" {
+		return nil, fmt.Errorf("sandbox 子进程用户 home 为空")
+	}
+	return []string{
+		sandbox.EnvWorkspaceRoot + "=" + workspace,
+		sandbox.EnvHomeDir + "=" + userHome,
+		// 与 builtinModules 里 FS 的 WithExtraReadRoot(home/artifacts) 同源：
+		// 只读放行外置 artifact，别的什么都不放。
+		sandbox.EnvExtraReadRoots + "=" + filepath.Join(home, "artifacts"),
+	}, nil
 }
 
 // childArgs 拼"起一轮 run 子进程"的全部参数。
@@ -92,6 +126,9 @@ func (r *loopRunner) childArgs(sessionID, text string, promptContentFile ...stri
 	if r.model != "" {
 		args = append(args, "--model", r.model)
 	}
+	// serve 侧解析过的宿主旋钮原样交给子进程：这些值在子进程里**没有别处可查**，
+	// 不传就等于退回 run 的写死默认（自动压缩 40000 / 外置 4000 / 容量 0…）。
+	args = append(args, r.runOpts.args()...)
 	if r.reasoning != "" || r.reasoningSet {
 		// off:null 也必须显式带空值，否则 cmdRun 会重新继承 DSHD_REASONING_EFFORT。
 		args = append(args, "--reasoning", r.reasoning)
@@ -145,7 +182,25 @@ func (r *loopRunner) run(ctx context.Context, sessionID, turnID, text, promptCon
 			r.emitTurn(sessionID, turnID, envErr)
 			return envErr
 		}
-		cmd.Env = append(os.Environ(), env...)
+		// 策略根也要固定：只写档位而让子进程继承父环境里的
+		// DSHD_SANDBOX_WORKSPACE/HOME/EXTRA_READ，等于允许"这个会话的工作区"
+		// 和"策略判定的工作区"是两条不同的 canonical 路径。
+		wd, wdErr := os.Getwd()
+		if wdErr != nil {
+			r.emitTurn(sessionID, turnID, wdErr)
+			return wdErr
+		}
+		userHome, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			r.emitTurn(sessionID, turnID, homeErr)
+			return homeErr
+		}
+		roots, rootsErr := sandboxChildRoots(wd, r.home, userHome)
+		if rootsErr != nil {
+			r.emitTurn(sessionID, turnID, rootsErr)
+			return rootsErr
+		}
+		cmd.Env = append(os.Environ(), append(env, roots...)...)
 	}
 	var stderr bytes.Buffer
 

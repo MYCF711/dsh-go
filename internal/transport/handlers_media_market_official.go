@@ -167,6 +167,14 @@ func (s *Server) ServeOfficialMediaMarketAPI(w http.ResponseWriter, r *http.Requ
 		writeOfficialError(w, err)
 		return
 	}
+	// PARITY-W3-RECOMMENDATIONS：有真实推荐服务时先走 describe；未接线时
+	// 保持原有的 501 语义（下面的 route 仍会走到 officialPluginRecommendationsDescribe）。
+	if Method(name) == MethodPluginRecommendationsDescribe {
+		if api := s.officialPluginRecommendationsAPI(); api.Describe != nil {
+			s.serveOfficialPluginRecommendationsDescribe(w, r.Context(), params, api)
+			return
+		}
+	}
 	result, err := routeOfficialMediaMarketMethod(r, Method(name), params)
 	if err != nil {
 		writeOfficialError(w, err)
@@ -530,10 +538,25 @@ const (
 
 // 翻译调用的上限与网关连接信息。
 //
-// env 键与默认值与 `cmd/dshd/serve.go` 完全一致（那里也是
-// `envOr("DSHD_LLM_BASE", "http://127.0.0.1:3425/v1")` 与 `envOr("DSHD_LLM_MODEL",
-// "group/deepseek-v4.1-flash-1017")`），这样"宿主跑哪个网关/哪个模型"和"翻译用
+// env 键与默认值与 `cmd/dshd` 完全一致：`DSHD_LLM_BASE` 的默认值是本机 3425
+// 网关（`cmd/dshd` 侧只有 `defaultLLMBase` 一处定义），`DSHD_LLM_MODEL` 的默认值
+// 是 `group/deepseek-v4.1-flash-1017`。这样"宿主跑哪个网关/哪个模型"和"翻译用
 // 哪个网关/哪个模型"不会各说一套。
+// cotTextUTF16Len 按官方 `maxTextChars` 的定义数 UTF-16 码元：BMP 字符 1，
+// 增补平面字符（emoji 等）2。不能用 len([]rune) 冒充——那会把 emoji 算成 1，
+// 客户端按 limits 给出的上限发满时会被宿主多拒一段。
+func cotTextUTF16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
 const (
 	cotTranslationTimeout  = 90 * time.Second
 	cotTranslationMaxChars = 100000
@@ -595,7 +618,7 @@ func officialCotTranslationTranslate(r *http.Request, p *officialParams) (any, e
 			"provider=%q 不是官方取值（google / bing / deepseek-account / deepseek-official）", provider)
 	}
 
-	if len([]rune(text)) > cotTranslationMaxChars {
+	if cotTextUTF16Len(text) > cotTranslationMaxChars {
 		return nil, officialBadRequest("text 超过 %d 个字符上限", cotTranslationMaxChars)
 	}
 	if text == "" {

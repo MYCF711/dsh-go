@@ -1,6 +1,7 @@
 package main
 
-// 官方桌面端 0.2.2 的 schedule.create / edit / view / run / history 在**宿主机**这一侧的实现。
+// 官方桌面端 0.2.2 的 schedule.create / edit / view / run / history，以及
+// schedule.catalog / deleteInactive / deliveryLimits 在**宿主机**这一侧的实现。
 //
 // 规矩（与 internal/transport/handlers_schedule_official.go 的分工）：
 //   - Transport 只做协议与形状（参数解析 / fail-loud / 四字段错误 / 挂载表）；
@@ -124,6 +125,10 @@ func (h *officialScheduleHost) api() transport.OfficialScheduleAPI {
 		View:    h.view,
 		Run:     h.run,
 		History: h.history,
+
+		Catalog:        h.catalog,
+		DeleteInactive: h.deleteInactive,
+		DeliveryLimits: h.deliveryLimits,
 	}
 }
 
@@ -281,6 +286,17 @@ func createPreset(info *transport.OfficialScheduleCreateInfo) string {
 		return ""
 	}
 	return strings.TrimSpace(info.AgentPreset)
+}
+
+// scheduleCreateInfoOf 把落盘的建会话参数还原成官方 create 对象。
+//
+// 两个字段都可以为空（= 用宿主默认值），但 create **这个键**在官方
+// new / new_once 分支里是 required：空对象 `{}` 与"没有这个键"在 zod 上
+// 是两种结果（后者解析失败）。所以这里永远返回非 nil 指针。
+func scheduleCreateInfoOf(item schedule.Item) *transport.OfficialScheduleCreateInfo {
+	return &transport.OfficialScheduleCreateInfo{
+		CWD: item.TargetCWD, AgentPreset: item.TargetPreset,
+	}
 }
 
 // createSessionFor 真建一个会话。
@@ -1010,6 +1026,119 @@ func (h *officialScheduleHost) history(req transport.OfficialScheduleHistoryRequ
 }
 
 // ---------------------------------------------------------------------------
+// schedule.catalog / schedule.deleteInactive / schedule.deliveryLimits
+// ---------------------------------------------------------------------------
+
+// catalog 返回**全量**目录（官方 catalog 无分页上限），排序照 compareEntries：
+// active 在前按 scheduledAt 升序；非 active 在后按最近一次投递/更新/创建/计划倒序。
+//
+// 读路径不写盘：只读 <home>/state/schedules/*.json 与投递历史侧车，不推进 next_at，
+// 也不激活任何目标会话（官方："without a page bound or Session activation"）。
+func (h *officialScheduleHost) catalog() ([]transport.OfficialScheduleEntry, error) {
+	schedule.LockMutations()
+	defer schedule.UnlockMutations()
+
+	sessions, err := schedule.Sessions(h.schedulesDir())
+	if err != nil {
+		return nil, fmt.Errorf("%w: 列日程文件失败: %v", transport.ErrStatePersistence, err)
+	}
+	entries := make([]transport.OfficialScheduleEntry, 0)
+	for _, sessionID := range sessions {
+		doc, err := h.readDocLocked(sessionID)
+		if err != nil {
+			return nil, err
+		}
+		for i, raw := range doc.entries {
+			var item schedule.Item
+			if err := json.Unmarshal(raw, &item); err != nil {
+				return nil, fmt.Errorf("%w: 解析定时任务 %s 第 %d 条失败: %v",
+					transport.ErrStatePersistence, doc.path, i, err)
+			}
+			entry := h.entryFromItem(doc, item)
+			// lastDelivery 是"已确认投递"的真实凭据；没有就是 nil，不编。
+			if rec := h.lastDelivery(item.ID); rec != nil {
+				entry.LastDelivery = rec
+			}
+			entries = append(entries, entry)
+		}
+	}
+	sortScheduleCatalog(entries)
+	return entries, nil
+}
+
+// sortScheduleCatalog 是官方 compareEntries 的等价实现（index.js:1869）。
+//
+// 官方排序不是"随便一个稳定序"：客户端靠它把 active 任务排在前面、把最近结束的
+// 任务排在最上面。两边排序不一致时，同一份数据在两套宿主上会显示成不同顺序。
+func sortScheduleCatalog(entries []transport.OfficialScheduleEntry) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		return scheduleCatalogEntryLess(entries[i], entries[j])
+	})
+}
+
+func scheduleCatalogEntryLess(a, b transport.OfficialScheduleEntry) bool {
+	aActive := a.Status == schedule.StatusActive
+	bActive := b.Status == schedule.StatusActive
+	if aActive != bActive {
+		return aActive
+	}
+	if aActive {
+		if a.ScheduledAt != b.ScheduledAt {
+			return a.ScheduledAt < b.ScheduledAt
+		}
+		return a.ID < b.ID
+	}
+	// 非 active：最近一次"投递 > 更新 > 创建 > 计划"倒序；同刻按 id 升序。
+	aRecent, bRecent := scheduleCatalogRecent(a), scheduleCatalogRecent(b)
+	if aRecent != bRecent {
+		return aRecent > bRecent
+	}
+	return a.ID < b.ID
+}
+
+func scheduleCatalogRecent(entry transport.OfficialScheduleEntry) string {
+	if entry.LastDelivery != nil && entry.LastDelivery.DeliveredAt != "" {
+		return entry.LastDelivery.DeliveredAt
+	}
+	if entry.UpdatedAt != "" {
+		return entry.UpdatedAt
+	}
+	if entry.CreatedAt != "" {
+		return entry.CreatedAt
+	}
+	return entry.ScheduledAt
+}
+
+// deleteInactive 删掉**所有 ended 任务**，active 与 paused 一个都不动。
+//
+// 复用 internal/schedule.ClearEnded：它就是这个语义的持久实现（全量预检 +
+// 原子写 + 失败回滚），并且和 schedule.delete/edit 共用同一把 LockMutations。
+// 注意这里**不能**先拿 LockMutations：ClearEnded 自己会拿，sync.Mutex 不可重入。
+//
+// 官方 deleteInactive 只删 status=ended（index.js:2375 `filter(task.status === "ended")`），
+// paused 是可恢复的、必须留着；"非 active 全删"会静默毁掉用户的暂停任务。
+func (h *officialScheduleHost) deleteInactive() (transport.OfficialScheduleDeleteInactiveResult, error) {
+	res, err := schedule.ClearEnded(h.schedulesDir(), h.now())
+	if err != nil {
+		return transport.OfficialScheduleDeleteInactiveResult{},
+			fmt.Errorf("%w: 清理 ended 任务失败: %v", transport.ErrStatePersistence, err)
+	}
+	return transport.OfficialScheduleDeleteInactiveResult{Deleted: res.Deleted}, nil
+}
+
+// deliveryLimits 返回本宿主真实生效的 new-session 投递最小间隔。
+//
+// 本宿主没有独立的 newSessionInterval 配置项：真实被入口强制执行的只有
+// transport.MinScheduleEverySeconds() 这一条（every_seconds 的下界，也是
+// 官方的默认值 60 秒）。这里回报的就是它——不在宿主里另写一个 60，
+// 两处各写一个迟早一处改了一处没改。
+func (h *officialScheduleHost) deliveryLimits() (transport.OfficialScheduleDeliveryLimits, error) {
+	return transport.OfficialScheduleDeliveryLimits{
+		NewSessionIntervalSeconds: int64(transport.MinScheduleEverySeconds()),
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
 // 真实存储：<home>/state/schedules/<sessionId>.json
 // ---------------------------------------------------------------------------
 
@@ -1544,9 +1673,14 @@ func (h *officialScheduleHost) entryFromItem(doc *officialScheduleDoc, item sche
 	var target transport.OfficialScheduleTarget
 	switch targetKind {
 	case "new":
-		target = transport.OfficialScheduleTarget{Kind: "new"}
+		// 官方 new 分支的 required 列表是 ["kind","create"]：create 键必须在，
+		// 哪怕里面两个字段都是"用宿主默认值"（空对象）。catalog 会把这条形状
+		// 原样发出去，少一个 required 键客户端就解析失败。
+		target = transport.OfficialScheduleTarget{Kind: "new", Create: scheduleCreateInfoOf(item)}
 	case "new_once":
-		target = transport.OfficialScheduleTarget{Kind: "new_once", SessionID: item.TargetSession}
+		target = transport.OfficialScheduleTarget{
+			Kind: "new_once", SessionID: item.TargetSession, Create: scheduleCreateInfoOf(item),
+		}
 	default:
 		target = transport.OfficialScheduleTarget{Kind: "session", SessionID: h.deliveryTarget(doc, item)}
 	}

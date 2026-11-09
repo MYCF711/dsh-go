@@ -23,10 +23,13 @@ import (
 type Options struct {
 	SpillDir string // 外置目录；空 = <temp>/dshd-spill
 	MaxChars int    // 超过就外置；<=0 = 4000
-	// ToolTimeout 是**每一次工具调用**的统一截止时间（timeout-policy）。
+	// ToolTimeout 是**每一次工具调用**的统一截止时间（timeout-policy）的默认值。
 	//
 	// 三值约定（本仓统一）：0 = 未配置，按 DSHD_TOOL_TIMEOUT_SECS → 内置默认；
 	// 负值 = 明确关闭（不装 deadline，行为退回"只看各工具自己"）；正值 = 这个预算。
+	//
+	// 单次调用可以覆盖它（`spi.WithToolDeadline`，见 timeout.go 的
+	// resolveToolBudget）：统一预算改的是**默认值**，per-call 改的是**这一次**。
 	//
 	// 为什么要有这一层：bash/web/MCP 各自有超时，但**流水线这一层没有**。任何一个
 	// 不自带超时的工具（新工具、第三方工具、卡在无 deadline 的网络读上、卡在第三方
@@ -326,8 +329,12 @@ func (p *Pipeline) Run(ctx context.Context, name string, args json.RawMessage) (
 // 调用方用 errors.As 认它；用 errors.Is(err, context.Canceled) 认用户取消。
 type ToolTimeoutError struct {
 	Tool   string        // 工具名（模型看到的名字）
-	Budget time.Duration // 这次的统一预算
+	Budget time.Duration // 这次的预算
 	Waited time.Duration // 实际等到的时长（≈ 预算；诊断用，不进模型文案）
+	// Source 说清这次的预算是谁定的：流水线统一预算（"pipeline"）还是调用方为
+	// 这一次声明的（"per_call"）。两者都是"工具太慢"，但排查方向不同——
+	// 前者要问"谁把默认值调小了"，后者要问"这一次为什么给这么紧"。
+	Source string
 }
 
 func (e *ToolTimeoutError) Error() string {
@@ -344,7 +351,11 @@ type execOutcome struct {
 	err error
 }
 
-// executeWithDeadline 在统一预算内执行工具；到点立刻返回，**不等**它。
+// executeWithDeadline 在这一次调用的预算内执行工具；到点立刻返回，**不等**它。
+//
+// 预算的来路由 resolveToolBudget 决定：ctx 上为这一次声明的
+// （`spi.WithToolDeadline`）优先，否则用流水线的统一预算（默认 30 分钟）。
+// 两条路的执行语义完全相同——per-call 不是"另一条更宽松的路"，只是另一个数字。
 //
 // 三种结局必须分得开：
 //
@@ -362,9 +373,10 @@ type execOutcome struct {
 //
 // 代价写在明处：Go 杀不掉 goroutine，挂死的工具那个 goroutine 会一直挂着（它的 ctx
 // 已经结束，能不能退出来取决于工具自己）。这一层能保证的是**流水线不再等它**，
-// 而不是"它一定停止"。
+// 而不是"它一定停止"；把进程树收干净是**拥有进程树的那个工具**的责任
+// （bash/pwsh 在 ctx.Done() 上终止整棵树）。
 func (p *Pipeline) executeWithDeadline(ctx context.Context, tool spi.Tool, args json.RawMessage) (spi.Result, error) {
-	budget := p.opts.ToolTimeout
+	budget, source := resolveToolBudget(ctx, p.opts.ToolTimeout)
 	if budget <= 0 {
 		// 明确关闭（负值）：行为与加这一层之前逐字节一致，连 panic 也照常上抛。
 		return tool.Exec(ctx, args)
@@ -424,7 +436,8 @@ func (p *Pipeline) executeWithDeadline(ctx context.Context, tool spi.Tool, args 
 		}, err
 	}
 	waited := time.Since(started)
-	p.log.Warn("工具调用超时（统一截止时间）", "tool", tool.Name(),
+	p.log.Warn("工具调用超时（截止时间）", "tool", tool.Name(),
+		"source", source,
 		"timeout_ms", budget.Milliseconds(), "waited_ms", waited.Milliseconds())
 	timedOut := timeoutResult(tool.Name(), budget, waited)
 	// R3：把 Hint 显式落在紧邻 return 的位置（timeoutResult 已经填了同一句），
@@ -432,7 +445,7 @@ func (p *Pipeline) executeWithDeadline(ctx context.Context, tool spi.Tool, args 
 	timedOut.Hint = fmt.Sprintf("这次调用没在 %s 内返回、已被取消，结果未知：别当成没生效——"+
 		"先用只读手段核实现场（读文件/看进程/查状态）；要重试就缩小范围或分步做，"+
 		"预计很久的活改用 run_in_background", budget)
-	return timedOut, &ToolTimeoutError{Tool: tool.Name(), Budget: budget, Waited: waited}
+	return timedOut, &ToolTimeoutError{Tool: tool.Name(), Budget: budget, Waited: waited, Source: source}
 }
 
 // cutByDeadline 判断一次"刚好卡在截止时间上返回"的结果算不算**被本层掐断**。

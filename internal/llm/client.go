@@ -17,12 +17,23 @@ type Client struct {
 	BaseURL string // 例如 http://127.0.0.1:3425/v1
 	APIKey  string
 	HTTP    *http.Client
+	// API 是 catalog `model.api` 的协议 id；空 = openai-completions。
+	//
+	// 它决定两件事：输出上限字段的拼写（适配器声明）与 provider 扩展字段的归属。
+	// 未注册的 id 在发请求前 fail-loud，不会静默回落到默认协议。
+	API string
 	// UserAgent 是发给网关的 UA。
 	//
 	// 不设的话 Go 默认发 `Go-http-client/1.1`，网关的客户端列表里就会出现一个
 	// 不知名的 "Go-http-client"——用户看到的第一反应是"这是谁在偷偷调模型"。
 	// 这是我们的请求，就该署我们的名（2026-11-03 用户截图反馈）。
 	UserAgent string
+
+	// OnExtensionError 接收 provider 扩展字段的 prepare 省略与 2xx 后 accept 失败。
+	//
+	// 官方语义是"记日志、请求照常"，宿主没有把 logger 塞进 llm 层，所以留一个
+	// 回调；nil = 静默丢弃（字段已经丢了，但不能因此让整轮回答失败）。
+	OnExtensionError func(error)
 
 	// retry 是这条 client 的重试参数；nil = 生产默认（见 retry.go 的 defaultRetryConfig）。
 	//
@@ -41,6 +52,29 @@ func New(baseURL, apiKey string) *Client {
 		APIKey:  apiKey,
 		HTTP:    &http.Client{Timeout: 0, Transport: http.DefaultTransport},
 	}
+}
+
+// NewWithAPI 造一个指定 wire 协议（catalog `model.api`）的客户端。
+//
+// 未知 api 不在这里失败：构造 Client 不该有 IO/全局状态依赖，真正的校验在
+// 发请求前（Stream 的 adapter()），错误信息会列出已注册的 id。
+func NewWithAPI(baseURL, apiKey, api string) *Client {
+	client := New(baseURL, apiKey)
+	client.API = api
+	return client
+}
+
+// adapter 解析这条 client 的协议适配器；空 API = 默认 openai-completions。
+func (c *Client) adapter() (ProviderAdapter, error) {
+	return LookupProviderAdapter(c.API)
+}
+
+// reportExtensionError 把扩展字段的省略/失败交给调用方（nil 时静默）。
+func (c *Client) reportExtensionError(err error) {
+	if err == nil || c.OnExtensionError == nil {
+		return
+	}
+	c.OnExtensionError(err)
 }
 
 // RedactCredential 是 catalog test 与真实 runner 共用的秘密文本清洗。
@@ -74,7 +108,22 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 		req.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
 
-	profile := c.requestProfile(req.Model)
+	adapter, err := c.adapter()
+	if err != nil {
+		return nil, err
+	}
+	// provider 专属顶层字段在**这条调用**里 prepared 一次：重试重发的是同一个
+	// 请求体（官方也是"一次 preparation，多次 HTTP 尝试"）。
+	prepared, omitted, err := PrepareRequestExtensions(ctx, adapter.API(), &req)
+	if err != nil {
+		return nil, err
+	}
+	for field, reason := range omitted {
+		c.reportExtensionError(fmt.Errorf("llm: 省略 provider 扩展字段 %q: %w", field, reason))
+	}
+	accepted := false
+
+	profile := c.requestProfile(req.Model, adapter)
 	attempted := map[wireProfile]bool{profile: true}
 	var adjustments []string
 
@@ -94,6 +143,10 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 		body, err := marshalWireRequest(req, profile)
 		if err != nil {
 			return nil, fmt.Errorf("序列化请求失败: %w", err)
+		}
+		body, err = marshalWireRequestWithExtensions(body, prepared)
+		if err != nil {
+			return nil, err
 		}
 		state.sent++
 		resp, err := c.post(ctx, body)
@@ -117,6 +170,12 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 			// 记下被这个端点真正接受过的形状：同一端点的后续请求（包括别的
 			// Client 实例）不必再吃一次 400。
 			rememberCapability(c.BaseURL, req.Model, profile)
+			// 2xx 才算 provider 扩展字段"被接收"：官方 accept 只在这一刻跑一次，
+			// 4xx/5xx/连接失败都不跑（否则 contributor 会以为状态已经送达）。
+			if !accepted {
+				accepted = true
+				c.reportExtensionError(RunExtensionAccept(prepared))
+			}
 			snap, err := consumeStream(resp, countingOnEvent(onEvent, &emitted))
 			if err == nil {
 				return snap, nil
@@ -145,7 +204,7 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 		_ = resp.Body.Close()
 
 		if next, change, ok := negotiateWire(profile, sentFields(req, profile), resp.StatusCode, string(raw)); ok &&
-			profileTries < maxWireAttempts && !attempted[next] {
+			profileTries < maxWireAttempts && !attempted[next] && wireChangeAllowed(adapter, next) {
 			profile = next
 			attempted[next] = true
 			profileTries++

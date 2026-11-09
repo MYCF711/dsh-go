@@ -72,6 +72,13 @@ func (r *modelOverrideLoopRunner) Run(ctx context.Context, sessionID, turnID, te
 		policy:       policy,
 		maxSteps:     r.base.maxSteps,
 		toolsMode:    r.base.toolsMode,
+		// 宿主旋钮整块拷贝：漏了它，modelOverride 路径上的每一轮都会静默退回
+		// 子进程默认值（自动压缩 40000 / 外置 4000 / 容量 0），而界面上毫无异常。
+		runOpts: r.base.runOpts,
+		// 沙盒档位是"每轮透传给子进程"的字段：漏了它，read-only/workspace-write
+		// 在 modelOverride 生产路径上会静默退回子进程默认（T17 §4 的 blocker）。
+		sandboxPresets: r.base.sandboxPresets,
+		sandboxStore:   r.base.sandboxStore,
 	}
 	provider, routed, err := resolveServeProvider(r.base.home, model)
 	if err != nil {
@@ -110,7 +117,8 @@ func (r *modelOverrideLoopRunner) RunContent(ctx context.Context, sessionID, tur
 	}
 	next := &loopRunner{journals: r.base.journals, broker: r.base.broker, jobActions: r.base.jobActions,
 		model: model, reasoning: reasoning, reasoningSet: true, effortLevel: effortLevel, recordEffort: r.recordEffort,
-		pub: r.base.pub, home: r.base.home, policy: policy, maxSteps: r.base.maxSteps, toolsMode: r.base.toolsMode}
+		pub: r.base.pub, home: r.base.home, policy: policy, maxSteps: r.base.maxSteps, toolsMode: r.base.toolsMode,
+		runOpts: r.base.runOpts, sandboxPresets: r.base.sandboxPresets, sandboxStore: r.base.sandboxStore}
 	provider, routed, err := resolveServeProvider(r.base.home, model)
 	if err != nil {
 		r.base.emitTurn(sessionID, turnID, err)
@@ -141,12 +149,12 @@ func providerLoopEnvironment(provider llm.ModelProviderConfig) []string {
 	managed := make([]string, 0, len(env)+2)
 	for _, entry := range env {
 		name, _, ok := strings.Cut(entry, "=")
-		if ok && (strings.EqualFold(name, "DSHD_LLM_BASE") || strings.EqualFold(name, "DSHD_LLM_KEY")) {
+		if ok && (strings.EqualFold(name, "DSHD_LLM_BASE") || strings.EqualFold(name, "DSHD_LLM_KEY") || strings.EqualFold(name, "DSHD_LLM_API")) {
 			continue
 		}
 		managed = append(managed, entry)
 	}
-	return append(managed, "DSHD_LLM_BASE="+provider.BaseURL, "DSHD_LLM_KEY="+provider.Credential())
+	return append(managed, "DSHD_LLM_BASE="+provider.BaseURL, "DSHD_LLM_KEY="+provider.Credential(), "DSHD_LLM_API="+provider.API)
 }
 
 // runProviderLoop 与 loopRunner.Run 使用同一组 follow/journal/approval/jobs

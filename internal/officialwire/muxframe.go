@@ -128,6 +128,19 @@ func extraKey(raw map[string]json.RawMessage, allowed ...string) (bool, string) 
 	return false, ""
 }
 
+// emptyObjectArgs 报告 args 是不是**零键** JSON 对象。
+//
+// 这是官方 `$events` 的 args 契约（lib/index.js:1024-1026：payload 恰好一个键
+// `args`、且 `Reflect.ownKeys(payload.args).length === 0`）。payloadArgs 已经保证
+// "是对象"，这里只回答"空不空"——两个判据分开写，错误消息才能指出是哪一条不满足。
+func emptyObjectArgs(raw json.RawMessage) bool {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return false
+	}
+	return len(object) == 0
+}
+
 // hostFrame 是宿主 → 客户端的三帧之一。
 //
 // Value 用 json.RawMessage 而不是 any：`value` 允许缺省（表示 undefined，

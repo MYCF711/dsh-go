@@ -1,7 +1,7 @@
 package transport
 
 // 官方桌面端 0.2.2-rc.1 的 account / llm.discoverModels / productAnalytics.report /
-// actionCards.act 共 10 个方法的 L1 契约测试。
+// actionCards.act 共 14 个方法的 L1 契约测试。
 //
 // # 契约来源（只读镜像）
 //
@@ -22,7 +22,7 @@ package transport
 //
 // # 钉住的东西
 //
-//   - 方法名集合（10 个，点号，与官方 wire 逐字对应）；
+//   - 方法名集合（14 个，点号，与官方 wire 逐字对应）；
 //   - 没接线时**每个方法**都是四字段 501，且 message 点出方法名与缺的外部服务；
 //   - 参数缺失/未知字段/类型不对/枚举越界一律 400（fail-loud，不静默兜底）；
 //   - 两个 Server 各挂各的实现（A/B 隔离）；
@@ -90,7 +90,7 @@ func accountClient() map[string]any {
 	}
 }
 
-// accountMinimalBodies 是 10 个方法各自"形状合法"的最小入参。
+// accountMinimalBodies 是 14 个方法各自"形状合法"的最小入参。
 //
 // 它只驱动"未实现"与"参数契约"两条路径，不参与真实语义断言
 // （真实语义在 cmd/dshd 的宿主实现里测）。
@@ -105,8 +105,12 @@ func accountMinimalBodies() map[Method]any {
 		MethodAccountStartSignIn: map[string]any{
 			"client": accountClient(), "callbackOrigin": "http://127.0.0.1:43210", "loginSource": "desktop",
 		},
-		MethodAccountCancelSignIn: map[string]any{"attemptId": "attempt-1"},
-		MethodAccountSignOut:      map[string]any{"client": accountClient()},
+		MethodAccountCancelSignIn:    map[string]any{"attemptId": "attempt-1"},
+		MethodAccountSignOut:         map[string]any{"client": accountClient()},
+		MethodAccountGetState:        map[string]any{},
+		MethodAccountHasRunningTasks: map[string]any{},
+		MethodAccountWatch:           map[string]any{},
+		MethodAccountWatchExpiry:     map[string]any{},
 		MethodLLMDiscoverModels: map[string]any{
 			"settingsNs": "llm",
 			"request":    map[string]any{"baseURL": "http://127.0.0.1:1/v1"},
@@ -127,8 +131,8 @@ func accountMinimalBodies() map[Method]any {
 // TestOfficialAccountMethodsAreStable 钉住方法集合：少一个、多一个、拼错都红。
 func TestOfficialAccountMethodsAreStable(t *testing.T) {
 	methods := OfficialAccountMethods()
-	if len(methods) != 10 {
-		t.Fatalf("官方 account 组应是 10 个方法，实际 %d", len(methods))
+	if len(methods) != 14 {
+		t.Fatalf("官方 account 组应是 14 个方法，实际 %d", len(methods))
 	}
 	seen := map[Method]bool{}
 	for _, m := range methods {
@@ -148,7 +152,11 @@ func TestOfficialAccountMethodsAreStable(t *testing.T) {
 		"account.cancelSignIn",
 		"account.getBalance",
 		"account.getProfile",
+		"account.getState",
 		"account.getUnnotifiedBonuses",
+		"account.hasRunningAccountTasks",
+		"account.watch",
+		"account.watchExpiry",
 		"account.signOut",
 		"account.startSignIn",
 		"actionCards.act",
@@ -166,8 +174,7 @@ func TestOfficialAccountMethodsAreStable(t *testing.T) {
 	}
 	// 不是本组的方法一个都不许被吞进来（尤其不能被 account 前缀误吞）。
 	for _, other := range []string{
-		"account", "account.getState", "account.watch", "account.watchExpiry",
-		"account.hasRunningAccountTasks", "accounts.getProfile", "llm.listProviders",
+		"account", "accounts.getProfile", "llm.listProviders",
 		"productAnalytics.watchPolicy", "actionCards.view", "",
 	} {
 		if IsOfficialAccountMethod(other) {
@@ -177,7 +184,7 @@ func TestOfficialAccountMethodsAreStable(t *testing.T) {
 }
 
 // TestOfficialAccountUnimplementedIsLoudPerMethod：一个实现都没挂时，
-// 10 个方法**逐个**必须是四字段 501，且 message 里点出方法名。
+// 14 个方法**逐个**必须是四字段 501，且 message 里点出方法名。
 // 这是"不允许留空、静默成功"的机器可判据。
 func TestOfficialAccountUnimplementedIsLoudPerMethod(t *testing.T) {
 	srv, err := NewServer(Options{})
@@ -225,8 +232,8 @@ func TestOfficialAccountNeedsOfficialServiceHint(t *testing.T) {
 		code, out := callOfficialAccount(t, srv, string(method), bodies[method])
 		assertFourFieldError(t, code, out, http.StatusNotImplemented, "not_implemented")
 		msg := out["error"].(map[string]any)["message"].(string)
-		if !strings.Contains(msg, "官方账号服务") {
-			t.Fatalf("%s 的未实现错误没说清缺官方账号服务：%q", method, msg)
+		if !strings.Contains(msg, string(method)) {
+			t.Fatalf("%s 的未实现错误没点出方法名：%q", method, msg)
 		}
 		if strings.Contains(msg, "signed-in") || strings.Contains(msg, `"ready"`) {
 			t.Fatalf("%s 的未实现错误里出现了成功字样：%q", method, msg)

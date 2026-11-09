@@ -36,7 +36,7 @@ func cmdSchedule(args []string) error {
 	// 定时任务是无人值守的：默认 allow，否则每个任务都会死在"没人点同意"上。
 	// 这是**有意放宽**，所以每次真跑都要把它打在屏幕上（见下面 run 分支）。
 	policy := fs.String("policy", "allow", "schedule run 的审批策略：ask/allow/deny/auto")
-	maxSteps := fs.Int("max-steps", 12, "schedule run 每轮最多几步")
+	maxSteps := fs.Int("max-steps", defaultTurnMaxSteps, "schedule run 每轮最多几步")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}

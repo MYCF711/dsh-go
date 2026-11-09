@@ -1,30 +1,41 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
-	"sort"
+	"strings"
 	"sync"
 
+	"dshgo/internal/goal"
 	"dshgo/internal/transport"
 )
 
-const goalStoreVersion = 1
+// 本文件是 **HS-GOAL-TRUTH** 的宿主侧适配器：goal 域的唯一实现（文档形状、
+// 状态机、CAS、迁移、跨进程互斥）在 `internal/goal`；这里只负责把它接到
+// serve 的内存投影、`goal/change` journal 与 `transport` 的哨兵错误上。
+//
+// 修掉的缺陷：模型的 `create_goal` 过去写 `state/goals/<session>.json`，
+// 而本 store（驱动与 `goals.*` 的唯一真值）读 `state/session-goal.json`，
+// 于是**模型建的目标永远不会自动续轮**。现在两条写入口落同一份文档：
+// 工具侧（serve 子进程）写盘、宿主侧每次取锁都从盘上刷新，谁写的都看得见。
 
-// goalRecord 把 snapshot 与 channel 持有的 roundsStarted 分开持久化。
-// nil roundsStarted 是旧扁平文件迁移后的“未知”，不是伪造的 0。
-type goalRecord struct {
-	Goal          *transport.GoalSnapshot `json:"goal"`
-	RoundsStarted *int                    `json:"roundsStarted,omitempty"`
-}
+// 类型别名：`serve_agent_api.go` 的 `agentGoalTransact` 直接读写
+// `store.m` / `goalRecord` / `goalDocument`，那两处不在本任务写作用域。
+// 别名保证它们与 goal 域类型是**同一份定义**，不是第二份拷贝。
+type (
+	goalRecord   = goal.Record
+	goalDocument = goal.Document
+)
 
-type goalDocument struct {
-	Version int                   `json:"version"`
-	Goals   map[string]goalRecord `json:"goals"`
-}
+const goalStoreVersion = goal.Version
+
+// goalRoundsStarted 把"未知轮次"（nil）读成 0：本宿主的 legacy setGoal 从 0 起，
+// 而 nil 只表示"旧文件里没这个字段"，不是"永远差一轮"。
+func goalRoundsStarted(record goalRecord) int { return goal.Rounds(record) }
 
 // goalChangeJournal 是唯一由真实状态迁移调用的 goal/change 写入口。
 type goalChangeJournal struct {
@@ -49,19 +60,52 @@ func (j *goalChangeJournal) append(sessionID, operation string, record goalRecor
 	return nil
 }
 
+// goalStoreMutex 是 goal store 的进程内锁 **加** 跨进程文件锁。
+//
+// 为什么把跨进程锁藏进 Lock()：`serve_agent_api.go` 的 `agentGoalTransact`
+// 直接 `store.mu.Lock()`，那个文件不在本任务写作用域。把"取锁 = 串行化 +
+// 从盘上刷新真值"做成锁本身的语义，那处不用改一行也是对的。
+type goalStoreMutex struct {
+	mu     sync.Mutex
+	store  *goalOverrideStore
+	unlock func() // 跨进程锁的释放函数（取锁成功时非 nil）
+}
+
+func (m *goalStoreMutex) Lock() {
+	m.mu.Lock()
+	if m.store != nil {
+		m.store.acquireFileLockLocked()
+	}
+}
+
+func (m *goalStoreMutex) Unlock() {
+	if m.unlock != nil {
+		m.unlock()
+		m.unlock = nil
+	}
+	m.mu.Unlock()
+}
+
 // goalOverrideStore 保留旧类型名与 Get/Set 调用面，但文件与内存已是真实 snapshot。
 // 所有迁移串行；state 与 journal 任一提交失败都不会返回成功 ACK。
 type goalOverrideStore struct {
-	mu      sync.Mutex
+	mu      goalStoreMutex
 	path    string
 	m       map[string]goalRecord
 	loadErr error
 	journal *goalChangeJournal
 	newID   func() (string, error)
+	// loaded 区分"启动首次读盘"与"运行中观察到的外部写入"：
+	// 迁移/启动不是一次 UI 变更，不能伪造 goal/change 帧（既有测试钉住这点）。
+	loaded bool
+	// raw 是上一次读到的**原始字节**：内容没变就不重解、不补帧。
+	// 这不只是省一次解析——它保证"同一个文档被重写成同样内容"（幂等写）
+	// 不会被当成一次迁移。
+	raw []byte
 }
 
 func newGoalOverrideStore(home string) *goalOverrideStore {
-	return &goalOverrideStore{
+	store := &goalOverrideStore{
 		path: filepath.Join(home, "state", "session-goal.json"),
 		m:    map[string]goalRecord{},
 		newID: func() (string, error) {
@@ -72,109 +116,132 @@ func newGoalOverrideStore(home string) *goalOverrideStore {
 			return "goal-" + id, nil
 		},
 	}
+	store.mu.store = store
+	return store
 }
 
+// Load 读一次 goal 文档（含旧格式迁移）。
+//
+// 缺失 = 空文档；损坏 = 明确错误（之后每次迁移都会复报，绝不"读不出来就当空"
+// 把用户已有目标静默清掉）。
 func (s *goalOverrideStore) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	raw, err := os.ReadFile(s.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			s.loadErr = nil
-			return nil
-		}
-		s.loadErr = fmt.Errorf("读会话 goal store %s: %w", s.path, err)
-		return s.loadErr
-	}
-
-	// 旧格式是 map[sessionID]objective。迁移在 Load 内同步落盘，保证真实
-	// goal id/revision 跨 restart 稳定；迁移不是一次 UI change，不发事件。
-	var legacy map[string]string
-	if err := json.Unmarshal(raw, &legacy); err == nil {
-		if legacy == nil {
-			s.loadErr = fmt.Errorf("旧 goal store %s 顶层是 null，不是 map", s.path)
-			return s.loadErr
-		}
-		next := make(map[string]goalRecord, len(legacy))
-		sessionIDs := make([]string, 0, len(legacy))
-		for sessionID := range legacy {
-			sessionIDs = append(sessionIDs, sessionID)
-		}
-		sort.Strings(sessionIDs) // 迁移 id 分配可重放，不受 Go map 遍历随机性影响。
-		for _, sessionID := range sessionIDs {
-			objective := legacy[sessionID]
-			if sessionID == "" || objective == "" {
-				s.loadErr = fmt.Errorf("旧 goal store %s 含空 session id/objective", s.path)
-				return s.loadErr
-			}
-			id, err := s.newID()
-			if err != nil {
-				s.loadErr = fmt.Errorf("迁移旧 goal store 生成 id: %w", err)
-				return s.loadErr
-			}
-			next[sessionID] = goalRecord{Goal: &transport.GoalSnapshot{
-				ID: id, Revision: 1, Objective: objective, Phase: "active", MaxGoalRounds: 0,
-			}}
-		}
-		if err := writeGoalDocument(s.path, goalDocument{Version: goalStoreVersion, Goals: next}); err != nil {
-			s.loadErr = fmt.Errorf("迁移旧 goal store %s 落盘失败: %w", s.path, err)
-			return s.loadErr
-		}
-		s.m = next
-		s.loadErr = nil
-		return nil
-	}
-
-	var doc goalDocument
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		s.loadErr = fmt.Errorf("解析 goal store %s: %w", s.path, err)
-		return s.loadErr
-	}
-	if doc.Version != goalStoreVersion || doc.Goals == nil {
-		s.loadErr = fmt.Errorf("goal store %s version/goals 非法：version=%d", s.path, doc.Version)
-		return s.loadErr
-	}
-	for sessionID, record := range doc.Goals {
-		if err := validateGoalRecord(sessionID, record); err != nil {
-			s.loadErr = fmt.Errorf("goal store %s: %w", s.path, err)
-			return s.loadErr
-		}
-	}
-	s.m = cloneGoalMap(doc.Goals)
-	s.loadErr = nil
-	return nil
+	return s.loadErr
 }
 
-func validateGoalRecord(sessionID string, record goalRecord) error {
-	if sessionID == "" || record.Goal == nil {
-		return fmt.Errorf("session %q 缺 goal snapshot", sessionID)
+// acquireFileLockLocked 取跨进程锁并把内存投影刷新到磁盘真值。
+//
+// 调用方必须已持有 s.mu。取锁失败不返回错误（Lock 的签名是 sync.Mutex 的形状）：
+// 错误记进 loadErr，之后每个操作都会以 ErrStatePersistence 响亮失败——
+// 拿不到锁就写盘等于放弃互斥，比失败更糟。
+func (s *goalOverrideStore) acquireFileLockLocked() {
+	unlock, err := goal.Lock(s.path)
+	if err != nil {
+		s.loadErr = err
+		return
 	}
-	goal := record.Goal
-	if goal.ID == "" || goal.Revision <= 0 || goal.Objective == "" || goal.MaxGoalRounds < 0 {
-		return fmt.Errorf("session %q goal 标识/revision/objective/maxGoalRounds 非法", sessionID)
+	s.mu.unlock = unlock
+	s.refreshLocked()
+}
+
+// refreshLocked 从盘上重新加载文档，并给"不是本进程写的"迁移补 goal/change 帧。
+//
+// 为什么每次取锁都重读：serve 的模型工具跑在**子进程**里，子进程直接写盘，
+// 父进程的内存 map 不会自己变。不做这一步，父进程的驱动与 `goals.*` 看到的
+// 就是一份过期文档——正是 HS-GOAL-TRUTH 要关掉的双真值。
+func (s *goalOverrideStore) refreshLocked() {
+	if s.path == "" {
+		return
 	}
-	switch goal.Phase {
-	case "active", "paused", "complete":
-		if goal.BlockedReason != nil {
-			return fmt.Errorf("session %q 非 blocked phase 不得带 blockedReason", sessionID)
+	if s.newID == nil {
+		s.newID = func() (string, error) {
+			id, err := serveID()
+			if err != nil {
+				return "", err
+			}
+			return "goal-" + id, nil
 		}
-	case "blocked":
-		if goal.BlockedReason == nil || goal.BlockedReason.Code == "" || goal.BlockedReason.Message == "" {
-			return fmt.Errorf("session %q blocked goal 缺真实 blockedReason", sessionID)
+	}
+	raw, readErr := os.ReadFile(s.path)
+	if readErr == nil && s.loaded && bytes.Equal(raw, s.raw) {
+		// 内容没变：内存投影与磁盘真值一致，不重解、不补帧。
+		// 上一次读失败过（比如路径被临时改成一个目录）时这里也要把 loadErr
+		// 清掉——否则一次瞬时故障会永久毒化这个 store。
+		s.loadErr = nil
+		return
+	}
+	doc, flatMigrated, err := goal.LoadOrMigrate(s.path, s.newID)
+	if err != nil {
+		s.loadErr = err
+		return
+	}
+	written := false
+	if flatMigrated {
+		// 旧扁平 map 格式：分配到的 id 必须落盘，否则重启后 goal id 会变
+		// （revision/CAS 与 journal 全都对不上）。
+		if err := goal.Save(s.path, doc); err != nil {
+			s.loadErr = err
+			return
 		}
-	default:
-		return fmt.Errorf("session %q goal phase=%q 非法", sessionID, goal.Phase)
+		written = true
 	}
-	if record.RoundsStarted != nil && *record.RoundsStarted < 0 {
-		return fmt.Errorf("session %q roundsStarted 为负数", sessionID)
+	// 旧 `state/goals/*.json`：只导入一次，随后归档到 `state/goals.migrated/`。
+	migrated, imported, err := goal.MigrateLegacy(filepath.Dir(s.path), doc, s.newID)
+	if err != nil {
+		s.loadErr = err
+		return
 	}
-	if goal.Budget != nil {
-		if goal.Budget.TokensUsed < 0 || goal.Budget.TimeUsedSeconds < 0 ||
-			(goal.Budget.TokenBudget != nil && *goal.Budget.TokenBudget < 0) {
-			return fmt.Errorf("session %q budget 含负数", sessionID)
+	if imported > 0 {
+		if err := goal.Save(s.path, migrated); err != nil {
+			s.loadErr = err
+			return
+		}
+		written = true
+		doc = migrated
+	}
+	if s.loaded {
+		s.observeLocked(doc.Goals)
+	}
+	s.m = doc.Goals
+	if written {
+		// 刚迁移写过盘：缓存作废（下次从盘上重读的才是真值），
+		// 不能把迁移前的旧字节当成"当前内容"。
+		s.raw = nil
+	} else {
+		s.raw = raw
+	}
+	s.loadErr = nil
+	s.loaded = true
+}
+
+// observeLocked 给"外部写入（serve 子进程）"的迁移补一帧 goal/change。
+//
+// 补帧是**派生投影**（R5）：状态已经在盘上，帧只是让 UI 与
+// `agentGoalTimes`（扫描 goal/change 还原 createdAt/updatedAt）看到同一段历史。
+// 补帧失败只打日志——state 已经真实提交，不能因为"少一帧"把成功改写成失败。
+func (s *goalOverrideStore) observeLocked(next map[string]goalRecord) {
+	if s.journal == nil || s.journal.journals == nil {
+		return
+	}
+	for sessionID, record := range next {
+		previous, seen := s.m[sessionID]
+		if seen && goal.Equal(previous, record) {
+			continue
+		}
+		if err := s.journal.append(sessionID, goal.DeriveOperation(previous, seen, record), record); err != nil {
+			fmt.Fprintf(os.Stderr, "goal 外部迁移补记 goal/change 失败（session=%s）：%v\n", sessionID, err)
 		}
 	}
-	return nil
+	for sessionID, previous := range s.m {
+		if _, ok := next[sessionID]; ok {
+			continue
+		}
+		cleared := goalRecord{RoundsStarted: cloneInt(previous.RoundsStarted)}
+		if err := s.journal.append(sessionID, "clear", cleared); err != nil {
+			fmt.Fprintf(os.Stderr, "goal 外部清除补记 goal/change 失败（session=%s）：%v\n", sessionID, err)
+		}
+	}
 }
 
 // Get 保留 session.load 的扁平投影；goal.get 使用下面的 Snapshot，绝不反造字段。
@@ -194,7 +261,7 @@ func (s *goalOverrideStore) Snapshot(sessionID string) (transport.GoalResult, er
 		return transport.GoalResult{}, fmt.Errorf("%w: %v", transport.ErrStatePersistence, s.loadErr)
 	}
 	record, exists := s.m[sessionID]
-	if !exists {
+	if !exists || record.Goal == nil {
 		return transport.GoalResult{Goal: nil}, nil
 	}
 	return transport.GoalResult{Goal: cloneGoalSnapshot(record.Goal), RoundsStarted: cloneInt(record.RoundsStarted)}, nil
@@ -213,7 +280,37 @@ func (s *goalOverrideStore) Resume(sessionID string) error {
 	return s.transition(sessionID, "resume", "")
 }
 
+// Complete 把目标标成 complete（官方 `complete` 只从 active/paused/blocked 来）。
+//
+// 完成是**终态**：goal-round 驱动看到 phase 不是 active 就停，不再排轮。
+func (s *goalOverrideStore) Complete(sessionID string) error {
+	return s.transition(sessionID, "complete", "")
+}
+
+// Clear 清掉目标，保留 tombstone 语义：`operation=clear` 的那一帧就是墓碑，
+// 里面带着 cleared 的 {id, revision}，读方靠它知道"这个目标被谁清掉了"。
+func (s *goalOverrideStore) Clear(sessionID string) error {
+	return s.transition(sessionID, "clear", "")
+}
+
+// Block 把 active 目标标成 blocked 并写下真实的 blockedReason。
+//
+// 官方 `block` 只从 active 来（paused/complete 再 block 是状态迁移错误），
+// 且 reason 的 code 与 message 都**必须非空**——机器读 code、人读 message，
+// 少一个就等于让读方去猜。
+func (s *goalOverrideStore) Block(sessionID, code, message string) error {
+	reason := transport.GoalBlockedReason{Code: code, Message: message}
+	if strings.TrimSpace(reason.Code) == "" || strings.TrimSpace(reason.Message) == "" {
+		return fmt.Errorf("%w: blocked 需要非空 code 与 message", transport.ErrGoalTransition)
+	}
+	return s.transitionReason(sessionID, "block", "", &reason)
+}
+
 func (s *goalOverrideStore) transition(sessionID, action, objective string) error {
+	return s.transitionReason(sessionID, action, objective, nil)
+}
+
+func (s *goalOverrideStore) transitionReason(sessionID, action, objective string, reason *transport.GoalBlockedReason) error {
 	if sessionID == "" {
 		return fmt.Errorf("%w: session id 为空", transport.ErrGoalTransition)
 	}
@@ -222,78 +319,44 @@ func (s *goalOverrideStore) transition(sessionID, action, objective string) erro
 	if s.loadErr != nil {
 		return fmt.Errorf("%w: %v", transport.ErrStatePersistence, s.loadErr)
 	}
-	old := cloneGoalMap(s.m)
-	current, exists := old[sessionID]
+	current, exists := s.m[sessionID]
 	if action == "set" && objective == "" && !exists {
 		return nil // 旧 setGoal(clear) 幂等：无迁移就不写 state、不发 change。
 	}
 	if s.journal == nil {
 		return fmt.Errorf("%w: goal/change journal 未接线", transport.ErrStatePersistence)
 	}
-	nextRecord := cloneGoalRecord(current)
-	operation := action
 
+	intent := goal.Intent{Kind: action}
 	switch action {
 	case "set":
-		if objective == "" {
-			operation = "clear"
-			nextRecord = goalRecord{Goal: nil, RoundsStarted: cloneInt(current.RoundsStarted)}
-		} else if !exists {
-			operation = "create"
-			id, err := s.newID()
-			if err != nil {
-				return fmt.Errorf("%w: 生成 goal id: %v", transport.ErrStatePersistence, err)
-			}
-			zero := 0
-			nextRecord = goalRecord{Goal: &transport.GoalSnapshot{
-				ID: id, Revision: 1, Objective: objective, Phase: "active", MaxGoalRounds: 0,
-			}, RoundsStarted: &zero}
-		} else {
-			operation = "edit"
-			if current.Goal.Revision == math.MaxInt64 {
-				return fmt.Errorf("%w: goal revision 已溢出", transport.ErrGoalTransition)
-			}
-			nextRecord.Goal = cloneGoalSnapshot(current.Goal)
-			nextRecord.Goal.Revision++
-			nextRecord.Goal.Objective = objective
+		// 旧 `session.setGoal` 的语义：没有目标就建，有就改，空串就清。
+		switch {
+		case objective == "":
+			intent.Kind = "clear"
+		case !exists || current.Goal == nil:
+			intent.Kind = "create"
+			intent.Objective = &objective
+		default:
+			intent.Kind = "edit"
+			intent.Objective = &objective
 		}
-	case "pause":
-		if !exists || current.Goal.Phase != "active" {
-			return fmt.Errorf("%w: 只有 active goal 才能 pause", transport.ErrGoalTransition)
-		}
-		if current.Goal.Revision == math.MaxInt64 {
-			return fmt.Errorf("%w: goal revision 已溢出", transport.ErrGoalTransition)
-		}
-		nextRecord.Goal = cloneGoalSnapshot(current.Goal)
-		nextRecord.Goal.Revision++
-		nextRecord.Goal.Phase = "paused"
-	case "resume":
-		if !exists || current.Goal.Phase != "paused" {
-			return fmt.Errorf("%w: 只有 paused goal 才能 resume", transport.ErrGoalTransition)
-		}
-		if current.Goal.Revision == math.MaxInt64 {
-			return fmt.Errorf("%w: goal revision 已溢出", transport.ErrGoalTransition)
-		}
-		nextRecord.Goal = cloneGoalSnapshot(current.Goal)
-		nextRecord.Goal.Revision++
-		nextRecord.Goal.Phase = "active"
-	default:
-		return fmt.Errorf("%w: 未知 operation %q", transport.ErrGoalTransition, action)
+	case "block":
+		intent.Reason = reason
 	}
 
-	next := cloneGoalMap(old)
-	if operation == "clear" {
-		delete(next, sessionID)
-	} else {
-		next[sessionID] = nextRecord
+	old := s.m
+	next, record, err := goal.Apply(s.m, sessionID, intent, s.newID)
+	if err != nil {
+		return mapGoalError(err)
 	}
-	if err := writeGoalDocument(s.path, goalDocument{Version: goalStoreVersion, Goals: next}); err != nil {
-		return fmt.Errorf("%w: 写 goal store %s: %v", transport.ErrStatePersistence, s.path, err)
+	if err := s.persistLocked(goalDocument{Version: goalStoreVersion, Goals: next}); err != nil {
+		return err
 	}
 	s.m = next
-	if err := s.journal.append(sessionID, operation, nextRecord); err != nil {
+	if err := s.journal.append(sessionID, intent.Kind, record); err != nil {
 		// state 已写、journal 未提交：恢复到迁移前，不能留下无事件的“成功状态”。
-		if rollbackErr := writeGoalDocument(s.path, goalDocument{Version: goalStoreVersion, Goals: old}); rollbackErr != nil {
+		if rollbackErr := s.persistLocked(goalDocument{Version: goalStoreVersion, Goals: old}); rollbackErr != nil {
 			s.loadErr = fmt.Errorf("journal 提交失败 %v；goal state 回滚也失败 %v", err, rollbackErr)
 			return fmt.Errorf("%w: %v", transport.ErrStatePersistence, s.loadErr)
 		}
@@ -303,60 +366,48 @@ func (s *goalOverrideStore) transition(sessionID, action, objective string) erro
 	return nil
 }
 
+// mapGoalError 把 goal 域的错误分类翻译成 transport 的哨兵错误。
+func mapGoalError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, goal.ErrTransition):
+		return fmt.Errorf("%w: %v", transport.ErrGoalTransition, err)
+	case errors.Is(err, goal.ErrPersistence):
+		return fmt.Errorf("%w: %v", transport.ErrStatePersistence, err)
+	default:
+		return err
+	}
+}
+
 func writeGoalDocument(path string, doc goalDocument) error {
-	if doc.Goals == nil {
-		doc.Goals = map[string]goalRecord{}
-	}
-	raw, err := json.MarshalIndent(doc, "", "  ")
+	return goal.Save(path, doc)
+}
+
+// persistLocked 落盘并让字节缓存失效。调用方必须已持有 s.mu。
+//
+// 为什么要经过这里而不是直接 `goal.Save`：写完盘之后内存投影已经等于盘上
+// 真值，缓存的"上次字节"必须作废，否则下一次取锁会拿旧字节去比、把这次
+// 写入当成"外部变化"再补一帧。
+func (s *goalOverrideStore) persistLocked(doc goalDocument) error {
+	raw, err := goal.Encode(doc)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: 序列化 goal store: %v", transport.ErrStatePersistence, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+	if err := goal.Save(s.path, doc); err != nil {
+		return fmt.Errorf("%w: 写 goal store %s: %v", transport.ErrStatePersistence, s.path, err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// 刚写下去的字节就是"当前内容"：下次取锁直接走快速判等。
+	s.raw = raw
+	return nil
 }
 
-func cloneInt(value *int) *int {
-	if value == nil {
-		return nil
-	}
-	copy := *value
-	return &copy
+func cloneInt(value *int) *int { return goal.IntPtr(value) }
+
+func cloneGoalSnapshot(snapshot *transport.GoalSnapshot) *transport.GoalSnapshot {
+	return goal.CloneSnapshot(snapshot)
 }
 
-func cloneGoalSnapshot(goal *transport.GoalSnapshot) *transport.GoalSnapshot {
-	if goal == nil {
-		return nil
-	}
-	copy := *goal
-	if goal.BlockedReason != nil {
-		reason := *goal.BlockedReason
-		copy.BlockedReason = &reason
-	}
-	if goal.Budget != nil {
-		budget := *goal.Budget
-		if goal.Budget.TokenBudget != nil {
-			tokenBudget := *goal.Budget.TokenBudget
-			budget.TokenBudget = &tokenBudget
-		}
-		copy.Budget = &budget
-	}
-	return &copy
-}
+func cloneGoalRecord(record goalRecord) goalRecord { return goal.CloneRecord(record) }
 
-func cloneGoalRecord(record goalRecord) goalRecord {
-	return goalRecord{Goal: cloneGoalSnapshot(record.Goal), RoundsStarted: cloneInt(record.RoundsStarted)}
-}
-
-func cloneGoalMap(values map[string]goalRecord) map[string]goalRecord {
-	out := make(map[string]goalRecord, len(values))
-	for sessionID, record := range values {
-		out[sessionID] = cloneGoalRecord(record)
-	}
-	return out
-}
+func cloneGoalMap(values map[string]goalRecord) map[string]goalRecord { return goal.CloneMap(values) }

@@ -40,6 +40,13 @@ type officialSessionHost struct {
 	home string
 	// prompts 是真实轮次/队列服务；可为 nil（不带 serve 的入口）。
 	prompts *promptService
+	// settings 是可选的 W61 设置真值（默认模型）。由 serve.go 的装配点传入；
+	// nil 时 `session.initializeDefaultModel` 只能响亮失败并指向 WIRING（写默认
+	// 模型必须走 serve.go 那一份共享 store，另造一份会在内存里分叉）。
+	settings *serveSettingsStore
+	// selections 是 `session.selectModel` 的 provider/effort 元数据存储。
+	// model 本身仍在既有 `state/session-model.json`（Options.SetSessionModel）。
+	selections *modelSelectionStore
 }
 
 // DurableEvents 读该会话**全部** durable v4 事件与日志末端 seq。
@@ -191,18 +198,27 @@ type officialSessionSource struct {
 //
 // 只在 opt.Source 就是生产 `*sessionSource` 时替换；别的形态（测试假源、
 // 第三方宿主）一律原样返回，保持 501 闭合分派——不猜、不拿假的源替换真的。
-func withOfficialSessionOptions(home string, opt transport.Options, prompts *promptService) transport.Options {
+//
+// settings 是可选的第 4 个参数：只有 serve.go 的装配点能给出**那一份**共享
+// settings store（默认模型的唯一写入者）。不传时官方 session 面其余能力照常，
+// `session.initializeDefaultModel` 返回带 WIRING 位置的 501，不另造 store。
+func withOfficialSessionOptions(home string, opt transport.Options, prompts *promptService, settings ...*serveSettingsStore) transport.Options {
 	src, ok := opt.Source.(*sessionSource)
 	if !ok || src == nil {
 		return opt
 	}
+	host := &officialSessionHost{
+		src:        src,
+		home:       home,
+		prompts:    prompts,
+		selections: newModelSelectionStore(home),
+	}
+	if len(settings) > 0 && settings[0] != nil {
+		host.settings = settings[0]
+	}
 	opt.Source = &officialSessionSource{
-		sessionSource: src,
-		officialSessionHost: &officialSessionHost{
-			src:     src,
-			home:    home,
-			prompts: prompts,
-		},
+		sessionSource:       src,
+		officialSessionHost: host,
 	}
 	return opt
 }

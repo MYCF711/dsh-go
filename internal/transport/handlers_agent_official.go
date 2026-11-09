@@ -1,6 +1,6 @@
 package transport
 
-// 本文件是官方桌面端 0.2.2-rc.1「agent 侧」24 个 typert 方法的 L1 语义实现。
+// 本文件是官方桌面端 0.2.2-rc.1「agent 侧」25 个 typert 方法的 L1 语义实现。
 //
 // 对齐口径（见 docs/official-desktop-api-parity.md §2）：
 //   - **L1**：参数与结果**字段**按官方 zod 契约；wire 仍走本仓既有的
@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
 )
 
 // 官方方法名。字符串必须与官方 `@deepseek-ai/*` 的 `createTypertRemoteInfo`
@@ -45,6 +47,7 @@ const (
 	MethodUserQuestionsAnswer     Method = "userQuestions.answer"
 	MethodUserQuestionsAttachWait Method = "userQuestions.attachWait"
 
+	MethodAgentPresetsList   Method = "agentPresets.list"
 	MethodAgentPresetsRead   Method = "agentPresets.read"
 	MethodAgentPresetsSelect Method = "agentPresets.select"
 
@@ -61,7 +64,7 @@ const (
 	MethodToolResultsWatch                   Method = "toolResults.watch"
 )
 
-// OfficialAgentMethods 按命名空间分组返回本文件实现的 24 个方法（顺序固定）。
+// OfficialAgentMethods 按命名空间分组返回本文件实现的 25 个方法（顺序固定）。
 //
 // 它给快照/文档/门禁用：新增或删除一个方法必须显式改这里，不能让
 // "方法悄悄多了一个"从路由表里漏过去。
@@ -72,7 +75,7 @@ func OfficialAgentMethods() []Method {
 		MethodCommandsList, MethodCommandsExecute,
 		MethodSubagentsPrompt, MethodSubagentsInterruptByParent,
 		MethodUserQuestionsAnswer, MethodUserQuestionsAttachWait,
-		MethodAgentPresetsRead, MethodAgentPresetsSelect,
+		MethodAgentPresetsList, MethodAgentPresetsRead, MethodAgentPresetsSelect,
 		MethodSkillsList, MethodFileReferencesList, MethodFileUploadsUpload,
 		MethodMessageFeedbackList, MethodMessageFeedbackPut, MethodMessageFeedbackDelete,
 		MethodSessionFeedbackRecord, MethodSessionReferenceResolverCandidates,
@@ -80,10 +83,16 @@ func OfficialAgentMethods() []Method {
 	}
 }
 
-// IsOfficialAgentMethod 判断一个 /api 路径名是否属于本文件的 24 个方法。
+// IsOfficialAgentMethod 判断一个 /api 路径名是否属于官方 agent 分派面。
 //
-// 路由侧只需要这一次判断（**不要**在 server.go 里摊开 24 个 case：那样
+// 路由侧只需要这一次判断（**不要**在 server.go 里摊开全部 case：那样
 // 每加一个官方方法都要动一次早已冻结的路由表）。
+//
+// 本文件的方法仍是 25 个（HS-16A 后 agentPresets.list 已并入）；另外**借本分派面**接 GO.2 T04 收口的三条 session
+// 残余（session.control / session.initializeDefaultModel / session.modelCatalog）。
+// 原因只有一个：server.go 的 session switch 是 Lead 独占的路由表（见
+// tmp/GO2-TEAM/T04/WIRING.md），而这三个方法不能继续落 generic 501。
+// 它们的分派实现仍在 handlers_session_official.go，不在这里。
 func IsOfficialAgentMethod(name string) bool {
 	switch Method(name) {
 	case MethodGoalsGet, MethodGoalsCreate, MethodGoalsEdit, MethodGoalsPause,
@@ -91,11 +100,12 @@ func IsOfficialAgentMethod(name string) bool {
 		MethodCommandsList, MethodCommandsExecute,
 		MethodSubagentsPrompt, MethodSubagentsInterruptByParent,
 		MethodUserQuestionsAnswer, MethodUserQuestionsAttachWait,
-		MethodAgentPresetsRead, MethodAgentPresetsSelect,
+		MethodAgentPresetsList, MethodAgentPresetsRead, MethodAgentPresetsSelect,
 		MethodSkillsList, MethodFileReferencesList, MethodFileUploadsUpload,
 		MethodMessageFeedbackList, MethodMessageFeedbackPut, MethodMessageFeedbackDelete,
 		MethodSessionFeedbackRecord, MethodSessionReferenceResolverCandidates,
-		MethodToolResultsWatch:
+		MethodToolResultsWatch,
+		MethodSessionControl, MethodSessionInitializeDefaultModel, MethodSessionModelCatalog:
 		return true
 	}
 	return false
@@ -129,7 +139,17 @@ type OfficialAgentAPI struct {
 
 	UserQuestionsAnswer     func(sessionID, callID string, answer OfficialQuestionAnswer) (bool, error)
 	UserQuestionsAttachWait func(sessionID, callID string) (*OfficialQuestionWait, error)
+	// UserQuestionsClaimed 把"某个 attachWait 流正持有这个前台等待"告诉宿主。
+	//
+	// 官方 attach 的 claim 语义：客户端持有期间**不启动**宿主超时定时器；关流
+	// 只释放 claim、不结算问题（答案仍然可以投递）。本宿主的等待表没有后台定时
+	// 器，但 deadline 结算发生在 Arm() 里——所以流面必须让宿主知道"有人在看"，
+	// 否则轮询本身就会在 deadline 那一刻把等待结算掉，客户端再也 attach 不上。
+	//
+	// 宿主没实现时（nil）流面仍可用，只是持有期间不暂停 deadline 结算。
+	UserQuestionsClaimed func(sessionID, callID string, claimed bool)
 
+	AgentPresetsList  func() (OfficialAgentPresetRoster, error)
 	AgentPresetRead   func(presetID string) (OfficialAgentPresetDocument, error)
 	AgentPresetSelect func(sessionID, presetID string) (string, error)
 
@@ -844,12 +864,32 @@ type OfficialToolResultWatch struct {
 // 分发
 // ---------------------------------------------------------------------------
 
-// serveOfficialAgentAPI 处理本文件的 24 个方法。
+// serveOfficialAgentAPI 处理本文件的 25 个方法。
 //
 // 调用方（server.go 的 /api 路由）只需在既有 switch 之前判断
 // `IsOfficialAgentMethod(name)` 并调用它；认证、`POST` 校验、失败日志都已经
 // 在 handleAPI 里做过了。
 func (s *Server) serveOfficialAgentAPI(w http.ResponseWriter, r *http.Request, name string) {
+	// GO.2 T04：三条 session 残余借本分派面进入官方分派（server.go 路由表由
+	// Lead 独占，见 WIRING.md）。handler 全在 handlers_session_official.go。
+	switch Method(name) {
+	case MethodSessionControl:
+		s.handleSessionControl(w, r)
+		return
+	case MethodSessionInitializeDefaultModel:
+		s.handleSessionInitializeDefaultModel(w, r)
+		return
+	case MethodSessionModelCatalog:
+		s.handleSessionModelCatalog(w, r)
+		return
+	}
+	// `userQuestions.attachWait` 官方是 `mode:'stream'`：调用方按官方流面约定
+	// （Accept: application/x-ndjson）请求时走 NDJSON 长连接；否则保持既有
+	// unary L1 读数（本仓 58 方法面兼容）。见 serveOfficialQuestionAttachWaitStream。
+	if Method(name) == MethodUserQuestionsAttachWait && officialQuestionAttachWaitStreamRequested(r) {
+		s.serveOfficialQuestionAttachWaitStream(w, r)
+		return
+	}
 	// 流式方法（`toolResults.watch`）走 NDJSON 长连接：**先于** unary 路由。
 	// 官方它是 `mode:'stream'`（值会随结果淘汰而消失），一次性响应只能表达
 	// "这一刻可不可用"，表达不了"之后变了"。
@@ -909,6 +949,8 @@ func routeOfficialAgentMethod(api OfficialAgentAPI, method Method, p *officialPa
 		return officialUserQuestionsAnswer(api, p)
 	case MethodUserQuestionsAttachWait:
 		return officialUserQuestionsAttachWait(api, p)
+	case MethodAgentPresetsList:
+		return officialAgentPresetsList(api, p)
 	case MethodAgentPresetsRead:
 		return officialAgentPresetsRead(api, p)
 	case MethodAgentPresetsSelect:
@@ -1453,9 +1495,183 @@ func officialUserQuestionsAttachWait(api OfficialAgentAPI, p *officialParams) (a
 	return wait, nil
 }
 
+// officialQuestionAttachWaitStreamRequested 判断调用方是否要官方流面。
+//
+// 为什么需要显式标记：本仓 HTTP 是"一次请求一次响应"，`attachWait` 在既有
+// L1 面已经是 unary 读数（58 方法面兼容）。官方 typert 客户端在 L2（mux）上
+// 拿的是真流；HTTP 过渡面用一个明确的 header/查询开关表达"我要流"，而不是
+// 按 UA 猜。WIRING 里登记了把 attachWait 正式接进 mux 流面的位置。
+func officialQuestionAttachWaitStreamRequested(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.URL != nil && r.URL.Query().Get("stream") == "1" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/x-ndjson")
+}
+
+// serveOfficialQuestionAttachWaitStream 是 `userQuestions.attachWait` 的官方流面。
+//
+// 官方语义（dsh-user-questions/lib/index.js 的 TimedQuestionWait.attach）：
+//
+//	wait 还活着 → yield **一帧** {remainingMs}，然后持有 claim，直到 wait 结算
+//	              或调用方关流；关流只释放 claim，**不结算问题**（答案仍可投递）；
+//	wait 已经结束 → 一帧都不发，流直接结束。
+//
+// 本宿主把"持有 claim"落到 `UserQuestionsClaimed(sessionID, callID, true)` 上，
+// 让宿主的等待表在持有期间不走 deadline 结算；关流/结束一定 release。
+func (s *Server) serveOfficialQuestionAttachWaitStream(w http.ResponseWriter, r *http.Request) {
+	api, ok := s.officialAgentAPI()
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented",
+			"官方 agent API 未接线：宿主没有 AttachOfficialAgentAPI"))
+		return
+	}
+	params, err := decodeOfficialParams(r)
+	if err != nil {
+		writeOfficialError(w, err)
+		return
+	}
+	sessionID, err := params.sessionRef()
+	if err != nil {
+		writeOfficialError(w, err)
+		return
+	}
+	callID, err := params.str("callId")
+	if err != nil {
+		writeOfficialError(w, err)
+		return
+	}
+	if err := params.finish(); err != nil {
+		writeOfficialError(w, err)
+		return
+	}
+	if callID == "" {
+		writeOfficialError(w, officialBadRequest("callId 是空串"))
+		return
+	}
+	if api.UserQuestionsAttachWait == nil {
+		writeOfficialError(w, officialNotImplemented(
+			"userQuestions.attachWait 未接线：宿主没有定时等待通道"))
+		return
+	}
+	// 第一次读数在**写响应头之前**：未知 callId / 会话不存在仍然是普通四字段错误。
+	first, err := api.UserQuestionsAttachWait(sessionID, callID)
+	if err != nil {
+		writeOfficialError(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	writeFrame := func(wait *OfficialQuestionWait) bool {
+		raw, merr := json.Marshal(wait)
+		if merr != nil {
+			return false
+		}
+		if _, werr := w.Write(append(raw, '\n')); werr != nil {
+			return false
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return true
+	}
+	if first == nil {
+		// 官方：wait 已经结束 → 一帧都不发。流以正常结束收场（不是 4xx）。
+		return
+	}
+	claimed := api.UserQuestionsClaimed != nil
+	if claimed {
+		api.UserQuestionsClaimed(sessionID, callID, true)
+		defer api.UserQuestionsClaimed(sessionID, callID, false)
+	}
+	if !writeFrame(first) {
+		return
+	}
+	stall := time.NewTimer(officialQuestionClaimPollInterval)
+	defer stall.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			// 调用方关流：只释放 claim（defer），不结算、不投递任何东西。
+			return
+		case <-stall.C:
+		}
+		wait, err := api.UserQuestionsAttachWait(sessionID, callID)
+		if err != nil {
+			// 流已经开始，不能改状态码；按本仓官方流约定写一行四字段错误帧收场。
+			body := errorBodyFor(errorCodeForOfficialError(err), err.Error())
+			body["type"] = "error"
+			if raw, merr := json.Marshal(body); merr == nil {
+				_, _ = w.Write(append(raw, '\n'))
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			return
+		}
+		if wait == nil {
+			// 官方：wait 结束后不再发帧；流正常结束。
+			return
+		}
+		// 官方在 attach 里只 yield 一帧；之后是"持有 claim 等结算"。这里不再
+		// 重复发剩余时长，避免把一次前台等待变成客户端轮询源。
+		stall.Reset(officialQuestionClaimPollInterval)
+	}
+}
+
+// officialQuestionClaimPollInterval 是流面查询"等待是否已经结束"的采样间隔。
+//
+// 官方是通知驱动（wait.done）；本宿主只有 unary 探针，所以按 100ms 采样。
+// 它只决定**流结束的发现延迟**，不产生任何帧。
+const officialQuestionClaimPollInterval = 100 * time.Millisecond
+
+// errorCodeForOfficialError 把宿主错误翻成本仓四字段错误码（流内错误帧用）。
+func errorCodeForOfficialError(err error) string {
+	switch {
+	case errors.Is(err, ErrOfficialBadInput):
+		return "bad_request"
+	case errors.Is(err, ErrNoSuchSession):
+		return "no_such_session"
+	case errors.Is(err, ErrOfficialNotImplemented), errors.Is(err, ErrNotImplemented):
+		return "not_implemented"
+	default:
+		return "internal"
+	}
+}
+
 // ---------------------------------------------------------------------------
 // agentPresets.*
 // ---------------------------------------------------------------------------
+
+// officialAgentPresetsList 是官方 `agentPresets.list`（零参数）。
+//
+// 官方 zod：parameters: []，结果 `{presets:[{id, isDefault, name?, description?,
+// broken?}]}`（dsh-agent-preset-registry/lib/typert.host.js:41-55）。
+// 零参数是**硬形状**：strictCodec 的 additionalProperties=false，所以多给任何
+// 键都必须是 400，不能静默忽略。
+func officialAgentPresetsList(api OfficialAgentAPI, p *officialParams) (any, error) {
+	if err := p.finish(); err != nil {
+		return nil, err
+	}
+	if api.AgentPresetsList == nil {
+		return nil, officialNotImplemented("agentPresets.list 未接线：宿主没有 preset 名册")
+	}
+	roster, err := api.AgentPresetsList()
+	if err != nil {
+		return nil, err
+	}
+	if roster.Presets == nil {
+		// 官方结果里 presets 是必填数组：没有 preset 时回 []，不是 null。
+		roster.Presets = []OfficialAgentPreset{}
+	}
+	return roster, nil
+}
 
 func officialAgentPresetsRead(api OfficialAgentAPI, p *officialParams) (any, error) {
 	presetID, err := p.str("agentPreset")

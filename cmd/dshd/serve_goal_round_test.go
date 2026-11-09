@@ -160,6 +160,28 @@ func (f *goalRoundFixture) goalRunner() turnRunner {
 	}))
 }
 
+// mutateGoalRecord 在 store 锁内改一条记录并**落盘**。
+//
+// 单真值（HS-GOAL-TRUTH）之后，store 每次取锁都从盘上刷新：只改内存的夹具
+// 会被下一次刷新覆盖（那等于在测一份不存在的状态）。夹具必须像生产写入口
+// 一样同步写回文档。
+func (f *goalRoundFixture) mutateGoalRecord(t *testing.T, sessionID string, fn func(*goalRecord)) {
+	t.Helper()
+	f.store.mu.Lock()
+	defer f.store.mu.Unlock()
+	if f.store.loadErr != nil {
+		t.Fatalf("读 goal store: %v", f.store.loadErr)
+	}
+	record := f.store.m[sessionID]
+	fn(&record)
+	next := cloneGoalMap(f.store.m)
+	next[sessionID] = record
+	if err := f.store.persistLocked(goalDocument{Version: goalStoreVersion, Goals: next}); err != nil {
+		t.Fatalf("写 goal store: %v", err)
+	}
+	f.store.m = next
+}
+
 func (f *goalRoundFixture) count(t *testing.T, sessionID string) int {
 	t.Helper()
 	result, err := f.store.Snapshot(sessionID)
@@ -351,11 +373,7 @@ func TestGoalRoundCapStopsAtMaxGoalRounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 既有 session.setGoal 不传上限（落 0）；测试直接把上限钉成 2，模拟 goal 自带 cap。
-	f.store.mu.Lock()
-	record := f.store.m[sid]
-	record.Goal.MaxGoalRounds = 2
-	f.store.m[sid] = record
-	f.store.mu.Unlock()
+	f.mutateGoalRecord(t, sid, func(record *goalRecord) { record.Goal.MaxGoalRounds = 2 })
 
 	p := newPromptService(f.goalRunner())
 	for i := 0; i < 4; i++ {
@@ -608,8 +626,18 @@ func TestGoalRoundDiskFailureIsLoudAndRollsBack(t *testing.T) {
 	if !errors.Is(err, transport.ErrStatePersistence) {
 		t.Fatalf("错误应当是 ErrStatePersistence：%v", err)
 	}
-	if got := f.count(t, sid); got != 0 {
-		t.Fatalf("失败后内存 roundsStarted=%d，want 0（已回滚）", got)
+	// 回滚看内存投影：goal 文件已经被换成目录，读路径会响亮失败（见下），
+	// 而"回滚"要钉的是"没有半写进内存的那一份"。
+	f.store.mu.Lock()
+	record := f.store.m[sid]
+	f.store.mu.Unlock()
+	if record.RoundsStarted == nil || *record.RoundsStarted != 0 {
+		t.Fatalf("失败后内存 roundsStarted=%v，want 0（已回滚）", record.RoundsStarted)
+	}
+	// 读不到真值时**不许**拿内存里的旧投影冒充成功：每次取锁都重读，
+	// 读失败就 fail-loud（界面看到明确错误，而不是一条过期目标条）。
+	if _, err := f.store.Snapshot(sid); !errors.Is(err, transport.ErrStatePersistence) {
+		t.Fatalf("goal 文件不可读时 Snapshot 应当响亮失败：%v", err)
 	}
 	if frames := goalRoundFrames(f.pushed); len(frames) != 0 {
 		t.Fatalf("状态没写成功就不许发帧：%+v", frames)

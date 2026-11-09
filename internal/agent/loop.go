@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"dshgo/internal/llm"
 	"dshgo/internal/schema"
@@ -192,14 +194,51 @@ func (l *Loop) emit(ev Event) error {
 	return l.Emit(ev)
 }
 
+// runIDSeq 是进程内的 run 序号：一次 Run 调用 = 一次 run。
+//
+// 为什么不能只用 (会话, turn) 两段：
+//   - 子代理的 Loop 没有会话 id（SessionID 为空），而它每轮都是 turn=1——
+//     两次子代理会共用同一个键，后一次把前一次的计数当成自己的；
+//   - 宿主的 turn 是**每会话**的序号，A 会话的 turn 1 与 B 会话的 turn 1
+//     数值相同，靠会话段才隔离得开。
+//
+// 序号只保证"进程内不重复"，不参与任何跨进程语义（它不是持久 id）。
+var runIDSeq atomic.Uint64
+
+// runIDAnonymousSession 是没有会话 id 时的占位（`dshd run` 单会话、子代理）。
+const runIDAnonymousSession = "anonymous"
+
+// runID 生成本轮的 run 标识：会话 + 轮次 + 进程内序号。
+//
+// 一次 Run 只算一次，所以"同一轮稳定、下一轮唯一"是构造出来的，不靠谁自觉。
+func (l *Loop) runID(turn int) string {
+	session := l.SessionID
+	if session == "" {
+		session = runIDAnonymousSession
+	}
+	return session + "#turn-" + strconv.Itoa(turn) + "#run-" + strconv.FormatUint(runIDSeq.Add(1), 10)
+}
+
+// maxSteps 解析本轮的步数上限；**返回 0 表示不设上限**。
+//
+// 官方 agent loop 根本没有内置 turn budget：`@dsa/dsh-agent-loop/README.md:220`
+// 明写 "No built-in turn budget"，且全树搜 `maxSteps|stepLimit|maxTurns` 0 命中
+// （见 tmp/GO3-PARAMS/official.md §3①）。要限流只能由插件在 `agent/turn-stopping`
+// 上取消。所以 0 只能解释成"不限"——以前悄悄降级成 32 步，会让"调用方没给"
+// 变成"跑 32 步就报用满"，而屏幕上查不到原因，属于**隐藏的第二套默认值**。
+//
+// 安全阀由调用方显式给：宿主四个入口（run/serve/acp/schedule）与子代理统一传
+// cmd/dshd.defaultTurnMaxSteps=2000（官方真实会话单轮 max=1318，2000 不限制
+// 真实使用，只挡死循环）。0 只可能来自单元测试或第三方嵌入方。
 func (l *Loop) maxSteps() int {
 	if l.MaxSteps > 0 {
 		return l.MaxSteps
 	}
-	return 32
+	return 0
 }
 
-// Run 跑一个 turn：直到模型不再请求工具且没有待接管 steer，或步数用尽。
+// Run 跑一个 turn：直到模型不再请求工具且没有待接管 steer；调用方显式设了
+// 步数上限时，用满才算错（MaxSteps<=0 = 不设上限，与官方 agent loop 一致）。
 //
 // messages 会被追加（assistant 消息与 tool 结果都进历史），返回值是新历史。
 func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.Message, error) {
@@ -210,6 +249,14 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 	if l.SessionID != "" {
 		ctx = spi.WithSession(ctx, l.SessionID)
 	}
+	// 一轮 = 一次 run。**工具链的分段边界**就在这里：同一个 turn 里所有 step、
+	// 所有工具调用看到同一个 run id，下一轮必然换一个。
+	//
+	// 为什么必须由循环来放：只有它知道"这一轮是什么时候开始的"。没有这个值，
+	// repeat-tool-reminder 的链只能挂在会话上——同一个调用跨轮累计，新的一轮
+	// 数到第 3 次不再提醒（计数已经从上一轮接着走了），而模型的重复恰恰要在
+	// 每一轮里重新数。
+	ctx = spi.WithRunID(ctx, l.runID(turn))
 	if l.Chat == nil {
 		return history, fmt.Errorf("agent: 没有配置 Chat")
 	}
@@ -221,7 +268,12 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 		msgs = append([]llm.Message{{Role: "system", Content: l.System}}, msgs...)
 	}
 
-	for step := 1; step <= l.maxSteps(); step++ {
+	// 0 = 不设上限（官方语义）：只有调用方显式给了正数才截断。
+	limit := l.maxSteps()
+	for step := 1; ; step++ {
+		if limit > 0 && step > limit {
+			return msgs, fmt.Errorf("turn 用满了 %d 步仍未收敛（模型一直在请求工具）", limit)
+		}
 		if err := ctx.Err(); err != nil {
 			return msgs, err
 		}
@@ -373,8 +425,6 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 			return msgs, nil
 		}
 	}
-
-	return msgs, fmt.Errorf("turn 用满了 %d 步仍未收敛（模型一直在请求工具）", l.maxSteps())
 }
 
 // emitSteers 在一个模型步边界按 FIFO 发事件；只有 emit 成功的项才进入模型历史。
@@ -402,8 +452,9 @@ func (l *Loop) drainSteersOrClose(ctx context.Context, turn, step int, msgs []ll
 	if !ok {
 		return msgs, false, nil
 	}
-	if step >= l.maxSteps() {
-		return msgs, false, fmt.Errorf("turn 用满了 %d 步，仍有 steer 等待下一模型步", l.maxSteps())
+	// 只有显式给了上限才可能"没有下一步"；不设上限时永远有下一步。
+	if limit := l.maxSteps(); limit > 0 && step >= limit {
+		return msgs, false, fmt.Errorf("turn 用满了 %d 步，仍有 steer 等待下一模型步", limit)
 	}
 	msgs, err := l.emitSteers(ctx, turn, step+1, msgs, items)
 	if err != nil {

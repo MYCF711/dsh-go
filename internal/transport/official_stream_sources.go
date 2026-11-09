@@ -15,11 +15,15 @@ package transport
 // **轮询 stat 比对 version**：语义完全一致（版本变了就是一次失效），只是延迟
 // 从"内核通知"变成"一个轮询间隔"。这是显式差异，登记在 RESULT 里。
 //
-// 目录目标：官方支持"目录的直接子项"。本宿主 `FilesStat` 只对**普通文件**成立
-// （目录回 `workspaceFiles/not-a-file`），而 `FilesList` 的结果里**没有目录绝对
-// 路径**（官方帧必填 `absolutePath`）。所以目录目标明确回官方自己的
-// `workspace-file/watch-unsupported` 并点名缺什么——**不拿工作区相对路径冒充
-// 绝对路径**，那会让客户端把两套路径混用。
+// 目录目标：官方支持"目录的直接子项"。宿主 `FilesStat`
+// （`cmd/dshd/serve_workspace_api.go`）对目录回 `{absolutePath, version}` 并置
+// `IsDirectory`，目录帧因此带的是**解析后的绝对路径**（与文件帧同形），版本令牌
+// 取目录自身的 stat——直接子项增/删/改名会让它变化，正是官方"目录的直接子项"
+// 那条 watch 的失效面。
+//
+// 真正不能 watch 的目标（symlink、设备节点、其它非普通非目录的东西）回
+// 官方码 `workspace-file/watch-unsupported` + **400**：那是"这个目标不行"，
+// 不是"宿主没这个能力"，所以不是 501。
 //
 // # toolResults.watch（官方 dsh-api-remotes/lib/client.js:17415）
 //
@@ -112,7 +116,7 @@ func (s *officialWorkspaceChangesStream) step() (json.RawMessage, bool, *Officia
 	stat, err := s.api.FilesStat(s.sessionID, s.path)
 	if err != nil {
 		// 目标没了：这是官方的 `absent` 帧，不是流错误。
-		if isWorkspaceCode(err, "workspaceFiles/not-found") {
+		if isWorkspaceCode(err, "workspace-file/not-found") {
 			if s.absent {
 				return nil, false, nil
 			}
@@ -149,15 +153,18 @@ func (s *officialWorkspaceChangesStream) step() (json.RawMessage, bool, *Officia
 
 func (s *officialWorkspaceChangesStream) kind() Method { return MethodWorkspaceFilesChanges }
 
-// faultOf 把宿主错误翻成流故障（目录目标单独一条：官方有专门码）。
+// faultOf 把宿主错误翻成流故障。
+//
+// 只有"目标本身不是可 watch 的东西"（symlink / 设备节点 / 其它）走
+// `workspace-file/watch-unsupported`，而且是 **400**：官方码的语义是
+// "这个目标不能 watch"，不是"宿主没实现这个能力"。目录目标是支持的（见
+// 文件头），所以这里不再有 501 分支。
 func (s *officialWorkspaceChangesStream) faultOf(err error, opening bool) *OfficialStreamFault {
 	switch {
-	case isWorkspaceCode(err, "workspaceFiles/not-a-file"):
-		return &OfficialStreamFault{Code: "workspace-file/watch-unsupported", Status: 501,
-			Message: "workspaceFiles.changes 的目录目标未实现：官方要求目录帧带 absolutePath，" +
-				"而本宿主 FilesList 只给工作区相对路径（不拿相对路径冒充绝对路径）；" +
-				"目录 watch 来源见 RESULT 的接线清单"}
-	case isWorkspaceCode(err, "workspaceFiles/not-found"):
+	case isWorkspaceCode(err, "workspace-file/not-regular-file"):
+		return &OfficialStreamFault{Code: "workspace-file/watch-unsupported", Status: 400,
+			Message: "workspaceFiles.changes 不能 watch 这个目标（不是普通文件，也不是目录）：" + err.Error()}
+	case isWorkspaceCode(err, "workspace-file/not-found"):
 		return &OfficialStreamFault{Code: "workspace-file/not-found", Status: 404,
 			Message: "workspaceFiles.changes 的目标不存在：" + err.Error()}
 	case errors.Is(err, ErrNoSuchSession):

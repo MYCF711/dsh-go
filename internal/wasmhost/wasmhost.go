@@ -237,6 +237,22 @@ func (m *Module) InstanceGen() int64 {
 	return m.gen
 }
 
+// Closed 报告这个模块是否已经不可调用（宿主主动卸载，或 wazero 因超时/退出关闭了实例）。
+//
+// 为什么要有这个方法："卸载后运行时真的回收了"必须可断言，否则"关掉了"只是一句
+// 注释。调用方（pluginmgr.Loader 的回收测试）靠它证明 Close 真的发生了。
+func (m *Module) Closed() bool {
+	if m == nil {
+		return true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return true
+	}
+	return m.mod != nil && m.mod.IsClosed()
+}
+
 // deadReasonOr 给"实例为什么不能用"一句人话；有记录就用记录。
 // 调用方必须持有 m.mu。
 func (m *Module) deadReasonOr(fallback string) string {

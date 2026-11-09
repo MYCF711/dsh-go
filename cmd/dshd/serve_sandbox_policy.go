@@ -407,6 +407,38 @@ func sandboxChildEnv(mode sandbox.Mode) ([]string, error) {
 
 // sandboxWriteChildEnv 是 LoopRunner 侧的一行接线：解析该会话真实档位并
 // 生成要追加到 exec.Cmd.Env 的环境。Lead 在 serve_tools.go 起子进程时调用。
+// spillDir 是宿主自己拥有的 artifact 外置目录，与 cmdRun 的
+// tools.Options.SpillDir / FS 的 WithExtraReadRoot 是**同一路径**。
+// 名字不带 serve/run：两个入口都必须用同一份路径逻辑，不许各写一份。
+func spillDir(home string) string {
+	return filepath.Join(home, "artifacts")
+}
+
+// ensureSpillDir 在 serve 启动 / run 进入模块装配之前创建宿主自己的 SpillDir。
+//
+// 为什么必须入口处做：serve 把 <home>/artifacts 作为
+// DSHD_SANDBOX_EXTRA_READ_ROOTS 传给每轮子进程，sandbox 对不存在的
+// extra read root fail-closed；全新 home 还没有任何 artifact 被外置，
+// 目录不存在，于是**第一条 prompt** 就 turn/error。run 直连也会带同一套
+// sandbox env（serve 子进程就是 `dshd run`），所以两个入口必须自举。
+//
+// 边界：只创建宿主自己拥有的这个目录；用户显式配置的非法 extra root
+// 仍按原样 fail-closed，不在这里放宽；不新增写权限、不改变档位。
+func ensureSpillDir(home string) error {
+	dir := spillDir(home)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("建 SpillDir %s 失败: %w", dir, err)
+	}
+	st, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("检查 SpillDir %s 失败: %w", dir, err)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("SpillDir %s 不是目录", dir)
+	}
+	return nil
+}
+
 func sandboxWriteChildEnv(home, sessionID string, presets *modes.Registry, store *sandboxModeStore) ([]string, error) {
 	src, err := resolveSandboxModeForSession(home, sessionID, presets, store)
 	if err != nil {

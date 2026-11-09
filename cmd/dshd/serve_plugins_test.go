@@ -23,7 +23,13 @@ func writePluginTransportPackage(t *testing.T, dir, version string) string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	payload := []byte("private HTTP/CLI fixture " + version)
+	// enable 现在是**真的装载**（HS-07W 接线）：payload 必须是真的 wasm 模块，
+	// 否则 enable 会以 load_failed 正确失败——那正是本轮要的行为，不是 bug。
+	// 夹具用与装载器测试同一份客人产物（该包不声明 tools，装载只校验 alloc/call）。
+	payload, err := os.ReadFile(filepath.Join("..", "..", "internal", "wasmhost", "testdata", "toolplugin.wasm"))
+	if err != nil {
+		t.Fatalf("读不到 wasm 夹具: %v", err)
+	}
 	sum := sha256.Sum256(payload)
 	manifest := map[string]any{
 		"schema": "dsh.local-plugin@1", "id": "acme.audit", "version": version,

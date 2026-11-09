@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"dshgo/internal/spi"
+	"dshgo/internal/terminal"
 )
 
 // markerRe 匹配命令结束哨兵：\x01DSHD:<seq>:<rc>\x01<cwd>\x01\n
@@ -66,6 +67,13 @@ type session struct {
 	seq  int
 	// sink 是**额外的输出出口**（终端用）。
 	sink func([]byte)
+
+	// pty 是**真伪终端**会话（OpenPTY 起的那些）；管道式会话为 nil。
+	//
+	// 两种会话共用 session 的归属字段（control/waitDone/processRC）与 close 收工路径，
+	// 但输出走法不同：管道式走 readLoop→sink，PTY 由 terminal.Session 自己的读泵
+	// 写进有界 scrollback（见 pty.go 的说明）。
+	pty *terminal.Session
 
 	waitDone  chan struct{}
 	processRC int

@@ -262,8 +262,8 @@ func checkManifest(path string) checkResult {
 // cmdDoctor 是 `dshd doctor` 的入口。
 func cmdDoctor(argv []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	home := fs.String("home", envOr("DSHD_HOME", "tmp/dshd-home"), "会话根目录")
-	base := fs.String("base", "http://127.0.0.1:3425/v1", "OpenAI 兼容端点")
+	home := fs.String("home", defaultHome(), "会话根目录")
+	base := fs.String("base", envOr("DSHD_LLM_BASE", defaultLLMBase), "OpenAI 兼容端点")
 	manifest := fs.String("manifest", "dsh.toml", "manifest 路径（体检用它检查模块声明）")
 	if err := fs.Parse(argv); err != nil {
 		return err

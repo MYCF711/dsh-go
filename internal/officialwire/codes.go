@@ -163,6 +163,15 @@ func TranslateLegacy(namespace string, status int, legacyCode, message string) *
 		return &Error{Code: namespace + "/conflict", Message: message, Details: details}
 	case status == 501 || legacyCode == "not_implemented":
 		return &Error{Code: CodeMethodUnavailable, Message: message, Details: details}
+	case status == 503:
+		// 宿主"有这个方法、但这一侧暂时不可用"（如 market registry 未配置）：
+		// 保留 L1 的结构化码（registry_unavailable / detail_unavailable），
+		// 不让它退化成 gateway/internal 或 method-unavailable。
+		code := legacyCode
+		if code == "" {
+			code = "unavailable"
+		}
+		return &Error{Code: code, Message: message, Details: details}
 	default:
 		return &Error{Code: CodeInternal, Message: message, Details: details}
 	}

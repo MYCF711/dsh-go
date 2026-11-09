@@ -1,6 +1,6 @@
 package main
 
-// 官方 agent 侧 24 个方法的**宿主侧**真实语义测试。
+// 官方 agent 侧 25 个方法的**宿主侧**真实语义测试。
 //
 // 这里不测形状（形状与参数校验在 internal/transport/handlers_agent_official_test.go），
 // 只测"到底有没有真的动到真实状态"：goal 的 durable 迁移、反馈的重启可读、
@@ -321,10 +321,18 @@ func TestAgentOfficialLegacyGoalDoesNotFabricateTimes(t *testing.T) {
 		t.Fatalf("关闭会话: %v", err)
 	}
 	// 迁移是按 session id 存的，键要用真实的 id。
+	//
+	// 单真值（HS-GOAL-TRUTH）之后 store 每次取锁都从盘上刷新，所以这次改键
+	// 必须一并落盘，否则下一次刷新就把它覆盖回旧键。
 	goals.mu.Lock()
 	record := goals.m["session-legacy"]
 	delete(goals.m, "session-legacy")
 	goals.m[id] = record
+	renamed := cloneGoalMap(goals.m)
+	if err := goals.persistLocked(goalDocument{Version: goalStoreVersion, Goals: renamed}); err != nil {
+		goals.mu.Unlock()
+		t.Fatalf("落盘改键: %v", err)
+	}
 	goals.mu.Unlock()
 
 	if _, err := api.GoalGet(id); err == nil {
@@ -471,8 +479,11 @@ func TestAgentOfficialPresets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读默认 preset: %v", err)
 	}
-	if doc.AgentPreset != modes.DefaultID || !strings.Contains(doc.Content, "builtin: true") {
-		t.Fatalf("内置 preset 的正文是 %q", doc.Content)
+	// 生产绑定由 WIRING 指向 agentPresetReadYAML；旧方法仍保留 TOML 供
+	// 既有直接调用。两种正文都必须是真实声明，不能是同一份 TOML 冒充 YAML。
+	if doc.AgentPreset != modes.DefaultID ||
+		(!strings.Contains(doc.Content, "builtin: true") && !strings.HasPrefix(doc.Content, "- id: ")) {
+		t.Fatalf("内置 preset 的正文既不是 TOML 也不是 entry-list YAML：%q", doc.Content)
 	}
 	if _, err := f.api.AgentPresetRead("nope"); err == nil {
 		t.Fatal("未知 preset 竟然读到了")
@@ -491,8 +502,8 @@ func TestAgentOfficialPresets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读用户 preset: %v", err)
 	}
-	if userDoc.Content != tomlBody {
-		t.Fatalf("用户 preset 正文不是磁盘原文：%q", userDoc.Content)
+	if userDoc.Content != tomlBody && !strings.HasPrefix(userDoc.Content, "- id: ") {
+		t.Fatalf("用户 preset 正文既不是磁盘 TOML 也不是 entry-list YAML：%q", userDoc.Content)
 	}
 
 	selected, err := f.api.AgentPresetSelect(sessionID, "review")
@@ -517,6 +528,81 @@ func TestAgentOfficialPresets(t *testing.T) {
 	}
 	if _, err := f.api.AgentPresetSelect("no-such-session", "review"); !errors.Is(err, transport.ErrNoSuchSession) {
 		t.Fatalf("未知会话的错误类型不对: %v", err)
+	}
+}
+
+// agentPresets.list：名册来自真实 modes（内置 + `<home>/modes/*.toml`）。
+//
+// `isDefault` 不是猜的：会话不点名 preset 时的回落值就是 `modes.DefaultID`。
+// 坏 TOML 必须让 list 响亮失败（`modes.LoadDir` 不做静默跳过），不许编 broken 行。
+func TestAgentOfficialPresetsList(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	roster, err := f.api.AgentPresetsList()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(roster.Presets) != len(modes.Builtins()) {
+		t.Fatalf("内置名册应有 %d 项，实际 %d：%+v",
+			len(modes.Builtins()), len(roster.Presets), roster.Presets)
+	}
+	defaults := 0
+	for _, p := range roster.Presets {
+		if !p.IsDefault {
+			continue
+		}
+		defaults++
+		if p.ID != modes.DefaultID {
+			t.Fatalf("只有 %q 可以是默认，实际默认是 %q", modes.DefaultID, p.ID)
+		}
+	}
+	if defaults != 1 {
+		t.Fatalf("默认 preset 应恰好 1 个，实际 %d", defaults)
+	}
+
+	// 用户自建模式出现在名册里（磁盘真值），且不是默认。
+	modesDir := filepath.Join(f.home, "modes")
+	if err := os.MkdirAll(modesDir, 0o755); err != nil {
+		t.Fatalf("建 modes 目录: %v", err)
+	}
+	tomlBody := "id = \"review\"\nname = \"Review\"\ndescription = \"只读审阅\"\ntools = [\"read\", \"grep\"]\n"
+	if err := os.WriteFile(filepath.Join(modesDir, "review.toml"), []byte(tomlBody), 0o600); err != nil {
+		t.Fatalf("写用户模式: %v", err)
+	}
+	roster, err = f.api.AgentPresetsList()
+	if err != nil {
+		t.Fatalf("带用户模式的 list: %v", err)
+	}
+	var review *transport.OfficialAgentPreset
+	for i := range roster.Presets {
+		if roster.Presets[i].ID == "review" {
+			review = &roster.Presets[i]
+		}
+	}
+	if review == nil {
+		t.Fatalf("用户模式没进名册：%+v", roster.Presets)
+	}
+	if review.IsDefault || review.Name != "Review" || review.Description != "只读审阅" {
+		t.Fatalf("用户模式行不对：%+v", *review)
+	}
+
+	// A/B：另一个宿主（另一个 home）看不到这个模式。
+	other := newAgentAPIFixture(t)
+	rosterB, err := other.api.AgentPresetsList()
+	if err != nil {
+		t.Fatalf("B 的 list: %v", err)
+	}
+	for _, p := range rosterB.Presets {
+		if p.ID == "review" {
+			t.Fatalf("B 的 home 里没有 review，名册却出现了：%+v", rosterB.Presets)
+		}
+	}
+
+	// 坏 TOML：整份名册响亮失败，不静默跳过、不编 broken。
+	if err := os.WriteFile(filepath.Join(modesDir, "broken.toml"), []byte("id = \n"), 0o600); err != nil {
+		t.Fatalf("写坏模式: %v", err)
+	}
+	if _, err := f.api.AgentPresetsList(); err == nil {
+		t.Fatal("坏 TOML 竟然被静默跳过：名册失败必须响亮")
 	}
 }
 

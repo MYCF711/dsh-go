@@ -60,6 +60,10 @@ const (
 	MethodAccountGetUnnotifiedBonuses Method = "account.getUnnotifiedBonuses"
 	MethodAccountSignOut              Method = "account.signOut"
 	MethodAccountStartSignIn          Method = "account.startSignIn"
+	MethodAccountGetState             Method = "account.getState"
+	MethodAccountHasRunningTasks      Method = "account.hasRunningAccountTasks"
+	MethodAccountWatch                Method = "account.watch"
+	MethodAccountWatchExpiry          Method = "account.watchExpiry"
 
 	MethodLLMDiscoverModels Method = "llm.discoverModels"
 
@@ -114,7 +118,7 @@ const (
 	OfficialActionCardUnconfirmed = "unconfirmed"
 )
 
-// OfficialAccountMethods 按固定顺序返回本文件实现的 10 个方法。
+// OfficialAccountMethods 按固定顺序返回本文件实现的 14 个方法。
 //
 // 它给快照/文档/门禁用：新增或删除一个方法必须显式改这里，不能让
 // "方法悄悄多了一个"从路由表里漏过去。
@@ -127,13 +131,17 @@ func OfficialAccountMethods() []Method {
 		MethodAccountStartSignIn,
 		MethodAccountCancelSignIn,
 		MethodAccountSignOut,
+		MethodAccountGetState,
+		MethodAccountHasRunningTasks,
+		MethodAccountWatch,
+		MethodAccountWatchExpiry,
 		MethodLLMDiscoverModels,
 		MethodProductAnalyticsReport,
 		MethodActionCardsAct,
 	}
 }
 
-// IsOfficialAccountMethod 判断一个 /api 路径名是否属于本文件的 10 个方法。
+// IsOfficialAccountMethod 判断一个 /api 路径名是否属于本文件的 14 个方法。
 //
 // 路由侧只需要这一次判断（**不要**在 server.go 里摊开 10 个 case：那样
 // 每加一个官方方法都要动一次早已冻结的路由表）。
@@ -142,6 +150,8 @@ func IsOfficialAccountMethod(name string) bool {
 	case MethodAccountGetProfile, MethodAccountGetBalance,
 		MethodAccountGetUnnotifiedBonuses, MethodAccountAckBonusNotified,
 		MethodAccountStartSignIn, MethodAccountCancelSignIn, MethodAccountSignOut,
+		MethodAccountGetState, MethodAccountHasRunningTasks,
+		MethodAccountWatch, MethodAccountWatchExpiry,
 		MethodLLMDiscoverModels, MethodProductAnalyticsReport, MethodActionCardsAct:
 		return true
 	}
@@ -188,6 +198,7 @@ type OfficialAccountView struct {
 	Status  string                  `json:"status"`
 	Links   OfficialAccountLinks    `json:"links"`
 	Attempt *OfficialAccountAttempt `json:"attempt"`
+	Source  string                  `json:"source,omitempty"`
 }
 
 // OfficialAccountProfileValue 是官方 `getProfile` 的 `value`。
@@ -206,6 +217,7 @@ type OfficialAccountProfileValue struct {
 type OfficialAccountProfile struct {
 	Status string                       `json:"status"`
 	Value  *OfficialAccountProfileValue `json:"value,omitempty"`
+	Source string                       `json:"source,omitempty"`
 }
 
 // OfficialAccountWallet 是一个钱包余额（官方 `{currency:"CNY"|"USD", balance:string}`）。
@@ -222,6 +234,7 @@ type OfficialAccountBalance struct {
 	Status       string                  `json:"status"`
 	Value        []OfficialAccountWallet `json:"value"`
 	BonusWallets []OfficialAccountWallet `json:"bonusWallets"`
+	Source       string                  `json:"source,omitempty"`
 }
 
 // OfficialAccountBonus 是一条未提醒的赠送记录。
@@ -243,6 +256,7 @@ type OfficialAccountBonus struct {
 type OfficialAccountBonusList struct {
 	AccountID string                 `json:"accountId"`
 	Bonuses   []OfficialAccountBonus `json:"bonuses"`
+	Source    string                 `json:"source,omitempty"`
 }
 
 // OfficialModelDiscoveryRequest 是官方 `LlmModelDiscoveryRequest`。
@@ -315,6 +329,10 @@ type OfficialAccountAPI struct {
 	AccountStartSignIn          func(ctx context.Context, client OfficialAccountClientMetadata, callbackOrigin, loginSource string) (OfficialAccountView, error)
 	AccountCancelSignIn         func(ctx context.Context, attemptID string) (OfficialAccountView, error)
 	AccountSignOut              func(ctx context.Context, client OfficialAccountClientMetadata) (OfficialAccountView, error)
+	AccountGetState             func(ctx context.Context) (OfficialAccountView, error)
+	AccountHasRunningTasks      func(ctx context.Context) (bool, error)
+	AccountWatch                func(ctx context.Context) (<-chan OfficialAccountView, error)
+	AccountWatchExpiry          func(ctx context.Context) (<-chan string, error)
 
 	LLMDiscoverModels func(ctx context.Context, settingsNS string, req OfficialModelDiscoveryRequest) ([]OfficialDiscoveredModel, error)
 
@@ -369,7 +387,7 @@ func (s *Server) officialAccountAPI() (OfficialAccountAPI, bool) {
 // 分发
 // ---------------------------------------------------------------------------
 
-// serveOfficialAccountAPI 处理本文件的 10 个方法。
+// serveOfficialAccountAPI 处理本文件的 14 个方法。
 //
 // 调用方（server.go 的 /api 路由）只需在既有 switch 之前判断
 // `IsOfficialAccountMethod(name)` 并调用它；认证、`POST` 校验、失败日志都已经
@@ -384,6 +402,14 @@ func (s *Server) serveOfficialAccountAPI(w http.ResponseWriter, r *http.Request,
 	params, err := decodeOfficialParams(r)
 	if err != nil {
 		writeOfficialError(w, err)
+		return
+	}
+	switch Method(name) {
+	case MethodAccountWatch:
+		s.serveAccountWatch(w, r, api, params)
+		return
+	case MethodAccountWatchExpiry:
+		s.serveAccountWatchExpiry(w, r, api, params)
 		return
 	}
 	result, err := routeOfficialAccountMethod(api, Method(name), r.Context(), params)
@@ -419,6 +445,10 @@ func routeOfficialAccountMethod(api OfficialAccountAPI, method Method, ctx conte
 		return officialAccountCancelSignIn(ctx, api, p)
 	case MethodAccountSignOut:
 		return officialAccountSignOut(ctx, api, p)
+	case MethodAccountGetState:
+		return officialAccountGetState(ctx, api, p)
+	case MethodAccountHasRunningTasks:
+		return officialAccountHasRunningTasks(ctx, api, p)
 	case MethodLLMDiscoverModels:
 		return officialLLMDiscoverModels(ctx, api, p)
 	case MethodProductAnalyticsReport:
@@ -716,6 +746,121 @@ func officialAccountSignOut(ctx context.Context, api OfficialAccountAPI, p *offi
 				"本地没有可清掉的账号授权）；清 API key 请用 credentials.unset")
 	}
 	return api.AccountSignOut(ctx, client)
+}
+
+// ---------------------------------------------------------------------------
+// account.getState / hasRunningAccountTasks / watch / watchExpiry
+// ---------------------------------------------------------------------------
+
+func officialAccountGetState(ctx context.Context, api OfficialAccountAPI, p *officialParams) (any, error) {
+	if err := p.finish(); err != nil {
+		return nil, err
+	}
+	if api.AccountGetState == nil {
+		return nil, officialNotImplemented(
+			"account.getState 未接线：宿主没有账号状态机（AccountGetState）")
+	}
+	return api.AccountGetState(ctx)
+}
+
+func officialAccountHasRunningTasks(ctx context.Context, api OfficialAccountAPI, p *officialParams) (any, error) {
+	if err := p.finish(); err != nil {
+		return nil, err
+	}
+	if api.AccountHasRunningTasks == nil {
+		return nil, officialNotImplemented(
+			"account.hasRunningAccountTasks 未接线：宿主没有账号任务登记（AccountHasRunningTasks）")
+	}
+	running, err := api.AccountHasRunningTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// 官方 result 是 z.boolean()，不是 {running: bool}。
+	return running, nil
+}
+
+func (s *Server) serveAccountWatch(w http.ResponseWriter, r *http.Request, api OfficialAccountAPI, p *officialParams) {
+	if err := p.finish(); err != nil {
+		writeOfficialError(w, err)
+		return
+	}
+	if api.AccountWatch == nil {
+		writeOfficialError(w, officialNotImplemented(
+			"account.watch 未接线：宿主没有账号状态流（AccountWatch）"))
+		return
+	}
+	stream, err := api.AccountWatch(r.Context())
+	if err != nil {
+		writeOfficialError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case view, ok := <-stream:
+			if !ok {
+				return
+			}
+			raw, err := json.Marshal(view)
+			if err != nil {
+				return
+			}
+			if _, err := w.Write(append(raw, '\n')); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+func (s *Server) serveAccountWatchExpiry(w http.ResponseWriter, r *http.Request, api OfficialAccountAPI, p *officialParams) {
+	if err := p.finish(); err != nil {
+		writeOfficialError(w, err)
+		return
+	}
+	if api.AccountWatchExpiry == nil {
+		writeOfficialError(w, officialNotImplemented(
+			"account.watchExpiry 未接线：宿主没有凭据到期观察流（AccountWatchExpiry）"))
+		return
+	}
+	stream, err := api.AccountWatchExpiry(r.Context())
+	if err != nil {
+		writeOfficialError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-stream:
+			if !ok {
+				return
+			}
+			raw, err := json.Marshal(event)
+			if err != nil {
+				return
+			}
+			if _, err := w.Write(append(raw, '\n')); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

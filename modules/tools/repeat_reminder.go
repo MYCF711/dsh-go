@@ -57,8 +57,9 @@ func repeatThresholds() []int { return []int{3, 5, 8} }
 // 为什么必须带 session：A/B 两个会话同时跟同一个模型说话，链必须是两条；
 // 否则 B 的一次调用会把 A 的计数冲掉，A 反而收不到提醒。
 //
-// turn 取自 spi.RunIDFrom(ctx)（宿主目前没挂这个值，恒为空）；轮次边界靠
-// repeatChain.ctx 的生命周期兜底——turn ctx 一结束就等于"新的用户消息"。
+// turn 取自 spi.RunIDFrom(ctx)：agent 循环在**每一轮入口**放一次（同一轮里所有
+// step 稳定、下一轮必然换一个），所以"新的用户消息清零"是构造出来的，不靠 ctx
+// 生命周期兜底——turn ctx 常常活到进程退出，靠它等于不重置。
 type repeatScope struct {
 	session string
 	turn    string
@@ -69,7 +70,17 @@ type repeatChain struct {
 	ctx   context.Context // 建立这条链的那一次 ctx；它结束就代表这一轮结束了
 	key   string          // (工具名, 规范化参数) 的指纹
 	count int             // 连续次数
+	// seq 是建立序号：链表超过上限时按它淘汰最老的一条（见 evictLocked）。
+	seq uint64
 }
+
+// maxRepeatChains 是链表的硬上限。
+//
+// 为什么需要：run id 每轮一个新值，而 turn ctx 常常活到进程退出，只靠
+// ctx.Done() 回收等于不回收——一个跑了几万轮的长驻会话会留下同样多的链，
+// 其中除了最后一轮以外再也不会被用到。上限只影响"多老的轮次还能被记住"，
+// 不影响任何一轮内的计数：一轮的链只要还在上限内就是准确的。
+const maxRepeatChains = 4096
 
 // repeatGuard 是计数器本体。它由 Pipeline 持有，不注册任何全局状态。
 type repeatGuard struct {
@@ -77,6 +88,7 @@ type repeatGuard struct {
 	preview    int
 
 	mu     sync.Mutex
+	seq    uint64
 	chains map[repeatScope]*repeatChain
 }
 
@@ -116,8 +128,10 @@ func (g *repeatGuard) observe(ctx context.Context, toolName string, args json.Ra
 	if chain != nil && chain.key == key {
 		count = chain.count + 1
 	}
-	next := &repeatChain{ctx: ctx, key: key, count: count}
+	g.seq++
+	next := &repeatChain{ctx: ctx, key: key, count: count, seq: g.seq}
 	g.chains[scope] = next
+	g.evictLocked()
 	if chain == nil && ctx != nil && ctx.Done() != nil {
 		// 链按 ctx 生命周期回收：不这么做的话，长驻进程里每个会话每一轮都会留
 		// 一条再也用不到的链。身份比对是必要的——回收时作用域可能已经被新一轮
@@ -142,6 +156,29 @@ func (g *repeatGuard) expire(scope repeatScope, chain *repeatChain, done <-chan 
 		delete(g.chains, scope)
 	}
 	g.mu.Unlock()
+}
+
+// evictLocked 在链表超过上限时淘汰最老的一条。
+//
+// 只在**新增**链时调用，所以稳态下每次工具调用最多做一次全表扫描（4096 条，
+// 微秒级）——比"每轮留一条永久链"的内存增长便宜得多。
+func (g *repeatGuard) evictLocked() {
+	if len(g.chains) <= maxRepeatChains {
+		return
+	}
+	var (
+		oldestScope repeatScope
+		oldestSeq   uint64
+		found       bool
+	)
+	for scope, chain := range g.chains {
+		if !found || chain.seq < oldestSeq {
+			oldestScope, oldestSeq, found = scope, chain.seq, true
+		}
+	}
+	if found {
+		delete(g.chains, oldestScope)
+	}
 }
 
 // hit 判断这次次数是不是配置里的某个阈值（精确命中，不是"达到"）。

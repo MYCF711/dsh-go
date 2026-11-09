@@ -1,6 +1,6 @@
 package transport
 
-// 官方桌面端 workspace / workspaceFiles / directoryPicker 16 个方法的**契约测试**。
+// 官方桌面端 workspace / workspaceFiles / directoryPicker 17 个方法的**契约测试**。
 //
 // 这些测试只打本包的 `serveOfficialWorkspaceAPI`（Lead 接线后由 /api 路由调它），
 // 因此不依赖 server.go 的分发表——路由接线是 Lead 的验收项，这里用
@@ -90,11 +90,11 @@ func officialWorkspaceErrorMessage(t *testing.T, out map[string]any) string {
 	return msg
 }
 
-// TestOfficialWorkspaceMethodSet 钉住 16 个方法名与路由判定。
+// TestOfficialWorkspaceMethodSet 钉住 17 个方法名与路由判定。
 func TestOfficialWorkspaceMethodSet(t *testing.T) {
 	methods := OfficialWorkspaceMethods()
 	want := []string{
-		"workspace.create", "workspace.rename", "workspace.delete",
+		"workspace.create", "workspace.initializeDefault", "workspace.rename", "workspace.delete",
 		"workspace.insertBefore", "workspace.insertSessionBefore",
 		"workspace.pinSession", "workspace.unpinSession",
 		"workspace.archiveSession", "workspace.unarchiveSession",
@@ -129,7 +129,7 @@ func TestOfficialWorkspaceMethodSet(t *testing.T) {
 	}
 }
 
-// TestOfficialWorkspaceNotAttachedIsNotImplemented 没接线时 16 个方法都必须
+// TestOfficialWorkspaceNotAttachedIsNotImplemented 没接线时 17 个方法都必须
 // 明确 501（四字段），不许静默成功、不许拿假数据顶上。
 func TestOfficialWorkspaceNotAttachedIsNotImplemented(t *testing.T) {
 	srv, err := NewServer(Options{})
@@ -141,6 +141,7 @@ func TestOfficialWorkspaceNotAttachedIsNotImplemented(t *testing.T) {
 	absParent := filepath.Join(os.TempDir(), "official-workspace-parent")
 	valid := map[string]string{
 		"workspace.create":              `{"path":"x"}`,
+		"workspace.initializeDefault":   `{}`,
 		"workspace.rename":              `{"workspaceId":"w","title":"t"}`,
 		"workspace.delete":              `{"workspaceId":"w"}`,
 		"workspace.insertBefore":        `{"workspaceId":"w"}`,
@@ -513,8 +514,19 @@ func TestOfficialWorkspaceFilesZodShapes(t *testing.T) {
 			}, nil
 		},
 		FilesRead: func(sessionID, path string, r OfficialWorkspaceFileRange) (OfficialWorkspaceFileText, error) {
-			if !r.HasOffset || r.Offset != 2 || !r.HasLimit || r.Limit != 1 {
-				t.Fatalf("range 没解析对：%+v", r)
+			// 官方 resolvePage 的判定只看"客户端到底给没给"：没给就是默认值
+			// （offset=1），但 Offset 字段本身必须已经是 1，宿主才能直接算 start。
+			switch {
+			case !r.HasOffset && !r.HasLimit:
+				if r.Offset != 1 {
+					t.Fatalf("省略 offset 时 Offset 必须已是官方默认值 1：%+v", r)
+				}
+			case r.HasOffset && r.HasLimit:
+				if r.Offset != 2 || r.Limit != 1 {
+					t.Fatalf("显式 range 没解析对：%+v", r)
+				}
+			default:
+				t.Fatalf("range 的显式标记只可能同时有或同时无：%+v", r)
 			}
 			bytes := int64(99)
 			return OfficialWorkspaceFileText{
@@ -557,7 +569,7 @@ func TestOfficialWorkspaceFilesZodShapes(t *testing.T) {
 		t.Fatalf("目录项不该带 size：%v", entries[1])
 	}
 
-	// read：range 必填（官方对象参数），offset/limit 是整数。
+	// read：offset/limit 是整数；省略 range 走官方默认值（offset=1）。
 	code, out = callOfficialWorkspace(t, srv, "workspaceFiles.read", map[string]any{
 		"workspaceFileScopeId": "s1", "path": "a.txt", "range": map[string]any{"offset": 2, "limit": 1},
 	})
@@ -574,12 +586,20 @@ func TestOfficialWorkspaceFilesZodShapes(t *testing.T) {
 		t.Fatalf("read 结果值不对：%v", res)
 	}
 
+	// 省略 range 不再是错误：官方 resolvePage 的缺省就是首页（offset=1）。
 	code, out = callOfficialWorkspace(t, srv, "workspaceFiles.read", map[string]any{
 		"workspaceFileScopeId": "s1", "path": "a.txt",
 	})
+	if code != http.StatusOK {
+		t.Fatalf("省略 range 必须 200（官方按 {} 处理），实际 %d：%v", code, out)
+	}
+	// 但显式 null 不是"给了空对象"。
+	code, out = callOfficialWorkspace(t, srv, "workspaceFiles.read", map[string]any{
+		"workspaceFileScopeId": "s1", "path": "a.txt", "range": nil,
+	})
 	assertFourFieldError(t, code, out, http.StatusBadRequest, "bad_request")
 	if msg := officialWorkspaceErrorMessage(t, out); !strings.Contains(msg, "range") {
-		t.Fatalf("缺 range 的错误没说清缺什么：%q", msg)
+		t.Fatalf("range=null 的错误没说清问题字段：%q", msg)
 	}
 
 	code, out = callOfficialWorkspace(t, srv, "workspaceFiles.read", map[string]any{
@@ -873,7 +893,7 @@ func TestOfficialWorkspaceTwoServersDoNotMix(t *testing.T) {
 // 宿主用同一个 FilesStat 喂两个面：目录命中时置 IsDirectory。transport 必须
 //
 //  1. 让 unary `workspaceFiles.stat` 继续按官方契约拒绝目录（400 +
-//     workspaceFiles/not-a-file），不把目录当文件报出去；
+//     workspace-file/not-regular-file），不把目录当文件报出去；
 //  2. 让 `workspaceFiles.changes` 的目录目标产出官方帧——
 //     {kind:"ready"} → {kind:"change",change:{absolutePath,version}} →
 //     {kind:"change",change:{absolutePath,absent:true}}。
@@ -892,7 +912,7 @@ func TestOfficialWorkspaceDirectoryTargetStatAndChanges(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		if absent {
-			return OfficialWorkspaceFileStat{}, OfficialWorkspaceError("workspaceFiles/not-found", "目录不存在：dir")
+			return OfficialWorkspaceFileStat{}, OfficialWorkspaceError("workspace-file/not-found", "目录不存在：dir")
 		}
 		return OfficialWorkspaceFileStat{AbsolutePath: dirAbs, Version: version, IsDirectory: true}, nil
 	}
@@ -903,8 +923,8 @@ func TestOfficialWorkspaceDirectoryTargetStatAndChanges(t *testing.T) {
 		"workspaceFileScopeId": "s1", "path": "dir",
 	})
 	assertFourFieldError(t, code, out, http.StatusBadRequest, "bad_request")
-	if msg := officialWorkspaceErrorMessage(t, out); !strings.Contains(msg, "workspaceFiles/not-a-file") {
-		t.Fatalf("目录 stat 必须报 workspaceFiles/not-a-file：%q", msg)
+	if msg := officialWorkspaceErrorMessage(t, out); !strings.Contains(msg, "workspace-file/not-regular-file") {
+		t.Fatalf("目录 stat 必须报 workspace-file/not-regular-file：%q", msg)
 	}
 	if _, has := out["result"]; has {
 		t.Fatalf("目录 stat 不许有 result（不能把目录当文件）：%v", out)

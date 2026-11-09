@@ -311,7 +311,76 @@ func officialSettingsWrite(api OfficialSettingsCredentialAPI, p *officialParams,
 	if err != nil {
 		return nil, officialSettingsError(err)
 	}
-	return result.Namespace.Official(), nil
+	return OfficialSettingsNamespaceView(result.Namespace), nil
+}
+
+// ---------------------------------------------------------------------------
+// 官方 settings/describe 投影（L2 `settings/describe`）
+// ---------------------------------------------------------------------------
+
+// OfficialSettingsDescribeResult 逐字段对齐官方 `SettingsDescribeValue`
+// （settings-controller/lib/typert.host.js:24-42）：
+//
+//	{ writable: boolean, hasDocument: boolean, namespaces: SettingsNamespaceView[] }
+//
+// `sections` / `errors` 是 L1 additive `settings.describe` 的额外字段，官方
+// 形状里不出现，因此这里**不嵌 DescribeResult**，只保留官方三键。
+type OfficialSettingsDescribeResult struct {
+	Writable    bool                                 `json:"writable"`
+	HasDocument bool                                 `json:"hasDocument"`
+	Namespaces  []settingsform.OfficialNamespaceView `json:"namespaces"`
+}
+
+// OfficialSettingsDescribeResultOf 把 L1 `settings.describe` 的结果投影成
+// 官方 `settings/describe` 的结果。**只投影，不重算**：writable / hasDocument /
+// revision / value / base / user 都来自同一次 Describe() 读取。
+//
+// 密钥零泄漏：`NamespaceView.Secrets` 的每个槽位既投影成
+// `secrets: [{path, set}]` 的 sidecar，又必须从 value/base/user 里剥掉——
+// 官方 zod 把这三项定义为 "redacted"；只给 sidecar 不剥值等于把密钥原文
+// 送出。`settingsform.Official()` 本身只做形状投影，不做剥离，所以这层
+// 包一层剥离是官方 describe 的必要语义，不是可选美化。
+func OfficialSettingsDescribeResultOf(described settingsform.DescribeResult) OfficialSettingsDescribeResult {
+	result := OfficialSettingsDescribeResult{
+		Writable:    described.Writable,
+		HasDocument: described.HasDocument,
+		Namespaces:  make([]settingsform.OfficialNamespaceView, 0, len(described.Namespaces)),
+	}
+	for _, namespace := range described.Namespaces {
+		result.Namespaces = append(result.Namespaces, OfficialSettingsNamespaceView(namespace))
+	}
+	return result
+}
+
+// OfficialSettingsNamespaceView 投影单个 namespace，并剥掉 secret 槽位的值。
+//
+// 与直接调用 `NamespaceView.Official()` 的区别只有一条：本函数保证
+// value/base/user 里不再出现 `view.Secrets` 列出的键。非 secret 字段原样保留。
+func OfficialSettingsNamespaceView(view settingsform.NamespaceView) settingsform.OfficialNamespaceView {
+	official := view.Official()
+	if len(view.Secrets) == 0 {
+		return official
+	}
+	official.Value = redactOfficialSecretValues(official.Value, view.Secrets)
+	official.Base = redactOfficialSecretValues(official.Base, view.Secrets)
+	official.User = redactOfficialSecretValues(official.User, view.Secrets)
+	return official
+}
+
+// redactOfficialSecretValues 返回删掉 secret 键的副本。**不修改输入 map**：
+// NamespaceView 的 value/base/user 可能仍与 DescribeResult 或存储快照共享引用。
+func redactOfficialSecretValues(values map[string]any, secrets []string) map[string]any {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	for _, path := range secrets {
+		delete(out, path)
+	}
+	return out
 }
 
 // officialExpectedRevision 取官方可选参数 expectedRevision。

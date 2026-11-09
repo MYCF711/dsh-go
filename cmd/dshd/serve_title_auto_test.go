@@ -101,7 +101,9 @@ type autoTitleGatewayRequest struct {
 	// MaxTokens 是 max_tokens；兼容形状下可能改名，测试按"两个都为 0 就不对"判。
 	MaxTokens           int `json:"max_tokens"`
 	MaxCompletionTokens int `json:"max_completion_tokens"`
-	Messages            []struct {
+	// ReasoningEffort 是 reasoning_effort（官方标题调用按 efforts[0] 选最小一档）。
+	ReasoningEffort string `json:"reasoning_effort"`
+	Messages        []struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	} `json:"messages"`
@@ -256,8 +258,11 @@ func waitAutoTitle(t *testing.T, home, sessionID, path string, within time.Durat
 }
 
 // TestAutoTitleFirstTurnWritesDurableAutoTitle 是这一格的先红用例：
-// 首轮 turn 正常结束后必须出现官方形状的 session/title（source=auto），
+// 首轮 turn 正常结束后必须出现官方形状的 session/title（source.kind=provider），
 // 并且重启后 session.list 逐字回读同一个标题。
+//
+// HS-03 起 v4 多两条：`session/title-llm-request`（流式前的请求审计）与 `session/title`。
+// 逐项 delta 的断言在 serve_title_auto_delta_test.go；这里钉端到端接线与推送顺序。
 func TestAutoTitleFirstTurnWritesDurableAutoTitle(t *testing.T) {
 	home := t.TempDir()
 	const sessionID = "session-auto-title"
@@ -279,6 +284,9 @@ func TestAutoTitleFirstTurnWritesDurableAutoTitle(t *testing.T) {
 		pubMu.Unlock()
 	}
 	runner := autoTitleRunner(t, home, gateway.base(), journals, pub)
+	// 异步标题 goroutine 必须在 TempDir 清理前确定结束（I04 的清理竞态）。
+	service := runner.autoTitleService()
+	defer service.wait()
 	if err := runner.Run(context.Background(), sessionID, "turn-1", "please fix the login redirect"); err != nil {
 		t.Fatalf("首轮正常收口不该失败: %v", err)
 	}
@@ -309,27 +317,39 @@ func TestAutoTitleFirstTurnWritesDurableAutoTitle(t *testing.T) {
 		t.Fatalf("标题调用没有输出上限：%+v", req)
 	}
 
-	// v4 只多了**一条** session/title，形状与官方一致（messageSeqs 为空数组）。
+	// v4 只多了**两条**：请求审计帧（先）+ session/title（后），形状与官方一致。
 	after := autoTitleEvents(t, path)
-	if len(after) != len(before)+1 {
-		t.Fatalf("v4 事件数 %d → %d，只许多一条 session/title；类型=%v", len(before), len(after), autoTitleEventTypes(t, path))
+	if len(after) != len(before)+2 {
+		t.Fatalf("v4 事件数 %d → %d，只许多 session/title-llm-request + session/title；类型=%v", len(before), len(after), autoTitleEventTypes(t, path))
+	}
+	wantSeq := int64(-1)
+	for _, ev := range before {
+		if ev.Type == "user/message" {
+			wantSeq = ev.Seq
+		}
 	}
 	var titleData struct {
 		Title       string  `json:"title"`
 		MessageSeqs []int64 `json:"messageSeqs"`
 		Source      struct {
-			Kind string `json:"kind"`
+			Kind     string `json:"kind"`
+			Provider string `json:"provider"`
 		} `json:"source"`
 	}
-	last := after[len(after)-1]
+	auditEvent, last := after[len(after)-2], after[len(after)-1]
+	if auditEvent.Type != "session/title-llm-request" {
+		t.Fatalf("倒数第二条 v4 事件=%q，要 session/title-llm-request", auditEvent.Type)
+	}
 	if last.Type != "session/title" {
 		t.Fatalf("最后一条 v4 事件=%q，要 session/title", last.Type)
 	}
 	if err := json.Unmarshal(last.Data, &titleData); err != nil {
 		t.Fatal(err)
 	}
-	if titleData.Title != title || titleData.MessageSeqs == nil || len(titleData.MessageSeqs) != 0 || titleData.Source.Kind != "auto" {
-		t.Fatalf("session/title 形状=%+v（要 title=%q、messageSeqs=[]、source.kind=auto）", titleData, title)
+	if titleData.Title != title || len(titleData.MessageSeqs) != 1 || titleData.MessageSeqs[0] != wantSeq ||
+		titleData.Source.Kind != "provider" || titleData.Source.Provider != autoTitleProviderID {
+		t.Fatalf("session/title 形状=%+v（要 title=%q、messageSeqs=[%d]、source.kind=provider、source.provider=%s）",
+			titleData, title, wantSeq, autoTitleProviderID)
 	}
 
 	// 不污染主 turn 的模型历史：投影逐字相同，且没有新增 user/assistant 事件。
@@ -338,7 +358,8 @@ func TestAutoTitleFirstTurnWritesDurableAutoTitle(t *testing.T) {
 	}
 	for _, typ := range autoTitleEventTypes(t, path) {
 		switch typ {
-		case "session/title", "system/message", "turn/start", "turn/end":
+		// 标题调用只许加这两条：请求审计帧与标题帧（都不进模型历史）。
+		case "session/title", "session/title-llm-request", "system/message", "turn/start", "turn/end":
 		default:
 			if !autoTitleContains(beforeTypes, typ) {
 				t.Fatalf("标题调用写了额外事件 %q", typ)
@@ -364,7 +385,8 @@ func TestAutoTitleFirstTurnWritesDurableAutoTitle(t *testing.T) {
 	if err := json.Unmarshal(callW145HTTP(t, srv, "session.history", map[string]any{"id": sessionID, "sinceSeq": 0}, http.StatusOK), &history); err != nil {
 		t.Fatal(err)
 	}
-	if len(history.Frames) != 2 || history.Frames[0].Type != TurnDone || history.Frames[1].Type != "session/title" {
+	if len(history.Frames) != 3 || history.Frames[0].Type != TurnDone ||
+		history.Frames[1].Type != "session/title-llm-request" || history.Frames[2].Type != "session/title" {
 		t.Fatalf("重启后 journal 帧=%+v", history.Frames)
 	}
 	var journalTitle struct {
@@ -373,10 +395,10 @@ func TestAutoTitleFirstTurnWritesDurableAutoTitle(t *testing.T) {
 			Kind string `json:"kind"`
 		} `json:"source"`
 	}
-	if err := json.Unmarshal(history.Frames[1].Data, &journalTitle); err != nil {
+	if err := json.Unmarshal(history.Frames[2].Data, &journalTitle); err != nil {
 		t.Fatal(err)
 	}
-	if journalTitle.Title != title || journalTitle.Source.Kind != "auto" {
+	if journalTitle.Title != title || journalTitle.Source.Kind != "provider" {
 		t.Fatalf("journal 里的标题帧=%+v", journalTitle)
 	}
 }
@@ -722,6 +744,11 @@ func TestAutoTitleFailureWritesNothingAndDoesNotRetry(t *testing.T) {
 			if got := autoTitleTitleEvents(t, path); len(got) != 0 {
 				t.Fatalf("失败仍写了 session/title：%+v", got)
 			}
+			// 官方顺序是"先落审计帧、再流式"：失败也该留下"当时请求了什么"。
+			// 但标题与索引一条都不能有——失败不重试、不写标题这条边界没变。
+			if types := autoTitleEventTypes(t, path); !autoTitleContains(types, "session/title-llm-request") {
+				t.Fatalf("失败没有留下请求审计帧：%v", types)
+			}
 			if _, statErr := os.Stat(autoTitleIndexPath(path)); !os.IsNotExist(statErr) {
 				t.Fatalf("失败仍写了索引：%v", statErr)
 			}
@@ -755,6 +782,7 @@ func TestAutoTitleDoesNotBlockMainTurn(t *testing.T) {
 		published = append(published, f)
 		pubMu.Unlock()
 	})
+	service := runner.autoTitleService()
 	start := time.Now()
 	if err := runner.Run(context.Background(), sessionID, "turn-1", "please fix the login redirect"); err != nil {
 		t.Fatalf("主 turn 收口失败: %v", err)
@@ -774,8 +802,10 @@ func TestAutoTitleDoesNotBlockMainTurn(t *testing.T) {
 	if !turnDone {
 		t.Fatalf("主 turn 的 turn/done 没有推出去：%+v", published)
 	}
-	// 放开挂住的标题调用：连接被关掉后它只会失败，且不写任何东西。
+	// 放开挂住的标题调用：取消（连接关闭）+ 等 goroutine 真正退出，再做读与
+	// TempDir 清理；"只关连接不等"正是 I04 清理竞态的来源。
 	gateway.server.CloseClientConnections()
+	service.stop()
 	if got := autoTitleTitleEvents(t, path); len(got) != 0 {
 		t.Fatalf("挂住超时的标题调用仍写了事件：%+v", got)
 	}
@@ -805,6 +835,9 @@ func TestAutoTitleConcurrentSessionsKeepOwnTitles(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := autoTitleRunner(t, home, gateway.base(), journals, nil)
+	service := runner.autoTitleService()
+	// A/B 两轮都收口后，后台标题 goroutine 可能还在写帧/索引；等它们退出再清理。
+	defer service.wait()
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 2)
