@@ -24,17 +24,17 @@
 |---|---|
 | `COVERED` | 宿主有同名/同义读取点 |
 | `COVERED-EQUIV` | 宿主有等价能力/参数，只是名字或形状不同（必须给 `hostEquivalent` file:line） |
-| `N-A` | 对无头宿主不适用（必须带 `naClass`：desktop-shell / ui-only / telemetry-ui / plugin-market-ui / protocol-shape） |
+| `N-A` | 对无头宿主不适用（必须带 `naClass`：desktop-shell / ui-only / telemetry-ui / plugin-market-ui / protocol-shape / naming-conflict） |
 | `UNREAD-GAP` | 真能力缺口（必须写缺什么 / 现在降级成什么样 / 有无替代路径） |
 
 ## 1. 统计
 
 - 总账条目 **239** 条（宿主 186 / TUI2GO 49 / 官方对齐 4）+ CLI flag **98** 个。
-- verdict 分布（entries）：`OK` 122 / `HARDCODED` 14 / `UNREAD` 5 / `DEVIATION-SAFETY` 1 / `N-A` 97
+- verdict 分布（entries）：`OK` 134 / `HARDCODED` 2 / `UNREAD` 5 / `DEVIATION-SAFETY` 1 / `N-A` 97
 - verdict 分布（CLI flags）：`OK` 22 / `HARDCODED` 0 / `UNREAD` 3 / `DEVIATION-SAFETY` 0 / `N-A` 73
 - 词表（`meta.verdictVocabulary`）与实际取值**完全一致**：`OK` / `HARDCODED` / `UNREAD` / `DEVIATION-SAFETY` / `N-A`
-- 官方 342 条的覆盖（逐条三分 + N-A 补子类 + t7 改判，见 §7）：`COVERED` 60 / `COVERED-EQUIV` 139 / `N-A` 30（子类：protocol-shape 14 / ui-only 7 / telemetry-ui 4 / plugin-market-ui 3 / desktop-shell 2）/ `UNREAD-GAP` 113 / `UNREAD` 0；`naBreakdownUntriaged` 为空。
-- 已修条目按任务：`t10` 5 / `t12` 1 / `t7` 5 / `t8` 4 / `t9` 7
+- 官方 342 条的覆盖（逐条三分，见 §7）：`COVERED` 63 / `COVERED-EQUIV` 135 / `N-A` 31 / `UNREAD-GAP` 113 / `UNREAD` 0
+- 已修条目按任务：`t10` 5 / `t12` 1 / `t2` 8 / `t3` 3 / `t5` 1 / `t7` 5 / `t8` 4 / `t9` 7
 
 ## 2. 修复记录（先红后绿）
 
@@ -50,6 +50,9 @@
 | F8 | t7 | doctor --base 不读 DSHD_LLM_BASE（唯一一处绕过 envOr 的入口） | --base 在 doctor.go:266 的默认值是裸字面量 | envOr("DSHD_LLM_BASE", defaultLLMBase) | `tmp/GO3-PARAMS/register/red-guard.log / green-guard.log` |
 | F9 | t7 | 网关 URL 字面量 9 处重复（改端口要改 9 个地方） | test 报 2 次出现（main.go/serve_title_auto.go） | defaultLLMBase 单一定义 + 字符串字面量守卫 | `tmp/GO3-PARAMS/register/red-guard.log / green-guard.log` |
 | F10 | t7 | --home 两套默认（cwd 相对 tmp/dshd-home vs defaultHome()=~/.dshd） | --home 在 acp/doctor/main 的默认值是 envOr("DSHD_HOME","tmp/dshd-home") | 统一 defaultHome()；TestGuardNoCwdRelativeHomeDefault | `tmp/GO3-PARAMS/register/red-guard.log / green-guard.log` |
+| F11 | GO.5/T1 | 官方 OTLP 端点 env（`DSH_TELEMETRY_OTLP_URL` / `DSH_PRODUCT_ANALYTICS_OTLP_URL`）宿主 0 处读取 | `go test ./internal/analytics/ -run 'CollectorURL\|OTLP'` → `undefined: collectorURLEnvNames`（build failed） | `internal/analytics/env.go` 的 `CollectorURLFromEnv`/`WithEnvCollectorURL` 接线；7 条测试全绿（不设不变 / 设了生效且零出站 / 非法 URL fail-loud / 显式配置优先） | `tmp/GO5-DELIVERABLE/env/RESULT.md` |
+| F12 | GO.5/T1 | 官方 `DSH_MAX_TOKENS_AS_SUCCESS` 宿主 0 处读取（行为写死为“恒当成功”） | `go test ./internal/agent/ -run MaxTokens` → `undefined: MaxTokensAsSuccess`（build failed） | `internal/agent/finish_policy.go` 解析 false/0/no + loop 副作用前闸门；agent 4 条 + cmd/dshd 结算 1 条（真读 v4 `turn/end.reason.kind`）全绿 | `tmp/GO5-DELIVERABLE/env/RESULT.md` |
+| F13 | GO.5/T1 | `DSH_HOME` 命名冲突未成文（宿主 home 根是 `DSHD_HOME`；TUI2GO 的 `DSH_HOME` 是桌面 profile home） | 总账原判 `COVERED-EQUIV`，reason 只说“只部分生效”，没说两个 `DSH_HOME` 撞车 | verdict 改 `N-A`（`naClass=naming-conflict`）+ `docs/go5-env-notes.md` §4 写清两个语义；**不实现别名** | `tmp/GO5-DELIVERABLE/env/RESULT.md` |
 
 ## 3. 防再犯守卫
 
@@ -263,24 +266,24 @@
 | `DSH_GO_HOME` | `public/dsh-tui2go/src/backend.ts:312` | (无默认值，必填) | **OK** | launcher 注入 PLAY/dsh-go-fresh（run-019.cmd:8）；与 DSH_HOME（PLAY/home，装 TUI profile 用）是两套根，不冲突。 |
 | `DSH_GO_DSHD` | `public/dsh-tui2go/src/backend.ts:314` | 默认 'dshd'（PATH 查找） | **OK** | launcher 钉绝对路径 PLAY/bin/dshd.exe（run-019.cmd:7），detect 也用同一个（backend.ts:359）。 |
 | `DSH_GO_POLICY` | `public/dsh-tui2go/src/backend.ts:284` | 插件回落 'ask'；launcher 现显式 'allow'（= 宿主产品默认 serve.go:169） | **OK** | 原判 OK 不成立（插件默认 ask 与产品默认 allow 相反）；t11 让 launcher 显式带 allow，t12 让插件在未配置时**一个 --policy 都不传**，默认由宿主决定。 |
-| `DSH_GO_MODEL` | `public/dsh-tui2go/launcher/run-019.cmd:10` | launcher: 'deepseek-v4.1-flash-1017'（无 group/ 前缀） | **OK** | launcher 改用规范 id group/deepseek-v4.1-flash-1017；宿主另有唯一别名归一点兜底。 |
-| `DSH_GO_DEBUG_LOG` | `public/dsh-tui2go/launcher/run-019.cmd:17` | launcher 默认开启：PLAY/logs/tui2go-debug.jsonl | **OK** | 默认关；仅 DSH_GO_DEBUG=1 时开且启动前截断。 |
+| `DSH_GO_MODEL` | `public/dsh-tui2go/launcher/run-019.cmd:47` | launcher: 'deepseek-v4.1-flash-1017'（无 group/ 前缀） | **OK** | launcher 改用规范 id group/deepseek-v4.1-flash-1017；宿主另有唯一别名归一点兜底。 |
+| `DSH_GO_DEBUG_LOG` | `public/dsh-tui2go/launcher/run-019.cmd:56-58` | launcher 默认开启：PLAY/logs/tui2go-debug.jsonl | **OK** | 默认关；仅 DSH_GO_DEBUG=1 时开且启动前截断。 |
 | `DSH_GO_QUIT_TRACE` | `public/dsh-tui2go/src/backend.ts:407` | '1' 才开，默认关 | **OK** | 只写 stderr 一行，不影响行为。 |
-| `DSH_PLAY_PROFILE / DSH_HOME（installer）` | `public/dsh-tui2go/launcher/install-play.mjs:28` | DSH_PLAY_PROFILE > DSH_HOME/profiles/dsh-tui > 硬编码 'C:/Users/Administrator/AppData/Local/Temp/TUI2GO-PLAY/home/profiles/dsh-tui' | **HARDCODED** | 回落值是本机绝对路径；换机/换盘必须设 env 才能用。 |
+| `DSH_PLAY_PROFILE / DSH_HOME（installer）` | `public/dsh-tui2go/launcher/install-play.mjs:53` | `DSH_PLAY_PROFILE` > `DSH_HOME/profiles/dsh-tui` > 从脚本自身位置推导（`<PLAY>/home/profiles/dsh-tui` 且旁边有 `bin/dshd.exe` 或 `npm/node_modules`）> fail-loud 报错并点名该设哪个变量 | **OK** | **GO.5/T5 已去绝对 fallback**：`locateProfile()` 三级推导，全部不成立时打 `[install-play] ERROR: cannot locate a dsh-tui play profile` 并列出试过的路径、给出三种修法（`DSH_PLAY_PROFILE` / `DSH_HOME` / `bootstrap-play.mjs`），`exit 2`。`grep -F 'C:\\' 'D:\\' launcher/` 0 命中。 |
 | `DSH_TUI2GO_PRISTINE` | `public/dsh-tui2go/launcher/overlay/_pristine.mjs:64` | 未设 = 用默认 pristine 缓存根 | **OK** | 只影响离线取官方原始包的缓存位置，不进运行时链路。 |
-| `DSHD_LLM_BASE` | `public/dsh-tui2go/launcher/run-019.cmd:11` | 'http://127.0.0.1:3425/v1' | **OK** | 显式写死但等于默认值，属冗余；真要换网关时这里才是唯一开关。 |
-| `DSHD_LLM_MODEL` | `public/dsh-tui2go/launcher/run-019.cmd:10` | 未设（launcher 不设） | **OK** | launcher 走 DSH_GO_MODEL → 插件再传 --model，所以 DSHD_LLM_MODEL 空着是对的；但它同时是宿主 explicitServeModel 判据之一（serve.go:189），日后若两边都设要注意优先级。 |
-| `DSHD_CONTEXT_WINDOW` | `public/dsh-tui2go/launcher/run-019.cmd:3-12` | 未设 | **OK** | 不设才对：设了会把 catalog/内置表的真值压掉（TUI 端 context.ts:47 把 0 当“不知道”，不画进度条）。 |
-| `PLAY（play 根）` | `public/dsh-tui2go/launcher/run-019.cmd:3` | 'C:\Users\Administrator\AppData\Local\Temp\TUI2GO-PLAY' | **HARDCODED** | TUI-GO.vbs:4 里是同一份字面量，两处必须同步改（改一处不会生效）。 |
-| `HOME / USERPROFILE` | `public/dsh-tui2go/launcher/run-019.cmd:4-5` | 均重定向到 PLAY | **HARDCODED** | 把 Node/npm 的用户态也一起隔离到 play 根（install-play 取 pristine 时用得到）。 |
-| `DSH_HOME` | `public/dsh-tui2go/launcher/run-019.cmd:6` | PLAY\home | **HARDCODED** | TUI profile（含被 overlay 打过补丁的 0.19 包）在这里；隔离正确，路径写死。 |
-| `PATH 前缀` | `public/dsh-tui2go/launcher/run-019.cmd:40` | '%PLAY%\npm\node_modules\.bin;C:\Program Files\nodejs;%PATH%' | **HARDCODED** | node 装在别的盘/别的版本（非 C:\Program Files\nodejs）会直接跑不起来；package.json engines 要求 node ^22.19 \|\| >=24。 |
-| `插件工作目录` | `public/dsh-tui2go/launcher/run-019.cmd:14` | 'D:\DeepSeek Harness\default-workspace\public\dsh-tui2go' | **HARDCODED** | 整机绝对路径；仓库换位置 launcher 立刻失效（且 install-play 用 %~dp0 自带定位，只有这一行是硬编码残渣）。 |
-| `install-play 每次启动都跑 --ensure` | `public/dsh-tui2go/launcher/run-019.cmd:42` | node %~dp0install-play.mjs --ensure | **HARDCODED** | 幂等，但每次启动都会 walk src+launcher/overlay 做 sha256、按需 npm run build（install-play.mjs:36-52,123-126）→ 冷启动多一段可观测延迟；失败即 exit /b 拦住 TUI。 |
-| `TUI 入口路径` | `public/dsh-tui2go/launcher/run-019.cmd:16` | %DSH_HOME%\profiles\dsh-tui\node_modules\@deepseek-harness-tui\dsh-tui\bin\dsh-tui.js --backend dsh-go | **HARDCODED** | 路径形状钉死 npm 包内层级；0.19 → 0.20 若改 bin 落点，launcher 与 10 个 overlay 的锚点会一起失效（版本变化时 install-play 只做 pristine 还原，不校验 bin 是否存在）。 |
+| `DSHD_LLM_BASE` | `public/dsh-tui2go/launcher/run-019.cmd:48` | 'http://127.0.0.1:3425/v1' | **OK** | 显式写死但等于默认值，属冗余；真要换网关时这里才是唯一开关。 |
+| `DSHD_LLM_MODEL` | `public/dsh-tui2go/launcher/run-019.cmd:47-48` | 未设（launcher 不设） | **OK** | launcher 走 DSH_GO_MODEL → 插件再传 --model，所以 DSHD_LLM_MODEL 空着是对的；但它同时是宿主 explicitServeModel 判据之一（serve.go:189），日后若两边都设要注意优先级。 |
+| `DSHD_CONTEXT_WINDOW` | `public/dsh-tui2go/src/context.ts:47` | 未设 | **OK** | 不设才对：设了会把 catalog/内置表的真值压掉（TUI 端 context.ts:47 把 0 当“不知道”，不画进度条）。 |
+| `PLAY（play 根）` | `public/dsh-tui2go/launcher/run-019.cmd:15-19` | 派生的 play 根：`%DSH_GO_PLAY%` > `%TEMP%\TUI2GO-PLAY`，再用 `%%~fI` 归一化（不再写死任何盘符） | **OK** | **GO.5/T2 已修**：默认值改为 `%TEMP%\TUI2GO-PLAY`，`DSH_GO_PLAY` 可预置；`TUI-GO.vbs` 读同一个变量（不再是第二份字面量）。证据：`grep -F 'C:\' 'D:\' launcher/run-019.cmd launcher/TUI-GO.vbs` 0 命中 + 副本真实链。 |
+| `HOME / USERPROFILE` | `public/dsh-tui2go/launcher/run-019.cmd:23-24` | 均重定向到 PLAY | **OK** | 把 Node/npm 的用户态一起隔离到 play 根（install-play 取 pristine 时用得到）；**GO.5/T2 起由 PLAY 派生**（`set "HOME=%PLAY%"` / `USERPROFILE=%PLAY%`），隔离不变式未动。 |
+| `DSH_HOME` | `public/dsh-tui2go/launcher/run-019.cmd:25` | PLAY\home | **OK** | TUI profile（含被 overlay 打过补丁的 0.19 包）在这里；**GO.5/T2 起由 PLAY 派生**（`set "DSH_HOME=%PLAY%\home"`）。命名冲突（宿主 home 根是 `DSHD_HOME`）见 `docs/go5-env-notes.md` §4。 |
+| `PATH 前缀` | `public/dsh-tui2go/launcher/run-019.cmd:66` | '%PLAY%\npm\node_modules\.bin;%PATH%'（node 先 `where`，只在 PATH 完全没有时才回退 `%ProgramFiles%\nodejs`） | **OK** | **GO.5/T2 已修**：不再无条件 prepend `C:\Program Files\nodejs`；`where node` 命中就用宿主自己的 node（nvm/fnm/便携版都行），都没有才回退，再没有 `exit /b 3` 并说明装什么（package.json engines 要求 node ^22.19 \|\| >=24）。 |
+| `插件工作目录` | `public/dsh-tui2go/launcher/run-019.cmd:74` | `%~dp0..`（launcher/ 的上一级 = 插件根），并用 `package.json` 存在性校验 | **OK** | **GO.5/T2 已修**：`cd /d "%~dp0.."` 从脚本自身位置推导，插件复制到任何目录都成立；找不到 `package.json` 时 `exit /b 4` 点名路径，不静默继续。 |
+| `install-play 每次启动都跑 --ensure` | `public/dsh-tui2go/launcher/run-019.cmd:77` | node %~dp0install-play.mjs --ensure | **HARDCODED** | 幂等，但每次启动都会 walk src+launcher/overlay 做 sha256、按需 npm run build（install-play.mjs:36-52,123-126）→ 冷启动多一段可观测延迟；失败即 exit /b 拦住 TUI。 |
+| `TUI 入口路径` | `public/dsh-tui2go/launcher/run-019.cmd:79` | %DSH_HOME%\profiles\dsh-tui\node_modules\@deepseek-harness-tui\dsh-tui\bin\dsh-tui.js --backend dsh-go | **OK** | 路径形状仍钉死 npm 包内层级（`%DSH_HOME%\profiles\dsh-tui\node_modules\@deepseek-harness-tui\dsh-tui\bin\dsh-tui.js`），但根已经由 PLAY 派生，**GO.5/T2 起不再是整机绝对路径**；0.19 → 0.20 若改 bin 落点仍要同步改这一行。 |
 | `监听端口` | `public/dsh-tui2go/src/backend.ts:286` | '127.0.0.1:0'（OS 分配） | **OK** | 无固定端口，不会撞端口；连接信息来自 dshd 的 ready 行。 |
-| `elyterminal 路径` | `public/dsh-tui2go/launcher/TUI-GO.vbs:5` | 'D:\DeepSeek Harness\default-workspace\tools\ELYTerminal\app\elyterminal.exe' | **HARDCODED** | 换终端或换盘即失效；play 目录同时作为 -d 传入。 |
-| `VBS 等待/激活时间` | `public/dsh-tui2go/launcher/TUI-GO.vbs:8-11` | Sleep 4000 → AppActivate('TUI2GO-PLAY') → Sleep 600 → SendKeys cmd /c run-019.cmd{ENTER} | **HARDCODED** | 窗口标题字符串 'TUI2GO-PLAY' 与 play 目录名同源；机器慢于 4s 时 SendKeys 会打进别的窗口（无校验）。 |
+| `elyterminal 路径` | `public/dsh-tui2go/launcher/TUI-GO.vbs:39-48` | `%DSH_ELYTERMINAL%` > `<脚本>\..\..\tools\…`（打包） > `<脚本>\..\..\..\tools\…`（工作区） > 无终端则直接跑 cmd 且不失败 | **OK** | **GO.5/T2 已修**：三级推导（环境变量 → 包内 → 工作区），全部找不到时降级为「直接启动 launcher 的普通控制台」而不是静默失败；play 目录仍作为 `-d` 传入。 |
+| `VBS 等待/激活时间` | `public/dsh-tui2go/launcher/TUI-GO.vbs:31-36` | `%DSH_GO_TUI_WAIT_MS%`（默认 4000）→ AppActivate(play 的 basename，10×500ms 重试) → `%DSH_GO_TUI_SETTLE_MS%`（默认 600）→ SendKeys（特殊字符转义） | **OK** | **GO.5/T2 已修**：等待/沉降可配置（默认值不变），窗口标题不再是第二份字面量而是 play 根的 basename（与 `-d` 同源）；`SendKeys` 对 `+^%~(){}[]` 做转义，且 AppActivate 失败时不盲打。 |
 | `readyTimeoutMs（dshd ready 行等待）` | `public/dsh-tui2go/src/backend.ts:300` | 10_000 | **OK** | 超时后 terminate(child) 再抛错（backend.ts:313-316），不留孤儿。 |
 | `terminate SIGKILL 宽限` | `public/dsh-tui2go/src/backend.ts:257` | 2_000 | **OK** |  |
 | `detect: dshd --version` | `public/dsh-tui2go/src/backend.ts:362` | timeout 3_000 / maxBuffer 64 KiB | **OK** |  |
@@ -290,23 +293,23 @@
 | `context summary 取样` | `public/dsh-tui2go/src/context.ts:105` | session.load { tailMessages: 1 } | **OK** | summary 只取 1 条消息，靠 contextTokens/contextWindow 两个计数器，不拉全量。 |
 | `contextWindow=0 的语义` | `public/dsh-tui2go/src/context.ts:47` | 0 → 不下发 max（界面不画占用条） | **OK** | 另有 context.usage 的 max 不得为 0（context.ts:60）。 |
 | `权限模式 id 集` | `public/dsh-tui2go/src/modes.ts:22-43` | deny\|ask\|allow\|auto（4 档，去掉了 cycle） | **OK** | 不返回 cycle 是刻意的（modes.ts:54）：0.19 会把 cycle 再画一遍导致每行重复。 |
-| `权限模式文案（ask 档）` | `public/dsh-tui2go/src/modes.ts:30-31` | label '工作区内修改' / desc '工作区内读写；需要审批的调用会先询问' | **HARDCODED** | 4 档里 deny/allow/auto 三档文案与官方 i18n 逐字相同（i18n.js:713-719），只有 ask 档漂了：文案写死在插件里，且不吃 /lang —— en 用户看到的也是中文。 |
-| `推理档位文案` | `public/dsh-tui2go/src/effort.ts:25-32` | {off:关闭, low:低, medium:中, high:高, xhigh:超高, max:最高} | **HARDCODED** | others 与官方中文逐字一致；off 这一档的 '关闭' 是本仓自造（catalog 里 off 的 wire 值是 null，effort.ts:61）。同样不吃 /lang。 |
+| `权限模式文案（ask 档）` | `public/dsh-tui2go/src/i18n.ts:84-86` | label '工作区读写' / desc '写入需先读该文件'（官方 `permission-preset-workspace-write*` 逐字） | **OK** | **GO.5/T3 已修**：4 档文案改由 `src/i18n.ts` 提供并逐字照抄官方 0.19 `permission-preset-*`（ask 从自造的「工作区内修改 / 需要审批的调用会先询问」改为官方文案）；`modes.list()` 每次从活的 `locale()` 现算，吃 `/lang`。`labelProvenance()` 可机读断言「官方 key vs derived」。 |
+| `推理档位文案` | `public/dsh-tui2go/src/i18n.ts:126-130` | {off:关闭/Off(derived), low:低, medium:中, high:高, xhigh:超高, max:最高}（后五档 = 官方 `effort-tier-*`） | **OK** | **GO.5/T3 已修**：low/medium/high/xhigh/max 逐字照抄官方 `effort-tier-*`（i18n.js:198-202）；官方**没有** off 档 key，故 off 显式标 `{ derived: true }` 并说明为什么不复用 `picker-effort-default`。同样吃 `/lang`。 |
 | `effort 默认档来源` | `public/dsh-tui2go/src/effort.ts:72-80` | catalog 行自己的 defaultReasoningEffort（缺失即 undefined，声明不合阶梯则抛错） | **OK** |  |
 | `historyLimit（session.history 默认分页）` | `public/dsh-tui2go/src/transport.ts:259` | 256 | **OK** |  |
 | `重连退避` | `public/dsh-tui2go/src/transport.ts:260-261,421-423` | initial 100 ms / max 5_000 ms，delay = min(max, initial * 2^attempt) | **OK** | **无尝试次数上限**（scheduleReconnect 只按回合累加 attempt，transport.ts:623-633）——官方也这样：宿主长时间掉线会一直以 5s 间隔重试。 |
 | `WS maxPayload` | `public/dsh-tui2go/src/transport.ts:430` | 1024 * 1024（1 MiB） | **OK** | 单帧超 1 MiB（例如超长工具结果）会由 ws 层断开并走重连；宿主侧没有对应上限，属潜在可见断流点。 |
 | `dispose 时 socket 关闭等待` | `public/dsh-tui2go/src/transport.ts:510-514` | 1_000 ms 后 terminate | **OK** |  |
 | `HTTP 调用重试` | `public/dsh-tui2go/src/transport.ts:275-309` | 无（call() 不重试任何方法） | **OK** |  |
-| `overlay 补丁数量` | `public/dsh-tui2go/launcher/install-play.mjs:46-73` | 10（permission-modes / core-ipc / command-bridge / channel-gate / promptinput-gate / flow-close / workspace-capability / workspace-action-readiness / workspace-attach-trace / placeholder-workspace） | **OK** | 目录里共 12 个 .mjs = 10 个补丁 + _patch.mjs（引擎）+ _pristine.mjs（原始字节源）。 |
-| `overlay: 4 档权限循环（permission-modes）` | `public/dsh-tui2go/launcher/overlay/permission-modes.mjs:20-16` | 把 0.19 的 DEFAULT_SESSION_MODES（default/plan/full，sandbox+approval 原子）整体替换为 deny/ask/allow/auto（permission 原子） | **HARDCODED** | 这是 10 个补丁里唯一“其实是参数、却用源码补丁实现”的一条：写成 cordis.patch.yml 的 modes 配置即可达到同样效果，且不依赖锚点文本。现状也解释了为什么 profile 的 cordis.patch.yml 是空的 []。 |
+| `overlay 补丁数量` | `public/dsh-tui2go/launcher/install-play.mjs:151` | `scripts` 表 **9** 条（GO.5/T3 退场 permission-modes 后 10 → 9），`run()` 逐条 `execFileSync` 执行 `overlay/<name>` | **OK** | 目录里共 **11** 个 `.mjs` = 9 个补丁 + `_patch.mjs`（引擎）+ `_pristine.mjs`（原始字节源）；T3 退场 `permission-modes.mjs` 后由 12 → 11。 |
+| `overlay: 4 档权限循环（permission-modes）` | `public/dsh-tui2go/src/modes.ts:28` | backend `capabilities.modes` 由 `src/modes.ts` 的 `permissionModes()` 提供（deny/ask/allow/auto），overlay 补丁已退场 | **OK** | **GO.5/T3 已收口（补丁退场）**：这个循环现在由 backend capability 提供（`src/modes.ts:28 permissionModes`），TUI 一看到 `capabilities.modes` 就 `delete` 自己的原生 `cycleMode`（dsh-adapter/channel/core/compose.js:1074），Shift+Tab 走 `modes.cycle() ?? modes.list()`（actions.js:28）。旧 overlay 对 DSH-GO 会话本就是死补丁（`modes:` 配置只喂原生 roster，extensions.js:179），已从 `install-play.mjs` 的 `scripts` 表移除并加 `retired` 迁移把旧 profile 原子回写官方 pristine。真实链：`tmp/GO5-DELIVERABLE/i18n/RESULT.md`。 |
 | `overlay: flow-close 里的 timeoutMs: 8000` | `public/dsh-tui2go/launcher/overlay/flow-close.mjs:6` | 8000（出现在 NEEDLE 字符串里） | **OK** | 纯锚点：匹配不到就 AnchorMissing 报错退出；我们只在其后插一行 dispatchOverlay({type:'close-if',kind:'workspace-flow'})（:7），不写任何数字。 |
 | `overlay: 其余 8 个补丁的字符串常量` | `public/dsh-tui2go/launcher/overlay/command-bridge.mjs:3-12` | 命令名/能力键/函数名等锚点（如 ['trace','any']、goals: input.dsh ...、backendStart = { ...prepared, ... }） | **OK** | channel-gate/command-bridge/workspace-capability/promptinput-gate/placeholder-workspace/core-ipc/workspace-action-readiness 逐个看过：无一设置超时、窗口、阈值；只有 permission-modes 改语义。 |
 | `overlay: workspace-attach-trace 落盘` | `public/dsh-tui2go/launcher/overlay/workspace-attach-trace.mjs:51-27` | 每次 workspace 附着 appendFileSync 一行 JSONL 到 $DSH_GO_DEBUG_LOG | **HARDCODED** | 与 DSH_GO_DEBUG_LOG 同源：日志关掉它也就静默；开着时和 transport 的调试写共享同一文件，同样无轮转。 |
 | `overlay: workspace 端口桥` | `public/dsh-tui2go/launcher/overlay/workspace-action-readiness.mjs:14,29` | globalThis.__DSH_GO_WORKSPACE_PORT__ | **OK** | 与 src/workspace.ts:63 常量同名，缺端口时一律 refuse（fail-loud），不静默返回空数组。 |
 | `overlay 引擎: npm pack 超时/缓冲` | `public/dsh-tui2go/launcher/overlay/_pristine.mjs:100-101` | timeout 300_000 ms / maxBuffer 64 MiB | **OK** | 只在取 pristine 源码时用；300s 超时对慢网偏紧，但失败只影响 --restore/--audit 路径。 |
-| `overlay 引擎: .bak 后缀` | `public/dsh-tui2go/launcher/overlay/permission-modes.mjs:24` | .dsh-go-<patch>.bak（每个补丁各一个后缀） | **OK** | 会在 dsh-tui 包里留 10 个 .bak 与若干 .dsh-tui2go-* 标记；--restore 依赖这些后缀，改名等于丢回滚点。 |
-| `alias: launcher 模型 id vs 宿主导航/内置表键` | `public/dsh-tui2go/launcher/run-019.cmd:25` | 'deepseek-v4.1-flash-1017' vs 'group/deepseek-v4.1-flash-1017' | **OK** | launcher 改用规范 id group/deepseek-v4.1-flash-1017；宿主另有唯一别名归一点兜底（TestGuardCapacityAndCatalogAgreeOnAlias）。 |
+| `overlay 引擎: .bak 后缀` | `public/dsh-tui2go/launcher/overlay/_patch.mjs:66` | .dsh-go-<patch>.bak（每个补丁各一个后缀） | **OK** | 会在 dsh-tui 包里留 9 个 .bak 与若干 .dsh-tui2go-* 标记（GO.5/T3 退场 permission-modes 后 10 → 9）；`--restore` 依赖这些后缀，改名等于丢回滚点。 |
+| `alias: launcher 模型 id vs 宿主导航/内置表键` | `public/dsh-tui2go/launcher/run-019.cmd:47` | 'deepseek-v4.1-flash-1017' vs 'group/deepseek-v4.1-flash-1017' | **OK** | launcher 改用规范 id group/deepseek-v4.1-flash-1017；宿主另有唯一别名归一点兜底（TestGuardCapacityAndCatalogAgreeOnAlias）。 |
 | `alias: effort 阶梯的按模型查表` | `public/dsh-tui2go/src/effort.ts:100` | rows.get(ref.model)（catalog 行 id 作键） | **UNREAD** | TUI 线：catalog 为空时无法证伪；写入 catalog 后与 t8 的别名归一同源。 |
 | `官方 0.19 无 dsh-go backend` | `public/dsh-tui2go/package.json:4` | dsh-tui@0.19.0 只带 backends/claude、backends/codex、backends/shared | **OK** | 所以 backend.ts 的移植基线只能是 0.18.0（src/backend.ts:4 注释已写明）；0.19 侧只提供 plugin/adapter 契约，不提供 dsh-go 参考实现——升级到 0.20 时没有官方 diff 可抄，只能看声明文件。 |
 
@@ -526,11 +529,11 @@
 |---|---|---|
 | `DEEPSEEK_API_KEY` | modules/search/deepseek.go:77 DEEPSEEK_API_KEY / DSHD_SEARCH_API_KEY + LLM 侧 DSHD_LLM_KEY | 官方按请求从凭据库解析该 key（llm-deepseek / web-search-deepseek / web-deepseek-api 共用）；宿主在搜索侧直接读 DEEPSEEK_API_KEY（或 DSHD_SEARCH_API_KEY），LLM 侧用 DSHD_LLM_KEY，能力等价、变量名不同。 |
 | `DSH_CONTEXT_WINDOW` | cmd/dshd/host_run_options.go:58 --context-window + internal/llm/capacity.go:79-104 ResolveModelCapacity | 官方 DSH_CONTEXT_WINDOW 只作 sdk-minimal 的兜底容量；宿主把容量做成 --context-window 旗标（0 = 按模型解析），优先级形状一致（显式声明 > 目录/内置 > 兜底），但没有同名环境变量。 |
-| `DSH_HOME` | cmd/dshd/main.go:292-296 defaultHome（home 根 = DSHD_HOME）+ cmd/dshd/acp.go:1328 / :1397 仅作保护 | **官方名 `DSH_HOME` 在宿主只部分生效**：它有 3 处读取，但**只用于删除保护/历史守卫**（`session.UnderDSHHome`、`session.HistoryGuard`、relayd 的持久目录回退）；**home 根本身走 `DSHD_HOME`**（`--home` > `DSHD_HOME` > `~/.dshd`）。设 `DSH_HOME` 不会改会话根目录。 |
-| `DSH_MAX_TOKENS_AS_SUCCESS` | internal/agent/loop.go:665-670 `emptyResponseErr`（行为即默认，无开关） | **官方名 `DSH_MAX_TOKENS_AS_SUCCESS` 在宿主不生效**（0 处读取）；宿主没有这个开关，行为是**写死的等价默认**：finish=length 且有内容就正常结束这一轮，只有"空响应 + length"才报错。要改成相反语义得改代码。 |
+| `DSH_HOME` | **不实现**（`N-A`，`naClass=naming-conflict`）：home 根 = `cmd/dshd/main.go:292-296 defaultHome`（`--home` > `DSHD_HOME` > `~/.dshd`） | **官方名 `DSH_HOME` 在宿主不实现 —— 命名冲突（见 `docs/go5-env-notes.md` §4）**：官方的 `DSH_HOME` 是**整个 DSH 的数据根**（`显式路径 > $DSH_HOME > ~/.dsh`）；**宿主 home 用 `DSHD_HOME`**，而 TUI2GO 的 `run-019.cmd` 里 **`DSH_HOME` 是桌面 profile home**（`%PLAY%\home`）。两个语义撞车，简单别名会让宿主会话库被指到桌面 profile home。`DSH_HOME` 在宿主的既有读取只有 3 处删除保护/历史守卫（`cmd/dshd/acp.go:1328`、`cmd/dshd/main.go:1397`、`cmd/dsh-relayd/main.go:92`），维持不变。 |
+| `DSH_MAX_TOKENS_AS_SUCCESS` | `internal/agent/finish_policy.go:34 MaxTokensAsSuccess` + `internal/agent/loop.go:349` 闸门 | **官方名 `DSH_MAX_TOKENS_AS_SUCCESS` 在宿主已真读（GO.5/T1）**：只把 `false`/`0`/`no`（大小写不敏感）当 false，其余一律按官方默认 true。true（默认）：finish=length 照常收口，v4 记 `turn/end{kind:"max-tokens"}`；false：同一响应在**任何副作用之前**判失败，v4 记 `turn/end{kind:"error"}` 且 error.message 点名该变量。 |
 | `DSH_PERMISSION_MODE` | cmd/dshd/acp.go:92 sandboxCeiling（DSHD_SANDBOX_MODE）+ :129 上限语义 | 官方 DSH_PERMISSION_MODE 设 sandbox-policy.mode（danger-full-access 时审批变 never）；宿主用 DSHD_SANDBOX_MODE 作进程上限，会话档位不得比它更宽，且 danger-full-access 有独立审批语义。 |
-| `DSH_PRODUCT_ANALYTICS_OTLP_URL` | internal/analytics/policy.go:52 `CollectorURL`（与 DSH_TELEMETRY_OTLP_URL 同一入口） | **官方名 `DSH_PRODUCT_ANALYTICS_OTLP_URL` 在宿主不生效**（0 处读取）；实际入口与上一条同一个 `CollectorURL`（`mode=local+export` 且非空时才导出）。设官方 env 不会切端点。 |
-| `DSH_TELEMETRY_OTLP_URL` | internal/analytics/policy.go:52 / :95 `CollectorURL`（策略文件，非环境变量） | **官方名 `DSH_TELEMETRY_OTLP_URL` 在宿主不生效**（0 处读取）；实际入口是 analytics 策略文件里的 `CollectorURL`（只允许 http/https，`mode=local` 时即使有值也不导出）。能力等价、入口不同：照官方文档设这个 env 不会有任何效果。 |
+| `DSH_PRODUCT_ANALYTICS_OTLP_URL` | `internal/analytics/env.go:58 CollectorURLFromEnv` → `internal/analytics/policy.go:56 CollectorURL` | **官方名 `DSH_PRODUCT_ANALYTICS_OTLP_URL` 在宿主已真接（GO.5/T1）**：与 `DSH_TELEMETRY_OTLP_URL` 同一条解析器，且作为**更具体的名字优先**（`DSHD_PRODUCT_ANALYTICS_OTLP_URL` > `DSH_PRODUCT_ANALYTICS_OTLP_URL` > `DSHD_TELEMETRY_OTLP_URL` > `DSH_TELEMETRY_OTLP_URL`）。优先级：**显式配置 > env > 默认（空 = 本地零出网）**；env 只改端点不改 mode，非法 URL fail-loud。 |
+| `DSH_TELEMETRY_OTLP_URL` | `internal/analytics/env.go:58 CollectorURLFromEnv` → `internal/analytics/policy.go:56 CollectorURL` | **官方名 `DSH_TELEMETRY_OTLP_URL` 在宿主已真接（GO.5/T1）**：解析进 `Policy.CollectorURL`（只允许 http/https，`mode=local` 时即使有值也不导出）。优先级：**显式配置（policy.json 非空 `collectorUrl`）> env > 默认（空 = 本地零出网）**；读到 env **不会**把 mode 抬成 `local+export`（默认仍一个字节都不外发），非法 URL 在 `analytics.Open` fail-loud 并点名变量。与官方的差异只剩默认值。 |
 | `DSH_WEB_FETCH_PROVIDER` | internal/spi/search.go:388 双前缀解析（喂同一字段；都设时 DSHD_* 先命中） | **官方名 `DSH_WEB_FETCH_PROVIDER` 在宿主也生效**：与搜索同一条解析器，双前缀都认（都设时 `DSHD_WEB_FETCH_PROVIDER` 先命中，官方名兜底），照官方文档设能生效。 |
 | `DSH_WEB_SEARCH_PROVIDER` | internal/spi/search.go:375 双前缀解析（喂同一字段；都设时 DSHD_* 先命中） | **官方名 `DSH_WEB_SEARCH_PROVIDER` 在宿主也生效**：解析器同时认两个前缀（`DSHD_WEB_SEARCH_PROVIDER` 与官方 `DSH_WEB_SEARCH_PROVIDER` 喂同一个字段；都设时按解析顺序以 `DSHD_*` 为准），语义与官方"等价于 searchProvider 配置值"一致——照官方文档设能生效。 |
 | `llm.contextWindow.precedence` | internal/llm/capacity.go:79-104 ResolveModelCapacity + cmd/dshd/transport_source.go:388 调用点 | 官方优先级“模型目录条目 > adapter 默认（llm-deepseek 1e6）> DSH_CONTEXT_WINDOW（仅 sdk-minimal）”；宿主的 ResolveModelCapacity 就是“显式声明 > 内置模型容量 > 未声明自定义模型 1M 兜底”，单点解析、不缓存。 |
@@ -566,7 +569,7 @@
 
 ---
 
-### N-A（30 条，按子类分组 —— 每条都有 `naClass`，`naBreakdownUntriaged` 为空）
+### N-A（31 条，按子类分组 —— 每条都有 `naClass`，`naBreakdownUntriaged` 为空）
 
 | 子类 | 条数 | 含义 |
 |---|---|---|
@@ -575,7 +578,8 @@
 | `telemetry-ui` | 4 | telemetry-ui（产品遥测/会话上传/匿名 id 的展示面） |
 | `plugin-market-ui` | 3 | plugin-market-ui（插件市场的客户端 UI） |
 | `protocol-shape` | 14 | protocol-shape（纯 wire 形状/镜像常量/实现形状不适用） |
-| **合计** | **30** | |
+| `naming-conflict` | 1 | naming-conflict（官方 env 名与本地同名变量语义撞车，显式不做别名） |
+| **合计** | **31** | |
 
 #### desktop-shell（窗口/主题/托盘/快捷键/启动器/自动更新） —— 2 条
 
@@ -631,6 +635,12 @@
 | `tool.fsSearch.searchMetaMaxBytes` | `agent-loop` | 官方给“序列化后的 presentationMeta”设 64KB 上限，这是官方检索工具的结果投影形状；宿主结果结构是 spi.Result{Text,Data,Hint,Artifacts}，没有 presentationMeta 这一层，故不适用。 |
 | `tool.fsSearch.stderrMaxBytes` | `agent-loop` | rg 子进程 stderr 的尾部预算；宿主进程内实现没有子进程 stderr 通道，不适用。 |
 | `tools.nativeExecutorConfig` | `tools-sandbox-approval` | 官方明确 native 执行器不接受任何配置（默认 {}，whereApplied='the native executor takes no configuration'）；宿主 native 执行器同样没有配置面，这个空对象没有对应项可读，不是缺口。 |
+
+#### naming-conflict（官方 env 名与本地同名变量语义撞车） —— 1 条
+
+| 官方 key | 域 | 为什么不做（不是缺口，是撞车） |
+|---|---|---|
+| `DSH_HOME` | `env` | 官方 `DSH_HOME` 是**整个 DSH 的数据根**（`显式路径 > $DSH_HOME > ~/.dsh`）；宿主 home 根走 **`DSHD_HOME`**（`--home` > `DSHD_HOME` > `~/.dshd`），而 TUI2GO 的 `run-019.cmd` 里 **`DSH_HOME` 是桌面 profile home**（`%PLAY%\home`）。两个语义撞车：一旦宿主把 `DSH_HOME` 当 home 根，launcher 会把宿主会话库指到桌面 profile home（会话/插件/策略互相污染），且官方与宿主的覆盖顺序本来就不同（`显式路径 > $DSH_HOME > ~/.dsh` vs `--home > $DSHD_HOME > ~/.dshd`）。结论：**宿主 home 用 `DSHD_HOME`；TUI2GO 里的 `DSH_HOME` 是桌面 profile home**，不做别名。详见 `docs/go5-env-notes.md` §4。 |
 
 ---
 
@@ -804,27 +814,21 @@
 ## 8. 写作用域外：TUI2GO 侧（owner=tui-line）
 
 本任务的写作用域是 `cmd/`、`internal/`、`docs/`、`tmp/GO3-PARAMS/`；TUI2GO 只在确有 ALIAS-MISMATCH 时改。
-按这条边界，下面这些**仍然是 HARDCODED**，登记在此不静默：
+
+**GO.5 起这一节基本清空**：/T2 可搬移 launcher（8 处机器绝对路径清零）、/T3 官方 i18n +
+permission-modes overlay 退场、/T5 play 根自举（`launcher/bootstrap-play.mjs`）把原来的 12 条
+`HARDCODED` 收成 **2 条**，逐条见 §5 与 §12。仍然 `HARDCODED` 的只剩：
 
 | key | 位置 | 我们的默认 | verdict |
 |---|---|---|---|
-| `DSH_PLAY_PROFILE / DSH_HOME（installer）` | `public/dsh-tui2go/launcher/install-play.mjs:28` | DSH_PLAY_PROFILE > DSH_HOME/profiles/dsh-tui > 硬编码 'C:/Users/Administrator/AppData/Local/Temp/TUI2GO-PLAY/home/profiles/dsh-tui' | **HARDCODED** |
-| `PLAY（play 根）` | `public/dsh-tui2go/launcher/run-019.cmd:3` | 'C:\Users\Administrator\AppData\Local\Temp\TUI2GO-PLAY' | **HARDCODED** |
-| `HOME / USERPROFILE` | `public/dsh-tui2go/launcher/run-019.cmd:4-5` | 均重定向到 PLAY | **HARDCODED** |
-| `DSH_HOME` | `public/dsh-tui2go/launcher/run-019.cmd:6` | PLAY\home | **HARDCODED** |
-| `PATH 前缀` | `public/dsh-tui2go/launcher/run-019.cmd:40` | '%PLAY%\npm\node_modules\.bin;C:\Program Files\nodejs;%PATH%' | **HARDCODED** |
-| `插件工作目录` | `public/dsh-tui2go/launcher/run-019.cmd:14` | 'D:\DeepSeek Harness\default-workspace\public\dsh-tui2go' | **HARDCODED** |
-| `install-play 每次启动都跑 --ensure` | `public/dsh-tui2go/launcher/run-019.cmd:42` | node %~dp0install-play.mjs --ensure | **HARDCODED** |
-| `TUI 入口路径` | `public/dsh-tui2go/launcher/run-019.cmd:16` | %DSH_HOME%\profiles\dsh-tui\node_modules\@deepseek-harness-tui\dsh-tui\bin\dsh-tui.js --backend dsh-go | **HARDCODED** |
-| `elyterminal 路径` | `public/dsh-tui2go/launcher/TUI-GO.vbs:5` | 'D:\DeepSeek Harness\default-workspace\tools\ELYTerminal\app\elyterminal.exe' | **HARDCODED** |
-| `VBS 等待/激活时间` | `public/dsh-tui2go/launcher/TUI-GO.vbs:8-11` | Sleep 4000 → AppActivate('TUI2GO-PLAY') → Sleep 600 → SendKeys cmd /c run-019.cmd{ENTER} | **HARDCODED** |
-| `权限模式文案（ask 档）` | `public/dsh-tui2go/src/modes.ts:30-31` | label '工作区内修改' / desc '工作区内读写；需要审批的调用会先询问' | **HARDCODED** |
-| `推理档位文案` | `public/dsh-tui2go/src/effort.ts:25-32` | {off:关闭, low:低, medium:中, high:高, xhigh:超高, max:最高} | **HARDCODED** |
-| `overlay: 4 档权限循环（permission-modes）` | `public/dsh-tui2go/launcher/overlay/permission-modes.mjs:20-16` | 把 0.19 的 DEFAULT_SESSION_MODES（default/plan/full，sandbox+approval 原子）整体替换为 deny/ask/allow/auto（permission 原子） | **HARDCODED** |
+| `install-play 每次启动都跑 --ensure` | `public/dsh-tui2go/launcher/run-019.cmd:77` | node %~dp0install-play.mjs --ensure | **HARDCODED** |
 | `overlay: workspace-attach-trace 落盘` | `public/dsh-tui2go/launcher/overlay/workspace-attach-trace.mjs:51-27` | 每次 workspace 附着 appendFileSync 一行 JSONL 到 $DSH_GO_DEBUG_LOG | **HARDCODED** |
-| `alias: effort 阶梯的按模型查表` | `public/dsh-tui2go/src/effort.ts:100` | rows.get(ref.model)（catalog 行 id 作键） | **UNREAD** |
 
-其中 t8/t11/t12 已经修掉的三条（模型 id 别名、调试日志默认关、policy 默认）不在上表——它们的 verdict 已是 `OK`。
+仍为 `UNREAD` 的（官方有、宿主没读，结构化未实现）：
+
+| key | 位置 | 我们的默认 | verdict |
+|---|---|---|---|
+| `alias: effort 阶梯的按模型查表` | `public/dsh-tui2go/src/effort.ts:100` | rows.get(ref.model)（catalog 行 id 作键） | **UNREAD** |
 
 ## 9. 未做 / 边界
 
@@ -833,12 +837,13 @@
   t7 再按 t4 交叉核对改判 3 条（`uiTheme.preference` / `transcriptView` → `COVERED-EQUIV`，
   `sessionLogDeepseek.enabled` → `UNREAD-GAP`）。
   真缺口 `UNREAD-GAP` 113 条，每条写清了缺什么 / 现在降级成什么样 / 有无替代路径，可直接派单。
-- env 15 条的实际分布是 **`COVERED-EQUIV` 10 / `N-A` 4 / `UNREAD-GAP` 1**（不是 10/1/4）：
-  N-A 4 = `DSH_TELEMETRY_MODE` / `DSH_TELEMETRY_DISABLED` / `DSH_CLIENT_VERSION` / `DSH_PRIMARY_RUNTIME`，
-  GAP 1 = `DSH_SYSTEM_PROMPT`。其中 6 条的 `reason` 已写明「官方名是否生效 + 实际入口」——
-  **`DSH_TELEMETRY_OTLP_URL` / `DSH_PRODUCT_ANALYTICS_OTLP_URL` / `DSH_MAX_TOKENS_AS_SUCCESS` 在宿主不生效**
-  （0 处读取），`DSH_HOME` 只用于删除保护（home 根走 `DSHD_HOME`），
-  `DSH_WEB_SEARCH_PROVIDER` / `DSH_WEB_FETCH_PROVIDER` 双前缀也生效。
+- env 15 条的实际分布是 **`COVERED` 3 / `COVERED-EQUIV` 6 / `N-A` 5 / `UNREAD-GAP` 1**（GO.5/T1 之后；
+  此前是 `COVERED-EQUIV` 10 / `N-A` 4 / `UNREAD-GAP` 1）：
+  GO.5/T1 把 `DSH_TELEMETRY_OTLP_URL` / `DSH_PRODUCT_ANALYTICS_OTLP_URL` / `DSH_MAX_TOKENS_AS_SUCCESS`
+  做成**官方名真读取**（→ `COVERED`），把 `DSH_HOME` 判成 **`N-A`（`naming-conflict`）**。
+  `N-A` 5 = `DSH_HOME` / `DSH_TELEMETRY_MODE` / `DSH_TELEMETRY_DISABLED` / `DSH_CLIENT_VERSION` / `DSH_PRIMARY_RUNTIME`，
+  GAP 1 = `DSH_SYSTEM_PROMPT`。全部 15 条的 `reason` 都写明「官方名是否生效 + 实际入口」。
+  `DSH_WEB_SEARCH_PROVIDER` / `DSH_WEB_FETCH_PROVIDER` 双前缀也生效（复核后保持 `COVERED-EQUIV`）。
 - 宿主参数表（§4）里仍有 5 条旧 `UNREAD` 标签（`subRunner.timeout`、`subRunner.maxDepth`、
   `compact.Summarize MaxTokens`、`agentQuestionWaitTimeout` 等）：它们是**宿主自己写死的值**、
   没有 CLI/env 入口，与官方 342 条那一轴是两回事，仍按「结构化未实现」登记。
@@ -852,5 +857,38 @@
 
 - **evidence 校验**：`python tmp/GO3-PARAMS/register/validate_register.py` → `OK=306 MISMATCH=0 NO-REF=4 SKIP-NO-IDENT=20 SKIP-WHITELIST=7`，退出码 **0**。
 - 判据两条：① 文件存在且行号在范围内；② ±2 行窗口内含 key 的标识符之一（大小写不敏感）。
-- 本轮改了 **237** 处引用：行号**真的变了** 212 处，另有 25 处只补了目录（裸 `main.go:1012` → `cmd/dshd/main.go:1012`，方便人直接 `sed`）。详情与 10 条回读见 `tmp/GO3-PARAMS/register-refresh/RESULT.md`。
+- 累计改了 **261** 处引用：行号**真的变了** 236 处，另有 25 处只补了目录（裸 `main.go:1012` → `cmd/dshd/main.go:1012`，方便人直接 `sed`）。详情见 `tmp/GO3-PARAMS/register-refresh/RESULT.md` 与本轮 `tmp/GO5-DELIVERABLE/verify/RESULT.md`。
 - `ALIGNED` 已归一（原词保留在各条 note）；`DEVIATION-SAFETY` 是 t10 要求新增的合法值，已进词表；98 个 CLI flag 全部补 `verdict`。
+
+## 11. 本轮更新（GO.5 / T1：官方 env 收口）
+
+> 详细说明与自查命令见 [`go5-env-notes.md`](go5-env-notes.md)；证据 `tmp/GO5-DELIVERABLE/env/RESULT.md`。
+
+- **3 条官方 env 从「0 处读取」变成真读取**（verdict `COVERED-EQUIV` → `COVERED`）：
+  - `DSH_TELEMETRY_OTLP_URL` / `DSH_PRODUCT_ANALYTICS_OTLP_URL` → `internal/analytics/env.go` 的
+    `CollectorURLFromEnv` 喂 `Policy.CollectorURL`。优先级 **显式配置 > env > 默认（空 = 本地零出网）**；
+    读到 env 只改端点、不改 `mode`（默认仍一个字节都不外发）；非法 URL 在 `analytics.Open` fail-loud 并点名变量。
+  - `DSH_MAX_TOKENS_AS_SUCCESS` → `internal/agent/finish_policy.go` 的 `MaxTokensAsSuccess`（只认 `false`/`0`/`no`）+
+    `internal/agent/loop.go` 副作用前闸门。true（默认）：`turn/end{kind:"max-tokens"}`；false：`turn/end{kind:"error"}`。
+- **1 条改判 `N-A`（新增子类 `naming-conflict`）**：`DSH_HOME` —— 官方 `DSH_HOME` 是 DSH 数据根，
+  宿主 home 根走 `DSHD_HOME`，而 TUI2GO 的 `DSH_HOME` 是桌面 profile home；两个语义撞车，显式不做别名（见 §9 与 notes §4）。
+- **2 条复核后保持** `COVERED-EQUIV`：`DSH_WEB_SEARCH_PROVIDER` / `DSH_WEB_FETCH_PROVIDER`（`internal/spi/search.go:375/388` 双前缀）。
+- 计数：`COVERED` 60 → **63**，`COVERED-EQUIV` 139 → **135**，`N-A` 30 → **31**（`naming-conflict` 1），`UNREAD-GAP` 113 不变；总数仍 342。
+- 门禁：`go build ./... && go vet ./...`、`go test ./...` 全绿；先红后绿见 §2 的 F11/F12/F13。
+
+## 12. 本轮更新（GO.5 / T4：可搬移 + 总账收口）
+
+> 证据：`tmp/GO5-DELIVERABLE/verify/RESULT.md`（副本链 + 原目录链 + 官方 env 真实链 + 两道闸）。
+
+- **总账重锚**：T2 重写 `launcher/run-019.cmd` / `launcher/TUI-GO.vbs`、T3 退场
+  `launcher/overlay/permission-modes.mjs` 并新增 `src/i18n.ts`、T5 重写
+  `launcher/install-play.mjs` 之后，8 条 `file:line` 漂移**全部按 key 重新 grep 定位**
+  （`tmp/GO5-DELIVERABLE/verify/reanchor_register.py`，写回前对每行做 `assert` 硬校验）：
+  `DSH_GO_MODEL` / `HOME / USERPROFILE` / `DSH_HOME` / `PATH 前缀` / `install-play --ensure` /
+  `alias 模型 id` / `overlay: 4 档权限循环`（NOFILE）/ `overlay 引擎: .bak 后缀`（NOFILE）。
+- **两份总账逐字节一致**：`docs/parameter-register.json` 与
+  `tmp/GO3-PARAMS/register.json` 同一 sha256（`157f2e99…`），统一 LF；
+  `meta.validate` 记录本轮闸值（`OK=306 MISMATCH=0`、可疑 0、cwd 自检 ok）。
+- **verdict 归位**（T2/T3/T5 已修，总账不再挂着旧的 `HARDCODED`）：`HARDCODED` 14 → **2**（其中 TUI2GO 侧 12 条 → 2 条），`OK` 122 → **134**；`fixedBy` 新增 `t2` 8 条、`t3` 3 条、`t5` 1 条。
+  剩下 2 条 `HARDCODED` 是**真行为**（每次启动跑 `--ensure`；debug 落盘路径固定），不是漂移。
+- 门禁：`validate_register.py` → `MISMATCH=0` EXIT=0；`audit_refs.py` → 可疑 **0** EXIT=0。

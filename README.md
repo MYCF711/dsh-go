@@ -45,6 +45,15 @@ export DSHD_LLM_BASE="http://127.0.0.1:3425/v1"
 export DSHD_LLM_KEY="<your-key>"
 ```
 
+环境变量速查（宿主自己的都是 `DSHD_` 前缀；官方 `DSH_*` 名只有下面两行真接了，其余见
+[docs/parameter-register.md](docs/parameter-register.md) §7 的 env 域）：
+
+| 变量 | 作用 |
+|---|---|
+| `DSHD_HOME` | 会话根目录（`--home` > `DSHD_HOME` > `~/.dshd`）。**官方的 `DSH_HOME` 不是它**：`DSH_HOME` 在本宿主只用于删除保护/历史守卫，而 TUI2GO 的 `run-019.cmd` 里 `DSH_HOME` 是 **DSH 桌面 profile home**——两个语义撞车，所以不设别名（见 [docs/go5-env-notes.md](docs/go5-env-notes.md) §4）。 |
+| `DSH_TELEMETRY_OTLP_URL` / `DSH_PRODUCT_ANALYTICS_OTLP_URL` | 覆盖 analytics 的 collector 端点（优先级：显式配置 > env > 默认）。**默认仍是本地零出网**：只改端点、不改 mode，要外发得显式把策略改成 `local+export`；非法 URL 直接报错。 |
+| `DSH_MAX_TOKENS_AS_SUCCESS` | 默认 `true`：`finish=length` 当作这一轮跑完了（日志记 `max-tokens`）。设 `false` / `0` / `no` 则把它结算成失败（日志记 `error`）。 |
+
 ---
 
 ## 用 dsh-TUI 玩
