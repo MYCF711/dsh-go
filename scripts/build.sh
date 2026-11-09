@@ -12,10 +12,11 @@
 # 目录形状：**产品名在文件名里，平台放在目录里**。三个平台的交叉编译产物同名不同目录，
 # 也就不存在"给文件名塞版本号/平台串"这种把产品名挤掉的做法。
 #
-#   dist/DSH GO.exe                本机 windows/amd64，不带版本号：真机、任务管理器、脚本用这一个
-#   dist/DSH TUI GO.exe            同上
-#   dist/<os>-<arch>/DSH GO[.exe]  三个平台的产物（windows 加 .exe，linux/darwin 不加后缀）
-#   dist/<os>-<arch>/DSH TUI GO[.exe]
+#   dist/dsh-<版本号>.exe          本机 windows/amd64 的**宿主**（用户要求宿主产物带版本号；
+#                                  `--version` 首词仍是产品名 DSH GO）：真机、任务管理器、脚本用这一个
+#   dist/DSH TUI GO.exe            本机 windows/amd64 的 TUI（名字就是产品名）
+#   dist/<os>-<arch>/dsh-<版本号>[.exe]     三个平台的宿主（windows 加 .exe，linux/darwin 不加后缀）
+#   dist/<os>-<arch>/DSH TUI GO[.exe]       三个平台的 TUI
 #   dist/SHA256SUMS                路径相对 dist/，在 dist/ 里跑 `sha256sum -c SHA256SUMS`
 #
 # **名字里有空格**：本脚本每一处用到产物路径都整段加引号（`"${out}"`、`"dist/${name}.exe"`）。

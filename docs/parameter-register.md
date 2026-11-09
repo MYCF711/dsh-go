@@ -785,7 +785,9 @@ permission-modes overlay 退场、/T5 play 根自举（`launcher/bootstrap-play.
   并复核改判（t5：17 条改 `COVERED-EQUIV`、45 条改 `UNREAD-GAP`、9 条留 `N-A` 带子类）；
   t7 再按 t4 交叉核对改判 3 条（`uiTheme.preference` / `transcriptView` → `COVERED-EQUIV`，
   `sessionLogDeepseek.enabled` → `UNREAD-GAP`）。
-  真缺口 `UNREAD-GAP` 96 条（GO.6 四族补齐后由 113 降下来：17 条改判 `COVERED-EQUIV`，见 §13），每条写清了缺什么 / 现在降级成什么样 / 有无替代路径，可直接派单。
+  真缺口 `UNREAD-GAP` **0 条**（GO.6 四族补齐后由 113 降到 96，见 §13；GO.7 按域分路收口 96 → 0，见 §7）：
+  全表现在是 `COVERED` 64 / `COVERED-EQUIV` 214 / `N-A` 37 / `DEFERRED` 8 / `OFFICIAL_UNSUPPORTED` 19，
+  后三类逐条写清了「缺什么 / 现在降级成什么样 / 有什么替代路径」，明确不做的带 `capableWhen`。
 - env 15 条的实际分布是 **`COVERED` 3 / `COVERED-EQUIV` 6 / `N-A` 5 / `UNREAD-GAP` 1**（GO.5/T1 之后；
   此前是 `COVERED-EQUIV` 10 / `N-A` 4 / `UNREAD-GAP` 1）：
   GO.5/T1 把 `DSH_TELEMETRY_OTLP_URL` / `DSH_PRODUCT_ANALYTICS_OTLP_URL` / `DSH_MAX_TOKENS_AS_SUCCESS`

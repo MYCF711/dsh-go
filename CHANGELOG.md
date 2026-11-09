@@ -25,8 +25,9 @@
   - 团队 / 提示 / 工作目录 4 条：`agentTeam.maxMembers` 名册与 `maxTasks` 闸、`systemPrompt.toolOrder`、
     `workingDirectory.defaultDirectory`（工具的根与系统提示里的 Workspace 同源）。
   - jobs 2 条：每 owner 运行中任务配额、已结算保留字节裁剪。
-- **`N-A` / `OFFICIAL_UNSUPPORTED` / `DEFERRED` 逐条写了依据**，不是一句话带过：不适用按子类分组（每条带 `naClass`），
-  明确不做按成文红线写清「什么条件下能做」（每条带 `capableWhen`），后置的写清依赖什么（每条带 `dependsOn`）。
+- **`N-A` / `OFFICIAL_UNSUPPORTED` / `DEFERRED` 逐条写了依据**，不是一句话带过：不适用按子类分组（37 条 `N-A` 每条带 `naClass`），
+  明确不做的 19 条**每条带 `capableWhen`**（写清「什么条件下能做」），后置的 8 条**每条都在 `reason` 里写清为什么后置**、
+  其中 3 条另给了接入前提字段 `dependsOn`（其余 5 条的前提是同一条上游管线，写在 `reason` 里）。
 
 ### GO.6 官方参数面与并发收口（2026-11-09）
 
@@ -58,8 +59,11 @@
 
 ### 已知缺口（不虚报，逐条在总账里）
 
-- `OFFICIAL_UNSUPPORTED` **19 条**：平台型沙盒族（`sandbox` / `bash-sandbox` / `pwsh-sandbox` / `ptc-runtime`）
-  与按 W0 裁定「换了实现路径而不是做不到」的 OTel 族（遥测走本地零出网管道）。
+- `OFFICIAL_UNSUPPORTED` **19 条**（每条带 `capableWhen`，逐条在总账 §7）：遥测/团队域 **11 条**
+  （`telemetry.session.processor.*` 4 + `telemetry.host.*` 6 + `agentTeam.disposalTimeoutMs`）、agent-loop 的 PTC
+  `workflow.*` **4 条**、沙盒工具 **3 条**（`tools.ptc.maxParallelSubCalls` + `sandboxLocal.probeTimeoutMs` /
+  `runnerCommand`）、桌面壳 **1 条**（`sessionLogDeepseek.enabled`）。其中遥测族是按 **W0 裁定「换了实现路径
+  而不是做不到」**——宿主的遥测走**本地零出网**管道，没有 OTel 批处理队列/导出器的落点。
 - `DEFERRED` **8 条**：steering 取消保留 inbox 选项、DeepSeek 文件 API 两条、会话引用三条（上限/占比/字节）、
   telemetry session 两条（关停超时与请求体上限）；以及 `jobs.settledRetainBytes` **默认不裁剪**这一处与官方的策略差异
   （设 `DSHD_SETTLED_RETAIN_BYTES=16384` 才是官方语义）。
