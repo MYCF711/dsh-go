@@ -29,9 +29,9 @@
    "flags": 98,
    "officialCoverage": {
     "COVERED": 63,
-    "COVERED-EQUIV": 135,
+    "COVERED-EQUIV": 152,
     "N-A": 31,
-    "UNREAD-GAP": 113,
+    "UNREAD-GAP": 96,
     "UNREAD": 0
    },
    "fixedBy": {
@@ -63,9 +63,9 @@
   "officialCoverageSummary": {
    "total": 342,
    "COVERED": 63,
-   "COVERED-EQUIV": 135,
+   "COVERED-EQUIV": 152,
    "N-A": 31,
-   "UNREAD-GAP": 113,
+   "UNREAD-GAP": 96,
    "naBreakdown": {
     "desktop-shell": 2,
     "naming-conflict": 1,
@@ -76,7 +76,7 @@
    },
    "naBreakdownUntriaged": {},
    "UNREAD": 0,
-   "source": "tmp/GO3-PARAMS/official-coverage-triage.json + triage/na-subclass/na-subclass.json + triage/corrections/corrections.json + GO.5/T1",
+   "source": "tmp/GO3-PARAMS/official-coverage-triage.json + triage/na-subclass/na-subclass.json + triage/corrections/corrections.json + GO.5/T1 + GO.6/T5（17 条 UNREAD-GAP → COVERED-EQUIV）",
    "generator": "tmp/GO3-PARAMS/register/apply_triage.py（就地更新） + GO.5/T1 env 收口（定点更新 6 条）",
    "reasonNormalized": 60
   },
@@ -150,7 +150,7 @@
    "officialSource": "subagent.timeoutMs / dsh-subagent 的 timeout",
    "officialDefault": null,
    "hostReadPoint": "cmd/dshd/main.go:981",
-   "hostUsePoint": "subRunner.RunSub → context.WithTimeout（cmd/dshd/subagent.go:48）；子代理总预算，无 flag/env",
+   "hostUsePoint": "subRunner.RunSub → context.WithTimeout（cmd/dshd/subagent.go:62）；子代理总预算，无 flag/env",
    "ourDefault": "5 * time.Minute",
    "verdict": "UNREAD",
    "fixedBy": null,
@@ -205,14 +205,14 @@
    "domain": "host",
    "officialSource": "agent.maxSteps",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/acp.go:880",
-   "hostUsePoint": "newACPRunner(..., steps) → acpRunner.steps → Loop.MaxSteps（cmd/dshd/acp.go:880）",
+   "hostReadPoint": "cmd/dshd/acp.go:922",
+   "hostUsePoint": "newACPRunner(..., steps) → acpRunner.steps → Loop.MaxSteps（cmd/dshd/acp.go:922）",
    "ourDefault": "defaultTurnMaxSteps = 2000",
    "verdict": "OK",
    "fixedBy": null,
    "owner": "host",
    "note": "",
-   "evidence": "cmd/dshd/acp.go:880"
+   "evidence": "cmd/dshd/acp.go:922"
   },
   {
    "key": "--max-steps@schedule",
@@ -317,14 +317,14 @@
    "domain": "host",
    "officialSource": "permission.defaultPreset",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/main.go:626",
-   "hostUsePoint": "makeAskFunc/deniesSilently（main.go:952-1562）；取值 ask|allow|deny|auto，非法值 fail-loud",
+   "hostReadPoint": "cmd/dshd/main.go:625",
+   "hostUsePoint": "makeAskFunc/deniesSilently（main.go:930 取值、makeAskFunc 在 main.go:1556）；取值 ask|allow|deny|auto，非法值 fail-loud",
    "ourDefault": "defaultRunPolicy = \"allow\"",
    "verdict": "OK",
    "fixedBy": null,
    "owner": "host",
    "note": "",
-   "evidence": "cmd/dshd/main.go:626"
+   "evidence": "cmd/dshd/main.go:625"
   },
   {
    "key": "defaultRunPolicy",
@@ -373,14 +373,14 @@
    "domain": "host",
    "officialSource": "permission.defaultPreset",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/acp.go:740",
+   "hostReadPoint": "cmd/dshd/acp.go:552",
    "hostUsePoint": "ACP 入口没有 --policy；审批策略只能经 --mode 的 Approval 或 session.setPermission 间接设定",
    "ourDefault": "无该旗标",
    "verdict": "N-A",
    "fixedBy": null,
    "owner": "host",
    "note": "ACP 没有 --policy 是能力面差异（审批由 --mode 的 Approval 或 session.setPermission 定），官方 ACP 也没有该旗标。",
-   "evidence": "cmd/dshd/acp.go:740"
+   "evidence": "cmd/dshd/acp.go:552"
   },
   {
    "key": "settingsform 默认权限枚举",
@@ -471,14 +471,14 @@
    "domain": "host",
    "officialSource": "config 文件路径（官方为 settings 文档）",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/serve.go:451",
+   "hostReadPoint": "cmd/dshd/serve.go:458",
    "hostUsePoint": "config.OpenStore 的唯一生产路径；revision + values 同时落盘，原子 rename",
    "ourDefault": "<home>/state/config-tree.json",
    "verdict": "OK",
    "fixedBy": null,
    "owner": "host",
    "note": "",
-   "evidence": "cmd/dshd/serve.go:451"
+   "evidence": "cmd/dshd/serve.go:458"
   },
   {
    "key": "config maxDepth",
@@ -625,28 +625,28 @@
    "domain": "host",
    "officialSource": "models.catalog",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/serve.go:394",
+   "hostReadPoint": "cmd/dshd/serve.go:288",
    "hostUsePoint": "模型目录 + 凭据存储（credentials 段）；ContextWindow 解析的第二优先来源",
    "ourDefault": "path",
    "verdict": "OK",
    "fixedBy": null,
    "owner": "host",
    "note": "",
-   "evidence": "cmd/dshd/serve.go:394"
+   "evidence": "cmd/dshd/serve.go:288"
   },
   {
    "key": "state/approvals",
    "domain": "host",
    "officialSource": "approval.remember",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/acp.go:985",
+   "hostReadPoint": "cmd/dshd/acp.go:1038",
    "hostUsePoint": "跨进程审批记忆（--remember-approvals）",
    "ourDefault": "<home>/state/approvals",
    "verdict": "OK",
    "fixedBy": null,
    "owner": "host",
    "note": "",
-   "evidence": "cmd/dshd/acp.go:985"
+   "evidence": "cmd/dshd/acp.go:1038"
   },
   {
    "key": "DSHD_HOME",
@@ -654,7 +654,7 @@
    "officialSource": "home 目录",
    "officialDefault": null,
    "hostReadPoint": "cmd/dshd/main.go:293",
-   "hostUsePoint": "九个入口的 home 解析：main.go:293,1472；cmd/dshd/acp.go:879；doctor.go:265；cmd/dshd/serve.go:157；defaultHome() main.go:284",
+   "hostUsePoint": "九个入口的 home 解析：main.go:293,1472；cmd/dshd/acp.go:921；doctor.go:265；cmd/dshd/serve.go:157；defaultHome() main.go:284",
    "ourDefault": "\"\"（serve 必填）/ \"tmp/dshd-home\"（run/acp/doctor 默认）",
    "verdict": "OK",
    "fixedBy": null,
@@ -710,7 +710,7 @@
    "officialSource": "provider.baseURL",
    "officialDefault": null,
    "hostReadPoint": "cmd/dshd/serve.go:295",
-   "hostUsePoint": "11 处读取（cmd/dshd/serve.go:295,328,380,570,687；main.go:602,1351；cmd/dshd/acp.go:877；doctor.go:266；cmd/dshd/models_cmd.go:23；cmd/dshd/serve_title_auto.go:1017）",
+   "hostUsePoint": "11 处读取（cmd/dshd/serve.go:295,328,380,570,687；main.go:602,1351；cmd/dshd/acp.go:919；doctor.go:266；cmd/dshd/models_cmd.go:23；cmd/dshd/serve_title_auto.go:1017）",
    "ourDefault": "\"http://127.0.0.1:3425/v1\"",
    "verdict": "OK",
    "fixedBy": null,
@@ -751,14 +751,14 @@
    "domain": "host",
    "officialSource": "provider.apiKeyEnv",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/serve.go:577",
+   "hostReadPoint": "cmd/dshd/serve.go:584",
    "hostUsePoint": "48 处读取；**没有对应 --api-key 旗标**，只能走环境变量",
    "ourDefault": "\"\"（空默认，envOr 等价于 os.Getenv）",
    "verdict": "OK",
    "fixedBy": null,
    "owner": "host",
    "note": "",
-   "evidence": "cmd/dshd/serve.go:577"
+   "evidence": "cmd/dshd/serve.go:584"
   },
   {
    "key": "DSHD_LLM_API",
@@ -821,28 +821,28 @@
    "domain": "host",
    "officialSource": "model.contextWindow（未声明时的默认）",
    "officialDefault": null,
-   "hostReadPoint": "internal/llm/capacity.go:5",
+   "hostReadPoint": "internal/llm/capacity.go:10",
    "hostUsePoint": "ResolveModelCapacity 对非内置、非空自由文本模型补的窗口默认值（十进制 1M，非 1MiB）",
    "ourDefault": "1_000_000",
    "verdict": "N-A",
    "fixedBy": null,
    "owner": "host",
    "note": "未声明自定义模型的默认窗口（十进制 1M），与官方 llm-deepseek 的 DEFAULT_CONTEXT_WINDOW 同值；无配置面。",
-   "evidence": "internal/llm/capacity.go:5"
+   "evidence": "internal/llm/capacity.go:10"
   },
   {
    "key": "llm.DefaultCustomMaxOutput",
    "domain": "host",
    "officialSource": "model.maxOutputTokens（默认）",
    "officialDefault": null,
-   "hostReadPoint": "internal/llm/capacity.go:6",
+   "hostReadPoint": "internal/llm/capacity.go:11",
    "hostUsePoint": "同上，单次最大输出 token 默认值",
    "ourDefault": "128_000",
    "verdict": "N-A",
    "fixedBy": null,
    "owner": "host",
    "note": "未声明自定义模型的默认输出上限（128K）；内置模型走 0（不带 max_tokens），只有真·自定义模型才用这个默认值。",
-   "evidence": "internal/llm/capacity.go:6"
+   "evidence": "internal/llm/capacity.go:11"
   },
   {
    "key": "builtInModelCapacity 内置表",
@@ -905,14 +905,14 @@
    "domain": "host",
    "officialSource": "modes.default",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/acp.go:889",
+   "hostReadPoint": "cmd/dshd/acp.go:931",
    "hostUsePoint": "ACP 启动模式；run/serve 无此旗标（模式只能经 session preset 设置）",
    "ourDefault": "modes.DefaultID",
    "verdict": "OK",
    "fixedBy": null,
    "owner": "host",
    "note": "",
-   "evidence": "cmd/dshd/acp.go:889"
+   "evidence": "cmd/dshd/acp.go:931"
   },
   {
    "key": "--tools-mode / --tool-schema / --schema",
@@ -961,28 +961,28 @@
    "domain": "host",
    "officialSource": "compaction.autoCompactTokens",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/acp.go:883",
+   "hostReadPoint": "cmd/dshd/acp.go:927",
    "hostUsePoint": "acpRunner.autoCompact 阈值；与 run 各自写死同一数（没有共享常量）",
    "ourDefault": "40000",
    "verdict": "N-A",
    "fixedBy": null,
    "owner": "host",
    "note": "ACP 的 --auto-compact 默认就是 defaultAutoCompact（与 run/serve 同一常量），不是第二套默认值。",
-   "evidence": "cmd/dshd/acp.go:883"
+   "evidence": "cmd/dshd/acp.go:927"
   },
   {
    "key": "runCompactor.KeepRecent",
    "domain": "host",
    "officialSource": "compaction.keepRecent",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/main.go:1616",
+   "hostReadPoint": "cmd/dshd/main.go:1638",
    "hostUsePoint": "run 自动压缩的保留条数下限；注释写「run 这条路径不暴露 token 预算」，KeepTokens 走 compact 包默认 2000",
    "ourDefault": "6（兜底 2）",
    "verdict": "N-A",
    "fixedBy": null,
    "owner": "host",
    "note": "run 自动压缩的保留条数（6，兜底 2）；压缩策略内部预算。",
-   "evidence": "cmd/dshd/main.go:1616"
+   "evidence": "cmd/dshd/main.go:1638"
   },
   {
    "key": "runCompactor.CompactionMeta",
@@ -1003,28 +1003,28 @@
    "domain": "host",
    "officialSource": "compaction.keepRecent",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/acp.go:111",
-   "hostUsePoint": "死字段：autoCompactNow 实际用写死的 KeepRecent: 2（cmd/dshd/acp.go:1171）",
+   "hostReadPoint": "cmd/dshd/acp.go:76",
+   "hostUsePoint": "autoCompactNow 经 compactOptions() 读字段（cmd/dshd/acp.go:1217）；GO.3/t9 F3 起不再是死字段",
    "ourDefault": "8（字段，从未被读取）",
    "verdict": "OK",
    "fixedBy": "t9",
    "owner": "host",
    "note": "死字段接线：使用点改为 r.compactSelectOptions()，默认值取改动前实际生效的 2。",
-   "evidence": "cmd/dshd/acp.go:111"
+   "evidence": "cmd/dshd/acp.go:76"
   },
   {
    "key": "acp autoCompactNow 选项",
    "domain": "host",
    "officialSource": "compaction.keepRecent / keepTokens",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/acp.go:1171",
+   "hostReadPoint": "cmd/dshd/acp.go:1215",
    "hostUsePoint": "ACP 自动压缩的保留预算，写死在调用点",
    "ourDefault": "KeepRecent: 2, KeepTokens: 2000, MinToCompact: 2",
    "verdict": "N-A",
    "fixedBy": null,
    "owner": "host",
    "note": "ACP 自动压缩的保留预算（KeepRecent/KeepTokens/MinToCompact），与 compact.Options 同源。",
-   "evidence": "cmd/dshd/acp.go:1171"
+   "evidence": "cmd/dshd/acp.go:1215"
   },
   {
    "key": "compact.Options 默认值",
@@ -1157,14 +1157,14 @@
    "domain": "host",
    "officialSource": "n/a",
    "officialDefault": null,
-   "hostReadPoint": "internal/llm/compat.go:246",
+   "hostReadPoint": "internal/llm/compat.go:255",
    "hostUsePoint": "wire 能力协商结果的缓存时长（不设永久记忆）",
    "ourDefault": "5 * time.Minute",
    "verdict": "N-A",
    "fixedBy": null,
    "owner": "host",
    "note": "wire 能力协商结果缓存 5min。",
-   "evidence": "internal/llm/compat.go:246"
+   "evidence": "internal/llm/compat.go:255"
   },
   {
    "key": "llm discoverTimeout",
@@ -1213,14 +1213,14 @@
    "domain": "host",
    "officialSource": "n/a",
    "officialDefault": null,
-   "hostReadPoint": "internal/llm/client.go:307",
+   "hostReadPoint": "internal/llm/client.go:328",
    "hostUsePoint": "SSE 行扫描上限：单行超过 4MiB 会 ErrTooLong",
    "ourDefault": "初始 64KiB，上限 4MiB",
    "verdict": "N-A",
    "fixedBy": null,
    "owner": "host",
    "note": "SSE 行扫描缓冲（64KiB→4MiB）。",
-   "evidence": "internal/llm/client.go:307"
+   "evidence": "internal/llm/client.go:328"
   },
   {
    "key": "llm model_catalog 测试探针超时",
@@ -2012,7 +2012,7 @@
    "officialSource": "tools.spillThresholdChars",
    "officialDefault": null,
    "hostReadPoint": "cmd/dshd/main.go:605",
-   "hostUsePoint": "工具输出外置成 artifact 的字符阈值（cmd/dshd/acp.go:878 同值）；spill 默认目录 <temp>/dshd-spill（modules/tools/pipeline.go:122）",
+   "hostUsePoint": "工具输出外置成 artifact 的字符阈值（cmd/dshd/acp.go:920 同值）；spill 默认目录 <temp>/dshd-spill（modules/tools/pipeline.go:122）",
    "ourDefault": "4000",
    "verdict": "OK",
    "fixedBy": null,
@@ -2026,7 +2026,7 @@
    "officialSource": "workspace.agentsMdBytes",
    "officialDefault": null,
    "hostReadPoint": "cmd/dshd/main.go:545",
-   "hostUsePoint": "AGENTS.md 进系统提示的字节上限（--workspace-bytes 默认）；cmd/dshd/acp.go:881 却写死 8000",
+   "hostUsePoint": "AGENTS.md 进系统提示的字节上限（--workspace-bytes 默认）；cmd/dshd/acp.go:923 却写死 8000",
    "ourDefault": "65536",
    "verdict": "OK",
    "fixedBy": "t7",
@@ -2039,14 +2039,14 @@
    "domain": "host",
    "officialSource": "workspace.agentsMdBytes",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/acp.go:881",
+   "hostReadPoint": "cmd/dshd/acp.go:923",
    "hostUsePoint": "ACP 的 AGENTS.md 预算只有 run 的 1/8，两处默认值不一致",
    "ourDefault": "8000（与 defaultWorkspaceBytes=65536 不同源）",
    "verdict": "OK",
    "fixedBy": "t7",
    "owner": "host",
    "note": "ACP 的 8000 已改成同一常量 defaultWorkspaceBytes；守卫 TestGuardFlagDefaultsAreSingleSourced。",
-   "evidence": "cmd/dshd/acp.go:881"
+   "evidence": "cmd/dshd/acp.go:923"
   },
   {
    "key": "defaultToolTimeout",
@@ -2445,14 +2445,14 @@
    "domain": "host",
    "officialSource": "n/a",
    "officialDefault": null,
-   "hostReadPoint": "internal/agent/loop.go:209",
+   "hostReadPoint": "internal/agent/loop.go:223",
    "hostUsePoint": "无会话 id 时的 run id 占位段",
    "ourDefault": "\"anonymous\"",
    "verdict": "N-A",
    "fixedBy": null,
    "owner": "host",
    "note": "",
-   "evidence": "internal/agent/loop.go:209"
+   "evidence": "internal/agent/loop.go:223"
   },
   {
    "key": "approval/steer/jobs 帧标签",
@@ -2571,14 +2571,14 @@
    "domain": "host",
    "officialSource": "n/a（CLI）",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/main.go:607",
+   "hostReadPoint": "cmd/dshd/main.go:606",
    "hostUsePoint": "会话操作子命令的 I/O 与开关旗标（session rewrite/compact/info/fork、schedule）",
    "ourDefault": "\"\" / \"\" / \"\" / \"\" / \"\" / \"\" / false / false / false",
    "verdict": "OK",
    "fixedBy": null,
    "owner": "host",
    "note": "",
-   "evidence": "cmd/dshd/main.go:607"
+   "evidence": "cmd/dshd/main.go:606"
   },
   {
    "key": "--keep / --max@session compact",
@@ -2641,14 +2641,14 @@
    "domain": "host",
    "officialSource": "approval.remember",
    "officialDefault": null,
-   "hostReadPoint": "cmd/dshd/acp.go:891",
+   "hostReadPoint": "cmd/dshd/acp.go:933",
    "hostUsePoint": "把「以后都允许」落盘到 <home>/state/approvals",
    "ourDefault": "false",
    "verdict": "OK",
    "fixedBy": null,
    "owner": "host",
    "note": "",
-   "evidence": "cmd/dshd/acp.go:891"
+   "evidence": "cmd/dshd/acp.go:933"
   },
   {
    "key": "--home@analytics / --enabled / --mode / --collector / --retention-days / --sampling-rate / --since",
@@ -3397,14 +3397,14 @@
    "domain": "official-align",
    "officialSource": "@dsa/dsh-agent-loop/README.md:220（\"No built-in turn budget — tool calls or steering continue the current turn; a policy that bounds runaway turns must cancel from an existing lifecycle extension point such as agent/turn-stopping\"）；全树 grep -rE 'maxSteps|stepLimit|maxTurns|maxStepsPerTurn' _official --include=*.js → 0 命中",
    "officialDefault": "不存在（官方没有每轮步数上限；限流只能做成 agent/turn-stopping 策略插件且默认关闭）",
-   "hostReadPoint": "cmd/dshd/serve.go:159（serve --max-steps）；cmd/dshd/main.go:595（run）；cmd/dshd/acp.go:880（acp）；cmd/dshd/schedule.go:39（schedule）",
-   "hostUsePoint": "internal/agent/loop.go（Run 的 limit）；透传 cmd/dshd/serve_tools.go:119、cmd/dshd/main.go:1012/1004（子代理/主循环）、cmd/dshd/subagent.go:101",
+   "hostReadPoint": "cmd/dshd/serve.go:159（serve --max-steps）；cmd/dshd/main.go:595（run）；cmd/dshd/acp.go:922（acp）；cmd/dshd/schedule.go:39（schedule）",
+   "hostUsePoint": "internal/agent/loop.go（Run 的 limit）；透传 cmd/dshd/serve_tools.go:119、cmd/dshd/main.go:1012/1004（子代理/主循环）、cmd/dshd/subagent.go:106",
    "ourDefault": 2000,
    "verdict": "DEVIATION-SAFETY",
    "fixedBy": "t10",
    "owner": "host",
    "note": "不是“对齐官方”，是**安全阀**：官方没有上限，我们保留 2000 只挡死循环。观测数据：官方真实会话单轮步数 p50=13 / p99=938 / max=1318（tmp/GO3-PARAMS/official.md:20），2000 高于 max 且留 682 步余量，不限制真实使用。要彻底与官方一致得把这个值设为 0（=不限），但那会让无人值守入口真的可能永不收敛；采用“默认 2000 安全阀 + 0 表示不限”的形状，能力比官方只多不少。",
-   "evidence": "cmd/dshd/serve.go:159（serve --max-steps）；cmd/dshd/main.go:595（run）；cmd/dshd/acp.go:880（acp）；cmd/dshd/schedule.go:39（schedule）"
+   "evidence": "cmd/dshd/serve.go:159（serve --max-steps）；cmd/dshd/main.go:595（run）；cmd/dshd/acp.go:922（acp）；cmd/dshd/schedule.go:39（schedule）"
   },
   {
    "key": "agentLoop.loopMaxStepsFallback",
@@ -3456,7 +3456,7 @@
    "goType": "String",
    "default": "\"dsh.toml\"",
    "file": "cmd/dshd/acp.go",
-   "line": 871,
+   "line": 913,
    "help": "manifest 路径",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（acp 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3467,7 +3467,7 @@
    "goType": "String",
    "default": "envOr(\"DSHD_LLM_MODEL\", \"group/deepseek-v4.1-flash-1017\")",
    "file": "cmd/dshd/acp.go",
-   "line": 872,
+   "line": 914,
    "help": "group/deepseek-v4.1-flash-1017",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（acp 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3478,7 +3478,7 @@
    "goType": "String",
    "default": "os.Getenv(\"DSHD_REASONING_EFFORT\")",
    "file": "cmd/dshd/acp.go",
-   "line": 875,
+   "line": 917,
    "help": "",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（acp 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3489,7 +3489,7 @@
    "goType": "String",
    "default": "envOr(\"DSHD_LLM_BASE\", \"http://127.0.0.1:3425/v1\")",
    "file": "cmd/dshd/acp.go",
-   "line": 877,
+   "line": 919,
    "help": "http://127.0.0.1:3425/v1",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（acp 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3500,7 +3500,7 @@
    "goType": "Int",
    "default": "4000",
    "file": "cmd/dshd/acp.go",
-   "line": 878,
+   "line": 920,
    "help": "工具输出外置阈值（字符）",
    "verdict": "OK",
    "note": "host.json --max-chars@run / @acp 判定 normal → OK"
@@ -3511,7 +3511,7 @@
    "goType": "String",
    "default": "envOr(\"DSHD_HOME\", \"tmp/dshd-home\")",
    "file": "cmd/dshd/acp.go",
-   "line": 879,
+   "line": 921,
    "help": "tmp/dshd-home",
    "verdict": "OK",
    "note": "host.json --home@analytics / --enabled / --mode / --collector / --retention-days / --sampling-rate / --since 判定 normal → OK"
@@ -3522,7 +3522,7 @@
    "goType": "Int",
    "default": "defaultTurnMaxSteps",
    "file": "cmd/dshd/acp.go",
-   "line": 880,
+   "line": 922,
    "help": "每轮最多几步",
    "verdict": "OK",
    "note": "host.json --max-steps@acp 判定 normal → OK"
@@ -3533,7 +3533,7 @@
    "goType": "Int",
    "default": "8000",
    "file": "cmd/dshd/acp.go",
-   "line": 881,
+   "line": 923,
    "help": "AGENTS.md 进系统提示的字节上限（0=不传）",
    "verdict": "UNREAD",
    "note": "host.json --workspace-bytes@acp 判定 suspicious → UNREAD"
@@ -3544,7 +3544,7 @@
    "goType": "StringVar",
    "default": "\"\"",
    "file": "cmd/dshd/acp.go",
-   "line": 882,
+   "line": 924,
    "help": "规则文件路径（默认工作区 AGENTS.md）",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（acp 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3555,7 +3555,7 @@
    "goType": "Int",
    "default": "40000",
    "file": "cmd/dshd/acp.go",
-   "line": 885,
+   "line": 927,
    "help": "surface 估算超过多少 token 就自动压缩（0=关闭）",
    "verdict": "UNREAD",
    "note": "host.json --auto-compact@acp 判定 suspicious → UNREAD"
@@ -3566,7 +3566,7 @@
    "goType": "Int",
    "default": "0",
    "file": "cmd/dshd/acp.go",
-   "line": 887,
+   "line": 929,
    "help": "显式上下文窗口（usage_update 分母）；0=按模型容量解析",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（acp 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3577,7 +3577,7 @@
    "goType": "Int",
    "default": "0",
    "file": "cmd/dshd/acp.go",
-   "line": 888,
+   "line": 930,
    "help": "显式单次最大输出 token；0=按模型容量解析",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（acp 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3588,7 +3588,7 @@
    "goType": "String",
    "default": "modes.DefaultID",
    "file": "cmd/dshd/acp.go",
-   "line": 889,
+   "line": 931,
    "help": "启动模式 id（见 --modes-dir 与内置）",
    "verdict": "OK",
    "note": "host.json --mode@acp 判定 normal → OK"
@@ -3599,7 +3599,7 @@
    "goType": "String",
    "default": "\"\"",
    "file": "cmd/dshd/acp.go",
-   "line": 890,
+   "line": 932,
    "help": "用户自建模式目录（默认 <home>/modes）",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（acp 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3610,7 +3610,7 @@
    "goType": "Bool",
    "default": "false",
    "file": "cmd/dshd/acp.go",
-   "line": 891,
+   "line": 933,
    "help": "把\\\"以后都允许\\\"记到磁盘，resume 后仍然生效",
    "verdict": "OK",
    "note": "host.json --remember-approvals@acp 判定 normal → OK"
@@ -3742,7 +3742,7 @@
    "goType": "String",
    "default": "\"dsh.toml\"",
    "file": "cmd/dshd/main.go",
-   "line": 466,
+   "line": 465,
    "help": "manifest 路径",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（tools 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3885,7 +3885,7 @@
    "goType": "String",
    "default": "\"\"",
    "file": "cmd/dshd/main.go",
-   "line": 607,
+   "line": 606,
    "help": "续这个会话（空=新建）；cwd 可省，按 id 找",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（run 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3929,7 +3929,7 @@
    "goType": "String",
    "default": "defaultToolSchema",
    "file": "cmd/dshd/main.go",
-   "line": 619,
+   "line": 618,
    "help": "工具表形态（旧名，等价 --tools-mode）：compact=压掉参数说明与冗余 schema 骨架 | full=完整",
    "verdict": "N-A",
    "note": "宿主自有 CLI 入口（run 子命令），官方 asar 无对应参数，也没有单独判定依据 → N-A（不参与官方对齐判定；行号见 file:line）"
@@ -3962,7 +3962,7 @@
    "goType": "String",
    "default": "defaultRunPolicy",
    "file": "cmd/dshd/main.go",
-   "line": 626,
+   "line": 625,
    "help": "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）",
    "verdict": "OK",
    "note": "host.json --policy@run 判定 normal → OK"
@@ -4535,16 +4535,18 @@
    "domain": "agent-loop",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js:1309 | app.asar:dsh/node_modules/@deepseek-ai/dsh-agent-loop/README.md:55",
    "officialDefault": 10,
-   "status": "UNREAD-GAP",
-   "reason": "宿主工具执行是严格串行的 for 循环（一次模型响应里的 N 个 tool_call 逐个 runTool2），没有并行批处理，也没有并发度上限参数；官方默认 10 路并行的语义完全缺席。",
+   "status": "COVERED-EQUIV",
+   "reason": "宿主同一次模型响应里的 N 个 tool_call 现在按上限并发执行（默认 10 路，与官方一致）：固定 worker 池、结果与事件仍按模型顺序结算、审批类工具单独成一条互斥车道。名字不同：官方是 agentLoop.maxParallelToolCalls 配置字段，宿主是 DSHD_MAX_PARALLEL_TOOL_CALLS 环境变量 + Loop.MaxParallelToolCalls 字段（1 = 逐字节退回串行）。",
    "evidence": [
-    "internal/agent/loop.go:391 `for _, call := range resp.ToolCalls { msg, stop := l.runTool2(...) }`",
-    "全仓 grep 'maxParallelToolCalls' 在 cmd/ internal/ modules/ 0 命中",
-    "grep -rn 'Parallel' 只命中 internal/kernel/eventbus.go:138（事件总线，与工具执行无关）"
+    "internal/agent/parallel.go:45 `const EnvMaxParallelToolCalls = \"DSHD_MAX_PARALLEL_TOOL_CALLS\"`",
+    "internal/agent/parallel.go:67 `func MaxParallelToolCalls(getenv func(string) string) int`",
+    "internal/agent/parallel_test.go 4×200ms：默认 0.21s / 上限 2 0.41s / 上限 1 0.81s",
+    "tmp/GO6-PARAMS/verify/logs/probe-parallel.log 独立计时：serial(env=1)=802ms limit2(env=2)=401ms default=200ms"
    ],
    "triageDomain": "agent-loop",
-   "gap": "缺并行工具执行（N 路并发 + 结果按 call 顺序回填）。降级：串行，N 个工具调用的墙钟 = 各自耗时之和；多工具步（并行读文件/多路搜）明显变慢。替代路径：modules/tool/workflow 可把多步写成 JSON 步骤表一次往返，但仍是串行。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "agent.MaxParallelToolCalls（internal/agent/parallel.go:67 解析 / :87 Loop 字段优先），执行点 runToolBatch/executeToolCalls（internal/agent/parallel.go:198/268）",
+   "note": "语义边界：同批工具之间的顺序依赖不再成立（官方 10 路本就如此）；DSHD_MAX_PARALLEL_TOOL_CALLS=1 可回退串行（事件形状也从 call,call,result,result 回到 call,result,call,result）。"
   },
   {
    "key": "agentLoop.stepsPerTurn",
@@ -5130,16 +5132,18 @@
    "domain": "agent-loop",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-bash-local/lib/index.js:29",
    "officialDefault": 3000,
-   "status": "UNREAD-GAP",
-   "reason": "宿主停止 bash 任务是一次性终止 Job Object（LimitFlags=KILL_ON_JOB_CLOSE，Service.Stop），没有“先请求退出、等 3s 宽限、再强杀”的升级链。",
+   "status": "COVERED-EQUIV",
+   "reason": "宿主停止 bash 任务改成「投递宽限终止请求 → 等 3000ms → 仍存活才 TerminateJobObject」，结局（宽限内退出 / 强杀 / 投递方式 / 实际等待）结构化可查。名字不同：官方 bash.graceMs，宿主 DSHD_BASH_GRACE_MS + Options.GraceBudget。",
    "evidence": [
-    "modules/exec/bash/process_windows.go:17/61 `jobObjectLimitKillOnJobClose = 0x00002000` → `info.BasicLimitInformation.LimitFlags = jobObjectLimitKillOnJobClose`",
-    "modules/exec/bash/service.go:270-271 `func (s *Service) Kill(id string) error { return s.Stop(id) }`（Stop 直接终止进程树）",
-    "grep -rn 'graceMs' --include=*.go modules/exec/bash 0 命中"
+    "modules/exec/bash/tools.go:19 `const envGraceMS = \"DSHD_BASH_GRACE_MS\"`，:45 `func (o Options) grace()`（默认 DefaultGrace=3s）",
+    "modules/exec/bash/process.go:129 `func (c *processControl) stopWithGrace(grace time.Duration, exited <-chan struct{}) (StopOutcome, error)`",
+    "modules/exec/bash/service.go:301 `func (s *Service) StopOutcome(id string) (StopOutcome, bool)`",
+    "tmp/GO6-PARAMS/verify/logs/probe-grace.log 真实进程：grace=3s delivery=ctrl-break graceful=true，Stop 24ms 返回"
    ],
    "triageDomain": "agent-loop",
-   "gap": "缺“优雅终止 → 宽限 → 强杀”的升级链。降级：Stop/Kill 立刻终止整棵进程树，子进程来不及收尾（写盘、清理临时文件、上报退出码）。替代路径：命令自己 trap SIGTERM 也没用（Job Object 直接 Terminate）。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "bash.Options.GraceBudget / envGraceMS（modules/exec/bash/tools.go:19/:45）、processControl.stopWithGrace（modules/exec/bash/process.go:129）、Service.StopOutcome（modules/exec/bash/service.go:301）",
+   "note": "平台边界：MSYS bash 不跑 trap，CTRL_BREAK 会直接结束 bash（T3 RESULT §5.2），所以对 bash 会话宽限层是「快速但非强杀」；「宽限用完 → 强杀」由 TestStopChainEscalatesAfterGrace 覆盖（本任务已重跑，logs/test-bashchain.log）。"
   },
   {
    "key": "pwsh.timeoutMs",
@@ -5233,32 +5237,34 @@
    "domain": "agent-loop",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-tool-web/lib/index.js:882",
    "officialDefault": 800,
-   "status": "UNREAD-GAP",
-   "reason": "官方把 provider 摘要钳到 800 字符；宿主 web_search 的 summary 只做“命中 N 条来源/有摘要答案”的短句拼装，provider 摘要正文没有字符上限——既没有该参数，也没有等价的截断点。",
+   "status": "COVERED-EQUIV",
+   "reason": "web_search 的每条来源摘要现在钳到 800 字符（省略号算在上限里），先合并空白；DSHD_WEB_SEARCH_SUMMARY_MAX_CHARS 可覆盖。旧实现是宿主自造的 240 rune，且环境变量完全无效。",
    "evidence": [
-    "modules/tool/websearch/websearch.go:108-111 `summary := fmt.Sprintf(\"命中 %d 条来源\", len(result.Sources))`（只拼短句，不截断 provider 摘要）",
-    "modules/tool/websearch/websearch.go:232 `excerpt := source.Summary` / :236+ `oneLine(excerpt)`（只压成一行，无 800 字符钳制）",
-    "grep -rn 'summaryMaxChars' --include=*.go modules internal 0 命中"
+    "modules/tool/websearch/websearch.go:106 `func (t *Tool) summaryMaxChars() int`（默认 defaultSummaryMaxChars=800）",
+    "modules/tool/websearch/websearch.go:375 `func capSummary(s string, maxChars int) string`（省略号算在上限内）",
+    "tmp/GO6-PARAMS/verify/logs/probe-search.log 探针：2000 字符摘要 → 790 字符在、801 不在、以 … 收尾"
    ],
    "triageDomain": "agent-loop",
-   "gap": "缺 provider 摘要的字符上限。降级：摘要原样进结果，长摘要由外层 tools.Pipeline 的 4000 字符 spill 兜底（比官方 800 宽 5 倍）。替代路径：外层 spill 会外置全文并留指针。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "websearch.Tool.summaryMaxChars（modules/tool/websearch/websearch.go:106）+ capSummary（:375）",
+   "note": "snippet 只合并空白、不截断（官方语义：卡片里保留原片段）。"
   },
   {
    "key": "tool.web.searchTimeoutMs",
    "domain": "agent-loop",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-tool-web/lib/index.js:884 | app.asar:dsh/node_modules/@deepseek-ai/dsh-base/cordis.patch.yml:490",
    "officialDefault": 30000,
-   "status": "UNREAD-GAP",
-   "reason": "宿主 web_search 把 ctx 直接透传给 provider，没有自己的 30s 协作预算（也没有“基础包覆盖成 60s”那层），超时完全由外层工具超时决定。",
+   "status": "COVERED-EQUIV",
+   "reason": "web_search 现在有自己的协作预算：默认 30s、基础包 provider（deepseek-official）60s、DSHD_WEB_SEARCH_TIMEOUT_MS 覆盖；超时返回 WEB_SEARCH_TIMEOUT + 可执行 Hint。provider 不守 ctx 也会按时返回（收集端 select ctx.Done）。",
    "evidence": [
-    "modules/tool/websearch/websearch.go:104-110 直接 `runSearchQueries(ctx, ...)`，无 context.WithTimeout",
-    "modules/tool/webfetch/provider.go:46 有 defaultProviderTimeout=30s，但 websearch 侧没有对应常量",
-    "grep -rn 'searchTimeoutMs' --include=*.go modules internal 0 命中"
+    "modules/tool/websearch/websearch.go:91 `func (t *Tool) searchBudget(providerID string) time.Duration`",
+    "internal/spi/search.go:65 `WebSearchTimeout = \"WEB_SEARCH_TIMEOUT\"`",
+    "tmp/GO6-PARAMS/verify/logs/probe-search.log 探针：provider 睡 5s + 预算 1s → 1s 返回 WEB_SEARCH_TIMEOUT"
    ],
    "triageDomain": "agent-loop",
-   "gap": "缺 web_search 自己的超时预算。降级：依赖调用方 ctx / 工具框架超时，provider 挂住时会一直等到外层超时。替代路径：无（webfetch 侧有 30s 默认，可参照移植）。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "websearch.Tool.searchBudget（modules/tool/websearch/websearch.go:91）+ spi.WebSearchTimeout（internal/spi/search.go:65）",
+   "note": "错误码与 WEB_ABORTED 分开：预算是工具层的决定，取消是调用方的决定，模型下一步不同。"
   },
   {
    "key": "tool.web.fetchTimeoutMs",
@@ -5453,16 +5459,17 @@
     "maxTokens",
     "stop"
    ],
-   "status": "UNREAD-GAP",
-   "reason": "官方每请求采样面恰好 4 个字段（reasoningEffort / temperature / maxTokens / stop，且明确没有 top_p/top_k）；宿主只实现 2 个——reasoning_effort 与 max_tokens 有落点，temperature 与 stop 在宿主全树 0 命中。",
+   "status": "COVERED-EQUIV",
+   "reason": "官方这一组就是每请求采样控制（reasoningEffort/temperature/maxTokens/stop）。宿主四条齐：Reasoning/MaxTokens 原有，temperature 与 stop 本轮补齐并显式转发；没有 top_p（官方也没有）。",
    "evidence": [
-    "cmd/dshd/main.go:613 `reasoningEffort := fs.String(\"reasoning\", os.Getenv(\"DSHD_REASONING_EFFORT\"), ...)` → :1011 `Reasoning: *reasoningEffort`",
-    "internal/agent/loop.go:315-317 `MaxTokens: capacity.MaxOutput` + `Reasoning: l.Reasoning`（只有这两个采样字段）",
-    "grep -rn 'temperature' --include=*.go cmd internal modules 0 命中；grep -rn 'stop_sequences|StopSequences' 在 llm 请求面无命中"
+    "internal/llm/types.go:183/:186 两个采样字段",
+    "cmd/dshd/env_llm.go:50 samplingFromEnv（run/acp/serve/子代理同一份解析）",
+    "tmp/GO6-PARAMS/verify/logs/probe-wire.log（默认不漂移 + 显式值逐字发出）"
    ],
    "triageDomain": "llm",
-   "gap": "缺 temperature 与 stop 两个采样参数（也无法透传到 wire）。降级：请求体不带 temperature / stop，模型只能用服务端默认温度，也没法用停用词截断输出。替代路径：无（只能靠提示词约束）。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "internal/llm/types.go:183/:186（Temperature/Stop）+ :176 Reasoning + :180 MaxTokens；转发在 internal/llm/compat.go",
+   "note": "宿主没有 top_p（官方每请求采样面里也没有这一项）；采样面的会话级覆盖未做。"
   },
   {
    "key": "llm.callConfig.routing",
@@ -5507,32 +5514,34 @@
    "domain": "llm",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js:1736",
    "officialDefault": null,
-   "status": "UNREAD-GAP",
-   "reason": "官方可选项（显式设置才转发给 adapter）；宿主完全没有 temperature 概念：llm.Request 没有该字段，wire 也不发，全树 0 命中。",
+   "status": "COVERED-EQUIV",
+   "reason": "llm.Request 现在有 Temperature *float64，显式设置才发（连 0 也发：确定性复现要靠它）；run/acp/serve/子代理四个入口共用 DSHD_LLM_TEMPERATURE 解析，非法/NaN/Inf fail-loud。",
    "evidence": [
-    "grep -rn 'temperature' --include=*.go cmd internal modules codecs 0 命中",
-    "internal/llm/types.go Request 结构无 Temperature 字段",
-    "internal/llm/provider.go:75-80 openAICompletionsAdapter.OptionalFields() 白名单里没有 temperature"
+    "internal/llm/types.go:183 `Temperature *float64 `json:\"temperature,omitempty\"``",
+    "cmd/dshd/env_llm.go:34 `llmTemperatureEnv = \"DSHD_LLM_TEMPERATURE\"`，:50 `func samplingFromEnv(...)`",
+    "tmp/GO6-PARAMS/verify/logs/probe-wire.log：默认报文无 temperature 键；0.2 逐字发出；0 也发出"
    ],
    "triageDomain": "llm",
-   "gap": "缺 temperature 透传。降级：所有请求使用服务端默认温度，无法做确定性（temperature=0）复现，也无法调创造性。替代路径：无。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "llm.Request.Temperature（internal/llm/types.go:183）+ wire 转发（internal/llm/compat.go）+ cmd/dshd/env_llm.go:50 samplingFromEnv（env 名 env_llm.go:34）",
+   "note": "官方是每请求 call-config 字段，宿主用环境变量给（会话级覆盖属 Transport 契约，未做）。"
   },
   {
    "key": "llm.stop",
    "domain": "llm",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-llm/lib/types/call-config.js:25",
    "officialDefault": null,
-   "status": "UNREAD-GAP",
-   "reason": "官方可选项 stop 序列（转发给 adapter）；宿主请求面没有 stop/stop_sequences 字段，wire 不发。",
+   "status": "COVERED-EQUIV",
+   "reason": "llm.Request 现在有 Stop []string，非空才发、按给定顺序原样发出；DSHD_LLM_STOP 逗号分隔并可写 \\n/\\r/\\t 转义（否则单行环境变量表达不出最常用的换行停用词）。",
    "evidence": [
-    "grep -rn 'stop_sequences' --include=*.go cmd internal modules codecs 0 命中",
-    "internal/llm/provider.go:75-80 adapter 的 OptionalFields 白名单（tools / stream_options / max_tokens / max_completion_tokens / reasoning_effort）无 stop",
-    "internal/llm/types.go Request 结构无 Stop 字段"
+    "internal/llm/types.go:186 `Stop []string `json:\"stop,omitempty\"``",
+    "cmd/dshd/env_llm.go:36 `llmStopEnv = \"DSHD_LLM_STOP\"`",
+    "tmp/GO6-PARAMS/verify/logs/probe-wire.log：stop=[\"\\n\\n\",\"STOP\"] 逐字出现在 wire"
    ],
    "triageDomain": "llm",
-   "gap": "缺 stop 序列。降级：只能靠提示词或客户端截断，模型可能继续说；结构化输出场景少了一道硬闸。替代路径：无。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "llm.Request.Stop（internal/llm/types.go:186）+ cmd/dshd/env_llm.go:36/:50",
+   "note": "空切片不发空数组（strict 网关会 400）。"
   },
   {
    "key": "llm.streaming",
@@ -5642,16 +5651,18 @@
    "domain": "llm",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js:36",
    "officialDefault": 300000,
-   "status": "UNREAD-GAP",
-   "reason": "官方给“流读取挂住”300000ms 的 idle 看门狗；宿主 Client 的 http.Client Timeout 显式设为 0（不设整体超时），也没有空闲看门狗，只靠调用方 ctx 兜底。",
+   "status": "COVERED-EQUIV",
+   "reason": "流空闲看门狗：默认 300000ms，每读到数据就重置，超时关流并返回 LLM_STREAM_IDLE_TIMEOUT 四字段错误；DSHD_LLM_STREAM_IDLE_TIMEOUT_MS 覆盖。旧实现 http.Client.Timeout=0、没有任何空闲计时，半开连接会永远挂住。",
    "evidence": [
-    "internal/llm/client.go:53 `HTTP: &http.Client{Timeout: 0, Transport: http.DefaultTransport}`",
-    "grep -rn 'IdleTimeout|idleTimeout|idle_timeout' --include=*.go internal/llm cmd/dshd 0 命中",
-    "internal/llm/client.go:460 `return context.WithTimeout(ctx, d)` 只用于显式 deadline 的辅助路径"
+    "internal/llm/stream_idle.go:40 `DefaultStreamIdleTimeout = 300 * time.Second`",
+    "internal/llm/stream_idle.go:100 `func streamIdleTimeoutFromEnv(env func(string) string) (time.Duration, error)`",
+    "internal/llm/client.go:114 `idleTimeout, err := streamIdleTimeoutFromEnv(os.Getenv)`；:283 `newIdleWatchdog(...)`",
+    "tmp/GO6-PARAMS/verify/logs/probe-idle.log：单格后挂住的流 254ms 返回，code=LLM_STREAM_IDLE_TIMEOUT"
    ],
    "triageDomain": "llm",
-   "gap": "缺流空闲看门狗（300s 无数据即判失败）。降级：上游半开连接时请求会一直挂着，直到调用方 ctx/工具超时；期间界面停在“正在生成”。替代路径：外层 tools timeout-policy 的 per-call 预算（DSHD_TOOL_TIMEOUT_SECS）。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "llm.DefaultStreamIdleTimeout（internal/llm/stream_idle.go:40）、streamIdleTimeoutFromEnv（:100）、接线 internal/llm/client.go:114/:283（newIdleWatchdog）",
+   "note": "per-provider 细分未做（宿主只有一条 llm 通道，取官方 deepseek/piAi 两档里更严的 300s）。"
   },
   {
    "key": "llm.deepseek.modelsTimeoutMs",
@@ -5673,15 +5684,18 @@
    "domain": "llm",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js:2755",
    "officialDefault": 600000,
-   "status": "UNREAD-GAP",
-   "reason": "官方给模型列表 600000ms 的缓存 TTL；宿主每次 discoverModels 都发真实请求，没有缓存层，因此没有该参数。",
+   "status": "COVERED-EQUIV",
+   "reason": "模型列表进程级 TTL 缓存：默认 600000ms，0 = 不缓存；按「端点 + 凭据 sha256」隔离；失败不缓存、空列表保留上一份（官方语义）；DSHD_LLM_MODELS_MAX_AGE_MS 覆盖。",
    "evidence": [
-    "grep -rn 'ModelsMaxAge|modelsMaxAge|modelsTTL|ModelsCache' --include=*.go cmd internal 0 命中",
-    "cmd/dshd/serve_account_api.go:336-378 discoverModels 每次都 `client.DiscoverModels(ctx)`（无缓存读取）"
+    "internal/llm/discover_cache.go:40 `modelsMaxAgeEnv = \"DSHD_LLM_MODELS_MAX_AGE_MS\"`",
+    "internal/llm/discover_cache.go:48 `func modelsMaxAgeFromEnv(...)`",
+    "internal/llm/discover_cache.go:95/:113 缓存读写",
+    "go test ./internal/llm -run 'TestDiscoverModels|TestModelsMaxAgeDefaultIsOfficial600s' → ok（tmp/GO6-PARAMS/verify/logs/test-llm.log）"
    ],
    "triageDomain": "llm",
-   "gap": "缺模型列表缓存与 TTL。降级：每次列模型都打一次上游 /models，频繁刷新会放大延迟与限流风险。替代路径：调用方自行缓存结果。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "internal/llm/discover_cache.go:48 modelsMaxAgeFromEnv、:95 cachedDiscoveredModels、:113 rememberDiscoveredModels（env 名 :40）",
+   "note": "进程级缓存（不是 per-client）：真实调用点大量是 llm.New(...).DiscoverModels(...)，挂在 Client 上一次都命中不了。"
   },
   {
    "key": "llm.deepseek.maxRequestFilesBytes",
@@ -5850,7 +5864,8 @@
    ],
    "triageDomain": "llm",
    "gap": "缺 per-provider 流空闲超时。降级：挂住的流只能等外层 ctx 取消；与 llm.deepseek.streamIdleTimeoutMs 同一缺口。替代路径：无。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。",
+   "note": "GO.6/T1 之后：挂死缺口已关闭（全局流空闲看门狗默认 300000ms，与官方 piAi 默认同值，DSHD_LLM_STREAM_IDLE_TIMEOUT_MS 可覆盖，见 internal/llm/stream_idle.go:40/:100）。仍缺的是**per-provider 细分**（宿主只有一条 llm 通道），故 status 保持 UNREAD-GAP。"
   },
   {
    "key": "llm.piAi.providers",
@@ -5916,16 +5931,18 @@
    "domain": "llm",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js:2128",
    "officialDefault": "must be an integer > 0, else INVALID_MODEL_CONTEXT",
-   "status": "UNREAD-GAP",
-   "reason": "官方要求 contextWindow 必须是正整数，否则报 INVALID_MODEL_CONTEXT；宿主对 <=0 静默当作“未声明”并回退默认容量，没有该错误码，配置写错会被吞掉。",
+   "status": "COVERED-EQUIV",
+   "reason": "contextWindow 声明非法（负值）现在 fail-closed：错误码 INVALID_MODEL_CONTEXT，Loop.Run 在任何模型请求之前返回，--context-window 也在启动参数校验阶段拒绝。官方要求「整数 > 0」，宿主 0 表示「未声明」是既有契约（--context-window 0 = 按模型容量解析；目录面写 0 在读盘时就被拒）。",
    "evidence": [
-    "internal/llm/capacity.go:96-103 `if declared.ContextWindow > 0 { ... }`（<=0 静默忽略，无错误）",
-    "grep -rn 'INVALID_MODEL_CONTEXT|invalid_model_context' --include=*.go cmd internal 0 命中",
-    "internal/llm/capacity.go:11-16 注释“零值字段表示调用方没有显式声明该字段”"
+    "internal/llm/capacity.go:80 `const ErrorCodeInvalidModelContext = \"INVALID_MODEL_CONTEXT\"`",
+    "internal/llm/capacity.go:126 `func ValidateDeclaredContextWindow(modelID string, contextWindow int) error`",
+    "internal/agent/loop.go:285 `capacity, err := llm.ResolveModelCapacityChecked(l.Model, l.Capacity)`",
+    "go test ./internal/agent -run TestLoopRejectsInvalidDeclaredContextWindow → PASS（T1 先红后绿）"
    ],
    "triageDomain": "llm",
-   "gap": "缺 modelInfo 的 contextWindow 校验错误码。降级：非法值（0/负数）被当成未声明，回退内置默认，用户看不到“你写错了”。替代路径：无。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "internal/llm/capacity.go:80 错误码 / :126 ValidateDeclaredContextWindow / :135 ResolveModelCapacityChecked；消费点 internal/agent/loop.go:285",
+   "note": "与官方的唯一差异：0 仍然等同「未声明」（不报错），因为 --context-window 0 是既有契约、serve→run 每次透传 0；负值已按官方码 fail-loud。"
   },
   {
    "key": "llm.modelDiscovery.namespaceRequired",
@@ -6102,48 +6119,52 @@
    "domain": "context",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js:82",
    "officialDefault": 1,
-   "status": "UNREAD-GAP",
-   "reason": "官方对摘要收敛给 1 次重试；宿主 Summarize 是一次性调用，失败即整次压缩失败（没有重试）。",
+   "status": "COVERED-EQUIV",
+   "reason": "摘要失败按 DSHD_COMPACT_RETRIES（默认 1）重试；压完仍高于阈值时再压一次（官方 compactionRetries 语义），而不是「压过一次就算交差」。非法 env 回落默认，负数不当无限重试。",
    "evidence": [
-    "grep -rn 'retry\\|Retry' internal/compact/compact.go 0 命中",
-    "internal/compact/compact.go:120-140 Summarize 单次 chat.Stream 调用",
-    "cmd/dshd/acp.go:1170-1200 autoCompactNow 失败直接返回错误"
+    "internal/compact/retry.go:24 `EnvCompactRetries = \"DSHD_COMPACT_RETRIES\"`",
+    "internal/compact/retry.go:76 `func SummarizeWithRetry(...)`",
+    "cmd/dshd/acp.go:1317 `compact.SummarizeWithRetry(ctx, r.compactChatFor(), r.model, items, r.retry)`",
+    "tmp/GO6-PARAMS/verify/logs/probe-retry.log：首发 502 + Retries=2 → 2 次调用成功；Retries=0 → 1 次即失败"
    ],
    "triageDomain": "context",
-   "gap": "缺摘要收敛重试。降级：摘要调用抖动（429/空响应）时整次压缩失败，本轮无法腾出空间。替代路径：靠 llm 层重试（internal/llm/retry.go）兜住一部分瞬时错误。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "internal/compact/retry.go:24 EnvCompactRetries / :51 解析 / :76 SummarizeWithRetry；消费点 cmd/dshd/acp.go:1317",
+   "note": "官方是 agent config 字段，宿主用环境变量；策略对象在 internal/compact（可被 ACP 与 run 共用）。"
   },
   {
    "key": "context.compaction.maxOverflowRetries",
    "domain": "context",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js:83",
    "officialDefault": 1,
-   "status": "UNREAD-GAP",
-   "reason": "官方在“溢出类停止”后重试 1 次；宿主没有 overflow 分类与重试（只有 gateway/uplink-overflow 那个无关的传输错误码）。",
+   "status": "COVERED-EQUIV",
+   "reason": "溢出（IsContextOverflow 分类：provider 文案 / 400·413·422 状态码）后按 DSHD_COMPACT_OVERFLOW_RETRIES（默认 1）强制压缩并重放这一轮；非溢出错误一律不重试（401/404 重试只会掩盖真实原因）。",
    "evidence": [
-    "grep -rn 'overflow' --include=*.go cmd internal 只命中 internal/officialwire/codes.go:25 CodeUplinkOverflow（上行流溢出，与压缩无关）",
-    "internal/compact/compact.go 无 overflow 分支",
-    "cmd/dshd/acp.go:1190-1200 无溢出重试"
+    "internal/compact/retry.go:26 `EnvCompactOverflowRetries = \"DSHD_COMPACT_OVERFLOW_RETRIES\"`",
+    "internal/compact/retry.go:130 `func IsContextOverflow(err error) bool`",
+    "cmd/dshd/acp.go:501 `for attempt := 0; err != nil && attempt < r.retry.OverflowRetries && compact.IsContextOverflow(err); attempt++`"
    ],
    "triageDomain": "context",
-   "gap": "缺溢出后重试。降级：上游返回上下文溢出时这一轮直接失败，需要用户重发。替代路径：无。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "internal/compact/retry.go:26 EnvCompactOverflowRetries / :52 / :130 IsContextOverflow；消费点 cmd/dshd/acp.go:501",
+   "note": "只接了 ACP/serve 路径（GUI 产品走的那条）；dshd run 的溢出恢复未做（T2 RESULT §6.2 已登记）。"
   },
   {
    "key": "context.compaction.reservedCompletionTokens",
    "domain": "context",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js:757",
    "officialDefault": "header.config.maxTokens ?? adapter defaultMaxTokens ?? 0",
-   "status": "UNREAD-GAP",
-   "reason": "官方先按 header.config.maxTokens ?? adapter defaultMaxTokens 预留完成 token 再算压力预算；宿主压缩只看 surface 估算，不扣预留输出。",
+   "status": "COVERED-EQUIV",
+   "reason": "压缩阈值改按官方公式 floor(min(W×0.8, W−O−B)) 算，其中 O = header.maxTokens ?? adapter defaultMaxTokens；再与宿主既有绝对阈值 --auto-compact 取小。默认行为一字不变，只有小窗口/大预留时官方口径才咬合。",
    "evidence": [
-    "grep -rn 'reservedCompletion' --include=*.go cmd internal 0 命中",
-    "cmd/dshd/acp.go:1190 只比 m.Estimate(surface) 与 autoCompact",
-    "internal/compact/compact.go:52-66 keepFrom 按 KeepTokens 累计，无输出预留"
+    "internal/compact/budget.go:32 `func ReservedCompletionTokens(headerMaxTokens *int, adapterDefault int) int`",
+    "internal/compact/budget.go:109 `func HostThreshold(absoluteTokens int, b PressureBudget) int`",
+    "cmd/dshd/acp.go:1283 `func (r *acpRunner) compactThreshold() int`"
    ],
    "triageDomain": "context",
-   "gap": "缺完成 token 预留。降级：压缩阈值不扣除 max_tokens，长输出场景仍可能溢出。替代路径：无（可把 auto-compact 调小近似）。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "internal/compact/budget.go:32 ReservedCompletionTokens / :109 HostThreshold；消费点 cmd/dshd/acp.go:1283 compactThreshold",
+   "note": "headroomTokens（官方 65536）仍未接线（缺口条目保持 UNREAD-GAP）：PressureBudget.HeadroomTokens 字段在，宿主动默认 0。"
   },
   {
    "key": "context.compaction.modelPolicies",
@@ -6166,32 +6187,34 @@
    "domain": "context",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-token-meter/lib/types/usage-projection.js:58",
    "officialDefault": "usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens (prompt side only, no output)",
-   "status": "UNREAD-GAP",
-   "reason": "官方 pressureTokens = inputTokens + cacheReadTokens + cacheWriteTokens（只看 prompt 侧）；宿主的 context.usage `used` 直接取最近 assistant 的 totalTokens（含输出），口径不同。",
+   "status": "COVERED-EQUIV",
+   "reason": "context.usage 现在发 pressureTokens = 未命中输入 + cacheRead + cacheWrite（只看 prompt 侧，不含输出），与官方 usage-projection 的 pressureFrom 同口径；used 仍保留最近一次 totalTokens 做向后兼容。",
    "evidence": [
-    "cmd/dshd/context_usage.go:78 `used, err := nonNegativeMeasured(last.TotalTokens, \"totalTokens\")`",
-    "cmd/dshd/context_usage.go:81-83 `// input/output 若存在必须合法，但它们是 API 计费方向，不是 full 的 context contributors`",
-    "grep -rn 'pressureTokens' --include=*.go cmd internal 0 命中"
+    "internal/session/usage_projection.go:133 `func ProjectContext(events []v4.Event) (ContextProjection, error)`",
+    "cmd/dshd/context_usage.go:119 `result.PressureTokens = projection.PressureTokens`",
+    "tmp/GO6-PARAMS/verify/logs/probe-project.log：input=200 + cacheRead=800 + cacheWrite=100 → pressure=1100（输出 70 不算）"
    ],
    "triageDomain": "context",
-   "gap": "缺 prompt 侧压力口径（input + cacheRead + cacheWrite）。降级：界面显示的已用量包含输出 token，比真实占用偏大；与官方 pressureTokens 不可比。替代路径：无。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "internal/session/usage_projection.go:133 ProjectContext / :51 PressureTokens；wire cmd/dshd/context_usage.go:119",
+   "note": "used（totalTokens）与 pressure 不可互推：used = pressure + output（缓存读写已在 pressure 里）。"
   },
   {
    "key": "context.measurement.projectedTokens",
    "domain": "context",
    "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-token-meter/lib/types/usage-projection.js:185",
    "officialDefault": "max(0, pressureTokens + surfaceTokens - sampledSurfaceTokens)",
-   "status": "UNREAD-GAP",
-   "reason": "官方 projectedTokens = max(0, pressure + surface - sampledSurface)，预测**下一次请求**的占用；宿主只回最近一次实测 usage，没有投影/采样扣减，也没有 surface 估算。",
+   "status": "COVERED-EQUIV",
+   "reason": "projectedTokens = max(0, pressure + surface − sampledSurface)，预测**下一次请求**的占用；同一份 events 只读派生（O(n)，不写盘）。这是「用户刚敲新消息 / 工具结果刚灌入」时唯一有用的读数。",
    "evidence": [
-    "grep -rn 'projectedTokens\\|ProjectedTokens' --include=*.go cmd internal 0 命中",
-    "cmd/dshd/context_usage.go:15-16 注释“只投影最近一次 assistant 同时代的真实记录。读路径不重拼提示”",
-    "internal/transport/context_mcp_sidequery.go:28-36 ContextUsageView 只有 used/max/categories/sections（无 projected）"
+    "internal/session/usage_projection.go:174 `out.ProjectedTokens = out.PressureTokens + out.SurfaceTokens - out.SampledSurfaceTokens`",
+    "cmd/dshd/context_usage.go:120 `result.ProjectedTokens = projection.ProjectedTokens`",
+    "tmp/GO6-PARAMS/verify/logs/probe-project.log：追加一条用户消息后 pressure 不变（1100）、projected 1105 → 1120"
    ],
    "triageDomain": "context",
-   "gap": "缺 projectedTokens 投影（下一次请求的占用预测）。降级：界面只能显示“上一次真实用量”，看不到“下一条消息会占多少”，压缩时机只能靠固定阈值。替代路径：无。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "internal/session/usage_projection.go:174 计算 / :53 字段；wire cmd/dshd/context_usage.go:120",
+   "note": "采样在 assistant/message 加入 surface **之前**打点（官方注释同款），所以 projected 的增量正好是这次回答自身的正文。"
   },
   {
    "key": "context.measurement.usageBuckets",
@@ -6203,16 +6226,18 @@
     "cacheReadTokens",
     "cacheWriteTokens"
    ],
-   "status": "UNREAD-GAP",
-   "reason": "官方投影分四个桶（uncachedInputTokens / outputTokens / cacheReadTokens / cacheWriteTokens）；宿主只有 inputTokens / outputTokens / totalTokens / cacheReadTokens 四个键，缺 uncachedInputTokens 与 cacheWriteTokens。",
+   "status": "COVERED-EQUIV",
+   "reason": "四桶齐：uncachedInputTokens / outputTokens / cacheReadTokens / cacheWriteTokens；旧会话只有 totalTokens 时按 total 兜底进未命中输入桶。",
    "evidence": [
-    "internal/transport/api.go:366 `CacheReadTokens int `json:\"cacheReadTokens,omitempty\"``",
-    "cmd/dshd/context_usage.go:32-37 `type v4LastUsage struct { InputTokens; OutputTokens; TotalTokens }`（无 cacheWrite/uncached）",
-    "grep -rn 'uncachedInputTokens\\|cacheWriteTokens' --include=*.go internal 0 命中"
+    "internal/session/usage_projection.go:26 `type UsageBuckets struct`",
+    "internal/session/usage_projection.go:152 `out.PressureTokens = out.Buckets.PromptTokens()`",
+    "cmd/dshd/context_usage.go:121 `result.UsageBuckets = &transport.ContextUsageBuckets{`",
+    "tmp/GO6-PARAMS/verify/logs/probe-project.log：uncachedInput=200 output=70 cacheRead=800 cacheWrite=100"
    ],
    "triageDomain": "context",
-   "gap": "缺 uncachedInputTokens 与 cacheWriteTokens 两个桶。降级：缓存写入量与“未命中缓存的输入”在界面不可见，缓存命中率只能算一半。替代路径：internal/llm/usage_cache.go 已有 cacheWritePaths 解析（叶子路径在），只是没进投影。",
-   "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "internal/session/usage_projection.go:26 UsageBuckets / :152 PromptTokens；wire cmd/dshd/context_usage.go:121",
+   "note": "wire 上四桶 omitempty：没有实测锚点时整体缺席（不把未知写成 0，官方 placeholderPolicy=null 同义）。"
   },
   {
    "key": "context.measurement.cacheCountsAreOptional",
@@ -9493,7 +9518,8 @@
    ],
    "triageDomain": "live-profile-desktop",
    "gap": "缺 per-provider 流空闲超时（600s）。降级：上游半开连接时请求一直挂着，直到调用方 ctx 或工具超时。替代路径：外层工具超时兜底。",
-   "legacyNote": "桌面壳 / Electron profile 面，headless Go 宿主不承担。"
+   "legacyNote": "桌面壳 / Electron profile 面，headless Go 宿主不承担。",
+   "note": "GO.6/T1 之后：挂死缺口已关闭（全局看门狗默认 300s；要复现 profile 的 600s 设 DSHD_LLM_STREAM_IDLE_TIMEOUT_MS=600000）。仍缺 per-provider 细分与 profile 直读，故 status 保持 UNREAD-GAP。"
   },
   {
    "key": "subagent.maxDepth",
@@ -9563,16 +9589,16 @@
    "domain": "live-profile-desktop",
    "officialSource": "D:/DeepSeek Harness/home/profiles/desktop/cordis.patch.yml:274",
    "officialDefault": 60000,
-   "status": "UNREAD-GAP",
-   "reason": "桌面 profile 给 web_search 60s 超时；宿主的 websearch 工具没有超时参数（搜索后端调用走调用方 ctx）。",
+   "status": "COVERED-EQUIV",
+   "reason": "桌面 profile 给 web_search 的 60000ms 与宿主基础包分支逐值相同：provider 是 deepseek-official 时预算就是 60s。",
    "evidence": [
-    "grep -rn \"searchTimeout\" --include=*.go modules/tool/websearch internal/spi 0 命中",
-    "modules/tool/websearch/websearch.go 无 timeout 字段",
-    "internal/spi/search.go:222-228 Search 只有 maxResults 参数"
+    "modules/tool/websearch/websearch.go:55 `baseBundleSearchBudget = 60 * time.Second`",
+    "modules/tool/websearch/websearch.go:101 `return baseBundleSearchBudget`"
    ],
    "triageDomain": "live-profile-desktop",
-   "gap": "缺 web_search 超时。降级：搜索挂住时只能等外层工具超时（默认更宽），单次慢查询会拖住整轮。替代路径：无。",
-   "legacyNote": "桌面壳 / Electron profile 面，headless Go 宿主不承担。"
+   "legacyNote": "GO.6 本轮补齐（T5 独立复验后改判）；差异写在 note 里。",
+   "hostEquivalent": "modules/tool/websearch/websearch.go:55 `baseBundleSearchBudget = 60 * time.Second`，判定在 :101（providerID == baseBundleSearchProvider）",
+   "note": "profile 里其他 provider 走官方默认 30s（websearch.go:51）；两者都可用 DSHD_WEB_SEARCH_TIMEOUT_MS 覆盖。"
   },
   {
    "key": "transcriptView",

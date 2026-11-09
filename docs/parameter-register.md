@@ -33,7 +33,7 @@
 - verdict 分布（entries）：`OK` 134 / `HARDCODED` 2 / `UNREAD` 5 / `DEVIATION-SAFETY` 1 / `N-A` 97
 - verdict 分布（CLI flags）：`OK` 22 / `HARDCODED` 0 / `UNREAD` 3 / `DEVIATION-SAFETY` 0 / `N-A` 73
 - 词表（`meta.verdictVocabulary`）与实际取值**完全一致**：`OK` / `HARDCODED` / `UNREAD` / `DEVIATION-SAFETY` / `N-A`
-- 官方 342 条的覆盖（逐条三分，见 §7）：`COVERED` 63 / `COVERED-EQUIV` 135 / `N-A` 31 / `UNREAD-GAP` 113 / `UNREAD` 0
+- 官方 342 条的覆盖（逐条三分，见 §7）：`COVERED` 63 / `COVERED-EQUIV` 152 / `N-A` 31 / `UNREAD-GAP` 96 / `UNREAD` 0
 - 已修条目按任务：`t10` 5 / `t12` 1 / `t2` 8 / `t3` 3 / `t5` 1 / `t7` 5 / `t8` 4 / `t9` 7
 
 ## 2. 修复记录（先红后绿）
@@ -324,15 +324,15 @@
 
 ## 7. 官方 342 条的覆盖情况（逐条三分：COVERED / COVERED-EQUIV / N-A / UNREAD-GAP）
 
-> 本节由 `tmp/GO3-PARAMS/register.json` 直接生成（生成器 `tmp/GO3-PARAMS/triage/gen_section7.py`）——行号取 t3 刷新后的真值；判定源是 `official-coverage-triage.json`（210 条）+ `triage/na-subclass/na-subclass.json`（71 条 N-A 补子类/改判），回写脚本 `register/apply_triage.py`（就地更新）。
+> 本节由 `docs/parameter-register.json` 直接生成（生成器 `tmp/GO6-PARAMS/verify/gen_section7_go6.py`，与 `tmp/GO3-PARAMS/triage/gen_section7.py` 同一套逻辑、只换了数据源与演进表）——行号取 **GO.6/T5 重锚后**的真值；判定源是 `official-coverage-triage.json`（210 条）+ `triage/na-subclass/na-subclass.json`（71 条 N-A 补子类/改判）+ **GO.6/T5 改判（17 条 UNREAD-GAP → COVERED-EQUIV）**。
 > 旧口径只有一个 `UNREAD` 大桶（210 条 note 全是同一句模板），不符合「逐条判定」；现在每条都有具体 verdict + 理由 + 宿主侧 file:line 证据。
 
 | status | 含义 | 条数 |
 |---|---|---|
-| `COVERED` | 宿主有同名/同义读取点 | 60 |
-| `COVERED-EQUIV` | 宿主有等价能力/参数，只是名字/形状不同（带 `hostEquivalent` file:line） | 139 |
-| `N-A` | 对无头宿主不适用（按子类分组，**每条都带 `naClass`**） | 30 |
-| `UNREAD-GAP` | 真能力缺口（缺什么 / 现在降级成什么样 / 替代路径） | 113 |
+| `COVERED` | 宿主有同名/同义读取点 | 63 |
+| `COVERED-EQUIV` | 宿主有等价能力/参数，只是名字/形状不同（带 `hostEquivalent` file:line） | 152 |
+| `N-A` | 对无头宿主不适用（按子类分组，**每条都带 `naClass`**） | 31 |
+| `UNREAD-GAP` | 真能力缺口（缺什么 / 现在降级成什么样 / 替代路径） | 96 |
 | **合计** | | **342** |
 
 **统计演进**
@@ -342,25 +342,26 @@
 | 判定前 | 61 | — | 71 | — | 210 |
 | t1 三分后 | 61 | 120 | 94（含 71 条无子类） | 67 | 0 |
 | t5 补子类后 | 60 | 139 | 30 | 113 | 0 |
+| GO.6 四族补齐后（T5 重锚） | 63 | 152 | 31 | 96 | 0 |
 
 按域分布：
 
 | 域 | 合计 | COVERED | COVERED-EQUIV | N-A | UNREAD-GAP |
 |---|---|---|---|---|---|
-| `agent-loop` | 65 | 17 | 30 | 6 | 12 |
-| `llm` | 34 | 2 | 22 | 1 | 9 |
-| `context` | 21 | 4 | 5 | 0 | 12 |
+| `agent-loop` | 65 | 17 | 34 | 6 | 8 |
+| `llm` | 34 | 2 | 28 | 1 | 3 |
+| `context` | 21 | 4 | 11 | 0 | 6 |
 | `session` | 37 | 6 | 16 | 4 | 11 |
 | `tools-sandbox-approval` | 35 | 7 | 14 | 1 | 13 |
 | `transport-http` | 24 | 4 | 12 | 1 | 7 |
 | `tui-capability` | 26 | 7 | 11 | 6 | 2 |
-| `env` | 15 | 0 | 10 | 4 | 1 |
-| `live-profile-desktop` | 24 | 10 | 7 | 3 | 4 |
+| `env` | 15 | 3 | 6 | 5 | 1 |
+| `live-profile-desktop` | 24 | 10 | 8 | 3 | 3 |
 | `schedule-plugins-account-telemetry` | 61 | 3 | 12 | 4 | 42 |
 
 ---
 
-### COVERED（60 条，宿主有同名/同义读取点）
+### COVERED（63 条，宿主有同名/同义读取点）
 
 - **agent-loop**（17）：`agentLoop.agents`、`agentLoop.agents[].provider`、`agentLoop.agents[].model`、`agentLoop.agents[].reasoningEffort`、`agentLoop.agents[].maxTokens`、`retry.mode`、`steering.steer`、`steering.inject`、`subagent.maxDepth`、`toolCallTimeoutPolicy.enforcement`、`timeout.maxTimerDelayMs`、`toolResult.prune.thresholdChars`、`bash.timeoutMs`、`pwsh.timeoutMs`、`tool.web.search`、`tool.web.fetch`、`tool.fsSearch.timeoutMs`
 - **llm**（2）：`llm.deepseek.models`、`llm.defaultModel`
@@ -369,23 +370,26 @@
 - **tools-sandbox-approval**（7）：`sandbox.modes`、`sandbox.mode`、`sandbox.workspaceRoot`、`approval.policy`、`permission.defaultPreset`、`skillFs.watch`、`terminal.scrollback`
 - **transport-http**（4）：`webserver.port`、`webserver.compression`、`sessionController.waitTimeoutMs`、`workspaceFiles.maxBytes`
 - **tui-capability**（7）：`context.occupancy.source`、`models.reasoningEffort`、`modes.agentPresets.default`、`modes.agentPreset.plugins`、`queue.placement`、`queue.actions`、`session.state`
+- **env**（3）：`DSH_TELEMETRY_OTLP_URL`、`DSH_MAX_TOKENS_AS_SUCCESS`、`DSH_PRODUCT_ANALYTICS_OTLP_URL`
 - **live-profile-desktop**（10）：`agentDefaultModel.provider`、`agentDefaultModel.model`、`agentDefaultModel.reasoningEffort`、`llmPiAi.providers.magpie.baseURL`、`llmPiAi.providers.magpie.models[0].contextWindow`、`llmPiAi.providers.magpie.models[0].maxTokens`、`llmPiAi.providers.magpie.models[1].contextWindow`、`llmPiAi.providers.magpie.models[1].maxTokens`、`subagent.maxDepth`、`permission.defaultPreset`
 - **schedule-plugins-account-telemetry**（3）：`analytics.enabled`、`telemetry.session.mode`、`hmr.root`
 
 ---
 
-### COVERED-EQUIV（139 条，宿主等价能力，名字/形状/数值不同）
+### COVERED-EQUIV（152 条，宿主等价能力，名字/形状/数值不同）
 
 > 每条都给了宿主侧读取点（`hostEquivalent`），可直接 `grep -n` 复核。
 
-#### agent-loop（30 条）
+#### agent-loop（34 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
 | `agentLoop.agents[].cwd` | spi.SubagentRequest.Cwd（modules/tool/subagent/subagent.go:24 schema / :42 字段 / :82 透传）→ cmd/dshd/subagent.go:72-95 解析并 chdir | subagent/subagent_fork 工具都暴露 cwd 入参，宿主在子代理执行期间进程级 chdir 到该目录（并用 subCwdMu 串行化），语义与官方一致。 |
 | `agentLoop.agents[].resumeSessionId` | --session 续会话（cmd/dshd/main.go:607 `resumeSession := fs.String("session", ...)` / :774 / :817）+ subagents.prompt 续问（cmd/dshd/serve_subagents_api.go:83 Deliver） | 宿主有两种续接：主会话用 --session 续已持久化会话（cwd 可省、按 id 全盘找），子代理用 subagents.prompt 往已 spawn 的 child 会话投递；合起来覆盖官方 resumeSessionId 的“续一个已存在会话而不是新建”。 |
 | `agentLoop.agents[].sessionId` | ChildRecord.ChildSessionID（internal/agent/child_session.go:51-56）+ subagents.prompt 的 (parentSessionId, childSessionId) 地址（cmd/dshd/serve_subagents_api.go:83） | 宿主用 childSessionId 表达“这是哪个子代理会话”，且是 durable 的（写进 v4 的 subagent/spawn 父子帧），续问时按 (parentSessionId, childSessionId) 认领；与官方 exact session identity 同一能力，只是 id 由宿主生成而非调用方给。 |
+| `agentLoop.maxParallelToolCalls` | agent.MaxParallelToolCalls（internal/agent/parallel.go:67 解析 / :87 Loop 字段优先），执行点 runToolBatch/executeToolCalls（internal/agent/parallel.go:198/268） | 宿主同一次模型响应里的 N 个 tool_call 现在按上限并发执行（默认 10 路，与官方一致）：固定 worker 池、结果与事件仍按模型顺序结算、审批类工具单独成一条互斥车道。名字不同：官方是 agentLoop.maxParallelToolCalls 配置字段，宿主是 DSHD_MAX_PARALLEL_TOOL_CALLS 环境变量 + Loop.MaxParallelToolCalls 字段（1 = 逐字节退回串行）。 |
 | `agentLoop.turnBudgetEnforcement` | agent.Loop.MaxSteps（internal/agent/loop.go:162 字段 / :234-240 maxSteps() / :274-275 超限报错） | 官方只提供扩展点（插件在 agent/turn-stopping 上取消），宿主把这件事做成了原生硬上限：Loop.MaxSteps 用满即报 turn 用满了 N 步，效果等价且不依赖插件钩子。 |
+| `bash.graceMs` | bash.Options.GraceBudget / envGraceMS（modules/exec/bash/tools.go:19/:45）、processControl.stopWithGrace（modules/exec/bash/process.go:129）、Service.StopOutcome（modules/exec/bash/service.go:301） | 宿主停止 bash 任务改成「投递宽限终止请求 → 等 3000ms → 仍存活才 TerminateJobObject」，结局（宽限内退出 / 强杀 / 投递方式 / 实际等待）结构化可查。名字不同：官方 bash.graceMs，宿主 DSHD_BASH_GRACE_MS + Options.GraceBudget。 |
 | `bash.maxOutputBytes` | modules/exec/bash/session.go:33 `maxRetainedJobOutput = 1024 * 1024` + modules/tools/pipeline.go:22-24 MaxChars=4000 + :525-575 spill | 宿主用两层有界：执行层保留窗口 1MiB（maxRetainedJobOutput）+ 工具层 spill 4000 字符截断并外置；官方 64000 字节内联上限在宿主是“更早的字符阈值 + 更大保留窗口”的组合。 |
 | `bash.maxSpillBytes` | modules/tools/pipeline.go:120-122 SpillDir 默认 `<temp>/dshd-spill` + :693 writeSpill / :547-556 Artifacts | 宿主把外置统一交给 tools.Pipeline.writeSpill（落 <temp>/dshd-spill 下的 artifact 并回指针），但没有 64MB 这个大小上限——能力在、上限缺席（记录在 reason，不额外记一次缺口）。 |
 | `bash.maxTimeoutMs` | modules/exec/bash/tools.go:26-31 `func (o Options) idle() time.Duration { ... return 10 * time.Minute }` + :74 schema `idle_seconds` maximum 900 | 宿主 bash 工具没有“单次调用硬上限”这个参数，但把等价预算给了 idle 超时：默认 10 分钟（=600000ms，与官方默认同值），且 schema 允许 idle_seconds 1..900 覆盖。 |
@@ -408,16 +412,19 @@
 | `tool.web.fetchTimeoutMs` | modules/tool/webfetch/provider.go:32-33 Timeout 字段 / :46 `defaultProviderTimeout = 30 * time.Second` / :72-77 timeout() / :102 context.WithTimeout | 宿主 webfetch 的 HTTPProvider 有兜底超时 30s（=官方 30000ms），且可被 Provider.Timeout 覆盖。 |
 | `tool.web.searchMaxQueries` | modules/tool/websearch/websearch.go:38 `maxQueries = 4` + :79-81 超限 Hint | 宿主 web_search 一次最多 4 条查询，与官方默认一致；超限直接回 Hint 让模型合并，而不是静默丢弃。 |
 | `tool.web.searchMaxResults` | modules/tool/websearch/websearch.go:38-39 `maxQueries = 4` / `maxResults = 8` + :102 runSearchQueries(..., maxResults) | 宿主 web_search 的合并来源上限就是 8，与官方默认一致，落在 maxResults 常量（不可配置）。 |
+| `tool.web.searchSummaryMaxChars` | websearch.Tool.summaryMaxChars（modules/tool/websearch/websearch.go:106）+ capSummary（:375） | web_search 的每条来源摘要现在钳到 800 字符（省略号算在上限里），先合并空白；DSHD_WEB_SEARCH_SUMMARY_MAX_CHARS 可覆盖。旧实现是宿主自造的 240 rune，且环境变量完全无效。 |
+| `tool.web.searchTimeoutMs` | websearch.Tool.searchBudget（modules/tool/websearch/websearch.go:91）+ spi.WebSearchTimeout（internal/spi/search.go:65） | web_search 现在有自己的协作预算：默认 30s、基础包 provider（deepseek-official）60s、DSHD_WEB_SEARCH_TIMEOUT_MS 覆盖；超时返回 WEB_SEARCH_TIMEOUT + 可执行 Hint。provider 不守 ctx 也会按时返回（收集端 select ctx.Done）。 |
 | `toolResult.prune.headChars` | prune.headShare（internal/prune/prune.go:41-43 headShare=6 / shareBase=10）+ :142-166 cutLines 留头 | 宿主 prune 包同样“留头留尾、中间换一行说明”，但按比例（头 60%）而不是固定 4096 字符；默认预算 16KB/200 行。 |
 | `toolResult.prune.marker` | internal/prune/prune.go:163 `notice := fmt.Sprintf("…（第 %d–%d 行已省略，共 %d 行）…", ...)` + :35-39 NoPointer | 宿主有等价的省略标记（一行中文占位，带被省略的行区间与总行数，并附“原文在哪/有没有原文”的指针），只是文案不是官方那句英文常量。 |
 | `toolResult.prune.tailChars` | internal/prune/prune.go:156 `tail := usable - head`（尾段保留）+ :166-175 拼接 | 同 headChars：尾巴按剩余 40% 保留（tail := usable - head），不是固定 1024 字符，但“保住错误/结论那段”的语义一致。 |
 | `toolResult.spill.maxInlineTokens` | tools.Pipeline.Options.MaxChars（modules/tools/pipeline.go:22-24 默认 4000 字符）+ :525-575 spill() + :582-600 spillText() | 宿主有 spill 层（超阈值外置成 artifact + 指针），但预算口径是字符而不是 token：阈值 4000 字符、正文留头 3/4 留尾 1/4；官方 12500 token 的内联预算在宿主用更严格的字符阈值实现。 |
 
-#### llm（22 条）
+#### llm（28 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
 | `llm.callConfig.adapterDefaults` | internal/agent/loop.go:315-317 `MaxTokens: capacity.MaxOutput` / `Reasoning: l.Reasoning`（注释：只有显式要了才带）+ internal/llm/provider.go:87-96 adapter 的 MaxTokensField 拼写 | 官方让 adapter 只允许给 reasoningEffort / maxTokens 兜默认；宿主同形：loop 先按模型解析出容量再填 MaxTokens，reasoningEffort 只有显式给了才带（避免打挂不支持该参数的网关），语义逐条对上。 |
+| `llm.callConfig.controls` | internal/llm/types.go:183/:186（Temperature/Stop）+ :176 Reasoning + :180 MaxTokens；转发在 internal/llm/compat.go | 官方这一组就是每请求采样控制（reasoningEffort/temperature/maxTokens/stop）。宿主四条齐：Reasoning/MaxTokens 原有，temperature 与 stop 本轮补齐并显式转发；没有 top_p（官方也没有）。 |
 | `llm.callConfig.routing` | llm.Request.Model（internal/llm/types.go）+ resolveServeProvider（cmd/dshd/model_steer.go:231 `base, credential, api = provider.BaseURL, provider.Credential(), provider.API`） | 宿主请求必须带 model，provider 由 resolveServeProvider 从模型目录/别名解析出 (baseURL, credential, API adapter)，等价于官方 provider + model 必填的路由对。 |
 | `llm.deepseek.defaultContextWindow` | internal/llm/capacity.go:6 `DefaultCustomContextWindow = 1_000_000` + ResolveModelCapacity 兜底 | 宿主对未声明容量的自定义模型兜底 1000000，与官方默认逐字一致。 |
 | `llm.deepseek.defaultMaxTokens` | internal/llm/capacity.go:5-8 `DefaultCustomMaxOutput = 128_000` + :79-104 ResolveModelCapacity 兜底 | 宿主对未声明容量的自定义模型给 maxOutput 兜底 128000（官方 256000）；语义相同（路由省略时填输出上限），数值不同。 |
@@ -426,9 +433,11 @@
 | `llm.deepseek.maxImagesPerRequest` | internal/session/image_offload.go:82 `DeepSeekMaxImagesPerRequest = 600` | 宿主保留单请求图片张数上限 600，与官方默认逐字一致。 |
 | `llm.deepseek.maxInlineRequestImageBytes` | internal/session/image_offload.go:80 `DeepSeekMaxInlineRequestImageBytes = 20 * 1024 * 1024` | 宿主保留 base64 内联图片预算 20 * 1024 * 1024，与官方 20971520 逐字一致。 |
 | `llm.deepseek.maxRequestFilesBytes` | internal/session/image_offload.go:78 `DeepSeekMaxRequestFilesBytes = 128 * 1024 * 1024` | 宿主 image-offload 移植里保留了 deepseek raw 表示的单请求字节上限 128 * 1024 * 1024，与官方 134217728 逐字一致。 |
+| `llm.deepseek.modelsMaxAgeMs` | internal/llm/discover_cache.go:48 modelsMaxAgeFromEnv、:95 cachedDiscoveredModels、:113 rememberDiscoveredModels（env 名 :40） | 模型列表进程级 TTL 缓存：默认 600000ms，0 = 不缓存；按「端点 + 凭据 sha256」隔离；失败不缓存、空列表保留上一份（官方语义）；DSHD_LLM_MODELS_MAX_AGE_MS 覆盖。 |
 | `llm.deepseek.modelsTimeoutMs` | internal/llm/discover.go:51-55 `const discoverTimeout = 15 * time.Second` + :116 `reqCtx, cancel := context.WithTimeout(ctx, discoverTimeout)` | 宿主模型发现（GET /models）有 15s 墙钟上限（官方 5000ms），语义相同（单次发现超时）、数值更宽。 |
 | `llm.deepseek.officialModelContextWindow` | internal/llm/capacity.go:38-48 `builtInModels = []builtInModel{{ID: "group/deepseek-v4.1-flash-1017", Capacity: ModelCapacity{ContextWindow: 1_000_000, ...}}}` | 官方给内置模型声明 1048576（1 MiB）；宿主给内置模型 group/deepseek-v4.1-flash-1017 声明 1000000，并明确以 magpie 网关 /v1/models 的实测 context_length 为准（十进制 1M）。能力等价、口径按实测修正。 |
 | `llm.deepseek.publicBaseURL` | cmd/dshd/main.go:290 `const defaultLLMBase = "http://127.0.0.1:3425/v1"` + :602 `base := fs.String("base", envOr("DSHD_LLM_BASE", defaultLLMBase), ...)` | 官方原生 DeepSeek 端点是编译期常量 https://api.deepseek.com/anthropic；宿主把端点做成可配的 --base / DSHD_LLM_BASE（单源常量 defaultLLMBase=本机网关），能力等价但默认值不同（本机网关 vs 官方直连）。 |
+| `llm.deepseek.streamIdleTimeoutMs` | llm.DefaultStreamIdleTimeout（internal/llm/stream_idle.go:40）、streamIdleTimeoutFromEnv（:100）、接线 internal/llm/client.go:114/:283（newIdleWatchdog） | 流空闲看门狗：默认 300000ms，每读到数据就重置，超时关流并返回 LLM_STREAM_IDLE_TIMEOUT 四字段错误；DSHD_LLM_STREAM_IDLE_TIMEOUT_MS 覆盖。旧实现 http.Client.Timeout=0、没有任何空闲计时，半开连接会永远挂住。 |
 | `llm.deepseekLlmApiExtensions.mounted` | internal/llm/provider.go:104-115 deepSeekCompletionsAdapter.UsageExtensions() + internal/llm/usage_cache.go:30-40 usageCacheReadPaths/usageCacheWritePaths | 官方 base 里挂了 DeepSeek Chat-API 扩展（usage 的 cache 计数等）；宿主把同一批扩展做成 adapter 的 UsageExtensions 白名单 + usage_cache 的叶子路径解析，实测形状对齐。 |
 | `llm.defaultModelProvider` | cmd/dshd/main.go:601 / :1387 / cmd/dshd/serve.go:181 `envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017")` + cmd/dshd/serve.go:192 explicitServeModel | 官方 base bundle 的默认路由是 deepseek-official；宿主有等价的“默认模型”单源默认值（--model / DSHD_LLM_MODEL，默认 group/deepseek-v4.1-flash-1017），provider 由该模型解析。 |
 | `llm.discoverModels.fields` | transport.OfficialDiscoveredModel（cmd/dshd/serve_account_api.go:347-350 / :362-373 两处投影） | 宿主 discoverModels 回的就是官方五个字段（id / name? / contextWindow? / maxTokens? / inputModalities?），逐条有落点。 |
@@ -438,16 +447,25 @@
 | `llm.piAi.maxTokensResolution` | internal/llm/capacity.go:79-104 ResolveModelCapacity（MaxOutput 分支） | 同 contextWindowResolution：maxOutput 走同一条 declared > built-in > default 解析链，且 <=0 视为未声明。 |
 | `llm.piAi.providers` | internal/llm/provider_registry.go:31-42 ProviderInfo/ConfigurableProvider + :104-130 registeredProviderAPIs / 解析；投影到 cmd/dshd/serve_provider_registry.go:38 | 官方“没有 provider profile 就没有路由”；宿主有等价的 provider 注册表（adapter → (baseURL, credential, API, settingsNs)），未注册的 provider 在 listProviders/discover 都是结构化错误。 |
 | `llm.piAi.reasoningEfforts` | cmd/dshd/serve_effort_override.go:128 `ReasoningEfforts json.RawMessage` / :136-142 解析校验 / :218 level 失配报错 + cmd/dshd/serve_session_api_t04.go:184 | 官方按模型声明 thinking level 字典（off 可留空，至少一个非 off）；宿主有同形的 per-model reasoningEfforts（JSON object）+ 会话级 effort 校验，level 不在当前模型字典里就报错。 |
+| `llm.resolveModelInfo.contextWindowValidation` | internal/llm/capacity.go:80 错误码 / :126 ValidateDeclaredContextWindow / :135 ResolveModelCapacityChecked；消费点 internal/agent/loop.go:285 | contextWindow 声明非法（负值）现在 fail-closed：错误码 INVALID_MODEL_CONTEXT，Loop.Run 在任何模型请求之前返回，--context-window 也在启动参数校验阶段拒绝。官方要求「整数 > 0」，宿主 0 表示「未声明」是既有契约（--context-window 0 = 按模型容量解析；目录面写 0 在读盘时就被拒）。 |
+| `llm.stop` | llm.Request.Stop（internal/llm/types.go:186）+ cmd/dshd/env_llm.go:36/:50 | llm.Request 现在有 Stop []string，非空才发、按给定顺序原样发出；DSHD_LLM_STOP 逗号分隔并可写 \n/\r/\t 转义（否则单行环境变量表达不出最常用的换行停用词）。 |
 | `llm.streaming` | llm.Client.Stream（internal/llm/client.go）+ internal/llm/provider.go:98-101 `RequiredFields() []string { return []string{"model", "messages", "stream"} }` | 官方“恒 stream、没有非流式开关”；宿主同样只有流式入口（Client.Stream + 逐事件回调），adapter 的 RequiredFields 里 stream 是必发字段，没有第二个调用形状。 |
+| `llm.temperature` | llm.Request.Temperature（internal/llm/types.go:183）+ wire 转发（internal/llm/compat.go）+ cmd/dshd/env_llm.go:50 samplingFromEnv（env 名 env_llm.go:34） | llm.Request 现在有 Temperature *float64，显式设置才发（连 0 也发：确定性复现要靠它）；run/acp/serve/子代理四个入口共用 DSHD_LLM_TEMPERATURE 解析，非法/NaN/Inf fail-loud。 |
 
-#### context（5 条）
+#### context（11 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
+| `context.compaction.compactionRetries` | internal/compact/retry.go:24 EnvCompactRetries / :51 解析 / :76 SummarizeWithRetry；消费点 cmd/dshd/acp.go:1317 | 摘要失败按 DSHD_COMPACT_RETRIES（默认 1）重试；压完仍高于阈值时再压一次（官方 compactionRetries 语义），而不是「压过一次就算交差」。非法 env 回落默认，负数不当无限重试。 |
+| `context.compaction.maxOverflowRetries` | internal/compact/retry.go:26 EnvCompactOverflowRetries / :52 / :130 IsContextOverflow；消费点 cmd/dshd/acp.go:501 | 溢出（IsContextOverflow 分类：provider 文案 / 400·413·422 状态码）后按 DSHD_COMPACT_OVERFLOW_RETRIES（默认 1）强制压缩并重放这一轮；非溢出错误一律不重试（401/404 重试只会掩盖真实原因）。 |
+| `context.compaction.reservedCompletionTokens` | internal/compact/budget.go:32 ReservedCompletionTokens / :109 HostThreshold；消费点 cmd/dshd/acp.go:1283 compactThreshold | 压缩阈值改按官方公式 floor(min(W×0.8, W−O−B)) 算，其中 O = header.maxTokens ?? adapter defaultMaxTokens；再与宿主既有绝对阈值 --auto-compact 取小。默认行为一字不变，只有小窗口/大预留时官方口径才咬合。 |
 | `context.compaction.retainRatio` | internal/compact/compact.go:21-27 KeepTokens 字段（默认 2000）+ :46-56 withDefaults | 宿主保留尾巴按**绝对 token 预算**（KeepTokens 默认 2000）而不是消息预算的 16%；注释里写清了为什么按体积留而不是按条数留。 |
 | `context.compaction.retainTokens` | internal/compact/compact.go:21-27 KeepTokens + Options 传入（cmd/dshd/acp.go:1158 compactSelectOptions 是唯一一份参数） | 官方的绝对保留预算就是宿主的 KeepTokens（默认 2000，可由调用方覆盖），语义逐条一致。 |
 | `context.compaction.thresholdRatio` | cmd/dshd/host_run_options.go:41 `defaultAutoCompact = 40000` + cmd/dshd/acp.go:1190 `if est := m.Estimate(surface); est <= r.autoCompact` | 宿主自动压缩的触发是**绝对 token 阈值**（--auto-compact，默认 40000）而不是窗口比例 0.8；能力等价（到预算就压），但口径不同——换模型窗口时不会自动跟着缩放。 |
 | `context.measurement.cacheCountsAreOptional` | internal/llm/usage_cache.go:21-30（ok 语义 + 绝不写 0）+ :31-40 usageCacheReadPaths/usageCacheWritePaths | 官方“provider 没给 cacheReadTokens/cacheWriteTokens 就当 0，绝不编造”；宿主的用法完全一致：usageCacheReadPaths 返回 ok 才写键，注释明写“绝不写 0 冒充实测”。 |
+| `context.measurement.pressureTokens` | internal/session/usage_projection.go:133 ProjectContext / :51 PressureTokens；wire cmd/dshd/context_usage.go:119 | context.usage 现在发 pressureTokens = 未命中输入 + cacheRead + cacheWrite（只看 prompt 侧，不含输出），与官方 usage-projection 的 pressureFrom 同口径；used 仍保留最近一次 totalTokens 做向后兼容。 |
+| `context.measurement.projectedTokens` | internal/session/usage_projection.go:174 计算 / :53 字段；wire cmd/dshd/context_usage.go:120 | projectedTokens = max(0, pressure + surface − sampledSurface)，预测**下一次请求**的占用；同一份 events 只读派生（O(n)，不写盘）。这是「用户刚敲新消息 / 工具结果刚灌入」时唯一有用的读数。 |
+| `context.measurement.usageBuckets` | internal/session/usage_projection.go:26 UsageBuckets / :152 PromptTokens；wire cmd/dshd/context_usage.go:121 | 四桶齐：uncachedInputTokens / outputTokens / cacheReadTokens / cacheWriteTokens；旧会话只有 totalTokens 时按 total 兜底进未命中输入桶。 |
 | `context.sessionReference.candidateLimit` | cmd/dshd/serve_agent_api.go:58-59 `agentSessionReferenceLimit = 20` + :1779-1781 截断 | 宿主会话引用候选上限 20（官方 50），语义相同（有界候选列表）、数值更紧。 |
 
 #### session（16 条）
@@ -523,22 +541,18 @@
 | `usage.fields.streamShape` | internal/transport/api.go:363-368 UsageMsg + cmd/dshd/assistant_usage.go:49-61 + internal/llm/provider.go:110-115 | 官方流式形状 inputTokens / outputTokens / totalTokens? / cacheReadTokens? / cacheWriteTokens? / reasoningTokens?；宿主四个必填+两个可选全有（reasoningTokens 只在 adapter 的 UsageExtensions 里收集，未投影进 usage 键——属可选键缺席）。 |
 | `workspace.documentsDirectory` | cmd/dshd/serve_workspace_api_documents_windows.go:19 officialDocumentsDirectory + serve_workspace_api.go:150 注入 | 官方把用户 Documents 根放进工作区视图；宿主实现了 officialDocumentsDirectory（Windows 已知文件夹查询 + 其它平台兜底）并注入 workspace 视图。 |
 
-#### env（10 条）
+#### env（6 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
 | `DEEPSEEK_API_KEY` | modules/search/deepseek.go:77 DEEPSEEK_API_KEY / DSHD_SEARCH_API_KEY + LLM 侧 DSHD_LLM_KEY | 官方按请求从凭据库解析该 key（llm-deepseek / web-search-deepseek / web-deepseek-api 共用）；宿主在搜索侧直接读 DEEPSEEK_API_KEY（或 DSHD_SEARCH_API_KEY），LLM 侧用 DSHD_LLM_KEY，能力等价、变量名不同。 |
 | `DSH_CONTEXT_WINDOW` | cmd/dshd/host_run_options.go:58 --context-window + internal/llm/capacity.go:79-104 ResolveModelCapacity | 官方 DSH_CONTEXT_WINDOW 只作 sdk-minimal 的兜底容量；宿主把容量做成 --context-window 旗标（0 = 按模型解析），优先级形状一致（显式声明 > 目录/内置 > 兜底），但没有同名环境变量。 |
-| `DSH_HOME` | **不实现**（`N-A`，`naClass=naming-conflict`）：home 根 = `cmd/dshd/main.go:292-296 defaultHome`（`--home` > `DSHD_HOME` > `~/.dshd`） | **官方名 `DSH_HOME` 在宿主不实现 —— 命名冲突（见 `docs/go5-env-notes.md` §4）**：官方的 `DSH_HOME` 是**整个 DSH 的数据根**（`显式路径 > $DSH_HOME > ~/.dsh`）；**宿主 home 用 `DSHD_HOME`**，而 TUI2GO 的 `run-019.cmd` 里 **`DSH_HOME` 是桌面 profile home**（`%PLAY%\home`）。两个语义撞车，简单别名会让宿主会话库被指到桌面 profile home。`DSH_HOME` 在宿主的既有读取只有 3 处删除保护/历史守卫（`cmd/dshd/acp.go:1328`、`cmd/dshd/main.go:1397`、`cmd/dsh-relayd/main.go:92`），维持不变。 |
-| `DSH_MAX_TOKENS_AS_SUCCESS` | `internal/agent/finish_policy.go:34 MaxTokensAsSuccess` + `internal/agent/loop.go:349` 闸门 | **官方名 `DSH_MAX_TOKENS_AS_SUCCESS` 在宿主已真读（GO.5/T1）**：只把 `false`/`0`/`no`（大小写不敏感）当 false，其余一律按官方默认 true。true（默认）：finish=length 照常收口，v4 记 `turn/end{kind:"max-tokens"}`；false：同一响应在**任何副作用之前**判失败，v4 记 `turn/end{kind:"error"}` 且 error.message 点名该变量。 |
 | `DSH_PERMISSION_MODE` | cmd/dshd/acp.go:92 sandboxCeiling（DSHD_SANDBOX_MODE）+ :129 上限语义 | 官方 DSH_PERMISSION_MODE 设 sandbox-policy.mode（danger-full-access 时审批变 never）；宿主用 DSHD_SANDBOX_MODE 作进程上限，会话档位不得比它更宽，且 danger-full-access 有独立审批语义。 |
-| `DSH_PRODUCT_ANALYTICS_OTLP_URL` | `internal/analytics/env.go:58 CollectorURLFromEnv` → `internal/analytics/policy.go:56 CollectorURL` | **官方名 `DSH_PRODUCT_ANALYTICS_OTLP_URL` 在宿主已真接（GO.5/T1）**：与 `DSH_TELEMETRY_OTLP_URL` 同一条解析器，且作为**更具体的名字优先**（`DSHD_PRODUCT_ANALYTICS_OTLP_URL` > `DSH_PRODUCT_ANALYTICS_OTLP_URL` > `DSHD_TELEMETRY_OTLP_URL` > `DSH_TELEMETRY_OTLP_URL`）。优先级：**显式配置 > env > 默认（空 = 本地零出网）**；env 只改端点不改 mode，非法 URL fail-loud。 |
-| `DSH_TELEMETRY_OTLP_URL` | `internal/analytics/env.go:58 CollectorURLFromEnv` → `internal/analytics/policy.go:56 CollectorURL` | **官方名 `DSH_TELEMETRY_OTLP_URL` 在宿主已真接（GO.5/T1）**：解析进 `Policy.CollectorURL`（只允许 http/https，`mode=local` 时即使有值也不导出）。优先级：**显式配置（policy.json 非空 `collectorUrl`）> env > 默认（空 = 本地零出网）**；读到 env **不会**把 mode 抬成 `local+export`（默认仍一个字节都不外发），非法 URL 在 `analytics.Open` fail-loud 并点名变量。与官方的差异只剩默认值。 |
-| `DSH_WEB_FETCH_PROVIDER` | internal/spi/search.go:388 双前缀解析（喂同一字段；都设时 DSHD_* 先命中） | **官方名 `DSH_WEB_FETCH_PROVIDER` 在宿主也生效**：与搜索同一条解析器，双前缀都认（都设时 `DSHD_WEB_FETCH_PROVIDER` 先命中，官方名兜底），照官方文档设能生效。 |
-| `DSH_WEB_SEARCH_PROVIDER` | internal/spi/search.go:375 双前缀解析（喂同一字段；都设时 DSHD_* 先命中） | **官方名 `DSH_WEB_SEARCH_PROVIDER` 在宿主也生效**：解析器同时认两个前缀（`DSHD_WEB_SEARCH_PROVIDER` 与官方 `DSH_WEB_SEARCH_PROVIDER` 喂同一个字段；都设时按解析顺序以 `DSHD_*` 为准），语义与官方"等价于 searchProvider 配置值"一致——照官方文档设能生效。 |
+| `DSH_WEB_FETCH_PROVIDER` | internal/spi/search.go:388 双前缀解析（喂同一字段；都设时 DSHD_* 先命中） | **官方名 `DSH_WEB_FETCH_PROVIDER` 在宿主也生效**（GO.5/T1 复核后保持）：与搜索同一条解析器，双前缀都认（都设时 `DSHD_WEB_FETCH_PROVIDER` 先命中，官方名兜底），照官方文档设能生效。 |
+| `DSH_WEB_SEARCH_PROVIDER` | internal/spi/search.go:375 双前缀解析（喂同一字段；都设时 DSHD_* 先命中） | **官方名 `DSH_WEB_SEARCH_PROVIDER` 在宿主也生效**（GO.5/T1 复核后保持）：解析器同时认两个前缀（`DSHD_WEB_SEARCH_PROVIDER` 与官方 `DSH_WEB_SEARCH_PROVIDER` 喂同一个字段；都设时按解析顺序以 `DSHD_*` 为准），语义与官方"等价于 searchProvider 配置值"一致——照官方文档设能生效。 |
 | `llm.contextWindow.precedence` | internal/llm/capacity.go:79-104 ResolveModelCapacity + cmd/dshd/transport_source.go:388 调用点 | 官方优先级“模型目录条目 > adapter 默认（llm-deepseek 1e6）> DSH_CONTEXT_WINDOW（仅 sdk-minimal）”；宿主的 ResolveModelCapacity 就是“显式声明 > 内置模型容量 > 未声明自定义模型 1M 兜底”，单点解析、不缓存。 |
 
-#### live-profile-desktop（7 条）
+#### live-profile-desktop（8 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
@@ -547,6 +561,7 @@
 | `llmPiAi.providers.magpie.models[0].reasoningEfforts` | cmd/dshd/serve_effort_override.go:128 ReasoningEfforts 字段 + :218 字典校验 | 桌面 profile 给该模型声明 reasoningEfforts 字典（xhigh/max）；宿主的模型目录同样存 reasoningEfforts 对象，并校验会话 effort 必须命中该字典。 |
 | `permission.presets` | internal/sandbox/policy.go:124 三档 preset 校验 + cmd/dshd/serve_sandbox_policy.go:341 | 桌面 profile 定义三档 permission preset（read-only / workspace-write / danger-full-access，各带 sandbox + approval）；宿主同样实现这三档并在装配期校验枚举。 |
 | `terminal.shell` | cmd/dshd/serve_terminal_api.go:1293 discoverOfficialShells + :1286 按名解析 | 桌面 profile 固定终端 shell（Git Bash 的 path/name/args）；宿主有等价的 shell 探测与指定能力（terminal.shellCandidates + TerminalShells）。 |
+| `toolWeb.searchTimeoutMs` | modules/tool/websearch/websearch.go:55 `baseBundleSearchBudget = 60 * time.Second`，判定在 :101（providerID == baseBundleSearchProvider） | 桌面 profile 给 web_search 的 60000ms 与宿主基础包分支逐值相同：provider 是 deepseek-official 时预算就是 60s。 |
 | `transcriptView` | cmd/dshtui/app.go:77 `showToolResults bool`（默认 false = 折叠 = 官方 compact） | 官方桌面壳的 transcript 呈现档位（默认 compact = 工具结果折叠）。**宿主 TUI 就是这个默认**：工具结果行默认折叠，Ctrl+T 展开（showToolResults 默认 false）；官方 compact 的语义被完整实现，只是没有"档位"这个词——开关是同一个。 |
 | `uiTheme.preference` | cmd/dshtui/theme.go:108 `var themeName = "dark"` + :115 覆盖优先级注释 | 官方桌面壳的主题偏好（默认 dark）。**宿主有 Go TUI，主题是真实能力**：themeName 默认就是 dark，覆盖优先级 `--theme` > `DSH_TUI_THEME` > `COLORFGBG` > dark，与官方同值同语义；区别是现代码在 cmd/dshtui 而不是桌面壳窗口。 |
 
@@ -578,7 +593,6 @@
 | `telemetry-ui` | 4 | telemetry-ui（产品遥测/会话上传/匿名 id 的展示面） |
 | `plugin-market-ui` | 3 | plugin-market-ui（插件市场的客户端 UI） |
 | `protocol-shape` | 14 | protocol-shape（纯 wire 形状/镜像常量/实现形状不适用） |
-| `naming-conflict` | 1 | naming-conflict（官方 env 名与本地同名变量语义撞车，显式不做别名） |
 | **合计** | **31** | |
 
 #### desktop-shell（窗口/主题/托盘/快捷键/启动器/自动更新） —— 2 条
@@ -636,180 +650,157 @@
 | `tool.fsSearch.stderrMaxBytes` | `agent-loop` | rg 子进程 stderr 的尾部预算；宿主进程内实现没有子进程 stderr 通道，不适用。 |
 | `tools.nativeExecutorConfig` | `tools-sandbox-approval` | 官方明确 native 执行器不接受任何配置（默认 {}，whereApplied='the native executor takes no configuration'）；宿主 native 执行器同样没有配置面，这个空对象没有对应项可读，不是缺口。 |
 
-#### naming-conflict（官方 env 名与本地同名变量语义撞车） —— 1 条
-
-| 官方 key | 域 | 为什么不做（不是缺口，是撞车） |
-|---|---|---|
-| `DSH_HOME` | `env` | 官方 `DSH_HOME` 是**整个 DSH 的数据根**（`显式路径 > $DSH_HOME > ~/.dsh`）；宿主 home 根走 **`DSHD_HOME`**（`--home` > `DSHD_HOME` > `~/.dshd`），而 TUI2GO 的 `run-019.cmd` 里 **`DSH_HOME` 是桌面 profile home**（`%PLAY%\home`）。两个语义撞车：一旦宿主把 `DSH_HOME` 当 home 根，launcher 会把宿主会话库指到桌面 profile home（会话/插件/策略互相污染），且官方与宿主的覆盖顺序本来就不同（`显式路径 > $DSH_HOME > ~/.dsh` vs `--home > $DSHD_HOME > ~/.dshd`）。结论：**宿主 home 用 `DSHD_HOME`；TUI2GO 里的 `DSH_HOME` 是桌面 profile home**，不做别名。详见 `docs/go5-env-notes.md` §4。 |
-
 ---
 
-### UNREAD-GAP（113 条，真能力缺口 —— 可直接拿去派单）
+### UNREAD-GAP（96 条，真能力缺口 —— 可直接拿去派单）
 
 > 排序：域 → key。每条含「缺什么 / 现在降级成什么样 / 替代路径」。同一族的条目在 `gap` 里互相点名（例如 pluginManager.* 全部指向"没有 registry 客户端"）。
 
-#### agent-loop（12 条）
+#### agent-loop（8 条）
 
 | # | 官方 key | 缺什么 / 降级 / 替代路径 |
 |---|---|---|
 | 1 | `agentLoop.agents[].id` | 缺调用方指定/复用的稳定 agent id。降级：每次委派都得到一个新 child 会话 id，跨轮无法按名字指向同一子代理。替代路径：continuable=true 后用回填的 childSessionId 续问（subagents.prompt）。 |
-| 2 | `agentLoop.maxParallelToolCalls` | 缺并行工具执行（N 路并发 + 结果按 call 顺序回填）。降级：串行，N 个工具调用的墙钟 = 各自耗时之和；多工具步（并行读文件/多路搜）明显变慢。替代路径：modules/tool/workflow 可把多步写成 JSON 步骤表一次往返，但仍是串行。 |
-| 3 | `bash.graceMs` | 缺“优雅终止 → 宽限 → 强杀”的升级链。降级：Stop/Kill 立刻终止整棵进程树，子进程来不及收尾（写盘、清理临时文件、上报退出码）。替代路径：命令自己 trap SIGTERM 也没用（Job Object 直接 Terminate）。 |
-| 4 | `retry.pluginConfig` | 缺每 provider 独立的重试配置（次数/退避/可重试码）。降级：全进程一套硬编码默认值，任何 provider 想放宽/收紧都必须改代码重编译。替代路径：无。 |
-| 5 | `steering.cancelKeepInboxOption` | 缺“取消 turn 但保留队列”的开关。降级：取消 = 丢弃所有 pending（用户中途插话若在取消瞬间会被静默丢弃）。替代路径：无；需要保留只能重发。 |
-| 6 | `subagent.maxActiveSubagents` | 缺并发子代理与活跃数上限。降级：完全串行，多路委派的墙钟线性叠加；同时没有上限保护（越深越慢而不是越多）。替代路径：无。 |
-| 7 | `tool.web.searchSummaryMaxChars` | 缺 provider 摘要的字符上限。降级：摘要原样进结果，长摘要由外层 tools.Pipeline 的 4000 字符 spill 兜底（比官方 800 宽 5 倍）。替代路径：外层 spill 会外置全文并留指针。 |
-| 8 | `tool.web.searchTimeoutMs` | 缺 web_search 自己的超时预算。降级：依赖调用方 ctx / 工具框架超时，provider 挂住时会一直等到外层超时。替代路径：无（webfetch 侧有 30s 默认，可参照移植）。 |
-| 9 | `workflow.maxConcurrentAgents` | 缺 PTC 并发 agent 池（含 0=unbounded 语义）。降级：workflow 只能串行跑步骤表，且没有 run_agent 之类子代理步骤。替代路径：用 workflow 串行编排 + 多次 subagent 调用。 |
-| 10 | `workflow.maxItemsPerCall` | 缺每调用项数上限。降级：foreach 全量展开，超大数组会一次性跑完（只有正文 3000 rune 的回包上限）。替代路径：无。 |
-| 11 | `workflow.maxTotalAgents` | 缺 workflow agent 总量预算。降级：无总量限制，全靠调用方自律；异常脚本可能长时间占用。替代路径：无。 |
-| 12 | `workflow.syncTimeoutMs` | 缺 workflow 级同步等待预算。降级：受外层工具超时（tools timeout-policy）约束，workflow 自身不能设上限。替代路径：调用方在 ctx 里设期限。 |
+| 2 | `retry.pluginConfig` | 缺每 provider 独立的重试配置（次数/退避/可重试码）。降级：全进程一套硬编码默认值，任何 provider 想放宽/收紧都必须改代码重编译。替代路径：无。 |
+| 3 | `steering.cancelKeepInboxOption` | 缺“取消 turn 但保留队列”的开关。降级：取消 = 丢弃所有 pending（用户中途插话若在取消瞬间会被静默丢弃）。替代路径：无；需要保留只能重发。 |
+| 4 | `subagent.maxActiveSubagents` | 缺并发子代理与活跃数上限。降级：完全串行，多路委派的墙钟线性叠加；同时没有上限保护（越深越慢而不是越多）。替代路径：无。 |
+| 5 | `workflow.maxConcurrentAgents` | 缺 PTC 并发 agent 池（含 0=unbounded 语义）。降级：workflow 只能串行跑步骤表，且没有 run_agent 之类子代理步骤。替代路径：用 workflow 串行编排 + 多次 subagent 调用。 |
+| 6 | `workflow.maxItemsPerCall` | 缺每调用项数上限。降级：foreach 全量展开，超大数组会一次性跑完（只有正文 3000 rune 的回包上限）。替代路径：无。 |
+| 7 | `workflow.maxTotalAgents` | 缺 workflow agent 总量预算。降级：无总量限制，全靠调用方自律；异常脚本可能长时间占用。替代路径：无。 |
+| 8 | `workflow.syncTimeoutMs` | 缺 workflow 级同步等待预算。降级：受外层工具超时（tools timeout-policy）约束，workflow 自身不能设上限。替代路径：调用方在 ctx 里设期限。 |
 
-#### llm（9 条）
+#### llm（3 条）
 
 | # | 官方 key | 缺什么 / 降级 / 替代路径 |
 |---|---|---|
-| 13 | `llm.callConfig.controls` | 缺 temperature 与 stop 两个采样参数（也无法透传到 wire）。降级：请求体不带 temperature / stop，模型只能用服务端默认温度，也没法用停用词截断输出。替代路径：无（只能靠提示词约束）。 |
-| 14 | `llm.deepseek.fileExpiresAfterSeconds` | 缺 Files API 上传与到期回收。降级：图片全量内联/本地存储，本地附件不会自动过期（靠 session.spill.cleanupPeriodDays 之类的清理另算）。替代路径：无（不需要 Files API 也能工作，属能力面差异）。 |
-| 15 | `llm.deepseek.filesApiTimeoutMs` | 缺 Files API 上传超时（以及整条上传通道）。降级：无该路径；图片走内联 base64，受 maxInlineRequestImageBytes 约束。替代路径：无。 |
-| 16 | `llm.deepseek.modelsMaxAgeMs` | 缺模型列表缓存与 TTL。降级：每次列模型都打一次上游 /models，频繁刷新会放大延迟与限流风险。替代路径：调用方自行缓存结果。 |
-| 17 | `llm.deepseek.streamIdleTimeoutMs` | 缺流空闲看门狗（300s 无数据即判失败）。降级：上游半开连接时请求会一直挂着，直到调用方 ctx/工具超时；期间界面停在“正在生成”。替代路径：外层 tools timeout-policy 的 per-call 预算（DSHD_TOOL_TIMEOUT_SECS）。 |
-| 18 | `llm.piAi.streamIdleTimeoutMs` | 缺 per-provider 流空闲超时。降级：挂住的流只能等外层 ctx 取消；与 llm.deepseek.streamIdleTimeoutMs 同一缺口。替代路径：无。 |
-| 19 | `llm.resolveModelInfo.contextWindowValidation` | 缺 modelInfo 的 contextWindow 校验错误码。降级：非法值（0/负数）被当成未声明，回退内置默认，用户看不到“你写错了”。替代路径：无。 |
-| 20 | `llm.stop` | 缺 stop 序列。降级：只能靠提示词或客户端截断，模型可能继续说；结构化输出场景少了一道硬闸。替代路径：无。 |
-| 21 | `llm.temperature` | 缺 temperature 透传。降级：所有请求使用服务端默认温度，无法做确定性（temperature=0）复现，也无法调创造性。替代路径：无。 |
+| 9 | `llm.deepseek.fileExpiresAfterSeconds` | 缺 Files API 上传与到期回收。降级：图片全量内联/本地存储，本地附件不会自动过期（靠 session.spill.cleanupPeriodDays 之类的清理另算）。替代路径：无（不需要 Files API 也能工作，属能力面差异）。 |
+| 10 | `llm.deepseek.filesApiTimeoutMs` | 缺 Files API 上传超时（以及整条上传通道）。降级：无该路径；图片走内联 base64，受 maxInlineRequestImageBytes 约束。替代路径：无。 |
+| 11 | `llm.piAi.streamIdleTimeoutMs` | 缺 per-provider 流空闲超时。降级：挂住的流只能等外层 ctx 取消；与 llm.deepseek.streamIdleTimeoutMs 同一缺口。替代路径：无。 |
 
-#### context（12 条）
+#### context（6 条）
 
 | # | 官方 key | 缺什么 / 降级 / 替代路径 |
 |---|---|---|
-| 22 | `context.compaction.compactionRetries` | 缺摘要收敛重试。降级：摘要调用抖动（429/空响应）时整次压缩失败，本轮无法腾出空间。替代路径：靠 llm 层重试（internal/llm/retry.go）兜住一部分瞬时错误。 |
-| 23 | `context.compaction.headroomTokens` | 缺窗口 headroom 预留。降级：压缩后仍可能因输出/工具结果把窗口顶满（下一次请求 400 风险），没有“留 64K”的保护带。替代路径：无（可把 auto-compact 阈值调小近似）。 |
-| 24 | `context.compaction.maxOverflowRetries` | 缺溢出后重试。降级：上游返回上下文溢出时这一轮直接失败，需要用户重发。替代路径：无。 |
-| 25 | `context.compaction.modelPolicies` | 缺 per-model 压缩策略覆盖。降级：所有模型共用一套阈值（1M 窗口与 32K 窗口用同一 auto-compact），小窗口模型容易顶满。替代路径：无。 |
-| 26 | `context.compaction.reservedCompletionTokens` | 缺完成 token 预留。降级：压缩阈值不扣除 max_tokens，长输出场景仍可能溢出。替代路径：无（可把 auto-compact 调小近似）。 |
-| 27 | `context.measurement.pressureTokens` | 缺 prompt 侧压力口径（input + cacheRead + cacheWrite）。降级：界面显示的已用量包含输出 token，比真实占用偏大；与官方 pressureTokens 不可比。替代路径：无。 |
-| 28 | `context.measurement.projectedTokens` | 缺 projectedTokens 投影（下一次请求的占用预测）。降级：界面只能显示“上一次真实用量”，看不到“下一条消息会占多少”，压缩时机只能靠固定阈值。替代路径：无。 |
-| 29 | `context.measurement.usageBuckets` | 缺 uncachedInputTokens 与 cacheWriteTokens 两个桶。降级：缓存写入量与“未命中缓存的输入”在界面不可见，缓存命中率只能算一半。替代路径：internal/llm/usage_cache.go 已有 cacheWritePaths 解析（叶子路径在），只是没进投影。 |
-| 30 | `context.runtimeContext.perStep` | 缺每步 runtime context 重投影。降级：系统提示里的时间/环境信息在会话开始就固定，长会话中“现在几点/在哪个目录”这类事实会过期。替代路径：模型自己调工具查（date/pwd）。 |
-| 31 | `context.sessionReference.maxReferenceBytes` | 缺单条引用的字节上限。降级：无自动引用。替代路径：无。 |
-| 32 | `context.sessionReference.maxReferences` | 缺会话引用自动附带（最多 3 条）。降级：用户必须手工 @ 选，模型不会自动拿到相关会话上下文。替代路径：@ 引用 + 手工粘贴。 |
-| 33 | `context.sessionReference.referenceContextFraction` | 缺引用上下文预算（20% 窗口）。降级：无自动引用。替代路径：无。 |
+| 12 | `context.compaction.headroomTokens` | 缺窗口 headroom 预留。降级：压缩后仍可能因输出/工具结果把窗口顶满（下一次请求 400 风险），没有“留 64K”的保护带。替代路径：无（可把 auto-compact 阈值调小近似）。 |
+| 13 | `context.compaction.modelPolicies` | 缺 per-model 压缩策略覆盖。降级：所有模型共用一套阈值（1M 窗口与 32K 窗口用同一 auto-compact），小窗口模型容易顶满。替代路径：无。 |
+| 14 | `context.runtimeContext.perStep` | 缺每步 runtime context 重投影。降级：系统提示里的时间/环境信息在会话开始就固定，长会话中“现在几点/在哪个目录”这类事实会过期。替代路径：模型自己调工具查（date/pwd）。 |
+| 15 | `context.sessionReference.maxReferenceBytes` | 缺单条引用的字节上限。降级：无自动引用。替代路径：无。 |
+| 16 | `context.sessionReference.maxReferences` | 缺会话引用自动附带（最多 3 条）。降级：用户必须手工 @ 选，模型不会自动拿到相关会话上下文。替代路径：@ 引用 + 手工粘贴。 |
+| 17 | `context.sessionReference.referenceContextFraction` | 缺引用上下文预算（20% 窗口）。降级：无自动引用。替代路径：无。 |
 
 #### session（11 条）
 
 | # | 官方 key | 缺什么 / 降级 / 替代路径 |
 |---|---|---|
-| 34 | `attachment.imageCompressionConcurrency` | 缺图片压缩并发度（与归一化同一缺口）。降级：无压缩。替代路径：无。 |
-| 35 | `attachment.maxImagesPerMessage` | 缺每消息图片张数上限。降级：一条消息可以塞任意多图（受 promptMaxBlocks=64 间接限制），内存与请求体不可控。替代路径：无。 |
-| 36 | `attachment.normalizedImageMaxBytes` | 缺归一化后的字节预算（与重编码一体）。降级：同上，只有接收上限。替代路径：无。 |
-| 37 | `attachment.normalizedImageMaxPixels` | 缺图片归一化（重采样到目标像素）。降级：大图原样内联，请求体膨胀（只能靠 maxImageBytes 拒收，用户体验是“这张图太大”而不是“已自动压缩”）。替代路径：无（需引入 Go 图像缩放）。 |
-| 38 | `goal.defaultMaxGoalRounds` | 缺默认轮次上限（256）。降级：goal 一旦 active 就没有轮次天花板，只能人工 complete/pause；失控循环只能靠人盯。替代路径：调用方显式给 maxGoalRounds。 |
-| 39 | `jobs.maxConcurrentJobsPerOwner` | 缺 per-owner 并发任务上限。降级：模型可以无限起后台任务，没有背压，机器可能被拖慢。替代路径：无（只能靠提示词自律）。 |
-| 40 | `jobs.settledRetainBytes` | 缺“已结束任务”的独立保留量。降级：结束的任务继续按 1MiB 占内存，长跑多任务的会话内存随任务数增长。替代路径：无。 |
-| 41 | `session.persistence.listConcurrency` | 缺列会话的并发度。降级：会话多时列会话是纯串行 IO，界面“最近会话”列表随文件数线性变慢。替代路径：无（可参考 fsutil.WalkFiles 的并发遍历自己加）。 |
-| 42 | `session.projectionCache.writeEveryEvents` | 缺写回批量（每 N 条事件 / 每 T 毫秒落一次）。降级：每次投影写都同步落盘，长会话高频事件下 fsync 次数按事件数线性放大。替代路径：无（storage.Domain 的写链可复用，但需要调用方自己攒批）。 |
-| 43 | `session.projectionCache.writeIntervalMs` | 缺写回定时器（5s 间隔）。降级：与 writeEveryEvents 同一根因——没有后台写回，只有同步写。替代路径：无。 |
-| 44 | `session.spill.cleanupPeriodDays` | 缺 spill 文件保留期与自动清理。降级：外置 artifact 永久堆积（临时目录随使用增长，磁盘只增不减）。替代路径：人工清 %TEMP%\dshd-spill。 |
+| 18 | `attachment.imageCompressionConcurrency` | 缺图片压缩并发度（与归一化同一缺口）。降级：无压缩。替代路径：无。 |
+| 19 | `attachment.maxImagesPerMessage` | 缺每消息图片张数上限。降级：一条消息可以塞任意多图（受 promptMaxBlocks=64 间接限制），内存与请求体不可控。替代路径：无。 |
+| 20 | `attachment.normalizedImageMaxBytes` | 缺归一化后的字节预算（与重编码一体）。降级：同上，只有接收上限。替代路径：无。 |
+| 21 | `attachment.normalizedImageMaxPixels` | 缺图片归一化（重采样到目标像素）。降级：大图原样内联，请求体膨胀（只能靠 maxImageBytes 拒收，用户体验是“这张图太大”而不是“已自动压缩”）。替代路径：无（需引入 Go 图像缩放）。 |
+| 22 | `goal.defaultMaxGoalRounds` | 缺默认轮次上限（256）。降级：goal 一旦 active 就没有轮次天花板，只能人工 complete/pause；失控循环只能靠人盯。替代路径：调用方显式给 maxGoalRounds。 |
+| 23 | `jobs.maxConcurrentJobsPerOwner` | 缺 per-owner 并发任务上限。降级：模型可以无限起后台任务，没有背压，机器可能被拖慢。替代路径：无（只能靠提示词自律）。 |
+| 24 | `jobs.settledRetainBytes` | 缺“已结束任务”的独立保留量。降级：结束的任务继续按 1MiB 占内存，长跑多任务的会话内存随任务数增长。替代路径：无。 |
+| 25 | `session.persistence.listConcurrency` | 缺列会话的并发度。降级：会话多时列会话是纯串行 IO，界面“最近会话”列表随文件数线性变慢。替代路径：无（可参考 fsutil.WalkFiles 的并发遍历自己加）。 |
+| 26 | `session.projectionCache.writeEveryEvents` | 缺写回批量（每 N 条事件 / 每 T 毫秒落一次）。降级：每次投影写都同步落盘，长会话高频事件下 fsync 次数按事件数线性放大。替代路径：无（storage.Domain 的写链可复用，但需要调用方自己攒批）。 |
+| 27 | `session.projectionCache.writeIntervalMs` | 缺写回定时器（5s 间隔）。降级：与 writeEveryEvents 同一根因——没有后台写回，只有同步写。替代路径：无。 |
+| 28 | `session.spill.cleanupPeriodDays` | 缺 spill 文件保留期与自动清理。降级：外置 artifact 永久堆积（临时目录随使用增长，磁盘只增不减）。替代路径：人工清 %TEMP%\dshd-spill。 |
 
 #### tools-sandbox-approval（13 条）
 
 | # | 官方 key | 缺什么 / 降级 / 替代路径 |
 |---|---|---|
-| 45 | `approval.memory` | 缺“每次请求都重问”的严格语义（宿主默认按会话记忆）。降级：批准一次后同类调用静默放行，审计面收窄（日志里看不到第二次询问）。替代路径：关闭记忆需要改代码，没有反向开关。 |
-| 46 | `fs.diffBasisMaxBytes` | 缺 diff 基线快照（以及随之而来的“基线太大就不做 diff”保护）。降级：编辑直接落盘，没有可回看的基线；大文件编辑不产生 diff 证据。替代路径：靠会话日志里的 write 事件重建。 |
-| 47 | `sandbox.additionalWritableRoots` | 缺工作区外的追加可写根。降级：要写工作区外的目录只能整档升到 danger-full-access（权限一次性放大到全盘），没有“只多这一个目录”的细粒度。替代路径：无。 |
-| 48 | `sandboxLocal.probeTimeoutMs` | 缺外部沙箱 runner（真隔离）。降级：进程内策略闸门 + Job Object 强杀，不是 OS 级隔离；能防误写，防不住恶意代码。替代路径：无（平台项 40/42/43 已登记后置）。 |
-| 49 | `sandboxLocal.runnerCommand` | 缺可配置的沙箱 runner（与 probeTimeoutMs 同一缺口）。降级：无外部 runner，命令直接在宿主进程树里跑。替代路径：无。 |
-| 50 | `skill.collectCacheMaxEntries` | 缺 skill 收集缓存。降级：每次列/找 skill 都打一遍文件系统，skill 多时列表变慢。替代路径：无。 |
-| 51 | `skillFs.watchUsePolling` | 缺 skill 目录监听（原生事件与轮询都没有）。降级：skill 变更在会话内不可见，必须重启。替代路径：无。 |
-| 52 | `terminal.activityPollIntervalMs` | 缺终端活跃度采样与闲置判定。降级：无法区分“有人在用”和“挂着没人管”，回收只能靠人工。替代路径：无。 |
-| 53 | `terminal.cleanupRetryMs` | 缺清理重试节奏。降级：清理失败就泄漏（句柄/临时文件），没有兜底重试。替代路径：重启宿主。 |
-| 54 | `terminal.disposeGraceMs` | 缺销毁宽限。降级：终端被立刻杀掉，shell 里的收尾脚本（写历史、清理临时文件）来不及跑。替代路径：命令自己 trap 也无用（PTY 关闭即收到挂断）。 |
-| 55 | `terminal.maxTerminals` | 缺每会话终端数上限。降级：可以无限开 PTY，每个都占一个 conhost 进程与缓冲，机器资源可被打满。替代路径：无（官方上限 8 可直接移植）。 |
-| 56 | `terminal.unattendedTimeoutMs` | 缺无人值守终端寿命上限。降级：后台终端可永久存活（进程级泄漏），没有人回收。替代路径：人工 kill。 |
-| 57 | `tools.ptc.maxParallelSubCalls` | 缺 PTC 并行子调用池。降级：子调用只能串行（workflow 的 JSON 步骤表 + 串行 for）。替代路径：无。 |
+| 29 | `approval.memory` | 缺“每次请求都重问”的严格语义（宿主默认按会话记忆）。降级：批准一次后同类调用静默放行，审计面收窄（日志里看不到第二次询问）。替代路径：关闭记忆需要改代码，没有反向开关。 |
+| 30 | `fs.diffBasisMaxBytes` | 缺 diff 基线快照（以及随之而来的“基线太大就不做 diff”保护）。降级：编辑直接落盘，没有可回看的基线；大文件编辑不产生 diff 证据。替代路径：靠会话日志里的 write 事件重建。 |
+| 31 | `sandbox.additionalWritableRoots` | 缺工作区外的追加可写根。降级：要写工作区外的目录只能整档升到 danger-full-access（权限一次性放大到全盘），没有“只多这一个目录”的细粒度。替代路径：无。 |
+| 32 | `sandboxLocal.probeTimeoutMs` | 缺外部沙箱 runner（真隔离）。降级：进程内策略闸门 + Job Object 强杀，不是 OS 级隔离；能防误写，防不住恶意代码。替代路径：无（平台项 40/42/43 已登记后置）。 |
+| 33 | `sandboxLocal.runnerCommand` | 缺可配置的沙箱 runner（与 probeTimeoutMs 同一缺口）。降级：无外部 runner，命令直接在宿主进程树里跑。替代路径：无。 |
+| 34 | `skill.collectCacheMaxEntries` | 缺 skill 收集缓存。降级：每次列/找 skill 都打一遍文件系统，skill 多时列表变慢。替代路径：无。 |
+| 35 | `skillFs.watchUsePolling` | 缺 skill 目录监听（原生事件与轮询都没有）。降级：skill 变更在会话内不可见，必须重启。替代路径：无。 |
+| 36 | `terminal.activityPollIntervalMs` | 缺终端活跃度采样与闲置判定。降级：无法区分“有人在用”和“挂着没人管”，回收只能靠人工。替代路径：无。 |
+| 37 | `terminal.cleanupRetryMs` | 缺清理重试节奏。降级：清理失败就泄漏（句柄/临时文件），没有兜底重试。替代路径：重启宿主。 |
+| 38 | `terminal.disposeGraceMs` | 缺销毁宽限。降级：终端被立刻杀掉，shell 里的收尾脚本（写历史、清理临时文件）来不及跑。替代路径：命令自己 trap 也无用（PTY 关闭即收到挂断）。 |
+| 39 | `terminal.maxTerminals` | 缺每会话终端数上限。降级：可以无限开 PTY，每个都占一个 conhost 进程与缓冲，机器资源可被打满。替代路径：无（官方上限 8 可直接移植）。 |
+| 40 | `terminal.unattendedTimeoutMs` | 缺无人值守终端寿命上限。降级：后台终端可永久存活（进程级泄漏），没有人回收。替代路径：人工 kill。 |
+| 41 | `tools.ptc.maxParallelSubCalls` | 缺 PTC 并行子调用池。降级：子调用只能串行（workflow 的 JSON 步骤表 + 串行 for）。替代路径：无。 |
 
 #### transport-http（7 条）
 
 | # | 官方 key | 缺什么 / 降级 / 替代路径 |
 |---|---|---|
-| 58 | `cordis.hostRunner.clientInspectTimeoutMs` | 缺 inspect 专用超时。降级：inspect 挂住时一直等到外层 ctx 取消（可能几分钟）。替代路径：调用方设 deadline。 |
-| 59 | `cordis.hostRunner.vmTimeoutMs` | 缺脚本 VM 默认超时（5s）。降级：脚本死循环只能靠调用方 ctx（外层工具超时）打断；没有 per-script 预算。替代路径：调用方自己设 ctx deadline。 |
-| 60 | `sessionController.listWorkSliceMs` | 缺列会话的工作切片预算。降级：会话多时一次请求同步扫完全部会话文件，HTTP 请求被拖长（没有增量/分片返回）。替代路径：无（可加 ctx 期限近似）。 |
-| 61 | `webserver.compressionLevel` | 缺运行期 gzip 压缩（级别可调）。降级：只有 dist 里预先压好的资源被压缩，API/WS 文本响应（JSON 帧）全程不压缩，长会话历史响应体积翻倍。替代路径：为 dist 预压缩（已有），API 侧无。 |
-| 62 | `webserver.compressionThresholdBytes` | 缺压缩阈值。降级：与 compressionLevel 同一根因（无运行期压缩）。替代路径：无。 |
-| 63 | `webserver.tls` | 缺 HTTPS 监听。降级：只能明文 HTTP（本机环回够用，跨机/隧道场景无 TLS）。替代路径：反向代理（nginx/caddy）终结 TLS。 |
-| 64 | `workspaceController.documentsLookupTimeoutMs` | 缺 Documents 查找超时。降级：域账号/网络重定向的 Documents 目录查询可能阻塞（启动期一次），没有超时兜底。替代路径：无。 |
+| 42 | `cordis.hostRunner.clientInspectTimeoutMs` | 缺 inspect 专用超时。降级：inspect 挂住时一直等到外层 ctx 取消（可能几分钟）。替代路径：调用方设 deadline。 |
+| 43 | `cordis.hostRunner.vmTimeoutMs` | 缺脚本 VM 默认超时（5s）。降级：脚本死循环只能靠调用方 ctx（外层工具超时）打断；没有 per-script 预算。替代路径：调用方自己设 ctx deadline。 |
+| 44 | `sessionController.listWorkSliceMs` | 缺列会话的工作切片预算。降级：会话多时一次请求同步扫完全部会话文件，HTTP 请求被拖长（没有增量/分片返回）。替代路径：无（可加 ctx 期限近似）。 |
+| 45 | `webserver.compressionLevel` | 缺运行期 gzip 压缩（级别可调）。降级：只有 dist 里预先压好的资源被压缩，API/WS 文本响应（JSON 帧）全程不压缩，长会话历史响应体积翻倍。替代路径：为 dist 预压缩（已有），API 侧无。 |
+| 46 | `webserver.compressionThresholdBytes` | 缺压缩阈值。降级：与 compressionLevel 同一根因（无运行期压缩）。替代路径：无。 |
+| 47 | `webserver.tls` | 缺 HTTPS 监听。降级：只能明文 HTTP（本机环回够用，跨机/隧道场景无 TLS）。替代路径：反向代理（nginx/caddy）终结 TLS。 |
+| 48 | `workspaceController.documentsLookupTimeoutMs` | 缺 Documents 查找超时。降级：域账号/网络重定向的 Documents 目录查询可能阻塞（启动期一次），没有超时兜底。替代路径：无。 |
 
 #### tui-capability（2 条）
 
 | # | 官方 key | 缺什么 / 降级 / 替代路径 |
 |---|---|---|
-| 65 | `context.occupancy.display` | 缺 contextPressure 三数视图。降级：界面能显示“已用/上限”，但没有“prompt 压力”和“下一次请求预计占用”，上下文占用条只能事后看。替代路径：无（与 context.measurement.* 同一缺口族）。 |
-| 66 | `placement.goValuesMapping` | 缺 placement → 官方双队列的**真机会话**等价性验证。降级：映射按字段名实现（turn=旧语义、steer=agent.steer、followup=排队下一轮），queue/now 的真实落点未证；语义错位只会在真机上表现为“消息插错位置”。替代路径：无（需一次真实会话对照实验）。 |
+| 49 | `context.occupancy.display` | 缺 contextPressure 三数视图。降级：界面能显示“已用/上限”，但没有“prompt 压力”和“下一次请求预计占用”，上下文占用条只能事后看。替代路径：无（与 context.measurement.* 同一缺口族）。 |
+| 50 | `placement.goValuesMapping` | 缺 placement → 官方双队列的**真机会话**等价性验证。降级：映射按字段名实现（turn=旧语义、steer=agent.steer、followup=排队下一轮），queue/now 的真实落点未证；语义错位只会在真机上表现为“消息插错位置”。替代路径：无（需一次真实会话对照实验）。 |
 
 #### env（1 条）
 
 | # | 官方 key | 缺什么 / 降级 / 替代路径 |
 |---|---|---|
-| 67 | `DSH_SYSTEM_PROMPT` | 缺“替换系统提示 persona 前缀”的入口。降级：persona 只能靠改 AGENTS.md（会被拼进提示，但不是替换前缀）；不同 profile 想换人格必须改文件。替代路径：AGENTS.md 覆盖（不精确）。 |
+| 51 | `DSH_SYSTEM_PROMPT` | 缺“替换系统提示 persona 前缀”的入口。降级：persona 只能靠改 AGENTS.md（会被拼进提示，但不是替换前缀）；不同 profile 想换人格必须改文件。替代路径：AGENTS.md 覆盖（不精确）。 |
 
-#### live-profile-desktop（4 条）
+#### live-profile-desktop（3 条）
 
 | # | 官方 key | 缺什么 / 降级 / 替代路径 |
 |---|---|---|
-| 68 | `llmPiAi.providers.magpie.streamIdleTimeoutMs` | 缺 per-provider 流空闲超时（600s）。降级：上游半开连接时请求一直挂着，直到调用方 ctx 或工具超时。替代路径：外层工具超时兜底。 |
-| 69 | `sessionLogDeepseek.enabled` | 缺会话日志上传管道（含开关）。降级：v4 日志只落本地，没有"上传/不上传"的选择——想外传只能自己拷文件。替代路径：无（要上传得先实现出站管道 + 脱敏 + 用户授权）。 |
-| 70 | `subagent.maxActiveSubagents` | 缺并发子代理上限（20）。降级：可无限并行派生，机器资源与 API 配额无背压。替代路径：无。 |
-| 71 | `toolWeb.searchTimeoutMs` | 缺 web_search 超时。降级：搜索挂住时只能等外层工具超时（默认更宽），单次慢查询会拖住整轮。替代路径：无。 |
+| 52 | `llmPiAi.providers.magpie.streamIdleTimeoutMs` | 缺 per-provider 流空闲超时（600s）。降级：上游半开连接时请求一直挂着，直到调用方 ctx 或工具超时。替代路径：外层工具超时兜底。 |
+| 53 | `sessionLogDeepseek.enabled` | 缺会话日志上传管道（含开关）。降级：v4 日志只落本地，没有"上传/不上传"的选择——想外传只能自己拷文件。替代路径：无（要上传得先实现出站管道 + 脱敏 + 用户授权）。 |
+| 54 | `subagent.maxActiveSubagents` | 缺并发子代理上限（20）。降级：可无限并行派生，机器资源与 API 配额无背压。替代路径：无。 |
 
 #### schedule-plugins-account-telemetry（42 条）
 
 | # | 官方 key | 缺什么 / 降级 / 替代路径 |
 |---|---|---|
-| 72 | `account.attemptTimeoutMs` | 缺设备登录的单次尝试预算。降级：登录请求受 20s client 超时约束，长流程（等用户在浏览器点授权）会被截断。替代路径：无。 |
-| 73 | `account.balanceTimeoutMs` | 缺余额查询独立超时。降级：与账号 API 共用 20s，余额慢时整条链路一起失败。替代路径：无。 |
-| 74 | `account.inferenceOrigin` | 缺"账号侧推理端点 origin"配置。降级：账号 API 与推理端点各自配置，切到自建/官方端点时不会联动，容易一半指向 A 一半指向 B。替代路径：分别设 DSHD_ACCOUNT_PLATFORM_ORIGIN 与 DSHD_LLM_BASE。 |
-| 75 | `account.logoutMaxRetries` | 缺登出重试。降级：网络抖动时登出失败即返回错误，本地凭据可能已清、服务端会话仍在。替代路径：手动再登出一次。 |
-| 76 | `account.logoutRetryDelayMs` | 缺登出重试间隔（同一缺口族）。降级：无重试。替代路径：无。 |
-| 77 | `account.requestTimeoutMs` | 缺可配的账号请求超时。降级：写死 20s（比官方 30s 更紧），慢网络下的登录/余额查询可能先超时。替代路径：无（external 部分只能改代码）。 |
-| 78 | `agentTeam.disposalTimeoutMs` | 缺团队销毁超时。降级：销毁慢（成员多/文件大）时会一直阻塞调用方。替代路径：无。 |
-| 79 | `agentTeam.maxMembers` | 缺团队人数上限。降级：可以无限加成员，团队拓扑与消息扇出无界。替代路径：无。 |
-| 80 | `agentTeam.maxMessageBytes` | 缺团队消息字节上限。降级：单条消息可无限大，撑爆状态文件。替代路径：无。 |
-| 81 | `agentTeam.maxTasks` | 缺团队任务数上限。降级：任务表可无限增长（内存 + 文件）。替代路径：无。 |
-| 82 | `analytics.environmentQueryMaxOutputBytes` | 缺环境查询输出上限（同一缺口族）。降级：无该通道。替代路径：无。 |
-| 83 | `analytics.environmentQueryTimeoutMillis` | 缺环境采集（os/arch/版本等遥测属性）。降级：事件里没有环境维度，无法按平台切片分析。替代路径：无。 |
-| 84 | `hmr.ignored` | 缺 HMR 忽略清单。降级：插件根下任何文件变动都会触发重载判定（含 node_modules），大插件树下噪声大。替代路径：把插件根限制在无 node_modules 的目录。 |
-| 85 | `pluginManager.detailFetchTimeoutMs` | 缺详情抓取超时（与 detailMaxBytes 同一缺口）。降级：无该通道。替代路径：无。 |
-| 86 | `pluginManager.detailMaxBytes` | 缺包详情抓取（含字节上限）。降级：远程包的 README/元数据拿不到。替代路径：无。 |
-| 87 | `pluginManager.fallbackRegistries` | 缺 registry 源列表（含回退）。降级：无 registry 通道，装不了任何远程包。替代路径：无。 |
-| 88 | `pluginManager.idleTimeoutMs` | 缺空闲子进程回收（pnpm 通道专属）。降级：无子进程可回收。替代路径：无。 |
-| 89 | `pluginManager.inspectTimeoutMs` | 缺 inspect 子进程预算。降级：inspect 只在本地目录上工作，无子进程可管。替代路径：无。 |
-| 90 | `pluginManager.lockWaitMs` | 缺安装锁等待（pnpm 通道专属）。降级：本地目录安装不需要锁等待；并发安装靠 job 串行。替代路径：无（也不需要）。 |
-| 91 | `pluginManager.outputBytes` | 缺安装输出尾部缓冲。降级：安装失败只有结构化错误，没有原始 stdout 尾巴可贴。替代路径：无。 |
-| 92 | `pluginManager.pnpmCommand` | 缺 pnpm 安装通道（子进程 + 参数注入）。降级：只能装本地目录包，registry 规格直接返回结构化未实现。替代路径：无（要真装 npm 包得先做 registry 客户端）。 |
-| 93 | `pluginManager.toolsMounted` | 缺"是否挂载插件工具"的开关（宿主恒挂载，官方默认不挂）。降级：插件一装好工具就出现在模型工具表里，没有下线开关。替代路径：卸载插件。 |
-| 94 | `pluginManager.versionListLimit` | 缺版本列表查询（含条数上限）。降级：插件市场里看不到可安装版本。替代路径：无。 |
-| 95 | `pluginManager.versionLookupConcurrency` | 缺并发版本查询。降级：无该查询通道。替代路径：无。 |
-| 96 | `systemPrompt.includeRuntimeContext` | 缺 runtime context 段（工作目录/时间/环境）。降级：模型不知道"现在几点、在哪个目录"，长会话里这些事实会过期。替代路径：模型自己调工具查（date/pwd）。 |
-| 97 | `systemPrompt.personaPrefix` | 缺可配 persona 前缀。降级：换人格要改 AGENTS.md（全局生效，不能按 profile 切换）。替代路径：AGENTS.md 覆盖（不精确）。 |
-| 98 | `systemPrompt.toolOrder` | 缺工具顺序覆盖。降级：提示里工具顺序只能由装配顺序决定（想调顺序得改代码）。替代路径：无。 |
-| 99 | `telemetry.anonymousUserId` | 缺匿名用户 id。降级：事件无法跨会话去重/统计独立用户数。替代路径：无。 |
-| 100 | `telemetry.host.exportTimeoutMillis` | 缺 host 遥测导出管道（20000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 101 | `telemetry.host.maxExportBatchSize` | 缺 host 遥测导出管道（512）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 102 | `telemetry.host.maxQueueSize` | 缺 host 遥测导出管道（2048）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 103 | `telemetry.host.scheduledDelayMillis` | 缺 host 遥测导出管道（30000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 104 | `telemetry.host.shutdownTimeoutMillis` | 缺 host 遥测导出管道（21000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 105 | `telemetry.host.timeoutMillis` | 缺 host 遥测导出管道（15000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 106 | `telemetry.session.exporter.timeoutMillis` | 缺导出超时（1000ms）。降级：导出挂住时只能等调用方 ctx 取消。替代路径：无。 |
-| 107 | `telemetry.session.maxRequestBytes` | 缺遥测请求字节上限（OTel 批量专属）。降级：无批量，也就没有该限制。替代路径：无。 |
-| 108 | `telemetry.session.processor.exportTimeoutMillis` | 缺 OTel 批处理队列/批量/定时导出（1500）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
-| 109 | `telemetry.session.processor.maxExportBatchSize` | 缺 OTel 批处理队列/批量/定时导出（2048）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
-| 110 | `telemetry.session.processor.maxQueueSize` | 缺 OTel 批处理队列/批量/定时导出（2048）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
-| 111 | `telemetry.session.processor.scheduledDelayMillis` | 缺 OTel 批处理队列/批量/定时导出（10000）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
-| 112 | `telemetry.session.shutdownTimeoutMillis` | 缺 OTel SDK 关停冲刷（3000ms）。降级：进程退出时没有"把队列里的事件刷出去"这一步（因为本来就没有队列）。替代路径：无。 |
-| 113 | `workingDirectory.defaultDirectory` | 缺新会话默认工作目录。降级：新会话一律用进程 cwd（--home 是会话根，不是工作目录），想换目录只能每次进会话后改。替代路径：启动时切 cwd。 |
+| 55 | `account.attemptTimeoutMs` | 缺设备登录的单次尝试预算。降级：登录请求受 20s client 超时约束，长流程（等用户在浏览器点授权）会被截断。替代路径：无。 |
+| 56 | `account.balanceTimeoutMs` | 缺余额查询独立超时。降级：与账号 API 共用 20s，余额慢时整条链路一起失败。替代路径：无。 |
+| 57 | `account.inferenceOrigin` | 缺"账号侧推理端点 origin"配置。降级：账号 API 与推理端点各自配置，切到自建/官方端点时不会联动，容易一半指向 A 一半指向 B。替代路径：分别设 DSHD_ACCOUNT_PLATFORM_ORIGIN 与 DSHD_LLM_BASE。 |
+| 58 | `account.logoutMaxRetries` | 缺登出重试。降级：网络抖动时登出失败即返回错误，本地凭据可能已清、服务端会话仍在。替代路径：手动再登出一次。 |
+| 59 | `account.logoutRetryDelayMs` | 缺登出重试间隔（同一缺口族）。降级：无重试。替代路径：无。 |
+| 60 | `account.requestTimeoutMs` | 缺可配的账号请求超时。降级：写死 20s（比官方 30s 更紧），慢网络下的登录/余额查询可能先超时。替代路径：无（external 部分只能改代码）。 |
+| 61 | `agentTeam.disposalTimeoutMs` | 缺团队销毁超时。降级：销毁慢（成员多/文件大）时会一直阻塞调用方。替代路径：无。 |
+| 62 | `agentTeam.maxMembers` | 缺团队人数上限。降级：可以无限加成员，团队拓扑与消息扇出无界。替代路径：无。 |
+| 63 | `agentTeam.maxMessageBytes` | 缺团队消息字节上限。降级：单条消息可无限大，撑爆状态文件。替代路径：无。 |
+| 64 | `agentTeam.maxTasks` | 缺团队任务数上限。降级：任务表可无限增长（内存 + 文件）。替代路径：无。 |
+| 65 | `analytics.environmentQueryMaxOutputBytes` | 缺环境查询输出上限（同一缺口族）。降级：无该通道。替代路径：无。 |
+| 66 | `analytics.environmentQueryTimeoutMillis` | 缺环境采集（os/arch/版本等遥测属性）。降级：事件里没有环境维度，无法按平台切片分析。替代路径：无。 |
+| 67 | `hmr.ignored` | 缺 HMR 忽略清单。降级：插件根下任何文件变动都会触发重载判定（含 node_modules），大插件树下噪声大。替代路径：把插件根限制在无 node_modules 的目录。 |
+| 68 | `pluginManager.detailFetchTimeoutMs` | 缺详情抓取超时（与 detailMaxBytes 同一缺口）。降级：无该通道。替代路径：无。 |
+| 69 | `pluginManager.detailMaxBytes` | 缺包详情抓取（含字节上限）。降级：远程包的 README/元数据拿不到。替代路径：无。 |
+| 70 | `pluginManager.fallbackRegistries` | 缺 registry 源列表（含回退）。降级：无 registry 通道，装不了任何远程包。替代路径：无。 |
+| 71 | `pluginManager.idleTimeoutMs` | 缺空闲子进程回收（pnpm 通道专属）。降级：无子进程可回收。替代路径：无。 |
+| 72 | `pluginManager.inspectTimeoutMs` | 缺 inspect 子进程预算。降级：inspect 只在本地目录上工作，无子进程可管。替代路径：无。 |
+| 73 | `pluginManager.lockWaitMs` | 缺安装锁等待（pnpm 通道专属）。降级：本地目录安装不需要锁等待；并发安装靠 job 串行。替代路径：无（也不需要）。 |
+| 74 | `pluginManager.outputBytes` | 缺安装输出尾部缓冲。降级：安装失败只有结构化错误，没有原始 stdout 尾巴可贴。替代路径：无。 |
+| 75 | `pluginManager.pnpmCommand` | 缺 pnpm 安装通道（子进程 + 参数注入）。降级：只能装本地目录包，registry 规格直接返回结构化未实现。替代路径：无（要真装 npm 包得先做 registry 客户端）。 |
+| 76 | `pluginManager.toolsMounted` | 缺"是否挂载插件工具"的开关（宿主恒挂载，官方默认不挂）。降级：插件一装好工具就出现在模型工具表里，没有下线开关。替代路径：卸载插件。 |
+| 77 | `pluginManager.versionListLimit` | 缺版本列表查询（含条数上限）。降级：插件市场里看不到可安装版本。替代路径：无。 |
+| 78 | `pluginManager.versionLookupConcurrency` | 缺并发版本查询。降级：无该查询通道。替代路径：无。 |
+| 79 | `systemPrompt.includeRuntimeContext` | 缺 runtime context 段（工作目录/时间/环境）。降级：模型不知道"现在几点、在哪个目录"，长会话里这些事实会过期。替代路径：模型自己调工具查（date/pwd）。 |
+| 80 | `systemPrompt.personaPrefix` | 缺可配 persona 前缀。降级：换人格要改 AGENTS.md（全局生效，不能按 profile 切换）。替代路径：AGENTS.md 覆盖（不精确）。 |
+| 81 | `systemPrompt.toolOrder` | 缺工具顺序覆盖。降级：提示里工具顺序只能由装配顺序决定（想调顺序得改代码）。替代路径：无。 |
+| 82 | `telemetry.anonymousUserId` | 缺匿名用户 id。降级：事件无法跨会话去重/统计独立用户数。替代路径：无。 |
+| 83 | `telemetry.host.exportTimeoutMillis` | 缺 host 遥测导出管道（20000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
+| 84 | `telemetry.host.maxExportBatchSize` | 缺 host 遥测导出管道（512）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
+| 85 | `telemetry.host.maxQueueSize` | 缺 host 遥测导出管道（2048）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
+| 86 | `telemetry.host.scheduledDelayMillis` | 缺 host 遥测导出管道（30000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
+| 87 | `telemetry.host.shutdownTimeoutMillis` | 缺 host 遥测导出管道（21000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
+| 88 | `telemetry.host.timeoutMillis` | 缺 host 遥测导出管道（15000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
+| 89 | `telemetry.session.exporter.timeoutMillis` | 缺导出超时（1000ms）。降级：导出挂住时只能等调用方 ctx 取消。替代路径：无。 |
+| 90 | `telemetry.session.maxRequestBytes` | 缺遥测请求字节上限（OTel 批量专属）。降级：无批量，也就没有该限制。替代路径：无。 |
+| 91 | `telemetry.session.processor.exportTimeoutMillis` | 缺 OTel 批处理队列/批量/定时导出（1500）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
+| 92 | `telemetry.session.processor.maxExportBatchSize` | 缺 OTel 批处理队列/批量/定时导出（2048）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
+| 93 | `telemetry.session.processor.maxQueueSize` | 缺 OTel 批处理队列/批量/定时导出（2048）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
+| 94 | `telemetry.session.processor.scheduledDelayMillis` | 缺 OTel 批处理队列/批量/定时导出（10000）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
+| 95 | `telemetry.session.shutdownTimeoutMillis` | 缺 OTel SDK 关停冲刷（3000ms）。降级：进程退出时没有"把队列里的事件刷出去"这一步（因为本来就没有队列）。替代路径：无。 |
+| 96 | `workingDirectory.defaultDirectory` | 缺新会话默认工作目录。降级：新会话一律用进程 cwd（--home 是会话根，不是工作目录），想换目录只能每次进会话后改。替代路径：启动时切 cwd。 |
 
 ## 8. 写作用域外：TUI2GO 侧（owner=tui-line）
 
@@ -836,7 +827,7 @@ permission-modes overlay 退场、/T5 play 根自举（`launcher/bootstrap-play.
   并复核改判（t5：17 条改 `COVERED-EQUIV`、45 条改 `UNREAD-GAP`、9 条留 `N-A` 带子类）；
   t7 再按 t4 交叉核对改判 3 条（`uiTheme.preference` / `transcriptView` → `COVERED-EQUIV`，
   `sessionLogDeepseek.enabled` → `UNREAD-GAP`）。
-  真缺口 `UNREAD-GAP` 113 条，每条写清了缺什么 / 现在降级成什么样 / 有无替代路径，可直接派单。
+  真缺口 `UNREAD-GAP` 96 条（GO.6 四族补齐后由 113 降下来：17 条改判 `COVERED-EQUIV`，见 §13），每条写清了缺什么 / 现在降级成什么样 / 有无替代路径，可直接派单。
 - env 15 条的实际分布是 **`COVERED` 3 / `COVERED-EQUIV` 6 / `N-A` 5 / `UNREAD-GAP` 1**（GO.5/T1 之后；
   此前是 `COVERED-EQUIV` 10 / `N-A` 4 / `UNREAD-GAP` 1）：
   GO.5/T1 把 `DSH_TELEMETRY_OTLP_URL` / `DSH_PRODUCT_ANALYTICS_OTLP_URL` / `DSH_MAX_TOKENS_AS_SUCCESS`
@@ -892,3 +883,31 @@ permission-modes overlay 退场、/T5 play 根自举（`launcher/bootstrap-play.
 - **verdict 归位**（T2/T3/T5 已修，总账不再挂着旧的 `HARDCODED`）：`HARDCODED` 14 → **2**（其中 TUI2GO 侧 12 条 → 2 条），`OK` 122 → **134**；`fixedBy` 新增 `t2` 8 条、`t3` 3 条、`t5` 1 条。
   剩下 2 条 `HARDCODED` 是**真行为**（每次启动跑 `--ensure`；debug 落盘路径固定），不是漂移。
 - 门禁：`validate_register.py` → `MISMATCH=0` EXIT=0；`audit_refs.py` → 可疑 **0** EXIT=0。
+
+## 13. 本轮更新（GO.6 / T5：四族补齐、总账改判与两道闸）
+
+> 证据：`tmp/GO6-PARAMS/verify/RESULT.md`（独立复验探针 + 两族以上的真实读数 + 两道闸原文）、
+> 四族各自的 `tmp/GO6-PARAMS/{llm,context,tools,parallel}/RESULT.md`。
+
+- **17 条官方参数从 `UNREAD-GAP` 改判 `COVERED-EQUIV`**（每条都带新 `hostEquivalent` file:line 与差异说明）：
+  - LLM 面（5）：`llm.temperature` / `llm.stop` / `llm.callConfig.controls`（每请求采样面）、
+    `llm.deepseek.streamIdleTimeoutMs`（300s 流空闲看门狗）、`llm.deepseek.modelsMaxAgeMs`（600s 模型列表 TTL）；
+  - 上下文面（7）：`context.measurement.pressureTokens` / `projectedTokens` / `usageBuckets`（四桶投影）、
+    `context.compaction.compactionRetries` / `maxOverflowRetries` / `reservedCompletionTokens`；
+  - 工具面（3）：`tool.web.searchTimeoutMs`（30s，基础包 60s）、`tool.web.searchSummaryMaxChars`（800 含省略号）、
+    `bash.graceMs`（3000ms 先礼后兵）；
+  - 并行（1）：`agentLoop.maxParallelToolCalls`（默认 10 路，结果保序、审批类串行）；
+  - live-profile（1）：`toolWeb.searchTimeoutMs`（60000ms，与宿主基础包分支逐值相同）。
+- **改判的硬约束**：`flip_coverage.py` 对每条改动先 assert 目标行内容（`grep -n` 级证据），再写回；
+  三条判据同时成立才改判（能力真存在 / 行是当前工作树的真行 / 差异写进 `note`）。
+- **保持 `UNREAD-GAP` 的两条**（**不虚报**）：`llm.piAi.streamIdleTimeoutMs`、`llmPiAi.providers.magpie.streamIdleTimeoutMs`
+  —— 挂死缺口已由全局看门狗关闭（默认 300s，env 可覆盖），但 **per-provider 细分确实没做**，所以只在 `note` 里标注现状。
+  `context.compaction.headroomTokens`（字段在、默认 0 未接线）、`tools.ptc.maxParallelSubCalls`、`terminal.disposeGraceMs` 等未动。
+- **计数**：`UNREAD-GAP` **113 → 96**，`COVERED-EQUIV` **135 → 152**，`COVERED` 63、`N-A` 31 不变，总数仍 342。
+- **行号重锚**：T1/T2/T3/T4 改产品代码后 38 条条目的 `file:line` 整体漂移（acp flag 块 +42 行等），
+  用 `tmp/GO6-PARAMS/verify/reanchor_register.py` 按 key 重新定位并把「期望行内容」写成 assert，
+  写回 48 处（含 4 条散文里的旧行号）。
+- **两道闸**（都对 `docs/parameter-register.json` 跑）：
+  - `validate_register.py --json docs/parameter-register.json` → `OK=306 MISMATCH=0`，EXIT=0；
+  - `audit_refs.py --cur docs/parameter-register.json` → 可疑（新行是包声明/空行/注释）**0**，EXIT=0。
+- **全量门禁**：`go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全 0（见 RESULT §2）。
