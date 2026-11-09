@@ -27,3 +27,17 @@ __pycache__/
 
 # 构建产物：不入库（发版走 Release 附件）
 *.exe
+
+# 本地运行态与隔离副本：不入库，内容留在原地可查（git 不管，但不清空）。
+# /.agent-teams/  AgentTeams 团队状态；archive/ 下是已归档团队 jsonl，历史证据要留。
+# /.dsh-zhuli/    主理鱼隔离副本目录（曾放 2 个 git worktree，已回收；目录本身仍在用，忽略根目录）。
+# /.agents/       agent worktree 根；其内部 .agents/worktrees/.gitignore 已是 `*`，
+#                 但根目录本身没有 ignore 规则，显式列一行，避免空目录/根条目出现在 untracked 里。
+/.agent-teams/
+/.dsh-zhuli/
+/.agents/
+
+# 补丁备份与 patch 拒绝残留：Go 只编译 *.go（.orig/.rej 连扩展名都不是 .go），
+# 永不参与 build/vet/test；它们只是 apply-patch 的中间产物，不该入库。
+*.orig
+*.rej
