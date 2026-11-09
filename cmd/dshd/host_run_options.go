@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -32,6 +33,11 @@ type hostRunOptions struct {
 	maxOutput     int
 	// agents 是规则文件路径（空 = 用工作区自己的 AGENTS.md）。
 	agents string
+	// compactHeadroom / compactPolicies 是官方 context.compaction.headroomTokens /
+	// modelPolicies（默认 65536 / 空）。serve 自己不压缩，但必须原样交给
+	// 子进程 `dshd run`——否则"从界面起的会话"与"命令行起的会话"阈值不同。
+	compactHeadroom int
+	compactPolicies string
 }
 
 // 这些默认值与 `cmdRun` 的同名 flag **同源**：常量只定义一次，serve 侧不写第二份字面量。
@@ -48,7 +54,14 @@ const (
 // run / serve 都调它一次就能拿到完全一致的默认值与语义；哪天要加第 7 个旋钮，
 // 只改这里与 childArgs 的 append，不会出现"两个入口各写一份默认值"。
 func addHostRunFlags(fs *flag.FlagSet) *hostRunOptions {
-	o := &hostRunOptions{autoCompact: defaultAutoCompact}
+	headroom, err := compactHeadroomFromEnv(os.Getenv)
+	if err != nil {
+		// 解析失败时留一个**非法值**，让 args() 之后的启动路径照样 fail-loud，
+		// 而不是在 flag 注册期 panic（注册期没有错误返回口）。
+		headroom = -1
+	}
+	o := &hostRunOptions{autoCompact: defaultAutoCompact, compactHeadroom: headroom,
+		compactPolicies: os.Getenv(EnvCompactModelPolicies)}
 	fs.Var(autoCompactValue{target: &o.autoCompact}, "auto-compact",
 		"每步前估算超过多少 token 就自动压缩（0/false=关闭，true=默认 40000）")
 	fs.IntVar(&o.maxChars, "max-chars", defaultMaxChars,
@@ -61,6 +74,10 @@ func addHostRunFlags(fs *flag.FlagSet) *hostRunOptions {
 		"显式单次最大输出 token；0=按模型容量解析")
 	fs.StringVar(&o.agents, "agents", "",
 		"规则文件路径（默认工作区 AGENTS.md）")
+	fs.IntVar(&o.compactHeadroom, "compact-headroom-tokens", o.compactHeadroom,
+		"窗口下方预留多少 token 的安全带（官方 headroomTokens，默认 65536；0=不留）")
+	fs.StringVar(&o.compactPolicies, "compact-model-policies", o.compactPolicies,
+		"按 provider/model 覆盖压缩阈值（JSON 数组；空=不覆盖）")
 	return o
 }
 
@@ -75,6 +92,11 @@ func (o *hostRunOptions) args() []string {
 		"--workspace-bytes", strconv.Itoa(o.workspaceBytes),
 		"--context-window", strconv.Itoa(o.contextWindow),
 		"--max-output", strconv.Itoa(o.maxOutput),
+		"--compact-headroom-tokens", strconv.Itoa(o.compactHeadroom),
+	}
+	// 空 = 子进程按默认策略走；显式传空串会覆盖成"没有覆盖"，语义不同。
+	if strings.TrimSpace(o.compactPolicies) != "" {
+		args = append(args, "--compact-model-policies", o.compactPolicies)
 	}
 	// 空 = 让子进程用工作区自己的 AGENTS.md。显式传空串会覆盖成"不要规则"，
 	// 那是另一种语义，不能靠"传个空值碰运气"。

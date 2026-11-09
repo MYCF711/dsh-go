@@ -756,10 +756,10 @@ func newOfficialWireTestClient(t *testing.T) *http.Client {
 //
 // 本用例两半都是判据：
 //
-//	1. 生产挂载（officialWireMount 把 LegacyCookie 接成 srv.MintInternalCookie）：
-//	   `POST /api/session/page` → 200 + result.ok:true + 真 journal 的 cursor/records；
-//	2. 修复前的旧路径（只给 TokenSource、不给 CookieSource）：同一条请求 →
-//	   200 + result.ok:false + `remote-access/denied`。
+//  1. 生产挂载（officialWireMount 把 LegacyCookie 接成 srv.MintInternalCookie）：
+//     `POST /api/session/page` → 200 + result.ok:true + 真 journal 的 cursor/records；
+//  2. 修复前的旧路径（只给 TokenSource、不给 CookieSource）：同一条请求 →
+//     200 + result.ok:false + `remote-access/denied`。
 //
 // 第 2 半就是"先红"本体：修复被摘掉时，第 1 半会拿到第 2 半的结果。
 func TestOfficialWireSpentTokenUsesMintedCookie(t *testing.T) {

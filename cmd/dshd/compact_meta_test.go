@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/compact"
 	"dshgo/internal/llm"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
@@ -79,7 +80,7 @@ func TestRunCompactionMetaUsesRealModel(t *testing.T) {
 	base := d1SSE(t, d1Text("摘要正文", "stop"))
 
 	// budget=1：任何非空 surface 都超预算，压缩必定触发。
-	cmp := runCompactor(llm.New(base, ""), lg, 1, compactMetaModel, &session.Meter{})
+	cmp := runCompactor(llm.New(base, ""), lg, 1, compact.DefaultPolicy(), llm.ModelCapacity{}, compactMetaModel, &session.Meter{})
 	if cmp == nil {
 		t.Fatal("budget>0 时 runCompactor 必须返回可用的压缩器")
 	}

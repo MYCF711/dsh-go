@@ -15,7 +15,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
@@ -51,7 +54,163 @@ var schema = json.RawMessage(`{
 }`)
 
 // Tool 按名字加载 <dir>/<name>/SKILL.md。
-type Tool struct{ dir string }
+type Tool struct {
+	dir string
+
+	// cache 是收集结果的缓存（官方 `skill.collectCacheMaxEntries`）。
+	// 懒初始化：`&Tool{dir: ...}` 这种零值构造照旧可用。
+	cacheMu sync.Mutex
+	cache   *collectCache
+}
+
+// skillEntry 是一条收集结果：名字 + 一句话说明（说明来自 SKILL.md frontmatter）。
+type skillEntry struct {
+	name string
+	desc string
+}
+
+// collectCache 是一份收集快照。
+type collectCache struct {
+	mu      sync.Mutex
+	entries []skillEntry
+	at      time.Time // 快照时间（TTL 从这一刻算）
+	valid   bool
+	sig     string    // 上一次看到的磁盘签名（轮询监听用）
+	sigAt   time.Time // 上一次算签名的时间
+}
+
+const (
+	// defaultCollectCacheMaxEntries 是官方 `skill.collectCacheMaxEntries`（默认 128）。
+	// 超过这个条数就不缓存——宁可不省这一次 IO，也不让缓存无界。
+	defaultCollectCacheMaxEntries = 128
+	// defaultCollectCacheTTL 是宿主给缓存加的有效期（官方没有这个旋钮，但不设 TTL
+	// 会让"改完 skill 要重启"变成新坑）。
+	defaultCollectCacheTTL = 2 * time.Second
+)
+
+func skillCacheTTL() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("DSHD_SKILLS_CACHE_TTL_MS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return defaultCollectCacheTTL
+}
+
+// skillWatchPoll 是轮询监听间隔（官方 `skillFs.watchUsePolling`，默认 false = 关闭）。
+// 开启后每次收集前先看磁盘签名，变了立刻失效缓存，不等 TTL。
+func skillWatchPoll() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("DSHD_SKILLS_WATCH_POLL_MS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return 0
+}
+
+func skillCacheMax() int {
+	if raw := strings.TrimSpace(os.Getenv("DSHD_SKILLS_COLLECT_CACHE_MAX")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return defaultCollectCacheMaxEntries
+}
+
+func (t *Tool) cacheRef() *collectCache {
+	t.cacheMu.Lock()
+	defer t.cacheMu.Unlock()
+	if t.cache == nil {
+		t.cache = &collectCache{}
+	}
+	return t.cache
+}
+
+// skillsSignature 是 skill 根目录的**廉价变化指纹**：目录名 + SKILL.md 的
+// size/mtime。它只回答"变了没有"，不解析内容。
+func skillsSignature(roots []string) string {
+	var b strings.Builder
+	for _, root := range roots {
+		dirs, err := os.ReadDir(root)
+		if err != nil {
+			fmt.Fprintf(&b, "%s:!%v\n", root, err)
+			continue
+		}
+		for _, d := range dirs {
+			if !d.IsDir() {
+				continue
+			}
+			b.WriteString(root + "/" + d.Name())
+			if st, err := os.Stat(filepath.Join(root, d.Name(), "SKILL.md")); err == nil {
+				fmt.Fprintf(&b, ":%d:%d", st.Size(), st.ModTime().UnixNano())
+			}
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// collect 返回收集结果（名字 + 说明），按 TTL 缓存；开了轮询监听就先看签名。
+func (t *Tool) collect() []skillEntry {
+	roots := t.roots()
+	now := time.Now()
+	poll := skillWatchPoll()
+	c := t.cacheRef()
+
+	c.mu.Lock()
+	if c.valid && now.Sub(c.at) < skillCacheTTL() {
+		changed := false
+		if poll > 0 && now.Sub(c.sigAt) >= poll {
+			sig := skillsSignature(roots)
+			c.sigAt = now
+			changed = sig != c.sig
+			if !changed {
+				out := append([]skillEntry(nil), c.entries...)
+				c.mu.Unlock()
+				return out
+			}
+		}
+		if !changed {
+			out := append([]skillEntry(nil), c.entries...)
+			c.mu.Unlock()
+			return out
+		}
+		// 磁盘变了：掉到下面重扫。
+	}
+	c.mu.Unlock()
+
+	names := existingSkillsAll(roots)
+	entries := make([]skillEntry, 0, len(names))
+	for _, n := range names {
+		entries = append(entries, skillEntry{name: n, desc: readDescriptionAny(roots, n)})
+	}
+
+	c.mu.Lock()
+	if max := skillCacheMax(); max <= 0 || len(entries) <= max {
+		c.entries = entries
+		c.at = now
+		c.valid = true
+		c.sig = skillsSignature(roots)
+		c.sigAt = now
+	} else {
+		// 超限：不缓存（结果照常返回，只是没有性能收益）。
+		c.valid = false
+		c.entries = nil
+	}
+	c.mu.Unlock()
+	return entries
+}
+
+// cachedSkillCount 是当前缓存里的条目数（用例用；0 表示没缓存）。
+func (t *Tool) cachedSkillCount() int {
+	c := t.cacheRef()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.valid {
+		return 0
+	}
+	return len(c.entries)
+}
 
 func (t *Tool) Name() string { return "skill" }
 
@@ -239,7 +398,13 @@ func (e skillErr) Error() string { return string(e) }
 //
 // 说明取不到就不编：只给名字。**空描述比假描述好**——假描述会让模型挑错 skill。
 func (t *Tool) list() (spi.Result, error) {
-	names := existingSkillsAll(t.roots())
+	entries := t.collect()
+	names := make([]string, 0, len(entries))
+	descOf := make(map[string]string, len(entries))
+	for _, e := range entries {
+		names = append(names, e.name)
+		descOf[e.name] = e.desc
+	}
 	if len(names) == 0 {
 		return spi.Result{
 			Hint: "这台机器上没装任何 skill（找过：" + filepath.ToSlash(strings.Join(t.roots(), ", ")) +
@@ -250,7 +415,7 @@ func (t *Tool) list() (spi.Result, error) {
 	var b strings.Builder
 	b.WriteString("本机可用 skill（用 {\"name\":\"<名字>\"} 取全文）：\n")
 	for _, n := range names {
-		desc := readDescriptionAny(t.roots(), n)
+		desc := descOf[n]
 		if desc == "" {
 			b.WriteString("- " + n + "\n")
 			continue

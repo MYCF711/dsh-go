@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,23 @@ const (
 	listDescRunes   = 240
 )
 
+// defaultMaxTasks 是官方 `agentTeam.maxTasks` 的默认值：团队任务图的条数上限。
+//
+// 官方原件（app.asar:dsh/node_modules/@deepseek-ai/dsh-experimental-agent-team/lib/index.js）：
+//
+//	:1439 const DEFAULT_MAX_TASKS = 256;                       // 默认值
+//	:1443 maxTasks: z.number().step(1).min(1).default(DEFAULT_MAX_TASKS)
+//	:1458 maxTasks: positiveLimit("maxTasks", ...)             // 正整数校验
+//	:1224 if (state.tasks.filter((t) => t.status !== "deleted").length >= this.maxTasks)
+//	        throw new TeamError(`Team task limit ${this.maxTasks} reached`, "TEAM_TASK_LIMIT");
+//
+// 宿主的任务板是单个 team-tasks.json：没有这道闸之前，表可以无限长（内存 + 文件），
+// 一个跑飞的循环就能把板子写成几万条，之后每次 list/create 都要整份读回来。
+const defaultMaxTasks = 256
+
+// envMaxTasks 是条数上限的覆盖项（官方是配置项，宿主用环境变量；非法值 fail-loud）。
+const envMaxTasks = "DSHD_TEAM_MAX_TASKS"
+
 var (
 	statuses = []string{statusPending, statusInProgress, statusCompleted}
 	actions  = []string{"claim", "release", "complete", "reopen", "edit", "set_dependencies", "delete"}
@@ -71,9 +89,36 @@ type taskFile struct {
 type board struct {
 	mu  sync.Mutex
 	dir string
+	// maxTasks 是条数上限（官方 agentTeam.maxTasks）；0 = 用官方默认 256。
+	// 零值必须是官方默认：老构造点（测试、老接线）不传这个字段时行为不变。
+	maxTasks int
 }
 
 func (b *board) path() string { return filepath.Join(b.dir, fileName) }
+
+// limit 是当前生效的条数上限。零值落到官方默认，不写第二份字面量。
+func (b *board) limit() int {
+	if b.maxTasks > 0 {
+		return b.maxTasks
+	}
+	return defaultMaxTasks
+}
+
+// maxTasksFromEnv 解析条数上限覆盖项：空 = 官方默认；非正整数 = fail-loud。
+//
+// 为什么非法值不静默退回默认：官方 positiveLimit 在配置期就抛
+// TEAM_INVALID_CONFIG——写错一个数不该悄悄变成"另一套上限"。
+func maxTasksFromEnv(getenv func(string) string) (int, error) {
+	raw := strings.TrimSpace(getenv(envMaxTasks))
+	if raw == "" {
+		return defaultMaxTasks, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s=%q 不是正整数：官方 maxTasks 要求正整数（默认 %d）", envMaxTasks, raw, defaultMaxTasks)
+	}
+	return n, nil
+}
 
 // display 只用于提示：对外一律正斜杠，Windows 的反斜杠不喂给模型。
 func (b *board) display() string { return strings.ReplaceAll(b.path(), `\`, "/") }
@@ -429,6 +474,14 @@ func (t *Tool) execCreate(ctx context.Context, raw json.RawMessage) (spi.Result,
 	tasks, err := t.b.load()
 	if err != nil {
 		return spi.Result{Hint: "任务板读不出来：先别写，检查 " + t.b.display() + " 是否损坏（损坏时保留原文件，别覆盖）"}, err
+	}
+	// 官方 agentTeam.maxTasks：任务图的条数上限（默认 256）。官方数的是
+	// "非 deleted" 的任务，宿主 delete 直接从板上移除，所以这里就是 len(tasks)。
+	// 拒绝必须是**没写进去**：先判上限再 append，别先落了盘再报错。
+	if limit := t.b.limit(); len(tasks) >= limit {
+		return spi.Result{Hint: fmt.Sprintf(
+			"团队任务板上限 %d 条已满：先 team_task_list 找出做完的，用 team_task_update 的 delete 清掉（会进 team-tasks.deleted.jsonl 归档），再建新的；也可以把几条合并成一条",
+			limit)}, fmt.Errorf("team_task_create: 团队任务数已达上限 %d", limit)
 	}
 	id, err := nextID(tasks)
 	if err != nil {
@@ -789,6 +842,13 @@ func Module(dir string) kernel.Module {
 		Backend:  kernel.BackendStatic,
 		Requires: []string{"tools"},
 		Register: func(s *kernel.Scope) error {
+			// 条数上限（官方 agentTeam.maxTasks）在装配期解析一次：写错环境变量
+			// 要在这里就炸，而不是等第一条任务创建时才报一个看不出源头的错。
+			maxTasks, err := maxTasksFromEnv(os.Getenv)
+			if err != nil {
+				return err
+			}
+			b.maxTasks = maxTasks
 			reg, err := kernel.Inject(s, spi.ToolsKey)
 			if err != nil {
 				return err

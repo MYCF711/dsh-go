@@ -77,7 +77,7 @@ type loopRunner struct {
 	// 为什么整块传而不逐字段散在结构体上：childArgs 是逐字段拷贝，散着就一定会
 	// 在 `modelOverrideLoopRunner` 的每轮副本里漏掉某一个（漏一个的表现是那一轮
 	// 静默退回子进程默认值，界面上看不出来）。
-	runOpts *hostRunOptions
+	runOpts   *hostRunOptions
 	toolsMode string
 }
 

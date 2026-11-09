@@ -293,7 +293,9 @@ func (u *unaryOnlyOfficialSvc) TerminalAttach(context.Context, string, string) (
 	panic("handler 不许再走一次性 TerminalAttach（那是残口）")
 }
 
-func (u *unaryOnlyOfficialSvc) TerminalList(string) ([]OfficialWebTerminalInfo, error) { return nil, nil }
+func (u *unaryOnlyOfficialSvc) TerminalList(string) ([]OfficialWebTerminalInfo, error) {
+	return nil, nil
+}
 
 func (u *unaryOnlyOfficialSvc) TerminalClose(context.Context, string, string) error { return nil }
 

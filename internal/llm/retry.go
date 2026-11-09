@@ -63,6 +63,12 @@ type retryConfig struct {
 	maxWait  time.Duration // 单次等待上限；Retry-After 超过它就不再重试
 	budget   time.Duration // 这条请求用于重试等待的总预算
 	jitter   float64       // 抖动比例 0..1（只往下抖，不会顶破 maxWait）
+	// unbounded 表示不管次数（官方 `retryPolicy.mode: always`）。
+	// 只有取消/收工能停——所以它必须与 budget 同时为"无限"才安全。
+	unbounded bool
+	// codes 是这条策略接纳的失败 code（官方 retryableCodes）。
+	// nil = 不筛（生产默认：429/5xx/连接层瞬时失败都重试，与改动前一致）。
+	codes map[string]bool
 	// sleep 只在用例里注入；nil 表示真的等（select 在 timer 与 ctx.Done 之间）。
 	sleep func(ctx context.Context, d time.Duration) error
 }
@@ -105,7 +111,21 @@ func newRetryState(cfg retryConfig) *retryState {
 
 // more 报告还能不能再发一次。
 func (s *retryState) more() bool {
+	if s.cfg.unbounded {
+		return true
+	}
 	return s.sent < s.cfg.attempts
+}
+
+// retryable 报告这条策略是否接纳某个失败 code（官方 retryableCodes）。
+//
+// cfg.codes == nil 表示这条 client 没有显式策略：保持生产默认（429/5xx/连接层
+// 瞬时失败都重试），与改动前逐字节一致。
+func (s *retryState) retryable(code string) bool {
+	if len(s.cfg.codes) == 0 {
+		return true
+	}
+	return s.cfg.codes[code]
 }
 
 // backoff 是第 n 次重试前的指数退避，带向下抖动。
@@ -162,7 +182,7 @@ func (s *retryState) plan(retryAfter time.Duration) (time.Duration, bool) {
 	if s.cfg.maxWait > 0 && wait > s.cfg.maxWait {
 		return 0, false
 	}
-	if s.cfg.budget > 0 {
+	if s.cfg.budget > 0 && !s.cfg.unbounded {
 		if s.waited+wait > s.cfg.budget {
 			return 0, false
 		}
@@ -201,7 +221,22 @@ func (s *retryState) wait(ctx context.Context, d time.Duration) error {
 // 401/403/404/400/422 一个都不许进来：那是确定性拒绝，重试只会把同一个
 // 错误重放 4 次。
 func retryableStatus(code int) bool {
-	return code == http.StatusTooManyRequests || (code >= 500 && code <= 599)
+	return retryableStatusCode(code) != ""
+}
+
+// retryableStatusCode 把 HTTP 状态映射成官方失败 code；""=不重试。
+//
+// 官方词表里这两类的名字是固定的：429 = RATE_LIMIT，5xx = SERVER。宿主用它来
+// 兑现 `retryPolicy.retryableCodes`——"策略里没写 RATE_LIMIT 就别重试 429"。
+func retryableStatusCode(code int) string {
+	switch {
+	case code == http.StatusTooManyRequests:
+		return RetryCodeRateLimit
+	case code >= 500 && code <= 599:
+		return RetryCodeServer
+	default:
+		return ""
+	}
 }
 
 // transientConnectMarkers 是 Windows 上拿不到 errno 时的文本兜底。

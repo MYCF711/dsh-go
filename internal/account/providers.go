@@ -178,11 +178,34 @@ func projectProfile(u officialUser) Profile {
 	return Profile{ID: u.ID, Name: name, Contact: strptr(contact), AvatarURL: avatar, Source: SourceOfficial}
 }
 
+// attemptContext 把官方 `attemptTimeoutMs` 落到"这次登录尝试"的请求上。
+//
+// 为什么不是靠客户端超时：`s.client` 的 20s 是**单次 HTTP** 的预算
+// （官方 requestTimeoutMs 是另一个参数），而一次尝试可能包含等待用户授权后的
+// 交换；用 attempt 预算包住本次尝试的请求，才能让"整次尝试"有一个官方口径的
+// 天花板，而不是被单请求超时截断或反过来无限期挂着。
+func (s *Service) attemptContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s.attemptTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, s.attemptTimeout)
+}
+
+// attemptDeadlineMs 返回本条尝试的绝对截止（毫秒）；0 表示不限。
+func (s *Service) attemptDeadlineMs(now time.Time) int64 {
+	if s.attemptTimeout <= 0 {
+		return 0
+	}
+	return now.Add(s.attemptTimeout).UnixMilli()
+}
+
 func (s *Service) startOfficial(ctx context.Context, opts StartOptions) (State, error) {
 	target := strings.TrimSpace(opts.CallbackOrigin)
 	if target == "" {
 		return State{}, fmt.Errorf("account: official startSignIn 需要 callbackOrigin")
 	}
+	attemptCtx, cancelAttempt := s.attemptContext(ctx)
+	defer cancelAttempt()
 	verifier, challenge, state, err := pkce()
 	if err != nil {
 		return State{}, err
@@ -198,7 +221,7 @@ func (s *Service) startOfficial(ctx context.Context, opts StartOptions) (State, 
 		AuthorizeID  string  `json:"authorize_id"`
 		ExpiresIn    float64 `json:"expires_in"`
 	}
-	if err := s.platformJSON(ctx, http.MethodPost, "/auth-api/v0/dsh/auth_init", "", req, &init); err != nil {
+	if err := s.platformJSON(attemptCtx, http.MethodPost, "/auth-api/v0/dsh/auth_init", "", req, &init); err != nil {
 		return State{}, err
 	}
 	if init.AuthorizeURL == "" || init.ExpiresIn <= 0 {
@@ -209,6 +232,12 @@ func (s *Service) startOfficial(ctx context.Context, opts StartOptions) (State, 
 		return State{}, err
 	}
 	expires := time.Now().Add(time.Duration(init.ExpiresIn) * time.Second).UnixMilli()
+	// 官方 :981 `expiresAt = Date.now() + attemptTimeout`：服务端说多久都不算数，
+	// 尝试窗口的上界是 attemptTimeoutMs。取两者较小值——用户要的"等一会儿"不能被
+	// 缩短到一个点不动窗口，服务端给一小时也不能让一次尝试挂一小时。
+	if deadline := s.attemptDeadlineMs(time.Now()); deadline > 0 && deadline < expires {
+		expires = deadline
+	}
 	s.mu.Lock()
 	s.doc.CodeVerifier = verifier
 	s.doc.State = state
@@ -219,6 +248,9 @@ func (s *Service) startOfficial(ctx context.Context, opts StartOptions) (State, 
 		s.mu.Unlock()
 		return State{}, err
 	}
+	// 尝试预算到点必须由定时器**主动**推进（官方 :983 setTimeout(deadline.abort)）：
+	// 不重新布防的话，attemptTimeout 只能在有人调 State() 时才被看见。
+	s.resetTimerLocked()
 	s.notifyLocked()
 	st := s.stateLocked()
 	s.mu.Unlock()
@@ -239,6 +271,9 @@ func (s *Service) failAttempt(ctx context.Context, code string) (State, error) {
 }
 
 func (s *Service) completeOfficial(ctx context.Context, code string) (State, error) {
+	attemptCtx, cancelAttempt := s.attemptContext(ctx)
+	defer cancelAttempt()
+	ctx = attemptCtx
 	s.mu.Lock()
 	verifier := s.doc.CodeVerifier
 	redirect := s.doc.RedirectURI

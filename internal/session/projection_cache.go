@@ -31,6 +31,8 @@ type ProjectionCache struct {
 	registry *ProjectionRegistry
 	// onWriteError 是写回失败的观察口（fail-soft：失败只记警告，不失败冷读）。
 	onWriteError func(error)
+	// batch 是写回批量器（官方 writeEveryEvents/writeIntervalMs）；nil 时写回退回同步。
+	batch *projectionWriteBatcher
 }
 
 // projectionRecordSchema 是持久记录的 schema：identity 绑定生命周期，
@@ -83,7 +85,10 @@ func OpenProjectionCache(facility *storage.Facility) (*ProjectionCache, error) {
 		_ = domain.Close()
 		return nil, err
 	}
-	return &ProjectionCache{domain: domain, table: table, registry: DefaultProjectionRegistry()}, nil
+	cache := &ProjectionCache{domain: domain, table: table, registry: DefaultProjectionRegistry()}
+	// 官方 write-behind 批量：默认 200 条事件或 5000ms 落一次盘。
+	cache.batch = newProjectionWriteBatcher(cache, projectionBatchConfigFromEnv())
+	return cache, nil
 }
 
 // Registry 返回投影单元注册表（调用方据此知道有哪些键）。
@@ -110,7 +115,13 @@ func (c *ProjectionCache) Subscribe(fn func(storage.Change)) func() {
 }
 
 // Close 关闭缓存。幂等。
+//
+// 关之前先 flush 待写项：批量器是延迟落盘的，而 Close 往往就是"宿主这一轮结束了"，
+// 不 flush 就等于把最后那段检查点丢掉（虽然缓存可重建，但白丢一次写没法解释）。
 func (c *ProjectionCache) Close() error {
+	if c.batch != nil {
+		c.batch.flushAll()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.domain == nil {
@@ -122,6 +133,10 @@ func (c *ProjectionCache) Close() error {
 // RecordFor 读一个会话的检查点记录，**只在**记录与调用方持有的日志身份
 // 完整匹配时返回。
 func (c *ProjectionCache) RecordFor(id string, expected ProjectionIdentity) (*ProjectionRecord, bool) {
+	// 读穿写回：批量器里攒着的那份比磁盘（domain 内存表）更新。
+	if record, ok := c.batch.lookup(id, expected.Matches); ok {
+		return record, true
+	}
 	record, ok := c.storedRecord(id)
 	if !ok {
 		return nil, false
@@ -138,7 +153,11 @@ func (c *ProjectionCache) RecordFor(id string, expected ProjectionIdentity) (*Pr
 // 格式代次内切点在 fork 时就固定了，不区分任何额外生命周期。返回的
 // `asOfSeq` 是所服务行的**最低**水位——消费方据此知道这份值有多旧。
 func (c *ProjectionCache) CachedSnapshot(id string, meta ProjectionIdentity, keys []string) (ProjectionSnapshot, bool) {
-	record, ok := c.storedRecord(id)
+	// 读穿写回：批量器里那份比磁盘新；列表读只比生命周期身份（见 LifecycleMatches）。
+	record, ok := c.batch.lookup(id, meta.LifecycleMatches)
+	if !ok {
+		record, ok = c.storedRecord(id)
+	}
 	if !ok || !record.Identity.LifecycleMatches(meta) {
 		return ProjectionSnapshot{}, false
 	}
@@ -163,11 +182,34 @@ func (c *ProjectionCache) CachedSnapshot(id string, meta ProjectionIdentity, key
 
 // Write 用一条完整记录替换该会话的检查点（整值纪律：每次都是完整切点）。
 func (c *ProjectionCache) Write(id string, identity ProjectionIdentity, rows map[string]ProjectionRow) error {
+	// 同步写会覆盖批量器里那份pending：不丢的话读穿写回会拿到更旧的切点。
+	c.batch.drop(id)
 	stored, err := recordToStored(ProjectionRecord{Identity: identity, Rows: rows})
 	if err != nil {
 		return fmt.Errorf("序列化投影检查点失败: %w", err)
 	}
 	return c.table.Put(id, stored)
+}
+
+// WriteBehind 把一次写回排进批量器（官方 write-behind 语义）。
+//
+// events 是这次写回顺带 fold 的事件数；累计到官方阈值就立即落盘，否则等间隔。
+// 批量器不存在时（例如只构造了零值缓存）退回同步 Write，语义不会更好也不会更坏。
+func (c *ProjectionCache) WriteBehind(id string, identity ProjectionIdentity, rows map[string]ProjectionRow, events int64) {
+	if c.batch == nil {
+		if err := c.Write(id, identity, rows); err != nil {
+			c.reportWriteError(err)
+		}
+		return
+	}
+	c.batch.enqueue(id, identity, rows, events)
+}
+
+// Flush 立刻落盘所有待写项（测试与关停用）。
+func (c *ProjectionCache) Flush() {
+	if c.batch != nil {
+		c.batch.flushAll()
+	}
 }
 
 // Checkpoint 拍一份当前状态并落盘（不 fail-soft：调用方决定怎么处理）。
@@ -206,9 +248,9 @@ func (c *ProjectionCache) Restore(
 	if err != nil {
 		return ProjectionSnapshot{}, err
 	}
-	if writeErr := c.Write(id, expected, refreshed); writeErr != nil {
-		c.reportWriteError(writeErr)
-	}
+	// 写回走批量器（官方 write-behind）：累计 200 条事件或满 5000ms 才真正落盘。
+	// len(events) 是这次冷读新 fold 的事件数，正好是"写放大"的来源。
+	c.WriteBehind(id, expected, refreshed, int64(len(events)))
 	return snapshot, nil
 }
 

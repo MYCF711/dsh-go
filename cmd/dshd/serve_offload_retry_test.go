@@ -31,8 +31,8 @@ import (
 
 // imageWireProbe 记录每次模型请求里的图片张数（按线上 JSON 数 image_url 段）。
 type imageWireProbe struct {
-	mu    sync.Mutex
-	shots []int
+	mu     sync.Mutex
+	shots  []int
 	bodies []string
 }
 

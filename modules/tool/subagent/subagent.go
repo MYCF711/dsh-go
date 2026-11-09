@@ -23,6 +23,7 @@ var schema = json.RawMessage(`{
     "continuable": {"type": "boolean", "description": "true = 留下一条可续问的子会话（父轮结束后可以用 subagents.prompt 续问）；省略 = 不可续问（默认，不写任何额外的东西）"},
     "cwd": {"type": "string", "description": "子代理的初始工作目录；相对路径按当前目录算，省略表示继承"},
     "description": {"type": "string", "description": "3-5 个词的短描述，给人看"},
+    "id": {"type": "string", "description": "稳定的 agent 名字（可选）。给了它，宿主就按官方规则派生/复用一条可续问的子会话（名字-session-随机 uuid），下一轮可以用同一个名字指回这个子代理；省略 = 匿名委派，跑完就散"},
     "prompt": {"type": "string", "description": "完整、自包含的任务；子代理看不到本会话的历史"}
   },
   "required": ["description", "prompt"],
@@ -41,7 +42,13 @@ func (t *Tool) Description() string {
 type args struct {
 	Cwd         string `json:"cwd"`
 	Description string `json:"description"`
-	Prompt      string `json:"prompt"`
+	// ID 是官方的具名 agent 标签（`agentLoop.agents[].id`）。
+	//
+	// 它和 Description 是**两件事**：description 是给人看的短描述，会随任务措辞
+	// 变化；id 是跨轮稳定的名字。把 description 当 id 用会让每次委派都是新地址，
+	// "按名字指回同一个子代理"就永远不成立——所以这里只读 a.ID，绝不回退到 desc。
+	ID     string `json:"id"`
+	Prompt string `json:"prompt"`
 	// Continuable 省略 = false：默认不留下可续问的子会话，既有调用方
 	// 发给宿主的请求形状一个字节都不变（见 subagent_test.go 的逐字节断言）。
 	//
@@ -82,6 +89,8 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		Prompt: prompt, Description: desc, Cwd: strings.TrimSpace(a.Cwd),
 		// 省略时是 false：老调用方的线上形状不变。
 		Continuable: a.Continuable,
+		// 具名委派：宿主据此派生 `${id}-session-<uuid>` 并把地址记进盘上。
+		AgentID: strings.TrimSpace(a.ID),
 	})
 	if err != nil {
 		return spi.Result{Hint: "子代理没跑成：先看它卡在哪——任务是否自包含、有没有它够不着的文件；也可以自己直接做"},

@@ -43,6 +43,9 @@ type subRunner struct {
 	home string
 	// depth 是当前嵌套深度：0 表示主代理。子代理内部再调 subagent 会被拒。
 	depth int
+	// gate 是并发池（官方 subagent.maxActiveSubagents，默认 8）。
+	// nil = 不闸门（测试与旧装配的零影响路径）。
+	gate *subagentGate
 }
 
 const maxDepth = 1
@@ -57,6 +60,43 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
 		return spi.SubagentResult{}, fmt.Errorf("prompt 为空")
+	}
+
+	// 官方 subagent.maxActiveSubagents：真正在跑的孩子的上限（默认 8）。
+	// 拿不到槽就**等**，拿不到且 ctx 被取消就当场收工——不先把活全跑起来。
+	if release, err := s.gate.acquire(ctx); err != nil {
+		return spi.SubagentResult{}, fmt.Errorf("等子代理并发额度时被取消: %w", err)
+	} else {
+		defer release()
+	}
+
+	// 具名委派（官方 `agentLoop.agents[].id`）：先认地址再干活。
+	//
+	// 为什么先认：同一个 (父会话, agent id) 已经有一条子会话时，这一趟要**续在
+	// 同一条**上（历史连得上、subagents.prompt 的地址不变），而不是再开一条。
+	// 地址只能从盘上认——serve 每一轮都是新的 `dshd run` 子进程。
+	agentID := strings.TrimSpace(req.AgentID)
+	var agentParent, reuseChild string
+	if agentID != "" {
+		agentParent = strings.TrimSpace(req.ParentSessionID)
+		if agentParent == "" {
+			agentParent = strings.TrimSpace(spi.SessionFrom(ctx))
+		}
+		if agentParent == "" {
+			return spi.SubagentResult{}, fmt.Errorf(
+				"具名委派需要父会话 id：ctx 上没有会话身份，也没有显式 ParentSessionID")
+		}
+		child, ok, err := agent.FindAgentChild(s.home, agentParent, agentID)
+		if err != nil {
+			return spi.SubagentResult{}, err
+		}
+		if ok {
+			// 索引是缓存、会话才是事实：盘上不在了就重新 spawn 一条，
+			// 而不是往一个不存在的地址上写。
+			if _, ferr := session.FindByID(s.home, child); ferr == nil {
+				reuseChild = child
+			}
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -141,12 +181,24 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 	// 可续问：把这一趟真实往返落成一条 durable 子会话，官方 `subagents.prompt`
 	// 才有地址可投。**放在成功之后**——委派失败不留孤儿会话（一个空会话既不能
 	// 续问也没人清理）。
-	if req.Continuable || strings.TrimSpace(req.ChildSessionID) != "" {
-		childID, err := s.continuation(ctx, req, prompt, text)
+	if reuseChild != "" {
+		// 复用：这一趟往返**追加**到同一条子会话（不新建，v4 重建等于抹历史）。
+		if err := agent.AppendChildTurn(s.home, "", reuseChild, prompt, text); err != nil {
+			return spi.SubagentResult{}, fmt.Errorf("委派已完成但复用子会话没写成: %w", err)
+		}
+		res.ChildSessionID = reuseChild
+	} else if req.Continuable || agentID != "" || strings.TrimSpace(req.ChildSessionID) != "" {
+		childID, err := s.continuation(ctx, req, prompt, text, agentID)
 		if err != nil {
 			// 响亮失败：这次委派的结果照实交回去，但"可续问"这件事没成，
 			// 绝不能回一个编出来的 child id。
 			return spi.SubagentResult{}, fmt.Errorf("委派已完成但可续问子会话没建成: %w", err)
+		}
+		// 具名委派：把地址记进盘，下一轮（另一个进程）按同一个名字还认得到。
+		if agentID != "" {
+			if err := agent.RecordAgentChild(s.home, agentParent, agentID, childID); err != nil {
+				return spi.SubagentResult{}, fmt.Errorf("委派已完成但具名地址没记下来: %w", err)
+			}
 		}
 		res.ChildSessionID = childID
 	}
@@ -159,7 +211,7 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 // 子进程，Loop 把会话身份绑在每一步的 ctx 上（agent.Loop.SessionID →
 // spi.WithSession），所以工具这条链上 ctx 里本来就有"我在为哪个会话干活"。
 // 显式 ParentSessionID 优先（调用方可能替别的会话派活）。
-func (s *subRunner) continuation(ctx context.Context, req spi.SubagentRequest, prompt, answer string) (string, error) {
+func (s *subRunner) continuation(ctx context.Context, req spi.SubagentRequest, prompt, answer, agentID string) (string, error) {
 	parentID := strings.TrimSpace(req.ParentSessionID)
 	if parentID == "" {
 		parentID = strings.TrimSpace(spi.SessionFrom(ctx))
@@ -181,8 +233,11 @@ func (s *subRunner) continuation(ctx context.Context, req spi.SubagentRequest, p
 		Cwd:             cwd,
 	}).Spawn(agent.ChildSpawnOptions{
 		ChildSessionID: strings.TrimSpace(req.ChildSessionID),
-		Prompt:         prompt,
-		Answer:         answer,
+		// 具名委派：宿主按官方规则派生 `${id}-session-<uuid>`
+		// （显式 ChildSessionID 仍然优先，对应官方的 sessionId）。
+		AgentID: agentID,
+		Prompt:  prompt,
+		Answer:  answer,
 	})
 	if err != nil {
 		return "", err

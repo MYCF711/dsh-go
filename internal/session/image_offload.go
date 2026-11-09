@@ -350,11 +350,11 @@ func OffloadedImagePrefixCount(lengths []int64, budget ImageOffloadBudget) int {
 	}
 	removeCount := 0
 	if excessCount > 0 {
-		removeCount = (excessCount+countQuantum-1)/countQuantum*countQuantum
+		removeCount = (excessCount + countQuantum - 1) / countQuantum * countQuantum
 	}
 	var removeBytes int64
 	if excessBytes > 0 {
-		removeBytes = (excessBytes+byteQuantum-1)/byteQuantum*byteQuantum
+		removeBytes = (excessBytes + byteQuantum - 1) / byteQuantum * byteQuantum
 	}
 	// 走一遍：累计到两种目标都满足为止。
 	count := 0

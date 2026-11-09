@@ -185,13 +185,10 @@ func (f *CwdFollower) SetCwd(dir string) error {
 	if f.log == nil {
 		return fmt.Errorf("working-directory: follower 没有会话日志")
 	}
-	current := f.cwd
-	if current == "" {
-		state, err := f.log.WorkingDirectory()
-		if err != nil {
-			return fmt.Errorf("working-directory: 读当前目录失败: %w", err)
-		}
-		current = state.Cwd
+	// 当前目录只在这里读一次做 fail-loud：真正的路径解析在 RecordWorkingDirectory 里做
+	// （它自己会读同一份状态），所以这里不保留返回值。
+	if _, err := f.log.WorkingDirectory(); err != nil {
+		return fmt.Errorf("working-directory: 读当前目录失败: %w", err)
 	}
 	// 相对路径按该会话当前目录解析（ResolveWorkingDirectory 负责），绝对路径原样。
 	change, err := RecordWorkingDirectory(f.log, dir)

@@ -335,6 +335,8 @@ func (t *task) scanLocked() {
 		t.done = true
 		t.rc = rc
 		t.cwd = cwd
+		// 结算点：官方 jobs.settledRetainBytes 在这里生效（运行中不裁）。
+		t.trimSettledLocked()
 	}
 }
 
@@ -346,6 +348,8 @@ func (t *task) finish(rc int, cwd string) {
 		t.rc = rc
 		t.cwd = cwd
 	}
+	// 结算点（含"已经由哨兵结算过"的重复调用）：幂等，超预算才裁。
+	t.trimSettledLocked()
 	t.notifyLocked()
 	t.mu.Unlock()
 }

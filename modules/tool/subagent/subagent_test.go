@@ -73,9 +73,13 @@ func TestValidation(t *testing.T) {
 // "省略时什么也没多传"不能靠读代码确认，必须有断言——任何顺手塞进去的字段
 // （哪怕是个 false 之外的零值变化）都会在这里红，而不是在真机上表现成
 // "子代理莫名其妙可续问"。
+//
+// 2026-11-09（GO.7 / agentLoop.agents[].id）：末尾多了 `"AgentID":""`——这是
+// **显式的契约变更**，不是"为变绿更新 golden"：具名委派需要一个稳定的 agent 标签，
+// 而"不传 id"时的请求形状必须仍然逐字节固定（零值字段照抄在 golden 里）。
 const requestGolden = `{"Prompt":"自包含的任务描述","Description":"查一件事",` +
 	`"Cwd":"","InheritSession":"","Inherit":"",` +
-	`"Continuable":false,"ChildSessionID":"","ParentSessionID":""}`
+	`"Continuable":false,"ChildSessionID":"","ParentSessionID":"","AgentID":""}`
 
 // TestContinuableOmittedKeepsRequestShapeByteForByte 钉住默认关闭。
 //

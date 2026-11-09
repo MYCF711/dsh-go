@@ -96,13 +96,33 @@ func (s *Server) notify(method string, params any) error {
 	return s.write(Notification{JSONRPC: "2.0", Method: method, Params: params})
 }
 
+// fallbackVersion 是 `Server.Version` 为空时的兜底版本。
+//
+// **它不是版本源**：由宿主编译入口在启动时用 `main.version` 注入
+// （`cmd/dshd/host_version.go` 的 wireHostVersion），真实路径上它总是被覆盖
+// （`cmd/dshd/acp.go` 构造 Server 时显式给 `Version: version`）。
+//
+// 未注入时给 `unknown`：握手里的版本号宁可说"我不知道"，也**绝不谎报**一个具体版本——
+// 那正是 2026-11-09 的事故形态（宿主自称的版本与它实际判定的版本不一致）。
+var fallbackVersion = "unknown"
+
+// SetFallbackVersion 注入兜底版本（唯一生产调用点：cmd/dshd 启动装配）。空值被忽略。
+func SetFallbackVersion(version string) {
+	if trimmed := strings.TrimSpace(version); trimmed != "" {
+		fallbackVersion = trimmed
+	}
+}
+
+// FallbackVersion 返回当前兜底版本（诊断/守卫测试用）。
+func FallbackVersion() string { return fallbackVersion }
+
 // Serve 读 stdin 的消息直到 EOF 或 ctx 结束。
 func (s *Server) Serve(ctx context.Context) error {
 	if s.Name == "" {
 		s.Name = "dsh-go-acp"
 	}
 	if s.Version == "" {
-		s.Version = "0.2.2-go.1"
+		s.Version = fallbackVersion
 	}
 	if s.Err == nil {
 		s.Err = os.Stderr

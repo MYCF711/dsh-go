@@ -51,6 +51,9 @@ func TestSettingsDefaultsReachExistingTurnRunnerAcrossABResetAndReopen(t *testin
 	t.Setenv("DSHD_MODEL_WIRE_ARGV", capture)
 	t.Setenv("DSHD_SERVE_NO_FOLLOW", "1")
 	store, models, permissions := openSettingsStores(t, home, "base-model", "allow")
+	// 第一份 models 在这段里用不上（断言的是 store/permissions；模型覆盖在下面 99 行
+	// 重新打开一次之后才断言）——显式丢弃，别让"这一份确实没读"和"忘了读"长得一样。
+	_ = models
 
 	ids := []string{"session-a", "session-b", "session-c"}
 	create := func(string) (string, error) {

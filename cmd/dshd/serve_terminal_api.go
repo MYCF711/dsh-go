@@ -75,6 +75,18 @@ const (
 	officialFollowMaxPages = 64
 	// officialTerminalMaxIDRunes 是终端身份的字符上限（官方 id 由调用方给）。
 	officialTerminalMaxIDRunes = 120
+	// 官方 api-terminal-controller 的四条生命周期预算（默认值逐字对齐官方）。
+	// 环境变量是宿主的配置入口（官方是插件配置项，宿主没有插件配置面）。
+	officialTerminalDisposeGrace      = 1000 * time.Millisecond // terminal.disposeGraceMs
+	officialTerminalCleanupRetry      = 60 * time.Second        // terminal.cleanupRetryMs
+	officialTerminalActivityPoll      = 30 * time.Second        // terminal.activityPollIntervalMs
+	officialTerminalUnattendedTimeout = 2 * time.Hour           // terminal.unattendedTimeoutMs
+
+	// officialTerminalMaxTerminals 是官方 `terminal.maxTerminals`（默认 8）：
+	// 同一个会话里**同时存活**的终端条数上限。没有它就能无限开 PTY，每条都占一个
+	// conhost 进程与滚动缓冲，机器资源可被打满。计数只看未 closed 的条目
+	// （closed 的留在 map 里是为了 terminal.close 的幂等语义，不占额度）。
+	officialTerminalMaxTerminals = 8
 	// officialRetainedPerSession 是每个会话保留布局的条数上限（有界池）。
 	officialRetainedPerSession = 16
 	// officialLabelMaxRunes 是 job 标签（命令首行）的字符上限。

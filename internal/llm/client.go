@@ -36,6 +36,11 @@ type Client struct {
 	// 回调；nil = 静默丢弃（字段已经丢了，但不能因此让整轮回答失败）。
 	OnExtensionError func(error)
 
+	// StreamIdleTimeout 是**这条 client** 的流空闲上限（官方 per-provider
+	// `streamIdleTimeoutMs`）。0 = 按 model 的 provider 前缀查 per-provider 表，
+	// 再退回全局 `DSHD_LLM_STREAM_IDLE_TIMEOUT_MS`，最后是官方默认 300000ms。
+	StreamIdleTimeout time.Duration
+
 	// retry 是这条 client 的重试参数；nil = 生产默认（见 retry.go 的 defaultRetryConfig）。
 	//
 	// 故意不导出：重试的次数/预算/退避只能按 client、按请求各自持有。留一个
@@ -111,7 +116,7 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 
 	// 流空闲看门狗的上限在这里解析一次：非法配置要 fail-loud，不能静默回落
 	// （否则"我设了 10 分钟"实际跑的是默认 5 分钟）。
-	idleTimeout, err := streamIdleTimeoutFromEnv(os.Getenv)
+	idleTimeout, err := c.streamIdleTimeoutFor(req.Model, os.Getenv)
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +170,11 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 			if !transientConnectError(err) {
 				return nil, err
 			}
+			// 官方 retryableCodes：这条 client 的策略没列 TRANSPORT 就不重试
+			// （没装策略时 cfg.codes 为 nil，行为与改动前一致）。
+			if !state.retryable(RetryCodeTransport) {
+				return nil, err
+			}
 			wait, ok := state.plan(0)
 			if !ok {
 				return nil, err
@@ -191,6 +201,9 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 			// 已经往外发过字：绝不重放（半句话不能拼成两段）。一条内容都没发过
 			// 时的瞬时网络错误（连接被重置/对端关连接）可以重来一次。
 			if emitted > 0 || !transientConnectError(err) {
+				return snap, err
+			}
+			if !state.retryable(RetryCodeTransport) {
 				return snap, err
 			}
 			wait, ok := state.plan(0)
@@ -227,7 +240,7 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 		}
 		// 429/5xx 是"可能只是抖了一下"：按退避与 Retry-After 重放；预算/次数/
 		// 单次等待任一超界就立刻把这条错误交出去（不吞错、不把 429 说成成功）。
-		if retryableStatus(resp.StatusCode) {
+		if code := retryableStatusCode(resp.StatusCode); code != "" && state.retryable(code) {
 			if wait, ok := state.plan(retryAfter); ok {
 				if waitErr := state.wait(ctx, wait); waitErr != nil {
 					return nil, waitErr

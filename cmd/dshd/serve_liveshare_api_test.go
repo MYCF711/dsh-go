@@ -165,8 +165,13 @@ func TestLiveshareHostEndToEnd(t *testing.T) {
 
 	// publisher 在线后 list 的 online 必须变 true（不是本地猜的）。
 	code, out = f.call(t, "liveshareShares.list", `{}`)
+	// code 在这里必须判：SA4006 之前指出的正是"这个值没人用"——不是删断言，
+	// 而是把已经隐含的前提（下面能取出 shares 就说明不是错误响应）写成断言。
+	if code != http.StatusOK {
+		t.Fatalf("publisher 在线时 list = %d %#v", code, out)
+	}
 	if shares := resultOf(t, out)["shares"].([]any); len(shares) != 1 || shares[0].(map[string]any)["online"] != true {
-		t.Fatalf("publisher 在线时 list = %#v", shares)
+		t.Fatalf("publisher 在线时 list shares = %#v", shares)
 	}
 
 	// 真实帧：owner → relay → viewer。
@@ -258,8 +263,11 @@ func TestLiveshareHostEndToEnd(t *testing.T) {
 		t.Fatalf("closed 事件 = %#v", closed)
 	}
 	code, out = f.call(t, "liveshareShares.list", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("stop 后 list = %d %#v", code, out)
+	}
 	if shares := resultOf(t, out)["shares"].([]any); len(shares) != 0 {
-		t.Fatalf("stop 后 list = %#v", shares)
+		t.Fatalf("stop 后 list shares = %#v", shares)
 	}
 }
 

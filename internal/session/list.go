@@ -4,13 +4,53 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/llm"
 )
+
+// 官方两个列会话参数（`dsh-session-persistence-jsonl` 与
+// `dsh-api-session-controller`）：
+//
+//   - `session.persistence.listConcurrency`：列会话时读日志文件的并发度，默认 3；
+//   - `sessionController.listWorkSliceMs`：列会话的工作切片预算，默认 16ms —— 官方
+//     这么切是为了不把事件循环一次占满，宿主这边对应的是"别让一次列会话长时间
+//     占住调用方"，所以切片之间用 runtime.Gosched() 让出执行权。
+//
+// 为什么两个参数都落在 ListSessions 里：宿主只有这一条列会话读路径，参数挂在
+// 别处就只是装饰。并发度决定"同时开几份日志"，切片预算决定"一次连续占用多久"。
+const (
+	// DefaultListConcurrency 是官方 `session.persistence.listConcurrency` 的默认值。
+	DefaultListConcurrency = 3
+	// DefaultListWorkSliceMS 是官方 `sessionController.listWorkSliceMs` 的默认值。
+	DefaultListWorkSliceMS = 16
+	// EnvListConcurrency 覆盖列会话并发度（1 = 退回串行）。
+	EnvListConcurrency = "DSHD_LIST_CONCURRENCY"
+	// EnvListWorkSliceMS 覆盖列会话单次工作切片预算（毫秒）。
+	EnvListWorkSliceMS = "DSHD_LIST_WORK_SLICE_MS"
+)
+
+// ListOptions 是列会话的两个官方可调项。零值 = 用官方默认值（再叠加环境变量）。
+type ListOptions struct {
+	// Concurrency 是并发读取会话日志的路数；<=0 时取 EnvListConcurrency 或默认 3。
+	Concurrency int
+	// WorkSliceMS 是单个工作切片的毫秒预算；<=0 时取 EnvListWorkSliceMS 或默认 16。
+	WorkSliceMS int
+}
+
+// listDescribe 是测试注入点：并发度与切片断言需要能放慢"读一份会话"这件事，
+// 否则小语料上并发与切片都观察不到。生产路径永远是 describe。
+var listDescribe = describe
+
+// listSlices 记已完成的切片数（观测点；测试据此断言"真的切了"，不靠计时猜）。
+var listSlices atomic.Int64
 
 // Listing 是会话面板需要的一行。
 type Listing struct {
@@ -43,9 +83,26 @@ type Listing struct {
 // 每个会话都要**读整份日志**才能算摘要与事件数。这在真实语料上是 100MB 级别，
 // 所以这里设了个上限：超过 maxScanBytes 的会话只读首 2MB 取摘要，事件数记为 -1。
 func ListSessions(home, cwd string) ([]Listing, error) {
+	return ListSessionsWithOptions(home, cwd, ListOptions{})
+}
+
+// ListSessionsWithOptions 是 ListSessions 的同一份实现，额外接受两个官方参数
+// （并发度 / 工作切片预算）。结果与参数无关：并发只是让多份日志的读取重叠，
+// 切片只是让出执行权，两者都不改变返回顺序与内容。
+func ListSessionsWithOptions(home, cwd string, opts ListOptions) ([]Listing, error) {
 	if home == "" {
 		return nil, os.ErrInvalid
 	}
+	concurrency := opts.Concurrency
+	if concurrency <= 0 {
+		concurrency = listConcurrencyFromEnv()
+	}
+	sliceMS := opts.WorkSliceMS
+	if sliceMS <= 0 {
+		sliceMS = listWorkSliceFromEnv()
+	}
+	sliceBudget := time.Duration(sliceMS) * time.Millisecond
+
 	sessionsDir := filepath.Join(home, "sessions")
 	var projectDirs []string
 	if cwd != "" {
@@ -65,7 +122,12 @@ func ListSessions(home, cwd string) ([]Listing, error) {
 		}
 	}
 
-	out := make([]Listing, 0, 16)
+	// 先串行做目录枚举 + stat（便宜），再并行读日志（贵）。
+	type listTarget struct {
+		path string
+		info os.FileInfo
+	}
+	targets := make([]listTarget, 0, 16)
 	for _, dir := range projectDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -80,11 +142,66 @@ func ListSessions(home, cwd string) ([]Listing, error) {
 			if err != nil {
 				continue
 			}
-			out = append(out, describe(path, info))
+			targets = append(targets, listTarget{path: path, info: info})
 		}
+	}
+
+	// 结果按 target 下标落位，所以并发度与切片都不影响顺序（排序前的输入完全相同）。
+	out := make([]Listing, len(targets))
+	work := func(start, step int) {
+		sliceStart := time.Now()
+		for i := start; i < len(targets); i += step {
+			out[i] = listDescribe(targets[i].path, targets[i].info)
+			if sliceBudget > 0 && time.Since(sliceStart) >= sliceBudget {
+				// 这一片已经用满预算：记一次切片、让出执行权、重开一片。
+				listSlices.Add(1)
+				runtime.Gosched()
+				sliceStart = time.Now()
+			}
+		}
+	}
+	if concurrency <= 1 || len(targets) <= 1 {
+		work(0, 1)
+	} else {
+		if concurrency > len(targets) {
+			concurrency = len(targets)
+		}
+		var wg sync.WaitGroup
+		wg.Add(concurrency)
+		for i := 0; i < concurrency; i++ {
+			go func(start int) {
+				defer wg.Done()
+				work(start, concurrency)
+			}(i)
+		}
+		wg.Wait()
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return dedupeByID(out), nil
+}
+
+// listConcurrencyFromEnv 解析列会话并发度（官方默认 3）。
+func listConcurrencyFromEnv() int {
+	return envPositiveInt(EnvListConcurrency, DefaultListConcurrency)
+}
+
+// listWorkSliceFromEnv 解析列会话工作切片预算（官方默认 16ms）。
+func listWorkSliceFromEnv() int {
+	return envPositiveInt(EnvListWorkSliceMS, DefaultListWorkSliceMS)
+}
+
+// envPositiveInt 读一个正整数环境变量；空/非法/非正一律退回默认值
+// （参数是预算与并发度，退化成 0 会让列会话停摆，所以这里不接受"0 表示关闭"）。
+func envPositiveInt(name string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }
 
 // dedupeByID 把同一个 session id 的多份合并成一条。

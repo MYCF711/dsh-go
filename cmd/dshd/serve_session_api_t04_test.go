@@ -155,7 +155,8 @@ func TestOfficialSessionHostResolveModelSelectionValidatesAndPersists(t *testing
 	if err := models.Set("s1", "plain-model"); err != nil {
 		t.Fatal(err)
 	}
-	lastUsed, next, err = host.ModelSelection("s1")
+	// 第二段只关心"新选择是不是 plain-model"：上一次的 lastUsed 已在上面断言过。
+	_, next, err = host.ModelSelection("s1")
 	if err != nil {
 		t.Fatal(err)
 	}

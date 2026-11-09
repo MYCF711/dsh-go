@@ -444,6 +444,12 @@ func Module(dir string) kernel.Module {
 		Backend:  kernel.BackendStatic,
 		Requires: []string{"tools"},
 		Register: func(s *kernel.Scope) error {
+			// 名册人数上限（官方 agentTeam.maxMembers）在装配期解析一次：写错环境
+			// 变量要在这里就炸，而不是等第 17 个队友登记时才报一个看不出源头的错。
+			maxMembers, err := teamMaxMembers(os.Getenv)
+			if err != nil {
+				return err
+			}
 			reg, err := kernel.Inject(s, spi.ToolsKey)
 			if err != nil {
 				return err
@@ -457,7 +463,7 @@ func Module(dir string) kernel.Module {
 			// 是信箱目录 <home>/state/mail。**不能直接把 dir 传下去**——
 			// 踩过：队友名单落进了 state/mail/agents.json，和收件箱混在一起。
 			agentsDir := filepath.Join(filepath.Dir(dir), "team")
-			if err := reg.Register(&spawnTool{dir: agentsDir}); err != nil {
+			if err := reg.Register(&spawnTool{dir: agentsDir, maxMembers: maxMembers}); err != nil {
 				return err
 			}
 			// 中断标记写的是同一份 agents.json，所以也用 agentsDir。

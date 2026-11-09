@@ -70,9 +70,8 @@ func TestOfficialSessionStateQueueCarriesRealContent(t *testing.T) {
 			}},
 		},
 	}
-	s := officialServerWith(t, src.fakeOfficialSource, Options{})
 	// 用真实假源（实现了 OfficialQueueHost）建服务器。
-	s = newTestServer(t, Options{Source: src})
+	s := newTestServer(t, Options{Source: src})
 
 	rec := postOfficial(t, s.handleSessionState, `{"sessionId":"s1"}`)
 	if rec.Code != http.StatusOK {

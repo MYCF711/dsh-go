@@ -6,9 +6,14 @@ package edit
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
@@ -50,6 +55,58 @@ type payload struct {
 	Replacements int    `json:"replacements"`
 	BytesBefore  int    `json:"bytes_before"`
 	BytesAfter   int    `json:"bytes_after"`
+	// DiffBasis 是这次编辑**之前**那份原文的快照路径（官方 `fs.diffBasisMaxBytes`）。
+	// 只回 bytes_before/after 两个数字说明不了"到底改了哪些字节"，事后复核要靠它。
+	DiffBasis string `json:"diff_basis,omitempty"`
+	// DiffBasisSkipped 是没留快照时的结构化原因（只有超限一种：too-large）。
+	DiffBasisSkipped string `json:"diff_basis_skipped,omitempty"`
+}
+
+const (
+	// defaultDiffBasisMaxBytes 是官方 `fs.diffBasisMaxBytes` 的默认值（10 MiB）：
+	// 超过这个大小的文件不留基线快照——不拿磁盘换证据。
+	defaultDiffBasisMaxBytes = 10 << 20
+	// diffBasisEnv / diffBasisDirEnv 是官方配置项在宿主的等价入口。
+	diffBasisEnv    = "DSHD_EDIT_DIFF_BASIS_MAX_BYTES"
+	diffBasisDirEnv = "DSHD_EDIT_DIFF_BASIS_DIR"
+)
+
+// diffBasisLimit 解析基线快照的字节上限：env 优先，非法值退回官方默认（不静默变成 0）。
+func diffBasisLimit() int64 {
+	if raw := strings.TrimSpace(os.Getenv(diffBasisEnv)); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return defaultDiffBasisMaxBytes
+}
+
+// diffBasisDir 是基线快照的落盘目录。默认放系统临时目录下的宿主自有子目录：
+// 它是**过程证据**，不是用户数据，不该混进工作区。
+func diffBasisDir() string {
+	if d := strings.TrimSpace(os.Getenv(diffBasisDirEnv)); d != "" {
+		return d
+	}
+	return filepath.Join(os.TempDir(), "dshd-edit-baselines")
+}
+
+// snapshotDiffBasis 把原文写到基线目录并返回路径；超过上限返回 ("", "too-large")。
+// 快照失败不阻断编辑（编辑本身是用户要的结果），但原因必须结构化回给调用方。
+func snapshotDiffBasis(target string, original []byte) (string, string) {
+	if int64(len(original)) > diffBasisLimit() {
+		return "", "too-large"
+	}
+	dir := diffBasisDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "mkdir-failed"
+	}
+	sum := sha256.Sum256([]byte(target))
+	name := fmt.Sprintf("%x-%d.bak", sum[:8], time.Now().UnixNano())
+	full := filepath.Join(dir, name)
+	if err := os.WriteFile(full, original, 0o600); err != nil {
+		return "", "write-failed"
+	}
+	return filepath.ToSlash(full), ""
 }
 
 func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
@@ -110,14 +167,24 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		return spi.Result{Hint: "写入失败；确认路径可写"}, err
 	}
 
+	basis, basisSkipped := snapshotDiffBasis(a.FilePath, data)
 	p := payload{
-		Path:         strings.ReplaceAll(a.FilePath, "\\", "/"),
-		Replacements: reps,
-		BytesBefore:  len(data),
-		BytesAfter:   len(updated),
+		Path:             strings.ReplaceAll(a.FilePath, "\\", "/"),
+		Replacements:     reps,
+		BytesBefore:      len(data),
+		BytesAfter:       len(updated),
+		DiffBasis:        basis,
+		DiffBasisSkipped: basisSkipped,
+	}
+	summary := fmt.Sprintf("%s 替换 %d 处（%d → %d 字节）", p.Path, reps, p.BytesBefore, p.BytesAfter)
+	switch {
+	case p.DiffBasis != "":
+		summary += "；diff 基线已保留"
+	case p.DiffBasisSkipped == "too-large":
+		summary += "；文件超过 diffBasisMaxBytes，未保留基线"
 	}
 	return spi.Result{
-		Summary: fmt.Sprintf("%s 替换 %d 处（%d → %d 字节）", p.Path, reps, p.BytesBefore, p.BytesAfter),
+		Summary: summary,
 		Data:    p,
 	}, nil
 }

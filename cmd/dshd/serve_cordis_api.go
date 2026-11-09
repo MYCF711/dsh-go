@@ -161,7 +161,11 @@ func (s *cordisService) HandleOfficialCordis(ctx context.Context, method string,
 			_ = json.Unmarshal(rawArgs, &args)
 		}
 		var out any
-		rec, err := c.Invoke(ctx, reqID, str("method"), args, &out)
+		// 官方 cordis.hostRunner.vmTimeoutMs（默认 5000ms）：脚本执行不能靠上游 ctx
+		// 兜底，否则一个死循环的插件会把这次 HTTP 请求按到永远。
+		vmCtx, cancel := withCordisBudget(ctx, cordisVMTimeout())
+		defer cancel()
+		rec, err := c.Invoke(vmCtx, reqID, str("method"), args, &out)
 		s.mu.Lock()
 		s.runs[reqID] = id
 		s.mu.Unlock()
@@ -210,7 +214,10 @@ func (s *cordisService) HandleOfficialCordis(ctx context.Context, method string,
 		if err != nil {
 			return nil, err
 		}
-		info, err := c.ResolveInspectQuery(ctx)
+		// 官方 cordis.hostRunner.clientInspectTimeoutMs（默认 10000ms）。
+		inspectCtx, cancel := withCordisBudget(ctx, cordisClientInspectTimeout())
+		defer cancel()
+		info, err := c.ResolveInspectQuery(inspectCtx)
 		if err != nil {
 			return nil, err
 		}

@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+
+	"dshgo/internal/session"
 )
 
 // contentWidth 是正文可用的列数。
@@ -105,15 +107,15 @@ func blocksFromContent(raw json.RawMessage) []assistantBlock {
 	}
 	out := make([]assistantBlock, 0, len(blocks))
 	for _, b := range blocks {
-		switch b.Type {
-		case "reasoning":
-			if strings.TrimSpace(b.Text) != "" {
-				out = append(out, assistantBlock{kind: "reasoning", text: b.Text})
-			}
-		case "text":
-			if b.Text != "" {
-				out = append(out, assistantBlock{kind: "text", text: b.Text})
-			}
+		// 「一个块算不算思考」只有一份判据（internal/session.ReasoningText）：
+		// 以前这里自己写了一遍 `Type == "reasoning" && TrimSpace(Text) != ""`，
+		// 两份判据必然漂（会话那边认的字段、这边不认，症状是"有时思考不显示"）。
+		if text, ok := session.ReasoningText(b.Type, b.Text); ok {
+			out = append(out, assistantBlock{kind: "reasoning", text: text})
+			continue
+		}
+		if b.Type == "text" && b.Text != "" {
+			out = append(out, assistantBlock{kind: "text", text: b.Text})
 		}
 	}
 	return out
@@ -145,14 +147,17 @@ func extractUserText(data json.RawMessage) string {
 func (a *app) pushAssistant(f ServerFrame) {
 	durationMs := assistantReasoningDuration(f.Data)
 	for _, blk := range parseAssistantBlocks(f.Data) {
-		switch blk.kind {
-		case "reasoning":
-			a.addThinking(blk.text)
+		// 同样的道理：这里不重新判"算不算思考"，走同一份判据。
+		// blk.kind 本来就是上面那个分类器的产物，但**再判一次**就是第二份实现。
+		if text, ok := session.ReasoningText(blk.kind, blk.text); ok {
+			a.addThinking(text)
 			if durationMs > 0 {
 				a.think.duration = time.Duration(durationMs) * time.Millisecond
 				a.think.hasDuration = true
 			}
-		case "text":
+			continue
+		}
+		if blk.kind == "text" {
 			// 正文到了 = 思考结束了。先把思考结算成一行，再画正文。
 			a.flushThinking(f.Time)
 			a.pushAssistantText(blk.text)

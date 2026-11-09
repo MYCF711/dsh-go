@@ -1019,6 +1019,10 @@
           "type": "string",
           "description": "3-5 个词的短描述，给人看"
         },
+        "id": {
+          "type": "string",
+          "description": "稳定的 agent 名字（可选）。给了它，宿主就按官方规则派生/复用一条可续问的子会话（名字-session-随机 uuid），下一轮可以用同一个名字指回这个子代理；省略 = 匿名委派，跑完就散"
+        },
         "prompt": {
           "type": "string",
           "description": "完整、自包含的任务；子代理看不到本会话的历史"

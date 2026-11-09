@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,9 +23,52 @@ var spawnNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}$`)
 
 const spawnFileName = "agents.json"
 
+// defaultMaxMembers 是官方 `agentTeam.maxMembers` 的默认值：一个团队最多几个成员。
+//
+// 官方原件（app.asar:dsh/node_modules/@deepseek-ai/dsh-experimental-agent-team/lib/index.js）：
+//
+//	:1438 const DEFAULT_MAX_MEMBERS = 16;
+//	:1442 maxMembers: z.number().step(1).min(1).default(DEFAULT_MAX_MEMBERS)
+//	:1457 maxMembers: positiveLimit("maxMembers", ...)   // 正整数校验
+//	:1026 if (state.members.some((m) => m.name === name))          throw NAME_TAKEN
+//	:1027 if (state.members.length >= this.maxMembers)             throw MEMBER_LIMIT
+//
+// 宿主的名册就是 <home>/state/team/agents.json（spawn_teammate 写的具名队友）。
+// 名册本来就有，缺的是人数上限：没有它就能无限加成员，团队拓扑与消息扇出无界。
+const defaultMaxMembers = 16
+
+// envMaxMembers 是人数上限的覆盖项（官方是配置项 maxMembers；宿主用环境变量，
+// 非法值 fail-loud——写错一个数不该悄悄变成另一套上限）。
+const envMaxMembers = "DSHD_TEAM_MAX_MEMBERS"
+
 // spawnTool 只做一件事：在 <home>/state/team/agents.json 里登记一个具名队友。
 type spawnTool struct {
 	dir string
+	// maxMembers 是名册人数上限（官方 agentTeam.maxMembers）；0 = 官方默认 16。
+	// 零值落到默认：老构造点（测试、老接线）不传这个字段时行为不变。
+	maxMembers int
+}
+
+// limit 是当前生效的人数上限。零值落到官方默认，不写第二份字面量。
+func (t *spawnTool) limit() int {
+	if t.maxMembers > 0 {
+		return t.maxMembers
+	}
+	return defaultMaxMembers
+}
+
+// teamMaxMembers 解析人数上限覆盖项：空 = 官方默认；非正整数 = fail-loud
+// （官方 positiveLimit 在配置期就抛 TEAM_INVALID_CONFIG）。
+func teamMaxMembers(getenv func(string) string) (int, error) {
+	raw := strings.TrimSpace(getenv(envMaxMembers))
+	if raw == "" {
+		return defaultMaxMembers, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s=%q 不是正整数：官方 maxMembers 要求正整数（默认 %d）", envMaxMembers, raw, defaultMaxMembers)
+	}
+	return n, nil
 }
 
 func (t *spawnTool) Name() string { return "spawn_teammate" }
@@ -161,6 +205,15 @@ func (t *spawnTool) Exec(ctx context.Context, args json.RawMessage) (spi.Result,
 		return spi.Result{
 			Hint: fmt.Sprintf("已有 %d 个队友：%s。换一个名字，或者直接给它派任务", len(f.Agents), strings.Join(f.names(), "、")),
 		}, fmt.Errorf("队友 %s 已经存在（建于 %s）", name, old.CreatedAt)
+	}
+	// 官方 agentTeam.maxMembers（默认 16）：名册满了就拒绝，且**不写盘**。
+	// 顺序与官方一致（先重名、后人数）：重名是"换个名字就好"，满员是"腾位置"。
+	// 拒绝必须发生在 append 之前——先落了盘再报错等于名册超员。
+	if limit := t.limit(); len(f.Agents) >= limit {
+		return spi.Result{
+			Hint: fmt.Sprintf("团队人数上限 %d 已满（%s）：先让不再需要的队友下线，或把几个队友的活并给一个人；官方 maxMembers 默认 16",
+				limit, strings.Join(f.names(), "、")),
+		}, fmt.Errorf("团队人数已达上限 %d（官方错误码 TEAM_MEMBER_LIMIT）", limit)
 	}
 
 	createdAt := time.Now().Format(time.RFC3339)

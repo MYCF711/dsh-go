@@ -111,6 +111,19 @@ type officialPTYEntry struct {
 
 	createdAt time.Time
 	lastUsed  time.Time
+
+	// ---- 官方 api-terminal-controller 的四条生命周期预算（见下方 sweep/closeEntry）----
+	idle          bool          // 最近一次 sweep 判定的闲置状态（activityPollIntervalMs）
+	idleSince     time.Time     // 第一次被判闲置的时刻（unattendedTimeoutMs 从这里算）
+	reaped        bool          // 因闲置超寿命而被回收
+	disposeHow    string        // 销毁路径：grace-exit / grace-timeout / forced
+	disposeWait   time.Duration // 宽限实际等了多久（disposeGraceMs 的实测值）
+	disposePolite bool          // 是否走了「先礼」（给 shell 发 exit 机会）
+	// cleanupAttempts / cleanupPending / cleanupNextAt 是清理失败的重试账
+	// （官方 cleanupRetryMs）：失败不吞、不丢，按节奏重试到成功或进程退出。
+	cleanupAttempts int
+	cleanupPending  bool
+	cleanupNextAt   time.Time
 }
 
 func (e *officialPTYEntry) key() string { return e.sessionID + "\x00" + e.id }
@@ -128,6 +141,29 @@ type officialPTYTerminalAPI struct {
 	entries   map[string]*officialPTYEntry
 	closedIDs map[string]bool
 	now       func() time.Time
+
+	// maxTerminals 是每会话同时存活的终端上限（官方 terminal.maxTerminals）。
+	// 构造函数里落 officialTerminalMaxTerminals；用例可以调小以免真起 8 条 PTY。
+	maxTerminals int
+
+	// ---- 官方 api-terminal-controller 的四条生命周期预算 ----
+	// disposeGrace      官方 terminal.disposeGraceMs（默认 1000）：销毁前给 shell 的宽限
+	// cleanupRetry      官方 terminal.cleanupRetryMs（默认 60000）：清理失败的重试节奏
+	// activityPoll      官方 terminal.activityPollIntervalMs（默认 30000）：活跃度采样窗口
+	// unattendedTTL     官方 terminal.unattendedTimeoutMs（默认 2h）：无人值守终端寿命上限
+	disposeGrace  time.Duration
+	cleanupRetry  time.Duration
+	activityPoll  time.Duration
+	unattendedTTL time.Duration
+
+	// closeFn 是"真正关掉一条 PTY"的注入点（默认 a.bash.CloseTerminal）。
+	// 用例靠它制造一次失败来验重试节奏。
+	closeFn func(id string) error
+
+	// closedEntries 留一份已关条目的账：销毁路径与清理重试都要在 delete(entries) 之后还能查。
+	closedEntries map[string]*officialPTYEntry
+	sweepStop     chan struct{}
+	sweepOnce     sync.Once
 }
 
 // newOfficialPTYTerminalAPI 起 PTY 终端层。
@@ -135,6 +171,17 @@ type officialPTYTerminalAPI struct {
 // svc 必须是 terminal.open 用的**同一个** bash.Service（否则官方列表与既有终端两套实例）。
 // scrollbackRows<=0 时按官方默认 1000 行。
 func newOfficialPTYTerminalAPI(home string, svc *bash.Service, cwdOf func(string) (string, error), scrollbackRows int) (*officialPTYTerminalAPI, error) {
+	return newOfficialPTYTerminalAPIWith(home, svc, cwdOf, scrollbackRows, true)
+}
+
+// newOfficialPTYTerminalAPIWith 是构造函数的实现，startSweep 决定要不要起后台 sweepLoop。
+//
+// 为什么留这个开关：sweepLoop 的 ticker 会周期性读 a.activityPoll / a.cleanupRetry /
+// a.unattendedTTL / a.now。生命周期用例必须**先改这些配置、再手动 sweep(now)**
+// 才能确定性地验四条预算；后台 loop 同时读同一批字段就是夹具与产品之间的竞争，
+// `-race` 会先抓它、把真竞争淹掉（docs/race.md 记的同名教训）。
+// 生产路径永远传 true（run/acp/serve 三处都走这个构造函数）。
+func newOfficialPTYTerminalAPIWith(home string, svc *bash.Service, cwdOf func(string) (string, error), scrollbackRows int, startSweep bool) (*officialPTYTerminalAPI, error) {
 	if svc == nil {
 		return nil, fmt.Errorf("official PTY terminal：必须复用 terminal.open 的 bash.Service")
 	}
@@ -153,19 +200,33 @@ func newOfficialPTYTerminalAPI(home string, svc *bash.Service, cwdOf func(string
 		entries:        map[string]*officialPTYEntry{},
 		closedIDs:      map[string]bool{},
 		now:            time.Now,
+		maxTerminals:   officialTerminalMaxTerminals,
+		disposeGrace:   officialTerminalDisposeGrace,
+		cleanupRetry:   officialTerminalCleanupRetry,
+		activityPoll:   officialTerminalActivityPoll,
+		unattendedTTL:  officialTerminalUnattendedTimeout,
+		closedEntries:  map[string]*officialPTYEntry{},
+		sweepStop:      make(chan struct{}),
 	}
 	if err := os.MkdirAll(a.stateDir, 0o755); err != nil {
 		return nil, fmt.Errorf("建 PTY 终端状态目录失败: %w", err)
 	}
 	a.loadLayouts()
+	if startSweep {
+		go a.sweepLoop()
+	}
 	return a, nil
 }
 
 // Close 关掉本层启动的**全部** PTY 会话（只关自己记录的，不扫别人的）。
+//
+// 这里走**强制**销毁（不走 disposeGrace）：进程要退了，给每条终端各留 1s 宽限
+// 会把退出时间按终端数放大。宽限只属于用户主动 `terminal.close`。
 func (a *officialPTYTerminalAPI) Close() {
 	if a == nil {
 		return
 	}
+	a.stopSweep()
 	a.mu.Lock()
 	targets := make([]*officialPTYEntry, 0, len(a.entries))
 	for _, e := range a.entries {
@@ -174,19 +235,244 @@ func (a *officialPTYTerminalAPI) Close() {
 	a.entries = map[string]*officialPTYEntry{}
 	a.mu.Unlock()
 	for _, e := range targets {
-		a.closeEntry(e)
+		a.closeEntryForced(e)
 	}
 }
 
+// closeEntry 是用户主动销毁的路径：先按 disposeGraceMs「先礼」再「后兵」，
+// 清理失败按 cleanupRetryMs 进重试队列（不吞错、不丢账）。
 func (a *officialPTYTerminalAPI) closeEntry(entry *officialPTYEntry) {
+	closeFn := a.closeFn
+	if closeFn == nil {
+		closeFn = a.bash.CloseTerminal
+	}
+	// 只有"还没决定过销毁路径"且 term 还在时才走宽限：closeEntry 可能因清理失败被重试，
+	// 重试不能再发一次礼（那样每次重试都多等 1s）。
+	if entry.term != nil && entry.disposeHow == "" && a.disposeGrace > 0 {
+		entry.disposePolite = true
+		start := time.Now()
+		// 「礼」：让 shell 自己走 exit（历史/临时文件这类收尾才有机会跑）。
+		_ = entry.term.Input("exit\r")
+		deadline := start.Add(a.disposeGrace)
+		for !termExited(entry.term) {
+			remain := time.Until(deadline)
+			if remain <= 0 {
+				break
+			}
+			// 睡眠切片夹在剩余预算内：否则最后一次 sleep 会把实测等待顶过 grace。
+			if remain > 5*time.Millisecond {
+				remain = 5 * time.Millisecond
+			}
+			time.Sleep(remain)
+		}
+		entry.disposeWait = time.Since(start)
+		if termExited(entry.term) {
+			entry.disposeHow = "grace-exit"
+		} else {
+			entry.disposeHow = "grace-timeout"
+		}
+	} else if entry.disposeHow == "" {
+		entry.disposeHow = "forced"
+	}
+
 	entry.closed = true
 	if entry.term != nil {
-		if err := a.bash.CloseTerminal(entry.term.ID()); err != nil {
+		entry.cleanupAttempts++
+		if err := closeFn(entry.term.ID()); err != nil {
+			// 清理失败不吞：记账后按 cleanupRetryMs 重试（sweep 驱动）。
+			entry.errMsg = err.Error()
+			entry.cleanupPending = true
+			entry.cleanupNextAt = a.now().Add(a.cleanupRetry)
+			return
+		}
+		entry.term = nil
+	}
+	entry.cleanupPending = false
+	entry.state = "exited"
+}
+
+// closeEntryForced 是进程退出路径：一刀切，不宽限。
+func (a *officialPTYTerminalAPI) closeEntryForced(entry *officialPTYEntry) {
+	closeFn := a.closeFn
+	if closeFn == nil {
+		closeFn = a.bash.CloseTerminal
+	}
+	entry.closed = true
+	if entry.disposeHow == "" {
+		entry.disposeHow = "forced"
+	}
+	if entry.term != nil {
+		if err := closeFn(entry.term.ID()); err != nil {
 			entry.errMsg = err.Error()
 		}
 		entry.term = nil
 	}
+	entry.cleanupPending = false
 	entry.state = "exited"
+}
+
+// termExited 报这条 PTY 会话的进程是否已经退出（宽限轮询的判据）。
+func termExited(term *bash.Terminal) bool {
+	if term == nil {
+		return true
+	}
+	if pty := term.PTY(); pty != nil {
+		return pty.Exited()
+	}
+	return true
+}
+
+// sweepLoop 是四条生命周期预算的驱动：定时采样活跃度、回收无人值守终端、重试失败的清理。
+func (a *officialPTYTerminalAPI) sweepLoop() {
+	interval := a.activityPoll
+	if interval <= 0 {
+		interval = officialTerminalActivityPoll
+	}
+	if a.cleanupRetry > 0 && a.cleanupRetry < interval {
+		interval = a.cleanupRetry
+	}
+	if interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+	if interval < 50*time.Millisecond {
+		interval = 50 * time.Millisecond
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-a.sweepStop:
+			return
+		case now := <-tick.C:
+			a.sweep(now)
+		}
+	}
+}
+
+func (a *officialPTYTerminalAPI) stopSweep() {
+	a.sweepOnce.Do(func() {
+		if a.sweepStop != nil {
+			close(a.sweepStop)
+		}
+	})
+}
+
+// sweep 是一次采样：判定闲置、回收超寿命的无人值守终端、处理到期的清理重试。
+//
+// now 显式传入（不内部读时钟）：用例可以确定性地推进时间，不靠 sleep 赌时序。
+func (a *officialPTYTerminalAPI) sweep(now time.Time) {
+	var retries []*officialPTYEntry
+	var reaps []*officialPTYEntry
+	a.mu.Lock()
+	for key, e := range a.entries {
+		if e.closed {
+			if e.cleanupPending && !now.Before(e.cleanupNextAt) {
+				retries = append(retries, e)
+			}
+			continue
+		}
+		idle := a.activityPoll > 0 && now.Sub(e.lastUsed) > a.activityPoll
+		e.idle = idle
+		if !idle {
+			e.idleSince = time.Time{}
+			continue
+		}
+		if e.idleSince.IsZero() {
+			e.idleSince = now
+			continue
+		}
+		if a.unattendedTTL > 0 && now.Sub(e.idleSince) >= a.unattendedTTL {
+			e.reaped = true
+			delete(a.entries, key)
+			a.closedIDs[key] = true
+			a.closedEntries[key] = e
+			reaps = append(reaps, e)
+		}
+	}
+	// 已关但清理未完成的条目也可能要重试（不在 entries 里了）。
+	for key, e := range a.closedEntries {
+		if e.cleanupPending && !now.Before(e.cleanupNextAt) && !containsEntry(retries, e) {
+			e.cleanupNextAt = a.now().Add(a.cleanupRetry)
+			retries = append(retries, e)
+			_ = key
+		}
+	}
+	a.mu.Unlock()
+
+	for _, e := range retries {
+		a.retryCleanup(e)
+	}
+	for _, e := range reaps {
+		a.closeEntry(e)
+	}
+}
+
+func containsEntry(list []*officialPTYEntry, want *officialPTYEntry) bool {
+	for _, e := range list {
+		if e == want {
+			return true
+		}
+	}
+	return false
+}
+
+// retryCleanup 是清理重试：成功就落账，失败就再排下一次。
+func (a *officialPTYTerminalAPI) retryCleanup(entry *officialPTYEntry) {
+	closeFn := a.closeFn
+	if closeFn == nil {
+		closeFn = a.bash.CloseTerminal
+	}
+	id := ""
+	if entry.term != nil {
+		id = entry.term.ID()
+	}
+	entry.cleanupAttempts++
+	if err := closeFn(id); err != nil {
+		entry.errMsg = err.Error()
+		entry.cleanupNextAt = a.now().Add(a.cleanupRetry)
+		return
+	}
+	entry.cleanupPending = false
+	entry.term = nil
+	entry.state = "exited"
+}
+
+// ---- 用例/可观测读点（生产代码也用来做一致性检查）----
+
+func (a *officialPTYTerminalAPI) entryOf(sessionID, id string) *officialPTYEntry {
+	key := sessionID + "\x00" + id
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if e := a.entries[key]; e != nil {
+		return e
+	}
+	return a.closedEntries[key]
+}
+
+func (a *officialPTYTerminalAPI) disposeOutcome(sessionID, id string) (how string, waited time.Duration, polite bool) {
+	e := a.entryOf(sessionID, id)
+	if e == nil {
+		return "", 0, false
+	}
+	return e.disposeHow, e.disposeWait, e.disposePolite
+}
+
+func (a *officialPTYTerminalAPI) cleanupStats(sessionID, id string) (attempts int, done bool) {
+	e := a.entryOf(sessionID, id)
+	if e == nil {
+		return 0, false
+	}
+	return e.cleanupAttempts, !e.cleanupPending
+}
+
+func (a *officialPTYTerminalAPI) isIdle(sessionID, id string) bool {
+	e := a.entryOf(sessionID, id)
+	return e != nil && e.idle
+}
+
+func (a *officialPTYTerminalAPI) isReaped(sessionID, id string) bool {
+	e := a.entryOf(sessionID, id)
+	return e != nil && e.reaped
 }
 
 // TerminalCreate 起一条**真 PTY** shell 会话并登记官方身份。
@@ -238,6 +524,24 @@ func (a *officialPTYTerminalAPI) TerminalCreate(ctx context.Context, sessionID s
 		return info, nil
 	}
 	a.mu.Unlock()
+
+	// 官方 `terminal.maxTerminals`（默认 8）：本会话同时存活的终端条数上限。
+	// 放在 OpenPTY **之前**：先拒绝，别先起一个 conhost 再关掉。
+	if limit := a.maxTerminals; limit > 0 {
+		a.mu.Lock()
+		open := 0
+		for _, e := range a.entries {
+			if e.sessionID == sessionID && !e.closed {
+				open++
+			}
+		}
+		a.mu.Unlock()
+		if open >= limit {
+			return transport.OfficialWebTerminalInfo{}, fmt.Errorf(
+				"%w: 本会话已有 %d 条终端（上限 %d），先 terminal.close 再开",
+				transport.ErrJTOfficialBadParam, open, limit)
+		}
+	}
 
 	// 真 PTY：起不来说明本机没有 ConPTY 或 shell 起不来，原样上抛（不降级成管道）。
 	term, err := a.bash.OpenPTY(bash.PTYOptions{
@@ -341,6 +645,8 @@ func (a *officialPTYTerminalAPI) TerminalClose(ctx context.Context, sessionID, i
 	entry.closed = true
 	delete(a.entries, key)
 	a.closedIDs[key] = true
+	// 关闭后仍要能查销毁路径与清理重试账，所以留一份已关条目的引用。
+	a.closedEntries[key] = entry
 	a.mu.Unlock()
 
 	a.closeEntry(entry)

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"dshgo/internal/compact"
 	"dshgo/internal/llm"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
@@ -34,7 +35,7 @@ func TestRunCompactorHonoursCalibratedMeter(t *testing.T) {
 	// 有锚点：实测比估算大 50 倍 → 同一份历史估算爆表 → 必须压。
 	cal := &session.Meter{}
 	cal.Observe(50000, 1000)
-	c := runCompactor(chat, l, 500, "m", cal)
+	c := runCompactor(chat, l, 500, compact.DefaultPolicy(), llm.ModelCapacity{}, "m", cal)
 	if c == nil {
 		t.Fatal("budget=500 时不该返回 nil")
 	}

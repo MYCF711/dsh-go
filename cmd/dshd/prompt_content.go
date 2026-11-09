@@ -54,6 +54,9 @@ func loadPromptContentForRun(home, path string) ([]session.ContentBlock, string,
 	}
 	var text strings.Builder
 	var images []llm.MessageImage
+	// 图片先收集、再按官方并发度（默认 2）统一归一化：单张处理时并发度没有意义，
+	// "一条消息里的多张图"才是官方 imageCompressionConcurrency 的粒度。
+	var pending []pendingImage
 	for _, block := range resolved {
 		switch block.Type {
 		case "text":
@@ -79,8 +82,8 @@ func loadPromptContentForRun(home, path string) ([]session.ContentBlock, string,
 				text.WriteByte('\n')
 				text.Write(content.Data)
 			} else {
-				images = append(images, llm.MessageImage{MIME: content.Attachment.MIME,
-					DataBase64: base64.StdEncoding.EncodeToString(content.Data)})
+				// 归一化在循环外统一做（见 loadPromptContentForRun 尾部）。
+				pending = append(pending, pendingImage{Data: content.Data, MIME: content.Attachment.MIME})
 			}
 		case "reference":
 			if text.Len() > 0 {
@@ -92,6 +95,14 @@ func loadPromptContentForRun(home, path string) ([]session.ContentBlock, string,
 				fmt.Fprintf(&text, "[会话引用 %s · %s]", block.SessionID, block.ReferenceID)
 			}
 		}
+	}
+	normalized, err := normalizeMessageImages(pending, imageNormalizeOptionsFromEnv())
+	if err != nil {
+		return nil, "", nil, attachmentBadRequest("图片归一化失败", err)
+	}
+	for _, img := range normalized {
+		images = append(images, llm.MessageImage{MIME: img.MIME,
+			DataBase64: base64.StdEncoding.EncodeToString(img.Data)})
 	}
 	return sessionBlocksFromTransport(resolved), text.String(), images, nil
 }
@@ -128,6 +139,9 @@ func promptPartsFromBlocks(home string, blocks []transport.ContentBlock) ([]sess
 		return nil, nil, err
 	}
 	parts := make([]llm.MessagePart, 0, len(resolved))
+	// 图片段先占位、归一化后回填：并发不能打乱块顺序（BEFORE/图/AFTER 的位置是语义）。
+	var pending []pendingImage
+	var imageSlots []int
 	for _, block := range resolved {
 		switch block.Type {
 		case "text":
@@ -148,8 +162,9 @@ func promptPartsFromBlocks(home string, blocks []transport.ContentBlock) ([]sess
 					content.Attachment.ByteSize, content.Data)))
 				continue
 			}
-			parts = append(parts, llm.ImagePart(llm.MessageImage{MIME: content.Attachment.MIME,
-				DataBase64: base64.StdEncoding.EncodeToString(content.Data)}))
+			imageSlots = append(imageSlots, len(parts))
+			pending = append(pending, pendingImage{Data: content.Data, MIME: content.Attachment.MIME})
+			parts = append(parts, llm.MessagePart{}) // 占位，归一化后回填
 		case "reference":
 			switch block.ReferenceType {
 			case "file":
@@ -165,6 +180,14 @@ func promptPartsFromBlocks(home string, blocks []transport.ContentBlock) ([]sess
 			return nil, nil, attachmentBadRequest("未知 content block type: "+block.Type, nil)
 		}
 	}
+	normalized, err := normalizeMessageImages(pending, imageNormalizeOptionsFromEnv())
+	if err != nil {
+		return nil, nil, attachmentBadRequest("图片归一化失败", err)
+	}
+	for i, slot := range imageSlots {
+		parts[slot] = llm.ImagePart(llm.MessageImage{MIME: normalized[i].MIME,
+			DataBase64: base64.StdEncoding.EncodeToString(normalized[i].Data)})
+	}
 	return sessionBlocksFromTransport(resolved), parts, nil
 }
 
@@ -179,6 +202,7 @@ func (s *attachmentStore) ResolveBlocksForChild(input []transport.ContentBlock) 
 	out := make([]transport.ContentBlock, len(input))
 	meaningful := false
 	textBytes := 0
+	images := 0
 	for i, block := range input {
 		switch block.Type {
 		case "text":
@@ -194,6 +218,9 @@ func (s *attachmentStore) ResolveBlocksForChild(input []transport.ContentBlock) 
 				return nil, err
 			}
 			a := content.Attachment
+			if strings.HasPrefix(a.MIME, "image/") {
+				images++
+			}
 			out[i] = transport.ContentBlock{Type: "attachment", AttachmentID: a.ID, Name: a.Name,
 				ByteSize: a.ByteSize, MIME: a.MIME, SHA256: a.SHA256, Width: a.Width, Height: a.Height}
 			meaningful = true
@@ -228,6 +255,10 @@ func (s *attachmentStore) ResolveBlocksForChild(input []transport.ContentBlock) 
 	}
 	if !meaningful {
 		return nil, attachmentBadRequest("content 不能全是空文本", nil)
+	}
+	// 子代理的消息也是一条消息：官方 `attachment.maxImagesPerMessage` 同样管它。
+	if err := checkImagesPerMessage(images); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

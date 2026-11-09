@@ -17,6 +17,10 @@ import (
 )
 
 // 范围语义：覆盖官方插件实际用的写法，且"不合法就报错"而不是猜。
+// 注意：下面的版本号是**夹具**，故意用与发布版本不同的预发布标签（`rc.`）——
+// 夹具写发布版本号会让这个文件变成"第二个版本源"（防复发守卫会红，见
+// cmd/dshd/version_guard_test.go）。这里只需"同一三元组下的预发布"这一形状，
+// 标签叫什么不影响任何一条断言（比较的两边用的是同一个标签）。
 func TestSatisfiesRangeSemantics(t *testing.T) {
 	cases := []struct {
 		version string
@@ -24,26 +28,26 @@ func TestSatisfiesRangeSemantics(t *testing.T) {
 		want    bool
 		wantErr bool
 	}{
-		{"0.2.2-go.1", "^0.2.0", true, false},
-		{"0.2.2-go.1", "^0.2.2-go.0", true, false},
-		{"0.2.2-go.1", "~0.2.0", true, false},
-		{"0.2.2-go.1", "0.2.2-go.1", true, false},
-		{"0.2.2-go.1", "=0.2.2-go.1", true, false},
-		{"0.2.2-go.1", "0.2.2", false, false},   // 预发布不满足"发布版"精确匹配
-		{"0.2.2-go.1", ">=0.2.2-go.1", true, false},
-		{"0.2.2-go.1", ">0.2.2", false, false},
-		{"0.2.2-go.1", "<0.3.0", true, false},
-		{"0.2.2-go.1", "0.2.x", true, false},
-		{"0.2.2-go.1", "0.3.x", false, false},
-		{"0.2.2-go.1", "^9.0.0", false, false},
-		{"0.2.2-go.1", ">=9.0.0 <10.0.0", false, false},
-		{"0.2.2-go.1", "^9.0.0 || ^0.2.0", true, false},
-		{"0.2.2-go.1", "0.1.0 - 0.3.0", true, false},
-		{"0.2.2-go.1", "*", true, false},
-		{"0.2.2-go.1", "x", true, false},
-		{"0.2.2-go.1", "workspace:^", false, true}, // engines 上 workspace: 一律不满足
-		{"0.2.2-go.1", "不是范围", false, true},
-		{"0.2.2-go.1", "", false, true},
+		{"0.2.2-rc.1", "^0.2.0", true, false},
+		{"0.2.2-rc.1", "^0.2.2-rc.0", true, false},
+		{"0.2.2-rc.1", "~0.2.0", true, false},
+		{"0.2.2-rc.1", "0.2.2-rc.1", true, false},
+		{"0.2.2-rc.1", "=0.2.2-rc.1", true, false},
+		{"0.2.2-rc.1", "0.2.2", false, false}, // 预发布不满足"发布版"精确匹配
+		{"0.2.2-rc.1", ">=0.2.2-rc.1", true, false},
+		{"0.2.2-rc.1", ">0.2.2", false, false},
+		{"0.2.2-rc.1", "<0.3.0", true, false},
+		{"0.2.2-rc.1", "0.2.x", true, false},
+		{"0.2.2-rc.1", "0.3.x", false, false},
+		{"0.2.2-rc.1", "^9.0.0", false, false},
+		{"0.2.2-rc.1", ">=9.0.0 <10.0.0", false, false},
+		{"0.2.2-rc.1", "^9.0.0 || ^0.2.0", true, false},
+		{"0.2.2-rc.1", "0.1.0 - 0.3.0", true, false},
+		{"0.2.2-rc.1", "*", true, false},
+		{"0.2.2-rc.1", "x", true, false},
+		{"0.2.2-rc.1", "workspace:^", false, true}, // engines 上 workspace: 一律不满足
+		{"0.2.2-rc.1", "不是范围", false, true},
+		{"0.2.2-rc.1", "", false, true},
 	}
 	for _, tc := range cases {
 		got, err := SatisfiesRange(tc.version, tc.expr)
@@ -230,9 +234,9 @@ func TestVersionExemptionPreconditions(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		name                                       string
-		packageVersion, runtimeVersion             string
-		enabled, acceptRisk                        bool
+		name                           string
+		packageVersion, runtimeVersion string
+		enabled, acceptRisk            bool
 	}{
 		{"packageVersion 不是 name@version", "acme.future", HostRuntimeVersion, true, true},
 		{"版本是范围", "acme.future@^1.0.0", HostRuntimeVersion, true, true},
@@ -291,9 +295,9 @@ func TestVersionExemptionSkipsOnlyBadRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := map[string]any{
-		"acme.future@1.0.0":     []string{HostRuntimeVersion},
-		"acme.range@^1.0.0":     []string{HostRuntimeVersion}, // 键不是精确版本
-		"acme.badversions@1.0.0": []string{"^0.2.0"},          // 值不是精确版本
+		"acme.future@1.0.0":      []string{HostRuntimeVersion},
+		"acme.range@^1.0.0":      []string{HostRuntimeVersion}, // 键不是精确版本
+		"acme.badversions@1.0.0": []string{"^0.2.0"},           // 值不是精确版本
 	}
 	raw, _ := json.Marshal(content)
 	if err := os.WriteFile(filepath.Join(root, compatibilityFileName), raw, 0o600); err != nil {

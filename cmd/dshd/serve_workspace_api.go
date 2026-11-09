@@ -147,7 +147,9 @@ func newOfficialWorkspaceHost(home string, src *sessionSource, prompts *promptSe
 			}
 			return "ws-" + id, nil
 		},
-		documentsDir: officialDocumentsDirectory,
+		// 带预算的查找：官方 workspaceController.documentsLookupTimeoutMs（默认 10000ms）。
+		// 装配期只装函数指针，真正调用发生在 workspace/initializeDefault（见本文件 :631）。
+		documentsDir: documentsDirBounded,
 		path:         filepath.Join(home, "state", "workspaces.json"),
 	}
 	if h.src == nil {

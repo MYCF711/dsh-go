@@ -39,7 +39,10 @@ func TestHS13OfficialBudgetAssemblyProbe(t *testing.T) {
 	*rulesPath = ""
 	t.Cleanup(func() { *rulesPath = oldRules })
 
-	assembled := buildSystemPromptWithHome(emptyRegistry{}, "m", project, home, defaultWorkspaceBytes)
+	assembled, err := buildSystemPromptWithHome(emptyRegistry{}, "m", project, home, defaultWorkspaceBytes)
+	if err != nil {
+		t.Fatalf("装配系统提示: %v", err)
+	}
 	t.Logf("budget=default(每个链 65536) assembled_bytes=%d global_present=%v project_present=%v truncation_notice=%v",
 		len(assembled),
 		strings.Contains(assembled, global40),
@@ -54,7 +57,10 @@ func TestHS13OfficialBudgetAssemblyProbe(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "AGENTS.md"), []byte(global70), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	assembled = buildSystemPromptWithHome(emptyRegistry{}, "m", project, home, defaultWorkspaceBytes)
+	assembled, err = buildSystemPromptWithHome(emptyRegistry{}, "m", project, home, defaultWorkspaceBytes)
+	if err != nil {
+		t.Fatalf("装配系统提示: %v", err)
+	}
 	section := assembled[strings.Index(assembled, "全局约定（"):]
 	if nl := strings.IndexByte(section, '\n'); nl >= 0 {
 		section = section[nl+1:]
@@ -69,7 +75,10 @@ func TestHS13OfficialBudgetAssemblyProbe(t *testing.T) {
 	}
 
 	// --workspace-bytes=0（不传）：两条链都不注入。
-	assembled = buildSystemPromptWithHome(emptyRegistry{}, "m", project, home, workspaceBytesForPrompt(0))
+	assembled, err = buildSystemPromptWithHome(emptyRegistry{}, "m", project, home, workspaceBytesForPrompt(0))
+	if err != nil {
+		t.Fatalf("装配系统提示: %v", err)
+	}
 	t.Logf("budget=0(不传) assembled_bytes=%d global_present=%v project_present=%v",
 		len(assembled), strings.Contains(assembled, "全局约定"), strings.Contains(assembled, "工作区约定"))
 	if strings.Contains(assembled, "全局约定") || strings.Contains(assembled, "工作区约定") {

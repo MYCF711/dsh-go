@@ -114,8 +114,8 @@ func TestUnaryArgumentsInvalidIsHTTP200(t *testing.T) {
 	connectAndCookies(t, ts, client, InteractionsNone)
 
 	cases := []struct {
-		name string
-		args string
+		name  string
+		args  string
 		field string
 	}{
 		{"多一个字段", `{"address":{"kind":"session","sessionId":"s"},"bogus":1}`, "bogus"},

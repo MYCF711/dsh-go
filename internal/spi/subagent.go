@@ -45,6 +45,17 @@ type SubagentRequest struct {
 	// （spi.SessionFrom）。两者都没有时 Continuable 必须**响亮失败**：
 	// 没有父就没有授权边界，编一个父等于没有归属。
 	ParentSessionID string
+	// AgentID 是官方的具名 agent 标签（`agentLoop.agents[].id`，稳定标识）。
+	//
+	// 语义（对齐 dsh-agent-loop/lib/index.js:1351 的
+	// `sessionId ?? `${id}-session-${randomUUID()}``）：
+	//   - 空 = 匿名委派：与改动前完全一致，不留任何具名地址；
+	//   - 非空 = 宿主按 `${id}-session-<uuid>` 派生/复用一条 durable 子会话，
+	//     并把 (父会话, agent id) → 子会话 id 记进 <home>/state/subagent-agents.json，
+	//     于是下一轮（另一个进程）还能按同一个名字指回同一个子代理。
+	//
+	// 非空即意味着 Continuable 语义：没有 durable 子会话就没有可指向的地址。
+	AgentID string
 }
 
 // SubagentResult 是子代理交回来的东西：**只要结果，不要中间步骤**。

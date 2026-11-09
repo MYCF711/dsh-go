@@ -159,7 +159,7 @@ func TestI04ProjectionsBaselineIsSharedAcrossThreeFaces(t *testing.T) {
 	controlKeys := sortedKeys(controlBlock.Values)
 
 	want := []string{
-		"agentPreset", "modelSelection", "permissions", "sessionListMetadata",
+		"agentPreset", "contextPressure", "modelSelection", "permissions", "sessionListMetadata",
 		"subagent", "subagentCatalog", "subagentTiming", "title", "todos", "workingDirectory",
 	}
 	if !sameKeys(httpKeys, want) {

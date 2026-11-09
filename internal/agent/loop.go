@@ -186,6 +186,13 @@ type Loop struct {
 	// 为什么放在 Loop 里：压缩是**策略**（选区间 + 生成摘要），
 	// 但"什么时候压"必须由跑 turn 的人决定——它才知道预算和会话文件在哪。
 	Compact func(ctx context.Context, step int, history []llm.Message) ([]llm.Message, error)
+	// RuntimeContext 可选：每步**重新投影**运行时事实（官方
+	// `context.runtimeContext.perStep`，默认 true）。nil = 不注入（默认形状不变）；
+	// 返回空串 = 这一步不出现该段。
+	//
+	// 它只影响这一次请求的 Messages 副本：Run 返回的历史里没有这条消息
+	// （见 runtime_context.go 的三条硬约束）。
+	RuntimeContext func() string
 	// PreStep 可选：每一步模型请求**发出之前**调用（官方 0.2.2 #78
 	// `session-checkpoint-policy` 的 `agent/pre-step` 钩子）。
 	//
@@ -333,9 +340,15 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 			return msgs, err
 		}
 
+		// 官方 context.runtimeContext.perStep：每步重新投影运行时事实，但**不**
+		// 重新装配提示词（历史与工具表都不动，prompt cache 前缀保持不变）。
+		requestMessages := msgs
+		if l.RuntimeContext != nil {
+			requestMessages = withRuntimeContext(msgs, l.RuntimeContext())
+		}
 		req := llm.Request{
 			Model:     l.Model,
-			Messages:  msgs,
+			Messages:  requestMessages,
 			Tools:     l.toolDefs(),
 			MaxTokens: capacity.MaxOutput,
 			// 只有显式要了才带：默认不带，避免把不支持该参数的网关打挂。

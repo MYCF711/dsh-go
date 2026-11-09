@@ -146,6 +146,22 @@ func (s *Service) register(cmd string, sess *session, t *task) (string, error) {
 	if s.closed {
 		return "", spi.ErrServiceClosed
 	}
+	// 官方 jobs.maxConcurrentJobsPerOwner（默认 10）：同一 owner 的**运行中**任务上限。
+	// 已结算的任务不占额度（它们只是保留输出，不占并发）；超限 fail-loud —— 排队会
+	// 让调用方以为"已经跑起来了"，静默丢弃更糟。调用方拿到错误会关闭刚起的会话，
+	// 所以不会留下没人管的进程树。
+	if limit := maxConcurrentJobsPerOwner(); limit > 0 {
+		running := 0
+		for _, j := range s.jobs {
+			if j != nil && j.task != nil && !j.task.finished() {
+				running++
+			}
+		}
+		if running >= limit {
+			return "", fmt.Errorf("同一 owner 已有 %d 个运行中的后台任务（上限 %d，可用 %s 调整）：先等它们结束，或停掉其中一个",
+				running, limit, EnvMaxConcurrentJobsPerOwner)
+		}
+	}
 	s.seq++
 	id := fmt.Sprintf("job-%s-%d", s.ownerID, s.seq)
 	s.jobs[id] = &job{id: id, cmd: cmd, sess: sess, task: t}

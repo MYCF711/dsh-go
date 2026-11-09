@@ -655,10 +655,7 @@ func officialPaginate(events []DurableEvent, beforeSeq *int64, maxMessages, thro
 	if cut < 0 {
 		cut = 0
 	}
-	page := make([]DurableEvent, 0, end-cut)
-	for _, ev := range events[cut:end] {
-		page = append(page, ev)
-	}
+	page := append(make([]DurableEvent, 0, end-cut), events[cut:end]...)
 	return page, cut > 0
 }
 
@@ -964,6 +961,10 @@ func (s *Server) officialProjectionValues(host OfficialSessionHost, sessionID st
 			}
 		}
 	}
+	// 官方 `contextPressure`：三数各自"未知就省略"（见 context_pressure_view.go）。
+	// 键**总是**出现（官方 SessionProjectionMap 里它没有 optional），没有实测时是 {}。
+	values["contextPressure"] = officialContextPressureView(events)
+
 	if ph, ok := host.(OfficialProjectionHost); ok {
 		lastUsed, next, err := ph.ModelSelection(sessionID)
 		if err != nil {

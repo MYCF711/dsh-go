@@ -44,7 +44,10 @@ func TestWorkspaceBytesDefaultMatchesOfficialTarget(t *testing.T) {
 	*rulesPath = ""
 	t.Cleanup(func() { *rulesPath = oldRules })
 
-	got := buildSystemPromptWithHome(emptyRegistry{}, "m", cwd, home, defaultWorkspaceBytes)
+	got, err := buildSystemPromptWithHome(emptyRegistry{}, "m", cwd, home, defaultWorkspaceBytes)
+	if err != nil {
+		t.Fatalf("装配系统提示: %v", err)
+	}
 	if !strings.Contains(got, globalBody) {
 		t.Fatalf("40 KiB 全局 AGENTS.md 被默认预算截断（len=%d，含正文=%v）",
 			len(got), strings.Contains(got, globalBody))

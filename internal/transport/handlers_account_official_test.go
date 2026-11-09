@@ -554,8 +554,7 @@ func TestOfficialAccountNilServerIsSafe(t *testing.T) {
 	if _, ok := srv.officialAccountAPI(); ok {
 		t.Fatalf("nil Server 不该有实现")
 	}
-	var api OfficialAccountAPI
-	api = OfficialAccountAPI{}
+	var api OfficialAccountAPI = OfficialAccountAPI{}
 	srv2 := accountTestServer(t, api)
 	if _, ok := srv2.officialAccountAPI(); !ok {
 		t.Fatalf("挂上去的实现读不回来")

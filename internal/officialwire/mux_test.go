@@ -3,8 +3,8 @@ package officialwire
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,7 +15,7 @@ import (
 
 // fakeOpener 是 mux 测试用的流工厂。
 type fakeOpener struct {
-	streams map[string]func() Stream
+	streams  map[string]func() Stream
 	failures map[string]*Error
 }
 

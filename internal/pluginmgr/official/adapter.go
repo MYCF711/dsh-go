@@ -40,6 +40,11 @@ import (
 // `pluginmgr` 的当前真实状态。
 type adapter struct {
 	manager *pluginmgr.Manager
+
+	// versionProbe 是**测试缝**：每个版本的兼容性补齐进入并发池时被调用一次。
+	// 生产恒为 nil（每一行都省掉一次判空后的间接调用）；只有包内测试用它断言
+	// "上限是读配置的、且在飞的补齐数真的被限住了"。
+	versionProbe func(version string)
 }
 
 // New 返回官方 pluginManager 的真实实现集合。
@@ -141,45 +146,149 @@ func (a *adapter) listVersions(p transport.OfficialListVersionsParams) (transpor
 			fmt.Sprintf("%s@%s 来自%s，不是 registry 依赖", state.Name, state.Version,
 				pluginmgr.DescribeSource(state.Source))), nil
 	}
-	client := pluginmgr.RegistryFromEnv(p.Registry)
-	if client == nil {
+	// 问源顺序按官方 `registryPlan`：调用方指定的源排第一、配置首源与回退源
+	// 按配置顺序跟在后面；指定的源不在配置集合里时**只问它自己**（私有源绝不
+	// 外溢到公共源）。
+	requested := ""
+	if p.Registry != nil {
+		requested = *p.Registry
+	}
+	plan := pluginmgr.RegistryPlan(requested, configuredRegistry(), "", pluginmgr.FallbackRegistries(nil))
+	if len(plan) == 0 {
 		return transport.OfficialVersionList{}, transport.OfficialRegistryUnavailable(
 			"pluginManager.listVersions 没有配置 registry：设置 DSHD_PLUGIN_REGISTRY 或 options.registry")
 	}
-	published, err := client.Versions(context.Background(), p.Name)
-	if err != nil {
-		return transport.OfficialVersionList{}, transport.OfficialRegistryUnavailable(
-			"pluginManager.listVersions 读取 registry 失败：%v", err)
-	}
-	registry, _ := json.Marshal(client.Base())
-	versions := make([]transport.OfficialPublishedVersion, 0, len(published))
-	for _, v := range published {
-		tags := v.Tags
-		if tags == nil {
-			tags = []string{}
+	token := os.Getenv("DSHD_PLUGIN_REGISTRY_TOKEN")
+	var published []pluginmgr.PublishedVersion
+	answered := ""
+	attempts := make([]transport.OfficialRegistryAttempt, 0, len(plan))
+	failures := make([]string, 0, len(plan))
+	for _, base := range plan {
+		client := pluginmgr.NewRegistryClient(base, token)
+		raw, _ := json.Marshal(base)
+		versions, fetchErr := client.Versions(context.Background(), p.Name)
+		if fetchErr != nil {
+			problem := pluginmgr.RegistryFailureKind(fetchErr)
+			attempts = append(attempts, transport.OfficialRegistryAttempt{
+				Registry: raw, Problem: problem, Reason: fetchErr.Error(),
+			})
+			failures = append(failures, fmt.Sprintf("%s(%s): %v", base, problem, fetchErr))
+			if !pluginmgr.NextRegistryAfterProblem(problem) {
+				break
+			}
+			continue
 		}
-		versions = append(versions, transport.OfficialPublishedVersion{
-			Version: v.Version, PublishedAt: v.PublishedAt, Tags: tags,
-			Prerelease: v.Prerelease, Deprecated: v.Deprecated,
-		})
+		published = versions
+		answered = base
+		attempts = append(attempts, transport.OfficialRegistryAttempt{Registry: raw})
+		break
+	}
+	if answered == "" {
+		return transport.OfficialVersionList{}, transport.OfficialRegistryUnavailable(
+			"pluginManager.listVersions 读取 registry 失败（问了 %d 个源）：%s", len(attempts), strings.Join(failures, "；"))
+	}
+	registry, _ := json.Marshal(answered)
+	versions, enrichErr := a.enrichVersions(p.Name, published)
+	if enrichErr != nil {
+		return transport.OfficialVersionsRefused("unknown", enrichErr.Error()), nil
 	}
 	return transport.OfficialVersionList{
 		Status: "ok", Installed: state.Version, Registry: registry,
-		Attempts: []transport.OfficialRegistryAttempt{{Registry: registry}},
+		Attempts: attempts,
 		Versions: versions,
 	}, nil
 }
 
+// enrichVersions 为每个已发布版本补齐"能不能在当前 runtime 上跑"。
+//
+// 官方为**每个版本**单独问一次 registry 拿 facts，再用 `mapConcurrent` 以
+// `versionLookupConcurrency`（默认 4，官方 index.js:1953/2407）限制在飞数量。
+// 宿主的 packument 里已经带了 `engines` / `peerDependencies`，所以这一层是
+// **本地**计算——但仍然走同一个有上限的并发池：版本多的时候逐个串行做兼容性
+// 判定会让一次列表刷新阻塞到几十个版本之和，而并发上限必须是我们能设的那个数。
+func (a *adapter) enrichVersions(name string, published []pluginmgr.PublishedVersion) ([]transport.OfficialPublishedVersion, error) {
+	exemptions, _ := a.manager.VersionExemptions()
+	concurrency := pluginmgr.VersionLookupConcurrency(nil)
+	type row struct {
+		version transport.OfficialPublishedVersion
+		err     error
+	}
+	rows := pluginmgr.MapConcurrent(published, concurrency, func(v pluginmgr.PublishedVersion) row {
+		if a.versionProbe != nil {
+			a.versionProbe(v.Version)
+		}
+		tags := v.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		out := transport.OfficialPublishedVersion{
+			Version: v.Version, PublishedAt: v.PublishedAt, Tags: tags,
+			Prerelease: v.Prerelease, Deprecated: v.Deprecated,
+		}
+		manifest := pluginmgr.Manifest{ID: name, Version: v.Version,
+			Engines: v.Engines, PeerDependencies: v.PeerDependencies}
+		issue, err := pluginmgr.EvaluateCompatibility(manifest, exemptions, pluginmgr.HostRuntimeVersion)
+		if err != nil {
+			return row{err: fmt.Errorf("%s@%s 的兼容性要求无法解析: %w", name, v.Version, err)}
+		}
+		// 官方口径：有豁免（用户显式接受风险）的版本不再标 incompatible。
+		if issue != nil && !issue.Exempted {
+			out.Incompatible = &transport.OfficialIncompatiblePackage{
+				Name: issue.Name, Version: issue.Version,
+				RuntimeVersion: issue.RuntimeVersion, Requirements: issue.Requirements,
+			}
+		}
+		return row{version: out}
+	})
+	versions := make([]transport.OfficialPublishedVersion, 0, len(rows))
+	for _, item := range rows {
+		if item.err != nil {
+			return nil, item.err
+		}
+		versions = append(versions, item.version)
+	}
+	return versions, nil
+}
+
+// registries 返回**真实生效**的问源集合（官方 `registries()`，index.js:2278-2287）。
+//
+// 三个字段各说一件事：
+//   - `registry`：配置首源（官方 `configuredRegistries.registry`）；
+//   - `fallbackRegistries`：官方默认 `["https://registry.npmmirror.com/"]`，可用
+//     `DSHD_PLUGIN_REGISTRY_FALLBACKS` 覆盖（显式 `none` = 不要回退源）；
+//   - `resolved`：**pnpm 自有配置解析出来的源**。宿主没有 pnpm 集成（AGENTS R6：
+//     不 fork/vendor dsc，也不起 pnpm 子进程），所以这里是 `null`——官方在
+//     "不知道 pnpm 自己指哪儿"时同样给 null。此前把配置首源塞进 resolved 是
+//     把两件事混成一件：会让客户端以为 pnpm 那边也这么配。
 func (a *adapter) registries() (transport.OfficialRegistries, error) {
-	client := pluginmgr.RegistryFromEnv(nil)
-	if client == nil {
+	configured := configuredRegistry()
+	if configured == "" {
 		return transport.OfficialRegistries{}, transport.OfficialRegistryUnavailable(
 			"pluginManager.registries 没有配置 registry：设置 DSHD_PLUGIN_REGISTRY")
 	}
-	raw, _ := json.Marshal(client.Base())
+	raw, _ := json.Marshal(configured)
+	fallbacks := pluginmgr.FallbackRegistries(nil)
+	if fallbacks == nil {
+		fallbacks = []string{}
+	}
 	return transport.OfficialRegistries{
-		Registry: raw, FallbackRegistries: []string{}, Resolved: raw,
+		Registry: raw, FallbackRegistries: fallbacks, Resolved: json.RawMessage("null"),
 	}, nil
+}
+
+// configuredRegistry 返回配置首源的规范化形态（未配置 = 空串）。
+func configuredRegistry() string {
+	raw := strings.TrimSpace(os.Getenv("DSHD_PLUGIN_REGISTRY"))
+	if raw == "" {
+		return ""
+	}
+	normalized, err := pluginmgr.NormalizeRegistry(raw)
+	if err != nil {
+		// 配错了就原样交给 registry 客户端去报"没有配置 registry"，
+		// 不要在这里悄悄替换成默认源。
+		return raw
+	}
+	return normalized
 }
 
 func (a *adapter) installBundle(p transport.OfficialInstallBundleParams) (transport.OfficialChangeResult, error) {
@@ -244,11 +353,9 @@ func (a *adapter) updateBundle(p transport.OfficialUpdateBundleParams) (transpor
 	fromRegistryCache := strings.HasPrefix(filepath.Clean(state.Source), filepath.Clean(pluginmgr.CacheDir())+string(os.PathSeparator))
 	if sourceKind == "registry" || sourceKind == "tarball" || p.Registry != nil || fromRegistryCache {
 		target := strings.TrimSpace(p.Version)
-		spec := p.Name
+		spec := p.Name + "@latest"
 		if target != "" && target != "latest" {
 			spec = p.Name + "@" + target
-		} else {
-			spec = p.Name + "@latest"
 		}
 		local, resolved, err := a.materializeRegistrySpec(spec, p.Registry)
 		if err != nil {
@@ -402,7 +509,9 @@ func (a *adapter) listVersionExemptions() (transport.OfficialVersionExemptions, 
 func (a *adapter) exemptionWarningFor(packageVersion string) string {
 	exemptions, _ := a.manager.VersionExemptions()
 	for _, runtimeVersion := range exemptions[packageVersion] {
-		if runtimeVersion == pluginmgr.HostRuntimeVersion {
+		// 只有"宿主的 runtime 版本已知且与豁免记录一致"才算这条豁免生效；
+		// 未注入（空串）时两边都空会假成立，所以显式要求非空。
+		if pluginmgr.HostRuntimeVersion != "" && runtimeVersion == pluginmgr.HostRuntimeVersion {
 			return fmt.Sprintf("%s 与 dsh %s 不兼容，是按精确版本豁免安装的：运行它可能崩溃或丢数据",
 				packageVersion, pluginmgr.HostRuntimeVersion)
 		}

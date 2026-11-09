@@ -146,15 +146,25 @@ func (r *modelOverrideLoopRunner) RunContent(ctx context.Context, sessionID, tur
 // 键（Windows 环境名不区分大小写），避免重复键让子进程读到 decoy/别人的值。
 func providerLoopEnvironment(provider llm.ModelProviderConfig) []string {
 	env := os.Environ()
-	managed := make([]string, 0, len(env)+2)
+	managed := make([]string, 0, len(env)+3)
 	for _, entry := range env {
 		name, _, ok := strings.Cut(entry, "=")
-		if ok && (strings.EqualFold(name, "DSHD_LLM_BASE") || strings.EqualFold(name, "DSHD_LLM_KEY") || strings.EqualFold(name, "DSHD_LLM_API")) {
+		if ok && (strings.EqualFold(name, "DSHD_LLM_BASE") || strings.EqualFold(name, "DSHD_LLM_KEY") ||
+			strings.EqualFold(name, "DSHD_LLM_API") || strings.EqualFold(name, llm.RetryPolicyEnv)) {
 			continue
 		}
 		managed = append(managed, entry)
 	}
-	return append(managed, "DSHD_LLM_BASE="+provider.BaseURL, "DSHD_LLM_KEY="+provider.Credential(), "DSHD_LLM_API="+provider.API)
+	managed = append(managed,
+		"DSHD_LLM_BASE="+provider.BaseURL,
+		"DSHD_LLM_KEY="+provider.Credential(),
+		"DSHD_LLM_API="+provider.API)
+	// 官方 `retryPolicy`（每 provider 一份）：只有 provider 真的声明了才传。
+	// 塞一个空值会让子进程的解析走进"非法配置"分支，把一个普通 provider 弄坏。
+	if raw, err := provider.RetryPolicyJSON(); err == nil && raw != "" {
+		managed = append(managed, llm.RetryPolicyEnv+"="+raw)
+	}
+	return managed
 }
 
 // runProviderLoop 与 loopRunner.Run 使用同一组 follow/journal/approval/jobs

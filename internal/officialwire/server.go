@@ -94,13 +94,13 @@ func NewServer(cfg ServerConfig) (*Server, *Error) {
 		cfg.MaxUploadBytes = defaultMaxBodyBytes
 	}
 	auth, err := NewAuth(AuthConfig{
-		Secret:         cfg.Secret,
-		TokenSource:    cfg.TokenSource,
-		TrustedHosts:   cfg.TrustedHosts,
-		BindHost:       cfg.BindHost,
+		Secret:          cfg.Secret,
+		TokenSource:     cfg.TokenSource,
+		TrustedHosts:    cfg.TrustedHosts,
+		BindHost:        cfg.BindHost,
 		MaxAge:          cfg.CookieMaxAge,
 		AllowTokenReuse: cfg.AllowTokenReuse,
-		Now:            cfg.Now,
+		Now:             cfg.Now,
 	})
 	if err != nil {
 		return nil, err

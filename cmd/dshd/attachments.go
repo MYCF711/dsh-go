@@ -542,6 +542,9 @@ func (s *attachmentStore) ResolveBlocks(input []transport.ContentBlock) ([]trans
 	out := make([]transport.ContentBlock, len(input))
 	meaningful := false
 	textBytes := 0
+	// 官方 `attachment.maxImagesPerMessage`（默认 20）：这里是"一条消息"的准入点，
+	// 所以图片数在这里数——Put 是单文件入口，看不见一条消息里一共几张图。
+	images := 0
 	for i, block := range input {
 		switch block.Type {
 		case "text":
@@ -557,6 +560,9 @@ func (s *attachmentStore) ResolveBlocks(input []transport.ContentBlock) ([]trans
 				return nil, err
 			}
 			a := content.Attachment
+			if strings.HasPrefix(a.MIME, "image/") {
+				images++
+			}
 			out[i] = transport.ContentBlock{Type: "attachment", AttachmentID: a.ID, Name: a.Name,
 				ByteSize: a.ByteSize, MIME: a.MIME, SHA256: a.SHA256, Width: a.Width, Height: a.Height}
 			meaningful = true
@@ -591,6 +597,9 @@ func (s *attachmentStore) ResolveBlocks(input []transport.ContentBlock) ([]trans
 	}
 	if !meaningful {
 		return nil, attachmentBadRequest("content 不能全是空文本", nil)
+	}
+	if err := checkImagesPerMessage(images); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

@@ -107,6 +107,9 @@ type ModelProviderConfig struct {
 	API        string
 	APIKeyEnv  string
 	credential string
+	// Retry 是这个 provider 自己的重试策略（官方 `retryPolicy`）。
+	// nil = 没声明 = 生产默认（retry.go 的 defaultRetryConfig），一个字节都不变。
+	Retry *RetryPolicy
 }
 
 // Credential 返回 stored credential 或 apiKeyEnv 同名环境变量的解析结果。
@@ -117,7 +120,24 @@ func (c ModelProviderConfig) Credential() string { return c.credential }
 // 轮次的真实接线应走这里（而不是 llm.New）：API 决定输出上限拼写与
 // provider 扩展字段归属；漏掉它会把 catalog 里写的 api 静默退化成默认协议。
 func (c ModelProviderConfig) Client() *Client {
-	return NewWithAPI(c.BaseURL, c.credential, c.API)
+	client := NewWithAPI(c.BaseURL, c.credential, c.API)
+	client.applyRetryPolicy(c.Retry)
+	return client
+}
+
+// retryPolicyJSON 把 provider 的策略序列化成官方形状（空 = 空串）。
+//
+// 空串而不是 "{}"：下游（providerLoopEnvironment）按"空 = 没设 = 不许塞进环境"
+// 处理——塞一个空值会让子进程的解析走进"非法配置"分支。
+func (c ModelProviderConfig) RetryPolicyJSON() (string, error) {
+	if c.Retry == nil {
+		return "", nil
+	}
+	raw, err := json.Marshal(c.Retry)
+	if err != nil {
+		return "", fmt.Errorf("序列化 retryPolicy: %w", err)
+	}
+	return string(raw), nil
 }
 
 type modelCatalogDocument struct {
@@ -738,6 +758,7 @@ func (s *ModelCatalogStore) ResolveProvider(id string) (ModelProviderConfig, err
 	}
 	return ModelProviderConfig{
 		BaseURL: info.BaseURL, API: info.API, APIKeyEnv: info.APIKeyEnv, credential: credential,
+		Retry: info.Retry,
 	}, nil
 }
 
@@ -866,6 +887,8 @@ type catalogModelInfo struct {
 	API       string
 	BaseURL   string
 	APIKeyEnv string
+	// Retry 是条目自己的重试策略（官方 `retryPolicy`，每 provider 一份）。
+	Retry *RetryPolicy
 }
 
 func parseCatalogObject(raw json.RawMessage) ([]catalogObjectField, error) {
@@ -954,7 +977,7 @@ func mergeCatalogFields(existing, incoming []catalogObjectField) []catalogObject
 
 func isNullableCatalogField(name string) bool {
 	switch name {
-	case "name", "owned_by", "api", "baseURL", "apiKeyEnv", "contextWindow", "maxTokens", "input", "reasoningEfforts":
+	case "name", "owned_by", "api", "baseURL", "apiKeyEnv", "contextWindow", "maxTokens", "input", "reasoningEfforts", "retryPolicy":
 		return true
 	default:
 		return false
@@ -1001,6 +1024,12 @@ func inspectCatalogFields(fields []catalogObjectField) catalogModelInfo {
 			target = &info.BaseURL
 		case "apiKeyEnv":
 			target = &info.APIKeyEnv
+		case "retryPolicy":
+			// inspect 路径不返回错误（它只回答"这个条目长什么样"）；真正的
+			// 校验在 validateCatalogFields，坏值不会走到生产。
+			if policy, err := ParseRetryPolicy(field.value); err == nil {
+				info.Retry = &policy
+			}
 		}
 		if target != nil {
 			_ = json.Unmarshal(field.value, target)
@@ -1081,6 +1110,12 @@ func validateCatalogFields(fields []catalogObjectField) (catalogModelInfo, error
 		case "reasoningEfforts":
 			if err := validateCatalogReasoningEfforts(field.value); err != nil {
 				return catalogModelInfo{}, err
+			}
+		case "retryPolicy":
+			// 官方 `retryPolicy` 是**每 provider 一份**，写错必须在写目录时就拒绝：
+			// 等到真跑一轮才炸，用户看到的是"模型调用莫名失败"。
+			if _, err := ParseRetryPolicy(field.value); err != nil {
+				return catalogModelInfo{}, modelCatalogError("invalid_field", "model.retryPolicy 非法: %v", err)
 			}
 		}
 	}

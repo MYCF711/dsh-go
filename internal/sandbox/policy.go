@@ -46,6 +46,7 @@ const (
 	ReasonWorkspaceWrite          Reason = "workspace-write"
 	ReasonWorkspaceCommand        Reason = "workspace-command"
 	ReasonExtraRead               Reason = "extra-read"
+	ReasonExtraWritable           Reason = "extra-writable"
 	ReasonHomeRead                Reason = "home-read"
 	ReasonDangerFullAccess        Reason = "danger-full-access"
 	ReasonReadOnlyWrite           Reason = "read-only-write-denied"
@@ -98,11 +99,16 @@ var (
 
 // Config 是一个会话的不可变策略上下文。New 会 canonicalize 所有根目录。
 type Config struct {
-	SessionID      string
-	Mode           Mode
-	WorkspaceRoot  string
+	SessionID     string
+	Mode          Mode
+	WorkspaceRoot string
+	// ExtraReadRoots 是工作区外**可读**的根（原有通道）。
 	ExtraReadRoots []string
-	HomeDir        string
+	// AdditionalWritableRoots 是官方 `sandbox.additionalWritableRoots`（默认 []）：
+	// workspace-write 档位下额外允许**写**的根。它只放开写，不放开读——
+	// 想读同一个目录仍然要显式配在 ExtraReadRoots 里（两条通道各管一件事）。
+	AdditionalWritableRoots []string
+	HomeDir                 string
 }
 
 // Policy 不含可变授权状态，可安全并发处理同一会话的独立调用。
@@ -292,6 +298,9 @@ func (p *Policy) evaluate(call Call, operation Operation, rawPath, subject strin
 			d.Action, d.Reason = ActionAllow, ReasonWorkspaceRead
 		case pathExtra:
 			d.Action, d.Reason = ActionAllow, ReasonExtraRead
+		case pathExtraWritable:
+			// 追加**可写**根不顺带放开读：读要单独配 ExtraReadRoots。
+			d.Action, d.Reason = ActionDeny, ReasonOutsideRead
 		case pathHome:
 			d.Action, d.Reason = ActionAllow, ReasonHomeRead
 		default:
@@ -303,7 +312,14 @@ func (p *Policy) evaluate(call Call, operation Operation, rawPath, subject strin
 		case pathWorkspace:
 			d.Action, d.Reason = ActionAllow, ReasonWorkspaceWrite
 		case pathExtra:
-			d.Action, d.Reason = ActionDeny, ReasonExtraReadOnly
+			// 同一路径同时配了「可读」与「追加可写」时按可写处理；只配可读的仍然拒写。
+			if p.resolver.isExtraWritable(canonical) {
+				d.Action, d.Reason = ActionAllow, ReasonExtraWritable
+			} else {
+				d.Action, d.Reason = ActionDeny, ReasonExtraReadOnly
+			}
+		case pathExtraWritable:
+			d.Action, d.Reason = ActionAllow, ReasonExtraWritable
 		case pathHome:
 			d.Action, d.Reason = ActionDeny, ReasonHomeReadOnly
 		default:

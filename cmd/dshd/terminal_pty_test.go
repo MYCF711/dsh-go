@@ -26,8 +26,9 @@ func newTestPTYTerminalAPI(t *testing.T, cwd string) (*officialPTYTerminalAPI, s
 	home := t.TempDir()
 	svc := bash.NewService(cwd)
 	t.Cleanup(svc.Close)
-	api, err := newOfficialPTYTerminalAPI(home, svc,
-		func(string) (string, error) { return cwd, nil }, 1000)
+	// 不起后台 sweepLoop：用例要先改配置再手动 sweep(now)（见 newOfficialPTYTerminalAPIWith）。
+	api, err := newOfficialPTYTerminalAPIWith(home, svc,
+		func(string) (string, error) { return cwd, nil }, 1000, false)
 	if err != nil {
 		t.Fatalf("起 PTY 终端层失败：%v", err)
 	}
@@ -211,5 +212,54 @@ func TestPTYUnsupportedMapsToOfficial501(t *testing.T) {
 	other := errors.New("别的错误")
 	if !errors.Is(mapPTYError(other), other) {
 		t.Fatal("非未实现错误必须原样上抛（不能吞成 501）")
+	}
+}
+
+// TestPTYTerminalMaxTerminalsIsEnforced 钉住官方 `terminal.maxTerminals`（默认 8）：
+// 同一会话同时在跑的终端条数必须被限住——没有上限就能无限开 PTY，每条都占一个
+// conhost 进程与滚动缓冲。同时验证「关掉一条就释放一个额度」和「别的会话不吃这个额度」。
+func TestPTYTerminalMaxTerminalsIsEnforced(t *testing.T) {
+	cwd := t.TempDir()
+	api, _ := newTestPTYTerminalAPI(t, cwd)
+	// 用例把上限调到 2：真起 8 条 ConPTY 太贵，判据是「计数与拒绝」而不是 8 这个数字本身。
+	api.maxTerminals = 2
+	ctx := context.Background()
+
+	for _, id := range []string{"a", "b"} {
+		if _, err := api.TerminalCreate(ctx, "sess-a", transport.OfficialTerminalCreateRequest{
+			ID: id, Cols: 80, Rows: 24,
+		}); err != nil {
+			t.Fatalf("第 %s 条终端应能创建：%v", id, err)
+		}
+	}
+	// 第三条必须被拒，且是官方 400 形状（不是 501、不是静默成功）。
+	_, err := api.TerminalCreate(ctx, "sess-a", transport.OfficialTerminalCreateRequest{
+		ID: "c", Cols: 80, Rows: 24,
+	})
+	if err == nil {
+		t.Fatal("超过 maxTerminals 还创建成功：上限没生效")
+	}
+	if !errors.Is(err, transport.ErrJTOfficialBadParam) {
+		t.Fatalf("超限要回官方 bad param（400），拿到 %v", err)
+	}
+	if !strings.Contains(err.Error(), "上限 2") {
+		t.Fatalf("错误里要说清上限，拿到：%v", err)
+	}
+
+	// 另一个会话不吃这个额度（上限是 per-session 的）。
+	if _, err := api.TerminalCreate(ctx, "sess-b", transport.OfficialTerminalCreateRequest{
+		ID: "a", Cols: 80, Rows: 24,
+	}); err != nil {
+		t.Fatalf("别的会话不应被占用额度挡住：%v", err)
+	}
+
+	// 关掉一条，额度要回来。
+	if err := api.TerminalClose(ctx, "sess-a", "a"); err != nil {
+		t.Fatalf("close 失败：%v", err)
+	}
+	if _, err := api.TerminalCreate(ctx, "sess-a", transport.OfficialTerminalCreateRequest{
+		ID: "c", Cols: 80, Rows: 24,
+	}); err != nil {
+		t.Fatalf("关掉一条后应能再开一条：%v", err)
 	}
 }

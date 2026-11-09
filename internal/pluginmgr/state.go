@@ -212,6 +212,58 @@ func (m *Manager) pluginInfoLocked(id string) (PluginInfo, error) {
 	return m.recordInfoLocked(id, record)
 }
 
+// ToolsMounted 报告插件包的工具当前是否挂进模型工具表。
+//
+// 三级来源，前一级赢：
+//  1. 环境变量 `DSHD_PLUGIN_TOOLS_MOUNTED`（部署期下线开关，见 official_config.go）；
+//  2. `state.json` 里的显式开关（`SetToolsMounted` 落盘）；
+//  3. 都没有 → **挂载**（= 宿主既有行为；不设即零影响）。
+//
+// 为什么第 3 级是挂载而不是官方 `tool-plugin-manager` 行的 `disabled: true`：
+// 官方那一行禁掉的是**插件管理器自己的管理工具**（模型侧的 plugin_manager），
+// 宿主根本没有这个工具（`grep -rn plugin_manager --include=*.go` 在工具注册面 0 命中），
+// 该语义在宿主侧已经等价成立。本开关管的是"插件**包**提供的工具"，那些包存在的
+// 唯一目的就是提供能力；默认不挂等于"装了等于没装"，违反"能力不得比官方更少"。
+func (m *Manager) ToolsMounted() bool { return m.ToolsMountedWith(os.Getenv) }
+
+// ToolsMountedWith 是 ToolsMounted 的可注入环境版（测试用）。
+func (m *Manager) ToolsMountedWith(getenv func(string) string) bool {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	switch strings.ToLower(strings.TrimSpace(getenv(EnvToolsMounted))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state == nil || m.state.ToolsMounted == nil {
+		return true
+	}
+	return *m.state.ToolsMounted
+}
+
+// SetToolsMounted 显式落盘"插件工具是否挂进模型工具表"。
+//
+// 只改这一个位，不动任何 enabled/装载状态：关掉挂载**不是**卸载插件——插件仍然
+// 装载着（句柄、实例、线性内存都在），只是模型看不到它的工具；打开就立刻回来，
+// 不需要重新安装或重启。
+func (m *Manager) SetToolsMounted(mounted bool) error {
+	m.mu.Lock()
+	next := cloneState(m.state)
+	value := mounted
+	next.ToolsMounted = &value
+	if err := m.saveStateLocked(next); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	m.state = next
+	m.mu.Unlock()
+	return nil
+}
+
 func randomID() (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {

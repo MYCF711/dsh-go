@@ -13,13 +13,15 @@ const (
 	pathOutside pathClass = iota
 	pathWorkspace
 	pathExtra
+	pathExtraWritable
 	pathHome
 )
 
 type resolver struct {
-	workspace string
-	extra     []string
-	home      string
+	workspace     string
+	extra         []string
+	extraWritable []string
+	home          string
 }
 
 func newResolver(cfg Config) (resolver, error) {
@@ -38,6 +40,13 @@ func newResolver(cfg Config) (resolver, error) {
 			return resolver{}, err
 		}
 		r.extra = append(r.extra, canonical)
+	}
+	for _, root := range cfg.AdditionalWritableRoots {
+		canonical, err := canonicalRoot("additional writable", root)
+		if err != nil {
+			return resolver{}, err
+		}
+		r.extraWritable = append(r.extraWritable, canonical)
 	}
 	return r, nil
 }
@@ -127,6 +136,16 @@ func explicitHomePath(raw string) bool {
 	return raw == "~" || strings.HasPrefix(raw, "~/") || (os.PathSeparator == '\\' && strings.HasPrefix(raw, `~\`))
 }
 
+// isExtraWritable 报这个路径是否落在某个「追加可写根」下（供 extra-read 同时可写的情形复用）。
+func (r resolver) isExtraWritable(path string) bool {
+	for _, root := range r.extraWritable {
+		if withinRoot(root, path) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r resolver) classify(path string) pathClass {
 	if withinRoot(r.workspace, path) {
 		return pathWorkspace
@@ -134,6 +153,11 @@ func (r resolver) classify(path string) pathClass {
 	for _, root := range r.extra {
 		if withinRoot(root, path) {
 			return pathExtra
+		}
+	}
+	for _, root := range r.extraWritable {
+		if withinRoot(root, path) {
+			return pathExtraWritable
 		}
 	}
 	if withinRoot(r.home, path) {

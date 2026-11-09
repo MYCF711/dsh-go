@@ -268,15 +268,36 @@ func (s *Server) Start() (string, error) {
 			handler = wrapped
 		}
 	}
+	// 运行期 gzip（官方 webserver.compressionLevel / compressionThresholdBytes）：
+	// 静态资源仍走 webfrontend 的预压缩，这一层管的是 API 的 JSON 响应。
+	handler = WithCompression(handler, compressionLevelFromEnv(), compressionThresholdFromEnv())
+
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// TLS（官方 webserver.tls，默认 null = 明文）。证书配置坏掉时 fail-loud：
+	// 退回明文会让"以为开了 HTTPS"的部署裸奔。
+	tlsCfg, tlsErr := webserverTLSConfig()
+	if tlsErr != nil {
+		_ = ln.Close()
+		return "", tlsErr
+	}
+	srv.TLSConfig = tlsCfg
+	useTLS := tlsCfg != nil
+
 	s.srv = srv
 	s.url = baseURL(ln.Addr())
+	if useTLS {
+		s.url = "https" + strings.TrimPrefix(s.url, "http")
+	}
 
 	go func() {
 		// 监听已被 Close 时这里返回 ErrServerClosed，不是错误。
+		if useTLS {
+			_ = srv.ServeTLS(ln, "", "")
+			return
+		}
 		_ = srv.Serve(ln)
 	}()
 	return s.url, nil

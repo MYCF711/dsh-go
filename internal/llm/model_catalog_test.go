@@ -311,7 +311,7 @@ func TestModelCatalogTestUsesRealOpenAIEndpointAndNeverEchoesCredential(t *testi
 	}
 
 	t.Setenv("MISSING_MODEL_CATALOG_KEY", "")
-	view, err = store.Upsert(json.RawMessage(fmt.Sprintf(`{"id":"missing-key","api":"openai-completions","baseURL":%q,"apiKeyEnv":"MISSING_MODEL_CATALOG_KEY"}`, gateway.URL+"/v1")), nil, catalogRevision(1))
+	_, err = store.Upsert(json.RawMessage(fmt.Sprintf(`{"id":"missing-key","api":"openai-completions","baseURL":%q,"apiKeyEnv":"MISSING_MODEL_CATALOG_KEY"}`, gateway.URL+"/v1")), nil, catalogRevision(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestModelCatalogTestUsesRealOpenAIEndpointAndNeverEchoesCredential(t *testi
 		t.Fatalf("missing credential error=%v code=%s calls=%d->%d", err, ModelCatalogErrorCode(err), before, calls.Load())
 	}
 
-	view, err = store.Upsert(json.RawMessage(`{"id":"no-endpoint","api":"openai-completions"}`), nil, catalogRevision(2))
+	_, err = store.Upsert(json.RawMessage(`{"id":"no-endpoint","api":"openai-completions"}`), nil, catalogRevision(2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestModelCatalogTestUsesRealOpenAIEndpointAndNeverEchoesCredential(t *testi
 		fmt.Fprint(w, `{}`)
 	}))
 	defer malformed.Close()
-	view, err = store.Upsert(json.RawMessage(fmt.Sprintf(`{"id":"malformed","baseURL":%q}`, malformed.URL+"/v1")), nil, catalogRevision(3))
+	_, err = store.Upsert(json.RawMessage(fmt.Sprintf(`{"id":"malformed","baseURL":%q}`, malformed.URL+"/v1")), nil, catalogRevision(3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestModelCatalogTestUsesRealOpenAIEndpointAndNeverEchoesCredential(t *testi
 	unreachable := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	base := unreachable.URL
 	unreachable.Close()
-	view, err = store.Upsert(json.RawMessage(fmt.Sprintf(`{"id":"unreachable","baseURL":%q}`, base+"/v1")), nil, catalogRevision(4))
+	_, err = store.Upsert(json.RawMessage(fmt.Sprintf(`{"id":"unreachable","baseURL":%q}`, base+"/v1")), nil, catalogRevision(4))
 	if err != nil {
 		t.Fatal(err)
 	}

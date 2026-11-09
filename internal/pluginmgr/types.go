@@ -144,6 +144,13 @@ type pluginRecord struct {
 type persistentState struct {
 	Schema  string                   `json:"schema"`
 	Plugins map[string]*pluginRecord `json:"plugins"`
+	// ToolsMounted 是官方 `pluginManager.toolsMounted`（dsh-base/cordis.patch.yml:15-18）
+	// 在宿主侧的真实落点：**插件包提供的工具要不要挂进模型工具表**。
+	//
+	// 为什么是指针而不是 bool：三态才是真话——nil = 这份状态从没被设过（旧 state.json、
+	// 新装机），此时按宿主既有行为挂载；显式 false = 用户/部署把插件工具下线了。
+	// 用 bool 会把"没设"与"设成 false"混成一个零值，重开管理器后无法区分。
+	ToolsMounted *bool `json:"toolsMounted,omitempty"`
 }
 
 func emptyState() *persistentState {
@@ -152,6 +159,10 @@ func emptyState() *persistentState {
 
 func cloneState(in *persistentState) *persistentState {
 	out := emptyState()
+	if in.ToolsMounted != nil {
+		value := *in.ToolsMounted
+		out.ToolsMounted = &value
+	}
 	for id, record := range in.Plugins {
 		copyRecord := *record
 		copyRecord.Versions = make(map[string]versionSource, len(record.Versions))

@@ -208,6 +208,9 @@ func cmdServe(args []string) error {
 	if err := ensureSpillDir(*home); err != nil {
 		return err
 	}
+	// spill 保留期回收（官方 session.spill.cleanupPeriodDays，默认 30 天）：
+	// 启动时扫一遍 <home>/artifacts，删掉过期的外置文件；失败只记日志。
+	sweepSpillArtifactsBestEffort(*home)
 	// 看门狗要**尽早**起：启动阶段也算数。父进程在 serve 还没 ready 之前就死了，
 	// 否则会留下一个"起来得正好、但没人要"的服务。
 	watch := pw.start(os.Stderr)
@@ -438,7 +441,12 @@ func cmdServe(args []string) error {
 	}
 
 	// 建会话的能力在起来之前就确定（cwd 定一次，不随后续请求漂移）。
-	create, err := serveCreate(*home, "")
+	// 空 = 未配置官方 workingDirectory.defaultDirectory，走原来的进程 cwd 路径。
+	defaultWorkDir, err := defaultWorkDirFromEnv()
+	if err != nil {
+		return err
+	}
+	create, err := serveCreate(*home, defaultWorkDir)
 	if err != nil {
 		return err
 	}

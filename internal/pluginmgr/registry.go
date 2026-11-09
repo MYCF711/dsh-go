@@ -68,7 +68,46 @@ type packument struct {
 			Shasum    string `json:"shasum"`
 			Integrity string `json:"integrity"`
 		} `json:"dist"`
+		// Engines / PeerDependencies 是官方"每个版本补齐兼容性"用到的两个字段
+		// （`versionFacts`）。用 RawMessage 而不是 map[string]string：registry 里
+		// 一个包的 engines 写坏了不该让**整份** packument 解析失败（那样连版本名
+		// 都读不出来），坏字段按"没有这个字段"处理。
+		Engines          json.RawMessage `json:"engines"`
+		PeerDependencies json.RawMessage `json:"peerDependencies"`
 	} `json:"versions"`
+}
+
+// enginesOf 从 packument 的 `engines` 里取 `dsh` 范围。
+//
+// 只有真的写了 `engines.dsh` 才算"有引擎要求"：npm 包里 `engines.node` 很常见，
+// 把整个 engines 对象翻成 Engines{} 会得到空 DSH，从而被
+// compatibilityRequirements 判成"非法范围"，把兼容的版本误报成错误。
+func enginesOf(raw json.RawMessage) *Engines {
+	if len(raw) == 0 {
+		return nil
+	}
+	var parsed struct {
+		DSH string `json:"dsh"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(parsed.DSH) == "" {
+		return nil
+	}
+	return &Engines{DSH: parsed.DSH}
+}
+
+// peerDependenciesOf 取 packument 的 `peerDependencies`（没有就是 nil）。
+func peerDependenciesOf(raw json.RawMessage) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var parsed map[string]string
+	if err := json.Unmarshal(raw, &parsed); err != nil || len(parsed) == 0 {
+		return nil
+	}
+	return parsed
 }
 
 // SplitRegistrySpec 把 `name[@range]` 拆成包名与 range（空 range = latest）。
@@ -129,7 +168,10 @@ func (r *RegistryClient) Resolve(ctx context.Context, spec string) (ResolvedPack
 		}
 	}
 	if version == "" {
-		return ResolvedPackage{}, fmt.Errorf("registry 没有 %s 满足 %q 的版本", name, want)
+		// no-matching-version 是官方认为"另一个源可能给不同答案"的失败之一
+		// （索引可能过期），所以它必须带种类，而不是一段纯文本。
+		return ResolvedPackage{}, &RegistryError{Kind: RegistryKindNoMatchingVersion,
+			Err: fmt.Errorf("registry 没有 %s 满足 %q 的版本", name, want)}
 	}
 	entry, ok := doc.Versions[version]
 	if !ok || entry.Dist.Tarball == "" {
@@ -215,19 +257,21 @@ func (r *RegistryClient) get(ctx context.Context, endpoint string, limit int64) 
 		}
 		resp, err := r.HTTP.Do(req)
 		if err != nil {
-			lastErr = err
+			lastErr = registryTransportError(err)
 		} else {
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 			resp.Body.Close()
 			if readErr != nil {
-				lastErr = readErr
+				lastErr = &RegistryError{Kind: RegistryKindNetwork, Err: readErr}
 			} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				if int64(len(body)) > limit {
 					return nil, fmt.Errorf("registry 响应超过 %d 字节上限", limit)
 				}
 				return body, nil
 			} else {
-				lastErr = fmt.Errorf("registry %s 返回 HTTP %d: %s", endpoint, resp.StatusCode, truncateText(string(body), 300))
+				statusErr := registryStatusError(resp.StatusCode,
+					fmt.Errorf("registry %s 返回 HTTP %d: %s", endpoint, resp.StatusCode, truncateText(string(body), 300)))
+				lastErr = statusErr
 				if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
 					return nil, lastErr
 				}
@@ -439,12 +483,18 @@ func RegistryFromEnv(override *string) *RegistryClient {
 }
 
 // PublishedVersion 是 packument 里的一行版本。
+//
+// Engines / PeerDependencies 是**该版本自己**的兼容性要求（不是已安装版本的），
+// 官方 listVersions 会为每个版本补齐这一层（`versionFacts` + `evaluatePluginCompatibility`）；
+// 宿主在本地做同一件事，因此不需要为每个版本再打一次网络请求。
 type PublishedVersion struct {
-	Version     string
-	PublishedAt string
-	Tags        []string
-	Prerelease  bool
-	Deprecated  string
+	Version          string
+	PublishedAt      string
+	Tags             []string
+	Prerelease       bool
+	Deprecated       string
+	Engines          *Engines
+	PeerDependencies map[string]string
 }
 
 // Versions 读一个包的全部已发布版本（SemVer 降序）；tags 来自 dist-tags。
@@ -460,8 +510,10 @@ func (r *RegistryClient) Versions(ctx context.Context, name string) ([]Published
 		DistTags map[string]string `json:"dist-tags"`
 		Time     map[string]string `json:"time"`
 		Versions map[string]struct {
-			Version    string `json:"version"`
-			Deprecated any    `json:"deprecated"`
+			Version          string          `json:"version"`
+			Deprecated       any             `json:"deprecated"`
+			Engines          json.RawMessage `json:"engines"`
+			PeerDependencies json.RawMessage `json:"peerDependencies"`
 		} `json:"versions"`
 	}
 	if err := r.getJSON(ctx, r.BaseURL+"/"+url.PathEscape(name), &doc); err != nil {
@@ -486,7 +538,8 @@ func (r *RegistryClient) Versions(ctx context.Context, name string) ([]Published
 			}
 		}
 		out = append(out, PublishedVersion{Version: version, PublishedAt: doc.Time[version],
-			Tags: tagsByVersion[version], Prerelease: strings.Contains(version, "-"), Deprecated: deprecated})
+			Tags: tagsByVersion[version], Prerelease: strings.Contains(version, "-"), Deprecated: deprecated,
+			Engines: enginesOf(entry.Engines), PeerDependencies: peerDependenciesOf(entry.PeerDependencies)})
 	}
 	sort.Slice(out, func(i, j int) bool { c, _ := CompareVersions(out[i].Version, out[j].Version); return c > 0 })
 	return out, nil

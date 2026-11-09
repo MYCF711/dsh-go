@@ -22,7 +22,7 @@ package pluginmgr
 //   - peer 的 `workspace:^|~|*` 指"当前 runtime"；`engines.dsh` 上的 workspace:
 //     一律不满足（官方原文：including any workspace: `engines.dsh`, are unmet）；
 //   - 预发布版本**参与**比较（官方：Prereleases participate in ranges），
-//     所以本仓的 `0.2.2-go.1` 在 `^0.2.0` 里是满足的。
+//     所以本仓的发布版本号（`<major>.<minor>.<patch>-go.<n>` 形态）在 `^0.2.0` 里是满足的。
 //
 // # 本仓包的最小诚实体现在哪
 //
@@ -32,19 +32,41 @@ package pluginmgr
 // 在"没有要求"时返回 nil，不是"默认不兼容"。
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// HostRuntimeVersion 是本宿主的 runtime 版本，用来判 `engines.dsh` / peer 范围。
+// HostRuntimeVersion 是本宿主的 runtime 版本，用来判 `engines.dsh` / peer 范围，
+// 也是"只能为当前 runtime 授权"的判据。调用方应在装配期注入。
 //
-// 为什么是一个可覆盖的变量而不是常量：`cmd/dshd/main.go:69` 与
-// `cmd/dshtui/brand.go:27` 各自有 `version` 常量（0.2.2-go.1）。库包不能 import
-// main，所以在装配期把 main 的版本写进来是唯一不重复定义的做法；没有注入时用
-// 这个默认值（与 main 的常量一致）。
-var HostRuntimeVersion = "0.2.2-go.1"
+// **它不是第二个版本源**：唯一出处是 `cmd/dshd/main.go` 的 `version` 变量
+// （`scripts/build.sh` 也从那里 `sed` 出来注入两个 main 包）。库包不能 import main，
+// 所以由宿主启动时通过 SetHostRuntimeVersion 写进来（`cmd/dshd/host_version.go`）。
+//
+// 这里刻意**不留版本字面量**——留一个就会漂移，而漂移的表现是"宿主对插件生态说谎"：
+// 2026-11-09 的真实事故是 `--version` 报新版本、插件兼容性却按一个没人更新的旧字面量判，
+// 于是声明"要求新版本"的插件被这个宿主判成不兼容。防复发守卫见
+// `cmd/dshd/version_guard_test.go`（扫全仓，只允许两个被 build.sh 注入的 main 包有字面量）。
+//
+// 空串 = 尚未注入：此时任何兼容性判定都 fail-closed 返回
+// ErrHostRuntimeVersionUnknown，而不是拿一个假版本去判。
+var HostRuntimeVersion = ""
+
+// ErrHostRuntimeVersionUnknown 表示宿主还没注入 runtime 版本（装配错误，不是插件的问题）。
+var ErrHostRuntimeVersionUnknown = errors.New("pluginmgr: 宿主 runtime 版本未注入（cmd/dshd 启动时应调用 SetHostRuntimeVersion）")
+
+// SetHostRuntimeVersion 注入本宿主 runtime 版本（唯一生产调用点：cmd/dshd 启动装配）。
+//
+// 空值被忽略：注入一个空串等于"没注入"，不该把已经注入的值抹掉（那会让一次误调用
+// 把整台宿主推进 fail-closed）。
+func SetHostRuntimeVersion(runtimeVersion string) {
+	if trimmed := strings.TrimSpace(runtimeVersion); trimmed != "" {
+		HostRuntimeVersion = trimmed
+	}
+}
 
 // Engines 对应官方 package.json 的 `engines`。目前只认 `dsh` 一个键。
 type Engines struct {
@@ -95,6 +117,9 @@ func (i *CompatibilityIssue) Requires() string {
 // 其中 Exempted 由 exemptions 决定。engines.dsh 写坏了是**错误**（官方抛），
 // 不是"不兼容"：静默当成不兼容会让用户去授权一个根本解析不了的范围。
 func EvaluateCompatibility(manifest Manifest, exemptions map[string][]string, runtimeVersion string) (*CompatibilityIssue, error) {
+	// 注意：没有 engines/peer 要求的包**不需要** runtime 版本，一律放行
+	// （官方口径，也是本仓既有行为）；有要求而宿主没注入版本时，
+	// compatibilityRequirements 会 fail-closed 返回 ErrHostRuntimeVersionUnknown。
 	requirements, err := compatibilityRequirements(manifest, runtimeVersion)
 	if err != nil {
 		return nil, err
@@ -127,8 +152,38 @@ func hasExactExemption(versions []string, runtimeVersion string) bool {
 	return false
 }
 
+// manifestHasRuntimeRequirements 报告这个包**有没有**需要 runtime 版本才能判的要求。
+//
+// 判据与 compatibilityRequirements 的取值面严格一致：
+//   - 有 `engines`（哪怕 dsh 为空也算有——那是非法值，要报错而不是放行）；
+//   - 或 peerDependencies 里有 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的键。
+//
+// 其余（没有 engines、peer 全是第三方）→ 没有要求，与 runtime 版本无关。
+func manifestHasRuntimeRequirements(manifest Manifest) bool {
+	if manifest.Engines != nil {
+		return true
+	}
+	for name := range manifest.PeerDependencies {
+		if name == "@deepseek-ai/dsh" || strings.HasPrefix(name, "@deepseek-ai/dsh-") {
+			return true
+		}
+	}
+	return false
+}
+
 // compatibilityRequirements 返回未满足的要求（空 map = 兼容）。
+//
+// 顺序很重要：**先判"这个包有没有要求"**，有要求才需要 runtime 版本。
+// 反过来（先解析版本）会让"没有任何 engines/peer 要求的包"在一个还没注入版本的
+// 宿主里也装不上——那是把装配问题甩给用户，而这类包本来就是官方口径下的"一律放行"。
 func compatibilityRequirements(manifest Manifest, runtimeVersion string) (map[string]string, error) {
+	if !manifestHasRuntimeRequirements(manifest) {
+		return map[string]string{}, nil
+	}
+	if strings.TrimSpace(runtimeVersion) == "" {
+		// 有要求但没有版本可判：fail-closed（拿假版本判会得出看似正常、实际错误的结论）。
+		return nil, ErrHostRuntimeVersionUnknown
+	}
 	if _, err := parseSemver(runtimeVersion); err != nil {
 		return nil, fmt.Errorf("runtime 版本 %q 不是 SemVer: %w", runtimeVersion, err)
 	}
@@ -151,6 +206,8 @@ func compatibilityRequirements(manifest Manifest, runtimeVersion string) (map[st
 		if name != "@deepseek-ai/dsh" && !strings.HasPrefix(name, "@deepseek-ai/dsh-") {
 			continue
 		}
+		// 见 manifestHasRuntimeRequirements：非 dsh 的 peer 不参与，也不会让本函数
+		// 去要一个 runtime 版本。
 		expr := strings.TrimSpace(rangeExpr)
 		switch expr {
 		case "workspace:^", "workspace:~", "workspace:*":
@@ -170,15 +227,15 @@ func compatibilityRequirements(manifest Manifest, runtimeVersion string) (map[st
 //
 // 支持的子集（覆盖官方插件实际使用的写法，超出就**报错**而不是猜）：
 //
-//	* / x / X                 任意版本
-//	1.2.3        =1.2.3       精确
-//	1.2 / 1                   部分版本（npm 语义：1.2 = >=1.2.0 <1.3.0）
-//	^1.2.3  ~1.2.3            caret / tilde（0.x 的 caret 按 npm 收窄）
-//	>=1.2  >1.2  <=1.2  <1.2  比较符
-//	1.2.3 - 2.3.4             连字符区间
-//	A || B                    或；空格分隔 = 且
+//   - / x / X                 任意版本
+//     1.2.3        =1.2.3       精确
+//     1.2 / 1                   部分版本（npm 语义：1.2 = >=1.2.0 <1.3.0）
+//     ^1.2.3  ~1.2.3            caret / tilde（0.x 的 caret 按 npm 收窄）
+//     >=1.2  >1.2  <=1.2  <1.2  比较符
+//     1.2.3 - 2.3.4             连字符区间
+//     A || B                    或；空格分隔 = 且
 //
-// 预发布参与比较（0.2.2-go.1 与 0.2.2 是两个不同版本），与官方一致。
+// 预发布参与比较（`<x>-go.<n>` 与 `<x>` 是两个不同版本），与官方一致。
 func SatisfiesRange(version, expression string) (bool, error) {
 	current, err := parseSemver(version)
 	if err != nil {
@@ -318,10 +375,7 @@ type partialVersion struct {
 // parsePartial 解一个可能缺段的版本；prerelease/build 仍按 SemVer 校验。
 func parsePartial(text string) (partialVersion, error) {
 	var out partialVersion
-	value := strings.TrimSpace(text)
-	if strings.HasPrefix(value, "v") {
-		value = value[1:]
-	}
+	value := strings.TrimPrefix(strings.TrimSpace(text), "v")
 	if value == "" {
 		return out, fmt.Errorf("版本不能为空")
 	}

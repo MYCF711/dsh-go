@@ -231,7 +231,7 @@ func TestCallAfterClose(t *testing.T) {
 	_ = os.Getpid
 }
 
-// 11) 真实"无 node"探针：把 PATH 清空后，发现层必须给 CodeNodeMissing。
+//  11. 真实"无 node"探针：把 PATH 清空后，发现层必须给 CodeNodeMissing。
 //     （这条不走 NodePath 覆盖，验的是真实 PATH 查找路径。）
 func TestMissingNodeByEmptyPATH(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())

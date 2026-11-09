@@ -114,11 +114,11 @@ func (m *Mux) Serve(w http.ResponseWriter, r *http.Request, cred *Credential) {
 
 // streamState 是一条逻辑流的会话内状态。
 type streamState struct {
-	id      string
-	stream  Stream
-	bytes   int  // 上行累计字节（只对 UplinkStream 计）
-	closed  bool // 客户端 end 过（半关闭上行）
-	gone    bool // 已被 cancel/fail，后续帧不再发给它
+	id       string
+	stream   Stream
+	bytes    int  // 上行累计字节（只对 UplinkStream 计）
+	closed   bool // 客户端 end 过（半关闭上行）
+	gone     bool // 已被 cancel/fail，后续帧不再发给它
 	released bool // 上行被释放（`$events`）
 }
 

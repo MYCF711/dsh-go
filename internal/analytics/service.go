@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,6 +56,16 @@ type Service struct {
 
 	client   *http.Client
 	outbound atomic.Int64
+
+	// anonymousUserID 是 `$DSHD_HOME/.anonymous-user-id` 的内容（官方 user.id）。
+	// 在 Open 时就落地：身份是"这台机器上的这个人"，不是"这一条事件"。
+	anonymousUserID string
+	// environmentOptions 是环境采集的输入（两个官方参数 + 平台事实 + 执行器）。
+	environmentOptions environmentOptions
+	// envOnce/env 只采一次：官方也缓存到 analytics 实例生命周期
+	// （index.js:389 `this.environment ??= collectEnvironment(...)`）。
+	envOnce sync.Once
+	env     Environment
 }
 
 // Open 打开（必要时创建）一个 home 下的 analytics 目录。
@@ -68,6 +79,11 @@ func Open(home string) (*Service, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("analytics: 创建目录 %s 失败: %w", dir, err)
 	}
+	anonymousUserID, err := ensureAnonymousUserID(home)
+	if err != nil {
+		return nil, err
+	}
+	timeout, maxOutputBytes := EnvironmentQueryConfig(os.Getenv)
 	service := &Service{
 		home:     home,
 		dir:      dir,
@@ -75,6 +91,16 @@ func Open(home string) (*Service, error) {
 		watchers: map[chan bool]struct{}{},
 		random:   rand.New(rand.NewSource(time.Now().UnixNano())),
 		client:   &http.Client{Timeout: 3 * time.Second},
+
+		anonymousUserID: anonymousUserID,
+		environmentOptions: environmentOptions{
+			platform:       runtime.GOOS,
+			systemRoot:     os.Getenv("SystemRoot"),
+			goarch:         runtime.GOARCH,
+			timeout:        timeout,
+			maxOutputBytes: maxOutputBytes,
+			logicalCPUs:    runtime.NumCPU(),
+		},
 	}
 	stamp, err := service.loadPolicyLocked()
 	if err != nil {
@@ -91,6 +117,36 @@ func Open(home string) (*Service, error) {
 	}
 	service.lastHash = lastHash
 	return service, nil
+}
+
+// AnonymousUserID 返回本机匿名身份（官方 Resource.user.id）。
+func (s *Service) AnonymousUserID() string {
+	if s == nil {
+		return ""
+	}
+	return s.anonymousUserID
+}
+
+// environmentSnapshot 返回本次进程的环境维度（懒采集 + 只采一次）。
+//
+// 采集会起本地子进程（Windows 上最多 2 次），所以：
+//   - 绝不在 s.mu 里做（见 Report）；
+//   - 采集失败也要返回结果（字段如实进 missing_fields，绝不 panic）。
+func (s *Service) environmentSnapshot() Environment {
+	s.envOnce.Do(func() {
+		opts := s.environmentOptions
+		if opts.logicalCPUs <= 0 {
+			opts.logicalCPUs = runtime.NumCPU()
+		}
+		ctx := context.Background()
+		if opts.timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, opts.timeout)
+			defer cancel()
+		}
+		s.env = collectEnvironment(ctx, opts)
+	})
+	return s.env
 }
 
 // Dir 返回 analytics 目录（测试/CLI 诊断用；不是公开 wire 形状）。
@@ -234,11 +290,25 @@ func (s *Service) Report(ctx context.Context, event Event) (ReportResult, error)
 		s.mu.Unlock()
 		return ReportResult{Accepted: true, Dropped: 1}, nil
 	}
+	anonymousUserID := s.anonymousUserID
+	// 环境采集要起本地子进程（每个进程最多一次），**必须在锁外**做：
+	// 否则一次冷启动的子进程会把 enabled/watchPolicy 这些读路径一起堵住。
+	s.mu.Unlock()
+	environment := s.environmentSnapshot()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ReportResult{}, fmt.Errorf("analytics: service 已关闭")
+	}
 	record, err := sanitizeEvent(event, s.policy.PolicyVersion, now)
 	if err != nil {
 		s.mu.Unlock()
 		return ReportResult{}, err
 	}
+	// 身份与环境维度只能来自宿主自己（调用方塞的同名 attributes 已被白名单丢弃）。
+	record.AnonymousUserID = anonymousUserID
+	record.Environment = environment.Fields
+	record.MissingFields = environment.MissingSummary()
 	stored, err := appendRecordLocked(s.dir, now, record, s.lastHash)
 	if err != nil {
 		s.mu.Unlock()

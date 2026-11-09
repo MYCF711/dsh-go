@@ -412,6 +412,11 @@ func (t *Table) Get(name string) (spi.Tool, bool) {
 }
 
 func (l *Loader) pluginTool(name string) (spi.Tool, bool) {
+	// 挂载开关先判、且不在 l.mu 里问管理器：管理器 → 装载器 这条锁顺序已经存在
+	// （Install 持 m.mu 时调 Load），反过来拿会成环。
+	if !l.manager.ToolsMounted() {
+		return nil, false
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	tool, ok := l.byTool[name]
@@ -422,6 +427,9 @@ func (l *Loader) pluginTool(name string) (spi.Tool, bool) {
 }
 
 func (l *Loader) pluginTools() []spi.Tool {
+	if !l.manager.ToolsMounted() {
+		return nil
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	names := make([]string, 0, len(l.byTool))

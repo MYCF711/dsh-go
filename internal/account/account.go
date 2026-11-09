@@ -29,6 +29,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -131,6 +132,14 @@ type State struct {
 	Attempt   *Attempt `json:"attempt"`
 	ExpiresAt int64    `json:"expiresAt,omitempty"`
 	Source    Source   `json:"source,omitempty"`
+
+	// Diagnostic 承载"本地已完成、但远端没配合"的真实结果（目前只有一种：
+	// 登出时服务端撤销重试耗尽）。空串 = 没有任何异常。
+	//
+	// 为什么必须让调用方看见：官方 `revokeAccount` 把远端失败留在后台（:471-485
+	// 「remote failures stay in the background」），用户界面上"登出成功"= 本地凭据
+	// 已清。但服务端会话仍可能活着——那是一条真实的安全事实，不能只写在日志里。
+	Diagnostic string `json:"diagnostic,omitempty"`
 }
 
 type Task struct {
@@ -181,6 +190,17 @@ type Options struct {
 	OIDC           OIDCConfig
 	HTTPClient     *http.Client
 	LocalLease     time.Duration
+
+	// LogoutMaxRetries / LogoutRetryDelay 是官方 `logoutMaxRetries`(:515) 与
+	// `logoutRetryDelayMs`(:516)。nil / 0 = 走默认（先看环境变量，再看官方默认）。
+	//
+	// 用 *int 而不是 int：官方 `min(0)` 让"显式不重试"是一个**合法配置**，
+	// 用 int 的零值会把"没设"与"设成 0"混成一个东西。
+	LogoutMaxRetries *int
+	LogoutRetryDelay time.Duration
+	// AttemptTimeout 是官方 `attemptTimeoutMs`(:517)：设备登录**单次尝试**的预算
+	// （官方默认 600s）。0 = 走默认。
+	AttemptTimeout time.Duration
 }
 
 // Service 是 local/official/self-hosted 三合一的真实实现。
@@ -198,7 +218,29 @@ type Service struct {
 	expiry  map[chan string]struct{}
 	timer   *time.Timer
 	timerAt int64
+
+	// 官方 account 平台的三条预算（见 officialPolicyDefaults）。
+	logoutMaxRetries int
+	logoutRetryDelay time.Duration
+	attemptTimeout   time.Duration
 }
+
+// 官方默认值（app.asar:dsh/node_modules/@deepseek-ai/dsh-deepseek-account-platform/lib/index.js:515-517）。
+const (
+	OfficialLogoutMaxRetries = 5
+	OfficialLogoutRetryDelay = time.Second
+	OfficialAttemptTimeout   = 10 * time.Minute
+)
+
+// 环境变量名（宿主统一 DSHD_ 前缀；与 options 同时存在时 options 优先）。
+const (
+	EnvLogoutMaxRetries   = "DSHD_ACCOUNT_LOGOUT_MAX_RETRIES"
+	EnvLogoutRetryDelayMs = "DSHD_ACCOUNT_LOGOUT_RETRY_DELAY_MS"
+	EnvAttemptTimeoutMs   = "DSHD_ACCOUNT_ATTEMPT_TIMEOUT_MS"
+)
+
+// logoutPolicy 返回真实生效的登出重试策略（测试与诊断读它，不读私有字段）。
+func (s *Service) logoutPolicy() (int, time.Duration) { return s.logoutMaxRetries, s.logoutRetryDelay }
 
 // document 是三提供方共用的持久形状；不同 mode 只使用相关字段。
 type document struct {
@@ -252,6 +294,8 @@ func New(opts Options) (*Service, error) {
 		oidc: opts.OIDC, lease: opts.LocalLease,
 		subs: map[chan State]struct{}{}, expiry: map[chan string]struct{}{},
 	}
+	s.logoutMaxRetries, s.logoutRetryDelay = resolveLogoutPolicy(opts)
+	s.attemptTimeout = resolveAttemptTimeout(opts)
 	if s.client == nil {
 		s.client = &http.Client{Timeout: 20 * time.Second}
 	}
@@ -265,6 +309,64 @@ func New(opts Options) (*Service, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// resolveLogoutPolicy 解析登出重试策略：显式 options > 环境变量 > 官方默认。
+//
+// 三条官方约束一起守住：maxRetries 落在 [0,5]（超出夹紧），delay 落在 [1ms,60s]。
+// 为什么要夹紧而不是照抄：这两个值直接决定"登出最多卡多久"，一个写成 999999
+// 的配置不该让 dshd 在退出路径上等半小时。
+func resolveLogoutPolicy(opts Options) (int, time.Duration) {
+	retries := OfficialLogoutMaxRetries
+	if opts.LogoutMaxRetries != nil {
+		retries = *opts.LogoutMaxRetries
+	} else if raw := strings.TrimSpace(os.Getenv(EnvLogoutMaxRetries)); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			retries = parsed
+		}
+	}
+	if retries < 0 {
+		retries = 0
+	}
+	if retries > 5 {
+		retries = 5
+	}
+	delay := opts.LogoutRetryDelay
+	if delay <= 0 {
+		delay = OfficialLogoutRetryDelay
+		if raw := strings.TrimSpace(os.Getenv(EnvLogoutRetryDelayMs)); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				delay = time.Duration(parsed) * time.Millisecond
+			}
+		}
+	}
+	if delay < time.Millisecond {
+		delay = time.Millisecond
+	}
+	if delay > 60*time.Second {
+		delay = 60 * time.Second
+	}
+	return retries, delay
+}
+
+// resolveAttemptTimeout 解析设备登录的单次尝试预算（官方 min 1ms / max 3600s）。
+func resolveAttemptTimeout(opts Options) time.Duration {
+	timeout := opts.AttemptTimeout
+	if timeout <= 0 {
+		timeout = OfficialAttemptTimeout
+		if raw := strings.TrimSpace(os.Getenv(EnvAttemptTimeoutMs)); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				timeout = time.Duration(parsed) * time.Millisecond
+			}
+		}
+	}
+	if timeout < time.Millisecond {
+		timeout = time.Millisecond
+	}
+	if timeout > time.Hour {
+		timeout = time.Hour
+	}
+	return timeout
 }
 
 func (s *Service) Source() Source { return s.mode }
@@ -315,17 +417,20 @@ func (s *Service) saveLocked() error {
 	}
 	name := tmp.Name()
 	defer os.Remove(name)
-	if err := tmp.Chmod(0o600); err == nil {
-		_, err = tmp.Write(raw)
-	}
-	if err == nil {
-		err = tmp.Sync()
-	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
+	// Chmod 失败不算致命（Windows 上基本是空操作），所以只忽略它；
+	// 但 Write/Sync 失败**必须报出来**——旧写法把 `err :=` 写进了 if 的作用域，
+	// 内层那次赋值根本没碰到外层 err，写盘失败会被静默吞掉（SA4006 抓的就是它）。
+	_ = tmp.Chmod(0o600)
+	if _, err = tmp.Write(raw); err != nil {
+		_ = tmp.Close()
 		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if closeErr := tmp.Close(); closeErr != nil {
+		return closeErr
 	}
 	return os.Rename(name, s.path)
 }
@@ -341,8 +446,17 @@ func (s *Service) notifyLocked() {
 }
 
 func (s *Service) stateLocked() State {
+	// Attempt 必须**拷一份**再交出去：它是指针，直接给出去等于把服务内部的
+	// 活结构交给订阅者——定时器到点时 expireLocked 会在 s.mu 下改 Phase，
+	// 而订阅者读的是同一个 struct，`-race` 一跑就是 DATA RACE（真实链上就是
+	// "客户端读到半个 Attempt"）。Attempt 全是值字段，浅拷贝即完整快照。
+	var attempt *Attempt
+	if s.doc.Attempt != nil {
+		snapshot := *s.doc.Attempt
+		attempt = &snapshot
+	}
 	return State{
-		Status: s.doc.Status, Links: s.linksLocked(), Attempt: s.doc.Attempt,
+		Status: s.doc.Status, Links: s.linksLocked(), Attempt: attempt,
 		ExpiresAt: s.doc.ExpiresAt, Source: s.mode,
 	}
 }
@@ -400,14 +514,22 @@ func (s *Service) resetTimerLocked() {
 		s.timer.Stop()
 		s.timer = nil
 	}
-	if s.doc.ExpiresAt <= 0 {
+	// 定时器的触发点取"最早到点的那个"：登录态到期（doc.ExpiresAt）与
+	// 登录尝试预算（attempt.ExpiresAt，官方 attemptTimeoutMs）都可能先生效。
+	// 只看 doc.ExpiresAt 会让"尝试预算用尽"必须靠调用方轮询 State 才能推进。
+	at := s.doc.ExpiresAt
+	if s.doc.Attempt != nil && !finalPhase(s.doc.Attempt.Phase) &&
+		s.doc.Attempt.ExpiresAt > 0 && (at <= 0 || s.doc.Attempt.ExpiresAt < at) {
+		at = s.doc.Attempt.ExpiresAt
+	}
+	if at <= 0 {
 		return
 	}
-	d := time.Until(time.UnixMilli(s.doc.ExpiresAt))
+	d := time.Until(time.UnixMilli(at))
 	if d < 0 {
 		d = 0
 	}
-	s.timerAt = s.doc.ExpiresAt
+	s.timerAt = at
 	s.timer = time.AfterFunc(d, func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -603,9 +725,48 @@ func (s *Service) SignOut(ctx context.Context) (State, error) {
 	st := s.stateLocked()
 	s.mu.Unlock()
 	if s.mode == SourceOfficial && token != "" {
-		_ = s.officialLogout(ctx, token)
+		// 本地凭据已经清了（上面整体重置过 document）；这里补的是**服务端**撤销。
+		// 失败不改变本地登出结果，但必须让调用方看见（见 State.Diagnostic）。
+		if revokeErr := s.revokeOfficialGrant(ctx, token); revokeErr != nil {
+			st.Diagnostic = revokeErr.Error()
+		}
 	}
 	return st, nil
+}
+
+// revokeOfficialGrant 按官方 `revokeAccount` 的形状撤销服务端会话
+// （dsh-deepseek-account-platform/lib/index.js:471-485）：
+//
+//   - 总共最多 1+maxRetries 次尝试（首次 + maxRetries 次重试）；
+//   - 第 n 次重试前等 `delayMs * 2^(n-1)`（指数退避）；
+//   - 每次等待都可以被 ctx 取消（官方用 provider 生命周期 signal 做同一件事）；
+//   - 成功即返回 nil；耗尽后返回带"试了几次"的错误，由调用方决定怎么呈现。
+//
+// 与官方的**唯一差异**：官方把整次撤销扔在后台、失败只留在日志里；宿主改成
+// 同步 + 把结论写进 State.Diagnostic（有界：默认 6 次尝试 / 累计约 31s）。
+// 这样"登出看上去成功、服务端会话其实还在"不会被静默吞掉。
+func (s *Service) revokeOfficialGrant(ctx context.Context, token string) error {
+	attempts := s.logoutMaxRetries + 1
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			wait := s.logoutRetryDelay * time.Duration(int64(1)<<uint(attempt-1))
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				if lastErr != nil {
+					return fmt.Errorf("服务端撤销被取消（已尝试 %d 次）：%w", attempt, lastErr)
+				}
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+		if lastErr = s.officialLogout(ctx, token); lastErr == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("登出本地已完成，但服务端撤销 %d 次尝试后仍失败：%w", attempts, lastErr)
 }
 
 func (s *Service) RunningTasks(ctx context.Context) ([]Task, error) {

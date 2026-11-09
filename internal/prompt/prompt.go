@@ -31,6 +31,16 @@ type Context struct {
 	// MaxGlobalBytes 与 MaxWorkspaceBytes 是两条规则链各自的正文字节上限，互不争用。
 	MaxGlobalBytes    int
 	MaxWorkspaceBytes int
+	// PersonaPrefix 是官方 `systemPrompt.personaPrefix`（环境变量
+	// `DSH_SYSTEM_PROMPT`，见 @deepseek-ai/dsh-sdk-minimal/cordis.patch.yml:118）：
+	// 系统提示的**第一段**，用来替换默认人格。
+	//
+	// 空 = 不注入（宿主既有的提示词形状逐字节不变）。宿主不内置官方 sdk-minimal
+	// 的那句默认 persona：那句属于"整个系统提示只有 persona"的最小 SDK 包，
+	// 而宿主的提示是 AGENTS.md + 工具说明 + 运行时事实的装配体，把 sdk-minimal
+	// 的默认串塞进来是另一种产品形状，不是能力补齐。要官方那句话，显式设
+	// `DSH_SYSTEM_PROMPT='You are a helpful software engineer assistant.'` 即可。
+	PersonaPrefix string
 }
 
 // Provider 是提示词的一段。返回空串即表示这一段这轮不出现。
@@ -77,6 +87,16 @@ func Assemble(ctx Context, providers ...Provider) string {
 }
 
 // ---------- 内置的几段 ----------
+
+// Persona 是官方 `systemPrompt.personaPrefix`：一句话说清"你是谁"。
+//
+// 它是**第一段**（装配顺序里排在 Runtime 之前）：官方把它当人格前缀，位置换了
+// 就变成"附注"而不是"人格"。空串（含全空白）= 这一段不出现。
+type Persona struct{}
+
+func (Persona) Name() string { return "persona" }
+
+func (Persona) Build(c Context) string { return strings.TrimSpace(c.PersonaPrefix) }
 
 // Runtime 说明"你在哪、用什么模型、今天几号"。
 type Runtime struct{}
@@ -196,5 +216,5 @@ func rulesFromFile(title, path string, limit int) string {
 
 // Default 是默认的装配组合。
 func Default(c Context) string {
-	return Assemble(c, Runtime{}, ToolGuide{}, GlobalRules{}, WorkspaceRules{})
+	return Assemble(c, Persona{}, Runtime{}, ToolGuide{}, GlobalRules{}, WorkspaceRules{})
 }

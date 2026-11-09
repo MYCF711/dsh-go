@@ -150,7 +150,9 @@ func TestRouterEnabledInterceptsSlashRoute(t *testing.T) {
 	}
 	if err := wire.Handle("session/page", Binding{
 		Descriptor: &Descriptor{Required: []string{"address"}},
-		Handle:     func(_ context.Context, _ map[string]json.RawMessage) (any, *Error) { return map[string]any{"ok": true}, nil },
+		Handle: func(_ context.Context, _ map[string]json.RawMessage) (any, *Error) {
+			return map[string]any{"ok": true}, nil
+		},
 	}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

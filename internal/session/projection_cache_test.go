@@ -141,6 +141,9 @@ func TestProjectionCacheColdFoldResumes(t *testing.T) {
 	}
 
 	// 写回之后重开，应当是新切点（seq 5），不需要再 fold。
+	// 官方 write-behind：写回先攒在批量器里，落盘发生在阈值/间隔/Flush。
+	// 这里显式 Flush —— 断言仍然盯"落盘的是 seq 5"，只是不等 5s 的定时器。
+	cache.Flush()
 	reopened := openTestCache(t, root)
 	record, ok := reopened.RecordFor(fixture.header.ID, identity)
 	if !ok {
@@ -220,6 +223,10 @@ func TestProjectionCacheChangeNotification(t *testing.T) {
 	if _, err := cache.ColdSnapshot(fixture.header.ID, identity, fixture.header, 0, fixture.logEvents(t)); err != nil {
 		t.Fatal(err)
 	}
+	// 官方 write-behind（writeEveryEvents=200 / writeIntervalMs=5000）：写回先攒在批量器里，
+	// 落盘（以及 domain/changed 通知）发生在阈值/间隔/Flush。这里显式 Flush 让断言
+	// 盯着"落盘后恰好一条通知"，而不是把定时器当成测试的时钟。
+	cache.Flush()
 	if len(changes) != 1 {
 		t.Fatalf("changes = %#v，期望一条", changes)
 	}
@@ -231,6 +238,7 @@ func TestProjectionCacheChangeNotification(t *testing.T) {
 	if _, err := cache.ColdSnapshot(fixture.header.ID, identity, fixture.header, 0, fixture.logEvents(t)); err != nil {
 		t.Fatal(err)
 	}
+	cache.Flush() // 同一条写回路径：落盘了，但订阅已退订，不该再有第二条通知。
 	if len(changes) != 1 {
 		t.Fatalf("退订后不该再收到变更: %#v", changes)
 	}

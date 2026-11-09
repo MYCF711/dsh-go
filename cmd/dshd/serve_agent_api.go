@@ -473,7 +473,9 @@ func (a *agentOfficialAPI) agentGoalTransact(sessionID string, operation agentGo
 		if err != nil {
 			return agentGoalOutcome{}, fmt.Errorf("%w: 生成 goal id: %v", transport.ErrStatePersistence, err)
 		}
-		maxRounds := 0
+		// 官方 goal.defaultMaxGoalRounds（默认 256）：调用方没给上限时用默认，
+		// 显式传 0 才表示"本宿主 legacy 的无上限"。见 goal_defaults.go。
+		maxRounds := goalDefaultMaxRounds()
 		if operation.maxRounds != nil {
 			maxRounds = *operation.maxRounds
 		}

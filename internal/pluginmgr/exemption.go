@@ -201,6 +201,13 @@ func (m *Manager) SetVersionExemption(packageVersion, runtimeVersion string, ena
 	if enabled && !acceptRisk {
 		return out, badRequest("授权不兼容版本必须显式接受风险（acceptRisk=true）：它可能让宿主崩溃或丢数据")
 	}
+	if enabled && HostRuntimeVersion == "" {
+		// 没注入 runtime 版本时，"runtimeVersion == HostRuntimeVersion" 会因为两边都是空串
+		// 而**假成立**——那等于让任意 runtime 的豁免都算数。fail-closed 更安全。
+		return out, errorf("host_version_unknown", 500, false,
+			"宿主 runtime 版本未注入，无法判定豁免归属；这是装配错误（cmd/dshd 启动时应调用 pluginmgr.SetHostRuntimeVersion）",
+			"宿主 runtime 版本未注入，拒绝写入兼容性豁免")
+	}
 	if enabled && runtimeVersion != HostRuntimeVersion {
 		return out, badRequest("只能为当前 runtime（%s）授权，收到 %q", HostRuntimeVersion, runtimeVersion)
 	}

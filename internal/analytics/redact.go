@@ -31,8 +31,19 @@ type Record struct {
 	Attributes    map[string]any `json:"attributes"`
 	PolicyVersion int64          `json:"policyVersion"`
 	ReceivedAt    string         `json:"receivedAt"`
-	PrevHash      string         `json:"prevHash"`
-	Hash          string         `json:"hash"`
+
+	// AnonymousUserID 是 `$DSHD_HOME/.anonymous-user-id` 的内容（官方把它挂在
+	// OTel Resource 的 user.id 上）。omitempty：没有身份时该字段不出现，**旧记录
+	// 的 hash 因此逐字节不变**（hash 是对整条记录做规范化 JSON）。
+	AnonymousUserID string `json:"anonymousUserId,omitempty"`
+	// Environment / MissingFields 是官方 report() 并入 attributes 的环境维度
+	// （os/arch/版本/CPU）。放在 Record 顶层而不是 Attributes 里，是为了守住
+	// "attributes 只来自调用方白名单"这条隐私边界：环境维度**只能**来自采集器。
+	Environment   map[string]any `json:"environment,omitempty"`
+	MissingFields string         `json:"missingFields,omitempty"`
+
+	PrevHash string `json:"prevHash"`
+	Hash     string `json:"hash"`
 }
 
 // allowedAttributeKeys 是官方 ProductEventMap（app.asar 0.2.2-rc.1 的
@@ -224,6 +235,11 @@ func sanitizeExportBatch(batch ExportBatch) (ExportBatch, error) {
 		rebuilt.PrevHash = ""
 		rebuilt.Hash = ""
 		rebuilt.ReceivedAt = ""
+		// 身份与环境维度是 Resource 级属性（官方同一口径），导出时必须跟着走；
+		// 环境维度按自己的白名单再复检一次（不是重新信任本地文件）。
+		rebuilt.AnonymousUserID = record.AnonymousUserID
+		rebuilt.Environment = sanitizeEnvironment(record.Environment)
+		rebuilt.MissingFields = record.MissingFields
 		out.Events = append(out.Events, rebuilt)
 	}
 	return out, nil

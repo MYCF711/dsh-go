@@ -51,9 +51,15 @@ func accountProviderFromDeps(deps accountOfficialDeps) (account.Provider, error)
 
 func bindAccountProvider(p account.Provider) transport.OfficialAccountAPI {
 	return transport.OfficialAccountAPI{
-		AccountGetProfile:           func(ctx context.Context, c transport.OfficialAccountClientMetadata) (*transport.OfficialAccountProfile, error) { return accountProfile(ctx, p, c) },
-		AccountGetBalance:           func(ctx context.Context, c transport.OfficialAccountClientMetadata) (*transport.OfficialAccountBalance, error) { return accountBalance(ctx, p, c) },
-		AccountGetUnnotifiedBonuses: func(ctx context.Context, c transport.OfficialAccountClientMetadata) (*transport.OfficialAccountBonusList, error) { return accountBonuses(ctx, p, c) },
+		AccountGetProfile: func(ctx context.Context, c transport.OfficialAccountClientMetadata) (*transport.OfficialAccountProfile, error) {
+			return accountProfile(ctx, p, c)
+		},
+		AccountGetBalance: func(ctx context.Context, c transport.OfficialAccountClientMetadata) (*transport.OfficialAccountBalance, error) {
+			return accountBalance(ctx, p, c)
+		},
+		AccountGetUnnotifiedBonuses: func(ctx context.Context, c transport.OfficialAccountClientMetadata) (*transport.OfficialAccountBonusList, error) {
+			return accountBonuses(ctx, p, c)
+		},
 		AccountAckBonusNotified: func(ctx context.Context, accountID, orderID string, c transport.OfficialAccountClientMetadata) (bool, error) {
 			return p.AckBonus(ctx, accountID, orderID, accountClient(c))
 		},

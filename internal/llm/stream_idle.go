@@ -22,6 +22,7 @@ package llm
 // 的信封形状）加上计时证据（上限、实测静默时长、网关 base）。
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -41,6 +42,17 @@ const (
 
 	// StreamIdleTimeoutEnv 是覆盖项（毫秒，正整数）。
 	StreamIdleTimeoutEnv = "DSHD_LLM_STREAM_IDLE_TIMEOUT_MS"
+
+	// StreamIdleTimeoutProvidersEnv 是**per-provider** 覆盖项（官方
+	// `llm.piAi.providers.<name>.streamIdleTimeoutMs`，默认 300000；
+	// 桌面 profile 里 magpie 是 600000）。形状是 JSON 对象（毫秒）：
+	//
+	//	DSHD_LLM_STREAM_IDLE_TIMEOUT_PROVIDERS_MS={"magpie":600000,"deepseek":300000}
+	//
+	// 为什么需要它：不同 provider 的"正常静默"量级差一个数量级——本地网关
+	// 5 分钟没一格就是挂了，而走官方推理的 magpie 在长思考时本来就会静默
+	// 好几分钟。一条全局上限只能取最松的那个，否则会误杀慢 provider。
+	StreamIdleTimeoutProvidersEnv = "DSHD_LLM_STREAM_IDLE_TIMEOUT_PROVIDERS_MS"
 
 	// maxStreamIdleTimeoutMs 是官方 MAX_TIMER_DELAY_MS（2^31-1）：超过它的定时器
 	// 在实现上不可靠，官方同样 fail-loud 而不是截断。
@@ -114,6 +126,76 @@ func streamIdleTimeoutFromEnv(env func(string) string) (time.Duration, error) {
 			StreamIdleTimeoutEnv, ms, maxStreamIdleTimeoutMs)
 	}
 	return time.Duration(ms) * time.Millisecond, nil
+}
+
+// streamIdleTimeoutsFromEnv 解析 per-provider 表：provider 名（大小写不敏感）
+// → 空闲上限。空 = 没有 per-provider 覆盖。
+//
+// 与全局项同一套 fail-loud 判据：非 JSON、空 provider 名、非正数、超过 2^31-1
+// 一律报错——静默丢掉一行只会让人以为"magpie 我设了 10 分钟"。
+func streamIdleTimeoutsFromEnv(env func(string) string) (map[string]time.Duration, error) {
+	if env == nil {
+		return nil, nil
+	}
+	raw := strings.TrimSpace(env(StreamIdleTimeoutProvidersEnv))
+	if raw == "" {
+		return nil, nil
+	}
+	var table map[string]int64
+	dec := json.NewDecoder(strings.NewReader(raw))
+	if err := dec.Decode(&table); err != nil {
+		return nil, fmt.Errorf("%s 不是合法 JSON 对象（{provider: 毫秒}）：%w", StreamIdleTimeoutProvidersEnv, err)
+	}
+	out := make(map[string]time.Duration, len(table))
+	for provider, ms := range table {
+		name := strings.ToLower(strings.TrimSpace(provider))
+		if name == "" {
+			return nil, fmt.Errorf("%s 里有空的 provider 名（要覆盖哪一条通道？）", StreamIdleTimeoutProvidersEnv)
+		}
+		if ms <= 0 || ms > maxStreamIdleTimeoutMs {
+			return nil, fmt.Errorf("%s 的 %q=%d 越界：必须是 1..%d 的正整数（单位毫秒）",
+				StreamIdleTimeoutProvidersEnv, provider, ms, maxStreamIdleTimeoutMs)
+		}
+		out[name] = time.Duration(ms) * time.Millisecond
+	}
+	return out, nil
+}
+
+// providerOf 从模型 id 取路由命名空间（`magpie/deepseek-v4` → `magpie`）。
+//
+// 宿主的模型 id 就是 `<provider>/<model>` 形状（catalog 与 CLI 都用这一份），
+// 所以 provider 不需要第二处配置——它是 id 的前缀。
+func providerOf(model string) string {
+	model = strings.TrimSpace(model)
+	if i := strings.Index(model, "/"); i > 0 {
+		return strings.ToLower(model[:i])
+	}
+	return ""
+}
+
+// streamIdleTimeoutFor 解析**这条流**的空闲上限（官方 per-provider 语义）。
+//
+// 优先级：Client 显式字段 > per-provider 表 > 全局 env > 官方默认 300000ms。
+func (c *Client) streamIdleTimeoutFor(model string, env func(string) string) (time.Duration, error) {
+	global, err := streamIdleTimeoutFromEnv(env)
+	if err != nil {
+		return 0, err
+	}
+	if c != nil && c.StreamIdleTimeout > 0 {
+		return c.StreamIdleTimeout, nil
+	}
+	provider := providerOf(model)
+	if provider == "" {
+		return global, nil
+	}
+	table, err := streamIdleTimeoutsFromEnv(env)
+	if err != nil {
+		return 0, err
+	}
+	if timeout, ok := table[provider]; ok {
+		return timeout, nil
+	}
+	return global, nil
 }
 
 // idleWatchdog 是空闲计时器：每次读到数据重置，超时回调一次（之后不再回调）。

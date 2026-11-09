@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"dshgo/codecs/v4"
@@ -77,6 +78,17 @@ type acpRunner struct {
 	// retry 是压缩重试预算（官方 `compactionRetries` / `maxOverflowRetries`）。
 	// 出厂值 1/1，由 `DSHD_COMPACT_RETRIES` / `DSHD_COMPACT_OVERFLOW_RETRIES` 覆盖。
 	retry compact.RetryPolicy
+	// compactDefaults 是压缩策略默认值（官方 headroomTokens/thresholdRatio +
+	// env 覆盖的重试预算）；compactPolicies 是 modelPolicies 的精确目标覆盖。
+	// 两者一起进 compact.Resolve（见 compactPolicy）。
+	compactDefaults compact.Policy
+	compactPolicies []compact.ModelPolicy
+	// compactWarned 保证"窗口预算不成立"的诊断只打一次：每轮都打会把 stderr
+	// 刷成噪声，而人只需要知道一次"你的 headroom 比窗口还大"。
+	compactWarned atomic.Bool
+	// runtimeContextOn 是"每步重投影运行时事实"的开关（官方
+	// context.runtimeContext.perStep，默认 true）。
+	runtimeContextOn bool
 	// compactChat 是摘要用的模型入口；nil = 生产路径（llm.New）。
 	// 只有测试会替换它——不然"摘要失败重试"这条根本没法在没有网关的环境里验。
 	compactChat compact.Chat
@@ -114,16 +126,36 @@ type acpRunner struct {
 }
 
 func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home string, steps int) *acpRunner {
+	retry := compact.RetryPolicyFromEnv(os.Getenv)
 	r := &acpRunner{
 		reg: reg, runner: runner, base: base, model: model, home: home, steps: steps,
 		logs: map[string]*session.Log{}, turns: map[string]int{}, hist: map[string][]llm.Message{},
 		used: map[string]int{}, meter: map[string]*session.Meter{}, keepRecent: defaultACPKeepRecent,
-		retry:     compact.RetryPolicyFromEnv(os.Getenv),
+		retry:     retry,
 		approvals: approval.New(), sessionModes: map[string]string{}, modeID: modes.DefaultID,
 		sandboxSessions: map[string]sandbox.Mode{}, additionalDirs: map[string][]string{},
 	}
+	// 默认策略与官方逐值相同；cmdACP 会用 flag/env 再覆盖一次（见 compactPolicy）。
+	r.compactDefaults = compact.DefaultPolicy().WithRetry(retry)
 	r.setModelCapacity(llm.ModelCapacity{})
 	return r
+}
+
+// compactPolicy 是这条 runner 的**有效**压缩策略（默认值 + 命中的 per-model 覆盖）。
+//
+// 空结构（测试里直接造 &acpRunner{}）时退回官方默认 + 已解析的重试预算：
+// 阈值计算不能因为"没走 newACPRunner"而拿到全 0 的策略（那会把 headroom
+// 算成 0 并悄悄放宽阈值）。
+func (r *acpRunner) compactPolicy() compact.Policy {
+	defaults := r.compactDefaults
+	if defaults == (compact.Policy{}) {
+		defaults = compact.DefaultPolicy()
+	}
+	// 重试预算以 `r.retry` 为**唯一真值**：它在 newACPRunner 之后还可能被改
+	// （测试与 env 覆盖都走这条），在构造期烤进 compactDefaults 会读到旧值——
+	// 真踩过：`DSHD_COMPACT_OVERFLOW_RETRIES=0` 关不掉重试，溢出照样被吞。
+	defaults = defaults.WithRetry(r.retry)
+	return compact.Resolve(r.compactPolicies, defaults, r.model)
 }
 
 // setModelCapacity 在启动参数或测试给出显式声明后统一重算有效容量。
@@ -475,6 +507,8 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		SessionID:   sessionID,
 		MaxSteps:    r.steps,
 		Emit:        sink,
+		// 官方 context.runtimeContext.perStep：每步重投影运行时事实（不重组提示）。
+		RuntimeContext: runtimeContextProvider(r.runtimeContextOn, sessionID),
 		// 官方 0.2.2 #78 `agent/pre-step`：每一步模型请求之前先让请求前缀耐久。
 		// ACP 的 v4 不落 step/start，所以每一步的锚点就是该步请求前的事件数；
 		// 第一步与 prompt 侧车同锚点（幂等命中）。
@@ -498,7 +532,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	// （user/message 已经在下面之前写好了，所以它是"模型这一轮产出"的水位）。
 	startSeq := logw.Seq()
 	next, err := loop.Run(ctx, turn, append(hist, llm.Message{Role: "user", Content: text}))
-	for attempt := 0; err != nil && attempt < r.retry.OverflowRetries && compact.IsContextOverflow(err); attempt++ {
+	for attempt := 0; err != nil && attempt < r.compactPolicy().MaxOverflowRetries && compact.IsContextOverflow(err); attempt++ {
 		if logw.Seq() != startSeq {
 			fmt.Fprintf(os.Stderr, "上下文溢出，但这一轮已经落了事件（seq %d→%d）：不重放，避免重复历史\n",
 				startSeq, logw.Seq())
@@ -928,6 +962,18 @@ func cmdACP(argv []string) error {
 		"surface 估算超过多少 token 就自动压缩（0/false=关闭，true=默认 40000）")
 	ctxWindow := fs.Int("context-window", 0, "显式上下文窗口（usage_update 分母）；0=按模型容量解析")
 	maxOutput := fs.Int("max-output", 0, "显式单次最大输出 token；0=按模型容量解析")
+	// 官方 context.compaction.headroomTokens / modelPolicies（默认 65536 / []）：
+	// 三个入口共用同一份解析，见 compact_policy_wiring.go。
+	compactHeadroomDefault, err := compactHeadroomFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	compactHeadroom := fs.Int("compact-headroom-tokens", compactHeadroomDefault,
+		"窗口下方预留多少 token 的安全带（官方 headroomTokens，默认 65536；0=不留）")
+	compactPoliciesRaw := fs.String("compact-model-policies", os.Getenv(EnvCompactModelPolicies),
+		"按 provider/model 覆盖压缩阈值（JSON 数组；空=不覆盖）")
+	runtimeContextOn := fs.Bool("runtime-context", runtimeContextEnabled(os.Getenv),
+		"每步重新投影运行时事实（时间/工作目录/平台）；false=用装配期快照（官方默认 true）")
 	modeID := fs.String("mode", modes.DefaultID, "启动模式 id（见 --modes-dir 与内置）")
 	modesDir := fs.String("modes-dir", "", "用户自建模式目录（默认 <home>/modes）")
 	remember := fs.Bool("remember-approvals", false, "把\"以后都允许\"记到磁盘，resume 后仍然生效")
@@ -981,12 +1027,33 @@ func cmdACP(argv []string) error {
 	}
 
 	acpRunner := newACPRunner(reg, runner, *base, *model, *home, *steps)
-	assembled := buildSystemPromptWithHome(reg, *model, mustGetwd(), acpRunner.home, *workspaceBytes)
+	// 工作目录：配置了官方 workingDirectory.defaultDirectory 就用它，否则进程 cwd
+	// （= 官方默认 process.cwd()，与以前逐字节一致）。
+	acpCwd := mustGetwd()
+	if dir, dirErr := defaultWorkDirFromEnv(); dirErr != nil {
+		return dirErr
+	} else if dir != "" {
+		acpCwd = dir
+	}
+	assembled, err := buildSystemPromptWithHome(reg, *model, acpCwd, acpRunner.home, *workspaceBytes)
+	if err != nil {
+		// 工具顺序配置写错时在这里 fail-loud：提示里少一半工具比启动失败更难查。
+		return err
+	}
 	acpRunner.reasoning = *reasoning
 	acpRunner.sampling = sampling
 	acpRunner.system = assembled
 	acpRunner.autoCompact = autoCompact
 	acpRunner.setModelCapacity(llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput})
+	// 压缩策略在装配之后、第一次请求之前定下来：非法配置在这里 fail-loud，
+	// 不会等到第一次该压缩时才发现（那时人已经在会话里了）。
+	compactPolicy, compactPolicies, err := compactPolicyFromFlags(*model, *compactHeadroom, *compactPoliciesRaw, acpRunner.retry)
+	if err != nil {
+		return err
+	}
+	acpRunner.compactDefaults = compactPolicy
+	acpRunner.compactPolicies = compactPolicies
+	acpRunner.runtimeContextOn = *runtimeContextOn
 	dir := *modesDir
 	if dir == "" {
 		dir = filepath.Join(*home, "modes")
@@ -1144,27 +1211,64 @@ func cmdACP(argv []string) error {
 var rulesPath = flag.String("agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 
 // buildSystemPrompt 保留非 ACP 入口的原行为：没有显式 home，就不注入全局规则。
-func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes int) string {
+func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes int) (string, error) {
 	return buildSystemPromptWithHome(reg, model, cwd, "", workspaceBytes)
 }
 
 // buildSystemPromptWithHome 分别给 <home>/AGENTS.md 与项目规则同样的正文预算。
-func buildSystemPromptWithHome(reg spi.ToolRegistry, model, cwd, home string, workspaceBytes int) string {
+//
+// 官方 `systemPrompt.personaPrefix` 走 `DSH_SYSTEM_PROMPT`
+// （@deepseek-ai/dsh-sdk-minimal/cordis.patch.yml:118）：设了就排在提示词**第一段**，
+// 没设/全空白 = 宿主既有形状逐字节不变。两个入口（run / acp）都经过这里，
+// 所以不存在"某个入口偷偷不读"。
+func buildSystemPromptWithHome(reg spi.ToolRegistry, model, cwd, home string, workspaceBytes int) (string, error) {
 	globalRulesPath := ""
 	if home != "" {
 		globalRulesPath = filepath.Join(home, "AGENTS.md")
+	}
+	tools, err := orderedPromptTools(reg.Tools())
+	if err != nil {
+		return "", err
 	}
 	return prompt.Default(prompt.Context{
 		Model:             model,
 		Cwd:               cwd,
 		Platform:          runtime.GOOS + "/" + runtime.GOARCH,
 		Date:              time.Now().Format("2006-01-02"),
-		Tools:             reg.Tools(),
+		Tools:             tools,
 		GlobalRulesPath:   globalRulesPath,
 		MaxGlobalBytes:    workspaceBytes,
 		MaxWorkspaceBytes: workspaceBytes,
 		ExtraRulesPath:    *rulesPath,
-	})
+		PersonaPrefix:     strings.TrimSpace(os.Getenv(personaPrefixEnv)),
+	}), nil
+}
+
+// personaPrefixEnv 是官方 `systemPrompt.personaPrefix` 的环境变量名。
+//
+// 官方原件：@deepseek-ai/dsh-sdk-minimal/cordis.patch.yml:118 与 README.md:83
+// （`DSH_SYSTEM_PROMPT` 替换默认 persona）。宿主只做"替换"，不内置 sdk-minimal
+// 的那句默认串——理由见 internal/prompt.Context.PersonaPrefix 的注释。
+const personaPrefixEnv = "DSH_SYSTEM_PROMPT"
+
+// toolOrderEnv 是官方 `systemPrompt.toolOrder` 的环境变量名（宿主配置面是环境变量，
+// 与 personaPrefix 同一种映射）。值 = 逗号分隔的工具名，必须含 `<unlisted-tools>`。
+const toolOrderEnv = "DSHD_SYSTEM_PROMPT_TOOL_ORDER"
+
+// orderedPromptTools 把 toolOrder 配置应用到工具清单上；未配置 = 原样返回。
+//
+// 配置非法（重复名 / 缺 rest 标记 / 列了未注册的工具）一律返回 error：
+// 提示里的工具顺序是模型行为的输入，配置写错必须让人看见，不能静默退回装配顺序。
+func orderedPromptTools(tools []spi.Tool) ([]spi.Tool, error) {
+	order, err := prompt.ParseToolOrder(os.Getenv(toolOrderEnv))
+	if err != nil {
+		return nil, err
+	}
+	ordered, err := prompt.OrderTools(tools, order)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", toolOrderEnv, err)
+	}
+	return ordered, nil
 }
 
 func mustGetwd() string {
@@ -1256,7 +1360,7 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 		}
 		// 官方 compactionRetries：第一次压缩之后压力仍高于阈值时再压一次。
 		// 默认 1，所以最多两次；配置 0 时只压一次（旧行为）。
-		if compactions > r.retry.Retries {
+		if compactions > r.compactPolicy().CompactionRetries {
 			return fmt.Errorf("已压缩 %d 次，上下文估算 %d 仍高于阈值 %d", compactions, est, threshold)
 		}
 		compacted, err := r.compactSurface(ctx, sessionID, path, back, surface, threshold, est)
@@ -1281,11 +1385,19 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 // 请求里真正发出去的 `max_tokens`（internal/agent/loop.go 原样使用），所以这里
 // 它同时承担"header 声明"与"adapter 默认"两个角色；两者都没声明时是 0。
 func (r *acpRunner) compactThreshold() int {
-	return compact.HostThreshold(r.autoCompact, compact.PressureBudget{
-		ContextWindow:            r.ctxWindow,
-		ReservedCompletionTokens: compact.ReservedCompletionTokens(nil, r.capacity.MaxOutput),
-		ThresholdRatio:           compact.DefaultThresholdRatio,
-	})
+	policy := r.compactPolicy()
+	budget := policy.Budget(r.ctxWindow, r.capacity.MaxOutput)
+	threshold := compact.HostThreshold(r.autoCompact, budget)
+	// 预算不成立（headroom 比窗口还大）是配置错误：官方此时拒绝给出阈值
+	// （TargetPressureConfigError）。宿主不能因此停摆（停摆 = 永不压缩 = 每次
+	// 超窗），所以退回绝对阈值，但**必须说出来**——否则用户以为 headroom 生效了。
+	if r.ctxWindow > 0 {
+		if _, err := budget.PressureBudgetTokens(); err != nil && r.compactWarned.CompareAndSwap(false, true) {
+			fmt.Fprintf(os.Stderr, "压缩预算不成立（%v）；本轮起退回绝对阈值 %d，"+
+				"把 --compact-headroom-tokens 调小或换更大的窗口\n", err, r.autoCompact)
+		}
+	}
+	return threshold
 }
 
 // compactSurface 压一次：选区间 → 生成摘要（带重试）→ 写三条事件 → 重派生历史。
@@ -1608,6 +1720,15 @@ func (r *acpRunner) ensureSession(sessionID, cwd string) (*session.Log, error) {
 		if err := r.adoptWorkspace(want); err != nil {
 			return nil, err
 		}
+	} else if dir, dirErr := defaultWorkDirFromEnv(); dirErr != nil {
+		return nil, dirErr
+	} else if dir != "" {
+		// 客户端没带 cwd：落到配置的默认工作目录（官方 defaultDirectory）。
+		// 未配置时保持原行为（cwd 留空，不 adopt 工作区）。
+		if err := r.adoptWorkspace(dir); err != nil {
+			return nil, err
+		}
+		cwd = dir
 	}
 	// 建会话之前就把档位钉到进程边界上：文件一存在，"这个会话是什么档位"
 	// 就必须已经是确定的，不能留一个"先建完全权限、再切只读"的窗口。

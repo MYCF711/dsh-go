@@ -2,9 +2,7 @@ package relay
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -203,8 +201,7 @@ func (s *Server) handleViewerWS(w http.ResponseWriter, r *http.Request) {
 		"seq":                share.seq,
 		"subjectId":          subjectID,
 	})
-	var backlog []frameRecord
-	backlog = snapshotFramesLocked(share, since)
+	backlog := snapshotFramesLocked(share, since)
 	s.auditLocked(AuditEvent{Action: "viewer-connected", Actor: subjectActor(subjectID),
 		Detail: map[string]any{"shareId": shareID, "forkId": forkID, "viewerId": viewer.id}})
 	if forkID != "" {
@@ -227,9 +224,7 @@ func (s *Server) handleViewerWS(w http.ResponseWriter, r *http.Request) {
 	for {
 		raw, err := conn.ReadMessage()
 		if err != nil {
-			if !errors.Is(err, io.EOF) && !errors.Is(err, ws.ErrClosed) {
-				// 读失败就是连接断了；不需要额外审计噪音。
-			}
+			// 读失败就是连接断了（EOF / 对端关 / 写超时）；不需要额外审计噪音。
 			break
 		}
 		s.handleViewerMessage(viewer, raw)

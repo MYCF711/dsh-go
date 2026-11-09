@@ -137,7 +137,7 @@ func TestTildeHomeChannelDoesNotRelaxAbsolutePaths(t *testing.T) {
 }
 
 func TestTildeHomeChannelHonoursExtraReadRoot(t *testing.T) {
-	fs, root, home := newTildeFS(t)
+	_, root, home := newTildeFS(t)
 	base := filepath.Dir(root)
 	extra := filepath.Join(base, "extra")
 	if err := os.MkdirAll(extra, 0o755); err != nil {

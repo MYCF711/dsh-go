@@ -352,7 +352,11 @@ func TestAutoTitleDelta5RejectsOversizedInput(t *testing.T) {
 		}
 		os.RemoveAll(home)
 		home = t.TempDir()
-		path = autoTitleSeed(t, home, sessionID, prompt)
+		// 这里**不接**返回值：换过 home 之后本子用例只断言"压线能成功 + 发一次请求"，
+		// 后面一次都不读 path（接了就是死赋值，SA4006 抓的就是它）。
+		// 下面 over-limit 那个子用例要读，所以那里必须接——两处的差别是**真的**，
+		// 不是风格不一致。
+		autoTitleSeed(t, home, sessionID, prompt)
 
 		gateway := newAutoTitleGateway(t, nil)
 		service, base := autoTitleDirect(home, gateway.base(), 3*time.Second)
@@ -375,6 +379,9 @@ func TestAutoTitleDelta5RejectsOversizedInput(t *testing.T) {
 		}
 		os.RemoveAll(home)
 		home = t.TempDir()
+		// **必须接返回值**：下面要用 path 读新 home 的日志（autoTitleTitleEvents /
+		// autoTitleIndexPath / autoTitleEvents 三处）。丢掉它就会去读已经被
+		// os.RemoveAll 掉的旧 home，报 ENOENT——那正是回归的形状。
 		path = autoTitleSeed(t, home, sessionID, prompt)
 
 		gateway := newAutoTitleGateway(t, nil)

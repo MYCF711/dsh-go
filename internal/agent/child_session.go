@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/modes"
@@ -51,8 +52,11 @@ const EventChildSpawn = "subagent/spawn"
 type ChildRecord struct {
 	ChildSessionID  string `json:"childSessionId"`
 	ParentSessionID string `json:"parentSessionId"`
-	Cwd             string `json:"cwd,omitempty"`
-	SpawnedAt       int64  `json:"spawnedAt"`
+	// AgentID 是官方的具名 agent 标签（`agentLoop.agents[].id`）；空 = 匿名委派。
+	// 旧帧里没有这个键，解码成空串——只能加，不能改名。
+	AgentID   string `json:"agentId,omitempty"`
+	Cwd       string `json:"cwd,omitempty"`
+	SpawnedAt int64  `json:"spawnedAt"`
 }
 
 // ChildSpawn 是一次真实 spawn 的装配参数。
@@ -74,11 +78,69 @@ type ChildSpawn struct {
 type ChildSpawnOptions struct {
 	// ChildSessionID 空 = 宿主分配（session.NewID）。
 	ChildSessionID string
+	// AgentID 是官方的具名 agent 标签（`agentLoop.agents[].id`）。
+	//
+	// 非空且没有显式 ChildSessionID 时，按官方规则派生子会话 id：
+	//
+	//	const configuredId = sessionId ?? brandString(`${id}-session-${randomUUID()}`);
+	//	                       — app.asar:dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js:1351
+	//
+	// **description 永远不会走到这里**：工具层只把 schema 的 `id` 字段透传过来，
+	// 描述文字是给人看的，拿它当 id 会让每次委派换一条子会话（见
+	// modules/tool/subagent 的同名断言）。
+	AgentID string
 	// Prompt 是这次委派的正文（写成子会话的第一条 user 消息）。
 	Prompt string
 	// Answer 是子代理交回的正文（写成第一条 assistant 消息）。
 	// 空 = 只留提问：委派失败时**不编**一个空回答。
 	Answer string
+}
+
+// AgentChildSessionIDSeparator 是官方 `${id}-session-${uuid}` 里的中缀。
+const AgentChildSessionIDSeparator = "-session-"
+
+// maxAgentIDBytes 是 agent id 的上限。
+//
+// 官方 `id: z.string().required()` 不限长度，但宿主会把它变成**会话目录名**
+// （v4.EncodeSegment），所以这里收紧到一个能安全落盘的量级；超长当场报错，
+// 而不是写出一条路径长得打不开的会话。
+const maxAgentIDBytes = 128
+
+// ChildSessionIDForAgent 按官方规则派生一条子会话 id：`${id}-session-<uuid4>`。
+//
+// 每次调用都会铸一个新的 uuid（官方用的是 `randomUUID()`）：同一个 id 的第二趟
+// spawn 是**另一条**子会话。想复用同一条，用 RecordAgentChild/FindAgentChild。
+func ChildSessionIDForAgent(agentID string) string {
+	return agentID + AgentChildSessionIDSeparator + session.NewID()
+}
+
+// validateAgentID 校验具名 agent 的标签。
+//
+// 为什么严到这里：这个字符串会变成 `<home>/sessions/<project>/<id>/` 的目录段，
+// 空白/控制字符会让"盘上明明写了却找不着"变成一类查不出来的故障。
+func validateAgentID(agentID string) error {
+	if agentID == "" {
+		return fmt.Errorf("agent id 不能为空")
+	}
+	if agentID != strings.TrimSpace(agentID) {
+		return fmt.Errorf("agent id %q 首尾不能有空白", agentID)
+	}
+	if len([]byte(agentID)) > maxAgentIDBytes {
+		return fmt.Errorf("agent id 长度 %d 超过 %d 字节", len([]byte(agentID)), maxAgentIDBytes)
+	}
+	for _, r := range agentID {
+		if unicode.IsSpace(r) {
+			return fmt.Errorf("agent id %q 不能含空白字符", agentID)
+		}
+		if unicode.IsControl(r) {
+			return fmt.Errorf("agent id %q 不能含控制字符", agentID)
+		}
+	}
+	if strings.Contains(agentID, AgentChildSessionIDSeparator) {
+		// 否则 `a-session-b` 派生出 `a-session-b-session-<uuid>`，谁是谁就分不清了。
+		return fmt.Errorf("agent id %q 不能含中缀 %q", agentID, AgentChildSessionIDSeparator)
+	}
+	return nil
 }
 
 // Spawn 建一条 durable v4 子会话，写下父子帧与这次委派的真实往返。
@@ -99,9 +161,22 @@ func (s ChildSpawn) Spawn(opts ChildSpawnOptions) (ChildRecord, error) {
 		return ChildRecord{}, fmt.Errorf(
 			"可续问子会话需要父会话 id：没有父就没有授权边界，不编一个")
 	}
+	// 具名 agent：官方在 sessionId 缺省时按 `${id}-session-${randomUUID()}` 派生
+	// （dsh-agent-loop/lib/index.js:1351）。**显式 ChildSessionID 优先**——那对应
+	// 官方的 `sessionId`（"exact session identity; first use creates"）。
+	agentID := opts.AgentID
+	if agentID != "" {
+		if err := validateAgentID(agentID); err != nil {
+			return ChildRecord{}, err
+		}
+	}
 	child := strings.TrimSpace(opts.ChildSessionID)
 	if child == "" {
-		child = session.NewID()
+		if agentID != "" {
+			child = ChildSessionIDForAgent(agentID)
+		} else {
+			child = session.NewID()
+		}
 	}
 	if child == parent {
 		return ChildRecord{}, fmt.Errorf("子会话不能就是父会话（%q）", child)
@@ -128,15 +203,22 @@ func (s ChildSpawn) Spawn(opts ChildSpawnOptions) (ChildRecord, error) {
 	rec := ChildRecord{
 		ChildSessionID:  child,
 		ParentSessionID: parent,
+		AgentID:         agentID,
 		Cwd:             cwd,
 		SpawnedAt:       now().UnixMilli(),
 	}
-	appendErr := lg.Append(EventChildSpawn, map[string]any{
+	frame := map[string]any{
 		"childSessionId":  rec.ChildSessionID,
 		"parentSessionId": rec.ParentSessionID,
 		"cwd":             rec.Cwd,
 		"spawnedAt":       rec.SpawnedAt,
-	})
+	}
+	// 只有具名委派才多这一键：匿名委派的父子帧与改动前逐字节一致，
+	// 既有读者（serve_subagents_api / FindChild）一个字节都不用改。
+	if agentID != "" {
+		frame["agentId"] = agentID
+	}
+	appendErr := lg.Append(EventChildSpawn, frame)
 	if appendErr == nil {
 		if p := strings.TrimSpace(opts.Prompt); p != "" {
 			appendErr = lg.Append("user/message",

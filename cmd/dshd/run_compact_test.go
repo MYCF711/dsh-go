@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/compact"
 	"dshgo/internal/llm"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
@@ -46,7 +47,7 @@ func TestRunCompactorCompacts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := runCompactor(&stubChat{reply: "（摘要）"}, l, 1, "m", nil)
+	c := runCompactor(&stubChat{reply: "（摘要）"}, l, 1, compact.DefaultPolicy(), llm.ModelCapacity{}, "m", nil)
 	if c == nil {
 		t.Fatal("budget=1 时不该返回 nil")
 	}
@@ -73,7 +74,7 @@ func TestRunCompactorCompacts(t *testing.T) {
 func TestRunCompactorNoopWhenUnderBudget(t *testing.T) {
 	l := buildLongSession(t)
 	defer l.Close()
-	c := runCompactor(&stubChat{reply: "x"}, l, 1_000_000, "m", nil)
+	c := runCompactor(&stubChat{reply: "x"}, l, 1_000_000, compact.DefaultPolicy(), llm.ModelCapacity{}, "m", nil)
 	if c == nil {
 		t.Fatal("预算很大时也应有函数（只是不压）")
 	}
@@ -87,7 +88,7 @@ func TestRunCompactorNoopWhenUnderBudget(t *testing.T) {
 }
 
 func TestRunCompactorDisabled(t *testing.T) {
-	if runCompactor(&stubChat{}, nil, 0, "m", nil) != nil {
+	if runCompactor(&stubChat{}, nil, 0, compact.DefaultPolicy(), llm.ModelCapacity{}, "m", nil) != nil {
 		t.Fatal("budget=0 应关闭（返回 nil）")
 	}
 }

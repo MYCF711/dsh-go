@@ -66,7 +66,7 @@ import (
 
 // 这三个由 -ldflags 覆盖（scripts/build.sh），默认值给 go run 用。
 var (
-	version   = "0.2.2-go.1"
+	version   = "0.2.2-go.2"
 	commit    = "dev"
 	buildTime = "unknown"
 )
@@ -178,6 +178,9 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 }
 
 func main() {
+	// 版本号只有一个出处：把 main.version 注入需要"当前 runtime 版本"的下游
+	// （插件兼容性判定、ACP 握手）。见 cmd/dshd/host_version.go。
+	wireHostVersion()
 	timingf("main 开始")
 	if len(os.Args) < 2 {
 		usage()
@@ -308,7 +311,17 @@ func cwdOrDot() string {
 }
 
 func loadMods(manifestPath, home string, maxChars int, sub *subProvider) ([]kernel.Module, error) {
-	mods := builtinModules(cwdOrDot(), home, maxChars, sub)
+	return loadModsIn(manifestPath, home, maxChars, sub, cwdOrDot())
+}
+
+// loadModsIn 是 loadMods 的同一份实现，工作目录由调用方给定。
+//
+// run 入口用它把官方 `workingDirectory.defaultDirectory`（DSHD_DEFAULT_WORKDIR）
+// 变成**工具的根**：read/edit/glob/grep/bash 的相对路径都按它解析。不这么做就会出现
+// 「系统提示里写着 Workspace: A，工具却在 B 里干活」——那正是 ACP 那条注释里
+// 实测踩过的坑（文件不存在 → 在宿主启动目录里翻）。
+func loadModsIn(manifestPath, home string, maxChars int, sub *subProvider, workdir string) ([]kernel.Module, error) {
+	mods := builtinModules(workdir, home, maxChars, sub)
 
 	// wasm 模块在 Apply **之前**装：装不起来（缺文件/魔数不对/digest 不符）
 	// 就该在启动时炸，而不是等到第一次调用——那正是 digest 校验存在的意义。
@@ -342,7 +355,13 @@ func loadMods(manifestPath, home string, maxChars int, sub *subProvider) ([]kern
 // dsh.toml 的白名单静默丢掉（Apply 对没列出的模块只打一行 Warn 就跳过）——
 // 那正是「装好了插件、模型却永远看不见」的复现路径。
 func loadModsWithPlugins(manifestPath, home string, maxChars int, sub *subProvider) ([]kernel.Module, *pluginRuntime, error) {
-	mods, err := loadMods(manifestPath, home, maxChars, sub)
+	return loadModsWithPluginsIn(manifestPath, home, maxChars, sub, cwdOrDot())
+}
+
+// loadModsWithPluginsIn 是 loadModsWithPlugins 的同一份实现，工作目录由调用方给定
+// （run 入口传官方 `workingDirectory.defaultDirectory`，见 loadModsIn）。
+func loadModsWithPluginsIn(manifestPath, home string, maxChars int, sub *subProvider, workdir string) ([]kernel.Module, *pluginRuntime, error) {
+	mods, err := loadModsIn(manifestPath, home, maxChars, sub, workdir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -633,6 +652,20 @@ func cmdRun(argv []string) (retErr error) {
 	// maxOutput 落到请求的 max_tokens。
 	ctxWindow := fs.Int("context-window", 0, "显式上下文窗口（写进 v4 request/context）；0=按模型容量解析")
 	maxOutput := fs.Int("max-output", 0, "显式单次最大输出 token；0=按模型容量解析")
+	// 官方 context.compaction.headroomTokens / modelPolicies：三个入口同一份解析
+	// （compact_policy_wiring.go），serve 会原样透传这两个值。
+	compactHeadroomDefault, err := compactHeadroomFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	compactHeadroom := fs.Int("compact-headroom-tokens", compactHeadroomDefault,
+		"窗口下方预留多少 token 的安全带（官方 headroomTokens，默认 65536；0=不留）")
+	compactPoliciesRaw := fs.String("compact-model-policies", os.Getenv(EnvCompactModelPolicies),
+		"按 provider/model 覆盖压缩阈值（JSON 数组；空=不覆盖）")
+	// 官方 context.runtimeContext.perStep（默认 true）：每一步重新投影运行时事实。
+	// 关掉时请求消息与既有形状逐字节一致（老会话排查提示词漂移时能一键回退）。
+	runtimeContextOn := fs.Bool("runtime-context", runtimeContextEnabled(os.Getenv),
+		"每步重新投影运行时事实（时间/工作目录/平台）；false=用装配期快照（官方默认 true）")
 	// 父进程看门狗：serve 起的工具轮就是子进程 `dshd run`（serve_tools.go 的 childArgs），
 	// 所以 run 也得挂同一组开关——否则 serve 死了、它还在跑。
 	pw := addParentWatchFlags(fs)
@@ -642,7 +675,12 @@ func cmdRun(argv []string) (retErr error) {
 	if os.Getenv("DSHD_STEER_STDIO") == "1" && *turnID == "" {
 		return fmt.Errorf("steer IPC 要求显式 --turn-id")
 	}
-	var err error
+	// 非法压缩配置在**发任何模型请求之前**报出来（静默回退会让人以为
+	// headroom 生效了，实际跑的是默认 64K）。
+	compactPolicy, _, err := compactPolicyFromFlags(*model, *compactHeadroom, *compactPoliciesRaw, compact.RetryPolicyFromEnv(os.Getenv))
+	if err != nil {
+		return err
+	}
 	runPrompt := *prompt
 	var runContent []session.ContentBlock
 	var runParts []llm.MessagePart
@@ -670,6 +708,9 @@ func cmdRun(argv []string) (retErr error) {
 	if err := ensureSpillDir(*home); err != nil {
 		return err
 	}
+	// spill 保留期回收（官方 session.spill.cleanupPeriodDays，默认 30 天）：
+	// run 与 serve 同源，一次性宿主也顺手清一遍过期的外置文件。
+	sweepSpillArtifactsBestEffort(*home)
 
 	// 看门狗尽早起：参数校验通过就挂上，别等到建完会话目录才开始盯。
 	watch := pw.start(os.Stderr)
@@ -700,7 +741,14 @@ func cmdRun(argv []string) (retErr error) {
 	}
 
 	subp := &subProvider{}
-	mods, pluginRT, err := loadModsWithPlugins(*manifest, *home, *maxChars, subp)
+	// 官方 `workingDirectory.defaultDirectory`（DSHD_DEFAULT_WORKDIR）在这里定一次：
+	// 工具的根、系统提示里的 Workspace、新会话 header.cwd 三处用的是**同一个值**。
+	// 未配置 = 进程 cwd（与以前逐字节一致）。
+	workDir, err := sessionWorkDir()
+	if err != nil {
+		return err
+	}
+	mods, pluginRT, err := loadModsWithPluginsIn(*manifest, *home, *maxChars, subp, workDir)
 	if err != nil {
 		return err
 	}
@@ -750,10 +798,9 @@ func cmdRun(argv []string) (retErr error) {
 	}
 	runner := hostToolRunner(root, reg, *home, *maxChars)
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
+	// 新会话的工作目录与工具根是同一个值（装配期就定死的 workDir，见上面）。
+	// `--home` 是会话根，不是工作目录——两者互不替代。
+	cwd := workDir
 	// 工具表投影（只这一层）：合并 → 收紧 → lazy，见 projectTable。
 	// 系统提示里的工具清单也要跟着换——否则模型从提示里看到旧的 17 个名字，
 	// 从 tools 字段看到 4 个，两边对不上。
@@ -764,7 +811,10 @@ func cmdRun(argv []string) (retErr error) {
 	for _, w := range warns {
 		fmt.Fprintln(os.Stderr, "工具表："+w)
 	}
-	sys := buildSystemPrompt(table, *model, cwd, workspaceBytesForPrompt(*workspaceBytes))
+	sys, err := buildSystemPrompt(table, *model, cwd, workspaceBytesForPrompt(*workspaceBytes))
+	if err != nil {
+		return err
+	}
 	// lazy 的系统提示目录**故意不在这里拼**：它要等装载集回放完（见下面那一段），
 	// 否则上一轮已经装载过的工具会在目录里被重复列一遍。
 	// --session：续一个已经存在的会话，而不是新建。
@@ -954,7 +1004,13 @@ func cmdRun(argv []string) (retErr error) {
 		loopRunner = &lazyRunner{inner: loopRunner, table: lazyRef}
 	}
 
-	chat := llm.NewWithAPI(*base, os.Getenv("DSHD_LLM_KEY"), os.Getenv("DSHD_LLM_API"))
+	// 官方 `retryPolicy`（每 provider 一份）：策略由 serve 侧从模型目录读出、
+	// 经 DSHD_LLM_RETRY_POLICY 交给这一轮的 run 子进程。写错必须 fail-closed
+	// （一个请求都不发），不能静默回落到默认重试参数。
+	chat, err := newTurnChat(*base, os.Getenv("DSHD_LLM_KEY"), os.Getenv("DSHD_LLM_API"), os.Getenv)
+	if err != nil {
+		return err
+	}
 	// 官方每请求采样面（llm.temperature / llm.stop）。解析放在建循环之前、发请求
 	// 之前：配置写错必须 fail-closed（一个请求都不发），而不是静默用默认值跑一轮。
 	sampling, err := samplingFromEnv(os.Getenv)
@@ -975,26 +1031,35 @@ func cmdRun(argv []string) (retErr error) {
 	// 同样是"模型-工具"循环，8 步的墙在这里一样会把能跑完的任务砍成
 	// "用满仍未收敛"。真正的护栏是下面的墙钟 timeout（子代理不是无人值守的
 	// 无限任务），步数只是死循环安全阀。
+	// 官方 subagent.maxActiveSubagents：并发子代理上限（默认 8；desktop profile
+	// 覆盖为 20）。解析在建循环之前、发请求之前：写错就 fail-closed。
+	subGate, err := subagentGateFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
 	subp.Bind(&subRunner{
 		chat: chat, tools: table, runner: loopRunner,
 		model: *model, maxSteps: defaultTurnMaxSteps, timeout: 5 * time.Minute,
 		temperature: sampling.Temperature, stop: sampling.Stop,
 		// 可续问子会话的落点。空着会让 Continuable 明确失败——所以必须给。
 		home: *home,
+		gate: subGate,
 	})
 	loop := &agent.Loop{
 		Chat:   chat,
 		Steers: steerInbox,
 		// 容量声明由调用方给（serve 透传 --context-window/--max-output）；
 		// 循环里唯一的解析点是 llm.ResolveModelCapacity，这里不重复算。
-		Capacity:  llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput},
-		Compact:   runCompactor(chat, logw, autoCompact, *model, meter),
-		Tools:     table,
-		Runner:    loopRunner,
-		Project:   session.ProjectResult,
-		Model:     *model,
-		System:    sys,
-		SessionID: sessID,
+		Capacity: llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput},
+		Compact:  runCompactor(chat, logw, autoCompact, compactPolicy, llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput}, *model, meter),
+		// 官方 context.runtimeContext.perStep：每步重投影运行时事实（不重组提示）。
+		RuntimeContext: runtimeContextProvider(*runtimeContextOn, sessID),
+		Tools:          table,
+		Runner:         loopRunner,
+		Project:        session.ProjectResult,
+		Model:          *model,
+		System:         sys,
+		SessionID:      sessID,
 		// 官方 0.2.2 #78 `agent/pre-step`：每一步模型请求之前先让请求前缀耐久。
 		// 第一步与 prompt 侧车同锚点（幂等命中），第二步起各自落一份。
 		PreStep: worktreePreStep(newWorktreeService(newSessionSource(*home, "")), sessID, func(ctx context.Context, step int) error {
@@ -1615,10 +1680,14 @@ func isTerminal(f *os.File) bool {
 //
 // 和 ACP 那条用的是同一套：读 log → Surface → compact.Select → Summarize →
 // session.Compact 写事件 → 从日志重建历史。区别只在于触发时机（每步 vs 每轮）。
-func runCompactor(chat agent.Chat, logw *session.Log, budget int, model string, meter *session.Meter) func(context.Context, int, []llm.Message) ([]llm.Message, error) {
+func runCompactor(chat agent.Chat, logw *session.Log, budget int, policy compact.Policy,
+	capacity llm.ModelCapacity, model string, meter *session.Meter) func(context.Context, int, []llm.Message) ([]llm.Message, error) {
 	if budget <= 0 {
 		return nil
 	}
+	// 有效阈值 = min(绝对阈值 --auto-compact, 官方 W − O − B 口径)。run 这条
+	// 路径与 ACP 走同一个 compact.HostThreshold，两个入口不会压出两种结果。
+	threshold := compact.HostThreshold(budget, policy.Budget(capacity.ContextWindow, capacity.MaxOutput))
 	return func(ctx context.Context, step int, hist []llm.Message) ([]llm.Message, error) {
 		back, err := v4.ReadFile(logw.Path)
 		if err != nil {
@@ -1630,7 +1699,7 @@ func runCompactor(chat agent.Chat, logw *session.Log, budget int, model string, 
 		if meter == nil {
 			meter = &session.Meter{}
 		}
-		if meter.Estimate(surface) <= budget {
+		if meter.Estimate(surface) <= threshold {
 			return nil, nil // 没超预算，历史不动
 		}
 		// KeepRecent 是下限（至少留 6 条），真正的保留量由 KeepTokens 定。
@@ -1645,7 +1714,10 @@ func runCompactor(chat agent.Chat, logw *session.Log, budget int, model string, 
 			return nil, nil // 真没得压
 		}
 		// 摘要失败按官方 `compactionRetries`（DSHD_COMPACT_RETRIES，默认 1）重试。
-		text, err := compact.SummarizeWithRetry(ctx, chat, model, items, compact.RetryPolicyFromEnv(os.Getenv))
+		text, err := compact.SummarizeWithRetry(ctx, chat, model, items, compact.RetryPolicy{
+			Retries:         policy.CompactionRetries,
+			OverflowRetries: policy.MaxOverflowRetries,
+		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "自动压缩失败（不影响本轮）：%v\n", err)
 			return nil, nil

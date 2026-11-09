@@ -98,11 +98,11 @@ type DurableCheckpoint struct {
 	// SessionPath 是 v4 会话文件的绝对路径；SessionID 取自文件 header，不是调用方传的串。
 	SessionPath string `json:"sessionPath"`
 	// SizeBytes/SHA256 锁定“请求前的前缀”：崩溃后按这两个值复核字节有没有被改写。
-	SizeBytes int64  `json:"sizeBytes"`
-	SHA256    string `json:"sha256"`
-	Frames    int    `json:"frames"`
-	CapturedAt int64 `json:"capturedAt"`
-	Request   *CheckpointRequest `json:"request,omitempty"`
+	SizeBytes  int64              `json:"sizeBytes"`
+	SHA256     string             `json:"sha256"`
+	Frames     int                `json:"frames"`
+	CapturedAt int64              `json:"capturedAt"`
+	Request    *CheckpointRequest `json:"request,omitempty"`
 }
 
 // RecoveredPrefix 是崩溃重启后能拿回来的东西：只读派生的 v4 帧 + 这次请求的身份。
