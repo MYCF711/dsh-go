@@ -121,6 +121,13 @@ func TestPTYTerminalNaturalExitDoesNotRegress(t *testing.T) {
 
 // TestPTYTerminalCloseReclaimsProcessTree 证明 close 真的回收整棵进程树：
 // 终端里起的后台循环在 close 之后必须停止写心跳文件。
+//
+// **为什么这条 PTY 会话显式带 `--noediting`**：本用例要测的是「close 回收整棵
+// 进程树」，而它要下发的命令行约 130 字节。Git Bash 5.3.15 的 readline 8.3 在
+// ConPTY 下消费不了成块输入（≥ 约 96 字节整行会整段挂住，见
+// docs/pty-bash-compat.md），于是心跳根本跑不起来、用例变成随机红。
+// 关掉行编辑只换掉 readline 这一层：ConPTY、Write 分片、Job Object、
+// close 回收路径全部保持原样，判据（心跳先动、close 后必须停）一条没动。
 func TestPTYTerminalCloseReclaimsProcessTree(t *testing.T) {
 	svc := newSvc(t)
 	cwd := t.TempDir()
@@ -128,7 +135,12 @@ func TestPTYTerminalCloseReclaimsProcessTree(t *testing.T) {
 		t.Skip("ConPTY 只在 Windows 上实现")
 	}
 	requireBash(t)
-	term, err := svc.OpenPTYTerminal(cwd, 80, 24)
+	term, err := svc.OpenPTY(PTYOptions{
+		Cwd:  cwd,
+		Cols: 80,
+		Rows: 24,
+		Args: []string{"--noprofile", "--norc", "--noediting"},
+	})
 	if err != nil {
 		t.Fatalf("起 PTY 终端失败：%v", err)
 	}
