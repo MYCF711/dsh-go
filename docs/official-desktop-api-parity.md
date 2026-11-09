@@ -1,12 +1,17 @@
 # 官方桌面端接口对齐清单（0.2.2-rc.1）
 
+> **T18RR 修正（2026-11-08）**：无 override 193 探针 **FAIL=0 DOC_DRIFT=0 PASSLIKE=193**。10 条 status+probe 同时修正：workspace.initializeDefault / schedule.catalog / schedule.deleteInactive / schedule.deliveryLimits / agentPresets.list / session.initializeDefaultModel / pluginManager.listBundles / pluginManager.listPlugins = OK200；session.modelCatalog=VAL400；session.control=STREAM200 baseline。permissionPresets.catalog/speech.catalog 仍 501。
+
+> **T18R 增量（2026-11-08）**：按 T17 真实 probe 修正 3 个方法状态 —— `pluginManager.listBundles` DEFERRED→IMPLEMENTED（OK200）、`pluginManager.listPlugins` DO_NOT_IMPLEMENT→IMPLEMENTED（OK200）、`session.control` DEFERRED→IMPLEMENTED（STREAM200 NDJSON baseline 首帧）。`permissionPresets.catalog`（DEFERRED）与 `speech.catalog`（OFFICIAL_UNSUPPORTED）实测 501 保持未实现。
+
+> **T18 终审（2026-11-08）**：方法总数 **193**（旧快照 153 漏 40）；97 插件与官方同序全等。逐条 `file:line` 与证据见 §2/§3 与 `docs/host-stable-gap-register.md`；机器可读汇总 `tmp/GO2-TEAM/T18/parity-summary.json`。
 > 来源：`D:/DeepSeek Harness/Desktop-0.2.2-rc.1/resources/app.asar`（sha256 `5fa8a6b21bceb8f3e99e30efa2270efd0cc773a11e42aa0488f804a64b34e637`，213202918 bytes）内 `@deepseek-ai/*/lib/typert.host.js` 生成契约（只读取证，未改安装目录）。
 > 取证方法：解析 asar 头 → 提取 `dsh-api-*`、`dsh-goal`、`dsh-commands`、`dsh-plugin-manager`、`dsh-schedule`、`dsh-subagent`、`dsh-user-questions` 等包的 `createTypertRemoteInfo` 名与生成符号。
-> 方法名全集已固化到仓库：`docs/evidence/official-desktop-api-methods-0.2.2-rc.1.txt`（153 行）。官方 zod 契约原文镜像在 `C:/Users/Administrator/AppData/Local/Temp/official-api-src`（非仓库，可随时从上述 asar 重建）。
+> 方法名全集已固化到仓库：`docs/evidence/official-desktop-api-methods-0.2.2-rc.1.txt`（193 行；T18 机器可读版 `tmp/GO2-TEAM/T18/parity-summary.json`）。官方 zod 契约原文镜像在 `C:/Users/Administrator/AppData/Local/Temp/official-api-src`（非仓库，可随时从上述 asar 重建）。
 
 ## 0. 总量
 
-- 官方桌面端方法：**153**
+- 官方桌面端方法：**193**（IMPLEMENTED 86 / PARTIAL 13 / OFFICIAL_UNSUPPORTED 64 / DEFERRED 17 / DO_NOT_IMPLEMENT 13；97 插件 51/28/1/13/4。T18 终审，旧 82/153 口径作废）
 - Go 宿主当前 Transport 方法：**58**
 - 同名重合：**8**（schedule.list, session.cancel, session.create, session.fork, session.list, session.prompt, session.rename, settings.mutate）
 - 宿主独有（TUI/兼容面，不得改名删除）：**50**
@@ -31,7 +36,7 @@
 
 **2026-11-07 只读取证更正（`/tmp/L2-WIRE-EVIDENCE.md`，352 行）**：
 
-- **unary 路径已关闭"未取证"**：官方是 **`POST /api/<namespace>/<method>`（斜杠两段）**，如 `/api/session/page`、`/api/workspaceFiles/readBytes`；153 个方法里的点号只是客户端 JS 面 `remote[ns][method]`（证据：asar 内 `dsh-client-connection/lib/index.js:14,926-931,1044-1058`）。**本仓的 `POST /api/<dotted.method>` 不是官方 wire。**
+- **unary 路径已关闭"未取证"**：官方是 **`POST /api/<namespace>/<method>`（斜杠两段）**，如 `/api/session/page`、`/api/workspaceFiles/readBytes`；193 个方法里的点号只是客户端 JS 面 `remote[ns][method]`（证据：asar 内 `dsh-client-connection/lib/index.js:14,926-931,1044-1058`）。**本仓的 `POST /api/<dotted.method>` 不是官方 wire。**
 - **envelope**：请求 `{"type":"client-request","rpcId":<uuid>,"method":"session/page","payload":{"args":{…}}}`（`payload` 只许 `args`，字段集必须与 descriptor 完全一致）；响应 `{"type":"server-response","rpcId":<逐字回显>,"result":{"ok":true,"value":…}}` 或 `{"ok":false,"error":{"code","message","details"}}`。
 - **200-on-error**：业务失败也是 HTTP 200，错误在 `result.ok:false`；4xx/5xx 只给传输/认证/处理器异常。这解释了为什么 `schedule_conflict` 是**成功值 union 判别式**而不是错误码。
 - **mux 只有 7 帧**：客户端 `open/item/end/cancel`，宿主 `item/end/error`；`ready`/`emit` 属 `$events` 逻辑流的 item 载荷，不是 mux 判别式。背压：上行 256 KiB/流（超限 `gateway/uplink-overflow`）、下行串行、2s 心跳×2 判死、关闭码 1003/1008/1011/1001。

@@ -6,7 +6,13 @@
 
 ## 1. 已实现的真值
 
-`internal/pluginmgr` 实现 `list/install/enable/disable/uninstall/update/restore/reconcile`。它只管理本任务定义的 `dsh.local-plugin@1` 本地目录，不是官方完整插件生态，也不执行或动态加载包入口。
+`internal/pluginmgr` 实现 `list/install/enable/disable/uninstall/update/restore/reconcile`，并且**真的装载、真的执行** `dsh.local-plugin@1` 包的 `wasm` 入口（`internal/pluginmgr/loader.go` + `internal/wasmhost/tool.go`）：
+
+- **enable 先装载再提交**：装载失败时 state.json 一步都不动（"enabled 但跑不起来"落不了盘）；
+- **disable / uninstall 提交后卸载**：工具立刻出目录，之前拿到的句柄再调会被拒绝（不是"标记一下"）；
+- **Exec 真的跨到客人那边**：一次调用走完 wasm ABI，失败按 R3 返回 `Result{Hint:…}, err`。
+
+它仍然不是官方完整插件生态：`process` 与 JS/Cordis 插件在**安装边界**上就被显式拒绝（无 process 后端；不嵌 JS 运行时，AGENTS R6）。
 
 - **安装**：完整验证私有目录，默认 `enabled=false`；记录绝对 `source`、id/version/kind/entry。
 - **状态**：enable/disable 原子替换 `state.json` 后才返回；list 每次重新校验当前包并按 id 排序。
@@ -81,14 +87,38 @@ plugins --root <dir> reconcile
 
 ### 明确的集成边界
 
-任务开始时 `cmd/dshd/main.go` 的 CLI switch、`cmd/dshd/serve.go` 与 `internal/transport/server.go` 都是闭合分派，且没有插件 hook；本任务禁止修改这些文件。因此：
+- **CLI 已接线**：`cmd/dshd/main.go` 的 `plugins` 子命令（HS-07W）。CLI 在 `pluginmgr.Open` 之后立刻挂上运行时，所以 `enable` 真的装载、`disable`/`uninstall` 真的卸载；装载失败按四字段错误返回并保持启用位不变。
+- **HTTP 已接线**：`/api/plugin.*` 由 `serve.go` 的 `PluginHandler: newPluginHTTPHandler(pluginManager)` 挂在既有 Transport 认证之后（`/connect` 换 cookie），并挂上了同一个运行时，所以 HTTP enable 也会真的装载。
+- **HTTP 适配器自身的测试**直接运行 `newPluginHTTPHandler(manager)`；真实子进程测试直接运行 `runPluginsCLI(...)`。这两条都不替代 `serve` 的认证联调。
+- **还没接的是 ACP**（`cmd/dshd/acp.go`）：它注入 `spi.ToolsKey` 与 `spi.ToolRunnerKey`（静态目录），所以 `dshd acp` 起的会话**看不到**插件工具。改法是两行（`loadModsWithPlugins` + `pluginmod.TableKey` + `hostToolRunner`），见 `WIRING.md`；本轮写作用域不含该文件。
+- UI 没有改，也没有任何 UI 字段伪造；远端市场、跨进程写锁、真实用户插件目录均未实现/未验证。
 
-- 真实 socket 测试直接运行 `newPluginHTTPHandler(manager)`；真实子进程测试直接运行 `runPluginsCLI(...)`。
-- **现有 dshd 主二进制的 `plugins` 子命令和既有 serve listener 尚未接线**。Lead 需由有权限的 owner 把 HTTP handler 置于既有 cookie 认证后，并把 CLI action 接到显式 home 子目录。
-- 独立 HTTP 适配器测试没有冒充 `/connect` 认证已联调；生产集成必须保留现有认证，不能把裸 handler 直接暴露到非回环地址。
-- UI 没有改，也没有任何 UI 字段伪造；动态加载、第三方代码执行、远端市场、跨进程写锁、真实用户插件目录均未实现/未验证。
+## 5. 运行时装载与生产接线
 
-## 5. 先红后绿与本次实证
+两个服务键（定义在 `modules/tool/plugin/runtime.go`，**不在** `internal/spi`：它们是插件运行时的实现细节）：
+
+| 键 | 类型 | 含义 |
+|---|---|---|
+| `pluginloader` | `*pluginmgr.Loader` | 装/卸/对账的句柄（`Load`/`Unload`/`Reload`/`SyncAll`/`Loaded`/`Table`） |
+| `plugintools` | `spi.ToolRegistry` | **静态工具 + 插件工具**的合成目录（`Get` 先查插件、再查静态） |
+
+接线点（全部在 `cmd/dshd`）：
+
+| 位置 | 做什么 | 不这么做会怎样 |
+|---|---|---|
+| `main.go` `loadModsWithPlugins` | `openPluginRuntime(home)`（一个进程只 open 一次 `<home>/plugins`）+ 追加 `pluginmod.Runtime(manager)`，加在 `Manifest.Apply` **之后** | 放进 `builtinModules` 会被 dsh.toml 的白名单静默丢掉 |
+| `main.go` `cmdRun` | 装配后 `syncPlugins` → 注入 `pluginmod.TableKey` → `hostToolRunner` | 模型看不见插件工具；或看得见但 runner 回 `unknown tool` |
+| `main.go` `buildSystemPrompt`/`projectTable` 的输入 | 同一个 `reg`（合成表） | 系统提示里的工具名与 tools 字段分叉 |
+| `main.go` `cmdTools` | 也 Sync + 合成表 | `dshd tools` 这份诊断与模型表分叉 |
+| `main.go` `cmdExec` | 同上 + `hostToolRunner` | 模型能调、人调不了（第二个实现） |
+| `serve_plugins.go` `runPluginsCLI` | `newPluginRuntime(manager)` + `defer Close` | `plugins enable` 只改状态位、不装载 |
+| `serve.go` | 同一管理器挂运行时（不 Sync） | HTTP enable 对坏包返回成功，用户到下一轮才发现工具不在表里 |
+
+**启动 Sync 的语义**（`syncPlugins`）：state.json 里 `enabled=true` 的包按当前版本装载，其余卸载；某个包装载失败时**逐条**打出插件 id 与原因，其他包照常装载，本轮照常跑（一个坏插件不该让整轮起不来）。
+
+**为什么执行入口要在宿主里另建一条流水线**：`modules/tools` 的 `toolrunner` 在 `Register` 里用**静态目录**构造（构造即固定），插件工具不在里面；因此 `hostToolRunner` 用同一个构造函数（`tools.NewPipeline`）、同一份 `toolsOptions`、同一条 bus，只把目录换成合成表——审批、沙箱、超时、外置、R3 兜底一层不少。`kernel` 里的 `toolrunner` 仍然会在装配时被注入检查（模块没接上要当场炸），只是不再作为模型的执行入口。
+
+## 6. 先红后绿与本次实证
 
 ### 红
 
@@ -131,4 +161,36 @@ go build ./...
 | `TestPluginCLIRealProcessLifecycle` | 每个 action 都是新的测试二进制子进程；完整生命周期、跨进程持久状态及 not_found 四字段 stderr/exit=1 |
 | `TestPluginContractSnapshotIsAdditive` | canonical 仍 25 method，扩展 8 method 无交集；UI implemented=false |
 
-所有包和 home 都是 `t.TempDir()` 下的私有测试夹具。payload 只是带版本文本的字节，不是可执行插件；测试没有访问真实用户 home、远端市场、GUI 或现有插件目录。
+所有包和 home 都是 `t.TempDir()` 下的私有测试夹具；测试没有访问真实用户 home、远端市场、GUI 或现有插件目录。
+
+装载器/运行时的用例（`internal/pluginmgr/loader_test.go`、`modules/tool/plugin/runtime_test.go`、`cmd/dshd/serve_plugin_loader_test.go`）用的是**真的 wasm 客人**（`internal/wasmhost/testdata/toolplugin.wasm`），不是"带版本号的字节"：它们断言的是编译、`_initialize`、ABI 导出、真实调用与卸载后回收。存储与事务类用例（install/update/restore/reconcile）仍然用非可执行 payload——那几层不编译 wasm，用真产物只会让失败信息变模糊。
+
+### HS-07W：接线本身的红与绿
+
+上一轮（HS-07）交付了运行时装载器，但接线说明把落点写成 `cmd/dshd/serve.go`。`serve.go` 没有 `builtinModules`/kernel 装配，真实工具表在 `cmd/dshd/main.go` 的 `run` 路径——于是"装载器写好了、模型永远看不见"。
+
+红（隔离基线，真实进程，非编译错误）：
+
+```text
+FAIL  cli-enable-really-loads  坏 wasm 的 enable 成功返回（说明只改了启用位、没有装载）EXIT=0
+FAIL  broken-stays-disabled    装载失败的包被标成 enabled=true（状态与运行时不一致）
+FAIL  model-table-sees-plugin  工具表里没有 echo/upper（插件工具对模型不可见）60 个工具
+FAIL  real-tool-call           EXIT=1 ... error="unknown tool \"echo\""
+SUMMARY OK=3 FAIL=4            EXIT=1
+```
+
+绿（同一份脚本，只换二进制）：
+
+```text
+PASS  cli-enable-really-loads  坏 wasm 的 enable 失败且报 load_failed EXIT=1
+PASS  broken-stays-disabled    装载失败后启用位保持 false
+PASS  model-table-sees-plugin  工具表里有 echo / upper
+PASS  real-tool-call           流水线把调用派发到 wasm 插件：echo:hs07w
+PASS  disable-not-callable     disable 之后 echo 调用失败 EXIT=1
+PASS  disable-not-visible      disable 之后工具表里没有 echo
+SUMMARY OK=7 FAIL=0            EXIT=0
+```
+
+真实模型轮（magpie `group/deepseek-v4.1-flash-1017`，`dshd run --policy allow`）：stderr 打出 `插件 acme.echo@1.0.0：已装载，工具 echo,upper`，模型自己发出 `echo {"text":"hs07w-real-ok"}`、拿到 `echo:hs07w-real-ok`，`stats: tool_calls=1`；同一条链的 `dshd exec --tool echo`（无模型）也返回 `"Text": "echo:hs07w"`。
+
+原始日志与命令见证据目录 `HS-07W/{red,green,real,logs}`；`-race` 覆盖见 `HS-07W/logs/probe-final-race.log` 与 `probe-race-stability.log`（探针 `zz_hs07w_wiring_test.go`：读表与 enable/disable 并发跑 4 读 × 6 切换；单跑与 `-count=2` 连跑均退出码 0、无 DATA RACE）。

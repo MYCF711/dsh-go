@@ -1,5 +1,10 @@
 # 官方 0.2.2-rc.1 base 97 项 → DSH-GO 宿主映射（HOST-PLUGIN-SYNC-022-MAP）
 
+> **T18RR（2026-11-08）**：97 插件状态与证据不变（T18R 已修 10 条 path:line）；插件机器核对 FAIL=0 UNVERIFIED=0。方法侧的 10 条 status+probe 由 docs/official-desktop-api-parity.md 的 T18RR 段与 `tmp/GO2-TEAM/T18RR/parity-summary.json` 承载。
+
+> **T18R 增量（2026-11-08）**：10 条 DEFERRED 插件证据已改为真实 `path:line`（原 grep 模式/`cmd/dshd/mcp.go:345/:325` 越界行号作废；`mcp-resources` 改指 `modules/tools/mcp.go:1057`）；97 项状态分布不变。机器核对见 `tmp/GO2-TEAM/T18R/plugins-check.log`（FAIL=0 UNVERIFIED=0）。
+
+> **T18 终审（2026-11-08）**：97 项与官方 `cordis.patch.yml` **同序全等**；当前状态 **IMPLEMENTED 51 / PARTIAL 28 / OFFICIAL_UNSUPPORTED 1 / DEFERRED 13 / DO_NOT_IMPLEMENT 4**。§五 的 “MISSING” 表是历史快照，不参与 DONE/IMPLEMENTED 判定；以 `docs/host-stable-gap-register.md` §2.3–2.5 与本页 §一/§二 及 `tmp/GO2-TEAM/T18/parity-summary.json` 为准。
 > 官方来源：`D:/DeepSeek Harness/Desktop-0.2.2-rc.1/resources/app.asar` → `dsh/node_modules/@deepseek-ai/dsh-base/cordis.patch.yml`。本次只读解包已逐 id 比对 `docs/official-plugins-0.2.2-rc.1.md`：两边均 97 项、集合与顺序全等（§八 原始输出）。
 > 代码基线：`af4a49a` + 当前共享工作树。**只读审计**，未改产品/代码/PLAN/LEAD/UIPLAN。TUI 不归宿主，W167/W170 等 TUI 红不在本表。
 > 判定口径：`DONE`＝宿主有真实 Go 实现且证据可复跑；`PARTIAL`＝有实现但缺子能力或形态不同（必须写差什么）；`MISSING`＝宿主没有（列实试 grep）；`N/A`＝纯 UI/非宿主。**只认宿主**（`cmd/dshd`、`internal/**`、`modules/**`、`codecs/**`），客户端 `cmd/dshtui` 与 `../dsh-ui` 不计 DONE。
