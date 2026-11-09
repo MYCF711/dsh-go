@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/session"
 	"dshgo/internal/transport"
 )
 
@@ -91,13 +92,19 @@ func (s *sessionSource) contextUsageFromV4(lg *v4.Log) (transport.ContextUsageVi
 			}
 		}
 	}
-	// usage 之后又出现会改变模型可见 surface 的事件时，旧 totalTokens 已不是
-	// 查询时的 current context。没有新计量就 fail-loud，不能返回陈旧精确值。
-	for _, ev := range lg.Events[lastAssistant+1:] {
-		switch ev.Type {
-		case "system/message", "developer/message", "user/message", "tool/result", "compaction/summary", "compaction/prune":
-			return transport.ContextUsageView{}, fmt.Errorf("context.usage 最近 assistant usage 后 surface 已被 %s 改变，需要新计量", ev.Type)
-		}
+	// usage 之后又出现会改变模型可见 surface 的事件时，`used`（= 最近一次
+	// totalTokens）已经**不是**"现在的上下文占用"。GO.6 之前这里 fail-loud；
+	// 现在不再报错，理由是官方语义（dsh-token-meter/lib/types/usage-projection.js）：
+	// pressureTokens 本来就**只描述最近一次请求**（"holds still while a turn
+	// streams"），而"下一次请求会占多少"由 projectedTokens 回答——两者一起才
+	// 构成官方口径。继续报错会让 projectedTokens 在它唯一有用的那个状态下
+	// （用户刚敲了新消息、工具结果刚灌进来）永远观测不到。
+	//
+	// 所以：`used` 保持"最近一次实测 totalTokens"（含输出，向后兼容，见
+	// RESULT.md 的口径表），pressure/projected/四桶由下面的投影给出。
+	projection, err := session.ProjectContext(lg.Events)
+	if err != nil {
+		return transport.ContextUsageView{}, fmt.Errorf("context.usage 派生压力投影失败: %w", err)
 	}
 
 	result := transport.ContextUsageView{
@@ -105,6 +112,18 @@ func (s *sessionSource) contextUsageFromV4(lg *v4.Log) (transport.ContextUsageVi
 		// 没有真实 breakdown 时只给一个聚合类；这与 summary 一样诚实，
 		// 但 full 不会把 summary 伪造成 sections/files/skills/tools。
 		Categories: []transport.ContextCategory{{Name: "context", Tokens: used, Kind: "used"}},
+	}
+	if projection.Measured {
+		// 三组官方口径（context.measurement.*）。没有实测锚点时三个字段整体省略
+		// ——"不知道"不是"实测 0"。
+		result.PressureTokens = projection.PressureTokens
+		result.ProjectedTokens = projection.ProjectedTokens
+		result.UsageBuckets = &transport.ContextUsageBuckets{
+			UncachedInputTokens: projection.Buckets.UncachedInputTokens,
+			OutputTokens:        projection.Buckets.OutputTokens,
+			CacheReadTokens:     projection.Buckets.CacheReadTokens,
+			CacheWriteTokens:    projection.Buckets.CacheWriteTokens,
+		}
 	}
 	var requestContext json.RawMessage
 	for _, ev := range lg.Events[:lastAssistant] {
@@ -139,6 +158,35 @@ func validateContextDetails(view *transport.ContextUsageView) error {
 	if view.Max != 0 {
 		if _, err := contextSafeInt(int64(view.Max), "context.usage.max", true); err != nil {
 			return err
+		}
+	}
+	// GO.6 三组官方口径：与 transport 层同一条取值域判据（非负安全整数）。
+	// 两层都校验是有意的——transport 是 wire 边界，这里是**派生**边界
+	// （直接调 ContextUsage 的调用方不经过 HTTP，也必须拿到同样的保证）。
+	for _, field := range []struct {
+		name  string
+		value int
+	}{
+		{"pressureTokens", view.PressureTokens},
+		{"projectedTokens", view.ProjectedTokens},
+	} {
+		if _, err := contextSafeInt(int64(field.value), "context.usage."+field.name, false); err != nil {
+			return err
+		}
+	}
+	if b := view.UsageBuckets; b != nil {
+		for _, field := range []struct {
+			name  string
+			value int
+		}{
+			{"uncachedInputTokens", b.UncachedInputTokens},
+			{"outputTokens", b.OutputTokens},
+			{"cacheReadTokens", b.CacheReadTokens},
+			{"cacheWriteTokens", b.CacheWriteTokens},
+		} {
+			if _, err := contextSafeInt(int64(field.value), "context.usage.usageBuckets."+field.name, false); err != nil {
+				return err
+			}
 		}
 	}
 	if view.Categories == nil {

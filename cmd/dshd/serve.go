@@ -382,8 +382,15 @@ func cmdServe(args []string) error {
 		toolsMode: toolsMode, jobActions: jobActions,
 		runOpts:        serveRunOpts,
 		sandboxPresets: sandboxPresets, sandboxStore: sandboxStore}
+	// 官方每请求采样面：与 run/acp 是同一份环境变量解析（env_llm.go）。
+	// 配置写错在 serve 启动时就 fail-loud，而不是让每个 turn 各自失败一次。
+	sampling, err := samplingFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
 	mr := &modelRunner{home: *home, journals: journals, model: *serveModel, reasoning: *serveReasoning, recordEffort: true,
-		base: envOr("DSHD_LLM_BASE", defaultLLMBase), catalog: modelCatalog}
+		base: envOr("DSHD_LLM_BASE", defaultLLMBase), catalog: modelCatalog,
+		temperature: sampling.Temperature, stop: sampling.Stop}
 
 	// 审批的父进程半边（H13）：整进程一个 broker，每轮换 stdin。
 	// emit 用 lr 的方法，所以帧一样进 journal、一样可重放。

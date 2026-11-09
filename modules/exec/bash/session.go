@@ -78,9 +78,11 @@ type session struct {
 	waitDone  chan struct{}
 	processRC int
 	closeOnce sync.Once
+	// grace 是停止时的宽限预算（官方 `bash.graceMs`，默认 3000ms）。
+	grace time.Duration
 }
 
-func startSession(cwd string) (*session, error) {
+func startSession(cwd string, grace time.Duration) (*session, error) {
 	bash, err := findBash()
 	if err != nil {
 		return nil, err
@@ -117,7 +119,7 @@ func startSession(cwd string) (*session, error) {
 		_ = pr.Close()
 		return nil, fmt.Errorf("建立 bash 进程树归属失败: %w", err)
 	}
-	s := &session{cmd: c, stdin: stdin, out: pr, cwd: cwd, control: control,
+	s := &session{cmd: c, stdin: stdin, out: pr, cwd: cwd, control: control, grace: grace,
 		waitDone: make(chan struct{}), processRC: -1}
 	go s.readLoop()
 	go s.waitLoop()
@@ -184,18 +186,26 @@ func (s *session) busy() bool {
 	return s.task != nil && !s.task.finished()
 }
 
-// stop 只终止经过 processControl 身份复核的树；不关闭 out，让 EOF 前排空输出。
-func (s *session) stop(t *task) error {
+// stop 走「先礼后兵」：投递宽限终止请求 → 等 grace → 仍存活才强杀，
+// 并返回这次停止的结局（宽限内退出 / 强杀）。
+// 只终止经过 processControl 身份复核的树；不关闭 out，让 EOF 前排空输出。
+func (s *session) stop(t *task) (StopOutcome, error) {
 	if t == nil || t.finished() {
-		return spi.ErrJobFinished
+		return StopOutcome{}, spi.ErrJobFinished
 	}
-	if err := s.control.stop(); err != nil {
-		return err
+	var exited <-chan struct{} = s.waitDone
+	if s.pty != nil {
+		// PTY 会话没有管道式的 waitDone：退出通知来自伪控制台的 done 通道。
+		exited = s.pty.Done()
+	}
+	out, err := s.control.stopWithGrace(s.grace, exited)
+	if err != nil {
+		return out, err
 	}
 	if s.stdin != nil {
 		_ = s.stdin.Close()
 	}
-	return nil
+	return out, nil
 }
 
 func (s *session) close() {

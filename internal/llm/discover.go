@@ -32,6 +32,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -103,7 +104,12 @@ type discoverEntry struct {
 //	http://127.0.0.1:3425           → http://127.0.0.1:3425/models
 //
 // 凭据是**一次性**的（官方说明："the harness never stores it"）：它只出现在
-// 这一次请求头里，不进任何缓存、也不进错误消息（`RedactCredential` 兜底）。
+// 这一次请求头里，不进错误消息（`RedactCredential` 兜底）；模型列表的 TTL 缓存
+// （官方 modelsMaxAgeMs，见 discover_cache.go）只用它的 sha256 前缀区分"同一端点
+// 的不同账号"，原文不进任何缓存。
+//
+// 缓存本身是**按 (端点, 凭据) 隔离**的：一个 token 看见的模型不会被另一个 token
+// 复用；命中时一次网络请求都不发。
 func (c *Client) DiscoverModels(ctx context.Context) ([]DiscoveredModel, error) {
 	if c == nil {
 		return nil, fmt.Errorf("模型发现需要一条 client（nil）")
@@ -111,6 +117,15 @@ func (c *Client) DiscoverModels(ctx context.Context) ([]DiscoveredModel, error) 
 	endpoint, err := discoverEndpoint(c.BaseURL)
 	if err != nil {
 		return nil, err
+	}
+	// 官方 modelsMaxAgeMs：命中缓存就不发网络（默认 600000ms，0 = 不缓存）。
+	maxAge, err := modelsMaxAgeFromEnv(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	cacheKey := discoverCacheKey(endpoint, c.APIKey)
+	if cached, ok := cachedDiscoveredModels(cacheKey, time.Now()); ok {
+		return cached, nil
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, discoverTimeout)
@@ -173,6 +188,7 @@ func (c *Client) DiscoverModels(ctx context.Context) ([]DiscoveredModel, error) 
 			InputModalities: normalizeInputModalities(entry.InputModalities, entry.Modalities, architectureInputModalities(entry)),
 		})
 	}
+	rememberDiscoveredModels(cacheKey, out, maxAge, time.Now())
 	return out, nil
 }
 

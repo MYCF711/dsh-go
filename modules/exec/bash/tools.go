@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +14,9 @@ import (
 	"dshgo/internal/sandbox"
 	"dshgo/internal/spi"
 )
+
+// envGraceMS 是停止宽限的宿主环境变量（官方 `bash.graceMs` 的接线）。
+const envGraceMS = "DSHD_BASH_GRACE_MS"
 
 // Options 是执行层的可调参数。
 type Options struct {
@@ -21,6 +26,11 @@ type Options struct {
 	// 环境也没有 = 策略层未接线，工具保持旧行为，但任何 sandbox_permissions
 	// 请求都会 fail-loud，不会静默当作放行。
 	SandboxGate *sandbox.Gate
+	// GraceBudget 是停止时的宽限预算（官方 `bash.graceMs`）；<=0 时读
+	// DSHD_BASH_GRACE_MS，再回落 3000ms。
+	GraceBudget time.Duration
+	// Logf 记录停止结局（宽限内退出 / 强杀）；nil 不输出。
+	Logf func(format string, args ...any)
 }
 
 func (o Options) idle() time.Duration {
@@ -28,6 +38,20 @@ func (o Options) idle() time.Duration {
 		return o.IdleBudget
 	}
 	return 10 * time.Minute
+}
+
+// grace 解析停止宽限：显式配置 > DSHD_BASH_GRACE_MS > 官方默认 3000ms。
+// 非法/非正值回落默认——宽限写坏了不该把停止变成"永远不强杀"。
+func (o Options) grace() time.Duration {
+	if o.GraceBudget > 0 {
+		return o.GraceBudget
+	}
+	if raw := strings.TrimSpace(os.Getenv(envGraceMS)); raw != "" {
+		if ms, err := strconv.Atoi(raw); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return DefaultGrace
 }
 
 func registerTools(s *kernel.Scope, svc *Service, opts Options) error {
@@ -395,11 +419,38 @@ func (t *jobKillTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result
 	if err := t.svc.Kill(a.JobID); err != nil {
 		return spi.Result{Hint: "用 job_list 确认 id；已结束的任务不需要终止"}, err
 	}
+	summary := "已终止 " + a.JobID
+	data := map[string]any{"job_id": a.JobID, "killed": true}
+	// 结局必须能区分：宽限内自行退出（保留命令自己的收尾）vs 宽限用完强杀。
+	// 这既是日志事件，也是模型能看见的事实——"杀了"和"它自己走了"下一步不同。
+	if out, ok := t.svc.StopOutcome(a.JobID); ok {
+		data["stop"] = stopOutcomeData{
+			Delivery:  out.Delivery,
+			GraceMS:   out.Grace.Milliseconds(),
+			WaitedMS:  out.Waited.Milliseconds(),
+			Graceful:  out.Graceful,
+			Escalated: out.Escalated,
+		}
+		if out.Graceful {
+			summary = fmt.Sprintf("已终止 %s（宽限内自行退出，等待 %dms）", a.JobID, out.Waited.Milliseconds())
+		} else if out.Escalated {
+			summary = fmt.Sprintf("已强杀 %s（宽限 %dms 用完仍存活）", a.JobID, out.Grace.Milliseconds())
+		}
+	}
 	return spi.Result{
-		Summary: "已终止 " + a.JobID,
-		Data:    map[string]any{"job_id": a.JobID, "killed": true},
+		Summary: summary,
+		Data:    data,
 		Hint:    "已停止该任务所属的进程树；Windows 使用 Job Object，Unix 使用独立进程组，停止前已核对根进程身份",
 	}, nil
+}
+
+// stopOutcomeData 是 job_kill 结果里「这次停止怎么结束的」的结构化形状。
+type stopOutcomeData struct {
+	Delivery  string `json:"delivery"`
+	GraceMS   int64  `json:"grace_ms"`
+	WaitedMS  int64  `json:"waited_ms"`
+	Graceful  bool   `json:"graceful"`
+	Escalated bool   `json:"escalated"`
 }
 
 // ---------- job_list ----------

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -108,6 +109,13 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 		req.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
 
+	// 流空闲看门狗的上限在这里解析一次：非法配置要 fail-loud，不能静默回落
+	// （否则"我设了 10 分钟"实际跑的是默认 5 分钟）。
+	idleTimeout, err := streamIdleTimeoutFromEnv(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+
 	adapter, err := c.adapter()
 	if err != nil {
 		return nil, err
@@ -176,7 +184,7 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 				accepted = true
 				c.reportExtensionError(RunExtensionAccept(prepared))
 			}
-			snap, err := consumeStream(resp, countingOnEvent(onEvent, &emitted))
+			snap, err := consumeStream(resp, countingOnEvent(onEvent, &emitted), idleTimeout, c.BaseURL)
 			if err == nil {
 				return snap, nil
 			}
@@ -264,8 +272,16 @@ func (c *Client) post(ctx context.Context, body []byte) (*http.Response, error) 
 }
 
 // consumeStream 读 200 的 SSE 响应并拼成完整响应。
-func consumeStream(resp *http.Response, onEvent func(Event) error) (*Response, error) {
+//
+// idleTimeout 是流空闲上限（官方 streamIdleTimeoutMs）：整整这么长时间**没有读到
+// 任何数据**就判失败并关掉响应体。base 只用于错误里的定位信息。
+func consumeStream(resp *http.Response, onEvent func(Event) error, idleTimeout time.Duration, base string) (*Response, error) {
 	defer resp.Body.Close()
+
+	// 看门狗在 readSSE 之前挂上：连"响应头回来了但正文一格都没有"这种最典型的
+	// 半开连接也覆盖得到。
+	watchdog := newIdleWatchdog(idleTimeout, base, func() { _ = resp.Body.Close() })
+	defer watchdog.stop()
 
 	acc := newAccumulator(onEvent)
 	// 整条流必须有一个「完结」的凭据：finish_reason 或 `[DONE]`。
@@ -274,7 +290,7 @@ func consumeStream(resp *http.Response, onEvent func(Event) error) (*Response, e
 	// readSSE 返回 nil。于是半句话会被当成完整回答记进会话，turn 标 completed、
 	// 退出码 0——1 字节错误都没有。真机踩过这种形状（上游 502 后网关直接关流）。
 	sawDone := false
-	if err := readSSE(resp.Body, func(payload []byte) error {
+	if err := readSSE(&idleReader{inner: resp.Body, watch: watchdog}, func(payload []byte) error {
 		if bytes.Equal(payload, []byte("[DONE]")) {
 			sawDone = true
 			return nil
@@ -285,6 +301,12 @@ func consumeStream(resp *http.Response, onEvent func(Event) error) (*Response, e
 		}
 		return acc.feed(chunk)
 	}); err != nil {
+		// 关流是看门狗干的：交出去的是**结构化** `*StreamIdleError`，不是
+		// "use of closed network connection" 这种裸读错误（后者既不说明原因，
+		// 也会被上层当成一次需要重放的整体失败）。
+		if idleErr := watchdog.err(); idleErr != nil {
+			return acc.snapshot(), idleErr
+		}
 		return acc.snapshot(), err
 	}
 	snap := acc.snapshot()

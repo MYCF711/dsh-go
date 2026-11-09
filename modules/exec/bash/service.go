@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -31,6 +32,10 @@ type Service struct {
 	// terms 是**长连接终端**（`terminal.open` 起的那些），与一次性 job 分开。
 	terms map[string]*Terminal
 	tseq  int
+	// grace 是停止时的宽限预算（官方 `bash.graceMs`）；0 表示用默认 3000ms。
+	grace time.Duration
+	// logf 记录停止结局（宽限内退出 / 强杀）；nil 不输出。
+	logf func(format string, args ...any)
 }
 
 func newOwnerID() string {
@@ -86,7 +91,7 @@ func (s *Service) acquireSession() (*session, error) {
 	}
 	sess := s.sess
 	if sess == nil || sess.busy() || sess.isDead() {
-		next, err := startSession(s.cwd)
+		next, err := startSession(s.cwd, s.grace)
 		if err != nil {
 			return nil, err
 		}
@@ -253,6 +258,9 @@ func (s *Service) OutputPage(id string, cursor int64, limit int, wait time.Durat
 }
 
 // Stop 实现 spi.JobController：只停止本实例 id 且 root 创建代次/映像仍匹配的进程树。
+//
+// 停止是「先请求退出 → 等 graceMs → 仍存活才强杀」的升级链；结局记在任务上，
+// 用 StopOutcome 取——「宽限内退出」和「强杀」不能糊成同一个 killed。
 func (s *Service) Stop(id string) error {
 	j, err := s.job(id)
 	if err != nil {
@@ -261,10 +269,41 @@ func (s *Service) Stop(id string) error {
 	if j.task.finished() {
 		return fmt.Errorf("%w: 任务 %s（退出码 %d）", spi.ErrJobFinished, id, j.task.resultCode())
 	}
-	if err := j.sess.stop(j.task); err != nil {
+	out, err := j.sess.stop(j.task)
+	if err != nil {
 		return fmt.Errorf("停止任务 %s: %w", id, err)
 	}
+	s.logStop(id, out)
 	return nil
+}
+
+// logStop 把停止结局写成一条事件：**「宽限内自行退出」与「强杀」必须能区分**，
+// 因为两者的下一步完全不同（前者命令已经收尾，后者是被打断）。
+// 生产路径落 slog（dshd 在 diag.go 装了写文件的默认 handler）；
+// 测试/嵌入方可以用 Options.Logf 收走。
+func (s *Service) logStop(id string, out StopOutcome) {
+	if s.logf != nil {
+		s.logf("bash: 停止任务 %s：%s", id, out)
+		return
+	}
+	slog.Info("bash 停止任务",
+		"job", id,
+		"outcome", out.String(),
+		"delivery", out.Delivery,
+		"grace_ms", out.Grace.Milliseconds(),
+		"waited_ms", out.Waited.Milliseconds(),
+		"graceful", out.Graceful,
+		"escalated", out.Escalated,
+	)
+}
+
+// StopOutcome 返回某次停止的结局（宽限内退出 / 强杀）；没停过 ok=false。
+func (s *Service) StopOutcome(id string) (StopOutcome, bool) {
+	j, err := s.job(id)
+	if err != nil || j.sess == nil || j.sess.control == nil {
+		return StopOutcome{}, false
+	}
+	return j.sess.control.outcome()
 }
 
 // Kill 保留旧 spi.Job.Kill 签名；不再是 root Process.Kill，而是同一安全树 Stop。
@@ -371,6 +410,8 @@ func Module(cwd string, opts Options) kernel.Module {
 		Register: func(s *kernel.Scope) error {
 			svc := NewService(cwd)
 			svc.scopeName = s.Name()
+			svc.grace = opts.grace()
+			svc.logf = opts.Logf
 			s.Effect(svc.Close)
 			if err := kernel.Provide(s, spi.ExecKey, spi.Exec(svc)); err != nil {
 				return err

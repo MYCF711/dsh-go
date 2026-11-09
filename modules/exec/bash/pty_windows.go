@@ -20,6 +20,18 @@ type ptyProcessTree struct {
 	sess *terminal.Session
 }
 
+// graceful 往伪控制台写一个 ^C：官方 Windows 终端同样把 SIGINT 做成
+// 「\x03 Ctrl-C 输入写入」，由控制台主机转成 CTRL_C 事件。
+func (t *ptyProcessTree) graceful() (string, error) {
+	if t.sess == nil {
+		return "", fmt.Errorf("%w: PTY 会话为空", spi.ErrProcessTreeUnsafe)
+	}
+	if err := t.sess.Input("\x03"); err != nil {
+		return "", fmt.Errorf("向 PTY 写 ^C 失败: %w", err)
+	}
+	return DeliveryCtrlCInput, nil
+}
+
 func (t *ptyProcessTree) terminate() error { return t.sess.Kill() }
 
 func (t *ptyProcessTree) release() error { return t.sess.Close() }

@@ -1,5 +1,10 @@
 package llm
 
+import (
+	"errors"
+	"fmt"
+)
+
 // 0.2.2 对未声明容量的自定义模型使用十进制默认值，不是二进制 MiB/KiB。
 const (
 	DefaultCustomContextWindow = 1_000_000
@@ -66,6 +71,72 @@ func builtInModelCapacity(modelID string) (ModelCapacity, bool) {
 		}
 	}
 	return ModelCapacity{}, false
+}
+
+// ErrorCodeInvalidModelContext 是官方错误码：声明了 context 但 contextWindow
+// 不是正整数（`tmp/GO3-PARAMS/_official/dsh-llm/lib/types/index.js:629`：
+// `context !== undefined && (!Number.isInteger(...) || contextWindow <= 0)` →
+// `INVALID_MODEL_CONTEXT`）。
+const ErrorCodeInvalidModelContext = "INVALID_MODEL_CONTEXT"
+
+// InvalidModelContextError 是"容量声明写错了"的结构化错误。
+//
+// 为什么要一个独立类型而不是一句 fmt.Errorf：客户端要能区分"你写的窗口不合法"
+// （改参数就能过，不可重试）和"模型调用失败"（重发可能就好）。官方给的是机读码，
+// 这里保留同一个码。
+type InvalidModelContextError struct {
+	ModelID string
+	// Field 是出错的声明字段（当前只有 contextWindow；maxOutput 走
+	// 官方 INVALID_MODEL_MAX_TOKENS，不在本次范围内）。
+	Field string
+	Value int
+}
+
+func (e *InvalidModelContextError) Error() string {
+	model := e.ModelID
+	if model == "" {
+		model = "（未指定模型）"
+	}
+	return fmt.Sprintf("模型 %s 声明的 %s=%d 不合法：官方要求正整数（INVALID_MODEL_CONTEXT）；"+
+		"宿主不会静默回退默认容量——把窗口改成真实值，或不声明（0 = 按模型容量解析）",
+		model, e.Field, e.Value)
+}
+
+// Code 返回官方机读码。
+func (e *InvalidModelContextError) Code() string { return ErrorCodeInvalidModelContext }
+
+// ModelContextErrorCode 从错误链里取官方错误码；不是这个错误时 ok=false。
+func ModelContextErrorCode(err error) (string, bool) {
+	var invalid *InvalidModelContextError
+	if errors.As(err, &invalid) {
+		return invalid.Code(), true
+	}
+	return "", false
+}
+
+// ValidateDeclaredContextWindow 校验一份**显式声明**的上下文窗口。
+//
+// 只拒负值：宿主声明面是 int（`--context-window` / `ModelCapacity`），零值在本仓
+// 的契约里是"未声明"——`--context-window 0` 的帮助文本、`docs/model-capacity.md` §1、
+// 以及 `host_run_options.go` 每次给子进程透传的 `--context-window 0` 都依赖这个
+// 语义。官方 `undefined` 与"声明 0"的区分在目录面已经成立：目录里写
+// `contextWindow: 0` 在读盘时就被拒（model_catalog.go 的正整数校验），不会静默
+// 回退。所以这里要补的是**负值**这条真缺口：旧实现把它当成"未声明"，用户看不到
+// 自己写错了（docs/parameter-register.md #19）。
+func ValidateDeclaredContextWindow(modelID string, contextWindow int) error {
+	if contextWindow < 0 {
+		return &InvalidModelContextError{ModelID: modelID, Field: "contextWindow", Value: contextWindow}
+	}
+	return nil
+}
+
+// ResolveModelCapacityChecked 是"先校验、再解析"的唯一入口：解析前把非法声明
+// 打回去，绝不静默回退到内置/自定义默认值。
+func ResolveModelCapacityChecked(modelID string, declared ModelCapacity) (ModelCapacity, error) {
+	if err := ValidateDeclaredContextWindow(modelID, declared.ContextWindow); err != nil {
+		return ModelCapacity{}, err
+	}
+	return ResolveModelCapacity(modelID, declared), nil
 }
 
 // ResolveModelCapacity 是宿主唯一的模型容量解析点。

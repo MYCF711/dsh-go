@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"dshgo/codecs/v4"
@@ -850,25 +849,11 @@ func cmdRun(argv []string) (retErr error) {
 	// 结果就是：编排跑了 5 次 grep，回去看 session.history 却什么都没有。
 	// 这里补一条**只给 Nested** 的写入点——顶层调用仍由循环自己写，
 	// 不加这个判断就会把同一次调用记两遍（v4 是单写者模型）。
-	var nestedN atomic.Int64
-	kernel.OnTyped[*spi.Call](root.Bus(), root, spi.EventToolResult, func(c *spi.Call) error {
-		if c == nil || !c.Nested {
-			return nil
-		}
-		id := fmt.Sprintf("wf-%d", nestedN.Add(1))
-		if err := logw.Append("tool/call", session.ToolCallEvent(1, 0, id, c.Name, string(c.Args))); err != nil {
-			return nil // 记账失败不该打断真正在干活的调用
-		}
-		var blocks []spi.Block
-		switch {
-		case c.Result.Text != "":
-			blocks = []spi.Block{{Type: "text", Text: c.Result.Text}}
-		case c.Result.Summary != "":
-			blocks = []spi.Block{{Type: "text", Text: c.Result.Summary}}
-		}
-		return logw.Append("tool/result",
-			session.ToolResultEvent(1, 0, id, blocks, c.Err != nil, "", nil))
-	})
+	//
+	// 实现在 nested_v4.go：并行工具调用之后，两个调用可能各自带着子调用同时
+	// 走到这里，而 v4 是单写者模型（seq 分配与写帧都没有锁）——那里用一把锁
+	// 把"一次调用的 call+result"成对写完。
+	kernel.OnTyped[*spi.Call](root.Bus(), root, spi.EventToolResult, newNestedV4(logw).record)
 
 	if err := logw.Append("system/message", session.SystemMessageData(1, 1, sys)); err != nil {
 		return err
@@ -970,6 +955,18 @@ func cmdRun(argv []string) (retErr error) {
 	}
 
 	chat := llm.NewWithAPI(*base, os.Getenv("DSHD_LLM_KEY"), os.Getenv("DSHD_LLM_API"))
+	// 官方每请求采样面（llm.temperature / llm.stop）。解析放在建循环之前、发请求
+	// 之前：配置写错必须 fail-closed（一个请求都不发），而不是静默用默认值跑一轮。
+	sampling, err := samplingFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	// 官方 llm.resolveModelInfo.contextWindowValidation：声明了就必须是正整数，
+	// 否则 INVALID_MODEL_CONTEXT。`--context-window 0` 是宿主既有的"按模型容量
+	// 解析"（docs/model-capacity.md §1），负值只能是写错了。
+	if err := llm.ValidateDeclaredContextWindow(*model, *ctxWindow); err != nil {
+		return err
+	}
 	// meter 跨步复用：每步都用服务端给的 totalTokens 校准一次估算。
 	// 以前每步新建一个空 meter，等于永远按启发式比例猜。
 	meter := &session.Meter{}
@@ -981,6 +978,7 @@ func cmdRun(argv []string) (retErr error) {
 	subp.Bind(&subRunner{
 		chat: chat, tools: table, runner: loopRunner,
 		model: *model, maxSteps: defaultTurnMaxSteps, timeout: 5 * time.Minute,
+		temperature: sampling.Temperature, stop: sampling.Stop,
 		// 可续问子会话的落点。空着会让 Continuable 明确失败——所以必须给。
 		home: *home,
 	})
@@ -1009,7 +1007,11 @@ func cmdRun(argv []string) (retErr error) {
 		CompactTools: false,
 		// 只有显式设了才要推理：某些网关不认这个参数，默认不带更安全。
 		Reasoning: *reasoningEffort,
-		MaxSteps:  *maxSteps,
+		// 官方每请求采样面（llm.temperature / llm.stop）：只按环境变量显式配置，
+		// 不设时是 nil/空切片 = 报文里一个键都不出现（见 env_llm.go）。
+		Temperature: sampling.Temperature,
+		Stop:        sampling.Stop,
+		MaxSteps:    *maxSteps,
 		Emit: func(e agent.Event) error {
 			switch e.Kind {
 			case agent.EventStepStart:
@@ -1642,7 +1644,8 @@ func runCompactor(chat agent.Chat, logw *session.Log, budget int, model string, 
 		if !ok {
 			return nil, nil // 真没得压
 		}
-		text, err := compact.Summarize(ctx, chat, model, items)
+		// 摘要失败按官方 `compactionRetries`（DSHD_COMPACT_RETRIES，默认 1）重试。
+		text, err := compact.SummarizeWithRetry(ctx, chat, model, items, compact.RetryPolicyFromEnv(os.Getenv))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "自动压缩失败（不影响本轮）：%v\n", err)
 			return nil, nil

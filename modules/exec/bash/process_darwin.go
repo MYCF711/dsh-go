@@ -16,6 +16,17 @@ import (
 
 type unixProcessGroupTree struct{ pgid int }
 
+// graceful 投递 SIGTERM 到整个进程组（与 Linux 同一套先礼后兵）。
+func (t *unixProcessGroupTree) graceful() (string, error) {
+	if t.pgid <= 0 {
+		return "", fmt.Errorf("没有进程组 id，无法投递宽限终止请求")
+	}
+	if err := syscall.Kill(-t.pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return "", fmt.Errorf("投递 SIGTERM 到进程组 %d 失败: %w", t.pgid, err)
+	}
+	return DeliverySIGTERM, nil
+}
+
 func (t *unixProcessGroupTree) terminate() error {
 	if t.pgid <= 0 {
 		return nil

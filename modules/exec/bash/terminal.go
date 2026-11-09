@@ -42,7 +42,7 @@ func (s *Service) OpenTerminal(cwd string) (*Terminal, error) {
 		cwd = base
 	}
 
-	sess, err := startSession(cwd)
+	sess, err := startSession(cwd, s.grace)
 	if err != nil {
 		return nil, err
 	}

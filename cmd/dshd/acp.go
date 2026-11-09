@@ -54,6 +54,9 @@ type acpRunner struct {
 	steps     int
 	// reasoning 是推理强度（空 = 不要），和 run/serve 用同一个开关。
 	reasoning string
+	// sampling 是官方每请求采样面（temperature / stop）的进程级配置；
+	// 零值 = 两项都不发，ACP 报文与以前逐字节一致。
+	sampling llmSampling
 
 	// ask 是审批闸门：返回 false 表示用户拒绝这次工具调用。
 	ask func(ctx context.Context, sessionID, tool string, args string) (bool, error)
@@ -71,6 +74,12 @@ type acpRunner struct {
 	// 踩过：按 8 条留，在一条工具输出就 2,300 token 的会话里顶到 8k 以上，
 	// 压了 10 次上下文还是线性涨。
 	keepRecent int
+	// retry 是压缩重试预算（官方 `compactionRetries` / `maxOverflowRetries`）。
+	// 出厂值 1/1，由 `DSHD_COMPACT_RETRIES` / `DSHD_COMPACT_OVERFLOW_RETRIES` 覆盖。
+	retry compact.RetryPolicy
+	// compactChat 是摘要用的模型入口；nil = 生产路径（llm.New）。
+	// 只有测试会替换它——不然"摘要失败重试"这条根本没法在没有网关的环境里验。
+	compactChat compact.Chat
 	// approvals 记住"这个会话里这个工具已经批准过了"。
 	approvals *approval.Memory
 	// approvalsStore 非 nil 时，授权跨进程保留（需要 --remember-approvals）。
@@ -109,6 +118,7 @@ func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home str
 		reg: reg, runner: runner, base: base, model: model, home: home, steps: steps,
 		logs: map[string]*session.Log{}, turns: map[string]int{}, hist: map[string][]llm.Message{},
 		used: map[string]int{}, meter: map[string]*session.Meter{}, keepRecent: defaultACPKeepRecent,
+		retry:     compact.RetryPolicyFromEnv(os.Getenv),
 		approvals: approval.New(), sessionModes: map[string]string{}, modeID: modes.DefaultID,
 		sandboxSessions: map[string]sandbox.Mode{}, additionalDirs: map[string][]string{},
 	}
@@ -457,10 +467,14 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		Model:     r.model,
 		Capacity:  r.capacity,
 		Reasoning: r.reasoning,
-		System:    r.system,
-		SessionID: sessionID,
-		MaxSteps:  r.steps,
-		Emit:      sink,
+		// 官方每请求采样面（llm.temperature / llm.stop）：进程级环境变量配置，
+		// 不设就是 nil/空切片 = 报文里不出现（与 run 同一份解析，见 env_llm.go）。
+		Temperature: r.sampling.Temperature,
+		Stop:        r.sampling.Stop,
+		System:      r.system,
+		SessionID:   sessionID,
+		MaxSteps:    r.steps,
+		Emit:        sink,
 		// 官方 0.2.2 #78 `agent/pre-step`：每一步模型请求之前先让请求前缀耐久。
 		// ACP 的 v4 不落 step/start，所以每一步的锚点就是该步请求前的事件数；
 		// 第一步与 prompt 侧车同锚点（幂等命中）。
@@ -476,7 +490,35 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	hist := r.hist[sessionID]
 	r.mu.Unlock()
 
+	// GO.6 官方 `context.compaction.maxOverflowRetries`（默认 1）：
+	// 确认上下文溢出后，**压缩并重试这一轮**，而不是把错误直接甩给用户。
+	//
+	// 只在"这一轮还没往日志里落任何事件"时重放：落了 assistant/message 再重跑，
+	// 同一个 step 会被记两遍，读回来就是重复历史。startSeq 是这条判据的锚点
+	// （user/message 已经在下面之前写好了，所以它是"模型这一轮产出"的水位）。
+	startSeq := logw.Seq()
 	next, err := loop.Run(ctx, turn, append(hist, llm.Message{Role: "user", Content: text}))
+	for attempt := 0; err != nil && attempt < r.retry.OverflowRetries && compact.IsContextOverflow(err); attempt++ {
+		if logw.Seq() != startSeq {
+			fmt.Fprintf(os.Stderr, "上下文溢出，但这一轮已经落了事件（seq %d→%d）：不重放，避免重复历史\n",
+				startSeq, logw.Seq())
+			break
+		}
+		fmt.Fprintf(os.Stderr, "上下文溢出：压缩后重试这一轮（第 %d 次）\n", attempt+1)
+		if cerr := r.forceCompact(ctx, sessionID); cerr != nil {
+			fmt.Fprintf(os.Stderr, "溢出后压缩失败（不再重试）：%v\n", cerr)
+			break
+		}
+		after, rerr := v4.ReadFile(logw.Path)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "溢出后重读会话失败（不再重试）：%v\n", rerr)
+			break
+		}
+		// 重放用的历史必须从**压缩后**的日志派生：user/message 已经在里面了，
+		// 再 append 一次就会把它算两遍。
+		hist = session.History(after)
+		next, err = loop.Run(ctx, turn, hist)
+	}
 	r.mu.Lock()
 	r.hist[sessionID] = next
 	r.mu.Unlock()
@@ -898,6 +940,16 @@ func cmdACP(argv []string) error {
 	if err := checkHome(*home); err != nil {
 		return err
 	}
+	// 采样面与容量声明的配置错误都在**发任何模型请求之前**报出来：
+	// --context-window 负值是写错了（0 = 按模型容量解析，见 docs/model-capacity.md §1），
+	// 环境变量写错同样 fail-loud（见 env_llm.go）。
+	sampling, err := samplingFromEnv(os.Getenv)
+	if err != nil {
+		return err
+	}
+	if err := llm.ValidateDeclaredContextWindow(*model, *ctxWindow); err != nil {
+		return err
+	}
 	// ACP 也会长跑：客户端是编辑器/壳的一部分，它崩了 stdin 并不会立刻 EOF
 	// （管道还挂在别的进程手里），所以光靠"读不到输入"退不出去。
 	watch := pw.start(os.Stderr)
@@ -931,6 +983,7 @@ func cmdACP(argv []string) error {
 	acpRunner := newACPRunner(reg, runner, *base, *model, *home, *steps)
 	assembled := buildSystemPromptWithHome(reg, *model, mustGetwd(), acpRunner.home, *workspaceBytes)
 	acpRunner.reasoning = *reasoning
+	acpRunner.sampling = sampling
 	acpRunner.system = assembled
 	acpRunner.autoCompact = autoCompact
 	acpRunner.setModelCapacity(llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput})
@@ -1168,6 +1221,13 @@ func (r *acpRunner) compactSelectOptions() compact.Options {
 }
 
 // autoCompactNow 是"每轮前的自检"：估算超阈值就压缩并落事件。
+//
+// GO.6 起多两层收敛（官方 `context.compaction.compactionRetries` /
+// `maxOverflowRetries` / `reservedCompletionTokens`）：
+//   - 阈值 = min(绝对阈值 --auto-compact, 官方 W − O − B 口径)（见 compactThreshold）；
+//   - 摘要失败按 `DSHD_COMPACT_RETRIES`（默认 1）重试；
+//   - 压完压力**仍**高于阈值时再压一次（官方 compactionRetries 语义，默认 1 次），
+//     而不是"压过一次就算交差"。
 func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error {
 	path := ""
 	r.mu.Lock()
@@ -1178,19 +1238,61 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 	if path == "" {
 		return nil
 	}
-	back, err := v4.ReadFile(path)
-	if err != nil {
-		return err
+	threshold := r.compactThreshold()
+	compactions := 0
+	for {
+		back, err := v4.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		surface := session.Surface(back)
+		m := r.meterOf(sessionID)
+		if m == nil {
+			m = &session.Meter{}
+		}
+		est := m.Estimate(surface)
+		if est <= threshold {
+			return nil
+		}
+		// 官方 compactionRetries：第一次压缩之后压力仍高于阈值时再压一次。
+		// 默认 1，所以最多两次；配置 0 时只压一次（旧行为）。
+		if compactions > r.retry.Retries {
+			return fmt.Errorf("已压缩 %d 次，上下文估算 %d 仍高于阈值 %d", compactions, est, threshold)
+		}
+		compacted, err := r.compactSurface(ctx, sessionID, path, back, surface, threshold, est)
+		if err != nil {
+			return err
+		}
+		if !compacted {
+			// 没有可压的区间（整段都是不可分割的单位）：再压也不会有变化。
+			return nil
+		}
+		compactions++
 	}
-	surface := session.Surface(back)
-	m := r.meterOf(sessionID)
-	if m == nil {
-		m = &session.Meter{}
-	}
-	if est := m.Estimate(surface); est <= r.autoCompact {
-		return nil
-	}
+}
 
+// compactThreshold 是这一轮自动压缩的**有效**阈值（唯一计算点）。
+//
+// 官方口径 `floor(min(W × thresholdRatio, W − O − B))`（dsh-compaction-basic
+// lib/index.js:124-150），宿主既有的是绝对阈值 `--auto-compact`；两者取小。
+//
+// 预留完成 token O 的取值：`header.config.maxTokens ?? adapter default ?? 0`。
+// 宿主没有单独的 per-request header maxTokens —— `capacity.MaxOutput` **就是**
+// 请求里真正发出去的 `max_tokens`（internal/agent/loop.go 原样使用），所以这里
+// 它同时承担"header 声明"与"adapter 默认"两个角色；两者都没声明时是 0。
+func (r *acpRunner) compactThreshold() int {
+	return compact.HostThreshold(r.autoCompact, compact.PressureBudget{
+		ContextWindow:            r.ctxWindow,
+		ReservedCompletionTokens: compact.ReservedCompletionTokens(nil, r.capacity.MaxOutput),
+		ThresholdRatio:           compact.DefaultThresholdRatio,
+	})
+}
+
+// compactSurface 压一次：选区间 → 生成摘要（带重试）→ 写三条事件 → 重派生历史。
+//
+// 返回值 compacted=false 表示"没有可压的区间"——那不是错误，是这一轮能做的都做了。
+func (r *acpRunner) compactSurface(ctx context.Context, sessionID, path string, back *v4.Log,
+	surface []session.SurfaceMsg, threshold, est int) (bool, error) {
 	// 下限给 2（defaultACPKeepRecent）：压缩的收益来自"按体积留"，条数下限只
 	// 保证模型眼前不是空的。这个值读 r.keepRecent，不再是一份孤立字面量——
 	// 以前字段赋了 8 却没人读，等于一个假装可调的旋钮。
@@ -1203,18 +1305,18 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 			keep = 1
 		}
 		if keep >= len(surface) {
-			return nil
+			return false, nil
 		}
 		// 兜底：只按条数留，不再看 token 预算——已经超窗了，能压多少压多少。
 		items, span, ok = compact.Select(surface, compact.Options{KeepRecent: keep, KeepTokens: 1, MinToCompact: 2})
 		if !ok {
-			return nil
+			return false, nil
 		}
 		fmt.Fprintf(os.Stderr, "超预算且无处可压：放宽到只保留最近 %d 条\n", keep)
 	}
-	text, err := compact.Summarize(ctx, llm.New(r.base, os.Getenv("DSHD_LLM_KEY")), r.model, items)
+	text, err := compact.SummarizeWithRetry(ctx, r.compactChatFor(), r.model, items, r.retry)
 	if err != nil {
-		return err
+		return false, err
 	}
 	r.mu.Lock()
 	logw := r.logs[sessionID]
@@ -1222,20 +1324,54 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 	if _, shadowed, err := session.Compact(logw, back.Events, span,
 		[]spi.Block{{Type: "text", Text: text}},
 		session.CompactionMeta{Provider: "dshd-acp", Model: r.model, LLMStreamCall: true}); err != nil {
-		return err
+		return false, err
 	} else {
-		fmt.Fprintf(os.Stderr, "自动压缩：遮蔽 %d 条，摘要 %d 字\n", len(shadowed), len([]rune(text)))
+		fmt.Fprintf(os.Stderr, "自动压缩（阈值 %d，估算 %d）：遮蔽 %d 条，摘要 %d 字\n",
+			threshold, est, len(shadowed), len([]rune(text)))
 	}
 
 	// 重新派生历史，让本轮看到压缩后的表面。
 	after, err := v4.ReadFile(path)
 	if err != nil {
-		return err
+		return false, err
 	}
 	r.mu.Lock()
 	r.hist[sessionID] = session.History(after)
 	r.mu.Unlock()
+	return true, nil
+}
+
+// forceCompact 无视阈值压一次（上下文溢出后的恢复路径）。
+func (r *acpRunner) forceCompact(ctx context.Context, sessionID string) error {
+	path := ""
+	r.mu.Lock()
+	if l := r.logs[sessionID]; l != nil {
+		path = l.Path
+	}
+	r.mu.Unlock()
+	if path == "" {
+		return fmt.Errorf("会话 %s 还没有日志，无法压缩", sessionID)
+	}
+	back, err := v4.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	compacted, err := r.compactSurface(ctx, sessionID, path, back, session.Surface(back), 0, 0)
+	if err != nil {
+		return err
+	}
+	if !compacted {
+		return fmt.Errorf("上下文已溢出，但没有可压缩的区间（整段历史不可分割）")
+	}
 	return nil
+}
+
+// compactChatFor 是摘要用的模型入口：测试可替换，生产走真实客户端。
+func (r *acpRunner) compactChatFor() compact.Chat {
+	if r.compactChat != nil {
+		return r.compactChat
+	}
+	return llm.New(r.base, os.Getenv("DSHD_LLM_KEY"))
 }
 
 // contextUsed 决定 usage_update 里的 used：**这次调用的上下文大小**，不是累计值。

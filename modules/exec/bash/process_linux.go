@@ -15,6 +15,18 @@ import (
 
 type unixProcessGroupTree struct{ pgid int }
 
+// graceful 投递 SIGTERM 到整个进程组：命令自己 trap 就能收尾（写盘、清临时文件、
+// 上报退出码），宽限用完仍在才 SIGKILL。
+func (t *unixProcessGroupTree) graceful() (string, error) {
+	if t.pgid <= 0 {
+		return "", fmt.Errorf("没有进程组 id，无法投递宽限终止请求")
+	}
+	if err := syscall.Kill(-t.pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return "", fmt.Errorf("投递 SIGTERM 到进程组 %d 失败: %w", t.pgid, err)
+	}
+	return DeliverySIGTERM, nil
+}
+
 func (t *unixProcessGroupTree) terminate() error {
 	if t.pgid <= 0 {
 		return nil

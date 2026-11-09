@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"dshgo/internal/llm"
@@ -53,7 +54,9 @@ type fakeTool struct {
 	name string
 	res  spi.Result
 	err  error
-	runs int
+	// runs 用原子计数：一次响应里的多个 tool_call 现在会**并发**执行，
+	// 普通 int 自增就是数据竞争（-race 直接炸在这里，而它掩盖的是产品的竞争）。
+	runs atomic.Int64
 }
 
 func (t *fakeTool) Name() string            { return t.name }
@@ -61,7 +64,7 @@ func (t *fakeTool) Caps() spi.Caps          { return spi.Caps{} }
 func (t *fakeTool) Description() string     { return "假工具" }
 func (t *fakeTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 func (t *fakeTool) Exec(context.Context, json.RawMessage) (spi.Result, error) {
-	t.runs++
+	t.runs.Add(1)
 	return t.res, t.err
 }
 
@@ -87,12 +90,13 @@ func (r *fakeRegistry) Get(name string) (spi.Tool, bool) {
 }
 
 type fakeRunner struct {
-	reg  *fakeRegistry
-	runs int
+	reg *fakeRegistry
+	// 同 fakeTool：Runner 现在会被多个 worker goroutine 同时调用。
+	runs atomic.Int64
 }
 
 func (r *fakeRunner) Run(ctx context.Context, name string, args json.RawMessage) (spi.Result, error) {
-	r.runs++
+	r.runs.Add(1)
 	t, ok := r.reg.Get(name)
 	if !ok {
 		return spi.Result{Hint: "没有这个工具"}, fmt.Errorf("工具 %q 不存在", name)
@@ -105,8 +109,9 @@ func (r *fakeRunner) Run(ctx context.Context, name string, args json.RawMessage)
 // 为什么不用 fakeTool 的计数器：这条用例要断言的是"malformed 之后磁盘上
 // 什么都没有"，计数器只能证明"没调 Exec"，证明不了"没落盘"。
 type writeTool struct {
-	dir  string
-	runs int
+	dir string
+	// 同 fakeTool：并行执行下必须原子。
+	runs atomic.Int64
 }
 
 func (t *writeTool) Name() string            { return "write" }
@@ -115,7 +120,7 @@ func (t *writeTool) Description() string     { return "写文件" }
 func (t *writeTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 
 func (t *writeTool) Exec(_ context.Context, raw json.RawMessage) (spi.Result, error) {
-	t.runs++
+	t.runs.Add(1)
 	var in struct {
 		FilePath string `json:"file_path"`
 		Content  string `json:"content"`
@@ -607,8 +612,8 @@ func TestValidCallBeforeMalformedCallIsNotExecuted(t *testing.T) {
 
 	hist, err := l.Run(context.Background(), 1, []llm.Message{{Role: "user", Content: "hi"}})
 	runner := l.Runner.(*fakeRunner)
-	if runner.runs != 0 || read.runs != 0 {
-		t.Fatalf("坏响应执行了工具：Runner.Run=%d，合法工具 Exec=%d；两者都必须为 0", runner.runs, read.runs)
+	if runner.runs.Load() != 0 || read.runs.Load() != 0 {
+		t.Fatalf("坏响应执行了工具：Runner.Run=%d，合法工具 Exec=%d；两者都必须为 0", runner.runs.Load(), read.runs.Load())
 	}
 	if err == nil || !strings.Contains(err.Error(), "bad_call") ||
 		!strings.Contains(err.Error(), "JSON 对象") || !strings.Contains(err.Error(), "unexpected end of JSON input") {
@@ -652,8 +657,8 @@ func TestMalformedToolCallPositionFailsWholeResponse(t *testing.T) {
 
 			hist, err := l.Run(context.Background(), 1, nil)
 			runner := l.Runner.(*fakeRunner)
-			if runner.runs != 0 || read.runs != 0 {
-				t.Fatalf("坏 call 在位置 %d 时仍有执行：Runner.Run=%d，工具 Exec=%d", badPos, runner.runs, read.runs)
+			if runner.runs.Load() != 0 || read.runs.Load() != 0 {
+				t.Fatalf("坏 call 在位置 %d 时仍有执行：Runner.Run=%d，工具 Exec=%d", badPos, runner.runs.Load(), read.runs.Load())
 			}
 			if err == nil || !strings.Contains(err.Error(), "bad_call") || !strings.Contains(err.Error(), "JSON 对象") {
 				t.Fatalf("错误必须指出坏 call 与参数格式，得到 %v", err)
@@ -690,8 +695,8 @@ func TestToolArgumentsMustBeJSONObject(t *testing.T) {
 			l, _ := newLoop(t, chat, read)
 			_, err := l.Run(context.Background(), 1, nil)
 			runner := l.Runner.(*fakeRunner)
-			if runner.runs != 0 || read.runs != 0 {
-				t.Fatalf("非 object 参数 %q 被执行：Runner.Run=%d，工具 Exec=%d", args, runner.runs, read.runs)
+			if runner.runs.Load() != 0 || read.runs.Load() != 0 {
+				t.Fatalf("非 object 参数 %q 被执行：Runner.Run=%d，工具 Exec=%d", args, runner.runs.Load(), read.runs.Load())
 			}
 			if err == nil || !strings.Contains(err.Error(), "bad_call") || !strings.Contains(err.Error(), "JSON 对象") {
 				t.Fatalf("非 object 参数 %q 的错误不完整：%v", args, err)
@@ -736,11 +741,11 @@ func TestMalformedToolCallAbortsWholeResponseBeforeAnyEffect(t *testing.T) {
 
 	// 0 执行：Runner 与工具 Exec 都不能被调用一次（审批在 Runner 上层，
 	// 没走到 Runner 就等于没走审批）。
-	if runner := l.Runner.(*fakeRunner); runner.runs != 0 {
-		t.Fatalf("malformed 之后不该再调 Runner：%d 次", runner.runs)
+	if runner := l.Runner.(*fakeRunner); runner.runs.Load() != 0 {
+		t.Fatalf("malformed 之后不该再调 Runner：%d 次", runner.runs.Load())
 	}
-	if write.runs != 0 {
-		t.Fatalf("合法的前置写工具也不得执行：%d 次", write.runs)
+	if write.runs.Load() != 0 {
+		t.Fatalf("合法的前置写工具也不得执行：%d 次", write.runs.Load())
 	}
 	// 0 落盘。
 	entries, readErr := os.ReadDir(dir)
@@ -783,8 +788,8 @@ func TestEmptyArgumentsAreNotMalformed(t *testing.T) {
 	if _, err := l.Run(context.Background(), 1, nil); err != nil {
 		t.Fatalf("空参数不该终止响应：%v", err)
 	}
-	if ping.runs != 2 {
-		t.Fatalf("两个零参数 call 都应执行：%d", ping.runs)
+	if ping.runs.Load() != 2 {
+		t.Fatalf("两个零参数 call 都应执行：%d", ping.runs.Load())
 	}
 }
 
@@ -804,16 +809,32 @@ func TestAllValidToolCallsRun(t *testing.T) {
 		t.Fatalf("全合法响应必须正常执行：%v", err)
 	}
 	runner := l.Runner.(*fakeRunner)
-	if runner.runs != 2 || read.runs != 2 {
-		t.Fatalf("两个合法 call 都应执行一次：Runner.Run=%d，工具 Exec=%d", runner.runs, read.runs)
+	if runner.runs.Load() != 2 || read.runs.Load() != 2 {
+		t.Fatalf("两个合法 call 都应执行一次：Runner.Run=%d，工具 Exec=%d", runner.runs.Load(), read.runs.Load())
 	}
 	if len(hist) != 4 || hist[1].ToolCallID != "c1" || hist[2].ToolCallID != "c2" || hist[3].Content != "好了" {
 		t.Fatalf("全合法响应的历史不完整：%+v", hist)
 	}
-	want := "step/start,assistant/message,tool/call,tool/result,tool/call,tool/result,step/end," +
+	// 事件形状随并行执行变了：**先整批声明 call，再按模型顺序结算 result**。
+	//
+	// 旧的 call,result,call,result 是"串行执行"的副产品（第 2 个 call 要等第 1 个
+	// 跑完才发出）。并行之后一次响应里的 N 个 call 是**同时**发出的，按批声明
+	// 才是真实的因果顺序；而 result 的顺序仍然钉死在模型给的顺序上（c1 先于 c2）。
+	// 断言没有放宽：种类序列与条数都仍然逐项比对。
+	want := "step/start,assistant/message,tool/call,tool/call,tool/result,tool/result,step/end," +
 		"step/start,assistant/text,assistant/message,step/end,turn/end"
 	if got := strings.Join(kinds(*events), ","); got != want {
 		t.Fatalf("全合法响应事件=\n%s\n期望=\n%s", got, want)
+	}
+	// result 的 CallID 顺序必须等于模型顺序（kinds 只能证明种类，证明不了顺序对应谁）。
+	var resultOrder []string
+	for _, e := range *events {
+		if e.Kind == EventToolResult {
+			resultOrder = append(resultOrder, e.CallID)
+		}
+	}
+	if len(resultOrder) != 2 || resultOrder[0] != "c1" || resultOrder[1] != "c2" {
+		t.Fatalf("tool/result 的 CallID 顺序 = %v，期望 [c1 c2]", resultOrder)
 	}
 }
 

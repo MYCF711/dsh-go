@@ -152,7 +152,12 @@ type Loop struct {
 	// Reasoning 是推理强度（网关的 reasoning_effort）。空 = 不带这个参数。
 	// 不是所有模型都认它，所以只能由调用方显式开。
 	Reasoning string
-	System    string
+	// Temperature 是采样温度；nil = 不带这个参数（默认行为一字不改）。
+	// 非 nil 时**连 0 也照发**：temperature=0 是确定性复现的唯一手段。
+	Temperature *float64
+	// Stop 是停用词序列；空 = 不带这个参数（不是"发一个空数组"）。
+	Stop   []string
+	System string
 	// CompactTools 为真时，工具表压掉参数里的 description。
 	// 实测能省四成字节——但参数说明也帮模型填对参数，所以默认关，
 	// 用 --tool-schema=compact 显式打开，并靠 A/B 数据决定要不要改默认。
@@ -164,10 +169,18 @@ type Loop struct {
 	// Steers 非空时，在当前 turn 的下一模型步边界注入用户消息。
 	Steers *SteerInbox
 	// Emit 观测量；返回错误即中断整个 turn。
+	//
+	// **Emit 永远不会被并发调用**：工具调用并行执行之后，事件仍只在 Run 的
+	// 调用方 goroutine 上按模型顺序产生（见 parallel.go 的三条不变量）。
+	// 所以写 v4、写 Transport journal 的实现方不必自己上锁。
 	Emit func(Event) error
-	// lastImages 暂存"上一步工具产出的图片"，由 runTool2 写、调用方读走即清。
-	// 放在结构体上是因为 Run 会并发处理多个 tool call，但它们是顺序执行的。
-	lastImages []llm.MessageImage
+	// MaxParallelToolCalls 是同一次响应里并发执行工具调用的上限。
+	//
+	// 0 = 未配置，按 DSHD_MAX_PARALLEL_TOOL_CALLS 解析（官方默认 10）；
+	// 1 = 严格串行（拆并发问题时的开关）；其它正数 = 上限。
+	// 放在结构体上而不是只读 env：嵌入方（测试、子代理）需要能显式指定，
+	// 否则"这轮到底几路"就只能靠改环境变量来试。
+	MaxParallelToolCalls int
 	// Compact 可选：每步开始前调用，返回可能被瘦身过的历史。
 	//
 	// 为什么放在 Loop 里：压缩是**策略**（选区间 + 生成摘要），
@@ -263,7 +276,16 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 	}
 	// 模型在一轮内固定，容量也只解析一次；各 step 复用同一份结果，
 	// 不因其它模型或会话的声明而改变。
-	capacity := llm.ResolveModelCapacity(l.Model, l.Capacity)
+	//
+	// 官方 llm.resolveModelInfo.contextWindowValidation：声明了 contextWindow 就必须
+	// 是正整数，否则 INVALID_MODEL_CONTEXT。宿主旧实现在这里把非法值静默当成
+	// "未声明"，再回退内置/自定义默认容量——用户把窗口写错时会看到"一切正常"，
+	// 实际跑的是 1M 的默认值（docs/parameter-register.md #19）。
+	// 校验放在**任何模型请求之前**：声明非法时一个请求都不发。
+	capacity, err := llm.ResolveModelCapacityChecked(l.Model, l.Capacity)
+	if err != nil {
+		return history, err
+	}
 	msgs := append([]llm.Message(nil), history...)
 	if l.System != "" && (len(msgs) == 0 || msgs[0].Role != "system") {
 		msgs = append([]llm.Message{{Role: "system", Content: l.System}}, msgs...)
@@ -271,6 +293,8 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 
 	// 0 = 不设上限（官方语义）：只有调用方显式给了正数才截断。
 	limit := l.maxSteps()
+	// 并发上限整轮解析一次（字段 → env → 官方默认 10），不逐步重读。
+	parallelLimit := l.maxParallelToolCalls(os.Getenv)
 	for step := 1; ; step++ {
 		if limit > 0 && step > limit {
 			return msgs, fmt.Errorf("turn 用满了 %d 步仍未收敛（模型一直在请求工具）", limit)
@@ -316,6 +340,9 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 			MaxTokens: capacity.MaxOutput,
 			// 只有显式要了才带：默认不带，避免把不支持该参数的网关打挂。
 			Reasoning: l.Reasoning,
+			// 官方每请求采样面同一规矩：显式要了才带。
+			Temperature: l.Temperature,
+			Stop:        l.Stop,
 		}
 		resp, err := l.Chat.Stream(ctx, req, func(e llm.Event) error {
 			switch e.Kind {
@@ -395,25 +422,14 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 			return msgs, nil
 		}
 
-		stopAfter := false
-		for _, call := range resp.ToolCalls {
-			msg, stop := l.runTool2(ctx, turn, step, call)
-			msgs = append(msgs, msg)
-			// 带图的结果：图片不能塞进 tool 消息（OpenAI 兼容接口不支持），
-			// 所以紧跟一条 user 消息把图送过去。少了这一步，模型只会看到
-			// "读到了图片"这几个字，却看不见图——工具等于白跑。
-			if img := l.lastImages; len(img) > 0 {
-				l.lastImages = nil
-				msgs = append(msgs, llm.Message{
-					Role:    "user",
-					Content: "（这是工具刚返回的图片）",
-					Images:  img,
-				})
-			}
-			if stop {
-				stopAfter = true
-			}
+		// 同一次响应里的多个 tool_call 并发执行（上限 DSHD_MAX_PARALLEL_TOOL_CALLS，
+		// 官方 agentLoop.maxParallelToolCalls=10），但**结算严格按模型给的顺序**：
+		// messages、tool/result 事件与完成先后无关。
+		toolMsgs, stopAfter, err := l.runToolBatch(ctx, turn, step, resp.ToolCalls, parallelLimit)
+		if err != nil {
+			return msgs, err
 		}
+		msgs = append(msgs, toolMsgs...)
 		if err := l.emit(Event{Kind: EventStepEnd, Turn: turn, Step: step}); err != nil {
 			return msgs, err
 		}
@@ -511,73 +527,6 @@ func validateCompletedToolCalls(calls []llm.ToolCall) error {
 		}
 	}
 	return nil
-}
-
-// runTool 执行一次工具调用并返回给模型的 tool 消息。
-func (l *Loop) runTool(ctx context.Context, turn, step int, call llm.ToolCall) llm.Message {
-	msg, _ := l.runTool2(ctx, turn, step, call)
-	return msg
-}
-
-func (l *Loop) runTool2(ctx context.Context, turn, step int, call llm.ToolCall) (llm.Message, bool) {
-	args := call.Function.Arguments
-	_ = l.emit(Event{
-		Kind: EventToolCall, Turn: turn, Step: step,
-		CallID: call.ID, ToolName: call.Function.Name, Arguments: args,
-	})
-
-	msg := llm.Message{Role: "tool", ToolCallID: call.ID, Name: call.Function.Name}
-	if l.Runner == nil {
-		msg.Content = "（宿主没有工具执行器）"
-		return msg, false
-	}
-	res, err := l.Runner.Run(ctx, call.Function.Name, json.RawMessage(args))
-	if err != nil {
-		// 失败结果**也是**工具真实产出：从原 res 出发，保留
-		// Text / Data / Artifacts / Truncated / View，只附加 err 与 IsError。
-		// 新建一个只有 Summary/Hint 的空 Result 会把 actual body 整个丢掉——
-		// 而失败时"它到底吐了什么"恰恰是模型判断下一步的唯一依据。
-		// Hint 随原 res 保留；err 与 IsError 仍经 Event 显式传递。
-		shown := res
-		failure := "Error: " + err.Error()
-		// 取消/中断 ≠ 失败：命令可能已经跑完了，只是我们没收到结果。
-		// DSH 的措辞就是这个意思——"结果未知，你自己决定要不要重试"。
-		// 说成 "failed" 会让模型以为命令没执行，从而做出错误判断。
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			failure = "The tool call was interrupted after it was recorded, but no result was durably recorded. " +
-				"Its outcome is unknown. Decide whether to retry from the tool's output or a safer read."
-			shown.Hint = "结果未知：先读一下现场（文件/进程/日志）确认它到底做没做，再决定重试与否"
-		}
-		// 没有真实正文时，错误摘要就是模型能看到的全部内容。
-		if shown.Text == "" {
-			shown.Summary = failure
-		}
-		msg.Content = renderBlocks(l.project(shown))
-		if shown.Text != "" {
-			// ProjectResult 在 Text 非空时**只用** Text，会把错误摘要整条藏掉：
-			// 模型于是只看到工具正文，以为这次调用成功了。失败既有"错在哪"，
-			// 也有工具真实返回了什么，两样都要进模型消息。
-			msg.Content = failure + "\n\n" + msg.Content
-		}
-		_ = l.emit(Event{
-			Kind: EventToolResult, Turn: turn, Step: step,
-			CallID: call.ID, ToolName: call.Function.Name, IsError: true, Err: err, Result: &shown,
-		})
-		return msg, false
-	}
-	msg.Content = renderBlocks(l.project(res))
-	_ = l.emit(Event{
-		Kind: EventToolResult, Turn: turn, Step: step,
-		CallID: call.ID, ToolName: call.Function.Name, Result: &res,
-	})
-	if len(res.Images) > 0 {
-		imgs := make([]llm.MessageImage, 0, len(res.Images))
-		for _, im := range res.Images {
-			imgs = append(imgs, llm.MessageImage{MIME: im.MIME, DataBase64: im.DataBase64})
-		}
-		l.lastImages = imgs
-	}
-	return msg, res.Stop
 }
 
 func (l *Loop) project(r spi.Result) []spi.Block {

@@ -173,6 +173,17 @@ type Request struct {
 	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
 	MaxTokens     int            `json:"max_tokens,omitempty"`
 	Reasoning     string         `json:"reasoning_effort,omitempty"`
+	// Temperature 是采样温度。**指针**：nil = 发请求时不带这个字段（默认行为
+	// 逐字节不变），非 nil 时**连 0 也照发**——temperature=0 是确定性复现的唯一
+	// 手段，不能被 omitempty 当成"没设置"吃掉。
+	//
+	// 官方每请求采样面恰 4 个字段：reasoningEffort / temperature / maxTokens /
+	// stop（`tmp/GO3-PARAMS/_official/dsh-llm/README.md`）；**没有 top_p**，
+	// 所以宿主也不加。
+	Temperature *float64 `json:"temperature,omitempty"`
+	// Stop 是停用词序列。空（nil 或 len==0）= 不带这个字段；非空时按给定顺序
+	// 原样发出，不合并、不改写——它就是硬闸，改写等于换了一道闸。
+	Stop []string `json:"stop,omitempty"`
 }
 
 // Usage 是 token 用量。

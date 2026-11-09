@@ -32,6 +32,11 @@ type subRunner struct {
 	model    string
 	maxSteps int
 	timeout  time.Duration
+	// temperature / stop 是官方每请求采样面（llm.temperature / llm.stop）。
+	// 子代理与主代理共享同一份进程级配置：它们打同一个网关，采样面漂移会让
+	// "同一次委派"出现两种温度，A/B 就没法比。
+	temperature *float64
+	stop        []string
 	// home 是 durable 子会话的落点（<home>/sessions/...）。
 	// 空 = 这次装配不提供可续问（req.Continuable 会**响亮失败**，
 	// 而不是回一个指向空目录的 child id）。
@@ -99,6 +104,9 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 		Model:    s.model,
 		System:   subSystemPrompt,
 		MaxSteps: s.maxSteps,
+		// 采样面沿用父进程的显式配置（nil/空 = 不发，与主代理一致）。
+		Temperature: s.temperature,
+		Stop:        s.stop,
 	}
 
 	// 继承父会话的最近若干条：子代理要的是"刚才在聊什么"，

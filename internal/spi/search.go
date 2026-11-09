@@ -59,9 +59,13 @@ const (
 	WebInvalidURL                    = "WEB_INVALID_URL"
 	WebBlockedURL                    = "WEB_BLOCKED_URL"
 	WebRedirectBlocked               = "WEB_REDIRECT_BLOCKED"
-	WebFetchTimeout                  = "WEB_FETCH_TIMEOUT"
-	WebFetchTooLarge                 = "WEB_FETCH_TOO_LARGE"
-	WebUnsupportedContentType        = "WEB_UNSUPPORTED_CONTENT_TYPE"
+	// WebSearchTimeout 是搜索自己的协作预算用完（官方 tool.web.searchTimeoutMs）。
+	// 它必须与 WebAborted 分开：预算是**工具层**的一次决定，取消是**调用方**的决定，
+	// 模型下一步做什么完全不同（调预算 / 换查询 vs 重新发一次）。
+	WebSearchTimeout          = "WEB_SEARCH_TIMEOUT"
+	WebFetchTimeout           = "WEB_FETCH_TIMEOUT"
+	WebFetchTooLarge          = "WEB_FETCH_TOO_LARGE"
+	WebUnsupportedContentType = "WEB_UNSUPPORTED_CONTENT_TYPE"
 )
 
 // NewWebError 造一个带码的结构化错误。

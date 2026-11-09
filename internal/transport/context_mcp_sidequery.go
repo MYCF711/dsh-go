@@ -25,14 +25,39 @@ var (
 )
 
 // ContextUsageView 与 W141 中立视图同形；指针切片区分“没有真实计量”与真实空数组。
+//
+// GO.6 起补上官方 `context.measurement.*` 三组口径（**只加不改**：既有键一个都
+// 没动，新键全部 omitempty，旧客户端/旧快照照旧解析）。三个新字段的口径见
+// internal/session/usage_projection.go 的注释，源头是官方
+// `@deepseek-ai/dsh-token-meter/lib/types/usage-projection.js`。
 type ContextUsageView struct {
-	Used       int                `json:"used"`
-	Max        int                `json:"max,omitempty"`
+	Used int `json:"used"`
+	Max  int `json:"max,omitempty"`
+	// PressureTokens 是官方 `context.measurement.pressureTokens`：
+	// 未命中输入 + 缓存读 + 缓存写（prompt 侧三桶，**不含输出**）。
+	// 0 = 没有实测锚点（不是"压力是 0"）。
+	PressureTokens int `json:"pressureTokens,omitempty"`
+	// ProjectedTokens 是官方 `context.measurement.projectedTokens`：
+	// max(0, pressure + surface − sampledSurface)，预测**下一次**请求的占用。
+	// 0 = 没有实测锚点。
+	ProjectedTokens int `json:"projectedTokens,omitempty"`
+	// UsageBuckets 是官方 `context.measurement.usageBuckets` 四桶投影；
+	// nil = 没有实测锚点（不许用四个 0 冒充"实测全 0"）。
+	UsageBuckets *ContextUsageBuckets `json:"usageBuckets,omitempty"`
+
 	Categories []ContextCategory  `json:"categories"`
 	Sections   *[]ContextItemView `json:"sections,omitempty"`
 	Files      *[]ContextFileView `json:"files,omitempty"`
 	Skills     *[]ContextItemView `json:"skills,omitempty"`
 	Tools      *[]ContextToolView `json:"tools,omitempty"`
+}
+
+// ContextUsageBuckets 是官方 `usage.fields.projectionShape` 的四个桶。
+type ContextUsageBuckets struct {
+	UncachedInputTokens int `json:"uncachedInputTokens"`
+	OutputTokens        int `json:"outputTokens"`
+	CacheReadTokens     int `json:"cacheReadTokens"`
+	CacheWriteTokens    int `json:"cacheWriteTokens"`
 }
 
 type ContextCategory struct {
@@ -77,6 +102,29 @@ func validateContextUsageView(view ContextUsageView) error {
 	if view.Max != 0 {
 		if err := validTokens(view.Max, "context.usage.max", true); err != nil {
 			return err
+		}
+	}
+	// GO.6：三组官方口径的取值域与 used 同一条判据（非负安全整数）。
+	// 0 是"没有实测锚点"的合法占位（omitempty 时压根不出现），所以不要求正数。
+	if err := validTokens(view.PressureTokens, "context.usage.pressureTokens", false); err != nil {
+		return err
+	}
+	if err := validTokens(view.ProjectedTokens, "context.usage.projectedTokens", false); err != nil {
+		return err
+	}
+	if b := view.UsageBuckets; b != nil {
+		for _, bucket := range []struct {
+			name  string
+			value int
+		}{
+			{"uncachedInputTokens", b.UncachedInputTokens},
+			{"outputTokens", b.OutputTokens},
+			{"cacheReadTokens", b.CacheReadTokens},
+			{"cacheWriteTokens", b.CacheWriteTokens},
+		} {
+			if err := validTokens(bucket.value, "context.usage.usageBuckets."+bucket.name, false); err != nil {
+				return err
+			}
 		}
 	}
 	if view.Categories == nil {

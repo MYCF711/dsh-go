@@ -100,6 +100,11 @@ type wireRequest struct {
 	MaxTokens           int            `json:"max_tokens,omitempty"`
 	MaxCompletionTokens int            `json:"max_completion_tokens,omitempty"`
 	Reasoning           string         `json:"reasoning_effort,omitempty"`
+	// 采样面两项不参与协商（没有"替代拼写"，端点不认就是不能用），只按
+	// "显式设置才发"转发。omitempty 对 *float64 只省略 nil，所以 temperature=0
+	// 会真的出现在报文里；[]string 的 nil/空切片都不出现。
+	Temperature *float64 `json:"temperature,omitempty"`
+	Stop        []string `json:"stop,omitempty"`
 }
 
 // marshalWireRequest 按 profile 拼请求体。model/messages/tools/stream 是标准字段，
@@ -124,6 +129,10 @@ func marshalWireRequest(req Request, profile wireProfile) ([]byte, error) {
 	if profile.includeReasoning {
 		wire.Reasoning = req.Reasoning
 	}
+	// 采样面两项不受 profile 影响：它们是"用户显式要的"，不是宿主猜的默认值。
+	// nil/空切片 -> 结构体零值 -> omitempty 直接省略，默认报文一字不改。
+	wire.Temperature = req.Temperature
+	wire.Stop = req.Stop
 	return json.Marshal(wire)
 }
 

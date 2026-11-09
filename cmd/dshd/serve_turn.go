@@ -30,7 +30,11 @@ type modelRunner struct {
 	model        string
 	reasoning    string // host 默认 wire；会话覆盖在每轮局部解析，不写共享 runner。
 	recordEffort bool   // 生产 serve 开启；旧直接构造测试保持原有 v4 夹具形状。
-	catalog      *llm.ModelCatalogStore
+	// temperature / stop 是官方每请求采样面（llm.temperature / llm.stop）；
+	// nil/空 = 不发，报文与以前逐字节一致（见 env_llm.go 的解析）。
+	temperature *float64
+	stop        []string
+	catalog     *llm.ModelCatalogStore
 	// steers 按 sessionID+turnID 绑定当前 model 调用序列；map 只在 Run
 	// 存活期间登记，最终边界原子 drain-or-close，过晚提交不会变成新 turn。
 	steerMu sync.Mutex
@@ -139,7 +143,8 @@ func (r *modelRunner) runModelTurnWithEffort(ctx context.Context, sessionID, tur
 		// 半截流（assistant/text 增量）从**落盘**里退回，否则一次失败会写成两段回答。
 		attemptMark := len(events)
 		resp, streamErr := llm.NewWithAPI(base, credential, api).Stream(ctx,
-			llm.Request{Model: model, Messages: history, Stream: true, Reasoning: reasoning}, func(e llm.Event) error {
+			llm.Request{Model: model, Messages: history, Stream: true, Reasoning: reasoning,
+				Temperature: r.temperature, Stop: r.stop}, func(e llm.Event) error {
 				typ := ""
 				switch e.Kind {
 				case llm.EventReasoning:

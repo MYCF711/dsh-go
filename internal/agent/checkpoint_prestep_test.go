@@ -85,7 +85,7 @@ func TestPreStepRunsBeforeEveryModelStep(t *testing.T) {
 	if len(chat.reqs) != 2 {
 		t.Fatalf("模型请求数 = %d，期望 2", len(chat.reqs))
 	}
-	if tool.runs != 1 {
-		t.Fatalf("工具执行次数 = %d，期望 1", tool.runs)
+	if tool.runs.Load() != 1 {
+		t.Fatalf("工具执行次数 = %d，期望 1", tool.runs.Load())
 	}
 }

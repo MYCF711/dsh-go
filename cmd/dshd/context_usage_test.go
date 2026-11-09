@@ -89,31 +89,65 @@ func TestContextUsageFullDoesNotInventBreakdownOrReuseStaleUsage(t *testing.T) {
 	}
 }
 
-func TestContextUsageFullRejectsLatestMissingUsageAndChangedSurface(t *testing.T) {
-	for _, changed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "missing-usage", true: "changed-surface"}[changed], func(t *testing.T) {
-			home := t.TempDir()
-			const sid = "session-context-stale"
-			lg, err := session.CreateSession(home, t.TempDir(), sid, "default")
-			if err != nil {
-				t.Fatal(err)
-			}
-			appendW149ContextEvent(t, lg, "assistant/message", session.AssistantMessageEvent(1, 1,
-				[]map[string]any{session.TextBlock("old")}, "stop", map[string]any{"totalTokens": 40}))
-			if changed {
-				appendW149ContextEvent(t, lg, "user/message", session.UserMessage([]spi.Block{{Type: "text", Text: "new unmeasured input"}}))
-			} else {
-				appendW149ContextEvent(t, lg, "assistant/message", session.AssistantMessageEvent(2, 1,
-					[]map[string]any{session.TextBlock("latest-without-usage")}, "stop", nil))
-			}
-			if err := lg.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := newSessionSource(home, "").ContextUsage(sid, "full"); err == nil || !strings.Contains(err.Error(), "context.usage") {
-				t.Fatalf("陈旧 usage 被当成当前真值: changed=%v err=%v", changed, err)
-			}
-		})
-	}
+// GO.6 口径改判（**故意改了旧断言，理由写在下面**）：
+//
+//   - 最近 assistant 缺 usage：仍然 fail-loud。没有实测锚点就没有压力，不能补零。
+//   - 「usage 之后 surface 又被改变」：不再报错。旧断言守的是"不许把陈旧的
+//     totalTokens 当成当前上下文占用"；而官方（dsh-token-meter
+//     lib/types/usage-projection.js）正是为这个状态提供了 projectedTokens
+//     ——pressure 只描述最近一次请求，projected 预测下一次。继续报错会让
+//     projectedTokens 在**唯一有用的那个状态**（用户刚敲新消息 / 工具结果刚灌入）
+//     永远观测不到，属于宿主比官方更弱。
+func TestContextUsageRejectsMissingUsageButProjectsChangedSurface(t *testing.T) {
+	t.Run("missing-usage", func(t *testing.T) {
+		home := t.TempDir()
+		const sid = "session-context-stale"
+		lg, err := session.CreateSession(home, t.TempDir(), sid, "default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		appendW149ContextEvent(t, lg, "assistant/message", session.AssistantMessageEvent(1, 1,
+			[]map[string]any{session.TextBlock("old")}, "stop", map[string]any{"totalTokens": 40}))
+		appendW149ContextEvent(t, lg, "assistant/message", session.AssistantMessageEvent(2, 1,
+			[]map[string]any{session.TextBlock("latest-without-usage")}, "stop", nil))
+		if err := lg.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newSessionSource(home, "").ContextUsage(sid, "full"); err == nil || !strings.Contains(err.Error(), "context.usage") {
+			t.Fatalf("最近 assistant 没有 usage 却被当成当前真值: err=%v", err)
+		}
+	})
+
+	t.Run("changed-surface", func(t *testing.T) {
+		home := t.TempDir()
+		const sid = "session-context-stale"
+		lg, err := session.CreateSession(home, t.TempDir(), sid, "default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		appendW149ContextEvent(t, lg, "assistant/message", session.AssistantMessageEvent(1, 1,
+			[]map[string]any{session.TextBlock("old")}, "stop", map[string]any{"totalTokens": 40}))
+		appendW149ContextEvent(t, lg, "user/message", session.UserMessage([]spi.Block{{Type: "text", Text: "new unmeasured input"}}))
+		if err := lg.Close(); err != nil {
+			t.Fatal(err)
+		}
+		got, err := newSessionSource(home, "").ContextUsage(sid, "full")
+		if err != nil {
+			t.Fatalf("surface 变了也要给出投影（projectedTokens 就是为此存在）: %v", err)
+		}
+		if got.Used != 40 {
+			t.Fatalf("used = %d，期望最近一次实测 totalTokens 40（向后兼容口径）", got.Used)
+		}
+		if got.PressureTokens != 40 {
+			t.Fatalf("pressure = %d，期望 40（只有 totalTokens 的旧会话按 total 兜底）", got.PressureTokens)
+		}
+		if got.ProjectedTokens <= got.PressureTokens {
+			t.Fatalf("projected = %d 必须大于 pressure = %d（surface 长了）", got.ProjectedTokens, got.PressureTokens)
+		}
+		if got.UsageBuckets == nil || got.UsageBuckets.UncachedInputTokens != 40 {
+			t.Fatalf("四桶 = %+v，期望未命中输入 40", got.UsageBuckets)
+		}
+	})
 }
 
 func TestContextUsageSnapshotStrictNullAndSafeIntegers(t *testing.T) {
