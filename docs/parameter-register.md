@@ -33,8 +33,8 @@
 - verdict 分布（entries）：`OK` 134 / `HARDCODED` 2 / `UNREAD` 5 / `DEVIATION-SAFETY` 1 / `N-A` 97
 - verdict 分布（CLI flags）：`OK` 22 / `HARDCODED` 0 / `UNREAD` 3 / `DEVIATION-SAFETY` 0 / `N-A` 73
 - 词表（`meta.verdictVocabulary`）与实际取值**完全一致**：`OK` / `HARDCODED` / `UNREAD` / `DEVIATION-SAFETY` / `N-A`
-- 官方 342 条的覆盖（逐条三分，见 §7）：`COVERED` 63 / `COVERED-EQUIV` 152 / `N-A` 31 / `UNREAD-GAP` 96 / `UNREAD` 0
-- 已修条目按任务：`t10` 5 / `t12` 1 / `t2` 8 / `t3` 3 / `t5` 1 / `t7` 5 / `t8` 4 / `t9` 7
+- 官方 342 条的覆盖（逐条三分，见 §7）：`COVERED` 64 / `COVERED-EQUIV` 214 / `N-A` 37 / `DEFERRED` 8 / `OFFICIAL_UNSUPPORTED` 19 / `UNREAD-GAP` 0 / `UNREAD` 0
+- 已修条目按任务（`meta.summary.fixedBy`，从 `officialCoverage` 重算）：`t6` 16 / `t11` 4 / `t12` 2
 
 ## 2. 修复记录（先红后绿）
 
@@ -72,14 +72,14 @@
 
 | key | 官方源 | 官方默认 | 宿主读取点 | 我们的默认 | verdict | 备注 |
 |---|---|---|---|---|---|---|
-| `--max-steps@run` | agent.maxSteps / 官方宿主无此暴露项（安全阀，非预算） | — | `cmd/dshd/main.go:603` | defaultTurnMaxSteps = 2000 | **OK** |  |
+| `--max-steps@run` | agent.maxSteps / 官方宿主无此暴露项（安全阀，非预算） | — | `cmd/dshd/main.go:621` | defaultTurnMaxSteps = 2000 | **OK** |  |
 | `defaultTurnMaxSteps` | agent.maxSteps | — | `cmd/dshd/serve.go:153` | 2000 | **OK** |  |
 | `agent.Loop.maxSteps fallback` | agent.maxSteps | — | `internal/agent/loop.go:234` | 32 | **OK** | 0 现在明确表示不设上限（官方 agent loop 无 turn budget）；32 兜底已删。测试 TestMaxStepsZeroMeansUnlimitedUntilCanceled。 |
-| `subRunner.timeout (subagent 墙钟)` | subagent.timeoutMs / dsh-subagent 的 timeout | — | `cmd/dshd/main.go:981` | 5 * time.Minute | **UNREAD** | 子代理 5min 墙钟写死在装配点。官方由插件传 timeout；宿主可加 --subagent-timeout，本任务不扩参数面。 |
-| `subRunner.maxDepth` | subagent.maxDepth | — | `cmd/dshd/subagent.go:43` | 1 | **UNREAD** | 官方 subagent 有 maxDepth 概念，宿主写死 1（防递归）。做成 --subagent-max-depth 属新增能力，本任务不扩参数面；登记为结构化未实现。 |
-| `subRunner.maxSteps` | agent.maxSteps | — | `cmd/dshd/main.go:981` | defaultTurnMaxSteps (2000) | **OK** |  |
+| `subRunner.timeout (subagent 墙钟)` | subagent.timeoutMs / dsh-subagent 的 timeout | — | `cmd/dshd/main.go:1042` | 5 * time.Minute | **UNREAD** | 子代理 5min 墙钟写死在装配点。官方由插件传 timeout；宿主可加 --subagent-timeout，本任务不扩参数面。 |
+| `subRunner.maxDepth` | subagent.maxDepth | — | `cmd/dshd/subagent.go:57` | 1 | **UNREAD** | 官方 subagent 有 maxDepth 概念，宿主写死 1（防递归）。做成 --subagent-max-depth 属新增能力，本任务不扩参数面；登记为结构化未实现。 |
+| `subRunner.maxSteps` | agent.maxSteps | — | `cmd/dshd/subagent.go:146` | defaultTurnMaxSteps (2000) | **OK** |  |
 | `--max-steps@serve` | agent.maxSteps | — | `cmd/dshd/serve.go:159` | defaultTurnMaxSteps = 2000 | **OK** |  |
-| `--max-steps@acp` | agent.maxSteps | — | `cmd/dshd/acp.go:880` | defaultTurnMaxSteps = 2000 | **OK** |  |
+| `--max-steps@acp` | agent.maxSteps | — | `cmd/dshd/acp.go:956` | defaultTurnMaxSteps = 2000 | **OK** |  |
 | `--max-steps@schedule` | agent.maxSteps | — | `cmd/dshd/schedule.go:39` | defaultTurnMaxSteps = 2000 | **OK** |  |
 | `childArgs 透传面（serve → run）` | n/a（宿主内部透传） | — | `cmd/dshd/serve_tools.go:113` | home/session/prompt/policy/max-steps/tools-mode/model/reasoning/record-effort/effort-level/prompt-content-file/turn-id | **OK** |  |
 | `childArgs 缺口: --auto-compact` | compaction.autoCompactTokens | — | `cmd/dshd/serve_tools.go:113` | 子进程默认 40000（main.go:619） | **OK** | serve 注册 --auto-compact 并透传给子进程 run；TestServeHostRunFlagsReachChildArgs。 |
@@ -87,18 +87,18 @@
 | `childArgs 缺口: --workspace-bytes` | workspace.agentsMdBytes | — | `cmd/dshd/serve_tools.go:113` | 子进程默认 65536 | **OK** | serve 注册 --workspace-bytes 并透传；argv 级测试。 |
 | `childArgs 缺口: --context-window / --max-output` | model.contextWindow / model.maxOutputTokens | — | `cmd/dshd/serve_tools.go:113` | 0（按模型容量解析） | **OK** | serve 注册 --context-window/--max-output 并透传；run 侧接真实使用点（request/context、max_tokens）。 |
 | `childArgs 缺口: --mode / --modes-dir / --remember-approvals / --agents` | modes.default / rules.path | — | `cmd/dshd/serve_tools.go:113` | 子进程各自默认（default / <home>/modes / false / 工作区 AGENTS.md） | **N-A** | --mode/--modes-dir/--remember-approvals 在 run 侧根本没有参数面（只有 acp 有），属功能缺口不是透传缺口；强塞给 serve 会让子进程报 flag not defined。已在 fix-passthrough 的 RESULT 登记接入前提（sandbox 档位优先级要先定）。 |
-| `--policy@run` | permission.defaultPreset | — | `cmd/dshd/main.go:626` | defaultRunPolicy = "allow" | **OK** |  |
-| `defaultRunPolicy` | permission.defaultPreset | — | `cmd/dshd/main.go:552` | "allow" | **OK** |  |
+| `--policy@run` | permission.defaultPreset | — | `cmd/dshd/main.go:644` | defaultRunPolicy = "allow" | **OK** |  |
+| `defaultRunPolicy` | permission.defaultPreset | — | `cmd/dshd/main.go:570` | "allow" | **OK** |  |
 | `--policy@serve` | permission.defaultPreset | — | `cmd/dshd/serve.go:169` | "allow" | **OK** |  |
 | `--policy@schedule` | permission.defaultPreset | — | `cmd/dshd/schedule.go:38` | "allow" | **OK** |  |
-| `--policy@acp 缺失` | permission.defaultPreset | — | `cmd/dshd/acp.go:740` | 无该旗标 | **N-A** | ACP 没有 --policy 是能力面差异（审批由 --mode 的 Approval 或 session.setPermission 定），官方 ACP 也没有该旗标。 |
+| `--policy@acp 缺失` | permission.defaultPreset | — | `cmd/dshd/acp.go:586` | 无该旗标 | **N-A** | ACP 没有 --policy 是能力面差异（审批由 --mode 的 Approval 或 session.setPermission 定），官方 ACP 也没有该旗标。 |
 | `settingsform 默认权限枚举` | permission.defaultPreset（官方 zod enum） | — | `internal/settingsform/registry.go:191` | ["deny","ask","allow","auto"] | **OK** |  |
 | `settingsform 默认模型字段约束` | model.defaultModel（官方 schemastery string().min(1).max(256)） | — | `internal/settingsform/registry.go:183` | minLength=1, maxLength=256 | **OK** |  |
 | `settingsform namespace 名` | settings 命名空间契约 | — | `internal/settingsform/settingsform.go:14` | NamespaceModel="model", NamespacePermission="permission", FieldDefaultModel="defaultModel", FieldDefaultPreset="defaultPreset" | **N-A** |  |
 | `officialCredentialDescribeLimit` | MAX_DESCRIBE_REFS（官方 index.js:55） | — | `internal/transport/handlers_settings_official.go:69` | 64 | **N-A** |  |
 | `officialCredentialRefPattern` | credentialRefSchema（官方 index.js:56） | — | `internal/transport/handlers_settings_official.go:65` | ^[A-Za-z_][A-Za-z0-9_]*$ | **N-A** |  |
 | `config.FileSchema` | config 文档 schema 版本 | — | `internal/config/tree.go:34` | "dsh.config-tree@1" | **N-A** |  |
-| `config store 落点` | config 文件路径（官方为 settings 文档） | — | `cmd/dshd/serve.go:451` | <home>/state/config-tree.json | **OK** |  |
+| `config store 落点` | config 文件路径（官方为 settings 文档） | — | `cmd/dshd/serve.go:466` | <home>/state/config-tree.json | **OK** |  |
 | `config maxDepth` | n/a（防呆） | — | `internal/config/tree.go:38` | 32 | **N-A** | 配置树防呆上限（32 段），不是产品参数。 |
 | `config maxKeyLen` | n/a（防呆） | — | `internal/config/tree.go:39` | 128 | **N-A** | 配置键名 128 字节上限（ErrInvalidKey 的判据）。 |
 | `maxConfigPatchBody` | n/a（additive 面） | — | `internal/transport/handlers_config_patch.go:36` | 1 << 20 (1 MiB) | **N-A** | additive 面请求体上限（1 MiB），防滥用。 |
@@ -109,35 +109,35 @@
 | `state/session-sandbox.json` | session.sandboxMode | — | `cmd/dshd/serve_sandbox_policy.go:48` | path | **OK** |  |
 | `state/session-preset.json` | session.preset | — | `cmd/dshd/serve_agent_api.go:1105` | path | **OK** |  |
 | `state/session-effort.json` | session.reasoningEffort | — | `cmd/dshd/serve_effort_override.go:26` | path | **OK** |  |
-| `state/model-catalog.json` | models.catalog | — | `cmd/dshd/serve.go:394` | path | **OK** |  |
-| `state/approvals` | approval.remember | — | `cmd/dshd/acp.go:985` | <home>/state/approvals | **OK** |  |
-| `DSHD_HOME` | home 目录 | — | `cmd/dshd/main.go:293` | ""（serve 必填）/ "tmp/dshd-home"（run/acp/doctor 默认） | **OK** |  |
+| `state/model-catalog.json` | models.catalog | — | `internal/llm/model_catalog.go:176` | path | **OK** |  |
+| `state/approvals` | approval.remember | — | `cmd/dshd/acp.go:1105` | <home>/state/approvals | **OK** |  |
+| `DSHD_HOME` | home 目录 | — | `cmd/dshd/main.go:295` | ""（serve 必填）/ "tmp/dshd-home"（run/acp/doctor 默认） | **OK** |  |
 | `run/acp/doctor 的 home 默认值` | home 目录 | — | `cmd/dshd/main.go:209` | "tmp/dshd-home"（相对路径） | **OK** | 统一走 defaultHome()（env 或 ~/.dshd）；守卫 TestGuardFlagDefaultsAreSingleSourced + TestGuardNoCwdRelativeHomeDefault。 |
-| `defaultHome()` | home 目录 | — | `cmd/dshd/main.go:284` | $DSHD_HOME 或 ~/.dshd 或 ".dshd" | **OK** |  |
-| `DSHD_LLM_MODEL` | model.defaultModel | — | `cmd/dshd/main.go:601` | "group/deepseek-v4.1-flash-1017" | **OK** |  |
-| `DSHD_LLM_BASE` | provider.baseURL | — | `cmd/dshd/serve.go:295` | "http://127.0.0.1:3425/v1" | **OK** |  |
+| `defaultHome()` | home 目录 | — | `cmd/dshd/main.go:294` | $DSHD_HOME 或 ~/.dshd 或 ".dshd" | **OK** |  |
+| `DSHD_LLM_MODEL` | model.defaultModel | — | `cmd/dshd/main.go:619` | "group/deepseek-v4.1-flash-1017" | **OK** |  |
+| `DSHD_LLM_BASE` | provider.baseURL | — | `cmd/dshd/serve.go:298` | "http://127.0.0.1:3425/v1" | **OK** |  |
 | `硬编码端口 3425` | provider.baseURL | — | `internal/transport/handlers_media_market_official.go:568` | http://127.0.0.1:3425/v1 | **OK** | cmd/dshd 侧只剩 defaultLLMBase 一处定义；守卫 TestGuardNoDuplicatedGatewayURLLiteral（字符串字面量级扫描）。 |
 | `cotGatewayDefaultMdl` | model.defaultModel | — | `internal/transport/handlers_media_market_official.go:569` | "group/deepseek-v4.1-flash-1017" | **OK** | transport 侧 cotGatewayModelEnv 读 DSHD_LLM_MODEL、缺省常量与宿主默认同值；注释写清同源关系。 |
-| `DSHD_LLM_KEY` | provider.apiKeyEnv | — | `cmd/dshd/serve.go:577` | ""（空默认，envOr 等价于 os.Getenv） | **OK** |  |
-| `DSHD_LLM_API` | provider.api | — | `cmd/dshd/serve.go:333` | "" | **OK** |  |
+| `DSHD_LLM_KEY` | provider.apiKeyEnv | — | `cmd/dshd/serve.go:592` | ""（空默认，envOr 等价于 os.Getenv） | **OK** |  |
+| `DSHD_LLM_API` | provider.api | — | `cmd/dshd/serve.go:336` | "" | **OK** |  |
 | `DSH_GO_MODEL` | model.defaultModel（legacy 别名） | — | `cmd/dshd/serve.go:192` | "" | **N-A** | serve 侧空默认 = 未设；只用于 explicitServeModel 的 legacy 别名判定，不是默认值。 |
-| `DSHD_REASONING_EFFORT` | model.reasoningEffort | — | `cmd/dshd/main.go:613` | ""（空=不带该参数） | **OK** |  |
+| `DSHD_REASONING_EFFORT` | model.reasoningEffort | — | `cmd/dshd/main.go:631` | ""（空=不带该参数） | **OK** |  |
 | `DSHD_CONTEXT_WINDOW` | model.contextWindow | — | `cmd/dshd/transport_source.go:379` | 未设置 → 按 catalog/内置容量解析 | **OK** |  |
-| `llm.DefaultCustomContextWindow` | model.contextWindow（未声明时的默认） | — | `internal/llm/capacity.go:5` | 1_000_000 | **N-A** | 未声明自定义模型的默认窗口（十进制 1M），与官方 llm-deepseek 的 DEFAULT_CONTEXT_WINDOW 同值；无配置面。 |
-| `llm.DefaultCustomMaxOutput` | model.maxOutputTokens（默认） | — | `internal/llm/capacity.go:6` | 128_000 | **N-A** | 未声明自定义模型的默认输出上限（128K）；内置模型走 0（不带 max_tokens），只有真·自定义模型才用这个默认值。 |
-| `builtInModelCapacity 内置表` | models.catalog | — | `internal/llm/capacity.go:58` | {"group/deepseek-v4.1-flash-1017": {ContextWindow: 1_000_000, MaxOutput: 0}} | **N-A** | 内置模型→容量的**数据表**（t8 起是唯一来源，id 列表由同一张表派生），不是参数。 |
+| `llm.DefaultCustomContextWindow` | model.contextWindow（未声明时的默认） | — | `internal/llm/capacity.go:10` | 1_000_000 | **N-A** | 未声明自定义模型的默认窗口（十进制 1M），与官方 llm-deepseek 的 DEFAULT_CONTEXT_WINDOW 同值；无配置面。 |
+| `llm.DefaultCustomMaxOutput` | model.maxOutputTokens（默认） | — | `internal/llm/capacity.go:11` | 128_000 | **N-A** | 未声明自定义模型的默认输出上限（128K）；内置模型走 0（不带 max_tokens），只有真·自定义模型才用这个默认值。 |
+| `builtInModelCapacity 内置表` | models.catalog | — | `internal/llm/capacity.go:63` | {"group/deepseek-v4.1-flash-1017": {ContextWindow: 1_000_000, MaxOutput: 0}} | **N-A** | 内置模型→容量的**数据表**（t8 起是唯一来源，id 列表由同一张表派生），不是参数。 |
 | `模型 id 别名一致性` | search.model | — | `modules/search/deepseek.go:34` | "group/deepseek-v4.1-flash-1017"（8 处）vs "deepseek-v4-flash"（modules/search） | **N-A** | modules/search 用 deepseek-v4-flash 是**另一族**模型（搜索子系统），与主模型 id 不同源但不同用途。 |
 | `DSHD_SANDBOX_MODE` | sandbox.mode | — | `internal/sandbox/policy.go:19` | read-only \| workspace-write \| danger-full-access | **OK** |  |
 | `modes.DefaultID` | modes.default | — | `internal/modes/modes.go:63` | "default"（4 个内置：default / read-only / workspace-write / danger-full-access） | **OK** |  |
-| `--mode@acp` | modes.default | — | `cmd/dshd/acp.go:889` | modes.DefaultID | **OK** |  |
-| `--tools-mode / --tool-schema / --schema` | tools.tableShape | — | `cmd/dshd/main.go:622` | "" → defaultToolSchema = "compact" | **OK** |  |
+| `--mode@acp` | modes.default | — | `cmd/dshd/acp.go:977` | modes.DefaultID | **OK** |  |
+| `--tools-mode / --tool-schema / --schema` | tools.tableShape | — | `cmd/dshd/main.go:640` | "" → defaultToolSchema = "compact" | **OK** |  |
 | `toolsMode 枚举` | tools.tableShape | — | `cmd/dshd/tool_merged.go:40` | full \| compact \| merged \| lazy | **N-A** |  |
-| `--auto-compact@run` | compaction.autoCompactTokens | — | `cmd/dshd/main.go:630` | 40000 | **OK** |  |
-| `--auto-compact@acp` | compaction.autoCompactTokens | — | `cmd/dshd/acp.go:883` | 40000 | **N-A** | ACP 的 --auto-compact 默认就是 defaultAutoCompact（与 run/serve 同一常量），不是第二套默认值。 |
-| `runCompactor.KeepRecent` | compaction.keepRecent | — | `cmd/dshd/main.go:1616` | 6（兜底 2） | **N-A** | run 自动压缩的保留条数（6，兜底 2）；压缩策略内部预算。 |
-| `runCompactor.CompactionMeta` | compaction.model | — | `cmd/dshd/main.go:1615` | {Provider: "dshd", Model: "run"} | **OK** | 压缩元数据的 Model 从字面量 "run" 改为真实 model；先红后绿。 |
-| `acpRunner.keepRecent` | compaction.keepRecent | — | `cmd/dshd/acp.go:111` | 8（字段，从未被读取） | **OK** | 死字段接线：使用点改为 r.compactSelectOptions()，默认值取改动前实际生效的 2。 |
-| `acp autoCompactNow 选项` | compaction.keepRecent / keepTokens | — | `cmd/dshd/acp.go:1171` | KeepRecent: 2, KeepTokens: 2000, MinToCompact: 2 | **N-A** | ACP 自动压缩的保留预算（KeepRecent/KeepTokens/MinToCompact），与 compact.Options 同源。 |
+| `--auto-compact@run` | compaction.autoCompactTokens | — | `cmd/dshd/main.go:648` | 40000 | **OK** |  |
+| `--auto-compact@acp` | compaction.autoCompactTokens | — | `cmd/dshd/acp.go:961` | 40000 | **N-A** | ACP 的 --auto-compact 默认就是 defaultAutoCompact（与 run/serve 同一常量），不是第二套默认值。 |
+| `runCompactor.KeepRecent` | compaction.keepRecent | — | `cmd/dshd/main.go:1707` | 6（兜底 2） | **N-A** | run 自动压缩的保留条数（6，兜底 2）；压缩策略内部预算。 |
+| `runCompactor.CompactionMeta` | compaction.model | — | `cmd/dshd/main.go:1683` | {Provider: "dshd", Model: "run"} | **OK** | 压缩元数据的 Model 从字面量 "run" 改为真实 model；先红后绿。 |
+| `acpRunner.keepRecent` | compaction.keepRecent | — | `cmd/dshd/acp.go:77` | 8（字段，从未被读取） | **OK** | 死字段接线：使用点改为 r.compactSelectOptions()，默认值取改动前实际生效的 2。 |
+| `acp autoCompactNow 选项` | compaction.keepRecent / keepTokens | — | `cmd/dshd/acp.go:1335` | KeepRecent: 2, KeepTokens: 2000, MinToCompact: 2 | **N-A** | ACP 自动压缩的保留预算（KeepRecent/KeepTokens/MinToCompact），与 compact.Options 同源。 |
 | `compact.Options 默认值` | compaction.keepRecent / keepTokens | — | `internal/compact/compact.go:35` | KeepRecent=2, KeepTokens=2000, MinToCompact=2 | **N-A** | 内部压缩预算的零值默认（KeepRecent/KeepTokens/MinToCompact），由调用方覆盖。 |
 | `compact.Summarize MaxTokens` | compaction.summaryMaxTokens | — | `internal/compact/compact.go:169` | 2000 | **UNREAD** | 摘要生成的单次输出上限 2000 写死；属模型调用参数，可加 --compact-max-tokens。 |
 | `compact maxPromptChars` | compaction.summaryPromptChars | — | `internal/compact/compact.go:117` | 24000 | **N-A** | 摘要输入字符预算（24000），内部截断保护。 |
@@ -147,18 +147,18 @@
 | `llm retry 参数组` | llm.retry.* | — | `internal/llm/retry.go:40` | attempts=4, base=500ms, maxWait=8s, budget=20s, jitter=0.5 | **N-A** | HTTP 重放策略（attempts/base/maxWait/budget/jitter）：内部可靠性常量，官方无暴露项。 |
 | `llm maxWireAttempts` | llm.wireFallbackAttempts | — | `internal/llm/compat.go:44` | 4 | **N-A** | 可选字段回退次数（stream_options 等），协议兼容用。 |
 | `llm maxErrorBodyBytes` | n/a | — | `internal/llm/compat.go:48` | 8 << 10 | **N-A** | 错误响应体读取上限（8 KiB）。 |
-| `llm capabilityTTL` | n/a | — | `internal/llm/compat.go:246` | 5 * time.Minute | **N-A** | wire 能力协商结果缓存 5min。 |
+| `llm capabilityTTL` | n/a | — | `internal/llm/compat.go:255` | 5 * time.Minute | **N-A** | wire 能力协商结果缓存 5min。 |
 | `llm discoverTimeout` | provider.discoverTimeout | — | `internal/llm/discover.go:55` | 15 * time.Second | **N-A** | 模型发现兜底超时 15s。 |
 | `llm discoverResponseBodyLimit` | n/a | — | `internal/llm/discover.go:58` | 512 | **N-A** | 模型发现响应体上限 512。 |
 | `llm client http.Client.Timeout` | provider.timeout | — | `internal/llm/client.go:53` | 0（无客户端级超时） | **N-A** | 0 = 不设客户端级总超时，超时由每个请求的 ctx 控制（否则长流式响应会被腰斩）。 |
-| `llm scanner buffer` | n/a | — | `internal/llm/client.go:307` | 初始 64KiB，上限 4MiB | **N-A** | SSE 行扫描缓冲（64KiB→4MiB）。 |
+| `llm scanner buffer` | n/a | — | `internal/llm/client.go:342` | 初始 64KiB，上限 4MiB | **N-A** | SSE 行扫描缓冲（64KiB→4MiB）。 |
 | `llm model_catalog 测试探针超时` | n/a | — | `internal/llm/model_catalog.go:746` | 5 * time.Second | **N-A** | 目录测试探针 5s 超时。 |
 | `llm model_catalog 响应体上限` | n/a | — | `internal/llm/model_catalog.go:829` | 1 << 20 | **N-A** | 目录响应体 1MiB 上限。 |
 | `llm model_env_catalog 文档上限` | n/a | — | `internal/llm/model_env_catalog.go:66` | 4 << 20 | **N-A** | env 目录文档 4MiB 上限。 |
 | `transport defaultAddr` | server.addr | — | `internal/transport/server.go:34` | "127.0.0.1:0"（端口交给 OS） | **OK** |  |
-| `transport ReadHeaderTimeout` | server.readHeaderTimeout | — | `internal/transport/server.go:273` | 10 * time.Second | **N-A** | HTTP 读头超时 10s（服务端防慢速攻击的常量）。 |
+| `transport ReadHeaderTimeout` | server.readHeaderTimeout | — | `internal/transport/server.go:277` | 10 * time.Second | **N-A** | HTTP 读头超时 10s（服务端防慢速攻击的常量）。 |
 | `transport 通用 501 body drain` | n/a | — | `internal/transport/server.go:46` | limit 256KiB / timeout 2s | **N-A** | 501 前排空请求体的上限（256KiB/2s）。 |
-| `transport 请求体上限 1MiB（多方法）` | n/a | — | `internal/transport/server.go:428` | 1 << 20 | **N-A** | 十处官方方法的请求体上限；协议级防滥用。 |
+| `transport 请求体上限 1MiB（多方法）` | n/a | — | `internal/transport/server.go:461` | 1 << 20 | **N-A** | 十处官方方法的请求体上限；协议级防滥用。 |
 | `handlers_agent_official 请求体上限` | n/a | — | `internal/transport/handlers_agent_official.go:350` | 8 << 20 | **N-A** | agent 系方法请求体上限 8 MiB。 |
 | `handlers_speech_official 请求体上限` | n/a | — | `internal/transport/handlers_speech_official.go:109` | 16 << 20 | **N-A** | 语音方法请求体上限 16 MiB。 |
 | `officialStreamBodyLimit` | n/a | — | `internal/transport/official_stream_face.go:60` | 1 << 20 | **N-A** | 流方法请求体上限 1 MiB。 |
@@ -208,38 +208,38 @@
 | `parentwatch 默认组` | n/a（宿主看门狗） | — | `cmd/dshd/parentwatch.go:44` | parent-watch=true, interval=1s, misses=3, minInterval=20ms | **OK** |  |
 | `parentwatch defaultParentWatchMisses` | n/a | — | `cmd/dshd/parentwatch.go:46` | 3 | **N-A** | 父进程看门狗 3 次未命中即退出。 |
 | `--content-width@serve` | ui.contentWidth | — | `cmd/dshd/serve.go:162` | 0（不知道，界面自算） | **OK** |  |
-| `--max-chars@run / @acp` | tools.spillThresholdChars | — | `cmd/dshd/main.go:605` | 4000 | **OK** |  |
-| `defaultWorkspaceBytes` | workspace.agentsMdBytes | — | `cmd/dshd/main.go:545` | 65536 | **OK** | ACP 的 8000 已改成同一常量 defaultWorkspaceBytes；守卫 TestGuardFlagDefaultsAreSingleSourced。 |
-| `--workspace-bytes@acp` | workspace.agentsMdBytes | — | `cmd/dshd/acp.go:881` | 8000（与 defaultWorkspaceBytes=65536 不同源） | **OK** | ACP 的 8000 已改成同一常量 defaultWorkspaceBytes；守卫 TestGuardFlagDefaultsAreSingleSourced。 |
+| `--max-chars@run / @acp` | tools.spillThresholdChars | — | `cmd/dshd/main.go:623` | 4000 | **OK** |  |
+| `defaultWorkspaceBytes` | workspace.agentsMdBytes | — | `cmd/dshd/main.go:571` | 65536 | **OK** | ACP 的 8000 已改成同一常量 defaultWorkspaceBytes；守卫 TestGuardFlagDefaultsAreSingleSourced。 |
+| `--workspace-bytes@acp` | workspace.agentsMdBytes | — | `cmd/dshd/acp.go:957` | 8000（与 defaultWorkspaceBytes=65536 不同源） | **OK** | ACP 的 8000 已改成同一常量 defaultWorkspaceBytes；守卫 TestGuardFlagDefaultsAreSingleSourced。 |
 | `defaultToolTimeout` | tools.timeoutMs | — | `modules/tools/pipeline.go:93` | 30 * time.Minute（DSHD_TOOL_TIMEOUT_SECS 可覆盖） | **OK** |  |
 | `pipeline Options.MaxChars 默认` | tools.spillThresholdChars | — | `modules/tools/pipeline.go:125` | 4000 | **N-A** | tools pipeline 的 spill 默认 4000；run 侧 --max-chars 与之同值但由各自常量给出。 |
 | `bash idle 预算` | bash.idleTimeout | — | `modules/exec/bash/tools.go:30` | 10 * time.Minute（Options.IdleBudget，无 flag/env） | **N-A** | bash 工具空闲预算 10min（Options.IdleBudget，调用点常量）。 |
 | `pwsh 超时` | pwsh.timeoutSeconds | — | `modules/tool/pwsh/pwsh.go:99` | defaultTimeout=120s, maxTimeout=600s | **OK** |  |
-| `execlit 超时` | exec.timeoutSeconds | — | `modules/tool/execlit/execlit.go:15` | defaultTimeout=60s, maxTimeout=600s | **OK** |  |
+| `execlit 超时` | exec.timeoutSeconds | — | `modules/tool/execlit/execlit.go:49` | defaultTimeout=60s, maxTimeout=600s | **OK** |  |
 | `modules/search DeepSeekDefaultModel` | search.model | — | `modules/search/deepseek.go:34` | "deepseek-v4-flash" | **OK** |  |
 | `DSHD_SEARCH_URL / DSHD_SEARCH_API_KEY / DSHD_SEARCH_MODEL / DSHD_SEARCH_BASE_URL` | search.* | — | `modules/search/search.go:8` | ""（未设置即不启用原生搜索） | **OK** |  |
 | `DSHD_WEB_SEARCH_PROVIDER / DSHD_WEB_FETCH_PROVIDER` | webSearch.provider / webFetch.provider | — | `modules/search/search.go:14` | "" | **OK** |  |
 | `DSHD_SANDBOX_WORKSPACE / _HOME / _EXTRA_READ_ROOTS / _EXTRA_READ` | sandbox.workspaceRoot 等 | — | `cmd/dshd/serve_tools.go:87` | "" | **OK** |  |
 | `DSHD_APPROVAL_STDIO / DSHD_JOBS_STDIO / DSHD_STEER_STDIO` | n/a（内部协议） | — | `cmd/dshd/serve_tools.go:225` | "1" | **OK** |  |
 | `DSHD_SERVE_NO_FOLLOW / DSHD_FOLLOW_MODE / DSHD_DEBUG_FOLLOW` | n/a（调试） | — | `cmd/dshd/serve_tools.go:280` | "1" / "resolve\|read" / "" | **OK** |  |
-| `DSHD_SERVE_MODEL_RUNNER` | n/a | — | `cmd/dshd/serve.go:341` | "1" 才走无子进程 runner | **OK** |  |
+| `DSHD_SERVE_MODEL_RUNNER` | n/a | — | `cmd/dshd/serve.go:349` | "1" 才走无子进程 runner | **OK** |  |
 | `DSHD_OFFICIAL_WIRE / DSHD_OFFICIAL_WIRE_SECRET` | officialWire.enabled | — | `cmd/dshd/serve_official_wire.go:42` | "1"（默认关）/ secret | **OK** |  |
 | `DSHD_BOOT_FACADE / DSHD_FRONTEND_DIR` | frontend.dir | — | `cmd/dshd/serve_boot_facade.go:33` | "1" / "" | **OK** |  |
-| `DSHD_PLUGIN_HMR / DSHD_PLUGIN_CACHE / DSHD_PLUGIN_REGISTRY / DSHD_PLUGIN_REGISTRY_TOKEN / DSHD_PLUGIN_MARKET_*` | plugin.* | — | `cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/serve_plugin_loader.go:80` | "1" / path / url / token / indexes | **OK** |  |
-| `DSHD_SKILLS_EXTRA / DSHD_SKILLS_BUNDLED / DSH_BUNDLED_SKILL_DIR` | skills.* | — | `cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/serve_agent_api.go:1210` | "" | **OK** |  |
-| `DSHD_GITHUB_API_URL / DSHD_SEARCH_* / DSH_LIVESHARE_RELAY` | *.baseURL | — | `internal/forge/internal/forge/internal/forge/internal/forge/internal/forge/internal/forge/internal/forge/change_request.go:38` | ""（用各自默认） | **OK** |  |
-| `DSHD_ACCOUNT_* 组` | account.* | — | `cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/serve_account_provider.go:25` | provider / oidc issuer / client id / secret / scopes / device url / token url / userinfo url / platform origin / local lease seconds | **OK** |  |
-| `DSHD_FORGE_PROVIDER_TOKEN / DSHD_FORGE_CHANGE_REQUEST_URLS` | forge.* | — | `cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/serve_forge_state.go:58` | "" | **OK** |  |
-| `DSHD_TIMING / DSHD_TRACE_API / DSHD_PERF_120S / DSHD_LIVE_LLM` | n/a（诊断） | — | `cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/timing.go:13` | "" | **OK** |  |
-| `DSHD_PARENT_PID` | n/a | — | `cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/parentwatch.go:159` | "" | **OK** |  |
+| `DSHD_PLUGIN_HMR / DSHD_PLUGIN_CACHE / DSHD_PLUGIN_REGISTRY / DSHD_PLUGIN_REGISTRY_TOKEN / DSHD_PLUGIN_MARKET_*` | plugin.* | — | `cmd/dshd/serve_plugin_loader.go:80` | "1" / path / url / token / indexes | **OK** |  |
+| `DSHD_SKILLS_EXTRA / DSHD_SKILLS_BUNDLED / DSH_BUNDLED_SKILL_DIR` | skills.* | — | `cmd/dshd/serve_agent_api.go:1212` | "" | **OK** |  |
+| `DSHD_GITHUB_API_URL / DSHD_SEARCH_* / DSH_LIVESHARE_RELAY` | *.baseURL | — | `internal/forge/change_request.go:38` | ""（用各自默认） | **OK** |  |
+| `DSHD_ACCOUNT_* 组` | account.* | — | `cmd/dshd/serve_account_provider.go:25` | provider / oidc issuer / client id / secret / scopes / device url / token url / userinfo url / platform origin / local lease seconds | **OK** |  |
+| `DSHD_FORGE_PROVIDER_TOKEN / DSHD_FORGE_CHANGE_REQUEST_URLS` | forge.* | — | `cmd/dshd/serve_forge_state.go:58` | "" | **OK** |  |
+| `DSHD_TIMING / DSHD_TRACE_API / DSHD_PERF_120S / DSHD_LIVE_LLM` | n/a（诊断） | — | `cmd/dshd/timing.go:13` | "" | **OK** |  |
+| `DSHD_PARENT_PID` | n/a | — | `cmd/dshd/parentwatch.go:159` | "" | **OK** |  |
 | `DSHD_OFFICE_RENDERER / DSH_OFFICE_SRC / DSH_OFFICE_OUT` | office.renderer | — | `internal/officepdf/provider.go:66` | "" | **OK** |  |
 | `DSHD_STEER_MANIFEST / DSHD_STEER_HELPER / DSHD_SUBAGENT_SEED_HOME / DSHD_SUBAGENT_SEED_PARENT / DSHD_SUBAGENT_SEED_CHILD` | n/a（内部） | — | `cmd/dshd/effort_goal_store_test.go:421` | "" | **N-A** |  |
 | `DSHD_BASH / DSHD_MODEL_WIRE_ENV / DSHD_MODEL_WIRE_ARGV / DSHD_FAKE_CHILD_*` | n/a | — | `cmd/dshd/serve_loop_test.go:15` | 仅测试 | **N-A** |  |
-| `DSHD_BASH` | n/a | — | `cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/cmd/dshd/serve_terminal_api.go:1213` | ""（用 PATH 上的 bash） | **OK** |  |
+| `DSHD_BASH` | n/a | — | `cmd/dshd/serve_terminal_api.go:1225` | ""（用 PATH 上的 bash） | **OK** |  |
 | `DSHD_SANDBOX_EXTRA_READ` | sandbox.extraReadRoots | — | `internal/sandbox/runtime.go:30` | "" | **N-A** | sandbox 额外可读根的 env 常量名；注释写作 _EXTRA_READ_ROOTS 属笔误，已在 docs/sandbox-policy.md 口径内。 |
 | `transport handlers_config ConfigGet/ConfigSet 形状` | config.get | — | `internal/transport/handlers_config.go:23` | 扁平 map[string]string；同时回 values 与 config 两个键 | **OK** |  |
 | `config.set 请求形状` | config.set | — | `internal/transport/handlers_config.go:60` | {"values":{...}} 或扁平 kv；空 values → 400 | **N-A** | 协议形状（两种 body 都收），不是参数。 |
-| `runIDAnonymousSession` | n/a | — | `internal/agent/loop.go:209` | "anonymous" | **N-A** |  |
+| `runIDAnonymousSession` | n/a | — | `internal/agent/loop.go:230` | "anonymous" | **N-A** |  |
 | `approval/steer/jobs 帧标签` | n/a（内部协议） | — | `cmd/dshd/approval_stdio.go:27` | "@@APPROVAL@@ " / "@@APPROVAL-RESP@@ " / "@@STEER@@ " / "@@STEER-RESP@@ " / "@@JOBS-OUT@@ " / "@@JOBS-OUT-RESP@@ " | **N-A** |  |
 | `turn 事件名` | n/a（Transport 契约） | — | `cmd/dshd/serve_events.go:11` | "turn/done" / "turn/error" / "approval/request" / "approval/timeout" / "approval/cancel" | **N-A** |  |
 | `serveJournalVersion / Frame / Reset` | n/a（journal 契约） | — | `cmd/dshd/serve_journal_store.go:22` | 1 / "frame" / "reset" | **N-A** |  |
@@ -247,17 +247,17 @@
 | `officialQueuedPlacement` | session.queue.placement | — | `cmd/dshd/serve_queue_official.go:46` | "queued" | **N-A** |  |
 | `sandbox 三档 + 四种 Action + Reason 词表` | sandbox.mode / sandbox.action | — | `internal/sandbox/policy.go:33` | read-only \| workspace-write \| danger-full-access；allow \| deny \| needs-approval；15 个 Reason 常量 | **N-A** |  |
 | `EnforcementPolicyOnlyNoOSIsolation` | sandbox.enforcement | — | `internal/sandbox/policy.go:68` | "policy-only-no-os-isolation" | **N-A** |  |
-| `--manifest 默认` | modules.manifest | — | `cmd/dshd/main.go:597` | "dsh.toml" | **OK** |  |
-| `--session / --in / --out / --id / --cwd / --summary / --dry-run / --force / --advance` | n/a（CLI） | — | `cmd/dshd/main.go:607` | "" / "" / "" / "" / "" / "" / false / false / false | **OK** |  |
-| `--keep / --max@session compact` | compaction.keepRecent | — | `cmd/dshd/main.go:1385` | 6 / 0 | **OK** |  |
+| `--manifest 默认` | modules.manifest | — | `cmd/dshd/main.go:615` | "dsh.toml" | **OK** |  |
+| `--session / --in / --out / --id / --cwd / --summary / --dry-run / --force / --advance` | n/a（CLI） | — | `cmd/dshd/main.go:625` | "" / "" / "" / "" / "" / "" / false / false / false | **OK** |  |
+| `--keep / --max@session compact` | compaction.keepRecent | — | `cmd/dshd/main.go:1452` | 6 / 0 | **OK** |  |
 | `--timeout@wasm call / wasm tool` | wasm.timeoutMs | — | `cmd/dshd/wasm.go:110` | 0（不限）/ 10s | **OK** |  |
 | `--timeout@models` | n/a（CLI） | — | `cmd/dshd/models_cmd.go:24` | 15 * time.Second | **OK** |  |
 | `--parent-watch / --parent-watch-interval / --parent-pid` | n/a | — | `cmd/dshd/parentwatch.go:277` | true / 1s / 0 | **OK** |  |
-| `--remember-approvals@acp` | approval.remember | — | `cmd/dshd/acp.go:891` | false | **OK** |  |
+| `--remember-approvals@acp` | approval.remember | — | `cmd/dshd/acp.go:979` | false | **OK** |  |
 | `--home@analytics / --enabled / --mode / --collector / --retention-days / --sampling-rate / --since` | analytics.* | — | `cmd/dshd/analytics_cmd.go:33` | defaultHome() / "" / "" / "" / 0 / 0 / "" | **OK** |  |
 | `--root / --id / --path / --version@plugins` | plugin.root | — | `cmd/dshd/serve_plugins.go:178` | ""（必填）/ "" / "" / "" | **OK** |  |
-| `--verify / --record-effort / --effort-level / --turn-id / --prompt-content-file` | n/a（内部） | — | `cmd/dshd/main.go:617` | 内部参数 | **N-A** |  |
-| `builtInModelCapacity 精确匹配 + 别名漂移` | models.catalog 的 id 规范化 | — | `internal/llm/capacity.go:58` | switch modelID { case "group/deepseek-v4.1-flash-1017": {1_000_000, 0} } | **OK** | 新增 llm.ResolveModelID 作为唯一归一点；容量表与目录共用。守卫：TestGuardModelAliasHasSingleImplementation / TestGuardCapacityAndCatalogAgreeOnAlias。 |
+| `--verify / --record-effort / --effort-level / --turn-id / --prompt-content-file` | n/a（内部） | — | `cmd/dshd/main.go:635` | 内部参数 | **N-A** |  |
+| `builtInModelCapacity 精确匹配 + 别名漂移` | models.catalog 的 id 规范化 | — | `internal/llm/capacity.go:63` | switch modelID { case "group/deepseek-v4.1-flash-1017": {1_000_000, 0} } | **OK** | 新增 llm.ResolveModelID 作为唯一归一点；容量表与目录共用。守卫：TestGuardModelAliasHasSingleImplementation / TestGuardCapacityAndCatalogAgreeOnAlias。 |
 
 ## 5. TUI2GO 链路总表
 
@@ -322,69 +322,71 @@
 | `usage.assistantUsage.shape` | usage.fields.streamShape（app.asar:dsh/node_modules/@deepseek-ai/dsh-api-session-controller/lib/typert.host.js:159 ｜ declaration :4008）：{inputTokens, outputTokens, totalTokens?, cacheReadTokens?, cacheWriteTokens?, reasoningTokens?}；四桶必填的是**客户端投影** usage.fields.projectionShape（@dsa/dsh-token-meter/lib/types/usage-projection.js:30）；usage.fields.promptTokens = input+read+write（usage-projection.js:58）；usage.placeholderPolicy = null 表示“还没有 prompt 输入”，永不渲染成 0.0（@dsh-client-ui-chat/lib/client.js:8785） | 键名照 stream shape；inputTokens = prompt - cacheRead - cacheWrite（未命中部分）；provider 没给的缓存计数**不写键、不写 0**；provider 明说 0 才写 0；无 usage 整体不写 | **OK** | 判断：**保持现状（缺键）**，不改成“没给也写 0”。依据是官方 wire 形状三处可选 + 官方对“0.0%”的判定：0.0% 只应出现在 promptTokens>0 && cacheReadTokens===0，把未知写成 0 就是可观测的谎报（official.md §3② 结论行）。四桶“永远齐”是客户端投影的 required 形状，不是 wire 的要求；宿主若强行补 0，反而破坏“不知道 vs 实测 0”的区分（界面的 cacheKnown 就是按键在不在判的）。现有测试已覆盖：assistant_usage_test.go 的 WritesDeepSeekCacheRead |
 | `context.occupancy.contextWindowPrecedence` | llm.piAi.contextWindowResolution = entry.contextWindow ?? base.contextWindow ?? request.defaultContextWindow（@dsa/dsh-llm-pi-ai/lib/index.js:694）；DSH_CONTEXT_WINDOW 只出现在 dsh-sdk-minimal 且只喂 defaultContextWindow（@dsa/dsh-sdk-minimal/cordis.patch.yml:30 ｜ README.md:35）；context 占用只由 request/context 事件设置（@dsa/dsh-token-meter/lib/types/usage-projection.js:150） | catalog → DSHD_CONTEXT_WINDOW（兜底）→ 内置表 → 0 | **OK** | 修复前顺序是 env → catalog → 内置表 → 0，env 排第一 = 让运维开关压过真实模型元数据，与官方相反。现在目录声明优先，env 只在目录没这个模型时兜底。测试：cmd/dshd/transport_context_window_test.go TestLoadContextWindowCatalogBeatsEnv（目录 2000000 + env 32000 → 2000000）与 TestLoadContextWindowEnvFallbackWhenCatalogMisses（目录缺档 + env 32000 → 32000）。 |
 
-## 7. 官方 342 条的覆盖情况（逐条三分：COVERED / COVERED-EQUIV / N-A / UNREAD-GAP）
+## 7. 官方 342 条的覆盖情况（逐条六分：COVERED / COVERED-EQUIV / N-A / DEFERRED / OFFICIAL_UNSUPPORTED / UNREAD-GAP）
 
-> 本节由 `docs/parameter-register.json` 直接生成（生成器 `tmp/GO6-PARAMS/verify/gen_section7_go6.py`，与 `tmp/GO3-PARAMS/triage/gen_section7.py` 同一套逻辑、只换了数据源与演进表）——行号取 **GO.6/T5 重锚后**的真值；判定源是 `official-coverage-triage.json`（210 条）+ `triage/na-subclass/na-subclass.json`（71 条 N-A 补子类/改判）+ **GO.6/T5 改判（17 条 UNREAD-GAP → COVERED-EQUIV）**。
-> 旧口径只有一个 `UNREAD` 大桶（210 条 note 全是同一句模板），不符合「逐条判定」；现在每条都有具体 verdict + 理由 + 宿主侧 file:line 证据。
+> 本节由 `docs/parameter-register.json` **直接生成**（生成器 `tmp/GO7-RELEASE/gaps-eco/gen_section7_go7.py`）——行号取当前工作树真值；判定源是 `official-coverage-triage.json`（210 条）+ `triage/na-subclass/na-subclass.json`（71 条 N-A 补子类）+ GO.5/T1 与 GO.6/T5 的改判 + **GO.7 三路缺口收口**。
+> **GO.7 分路口径（已全部收口）**：96 条 `UNREAD-GAP` 按域拆四路——T1（context 6 / llm 3 / tui-capability 2 / env 1）、T1b（session 11 / transport-http 7）、T7（生态/平台型 66 条里的分类与 17 条改判）、T10（agent-loop 5 条）、T9（plugin/account/analytics 9 条真缺失）。**本表当前 `UNREAD-GAP` 归零**，每一条都逐条给了宿主读取点或缺失理由，没有为清零虚报。
 
 | status | 含义 | 条数 |
 |---|---|---|
-| `COVERED` | 宿主有同名/同义读取点 | 63 |
-| `COVERED-EQUIV` | 宿主有等价能力/参数，只是名字/形状不同（带 `hostEquivalent` file:line） | 152 |
-| `N-A` | 对无头宿主不适用（按子类分组，**每条都带 `naClass`**） | 31 |
-| `UNREAD-GAP` | 真能力缺口（缺什么 / 现在降级成什么样 / 替代路径） | 96 |
+| `COVERED` | 宿主有同名/同义读取点 | 64 |
+| `COVERED-EQUIV` | 宿主有等价能力/参数，只是名字/形状不同（带 `hostEquivalent` file:line） | 214 |
+| `N-A` | 对无头宿主不适用（按子类分组，**每条都带 `naClass`**） | 37 |
+| `DEFERRED` | 能做、排期后置（每条带 `dependsOn`） | 8 |
+| `OFFICIAL_UNSUPPORTED` | 官方有、本仓按成文红线明确不做（每条带 `capableWhen`） | 19 |
+| `UNREAD-GAP` | 真能力缺口（缺什么 / 现在降级成什么样 / 替代路径；真缺失带 `realGapOwner`） | 0 |
 | **合计** | | **342** |
 
 **统计演进**
 
-| 口径 | COVERED | COVERED-EQUIV | N-A | UNREAD-GAP | UNREAD |
-|---|---|---|---|---|---|
-| 判定前 | 61 | — | 71 | — | 210 |
-| t1 三分后 | 61 | 120 | 94（含 71 条无子类） | 67 | 0 |
-| t5 补子类后 | 60 | 139 | 30 | 113 | 0 |
-| GO.6 四族补齐后（T5 重锚） | 63 | 152 | 31 | 96 | 0 |
+| 口径 | COVERED | COVERED-EQUIV | N-A | DEFERRED | OFFICIAL_UNSUPPORTED | UNREAD-GAP |
+|---|---|---|---|---|---|---|
+| 判定前（GO.3 t1 之前） | 61 | — | 71 | — | — | — |
+| t1 三分后 | 61 | 120 | 94（含 71 条无子类） | — | — | 67 |
+| t5 补子类后 | 60 | 139 | 30 | — | — | 113 |
+| GO.6 四族补齐后（T5 重锚） | 63 | 152 | 31 | 0 | 0 | 96 |
+| **GO.7 当前（本表）** | 64 | 214 | 37 | 8 | 19 | 0 |
 
-按域分布：
+按域分布（当前工作树真值；T1/T1b 两路仍在途）：
 
-| 域 | 合计 | COVERED | COVERED-EQUIV | N-A | UNREAD-GAP |
-|---|---|---|---|---|---|
-| `agent-loop` | 65 | 17 | 34 | 6 | 8 |
-| `llm` | 34 | 2 | 28 | 1 | 3 |
-| `context` | 21 | 4 | 11 | 0 | 6 |
-| `session` | 37 | 6 | 16 | 4 | 11 |
-| `tools-sandbox-approval` | 35 | 7 | 14 | 1 | 13 |
-| `transport-http` | 24 | 4 | 12 | 1 | 7 |
-| `tui-capability` | 26 | 7 | 11 | 6 | 2 |
-| `env` | 15 | 3 | 6 | 5 | 1 |
-| `live-profile-desktop` | 24 | 10 | 8 | 3 | 3 |
-| `schedule-plugins-account-telemetry` | 61 | 3 | 12 | 4 | 42 |
+| 域 | 合计 | COVERED | COVERED-EQUIV | N-A | DEFERRED | OFFICIAL_UNSUPPORTED | UNREAD-GAP |
+|---|---|---|---|---|---|---|---|
+| `agent-loop` | 65 | 17 | 37 | 6 | 1 | 4 | 0 |
+| `llm` | 34 | 2 | 29 | 1 | 2 | 0 | 0 |
+| `context` | 21 | 4 | 14 | 0 | 3 | 0 | 0 |
+| `session` | 37 | 6 | 27 | 4 | 0 | 0 | 0 |
+| `tools-sandbox-approval` | 35 | 7 | 24 | 1 | 0 | 3 | 0 |
+| `transport-http` | 24 | 4 | 19 | 1 | 0 | 0 | 0 |
+| `tui-capability` | 26 | 7 | 13 | 6 | 0 | 0 | 0 |
+| `env` | 15 | 4 | 6 | 5 | 0 | 0 | 0 |
+| `live-profile-desktop` | 24 | 10 | 10 | 3 | 0 | 1 | 0 |
+| `schedule-plugins-account-telemetry` | 61 | 3 | 35 | 10 | 2 | 11 | 0 |
 
 ---
 
-### COVERED（63 条，宿主有同名/同义读取点）
+### COVERED（64 条，宿主有同名/同义读取点）
 
-- **agent-loop**（17）：`agentLoop.agents`、`agentLoop.agents[].provider`、`agentLoop.agents[].model`、`agentLoop.agents[].reasoningEffort`、`agentLoop.agents[].maxTokens`、`retry.mode`、`steering.steer`、`steering.inject`、`subagent.maxDepth`、`toolCallTimeoutPolicy.enforcement`、`timeout.maxTimerDelayMs`、`toolResult.prune.thresholdChars`、`bash.timeoutMs`、`pwsh.timeoutMs`、`tool.web.search`、`tool.web.fetch`、`tool.fsSearch.timeoutMs`
+- **agent-loop**（17）：`agentLoop.agents`、`agentLoop.agents[].maxTokens`、`agentLoop.agents[].model`、`agentLoop.agents[].provider`、`agentLoop.agents[].reasoningEffort`、`bash.timeoutMs`、`pwsh.timeoutMs`、`retry.mode`、`steering.inject`、`steering.steer`、`subagent.maxDepth`、`timeout.maxTimerDelayMs`、`tool.fsSearch.timeoutMs`、`tool.web.fetch`、`tool.web.search`、`toolCallTimeoutPolicy.enforcement`、`toolResult.prune.thresholdChars`
 - **llm**（2）：`llm.deepseek.models`、`llm.defaultModel`
-- **context**（4）：`context.window`、`context.compaction.auto`、`context.compaction.maxTokens`、`context.agentInstructions.maxBytes`
-- **session**（6）：`session.persistence.root`、`session.persistence.compression`、`session.titleLlm.autoTitle`、`session.titleLlm.maxOutputTokens`、`session.titleLlm.timeoutMs`、`session.query.path`
-- **tools-sandbox-approval**（7）：`sandbox.modes`、`sandbox.mode`、`sandbox.workspaceRoot`、`approval.policy`、`permission.defaultPreset`、`skillFs.watch`、`terminal.scrollback`
-- **transport-http**（4）：`webserver.port`、`webserver.compression`、`sessionController.waitTimeoutMs`、`workspaceFiles.maxBytes`
-- **tui-capability**（7）：`context.occupancy.source`、`models.reasoningEffort`、`modes.agentPresets.default`、`modes.agentPreset.plugins`、`queue.placement`、`queue.actions`、`session.state`
-- **env**（3）：`DSH_TELEMETRY_OTLP_URL`、`DSH_MAX_TOKENS_AS_SUCCESS`、`DSH_PRODUCT_ANALYTICS_OTLP_URL`
-- **live-profile-desktop**（10）：`agentDefaultModel.provider`、`agentDefaultModel.model`、`agentDefaultModel.reasoningEffort`、`llmPiAi.providers.magpie.baseURL`、`llmPiAi.providers.magpie.models[0].contextWindow`、`llmPiAi.providers.magpie.models[0].maxTokens`、`llmPiAi.providers.magpie.models[1].contextWindow`、`llmPiAi.providers.magpie.models[1].maxTokens`、`subagent.maxDepth`、`permission.defaultPreset`
-- **schedule-plugins-account-telemetry**（3）：`analytics.enabled`、`telemetry.session.mode`、`hmr.root`
+- **context**（4）：`context.agentInstructions.maxBytes`、`context.compaction.auto`、`context.compaction.maxTokens`、`context.window`
+- **session**（6）：`session.persistence.compression`、`session.persistence.root`、`session.query.path`、`session.titleLlm.autoTitle`、`session.titleLlm.maxOutputTokens`、`session.titleLlm.timeoutMs`
+- **tools-sandbox-approval**（7）：`approval.policy`、`permission.defaultPreset`、`sandbox.mode`、`sandbox.modes`、`sandbox.workspaceRoot`、`skillFs.watch`、`terminal.scrollback`
+- **transport-http**（4）：`sessionController.waitTimeoutMs`、`webserver.compression`、`webserver.port`、`workspaceFiles.maxBytes`
+- **tui-capability**（7）：`context.occupancy.source`、`models.reasoningEffort`、`modes.agentPreset.plugins`、`modes.agentPresets.default`、`queue.actions`、`queue.placement`、`session.state`
+- **env**（4）：`DSH_MAX_TOKENS_AS_SUCCESS`、`DSH_PRODUCT_ANALYTICS_OTLP_URL`、`DSH_SYSTEM_PROMPT`、`DSH_TELEMETRY_OTLP_URL`
+- **live-profile-desktop**（10）：`agentDefaultModel.model`、`agentDefaultModel.provider`、`agentDefaultModel.reasoningEffort`、`llmPiAi.providers.magpie.baseURL`、`llmPiAi.providers.magpie.models[0].contextWindow`、`llmPiAi.providers.magpie.models[0].maxTokens`、`llmPiAi.providers.magpie.models[1].contextWindow`、`llmPiAi.providers.magpie.models[1].maxTokens`、`permission.defaultPreset`、`subagent.maxDepth`
+- **schedule-plugins-account-telemetry**（3）：`analytics.enabled`、`hmr.root`、`telemetry.session.mode`
 
----
+### COVERED-EQUIV（214 条，宿主等价能力，名字/形状/数值不同）
 
-### COVERED-EQUIV（152 条，宿主等价能力，名字/形状/数值不同）
+> 每条都给了宿主侧读取点（`hostEquivalent`，可直接 `grep -n` 复核）。
 
-> 每条都给了宿主侧读取点（`hostEquivalent`），可直接 `grep -n` 复核。
-
-#### agent-loop（34 条）
+#### agent-loop（37 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
 | `agentLoop.agents[].cwd` | spi.SubagentRequest.Cwd（modules/tool/subagent/subagent.go:24 schema / :42 字段 / :82 透传）→ cmd/dshd/subagent.go:72-95 解析并 chdir | subagent/subagent_fork 工具都暴露 cwd 入参，宿主在子代理执行期间进程级 chdir 到该目录（并用 subCwdMu 串行化），语义与官方一致。 |
+| `agentLoop.agents[].id` | modules/tool/subagent/subagent.go:26（schema `id`）→ cmd/dshd/subagent.go:89/:186/:199（认地址/复用/记账）→ internal/agent/child_session.go:113（`${id}-session-<uuid4>` 派生）→ internal/agent/child_agents.go:113/:150（durable 地址表） | 官方 `agentLoop.agents[].id` 是**稳定标签**，`sessionId` 缺省时按 `${id}-session-${randomUUID()}` 铸子会话 id（dsh-agent-loop/lib/index.js:1351）。宿主现在真实现：`subagent` 工具多了一个可选 `id` 参数，宿主按同一条规则派生 `<id>-session-<uuid4>`，并把 `(父会话, agent id) → 子会话 id` 落进 `<home>/state/subagent-agents.json`，于是**下一轮（另一个 dshd run 子进程）还能按同一个名字指回同一个子代理**；同一 id 的第二趟把往返**追加**到同一条子会话（历史连得上），不同 id 是不同地址。差异（写清）：官方在启动配置里一次性把 `agents[]` 铸成会话并常驻；宿主是按需委派，第一次用到某个 id 时才铸地址——派生规则逐字符相同，生命周期不同。`description` 永远不参与派生：工具层只读 `id` 字段，`TestDescriptionNeverBecomesAgentID` 钉住这条。 |
 | `agentLoop.agents[].resumeSessionId` | --session 续会话（cmd/dshd/main.go:607 `resumeSession := fs.String("session", ...)` / :774 / :817）+ subagents.prompt 续问（cmd/dshd/serve_subagents_api.go:83 Deliver） | 宿主有两种续接：主会话用 --session 续已持久化会话（cwd 可省、按 id 全盘找），子代理用 subagents.prompt 往已 spawn 的 child 会话投递；合起来覆盖官方 resumeSessionId 的“续一个已存在会话而不是新建”。 |
 | `agentLoop.agents[].sessionId` | ChildRecord.ChildSessionID（internal/agent/child_session.go:51-56）+ subagents.prompt 的 (parentSessionId, childSessionId) 地址（cmd/dshd/serve_subagents_api.go:83） | 宿主用 childSessionId 表达“这是哪个子代理会话”，且是 durable 的（写进 v4 的 subagent/spawn 父子帧），续问时按 (parentSessionId, childSessionId) 认领；与官方 exact session identity 同一能力，只是 id 由宿主生成而非调用方给。 |
 | `agentLoop.maxParallelToolCalls` | agent.MaxParallelToolCalls（internal/agent/parallel.go:67 解析 / :87 Loop 字段优先），执行点 runToolBatch/executeToolCalls（internal/agent/parallel.go:198/268） | 宿主同一次模型响应里的 N 个 tool_call 现在按上限并发执行（默认 10 路，与官方一致）：固定 worker 池、结果与事件仍按模型顺序结算、审批类工具单独成一条互斥车道。名字不同：官方是 agentLoop.maxParallelToolCalls 配置字段，宿主是 DSHD_MAX_PARALLEL_TOOL_CALLS 环境变量 + Loop.MaxParallelToolCalls 字段（1 = 逐字节退回串行）。 |
@@ -400,9 +402,11 @@
 | `retry.jitterRatio` | internal/llm/retry.go:52-53 `defaultRetryJitter = 0.5` / :57 jitter 字段 / :131-140 向下抖动实现 | 宿主有抖动比例字段且默认 0.5（只向下抖，(1-jitter)*d ~ d），官方默认 0.1；同一能力、不同默认值，注释里写清了为什么只向下抖。 |
 | `retry.maxDelayMs` | internal/llm/retry.go:50 `defaultRetryMaxWait = 8 * time.Second` | 宿主有“单次等待上限 + Retry-After 天花板”，值是 8s 而不是官方 10s；语义相同（超过就不再等），数值不同。 |
 | `retry.maxRetries` | llm.retryConfig.attempts（internal/llm/retry.go:44 `defaultRetryAttempts = 4` / :84-92 defaultRetryConfig） | 宿主有一等公民的重试策略（指数退避 + 抖动 + 单次等待上限 + 总预算），次数为 4 次尝试（1 首发 + 3 重试）对比官方 5 次重试——能力在、默认值不同。 |
+| `retry.pluginConfig` | internal/llm/model_catalog.go:1027（条目校验）+ :112/:132（provider 携带）→ cmd/dshd/serve_loop.go:165（DSHD_LLM_RETRY_POLICY）→ cmd/dshd/llm_retry_wiring.go:23 → internal/llm/retry_policy.go:111（落到 retryConfig）+ internal/llm/retry.go:124（code 过滤） | 官方 `retryPolicy` 必须写**在各 provider 配置下**（dsh-llm-retry/lib/index.js:29 明确拒绝写在插件配置上），默认 normal：5 次重试 / 500ms→10s 退避 / 0.1 抖动 / 五个 code（dsh-llm-retry/README.md:51）。宿主现在真实现：模型目录的模型条目可以有 `retryPolicy`（官方形状：`mode`/`maxRetries`/`retryableCodes`/`backoff{initialDelayMs,maxDelayMs,jitterRatio}`，未知键报错、默认值与官方逐个相同），serve 侧用 `DSHD_LLM_RETRY_POLICY` 把它交给 `dshd run` 子进程，装到那一条 Client 上；`retryableCodes` 真的参与判定（不在集合里的 429/5xx/连接层失败一次都不重试），`mode: always` 是无次数上限（只由取消/收工停）。差异（写清）：宿主能**产生**的 code 只有 RATE_LIMIT / SERVER / TRANSPORT——`EMPTY_RESPONSE` 与 `TIMEOUT` 没有产生点（没有请求级超时，超时只来自 ctx 取消而取消绝不重试；空回答由上层 empty-response 策略处理），写进 `retryableCodes` 也不会误伤。不设时零影响：策略为 nil 就仍走 `defaultRetryConfig()`。 |
 | `retry.retryableCodes` | internal/llm/retry.go:199-204 retryableStatus（429 / 5xx）+ :22-36 分类注释 | 宿主按“可安全重放”的失败类判重试：429/5xx/连接层瞬时错误重试，401/403/404/400/422 一次都不重试，且流已开始吐字后不重放；与官方按 LlmFailure 码（RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT）分类等价，但 EMPTY_RESPONSE 在宿主是 turn 级硬失败而不是重试项。 |
 | `steering.cancelClearsInbox` | internal/agent/loop.go:245-247 `defer l.Steers.Close()` + :127-131 drainOrClose 关闭即停止 | 宿主的取消路径同样清空未消费的 steer 项：Run 用 defer 关闭信箱，close 后队列整体丢弃（drainOrClose 在关闭时返回“不再继续”），等价于官方 cancel() 默认清 inbox。 |
 | `steering.followup` | agent.SteerInbox（internal/agent/loop.go:85-131 Submit/Close/drain/drainOrClose）+ :163-164 注入点 + :290 调用点 + :430-431 emitSteers | 宿主的 steer 信箱就是官方 followup 的落点：turn 内 FIFO 接收用户消息，在当前 turn 的下一模型步边界注入，Run 返回时关闭并清空未消费项——语义与官方“排队到下一个 turn 边界领取”一致。 |
+| `subagent.maxActiveSubagents` | cmd/dshd/subagent_gate.go:78/:100（信号量 + env 解析）→ cmd/dshd/subagent.go:67（RunSub 入口 acquire/defer release）→ cmd/dshd/main.go（装配 gate） | 官方 subagent 服务的并发上限：默认 8，正整数（dsh-subagent/README.md:54；「A top-level parent starts a pool shared by its local and external descendants; the root parent consumes no slot」）。宿主现在真实现：`subRunner.RunSub` 入口先过一个带缓冲 channel 的**信号量**（默认 8，`DSHD_SUBAGENT_MAX_ACTIVE_SUBAGENTS` 覆盖），槽满就**等**（可被 ctx 取消），拿不到就排队而不是全跑；失败路径也还槽。差异（写清）：池是**进程级**的（`dshd serve` 每轮是新的 `dshd run` 子进程，多个会话各开子进程时各有各的额度）；官方是每棵 activation tree 一个池。要做到全机共享额度需要跨进程租约，不在这一条范围内。 |
 | `subagent.providers` | modules/tool/subagent/subagent.go:1（spawn）+ modules/tool/subagentfork/subagentfork.go:67（fork），均在 cmd/dshd/main.go 的模块表注册 | 官方两个 in-process provider（spawn / fork）在宿主各有一个工具实现：subagent 走真实 spawn（可选 durable 子会话），subagent_fork 走 fork 语义；provider 名不同但能力面一致。 |
 | `tool.fsSearch.globMaxResults` | modules/tool/glob/glob.go:33-34 `defaultLimit = 200` / `maxLimit = 1000` + :25 schema limit | 宿主 glob 工具默认返回 200 条（官方默认 100），上限可由入参 limit 收到 1000；语义相同（内联展示条数），默认值不同。 |
 | `tool.fsSearch.grepMaxLineBytes` | modules/tool/grep/grep.go:43 `maxLineChars = 400` + :194-196 逐行截断 | 宿主对每行预览有 400 字符上限（官方 2000 字节），截断点更靠前；能力相同、阈值不同。 |
@@ -419,7 +423,7 @@
 | `toolResult.prune.tailChars` | internal/prune/prune.go:156 `tail := usable - head`（尾段保留）+ :166-175 拼接 | 同 headChars：尾巴按剩余 40% 保留（tail := usable - head），不是固定 1024 字符，但“保住错误/结论那段”的语义一致。 |
 | `toolResult.spill.maxInlineTokens` | tools.Pipeline.Options.MaxChars（modules/tools/pipeline.go:22-24 默认 4000 字符）+ :525-575 spill() + :582-600 spillText() | 宿主有 spill 层（超阈值外置成 artifact + 指针），但预算口径是字符而不是 token：阈值 4000 字符、正文留头 3/4 留尾 1/4；官方 12500 token 的内联预算在宿主用更严格的字符阈值实现。 |
 
-#### llm（28 条）
+#### llm（29 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
@@ -447,17 +451,20 @@
 | `llm.piAi.maxTokensResolution` | internal/llm/capacity.go:79-104 ResolveModelCapacity（MaxOutput 分支） | 同 contextWindowResolution：maxOutput 走同一条 declared > built-in > default 解析链，且 <=0 视为未声明。 |
 | `llm.piAi.providers` | internal/llm/provider_registry.go:31-42 ProviderInfo/ConfigurableProvider + :104-130 registeredProviderAPIs / 解析；投影到 cmd/dshd/serve_provider_registry.go:38 | 官方“没有 provider profile 就没有路由”；宿主有等价的 provider 注册表（adapter → (baseURL, credential, API, settingsNs)），未注册的 provider 在 listProviders/discover 都是结构化错误。 |
 | `llm.piAi.reasoningEfforts` | cmd/dshd/serve_effort_override.go:128 `ReasoningEfforts json.RawMessage` / :136-142 解析校验 / :218 level 失配报错 + cmd/dshd/serve_session_api_t04.go:184 | 官方按模型声明 thinking level 字典（off 可留空，至少一个非 off）；宿主有同形的 per-model reasoningEfforts（JSON object）+ 会话级 effort 校验，level 不在当前模型字典里就报错。 |
+| `llm.piAi.streamIdleTimeoutMs` | internal/llm/stream_idle.go:179 streamIdleTimeoutFor → internal/llm/client.go:119（每条流自己的上限） | 官方 per-provider 流空闲超时（`llm.piAi.providers.<name>.streamIdleTimeoutMs`，默认 300000）现在真实现：宿主按模型 id 的 provider 前缀（`magpie/…` → `magpie`）查 per-provider 表，表由 `DSHD_LLM_STREAM_IDLE_TIMEOUT_PROVIDERS_MS`（JSON 对象，毫秒）给；解析优先级 = Client 显式字段 > per-provider 表 > 全局 `DSHD_LLM_STREAM_IDLE_TIMEOUT_MS` > 官方默认 300000。非法表（非 JSON / 空 provider / 非正数 / 超 2^31-1）fail-loud。实测：同进程两条通道分别按 200ms（deepseek）与 600ms（magpie）触发，说明「一条全局值」的旧限制已经解除。 |
 | `llm.resolveModelInfo.contextWindowValidation` | internal/llm/capacity.go:80 错误码 / :126 ValidateDeclaredContextWindow / :135 ResolveModelCapacityChecked；消费点 internal/agent/loop.go:285 | contextWindow 声明非法（负值）现在 fail-closed：错误码 INVALID_MODEL_CONTEXT，Loop.Run 在任何模型请求之前返回，--context-window 也在启动参数校验阶段拒绝。官方要求「整数 > 0」，宿主 0 表示「未声明」是既有契约（--context-window 0 = 按模型容量解析；目录面写 0 在读盘时就被拒）。 |
 | `llm.stop` | llm.Request.Stop（internal/llm/types.go:186）+ cmd/dshd/env_llm.go:36/:50 | llm.Request 现在有 Stop []string，非空才发、按给定顺序原样发出；DSHD_LLM_STOP 逗号分隔并可写 \n/\r/\t 转义（否则单行环境变量表达不出最常用的换行停用词）。 |
 | `llm.streaming` | llm.Client.Stream（internal/llm/client.go）+ internal/llm/provider.go:98-101 `RequiredFields() []string { return []string{"model", "messages", "stream"} }` | 官方“恒 stream、没有非流式开关”；宿主同样只有流式入口（Client.Stream + 逐事件回调），adapter 的 RequiredFields 里 stream 是必发字段，没有第二个调用形状。 |
 | `llm.temperature` | llm.Request.Temperature（internal/llm/types.go:183）+ wire 转发（internal/llm/compat.go）+ cmd/dshd/env_llm.go:50 samplingFromEnv（env 名 env_llm.go:34） | llm.Request 现在有 Temperature *float64，显式设置才发（连 0 也发：确定性复现要靠它）；run/acp/serve/子代理四个入口共用 DSHD_LLM_TEMPERATURE 解析，非法/NaN/Inf fail-loud。 |
 
-#### context（11 条）
+#### context（14 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
 | `context.compaction.compactionRetries` | internal/compact/retry.go:24 EnvCompactRetries / :51 解析 / :76 SummarizeWithRetry；消费点 cmd/dshd/acp.go:1317 | 摘要失败按 DSHD_COMPACT_RETRIES（默认 1）重试；压完仍高于阈值时再压一次（官方 compactionRetries 语义），而不是「压过一次就算交差」。非法 env 回落默认，负数不当无限重试。 |
+| `context.compaction.headroomTokens` | internal/compact/policy.go:228 Policy.Budget → cmd/dshd/acp.go:1347 compactThreshold / cmd/dshd/main.go:1649 runCompactor | 官方 `headroomTokens`（默认 65536）现在真接线：压缩阈值 = min(宿主绝对阈值 --auto-compact, floor(min(W×ratio, W−O−B)))，B 由 `--compact-headroom-tokens` / `DSHD_COMPACT_HEADROOM_TOKENS` 给（0 = 不留安全带）。小窗口模型因此被压到官方口径（100K 窗口 / 8K 预留 → 26272 < 40000），大窗口行为不变（1M 窗口仍取绝对阈值 40000）。预算不成立（headroom ≥ W−O）时官方 fail-loud；宿主退回绝对阈值并**打一次 stderr 警告**（不能因此停摆：停摆 = 永不压缩 = 每次超窗），警告文案里给出调小 headroom 的动作。 |
 | `context.compaction.maxOverflowRetries` | internal/compact/retry.go:26 EnvCompactOverflowRetries / :52 / :130 IsContextOverflow；消费点 cmd/dshd/acp.go:501 | 溢出（IsContextOverflow 分类：provider 文案 / 400·413·422 状态码）后按 DSHD_COMPACT_OVERFLOW_RETRIES（默认 1）强制压缩并重放这一轮；非溢出错误一律不重试（401/404 重试只会掩盖真实原因）。 |
+| `context.compaction.modelPolicies` | internal/compact/policy.go:153 Resolve → cmd/dshd/acp.go:149 compactPolicy（阈值/重试全部按命中策略） | 官方 `modelPolicies`（按 provider/model 精确覆盖 headroomTokens/thresholdRatio/maxTokens/compactionRetries/maxOverflowRetries）现在真接线：`--compact-model-policies` 或 `DSHD_COMPACT_MODEL_POLICIES` 收 JSON 数组，启动期解析并校验（重复目标、越界比例、负值一律 fail-loud）。命中优先级 p/m > p/* > */m > */*；命中后阈值与两条重试预算都按该策略执行，未命中的模型逐字段等于默认（同进程多会话不互相污染）。 |
 | `context.compaction.reservedCompletionTokens` | internal/compact/budget.go:32 ReservedCompletionTokens / :109 HostThreshold；消费点 cmd/dshd/acp.go:1283 compactThreshold | 压缩阈值改按官方公式 floor(min(W×0.8, W−O−B)) 算，其中 O = header.maxTokens ?? adapter defaultMaxTokens；再与宿主既有绝对阈值 --auto-compact 取小。默认行为一字不变，只有小窗口/大预留时官方口径才咬合。 |
 | `context.compaction.retainRatio` | internal/compact/compact.go:21-27 KeepTokens 字段（默认 2000）+ :46-56 withDefaults | 宿主保留尾巴按**绝对 token 预算**（KeepTokens 默认 2000）而不是消息预算的 16%；注释里写清了为什么按体积留而不是按条数留。 |
 | `context.compaction.retainTokens` | internal/compact/compact.go:21-27 KeepTokens + Options 传入（cmd/dshd/acp.go:1158 compactSelectOptions 是唯一一份参数） | 官方的绝对保留预算就是宿主的 KeepTokens（默认 2000，可由调用方覆盖），语义逐条一致。 |
@@ -466,22 +473,34 @@
 | `context.measurement.pressureTokens` | internal/session/usage_projection.go:133 ProjectContext / :51 PressureTokens；wire cmd/dshd/context_usage.go:119 | context.usage 现在发 pressureTokens = 未命中输入 + cacheRead + cacheWrite（只看 prompt 侧，不含输出），与官方 usage-projection 的 pressureFrom 同口径；used 仍保留最近一次 totalTokens 做向后兼容。 |
 | `context.measurement.projectedTokens` | internal/session/usage_projection.go:174 计算 / :53 字段；wire cmd/dshd/context_usage.go:120 | projectedTokens = max(0, pressure + surface − sampledSurface)，预测**下一次请求**的占用；同一份 events 只读派生（O(n)，不写盘）。这是「用户刚敲新消息 / 工具结果刚灌入」时唯一有用的读数。 |
 | `context.measurement.usageBuckets` | internal/session/usage_projection.go:26 UsageBuckets / :152 PromptTokens；wire cmd/dshd/context_usage.go:121 | 四桶齐：uncachedInputTokens / outputTokens / cacheReadTokens / cacheWriteTokens；旧会话只有 totalTokens 时按 total 兜底进未命中输入桶。 |
+| `context.runtimeContext.perStep` | internal/agent/loop.go:347 + internal/agent/runtime_context.go:50（请求期注入，不落盘） | 官方「每步重新投影 runtime context 事实、不重组提示」现在真实现：agent.Loop 新增 `RuntimeContext func() string`，每一步在发请求前取**当下**的时间/工作目录/平台，作为一条 `[runtime-context]` system 消息追加到**这一次请求**的消息副本末尾；历史、工具表、系统提示一个字节都不动（prompt cache 前缀保持稳定），该消息也**不落进 Run 返回的历史**（否则下一轮带的是过期值）。host 两个入口（run / acp）默认开启（官方默认 true），`--runtime-context=false` / `DSHD_RUNTIME_CONTEXT=false` 可回退到装配期快照。 |
 | `context.sessionReference.candidateLimit` | cmd/dshd/serve_agent_api.go:58-59 `agentSessionReferenceLimit = 20` + :1779-1781 截断 | 宿主会话引用候选上限 20（官方 50），语义相同（有界候选列表）、数值更紧。 |
 
-#### session（16 条）
+#### session（27 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
+| `attachment.imageCompressionConcurrency` | attachmentStore 的消息级归一化（cmd/dshd/attachments_normalize.go:37/:89/:111；调用点 prompt_content.go:99/:183） | 一条消息里的多张图按 2 路并发归一化（DSHD_IMAGE_COMPRESSION_CONCURRENCY 覆盖），worker 池 + 下标落位保证图片顺序不变；测试用慢归一化钩子断言 max in-flight=2 且结果顺序与输入一致。 |
 | `attachment.maxImageBytes` | cmd/dshd/attachments.go:30 `attachmentMaxBytes = 8 << 20` + :147 超限拒绝 | 宿主单张图片字节上限 8MiB（官方 50MiB），语义相同（超限即拒）、阈值更严。 |
+| `attachment.maxImagesPerMessage` | attachmentStore.ResolveBlocks / ResolveBlocksForChild 的图片计数闸（cmd/dshd/attachments.go:601、prompt_content.go:260），默认值/闸函数 cmd/dshd/attachments_normalize.go:39/:315 | 一条消息的图片张数在准入点强制 ≤ 20（ResolveBlocks 与 ResolveBlocksForChild 两处都查），超限是 400 参数错误而不是静默丢图；DSHD_MAX_IMAGES_PER_MESSAGE 覆盖，0 = 不限。 |
+| `attachment.normalizedImageMaxBytes` | 同上（cmd/dshd/attachments_normalize.go:35/:213 与 prompt_content.go:99/:183 的批量归一化） | 重编码后字节超 4194304 时继续缩像素（每轮 0.85），JPEG 先试 85→40 质量档，最多 24 轮；到 1×1 仍超预算就 fail-loud 报错，不静默返回原图。 |
+| `attachment.normalizedImageMaxPixels` | prompt 装配前的消息级归一化（cmd/dshd/prompt_content.go:99/:183 → normalizeMessageImages），实现与默认值 cmd/dshd/attachments_normalize.go:33/:142/:191 | 宿主原来只校验不缩放；现在真有归一化通道：解码 PNG/JPEG → 面积超 4194304 就按 sqrt(预算/面积) 等比缩小（自写双线性）→ 重编码。预算内的小图**不重编码**（不白丢质量）。WebP 无标准库解码器，显式透传并在 Note 里写明“未归一化”。 |
 | `fileReference.excludedDirectories` | internal/fsutil/walk.go:38-42 DefaultSkipDirs + :15-27 说明（.git / node_modules / refs 占绝大多数文件） | 宿主文件遍历有默认跳过目录集（.git / node_modules / refs 等），@ 引用与 glob 都走它；官方是“跳过的目录”参数，能力等价。 |
 | `fileReference.maxResults` | cmd/dshd/serve_agent_api.go:56 `const agentReferenceLimit = 50` + :1347-1349 达上限即停 | 宿主 @ 引用的候选条数上限是 50（官方 maxResults=20），语义相同（有界列表）、数值更宽；另有一条独立的 agentSessionReferenceLimit=20 用于会话引用。 |
+| `goal.defaultMaxGoalRounds` | goalStore 的 create 分支（cmd/dshd/serve_agent_api.go:478）+ 默认值/解析 cmd/dshd/goal_defaults.go:20/:29 | 新建 goal 且调用方没给上限时默认 256（官方 resolveMaxGoalRounds 的物化默认）；显式传 0 仍是“本宿主 legacy 的无上限”，DSHD_GOAL_DEFAULT_MAX_ROUNDS 可覆盖（0 = 不限）。落盘记录可查（测试断言 create 后 MaxGoalRounds=256）。 |
+| `jobs.maxConcurrentJobsPerOwner` | bash.Service.register 的 owner 配额闸（modules/exec/bash/service.go:153），默认值/解析 modules/exec/bash/retention_params.go:24/:35 | 宿主现在按 owner 限并发：`Service.register` 在登记后台任务前数一遍**运行中**的 job，达到上限直接 fail-loud（排队会让调用方以为已经跑起来了，静默丢弃更糟）；默认 10（官方默认），DSHD_MAX_CONCURRENT_JOBS_PER_OWNER 覆盖，0 = 不限。已结算的任务不占额度（它们只保留输出、不占并发）。 |
 | `jobs.retainBytes` | modules/exec/bash/session.go:33 `maxRetainedJobOutput = 1024 * 1024` + :297-301 裁剪 | 宿主给每个运行中任务保留 1MiB 滚动窗口（官方 262144 字节），语义相同（有界保留、超出丢最旧）、数值更宽。 |
+| `jobs.settledRetainBytes` | task 的结算点裁剪（modules/exec/bash/session.go:339 与 :352 → retention_params.go:82），默认值/解析 retention_params.go:31/:53 | 宿主现在分两档保留：运行中仍是 1MiB 运行窗口（jobs.retainBytes），结算点可以再缩到官方 16384；裁剪只前进 base、不改 total，所以 page() 照旧如实报 truncated；运行中的 job 完全不受影响。**默认不启用这一档**（不设置 = 零影响，保持 W69 契约），设 DSHD_SETTLED_RETAIN_BYTES 即按官方语义裁剪（16384 为官方默认）。 |
 | `session.checkpoints` | internal/session/checkpoint.go:52-53 checkpointFormatVersion / :237 写 / :399-400 版本校验 + internal/agent/loop.go:283-289 PreStep 每步请求前落盘 | 官方 checkpoint-policy 的语义是“每次模型请求前与每次顶层派发前打一个耐久检查点”；宿主有独立的 durable checkpoint 侧车（checkpointFormatVersion + 版本失配即判损坏），由 loop 的 PreStep 在每步模型请求前落盘。 |
 | `session.formatVersion` | codecs/v4（header.Version / 读路径 v4.ReadFile）+ internal/session/projection.go:67 `FormatVersion int` / :79 / :97 版本比对 | 官方 SESSION_FORMAT_VERSION=4 就是 v4 逻辑会话表示；宿主整个会话层就建在 codecs/v4 上（日志头 Version 字段 + 投影 FormatVersion 逐条比对），版本语义一致。 |
+| `session.persistence.listConcurrency` | session.ListSessionsWithOptions（internal/session/list.go:107）的 ListOptions.Concurrency；默认值/解析在 list.go:31/:184，执行点在 :150-:178 的 worker 池 | 宿主 ListSessions 现在按官方并发度读会话日志：默认 3 路有界 worker 池（DSHD_LIST_CONCURRENCY 覆盖），目录枚举 + stat 仍串行（便宜），只有读日志这一步并发；结果按下标落位后再排序，所以并发不改变返回顺序与内容（测试逐条比对串行/并发结果）。 |
+| `session.projectionCache.writeEveryEvents` | session.ProjectionCache.WriteBehind / Flush（internal/session/projection_batch.go:26 默认值、:91 入队；projection_cache.go:203 Restore 写回点） | 投影缓存改成官方 write-behind 批量：同一会话的写回先攒在批量器里，累计 200 条事件才落盘（DSHD_PROJECTION_WRITE_EVERY_EVENTS 覆盖），并加了“读穿写回”保证读到的永远是最新切点。多次写回合并成一次落盘（测试用落盘计数证明 3 次写回 = 1 次 Put）。 |
+| `session.projectionCache.writeIntervalMs` | session.ProjectionCache 的批量器时间轴（internal/session/projection_batch.go:28/:42/:126）；Close 前 flush 见 projection_cache.go:120 | 同一批量器的按时间落盘：距上次落盘满 5000ms 也落一次（DSHD_PROJECTION_WRITE_INTERVAL_MS 覆盖），定时器只在有 pending 时挂一个，Flush/Close 会先 flush 再关，避免最后一个检查点白丢。 |
 | `session.query.defaultLimit` | internal/session/query.go:31 `QueryDefaultLimit = 20` + :141-143 生效 | 宿主检索默认页大小 20，与官方默认逐字一致（QueryDefaultLimit）。 |
 | `session.query.maxLimit` | internal/session/query.go:33 `QueryMaxLimit = 100` + :145-147 夹紧 | 宿主单页上限 100，与官方默认逐字一致（QueryMaxLimit，超出夹紧）。 |
 | `session.query.openAt` | internal/session/query.go:27-34 `QueryEngineScan = "scan"` + :130 SearchSessions | 官方默认 'never'（FTS 关闭时检索报 SESSION_QUERY_SEARCH_DISABLED）；宿主没有 sqlite/FTS5，但提供了 scan 档跨会话检索（Engine 恒为 scan，诚实标注不是 fts5），比“默认关闭”更强，且不存在需要 opt-in 的开关。 |
 | `session.query.snippetChars` | internal/session/query.go:344-375 excerptOf（before=80 / after=120 + 省略号） | 宿主摘录按“命中位置前 80 字符 + 后 120 字符”取（合计约 200 字符，官方 240），两侧加省略号；能力相同、分档不同。 |
+| `session.spill.cleanupPeriodDays` | cmd/dshd/spill_cleanup.go:23 默认值 / :47 回收实现 / :90 启动接线；目录 = spillDir(home)（<home>/artifacts，与 tools.Options.SpillDir 同源） | 宿主启动时（serve / run 都走同一处 ensureSpillDir 之后）扫一遍 <home>/artifacts，删掉 mtime 早于 30 天的普通文件，保留期由 DSHD_SPILL_CLEANUP_PERIOD_DAYS 覆盖（0 = 关闭），删除失败 fail-soft 只记日志。 |
 | `session.title.fallbackMaxBytes` | cmd/dshd/serve_title_auto.go:164 autoTitleTruncateUTF8（官方 truncateTitleUtf8 移植）+ :80 autoTitleMaxBytes=120 | 机械标题的字节上限在宿主是 120 字节（官方 40），走同一条按字节取最长前缀且不拆码点的截断逻辑；能力相同、阈值更宽。 |
 | `session.title.fallbackMaxWords` | cmd/dshd/serve_title_auto.go:192 autoTitleFromOutput（官方 titleFromOutput 移植）+ :80 `autoTitleMaxBytes = 120` | 宿主有机械标题兜底（首个非空行 + 去包裹 + 按字节截断），但词数上限不是独立参数：它由 autoTitleMaxBytes=120 字节统一钳制，非 CJK 约等于 5 个词的目标。 |
 | `session.title.maxTitleBytes` | cmd/dshd/serve_title_auto.go:186-190 normalizeAutoTitle(input, maxBytes) + :80 autoTitleMaxBytes=120 | 最终落库标题的字节上限在宿主是 120 字节（官方 80），截断点同一处（normalizeAutoTitle → truncateTitleUtf8），且注释说明选择更宽一档的理由。 |
@@ -489,51 +508,70 @@
 | `session.titleLlm.targetCjkCharacters` | cmd/dshd/serve_title_auto.go:84 `autoTitleTargetCJK = 10` + :101 systemPrompt | 宿主标题 LLM 的 CJK 目标字符数 10，与官方默认逐字一致。 |
 | `session.titleLlm.targetWords` | cmd/dshd/serve_title_auto.go:83 `autoTitleTargetWords = 5` + :101 systemPrompt 拼装 | 宿主标题 LLM 的 systemPrompt 里明确要求“非 CJK 约 5 个词”，与官方 targetWords=5 逐字一致。 |
 
-#### tools-sandbox-approval（14 条）
+#### tools-sandbox-approval（24 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
 | `approval.failureMode` | cmd/dshd/acp.go:572 `fmt.Errorf("%w: 没有审批通道", sandbox.ErrNeedsApproval)` + modules/exec/bash/tools.go:259 / modules/tool/pwsh/pwsh.go:263 按 ErrNeedsApproval 拒绝 | 官方 fail-closed：答不出来 = unavailable，动作不执行；宿主同样在拿不到审批通道时直接报错并拒绝执行（工具不落副作用）。 |
+| `approval.memory` | internal/approval/memory.go:11-56（进程内记忆）+ internal/approval/store.go:19-21（durable，`--remember-approvals` 默认关） | 官方 approval.memory 是「审批记忆」策略（记住「以后都允许」）；宿主有 `internal/approval.Memory`（按 session+tool 记忆）+ 可选 durable `Store`（`--remember-approvals` 默认 false，只有显式打开才写盘）。差异：官方把记忆做成可配置参数，宿主做成进程内 Memory + 显式 flag；「每次都重问」的严格模式 = 不调 Remember，属调用方策略，没有单独的反向开关。 |
+| `fs.diffBasisMaxBytes` | modules/tool/edit/edit.go:60 `DiffBasis` 字段 / :74-82 `diffBasisLimit()`（默认 10MiB，`DSHD_EDIT_DIFF_BASIS_MAX_BYTES` 覆盖）/ :95-108 `snapshotDiffBasis()` | 官方 fs-local 在编辑/写入前保留一份 **diff 基线**（默认 10 MiB 上限：超限就不做，不拿磁盘换证据）。宿主本轮补上这条：edit 落盘前把**原文**快照到 `<tmp>/dshd-edit-baselines/<path-sha8>-<ns>.bak`，结果里回 `diff_basis`（快照路径）；超过上限则回 `diff_basis_skipped=too-large` 且**不影响编辑本身**。差异：官方基线是内置 diff 引擎的输入，宿主只留原文快照（不生成 diff 文本 / 不提供回滚 API），上限语义一致。 |
 | `permission.presets` | internal/sandbox/policy.go:124 `return nil, fmt.Errorf("%w: %q（可选：read-only, workspace-write, danger-full-access）", ErrUnknownMode, cfg.Mode)` + internal/modes/modes.go:26 | 官方 schema 两档、随附 base bundle 三档（含 read-only）；宿主同样实现三档沙箱（read-only / workspace-write / danger-full-access）并在装配期做枚举校验。 |
+| `sandbox.additionalWritableRoots` | internal/sandbox/policy.go:110 `AdditionalWritableRoots []string` / :49 `ReasonExtraWritable` / :314-320 写分支判定；internal/sandbox/path.go:140 `isExtraWritable` | 官方 sandbox-policy 允许在工作区外**再开几个可写根**（默认 []），不必把整档升到 danger-full-access。宿主本轮补上：`sandbox.Config.AdditionalWritableRoots`（canonicalize 后进 resolver），workspace-write 档位下落在这些根里的写请求放行（`ReasonExtraWritable`）；**只放开写、不放开读**——想读同一目录仍要显式配 `ExtraReadRoots`。默认空 = 行为与之前逐字一致（工作区外写入仍 deny/outside-workspace）。 |
+| `skill.collectCacheMaxEntries` | modules/tool/skill/skill.go:85 `defaultCollectCacheMaxEntries = 128` / :154 `func (t *Tool) collect()` / :131 `skillsSignature`（缓存与监听的公共指纹） | 官方 skill 包有收集缓存（默认 128 条上限）。宿主本轮补上：`Tool.collect()` 把「名字 + 一句话说明」的收集结果按 TTL 缓存（默认 2s，`DSHD_SKILLS_CACHE_TTL_MS`），**上限 128 条**（`DSHD_SKILLS_COLLECT_CACHE_MAX`）：超过上限就不缓存（行为不变，只是没有性能收益），绝不让缓存无界。降级消除了：以前每次 list/search 都把根目录走一遍。 |
 | `skillFs.customSkillDirs` | modules/tool/skill/skill.go:398-403 `for _, p := range strings.Split(os.Getenv("DSHD_SKILLS_EXTRA"), ";")` | 官方允许追加自定义 skill 目录（默认空）；宿主用环境变量 DSHD_SKILLS_EXTRA（分号分隔）追加额外根，能力等价、入口是环境变量而不是配置文件。 |
 | `skillFs.includeDefaultRoots` | modules/tool/skill/skill.go:393-405 roots()（先 t.dir，再 DSHD_SKILLS_EXTRA） | 官方默认包含内置 skill 根；宿主的 roots() 默认就带主 skill 目录（t.dir，由装配期给出），再叠加额外根，行为一致。 |
+| `skillFs.watchUsePolling` | modules/tool/skill/skill.go:102 `skillWatchPoll()`（`DSHD_SKILLS_WATCH_POLL_MS`，0=关闭）/ :154-180 collect() 里的签名比对与失效 | 官方 skill-filesystem 可开目录监听（原生事件或轮询，默认 false）。宿主本轮补上**轮询监听**：`DSHD_SKILLS_WATCH_POLL_MS` > 0 时，每次收集前先算一次「廉价变化指纹」（目录名 + SKILL.md 的 size/mtime），指纹一变立刻让缓存失效（不等 TTL）。默认 0 = 关闭，行为与之前一致。降级消除了：会话里改完 skill 立刻可见。 |
+| `terminal.activityPollIntervalMs` | cmd/dshd/serve_terminal_api.go:82 `officialTerminalActivityPoll = 30 * time.Second` / cmd/dshd/terminal_pty.go:345 `sweep(now)` / :308 `sweepLoop()` | 官方 api-terminal-controller 每 30s 采样终端活跃度做闲置判定。宿主本轮补上：`officialPTYTerminalAPI.activityPoll`（默认 30s，`DSHD_TERMINAL_ACTIVITY_POLL_MS`）+ 后台 `sweepLoop` 定时调用 `sweep(now)`：`now - lastUsed > activityPoll` 即判闲置（`entry.idle`），有输入立刻恢复活跃。 |
+| `terminal.cleanupRetryMs` | cmd/dshd/serve_terminal_api.go:81 `officialTerminalCleanupRetry = 60 * time.Second` / cmd/dshd/terminal_pty.go:262-270 失败记账 / :402 `retryCleanup()` | 官方清理失败按 60s 重试。宿主本轮补上：`closeEntry` 清理失败**不吞错、不丢账**（记 `cleanupPending/cleanupNextAt`），`sweep` 到期调 `retryCleanup` 重试到成功；`closeFn` 是可注入的关闭点（默认 `bash.CloseTerminal`），所以这条路径能被真实用例证伪。降级消除了：清理失败就泄漏（句柄/临时文件）。 |
+| `terminal.disposeGraceMs` | cmd/dshd/serve_terminal_api.go:80 `officialTerminalDisposeGrace = 1000 * time.Millisecond` / cmd/dshd/terminal_pty.go:231-275 `closeEntry()` 先礼后兵 | 官方销毁终端有 1000ms 宽限（让 shell 里的收尾脚本跑完再挂断）。宿主本轮补上：`closeEntry` 走「先礼后兵」——先给 PTY 写 `exit\r` 让 shell 自己退，最多等 `disposeGrace`（默认 1000ms），并记录结局 `grace-exit`（宽限内自己退了）/ `grace-timeout`（等满仍活着，随后强杀）/ `forced`（宽限=0，历史行为）。进程退出路径 `Close()` 仍是强制（不给每条终端各加 1s 退出拖尾）。 |
 | `terminal.maxBufferedBytes` | cmd/dshd/serve_terminal_api.go:66 `officialTerminalMaxScreenBytes = 256 * 1024` + cmd/dshd/terminal_pty.go:359 `MaxBufferedBytes: officialTerminalMaxScreenBytes` | 宿主每终端输出缓冲 256KiB（官方 2MiB），语义相同（有界环形保留）、阈值更小；env.MaxBufferedBytes 直接回该常量。 |
 | `terminal.maxCols` | cmd/dshd/serve_terminal_api.go:68 `officialTerminalMaxCols = 500` + :1340-1342 截断 | 宿主 create 接受的最大列数 500，与官方默认逐字一致（超出即截断，不报错）。 |
 | `terminal.maxInputBytes` | cmd/dshd/serve_terminal_api.go:53 `officialTerminalMaxInputBytes = 64 * 1024` + :989-992 超限报错 + :64 officialTerminalInputChunkBytes=32 分片 | 宿主单次 Input 上限 64KiB，与官方 65536 逐字一致（超限报 bad param）；另有一层 32 字节的 ConPTY 分片写。 |
 | `terminal.maxRows` | cmd/dshd/serve_terminal_api.go:69 `officialTerminalMaxRows = 200` + :1343-1345 截断 | 宿主 create 接受的最大行数 200，与官方默认逐字一致。 |
+| `terminal.maxTerminals` | cmd/dshd/serve_terminal_api.go:82 + cmd/dshd/terminal_pty.go:247-261（per-session 计数 + 官方 400；默认 8，不可配） | 官方每会话最多 8 个终端（`terminal.maxTerminals`）；宿主本轮真实现了这个上限：`officialPTYTerminalAPI.TerminalCreate` 在 `OpenPTY` **之前**按会话计数未 closed 的条目，达到上限就回官方 400（`ErrJTOfficialBadParam`）而不是 501/静默成功，closed 条目不计额度、别的会话不吃这个额度。差异：官方把 8 做成可配参数，宿主做成常量（`officialTerminalMaxTerminals`，不可配）——上限能力在，旋钮缺席。 |
 | `terminal.shellCandidates` | cmd/dshd/serve_terminal_api.go:1293 `func discoverOfficialShells()` + :1309 `candidates = []string{"sh", "bash", "zsh", "dash", "fish"}` + cmd/dshd/terminal_pty.go:367-372 TerminalShells | 官方给一串候选 shell（zsh/bash/fish/pwsh/powershell/cmd）按序探测；宿主是真实探测（discoverOfficialShells，默认 shell 第一，其余按可执行名去重），能力等价且更贴近本机实际。 |
+| `terminal.unattendedTimeoutMs` | cmd/dshd/serve_terminal_api.go:83 `officialTerminalUnattendedTimeout = 2 * time.Hour` / cmd/dshd/terminal_pty.go:345-380 `sweep()` 的回收分支 | 官方无人值守终端 2h 寿命上限。宿主本轮补上：`sweep` 给闲置终端记 `idleSince`，闲置累计超过 `unattendedTTL`（默认 2h，`DSHD_TERMINAL_UNATTENDED_TIMEOUT_MS`）就回收：从 entries 摘除、记 `closedIDs`、进重试账，之后 `terminal.attach` 不再成功。降级消除了：无人值守终端永久存活（进程级泄漏）。 |
 | `tool.fs.applyPatch` | modules/tool/read/read.go:1、modules/tool/write/write.go:1、modules/tool/edit/edit.go:1（只有 read/write/edit 三个 fs 工具，无 apply_patch） | 官方 base bundle 把 apply_patch 摘掉（默认 false），只留 edit；宿主同样不提供 apply_patch 工具（只有 read/write/edit），默认行为一致。 |
 | `tool.repeatReminder.argumentsPreviewChars` | modules/tools/repeat_reminder.go:46 `repeatArgumentsPreviewChars = 500` + :98 装配 | 宿主参数预览 500 字符，与官方默认逐字一致。 |
 | `tool.repeatReminder.thresholds` | modules/tools/repeat_reminder.go:53 `func repeatThresholds() []int { return []int{3, 5, 8} }` + :97 装配 | 宿主重复调用提醒的阈值就是 [3,5,8]，与官方默认逐字一致，且第一个阈值给 gentle 文案。 |
 | `tool.todo.allowParallelInProgress` | modules/tool/todo/todo.go:122-136（统计 in_progress，>1 且 >3 条只给 Hint，不拒绝） | 官方允许同时多个 in_progress（默认 true）；宿主的 todo 工具同样不禁止（只在“超过 1 项且清单 >3 条”时给一句提示），默认行为一致。 |
 | `tools.executorMode` | internal/spi/tool.go:17 `type Tool interface`（Name/Schema/Caps/Exec）+ internal/kernel 的注册与派发链；无 PTC 执行器 | 官方默认 native（PTC 执行器挂载但在 base 里禁用）；宿主只有 native 执行器（Go 进程内派发），与官方默认一致——PTC 那套 JS 执行器按 R6 明确不嵌。 |
 
-#### transport-http（12 条）
+#### transport-http（19 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
+| `cordis.hostRunner.clientInspectTimeoutMs` | inspect 调用点（cmd/dshd/serve_cordis_api.go:218）+ 预算解析 cmd/dshd/cordis_timeouts.go:26/:49 | inspect 查询套上 10000ms 专用预算（DSHD_CORDIS_CLIENT_INSPECT_TIMEOUT_MS 覆盖），同样加在宿主唯一消费点 dynamicCordisRunner.resolveInspectQuery 上，且不放宽上游更短的 deadline。 |
+| `cordis.hostRunner.vmTimeoutMs` | cordis 插件调用点（cmd/dshd/serve_cordis_api.go:166）+ 预算解析/包装 cmd/dshd/cordis_timeouts.go:24/:60 | 动态 cordis 插件脚本执行套上 5000ms 默认预算（DSHD_CORDIS_VM_TIMEOUT_MS 覆盖，0 = 不设预算），加在宿主唯一消费点 dynamicCordisRunner.invoke 上；调用方 ctx 已有更短 deadline 时保留更短的那个。 |
 | `gateway.maxMissedHeartbeats` | internal/officialwire/mux.go:140 missed 计数 + :508-512 阈值 2 | 宿主连续 2 次心跳未到即判定对端死亡，与官方默认 2 一致（硬编码在 mux 的读写循环里）。 |
 | `gateway.streamInboxBytes` | internal/officialwire/mux.go:40 UplinkBytes 256KiB + internal/officialwire/codes.go:25 CodeUplinkOverflow + internal/officialwire/mux.go:373 触发点 | 宿主每条流的上行配额 256 KiB，与官方 262144 逐字一致，溢出映射成 gateway/uplink-overflow（不关 socket）。 |
 | `gateway.websocketCompression` | internal/transport/ws.go:29 wsDeflateOfferResponse + :110 negotiateDeflate | 宿主 WS 协商 RFC7692 permessage-deflate（双向 no_context_takeover），与官方默认 deflate 一致；没有可接受的 deflate 时明确 400 而不是静默降级。 |
 | `gateway.websocketHeartbeatIntervalMs` | internal/officialwire/mux.go:20 `DefaultHeartbeat = 2 * time.Second` + :59-61 兜底 | 宿主官方 wire 的服务端 ping 间隔就是 2s，与官方默认逐字一致（DefaultHeartbeat）。 |
 | `jobController.observeFlushMs` | cmd/dshd/serve_terminal_api.go:87 `officialFollowPollInterval = 100 * time.Millisecond` | 宿主的 job.follow 帧机就是“观察任务输出”的通道，兜底采样间隔 100ms，与官方 observeFlushMs=100 同值；实现是轮询采样（不是定时 flush），但对调用方语义一致。 |
 | `jobController.observeMaxFrameBytes` | cmd/dshd/serve_terminal_api.go:71 `officialFollowPageBytes = 64 * 1024` | 宿主 job.follow 单帧最多 64KiB，与官方 65536 逐字一致。 |
+| `sessionController.listWorkSliceMs` | session.ListSessionsWithOptions 的 ListOptions.WorkSliceMS（internal/session/list.go:107 起）；默认值/解析 :33/:189，切片点在 :157-:163 | 列会话现在按 16ms 工作切片推进：每读完一份会话就核一次本片预算，超了记一次切片并 runtime.Gosched() 让出，预算由 DSHD_LIST_WORK_SLICE_MS 覆盖。切片只影响“一次连续占用多久”，不改变结果（测试比对切片/整段结果一致）。 |
 | `webApp.defaultHost` | internal/transport/server.go:34 defaultAddr + cmd/dshd/serve.go:185 --addr 默认空 → defaultAddr | 官方 web bundle 默认绑 127.0.0.1；宿主的默认监听地址就是 127.0.0.1:0（环回 + OS 分配端口），默认主机语义一致。 |
 | `webApp.defaultPort` | internal/transport/server.go:34 defaultAddr（端口 0）+ :284 回报真实地址；cmd/dshd-bridge/main.go:551 的 3080 默认 | 官方 web bundle 默认 3080；宿主默认端口是 0（OS 分配，启动后把真实地址回报给调用方），TUI 桥另有 3080 默认。能力等价（可指定端口）、默认值不同。 |
+| `webserver.compressionLevel` | transport 的 HTTP 中间件（internal/transport/compression.go:45 构造、:226 级别解析、server.go:273 装配） | 宿主加了运行期 gzip 中间件：默认 level 1（官方默认），DSHD_HTTP_COMPRESSION_LEVEL 覆盖，-1 = 关闭（对应官方 null）；只压“客户端要 gzip 且 handler 自己没压过”的响应，压缩后删掉原 Content-Length 并加 Vary。静态资源仍走 webfrontend 的预压缩，这一层管的是 API 的 JSON 响应。 |
+| `webserver.compressionThresholdBytes` | 同一中间件的阈值判定（internal/transport/compression.go:31/:239/:141；装配 server.go:273） | 阈值默认 1024（官方默认），DSHD_HTTP_COMPRESSION_THRESHOLD_BYTES 覆盖。三条语义：已知长度 < 阈值不压、已知长度 ≥ 阈值压、**长度未知立即可压**（与官方一致）。 |
 | `webserver.host` | internal/transport/server.go:34 `defaultAddr = "127.0.0.1:0"` + :255-260 兜底 + cmd/dshd/serve.go:185 --addr 旗标 | 宿主 HTTP 监听地址由 --addr 给，默认 127.0.0.1:0（环回 + OS 分配端口），与官方“默认环回、保持在本机”一致；差别是宿主没有显式拒绝通配地址（0.0.0.0 仍可绑）。 |
+| `webserver.tls` | transport 的 TLS 监听入口（internal/transport/tls.go:29 装配、server.go:281 接线、:296 ServeTLS） | 宿主加了 TLS 监听：DSHD_HTTP_TLS_CERT / DSHD_HTTP_TLS_KEY 成对设置即 HTTPS（TLS 1.2 起），都不设保持明文（等价官方 null），只设一个 fail-loud（不静默退回明文）。测试用自签证书真起 HTTPS 并验证 resp.TLS 非空。 |
+| `workspaceController.documentsLookupTimeoutMs` | workspace handler 的 documentsDir 注入点（cmd/dshd/serve_workspace_api.go:150 → :631 调用），预算实现 cmd/dshd/documents_lookup_timeout.go:22/:46/:69 | Documents 已知文件夹查找套上 10000ms 预算（DSHD_DOCUMENTS_LOOKUP_TIMEOUT_MS 覆盖，0 = 不设预算）：查找跑在 goroutine 里、超时即返回结构化错误，不再让一个卡住的 Win32 调用拖住 workspace/initializeDefault。 |
 | `workspaceFiles.maxEntries` | cmd/dshd/serve_workspace_api.go:63 officialWorkspaceEntryCap = 512 + :71 officialDirectoryEntryCap | 宿主每层最多 512 项（官方 2000），语义相同（目录列举条数上限）、数值更紧。 |
 | `workspaceFiles.maxFileBytes` | cmd/dshd/serve_workspace_api.go:68 `officialWorkspaceMaxBytes = 4 << 20` + :1414 生效 | 宿主 workspaceFiles.read 的单次字节上限 4MiB（官方 32MiB），语义相同（可打开文件大小上限）、阈值更严。 |
 | `workspaceFiles.maxLines` | cmd/dshd/serve_workspace_api.go:66 `officialWorkspaceMaxLines = 2000` + :1407 | 宿主一页最多 2000 行（官方 5000），语义相同（limit 不得超上限）、数值不同。 |
 
-#### tui-capability（11 条）
+#### tui-capability（13 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
 | `approval.displayShape` | cmd/dshd/approval_view.go:9-40 describeApproval + cmd/dshd/serve_approval.go 的 outcome/policy 字段 | 官方审批提示展示 outcome / policy / reason / displayReason；宿主的 describeApproval 生成“命令原文 + 模型自述（明确标注不可当依据）”的展示串，并有 outcome（allowed/rejected/cancelled）、policy（ask/never）与拒绝原因字段。 |
+| `context.occupancy.display` | internal/transport/context_pressure_view.go:42 → session.projections values.contextPressure（与 context.usage 同源） | 官方 `contextPressure` wire 视图（`{contextWindow?, pressureTokens?, projectedTokens?}`，**每字段未知就整段省略**）现在真实现：`session.projections` / follow baseline / `session.control` 的 values 里新增 `contextPressure` 键，三个数从 v4 事件只读派生（与 `context.usage` 同一份 session.ProjectContext，不另算一套）。没有实测锚点时该键是 `{}`（不是补 0）；有 `request/context` 才有 contextWindow。界面据此能画「prompt 压力 / 下一次请求预计占用」，不再只有「已用/上限」。 |
 | `models.catalogEntry` | transport.OfficialDiscoveredModel 投影（cmd/dshd/serve_account_api.go:347-350 / :362-373）+ internal/llm/model_catalog.go:864-870 | 官方模型目录项 id / name / description? / contextWindow? / maxTokens? / inputModalities?；宿主 discoverModels 与 models.list 的投影逐字段对应（description 由 name 兜底）。 |
 | `models.selection` | cmd/dshd/main.go:1019-1022 选择三元组 + cmd/dshd/model_steer.go:221-232 provider 解析 | 官方每会话可变的模型选择是 provider / model / reasoningEffort 三元组；宿主会话头里存 model + reasoningEffort，provider 由模型解析（resolveServeProvider），三者在一次选择里都可变。 |
 | `modes.agentPresets.selectedDefault` | cmd/dshd/acp.go:761-766 会话头 agentPreset 恢复 + cmd/dshd/serve_agent_api.go:156-157 preset 读写 API | 官方允许运行时覆盖默认 agent preset；宿主把 preset 记在会话头（header.agentPreset）并在恢复时优先用它，等价于“每个会话有自己的当前 preset”。 |
 | `modes.planMode` | modules/tool/plan/plan.go:5 包注释 / :190 Hint / :211 `func (t *exitTool) Name() string { return "exit_plan_mode" }` | 官方 plan mode 是挂载插件 + 模型可见 section，只能经 exit_plan_mode 或切模式结束；宿主有完整的 plan 工具（plan / exit_plan_mode，Result.Stop 让本轮停在方案上）。 |
+| `placement.goValuesMapping` | cmd/dshd/transport_prompt.go:226/:238/:215（placement 三档落点）+ 15 条 placement 用例 | placement → 官方双队列的映射在宿主是**可复跑的确定性等价**，不是「按字段名猜」：`now` = 撤掉旧 inbox + 中断当前轮 + 占位后立即起新一轮（官方 dropOwn(cancel)+followup）；`followup` = 空闲等价一轮、忙时 FIFO 排队；`steer` = 注入活跃轮、不起新 Run、不支持时**不**退化成 followup；`turn` 保留旧语义。15 条 placement 用例逐条钉住这些形状（含并发撤单与超时不接受）。真机会话对照属于 T5 真实链验收的门（本轮补的是可复跑的代码级等价证明）。 |
 | `queue.updateResult` | internal/transport/handlers_session_official.go:312 Accepted 字段 + cmd/dshd-bridge/main.go:418 | 官方队列变更只回 {accepted:true}；宿主的队列更新结果同样只有 Accepted 字段，没有额外负载。 |
 | `session.pendingInput` | internal/transport/handlers_session_official.go:759 officialPendingInput + :258 PendingInput 字段 | 官方 pendingInput 词表 approval / question / other；宿主把真实挂起的审批帧翻成同一套官方词表（officialPendingInput），并参与 session 视图。 |
 | `usage.fields.projectionShape` | cmd/dshd/assistant_usage.go:49-61 四个桶写入口 + internal/transport/api.go:363-368 UsageMsg 的 v4 键名 | 官方投影四键（uncachedInputTokens / outputTokens / cacheReadTokens / cacheWriteTokens）；宿主的 usage 对象是 {inputTokens(=未命中), outputTokens, totalTokens, cacheReadTokens?, cacheWriteTokens?}，只差键名（uncachedInputTokens 在 v4 线里叫 inputTokens），四个语义全在。 |
@@ -552,26 +590,45 @@
 | `DSH_WEB_SEARCH_PROVIDER` | internal/spi/search.go:375 双前缀解析（喂同一字段；都设时 DSHD_* 先命中） | **官方名 `DSH_WEB_SEARCH_PROVIDER` 在宿主也生效**（GO.5/T1 复核后保持）：解析器同时认两个前缀（`DSHD_WEB_SEARCH_PROVIDER` 与官方 `DSH_WEB_SEARCH_PROVIDER` 喂同一个字段；都设时按解析顺序以 `DSHD_*` 为准），语义与官方"等价于 searchProvider 配置值"一致——照官方文档设能生效。 |
 | `llm.contextWindow.precedence` | internal/llm/capacity.go:79-104 ResolveModelCapacity + cmd/dshd/transport_source.go:388 调用点 | 官方优先级“模型目录条目 > adapter 默认（llm-deepseek 1e6）> DSH_CONTEXT_WINDOW（仅 sdk-minimal）”；宿主的 ResolveModelCapacity 就是“显式声明 > 内置模型容量 > 未声明自定义模型 1M 兜底”，单点解析、不缓存。 |
 
-#### live-profile-desktop（8 条）
+#### live-profile-desktop（10 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
 | `llmPiAi.providers.magpie.api` | internal/llm/provider.go:65 openAICompletionsAdapter.API() + :113-130 adapterRegistry | 桌面 profile 给 magpie 渠道配 api=openai-completions；宿主的 provider 适配器表里有同名的 openai-completions 适配器（请求字段面由 adapter 声明）。 |
 | `llmPiAi.providers.magpie.models[0].id` | cmd/dshd/main.go:601 `envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017")` | 桌面 profile 的默认模型就是 group/deepseek-v4.1-flash-1017；宿主的 --model 默认值逐字相同。 |
 | `llmPiAi.providers.magpie.models[0].reasoningEfforts` | cmd/dshd/serve_effort_override.go:128 ReasoningEfforts 字段 + :218 字典校验 | 桌面 profile 给该模型声明 reasoningEfforts 字典（xhigh/max）；宿主的模型目录同样存 reasoningEfforts 对象，并校验会话 effort 必须命中该字典。 |
+| `llmPiAi.providers.magpie.streamIdleTimeoutMs` | internal/llm/stream_idle.go:179（按 provider 解析）→ internal/llm/client.go:119（每条流各自的看门狗上限）；desktop profile 的 600s 经 DSHD_LLM_STREAM_IDLE_TIMEOUT_PROVIDERS_MS 表达 | 官方 per-provider 流空闲超时（`llm.piAi.providers.<name>.streamIdleTimeoutMs`，基准默认 300000；本机 desktop profile 把 magpie 配成 600000）。宿主现在真实现：看门狗按**模型 id 的 provider 前缀**（`magpie/…` → `magpie`）查 per-provider 表，表由 `DSHD_LLM_STREAM_IDLE_TIMEOUT_PROVIDERS_MS`（JSON 对象，毫秒）给；解析优先级 = Client 显式字段 > per-provider 表 > 全局 `DSHD_LLM_STREAM_IDLE_TIMEOUT_MS` > 官方默认 300000。desktop profile 的 600s 就是 `DSHD_LLM_STREAM_IDLE_TIMEOUT_PROVIDERS_MS={"magpie":600000}`——本仓没有「profile 文件 → 参数默认值」的通道，profile 值一律经环境变量表达（与其它 profile 参数同一形状）。非法表（非 JSON / 空 provider 名 / 非正数 / 超 2^31-1）fail-loud；不设时零影响。 |
 | `permission.presets` | internal/sandbox/policy.go:124 三档 preset 校验 + cmd/dshd/serve_sandbox_policy.go:341 | 桌面 profile 定义三档 permission preset（read-only / workspace-write / danger-full-access，各带 sandbox + approval）；宿主同样实现这三档并在装配期校验枚举。 |
+| `subagent.maxActiveSubagents` | cmd/dshd/subagent_gate.go:100（默认 8 / env 覆盖 20）+ :78（闸门实现）；与 agent-loop 域同源 | 本机 desktop profile 把同一条参数覆盖成 20。宿主现在真实现，且**两处默认值同源**：基准默认是官方 8（`officialDefaultMaxActiveSubagents`），desktop profile 的 20 由 `DSHD_SUBAGENT_MAX_ACTIVE_SUBAGENTS=20` 表达——同一个解析点、同一把闸门，不出现「agent-loop 域说 8、live-profile 域说 20」两套真值。 |
 | `terminal.shell` | cmd/dshd/serve_terminal_api.go:1293 discoverOfficialShells + :1286 按名解析 | 桌面 profile 固定终端 shell（Git Bash 的 path/name/args）；宿主有等价的 shell 探测与指定能力（terminal.shellCandidates + TerminalShells）。 |
 | `toolWeb.searchTimeoutMs` | modules/tool/websearch/websearch.go:55 `baseBundleSearchBudget = 60 * time.Second`，判定在 :101（providerID == baseBundleSearchProvider） | 桌面 profile 给 web_search 的 60000ms 与宿主基础包分支逐值相同：provider 是 deepseek-official 时预算就是 60s。 |
 | `transcriptView` | cmd/dshtui/app.go:77 `showToolResults bool`（默认 false = 折叠 = 官方 compact） | 官方桌面壳的 transcript 呈现档位（默认 compact = 工具结果折叠）。**宿主 TUI 就是这个默认**：工具结果行默认折叠，Ctrl+T 展开（showToolResults 默认 false）；官方 compact 的语义被完整实现，只是没有"档位"这个词——开关是同一个。 |
 | `uiTheme.preference` | cmd/dshtui/theme.go:108 `var themeName = "dark"` + :115 覆盖优先级注释 | 官方桌面壳的主题偏好（默认 dark）。**宿主有 Go TUI，主题是真实能力**：themeName 默认就是 dark，覆盖优先级 `--theme` > `DSH_TUI_THEME` > `COLORFGBG` > dark，与官方同值同语义；区别是现代码在 cmd/dshtui 而不是桌面壳窗口。 |
 
-#### schedule-plugins-account-telemetry（12 条）
+#### schedule-plugins-account-telemetry（35 条）
 
 | 官方 key | 宿主等价物（file:line） | 差异要点 |
 |---|---|---|
 | `account.allowLoopbackHttp` | internal/webfrontend/webfrontend.go:42（只监听 loopback 明文）+ internal/transport/server.go:34 defaultAddr | 官方开关"允许 loopback 的明文 http origin"（默认 false）；宿主本来就只监听 loopback 明文、没有 TLS 分支，等价于该开关恒开。 |
+| `account.attemptTimeoutMs` | account.Service.attemptContext / attemptDeadlineMs（internal/account/providers.go:187/195） + startOfficial 取小值并布防定时器（internal/account/providers.go:238/252） + resetTimerLocked 把 attempt 到期纳入最早触发点（internal/account/account.go:508） | 设备登录**单次尝试**现在有官方口径的预算：默认 600s（官方 :517），`DSHD_ACCOUNT_ATTEMPT_TIMEOUT_MS` 覆盖。两条真实行为：① 尝试的到期时间取 `min(auth_init.expires_in, now+attemptTimeout)`——服务端给一小时也不能让一次尝试挂一小时，到点由定时器真的推进成 `expired`（不再依赖调用方轮询 State）；② 整次尝试里的请求都带这个截止，慢平台在预算处失败，而不是被 20s 客户端超时砍或无限期挂着。 |
+| `account.balanceTimeoutMs` | internal/account/account.go:445 + :254-257（共用 20s 客户端超时） | 官方余额查询独立超时 30000ms；宿主的余额查询与其它账号 API 共用同一个 20s 客户端超时（`Service.Balance` 走 `s.client`）。差异：没有独立预算（余额慢时整条链路一起超时）。 |
+| `account.inferenceOrigin` | internal/account/account.go:180+:251（Options.PlatformOrigin）+ cmd/dshd/serve_account_provider.go:46（DSHD_ACCOUNT_PLATFORM_ORIGIN） | 官方「账号侧推理端点 origin」（默认 https://api.deepseek.com）；宿主 `internal/account` 有 `Options.PlatformOrigin` + 环境变量 `DSHD_ACCOUNT_PLATFORM_ORIGIN`（默认 https://platform.deepseek.com）。差异：默认值不同（platform vs api），且宿主把「账号 API」与「推理端点」（`DSHD_LLM_BASE`）仍然分开配置——联动语义没有。 |
+| `account.logoutMaxRetries` | account.Service.revokeOfficialGrant（internal/account/account.go:736 重试循环 + 指数退避） + account.Service.SignOut（internal/account/account.go:703 调用点） + resolveLogoutPolicy（internal/account/account.go:319 默认值/夹紧） | `SignOut` 不再吞错误：本地凭据照旧先清（整体重置 document），然后按官方 `revokeAccount` 的形状撤销服务端会话——最多 **1+maxRetries** 次尝试（默认 5 → 最多 6 次），第 n 次重试前等 `delay * 2^(n-1)`（默认 1000ms → 1/2/4/8/16s），每次等待都可被 ctx 取消。值为 0 是合法配置（官方 min(0) = 不重试），越界按官方 max(5) 夹紧。撤销失败**不改变**登出结果，但结论写进 `State.Diagnostic`（默认累计约 31s，有界）。 |
+| `account.logoutRetryDelayMs` | account.resolveLogoutPolicy（internal/account/account.go:319 解析与夹紧）+ revokeOfficialGrant（:736 退避展开） | 登出重试间隔真实生效：`DSHD_ACCOUNT_LOGOUT_RETRY_DELAY_MS`（默认 1000ms，官方 :516），按官方 `delayMs * 2^(n-1)` 指数退避展开，夹在 [1ms, 60s] 内——一个写错的配置不该让 dshd 在退出路径上等半小时。 |
 | `account.platformOrigin` | internal/account/account.go:180 PlatformOrigin + cmd/dshd/serve_account_provider.go:46 DSHD_ACCOUNT_PLATFORM_ORIGIN | 官方 platform origin 默认 https://platform.deepseek.com；宿主有同一语义的 PlatformOrigin（可由 DSHD_ACCOUNT_PLATFORM_ORIGIN 覆盖），并在 account client 里做 trimRight 归一。 |
+| `account.requestTimeoutMs` | internal/account/account.go:254-257（20s 客户端超时） | 官方账号请求超时 30000ms；宿主的账号服务默认 `&http.Client{Timeout: 20 * time.Second}`。差异：20s vs 30s（更紧），且**不可配**（只有注入 HTTPClient 才能改）——超时能力在，旋钮缺席。 |
+| `agentTeam.maxMembers` | spawn_teammate 的名册人数闸（modules/tool/team/spawn.go:53 `limit()` / :62 `teamMaxMembers`）；装配期解析在 modules/tool/team/team.go:449 | 官方 Agent Teams 服务的名册有成员人数上限（默认 16，`positiveLimit` 正整数校验；重名报 `TEAM_MEMBER_NAME_TAKEN`，满员报 `TEAM_MEMBER_LIMIT`）。宿主的团队名册是 `spawn_teammate` 写的 `<home>/state/team/agents.json`（具名队友 + description + context + created_at）——名册本来就有，缺的是**人数上限**：以前可以无限加成员，团队拓扑与消息扇出无界。本轮补上：登记到上限（默认 16）就拒绝并给结构化 Hint，且拒绝发生在 append 之前（**不写盘**）；`DSHD_TEAM_MAX_MEMBERS` 可覆盖，非法值装配期 fail-loud（官方 positiveLimit 同理）。 |
+| `agentTeam.maxMessageBytes` | modules/tool/team/team.go:34 + :140-141（32KiB 正文上限） | 官方团队消息字节上限 65536；宿主的 `send_message` 工具对正文有 `maxTextBytes = 32 * 1024` 硬上限（超限返回结构化 Hint 让人拆条）。差异：32KiB vs 64KiB（更严格）。 |
+| `agentTeam.maxTasks` | team_task_create 的条数闸（modules/tool/teamtask/teamtask.go:100 `limit()` / :111 `maxTasksFromEnv`；拒绝点在 :483） | 官方团队任务图有条数上限（默认 256）。宿主 `team_task_*` 的板子是单个 `team-tasks.json`，以前没有条数闸——表可无限增长（内存 + 文件），一个跑飞的循环就能把板子写成几万条，之后每次 list/create 都要整份读回来。本轮在 `team_task_create` 落盘前加闸：到上限就拒绝（点名上限与怎么腾位置），且**拒绝发生在 append 之前**；delete 腾出位置后可以继续建（上限不是终身额度）。 |
+| `analytics.environmentQueryMaxOutputBytes` | analytics.limitedWriter（internal/analytics/environment.go 有界写）+ runEncoded 的兜底复检（同文件）+ EnvironmentQueryConfig（:74） | 环境查询的输出上限真实生效：默认 16384 字节（官方 :316），`DSHD_ANALYTICS_ENVIRONMENT_QUERY_MAX_OUTPUT_BYTES` 覆盖。执行器用有界 writer 收 stdout，超限立刻停止写入并报 `output-limit`（不会无限吃内存），该字段按官方口径降级为 missing，不影响其它字段。 |
+| `analytics.environmentQueryTimeoutMillis` | analytics.EnvironmentQueryConfig（internal/analytics/environment.go:74 默认/覆盖/夹紧） + analytics.collectEnvironment（internal/analytics/environment.go:144 固定 argv + 逐字段降级） + Service.environmentSnapshot（internal/analytics/service.go:135 懒采集一次） | 宿主现在真的采环境维度：`os_name` / `app_arch` / `os_version` / `os_version_full` / `os_build` / `os_arch` / `cpu_logical_count` / `cpu_physical_core_count`，随每条记录落进 `environment`，缺失字段带固定原因写进 `missingFields`。Windows 上跑官方那两条固定脚本（powershell -NoProfile -NonInteractive -EncodedCommand，无 shell），**每次查询各自带** timeout（默认 5000ms，`DSHD_ANALYTICS_ENVIRONMENT_QUERY_TIMEOUT_MS` 覆盖）；一个数据源超时只让依赖它的字段缺失（reason=timeout），不牵连其它字段。结果按进程缓存一次。 |
 | `hmr.debounce` | internal/pluginmgr/hmr.go:127-129 `cfg.Interval = time.Second`（去抖间隔） | 官方给 100ms 去抖；宿主的 HMR 有同语义的去抖间隔（Interval，默认 1s，可由 DSHD_PLUGIN_HMR 配置驱动），能力等价、默认更保守。 |
+| `pluginManager.detailFetchTimeoutMs` | internal/pluginmgr/registry.go:58（30s 客户端超时） | 官方详情抓取超时 15000ms；宿主的 registry 客户端 `&http.Client{Timeout: 30 * time.Second}`。差异：30s vs 15s（更宽松）。 |
+| `pluginManager.detailMaxBytes` | internal/pluginmgr/registry.go:32 + :190 + :204-227（8MiB 响应上限） | 官方包详情抓取有 1MiB 字节上限；宿主的 registry 客户端有 `registryMaxDoc = 8MiB` 响应体上限（`getJSON` 走 `get(endpoint, registryMaxDoc)`），详情/版本/packument 共用同一闸门。差异：8MiB vs 1MiB（更宽松）。 |
+| `pluginManager.fallbackRegistries` | pluginmgr.FallbackRegistries（internal/pluginmgr/official_config.go:99 默认/覆盖/去重） + pluginmgr.RegistryPlan（internal/pluginmgr/official_config.go:147 官方问源顺序） + official.adapter.listVersions（internal/pluginmgr/official/adapter.go:131 逐跳尝试） + official.adapter.registries（internal/pluginmgr/official/adapter.go:263 真实回退列表） | `registries()` 不再硬写空列表：回退源默认取官方 `["https://registry.npmmirror.com/"]`，可用 `DSHD_PLUGIN_REGISTRY_FALLBACKS` 覆盖（逗号分隔、规范化后去重，显式 `none` = 不要回退源），`resolved` 如实给 `null`（宿主没有 pnpm 自有配置）。`listVersions` 按官方 `registryPlan` 顺序问源：调用方指定的源不在配置集合里时**只问它自己**（私有源绝不外溢到公共源），只有 network / timeout / not-found / no-matching-version 才轮到下一个源，`attempts` 逐跳如实回报（problem+reason），成功那跳带 answering registry。 |
+| `pluginManager.toolsMounted` | pluginmgr.Manager.SetToolsMounted / ToolsMounted（internal/pluginmgr/state.go:253/227，persistentState.ToolsMounted 见 internal/pluginmgr/types.go:153） + pluginmgr.Loader.pluginTools/pluginTool 按开关透出（internal/pluginmgr/loader.go:429/414） | 宿主新增真实的插件工具挂载开关：`state.json` 的 `toolsMounted`（三态，未设 = 现在行为） + 部署期覆盖 `DSHD_PLUGIN_TOOLS_MOUNTED`。关掉时插件工具从模型工具表**整体消失**（`Table.Tools()` 为空、`Table.Get` 查不到），但插件仍装载着（句柄/实例/线性内存都在，`Loader.Loaded()` 不变）——打开立刻回来，不需要重装或重启；开关落盘，重开管理器后仍在。 |
+| `pluginManager.versionListLimit` | internal/pluginmgr/official/adapter.go:126-171 + internal/pluginmgr/registry.go:450（全量版本，无条数上限） | 官方按 20 条上限列可安装版本；宿主的 `pluginManager.listVersions` 真读 npm 兼容 packument 并 SemVer 降序返回（`RegistryClient.Versions`），已接线到官方方法。差异：宿主**不截断条数**（全量返回），官方默认 20 条——上限缺席，能力在。 |
+| `pluginManager.versionLookupConcurrency` | pluginmgr.VersionLookupConcurrency（internal/pluginmgr/official_config.go:54 解析） + pluginmgr.MapConcurrent（internal/pluginmgr/official_config.go:242 有界池，结果按输入顺序结算） + official.adapter.enrichVersions（internal/pluginmgr/official/adapter.go:209 每个版本一次兼容性判定） | 宿主现在有一个**真的有上限**的版本查询并发池：上限由 `DSHD_PLUGIN_VERSION_LOOKUP_CONCURRENCY` 解析（默认 4，与官方一致；1 = 逐版本串行；非法/<=0 按官方 min(1) 夹到 1，绝不变成 0 路）。`listVersions` 用它对**每个已发布版本**做兼容性补齐（官方是每版本问一次 registry 再 `mapConcurrent` 限流；宿主 packument 已带 engines/peerDependencies，所以在本地算同一件事）。上限是被读的实值：测试把上限设成 1 时在飞峰值回到 1，默认时 6 个版本峰值 4。 |
 | `schedule.deliveryHistoryDays` | cmd/dshd/serve_schedule_api.go:65 `officialScheduleHistoryMaxDays = 30` | 官方给投递历史 30 天保留期；宿主日程服务有同名同值的保留天数常量（officialScheduleHistoryMaxDays = 30），超期记录在 deleteInactive 时清。 |
 | `schedule.deliveryHistoryRecords` | cmd/dshd/serve_schedule_api.go:63 `officialScheduleHistoryMaxRecords = 100`（官方 200） | 官方给投递历史 200 条上限；宿主有同语义的条数上限，取 100（更紧），同样在裁剪时生效。 |
 | `schedule.listLimit` | internal/transport/handlers_schedule_official.go:94 `scheduleHistoryLimitMax = 100` | 官方给日程列表默认页大小 100；宿主 history 的 limit 上限就是 100（默认即上限），语义一致。 |
@@ -579,228 +636,129 @@
 | `schedule.maxTitleLength` | internal/transport/handlers_schedule_official.go:91 `scheduleTitleMaxRunes = 120` | 官方标题上限 120 字符；宿主同一个 120 的 rune 上限，在 create 与 patch 两处都校验。 |
 | `schedule.newSessionIntervalSeconds` | cmd/dshd/serve_schedule_api.go:1137 + internal/transport/handlers_schedule_official.go:98（60s） | 官方给"新会话投递最小间隔"60s；宿主由入口强制同一常量（MinScheduleEverySeconds = 60），并在 schedule.deliveryLimits 里回给客户端。 |
 | `systemPrompt.includeHarnessIdentity` | cmd/dshd/acp.go:1099 buildSystemPromptWithHome（身份段恒含） | 官方开关注入"harness 身份"段（默认 true）；宿主的系统提示恒由 buildSystemPromptWithHome 拼装（工具说明 + AGENTS.md + home 规则），身份段恒在，只是没有开关。 |
+| `systemPrompt.includeRuntimeContext` | internal/prompt/prompt.go:104-127（Runtime 段，恒包含） | 官方默认 true（系统提示里带工作目录/时间/环境段）；宿主的 `internal/prompt` 有独立的 `Runtime` 段（`Runtime.Build`），默认恒包含。差异：**恒为 true，没有关闭开关**。 |
+| `systemPrompt.personaPrefix` | internal/prompt/prompt.go:34-43 + :91-99（Persona 段，DSH_SYSTEM_PROMPT 驱动） | 官方可配 persona 前缀（默认空）；宿主的 `internal/prompt` 有 `PersonaPrefix` 字段 + `Persona` 段（trim 后作为第一段，空则整段消失），来源是 `DSH_SYSTEM_PROMPT`（T1 本轮在途真实现，先红测试已落盘）。 |
+| `systemPrompt.toolOrder` | prompt.ParseToolOrder（internal/prompt/tool_order.go:39）+ prompt.OrderTools（:72）；入口接线 orderedPromptTools（cmd/dshd/acp.go:1262） | 官方可覆盖工具在提示里的顺序（`toolOrder: z.array(z.string())`，含 `<unlisted-tools>` 保留标记；重复名 / 缺标记 / 列了未注册工具都在配置期报错）。宿主的工具顺序此前完全由装配顺序决定（`ToolGuide.Build` 按注册表遍历），没有覆盖入口。本轮补上：`internal/prompt` 提供解析与重排（`<unlisted-tools>` 处插入未列出的工具，按名字 code-unit 排序），run / acp 共用的 `buildSystemPromptWithHome` 从 `DSHD_SYSTEM_PROMPT_TOOL_ORDER` 读配置；**未配置 = 装配顺序，提示词逐字节不变**；配置非法启动即失败，不静默退回。 |
+| `telemetry.anonymousUserId` | analytics.ensureAnonymousUserID（internal/analytics/anonymous.go:44） + Service.AnonymousUserID（internal/analytics/service.go:123） + Record.AnonymousUserID（internal/analytics/redact.go:38，导出时保留） | `$DSHD_HOME/.anonymous-user-id` 真实落地：随机 UUIDv4（crypto/rand）、0600 原子写、已存在则复用（跨会话稳定），删文件即重置（内容损坏按等价语义重写，不让整条管道打不开）。身份在 `analytics.Open` 时读取/生成，写进每条记录的 `anonymousUserId`，导出时随 Resource 一起带出。**全程本地**：生成过程零网络请求；默认 mode=local 时 collector 命中 0 次（httptest 桩断言），没有因此打开任何外发通道。 |
 | `telemetry.host.endpoint` | internal/analytics/policy.go:52 CollectorURL（与 session 遥测同一端点配置） | 官方 host 遥测端点；宿主同一个 CollectorURL（product analytics 走 local+export 档），语义一致。 |
+| `telemetry.session.exporter.timeoutMillis` | internal/analytics/service.go:77（3s HTTP 客户端超时） | 官方 OTLP 导出单次传输超时 1000ms；宿主的 analytics 服务用 `&http.Client{Timeout: 3 * time.Second}` 发 collector 请求。差异：3s vs 1s（更宽松），且不可配。 |
 | `telemetry.session.exporter.url` | internal/analytics/policy.go:52 / :95 CollectorURL（http/https 校验） | 官方 session 遥测导出到 OTel collector 端点；宿主的 analytics 策略有同语义的 CollectorURL（只允许 http/https，local 档不导出），端点可配。 |
+| `workingDirectory.defaultDirectory` | defaultWorkDirFromEnv（cmd/dshd/workdir.go:41）/ sessionWorkDir（:56）；接线：run cmd/dshd/main.go（workDir → 工具根 + header.cwd）、serve cmd/dshd/serve.go:445、acp cmd/dshd/acp.go:1033 与 :1723 | 官方可配新会话默认工作目录（默认 = `process.cwd()`，且必须是绝对路径，否则构造期抛错）。宿主的新会话此前一律用进程 cwd（`--home` 是**会话根**不是工作目录），没有 per-deployment 的默认目录配置。本轮补上 `DSHD_DEFAULT_WORKDIR`：run / serve / acp 三个入口解析一次，新会话 `header.cwd` 用它（归一化与 `--home` 同源，去掉 `\\?\` 扩展前缀），**run 入口同时把它作为工具的根**（否则系统提示里写着 Workspace: A、read/edit 却在 B 里干活）；**未配置 = 进程 cwd，逐字节不变**；相对路径 fail-loud（官方同理）。 |
 
----
-
-### N-A（31 条，按子类分组 —— 每条都有 `naClass`，`naBreakdownUntriaged` 为空）
-
-| 子类 | 条数 | 含义 |
-|---|---|---|
-| `desktop-shell` | 2 | desktop-shell（窗口/主题/托盘/快捷键/启动器/自动更新） |
-| `ui-only` | 7 | ui-only（文案/布局/渲染档位/可见性开关） |
-| `telemetry-ui` | 4 | telemetry-ui（产品遥测/会话上传/匿名 id 的展示面） |
-| `plugin-market-ui` | 3 | plugin-market-ui（插件市场的客户端 UI） |
-| `protocol-shape` | 14 | protocol-shape（纯 wire 形状/镜像常量/实现形状不适用） |
-| **合计** | **31** | |
+### N-A（37 条，按子类分组 —— 每条都有 `naClass`，`naBreakdownUntriaged` 为空）
 
 #### desktop-shell（窗口/主题/托盘/快捷键/启动器/自动更新） —— 2 条
 
 | 官方 key | 域 | 为什么对无头宿主不适用 |
 |---|---|---|
-| `experimentalInspector.disabled` | `live-profile-desktop` | 桌面壳的实验性 inspector（开发者工具面板）开关；无头宿主没有可检查的渲染进程。 |
-| `sessionInspector.disabled` | `live-profile-desktop` | 桌面壳的会话 inspector 面板开关（查看某会话的原始事件）；无头宿主没有该面板——原始 v4 日志本来就是可读文件。 |
+| `experimentalInspector.disabled` | live-profile-desktop | 桌面壳的实验性 inspector（开发者工具面板）开关；无头宿主没有可检查的渲染进程。 |
+| `sessionInspector.disabled` | live-profile-desktop | 桌面壳的会话 inspector 面板开关（查看某会话的原始事件）；无头宿主没有该面板——原始 v4 日志本来就是可读文件。 |
 
 #### ui-only（文案/布局/渲染档位/可见性开关） —— 7 条
 
 | 官方 key | 域 | 为什么对无头宿主不适用 |
 |---|---|---|
-| `performanceUsage` | `live-profile-desktop` | 桌面 profile 的状态栏计费粒度档位（detailed 等）；无头宿主不渲染状态栏。 |
-| `trace.maxResultsPerSession` | `tui-capability` | 官方 trajectory（轨迹）视图每会话保留 1000 行，是客户端渲染的调试视图；宿主没有 trajectory 视图/接口（grep 0 命中），该上限无对象。 |
-| `usage.display.foldedReplies` | `tui-capability` | “完成的一轮折叠后保留哪些 assistant 回复可见”（默认 all）是纯客户端展示策略，宿主不渲染会话气泡。 |
-| `usage.display.performanceUsage` | `tui-capability` | 这是客户端“状态栏/详情区计费粒度”的渲染档位（detailed 等），宿主是无头服务，不渲染状态栏；TUI 侧另线（tui-line）自己决定档位。 |
-| `usage.display.transcriptView` | `tui-capability` | work-details 呈现模式（detailed/折叠等）是客户端渲染选择，无头宿主不渲染 transcript。 |
-| `usage.fields.cacheHitPercent` | `tui-capability` | 这是 TUI 里 formatCacheHitPercent() 的**格式化函数**（四舍五入、promptTokens=0 时返回 null）；宿主只写数字键（inputTokens/cacheReadTokens/cacheWriteTokens），百分比由客户端渲染，属 ui-only。 |
-| `usage.placeholderPolicy` | `tui-capability` | 官方规定“百分比为 null 表示还没有 prompt 输入，绝不渲染成 0.0”；这是客户端格式化策略，宿主只保证“没实测就不写键”，渲染判定在 TUI。 |
+| `trace.maxResultsPerSession` | tui-capability | 官方 trajectory（轨迹）视图每会话保留 1000 行，是客户端渲染的调试视图；宿主没有 trajectory 视图/接口（grep 0 命中），该上限无对象。 |
+| `usage.display.foldedReplies` | tui-capability | “完成的一轮折叠后保留哪些 assistant 回复可见”（默认 all）是纯客户端展示策略，宿主不渲染会话气泡。 |
+| `usage.display.performanceUsage` | tui-capability | 这是客户端“状态栏/详情区计费粒度”的渲染档位（detailed 等），宿主是无头服务，不渲染状态栏；TUI 侧另线（tui-line）自己决定档位。 |
+| `usage.display.transcriptView` | tui-capability | work-details 呈现模式（detailed/折叠等）是客户端渲染选择，无头宿主不渲染 transcript。 |
+| `usage.fields.cacheHitPercent` | tui-capability | 这是 TUI 里 formatCacheHitPercent() 的**格式化函数**（四舍五入、promptTokens=0 时返回 null）；宿主只写数字键（inputTokens/cacheReadTokens/cacheWriteTokens），百分比由客户端渲染，属 ui-only。 |
+| `usage.placeholderPolicy` | tui-capability | 官方规定“百分比为 null 表示还没有 prompt 输入，绝不渲染成 0.0”；这是客户端格式化策略，宿主只保证“没实测就不写键”，渲染判定在 TUI。 |
+| `performanceUsage` | live-profile-desktop | 桌面 profile 的状态栏计费粒度档位（detailed 等）；无头宿主不渲染状态栏。 |
 
 #### telemetry-ui（产品遥测/会话上传/匿名 id 的展示面） —— 4 条
 
 | 官方 key | 域 | 为什么对无头宿主不适用 |
 |---|---|---|
-| `DSH_CLIENT_VERSION` | `env` | 官方把 service/app 版本交给宿主产品遥测；宿主的产品遥测默认零外连且没有“客户端版本”上报字段，该版本上报面不适用。 |
-| `DSH_TELEMETRY_DISABLED` | `env` | 官方的语义是“launchers 把遥测那一行 patch 成 disabled，配置值无法关掉一行”，属于官方启动器/设置 UI 的行级开关；宿主没有遥测行（默认零外连），该行级开关不适用。 |
-| `DSH_TELEMETRY_MODE` | `env` | 官方遥测策略是 FEEDBACK_ONLY（会话分享/反馈级别的产品遥测）；宿主的 analytics 策略只有 local（零外连，默认）与 local+export 两档，没有“会话分享反馈”这套产品遥测语义，该模式值无对应物。 |
-| `sessionLogDeepseek.mounted` | `schedule-plugins-account-telemetry` | 官方默认挂载 `session-log-deepseek`：把会话日志上传到 DeepSeek 用于训练/改进。无头宿主按 W0 裁定默认零外连、不做会话上传，该插件没有对应物。 |
+| `DSH_CLIENT_VERSION` | env | 官方把 service/app 版本交给宿主产品遥测；宿主的产品遥测默认零外连且没有“客户端版本”上报字段，该版本上报面不适用。 |
+| `DSH_TELEMETRY_DISABLED` | env | 官方的语义是“launchers 把遥测那一行 patch 成 disabled，配置值无法关掉一行”，属于官方启动器/设置 UI 的行级开关；宿主没有遥测行（默认零外连），该行级开关不适用。 |
+| `DSH_TELEMETRY_MODE` | env | 官方遥测策略是 FEEDBACK_ONLY（会话分享/反馈级别的产品遥测）；宿主的 analytics 策略只有 local（零外连，默认）与 local+export 两档，没有“会话分享反馈”这套产品遥测语义，该模式值无对应物。 |
+| `sessionLogDeepseek.mounted` | schedule-plugins-account-telemetry | 官方默认挂载 `session-log-deepseek`：把会话日志上传到 DeepSeek 用于训练/改进。无头宿主按 W0 裁定默认零外连、不做会话上传，该插件没有对应物。 |
 
 #### plugin-market-ui（插件市场的客户端 UI） —— 3 条
 
 | 官方 key | 域 | 为什么对无头宿主不适用 |
 |---|---|---|
-| `clientUiPluginManager.registryProbeCacheTtlMs` | `schedule-plugins-account-telemetry` | 官方给探测结果 300000ms 缓存；宿主没有市场页面缓存这一层。（宿主侧唯一相关的是 pluginManager 的服务端 registry 通道，已在 pluginManager.* 里登记为 UNREAD-GAP。） |
-| `clientUiPluginManager.registryProbeEnabled` | `schedule-plugins-account-telemetry` | 官方默认开：客户端 UI 会主动探测插件 registry（拿市场列表/更新提示）；宿主没有渲染层也没有市场页面，该探测不适用。（宿主侧唯一相关的是 pluginManager 的服务端 registry 通道，已在 pluginManager.* 里登记为 UNREAD-GAP。） |
-| `clientUiPluginManager.registryProbeTimeoutMs` | `schedule-plugins-account-telemetry` | 官方给 registry 探测 1500ms 预算；宿主没有客户端 market 页面，也就没有这次探测。（宿主侧唯一相关的是 pluginManager 的服务端 registry 通道，已在 pluginManager.* 里登记为 UNREAD-GAP。） |
+| `clientUiPluginManager.registryProbeCacheTtlMs` | schedule-plugins-account-telemetry | 官方给探测结果 300000ms 缓存；宿主没有市场页面缓存这一层。（宿主侧唯一相关的是 pluginManager 的服务端 registry 通道，已在 pluginManager.* 里登记为 UNREAD-GAP。） |
+| `clientUiPluginManager.registryProbeEnabled` | schedule-plugins-account-telemetry | 官方默认开：客户端 UI 会主动探测插件 registry（拿市场列表/更新提示）；宿主没有渲染层也没有市场页面，该探测不适用。（宿主侧唯一相关的是 pluginManager 的服务端 registry 通道，已在 pluginManager.* 里登记为 UNREAD-GAP。） |
+| `clientUiPluginManager.registryProbeTimeoutMs` | schedule-plugins-account-telemetry | 官方给 registry 探测 1500ms 预算；宿主没有客户端 market 页面，也就没有这次探测。（宿主侧唯一相关的是 pluginManager 的服务端 registry 通道，已在 pluginManager.* 里登记为 UNREAD-GAP。） |
 
 #### protocol-shape（纯 wire 形状/镜像常量/实现形状不适用） —— 14 条
 
 | 官方 key | 域 | 为什么对无头宿主不适用 |
 |---|---|---|
-| `DSH_PRIMARY_RUNTIME` | `env` | 官方标注该变量只被 dsh-sdk-app 读（外部主运行时根）；宿主没有 sdk-app 包这条装配路径，也没有“外部主运行时根”的绑定面，不适用。 |
-| `agentLoop.maxParallelToolCallsConstant` | `agent-loop` | 这不是独立可配参数，只是官方把 schema 默认值再导出一份常量（lib/index.js:1101 对 1309 的镜像）。宿主没有并行工具执行，故没有对应常量；能力缺口的实体登记在 agentLoop.maxParallelToolCalls，此处不重复计一次缺口。 |
-| `agentLoop.stepsPerTurn` | `agent-loop` | 官方自己在 whereApplied 里写明 absent — no such parameter，README 原文 No built-in turn budget；宿主侧对应物不是该参数，而是宿主自加的安全阀 --max-steps（默认 2000），两者不是同一个东西，不能算等价覆盖。 |
-| `jobs.pumpPollMs` | `session` | 这是“轮询拉取任务输出”的间隔；宿主的任务输出是事件驱动推送（close-and-replace 广播 + 条件变量），没有轮询泵。job.follow 那一层有 100ms 兜底轮询，但那是官方帧机的采样间隔，不是这个参数。 |
-| `llm.modelDiscovery.namespaceRequired` | `llm` | 这是官方插件注册面的形状要求（registerModelDiscovery 在 settings namespace 为空时抛 INVALID_DISCOVERY）；宿主没有“插件注册 discovery”这一层（R2 明确禁止 init 注册，provider 在装配期显式注册），故该 namespace 约束不适用。 |
-| `session.journalEpoch` | `session` | 官方传输里没有 journalEpoch 字段（官方 whereApplied 明写 UNKNOWN / no journalEpoch field to mirror）；宿主额外引入了 journalEpoch 作为重启后水位失效的判据，属于宿主自加扩展，不是“官方参数未读”。 |
-| `session.query.journalMode` | `session` | 这是 SQLite 的 WAL journal 模式；宿主没有 sqlite（检索走内存扫描 + 文件读），该引擎级参数不适用。 |
-| `session.query.persistedReadConcurrency` | `session` | 这是 sqlite 侧“持久化 inspect 的并发度”参数；宿主没有 sqlite inspect 通道（检索是进程内扫 v4 日志），该并发参数不适用。 |
-| `sessionController.nativeOpen` | `transport-http` | 官方默认 None（= 不做 native open 集成），是“用系统程序打开文件”的桌面集成开关；无头宿主没有桌面壳，且默认就是关闭，不构成缺口。 |
-| `tool.fsSearch.graceMs` | `agent-loop` | 这是“终止 rg 子进程前的宽限”参数；宿主 glob/grep 是进程内纯 Go 实现（不 spawn rg），没有子进程可终止，因此该参数在宿主实现形状下不适用。 |
-| `tool.fsSearch.rawOutputMaxBytes` | `agent-loop` | 这是 rg 子进程 stdout 的原始字节上限（20MB，超了报 SEARCH_RAW_OUTPUT_OVERFLOW）；宿主没有 rg 子进程与 raw stdout，改用“单文件读取上限 2MB”的进程内边界，形状不同不可等价。 |
-| `tool.fsSearch.searchMetaMaxBytes` | `agent-loop` | 官方给“序列化后的 presentationMeta”设 64KB 上限，这是官方检索工具的结果投影形状；宿主结果结构是 spi.Result{Text,Data,Hint,Artifacts}，没有 presentationMeta 这一层，故不适用。 |
-| `tool.fsSearch.stderrMaxBytes` | `agent-loop` | rg 子进程 stderr 的尾部预算；宿主进程内实现没有子进程 stderr 通道，不适用。 |
-| `tools.nativeExecutorConfig` | `tools-sandbox-approval` | 官方明确 native 执行器不接受任何配置（默认 {}，whereApplied='the native executor takes no configuration'）；宿主 native 执行器同样没有配置面，这个空对象没有对应项可读，不是缺口。 |
+| `agentLoop.maxParallelToolCallsConstant` | agent-loop | 这不是独立可配参数，只是官方把 schema 默认值再导出一份常量（lib/index.js:1101 对 1309 的镜像）。宿主**有**并行工具执行（实体能力登记在 `agentLoop.maxParallelToolCalls`，实现 `internal/agent/parallel.go`），但没有把这个默认值再导出一份镜像常量——本仓默认值直接写在解析函数里，不存在第二份镜像。这里不重复计一次缺口。 |
+| `agentLoop.stepsPerTurn` | agent-loop | 官方自己在 whereApplied 里写明 absent — no such parameter，README 原文 No built-in turn budget；宿主侧对应物不是该参数，而是宿主自加的安全阀 --max-steps（默认 2000），两者不是同一个东西，不能算等价覆盖。 |
+| `tool.fsSearch.graceMs` | agent-loop | 这是“终止 rg 子进程前的宽限”参数；宿主 glob/grep 是进程内纯 Go 实现（不 spawn rg），没有子进程可终止，因此该参数在宿主实现形状下不适用。 |
+| `tool.fsSearch.rawOutputMaxBytes` | agent-loop | 这是 rg 子进程 stdout 的原始字节上限（20MB，超了报 SEARCH_RAW_OUTPUT_OVERFLOW）；宿主没有 rg 子进程与 raw stdout，改用“单文件读取上限 2MB”的进程内边界，形状不同不可等价。 |
+| `tool.fsSearch.searchMetaMaxBytes` | agent-loop | 官方给“序列化后的 presentationMeta”设 64KB 上限，这是官方检索工具的结果投影形状；宿主结果结构是 spi.Result{Text,Data,Hint,Artifacts}，没有 presentationMeta 这一层，故不适用。 |
+| `tool.fsSearch.stderrMaxBytes` | agent-loop | rg 子进程 stderr 的尾部预算；宿主进程内实现没有子进程 stderr 通道，不适用。 |
+| `llm.modelDiscovery.namespaceRequired` | llm | 这是官方插件注册面的形状要求（registerModelDiscovery 在 settings namespace 为空时抛 INVALID_DISCOVERY）；宿主没有“插件注册 discovery”这一层（R2 明确禁止 init 注册，provider 在装配期显式注册），故该 namespace 约束不适用。 |
+| `jobs.pumpPollMs` | session | 这是“轮询拉取任务输出”的间隔；宿主的任务输出是事件驱动推送（close-and-replace 广播 + 条件变量），没有轮询泵。job.follow 那一层有 100ms 兜底轮询，但那是官方帧机的采样间隔，不是这个参数。 |
+| `session.journalEpoch` | session | 官方传输里没有 journalEpoch 字段（官方 whereApplied 明写 UNKNOWN / no journalEpoch field to mirror）；宿主额外引入了 journalEpoch 作为重启后水位失效的判据，属于宿主自加扩展，不是“官方参数未读”。 |
+| `session.query.journalMode` | session | 这是 SQLite 的 WAL journal 模式；宿主没有 sqlite（检索走内存扫描 + 文件读），该引擎级参数不适用。 |
+| `session.query.persistedReadConcurrency` | session | 这是 sqlite 侧“持久化 inspect 的并发度”参数；宿主没有 sqlite inspect 通道（检索是进程内扫 v4 日志），该并发参数不适用。 |
+| `tools.nativeExecutorConfig` | tools-sandbox-approval | 官方明确 native 执行器不接受任何配置（默认 {}，whereApplied='the native executor takes no configuration'）；宿主 native 执行器同样没有配置面，这个空对象没有对应项可读，不是缺口。 |
+| `sessionController.nativeOpen` | transport-http | 官方默认 None（= 不做 native open 集成），是“用系统程序打开文件”的桌面集成开关；无头宿主没有桌面壳，且默认就是关闭，不构成缺口。 |
+| `DSH_PRIMARY_RUNTIME` | env | 官方标注该变量只被 dsh-sdk-app 读（外部主运行时根）；宿主没有 sdk-app 包这条装配路径，也没有“外部主运行时根”的绑定面，不适用。 |
 
----
+#### internal-impl（官方内部实现形状 / 本仓等价能力换了实现） —— 6 条
 
-### UNREAD-GAP（96 条，真能力缺口 —— 可直接拿去派单）
-
-> 排序：域 → key。每条含「缺什么 / 现在降级成什么样 / 替代路径」。同一族的条目在 `gap` 里互相点名（例如 pluginManager.* 全部指向"没有 registry 客户端"）。
-
-#### agent-loop（8 条）
-
-| # | 官方 key | 缺什么 / 降级 / 替代路径 |
+| 官方 key | 域 | 为什么对无头宿主不适用 |
 |---|---|---|
-| 1 | `agentLoop.agents[].id` | 缺调用方指定/复用的稳定 agent id。降级：每次委派都得到一个新 child 会话 id，跨轮无法按名字指向同一子代理。替代路径：continuable=true 后用回填的 childSessionId 续问（subagents.prompt）。 |
-| 2 | `retry.pluginConfig` | 缺每 provider 独立的重试配置（次数/退避/可重试码）。降级：全进程一套硬编码默认值，任何 provider 想放宽/收紧都必须改代码重编译。替代路径：无。 |
-| 3 | `steering.cancelKeepInboxOption` | 缺“取消 turn 但保留队列”的开关。降级：取消 = 丢弃所有 pending（用户中途插话若在取消瞬间会被静默丢弃）。替代路径：无；需要保留只能重发。 |
-| 4 | `subagent.maxActiveSubagents` | 缺并发子代理与活跃数上限。降级：完全串行，多路委派的墙钟线性叠加；同时没有上限保护（越深越慢而不是越多）。替代路径：无。 |
-| 5 | `workflow.maxConcurrentAgents` | 缺 PTC 并发 agent 池（含 0=unbounded 语义）。降级：workflow 只能串行跑步骤表，且没有 run_agent 之类子代理步骤。替代路径：用 workflow 串行编排 + 多次 subagent 调用。 |
-| 6 | `workflow.maxItemsPerCall` | 缺每调用项数上限。降级：foreach 全量展开，超大数组会一次性跑完（只有正文 3000 rune 的回包上限）。替代路径：无。 |
-| 7 | `workflow.maxTotalAgents` | 缺 workflow agent 总量预算。降级：无总量限制，全靠调用方自律；异常脚本可能长时间占用。替代路径：无。 |
-| 8 | `workflow.syncTimeoutMs` | 缺 workflow 级同步等待预算。降级：受外层工具超时（tools timeout-policy）约束，workflow 自身不能设上限。替代路径：调用方在 ctx 里设期限。 |
+| `hmr.ignored` | schedule-plugins-account-telemetry | 官方 HMR 监听整棵插件树，用 glob 忽略清单（`**/node_modules`、`**/.*` 等）挡噪声；宿主的 HMR 是**显式 `Observe(path)` / 扫 `<Root>/packages/<id>/<version>/plugin.json` 的 digest 比对**（internal/pluginmgr/hmr.go:1-39），没有「监听整棵树再排除」的形状，忽略清单无落点。这是实现形状差异，不是能力缺失（宿主 HMR 默认关闭且只读 plugin.json，天然不受 node_modules 噪声影响）。 |
+| `pluginManager.idleTimeoutMs` | schedule-plugins-account-telemetry | 官方回收空闲的 pnpm 子进程（默认 600000ms）。宿主不启子进程，「空闲回收」没有落点。 |
+| `pluginManager.inspectTimeoutMs` | schedule-plugins-account-telemetry | 官方 inspect 走子进程（默认 20000ms 预算）。宿主的 `inspect` 在**本地目录**上直接读 manifest（`pluginmgr.Manifest`），没有子进程可管，「inspect 子进程预算」没有落点。 |
+| `pluginManager.lockWaitMs` | schedule-plugins-account-telemetry | 官方等 pnpm 的安装锁（默认 120000ms）。宿主没有 pnpm 锁；并发安装由 `internal/pluginmgr/jobs.go` 的作业串行化处理，「锁等待」没有落点。 |
+| `pluginManager.outputBytes` | schedule-plugins-account-telemetry | 官方把 pnpm 安装的 stdout 尾部缓冲到 16384 字节贴给调用方。宿主没有安装子进程（纯 Go 物化 + 事务），安装失败已经是结构化错误（`hostError` / `transport.Official*`），「输出尾部缓冲」没有落点。 |
+| `pluginManager.pnpmCommand` | schedule-plugins-account-telemetry | 官方插件安装器是 **pnpm 子进程**，该参数配置用哪个 pnpm 二进制。宿主的安装通道是**纯 Go 的 HTTP tarball 下载 + staging 事务重命名**（不启任何外部包管理器，R6 不 fork 外部工具），「pnpm 命令」这个旋钮在宿主没有落点。注意：**这不是能力缺失**——从 registry 安装的能力已经真实现（见 pluginManager.versionListLimit 的 hostEquivalent）。 |
 
-#### llm（3 条）
+#### naming-conflict（同名不同义） —— 1 条
 
-| # | 官方 key | 缺什么 / 降级 / 替代路径 |
+| 官方 key | 域 | 为什么对无头宿主不适用 |
 |---|---|---|
-| 9 | `llm.deepseek.fileExpiresAfterSeconds` | 缺 Files API 上传与到期回收。降级：图片全量内联/本地存储，本地附件不会自动过期（靠 session.spill.cleanupPeriodDays 之类的清理另算）。替代路径：无（不需要 Files API 也能工作，属能力面差异）。 |
-| 10 | `llm.deepseek.filesApiTimeoutMs` | 缺 Files API 上传超时（以及整条上传通道）。降级：无该路径；图片走内联 base64，受 maxInlineRequestImageBytes 约束。替代路径：无。 |
-| 11 | `llm.piAi.streamIdleTimeoutMs` | 缺 per-provider 流空闲超时。降级：挂住的流只能等外层 ctx 取消；与 llm.deepseek.streamIdleTimeoutMs 同一缺口。替代路径：无。 |
+| `DSH_HOME` | env | **官方名 `DSH_HOME` 在宿主不实现 —— 命名冲突（`N-A`，详见 `docs/go5-env-notes.md` §4）**：官方 `DSH_HOME` 是**整个 DSH 的数据根**（`显式路径 > $DSH_HOME > ~/.dsh`）；宿主 home 根走 **`DSHD_HOME`**（`--home` > `DSHD_HOME` > `~/.dshd`），而 TUI2GO 的 `run-019.cmd` 里 `DSH_HOME` 指的是 **DSH 桌面 profile home**（`%PLAY%\home`）。两个语义撞车，**不能**简单别名：一旦宿主把 `DSH_HOME` 当 home 根，launcher 会把宿主会话库指到桌面 profile home。结论：**宿主 home 用 `DSHD_HOME`；TUI2GO 里的 `DSH_HOME` 是桌面 profile home**（launcher 归另一条线，不改）。 |
 
-#### context（6 条）
+### DEFERRED（8 条，能做但排期后置 —— 每条写清依赖什么）
 
-| # | 官方 key | 缺什么 / 降级 / 替代路径 |
+| 官方 key | 域 | 为什么后置（依赖什么） |
 |---|---|---|
-| 12 | `context.compaction.headroomTokens` | 缺窗口 headroom 预留。降级：压缩后仍可能因输出/工具结果把窗口顶满（下一次请求 400 风险），没有“留 64K”的保护带。替代路径：无（可把 auto-compact 阈值调小近似）。 |
-| 13 | `context.compaction.modelPolicies` | 缺 per-model 压缩策略覆盖。降级：所有模型共用一套阈值（1M 窗口与 32K 窗口用同一 auto-compact），小窗口模型容易顶满。替代路径：无。 |
-| 14 | `context.runtimeContext.perStep` | 缺每步 runtime context 重投影。降级：系统提示里的时间/环境信息在会话开始就固定，长会话中“现在几点/在哪个目录”这类事实会过期。替代路径：模型自己调工具查（date/pwd）。 |
-| 15 | `context.sessionReference.maxReferenceBytes` | 缺单条引用的字节上限。降级：无自动引用。替代路径：无。 |
-| 16 | `context.sessionReference.maxReferences` | 缺会话引用自动附带（最多 3 条）。降级：用户必须手工 @ 选，模型不会自动拿到相关会话上下文。替代路径：@ 引用 + 手工粘贴。 |
-| 17 | `context.sessionReference.referenceContextFraction` | 缺引用上下文预算（20% 窗口）。降级：无自动引用。替代路径：无。 |
+| `steering.cancelKeepInboxOption` | agent-loop | 宿主先把 turn 取消从 ctx 取消提升为显式 `cancel(cause, {keepInbox})` 入口，并定义保留项的消费方（下一 turn 接管）；当前 inbox 由 cmd/dshd/main.go:818 每次 run 新建，跨 turn 无宿主；官方 README 明确 `cancel()` 默认清空 inbox，`cancel(cause, { keepInbox: true })` 只中止 turn、保留 pending；宿主的取消就是 ctx 取消 → `Run` 返回 → `defer Steers.Close()` 无条件 `items = nil`，没有「只中止 turn」的形状，也没有 keepInbox 开关。能做，但要先把取消从 ctx 提升为显式 API，否则保留下来的项没有消费方（inbox 生命周期 = 一次 run）。 |
+| `llm.deepseek.fileExpiresAfterSeconds` | llm | ；官方给上传图片一个显式寿命（604800s = 7 天），属于 **Files API 上传通道**的参数；宿主没有该通道：图片要么内联 base64，要么走本地 attachment store（RepresentationRaw/RepresentationBase64），没有「上传后按 expires_after 回收」的对象。只把 604800 接成一个没人读的常量就是假实现。条件：① 拿到 provider 的 Files API 端点与契约（request/response 形状、过期语义）；② 在 internal/session/image_offload.go 增加第三条表示（file_id）+ 上传/回收/失效回退；③ 有可复现的上传-过期验收环境。当前内联 base64 功能不缺失，差异只在传输形态（请求体更大）。 |
+| `llm.deepseek.filesApiTimeoutMs` | llm | ；官方给每张图片的 Files API 调用 60000ms 期限（同一条上传通道的另一个旋钮）。宿主没有 Files API 调用点，因此没有可测量的「一次上传」可以套超时；把 60000 接进内联 base64 路径等于给一个不存在的调用设上限。条件：与 fileExpiresAfterSeconds 同批实现（上传器内部 per-call timeout + 重试/回退到内联）。 |
+| `context.sessionReference.maxReferenceBytes` | context | ；官方 `maxReferenceBytes`（显式上限覆盖自动预算，默认按剩余窗口自动算）是单条来源快照的序列化字节上限，与 maxReferences / referenceContextFraction 同属一条管线。宿主没有快照捕获，没有「序列化 JSON 预览 + 截断通知 + spill 落盘」这套结构，接一个字节上限没有意义。条件：随 sessionReference 管线实现（预览 JSON 有界 + omittedMessages/omittedBytes 通知 + spill 定位）。 |
+| `context.sessionReference.maxReferences` | context | ；官方 `maxReferences`（默认 3，上限 3）是 `dsh-session-reference` **自动附带会话快照**的条数上限，而宿主只有候选发现（`sessionReferenceResolver.candidates`，真实现），没有 mention 解析（`@[label](dsh-session:<base64url>)`）、没有快照捕获与不可信背景上下文那条管线。参数是那条管线的旋钮，管线不在时接参数 = 假实现。能做的前提（三条同时）：① 产品裁定「跨会话正文自动进提示」（隐私 + prompt cache 影响）；② 相关度/去重策略（官方按工作目录亲和度 + 最新标题排序）；③ 在 serve_turn/run 装配期插入第二条 user 消息的落点。实现点是 internal/sessionref（新包）+ cmd/dshd/serve_turn.go 的提示装配。 |
+| `context.sessionReference.referenceContextFraction` | context | ；官方 `referenceContextFraction`（默认 0.2）是「引用快照最多占上下文窗口的 20%」的预算比例，属于同一条自动附带管线的预算层；宿主没有该管线（见 maxReferences 条），单独把比例接进一个不存在的装配点只会造出「配了却没生效」的第二套事实。条件：随 sessionReference 管线一起实现——预算 = floor(contextWindow × fraction)，与 maxReferenceBytes 取小；落点同样是 internal/sessionref + serve_turn 装配。 |
+| `telemetry.session.maxRequestBytes` | schedule-plugins-account-telemetry | 先有批量拆批（telemetry.session.processor.maxExportBatchSize），否则单条超限只能拒绝；官方单次遥测请求体上限 4000000 字节（OTel 批量专属）；宿主的 `postCollector` 把「pending + 当前记录」整个 marshal 后一次 POST，**没有请求体字节上限**。能做（加上限 + 超限拆批），但拆批依赖批量语义。 |
+| `telemetry.session.shutdownTimeoutMillis` | schedule-plugins-account-telemetry | 先有内存批量/队列（telemetry.session.processor.* 那族），否则「关停时冲刷」没有对象；磁盘 pending 的冲刷可作为独立小改；官方 OTel 会话遥测的关停冲刷预算 3000ms（进程退出前把队列里的事件发出去）；宿主的 `Service.Close()` 只关 watcher，**不冲刷待发队列**（`pending.jsonl` 留在盘上等下一次 report）。能做，但依赖批量/队列语义先定：现在没有内存队列，flush 的对象是磁盘 pending 文件。 |
 
-#### session（11 条）
+### OFFICIAL_UNSUPPORTED（19 条，官方有、本仓按成文红线明确不做）
 
-| # | 官方 key | 缺什么 / 降级 / 替代路径 |
-|---|---|---|
-| 18 | `attachment.imageCompressionConcurrency` | 缺图片压缩并发度（与归一化同一缺口）。降级：无压缩。替代路径：无。 |
-| 19 | `attachment.maxImagesPerMessage` | 缺每消息图片张数上限。降级：一条消息可以塞任意多图（受 promptMaxBlocks=64 间接限制），内存与请求体不可控。替代路径：无。 |
-| 20 | `attachment.normalizedImageMaxBytes` | 缺归一化后的字节预算（与重编码一体）。降级：同上，只有接收上限。替代路径：无。 |
-| 21 | `attachment.normalizedImageMaxPixels` | 缺图片归一化（重采样到目标像素）。降级：大图原样内联，请求体膨胀（只能靠 maxImageBytes 拒收，用户体验是“这张图太大”而不是“已自动压缩”）。替代路径：无（需引入 Go 图像缩放）。 |
-| 22 | `goal.defaultMaxGoalRounds` | 缺默认轮次上限（256）。降级：goal 一旦 active 就没有轮次天花板，只能人工 complete/pause；失控循环只能靠人盯。替代路径：调用方显式给 maxGoalRounds。 |
-| 23 | `jobs.maxConcurrentJobsPerOwner` | 缺 per-owner 并发任务上限。降级：模型可以无限起后台任务，没有背压，机器可能被拖慢。替代路径：无（只能靠提示词自律）。 |
-| 24 | `jobs.settledRetainBytes` | 缺“已结束任务”的独立保留量。降级：结束的任务继续按 1MiB 占内存，长跑多任务的会话内存随任务数增长。替代路径：无。 |
-| 25 | `session.persistence.listConcurrency` | 缺列会话的并发度。降级：会话多时列会话是纯串行 IO，界面“最近会话”列表随文件数线性变慢。替代路径：无（可参考 fsutil.WalkFiles 的并发遍历自己加）。 |
-| 26 | `session.projectionCache.writeEveryEvents` | 缺写回批量（每 N 条事件 / 每 T 毫秒落一次）。降级：每次投影写都同步落盘，长会话高频事件下 fsync 次数按事件数线性放大。替代路径：无（storage.Domain 的写链可复用，但需要调用方自己攒批）。 |
-| 27 | `session.projectionCache.writeIntervalMs` | 缺写回定时器（5s 间隔）。降级：与 writeEveryEvents 同一根因——没有后台写回，只有同步写。替代路径：无。 |
-| 28 | `session.spill.cleanupPeriodDays` | 缺 spill 文件保留期与自动清理。降级：外置 artifact 永久堆积（临时目录随使用增长，磁盘只增不减）。替代路径：人工清 %TEMP%\dshd-spill。 |
+| 官方 key | 域 | 依据（为什么不做） | 什么条件下能做 |
+|---|---|---|---|
+| `workflow.maxConcurrentAgents` | agent-loop | 这是官方 `dsh-workflow-ptc`（PTC = programmatic tool calling，JS 运行时里 `agent()` 钩子的并发池预算，默认 0 = 不设限）的配置项。本仓 R6 明确不嵌 JS 运行时，workflow 工具是**自有的声明式 JSON 步骤表**（串行 foreach，没有 agent 步骤、没有并发扇出），该预算项没有任何语义落点。 | 接入外部受管 Node/PTC 运行时（W0 双轨里的 dynamicCordisRunner 形状）后，这 4 个预算项才有落点；届时按 provider 配置接外部运行时 |
+| `workflow.maxItemsPerCall` | agent-loop | 官方 `dsh-workflow-ptc` 的「每调用 PTC items 条数上限」（默认 4096）；宿主的 workflow 是 JSON 步骤表，没有 PTC items 这个集合，条数上限无落点。注：宿主步骤表本身没有防御性条数上限（靠工具超时兜底），但那是宿主自有的加固项，不是官方这条参数的等价物——不为清零把两者混为一谈。 | 同 workflow.maxConcurrentAgents：接入外部受管 PTC 运行时 |
+| `workflow.maxTotalAgents` | agent-loop | 官方 `dsh-workflow-ptc` 的 workflow 级 agent 总量预算（默认 1000）；宿主 workflow 没有 agent 概念，只有工具步骤，总量预算无落点。依据同 `workflow.maxConcurrentAgents`：R6 不嵌 JS 运行时。 | 同 workflow.maxConcurrentAgents：接入外部受管 PTC 运行时 |
+| `workflow.syncTimeoutMs` | agent-loop | 官方 `dsh-workflow-ptc` 的同步等待预算（默认 5000ms）；宿主的 workflow 调用直接跑在工具 ctx 上，受外层 tools timeout-policy 约束（modules/tools/pipeline.go 的 ToolTimeout），没有 per-workflow 同步预算这个形状。依据同上：R6 不嵌 JS 运行时。 | 同 workflow.maxConcurrentAgents：接入外部受管 PTC 运行时 |
+| `sandboxLocal.probeTimeoutMs` | tools-sandbox-approval | 官方 `dsh-sandbox-local` 是**外部沙箱 runner**（起子进程做 OS 级隔离 + 探测超时，默认 5000ms）。本仓按 AGENTS「沙盒不得冒名」：approval / 工具白名单 / FS 路径边界 / Windows Job Object 都不是完整沙箱，宿主只有进程内策略闸门 + Job Object 强杀，没有外部 runner，探测超时无落点。平台型 40 sandbox 已登记 DEFERRED、42 bash-sandbox 官方 win32 disabled。 | 引入外部沙箱 runner（容器 / WSL / 独立 Job Object 之外的 OS 隔离）并按平台开关打开后；win32 上需要官方先打开该插件 |
+| `sandboxLocal.runnerCommand` | tools-sandbox-approval | 与 `sandboxLocal.probeTimeoutMs` 同一缺口族：官方可配置沙箱 runner 命令行（默认 []），宿主没有外部 runner，命令直接在宿主进程树里跑（受 Job Object 约束）。依据同 AGENTS「沙盒不得冒名」+ 官方 win32 disabled。 | 同 sandboxLocal.probeTimeoutMs：接入外部沙箱 runner |
+| `tools.ptc.maxParallelSubCalls` | tools-sandbox-approval | 官方 `dsh-tool-executor-ptc` 是 PTC 执行器（`run_code` 里的并行子调用池，默认 10）。本仓 R6 不嵌 JS 运行时，生产代码 `grep -rniw ptc internal cmd modules codecs` 只有注释；`docs/host-stable-gap-register.md:296` 已判 `tool-executor-ptc` = DO_NOT_IMPLEMENT（R6 + 官方默认 disabled）。宿主没有 PTC 执行器，并行子调用池无落点。 | 接入外部受管 PTC 运行时（与 workflow.* 4 条同一前置） |
+| `sessionLogDeepseek.enabled` | live-profile-desktop | 官方 `session-log-deepseek` 把会话日志上传到 DeepSeek 用于训练/改进（默认 false，需用户显式开）。本仓按 W0 裁定「productAnalytics 默认本地零出网」：会话日志只落本地 v4，全仓 `grep sessionLog` = 0，没有上传管道。这不是「漏做」而是**出站策略**：未经用户明示授权的会话内容外传，与 R5「读路径不写盘」同级的红线。 | 先做出站管道 + 脱敏 + 用户明示授权（与 telemetry 导出同一套前置），并对齐官方「仅显式反馈才上传」的语义 |
+| `agentTeam.disposalTimeoutMs` | schedule-plugins-account-telemetry | 官方 `TeamRuntimeLifecycle` 有团队运行时销毁预算（默认 5000ms，超时抛 `TEAM_DISPOSAL_TIMEOUT`）；宿主的团队面是**无状态文件操作**（信箱 + 任务板），没有可销毁的运行时，销毁超时无落点。 | 接入官方 Team 运行时（Cordis 服务 + roster/messaging/task/runtime 四owner）后，销毁超时才有对象 |
+| `telemetry.host.exportTimeoutMillis` | schedule-plugins-account-telemetry | 官方 host 遥测导出看门狗 20000ms；宿主没有批量导出器与 active slot，看门狗无落点。依据 W0：不引 OTel SDK。 | 同 telemetry.session.processor.*：接入 OTel SDK 或自建等价批量导出管道 |
+| `telemetry.host.maxExportBatchSize` | schedule-plugins-account-telemetry | 这 6 条 `telemetry.host.*` 是官方 **host product telemetry 的 OTel SDK 导出器**预算（单批 512 条）。宿主按 W0 裁定不引 OTel SDK：host 侧产品遥测走 `internal/analytics` 的本地 JSONL + 可选单条 POST，没有批量导出器，批大小无落点。 | 同 telemetry.session.processor.*：接入 OTel SDK 或自建等价批量导出管道 |
+| `telemetry.host.maxQueueSize` | schedule-plugins-account-telemetry | 官方 host 遥测导出队列上限 2048 条；宿主没有内存队列（同 telemetry.session.processor.maxQueueSize 的根因）。依据 W0：不引 OTel SDK。 | 同 telemetry.session.processor.*：接入 OTel SDK 或自建等价批量导出管道 |
+| `telemetry.host.scheduledDelayMillis` | schedule-plugins-account-telemetry | 官方 host 遥测定时刷批 30000ms；宿主没有定时刷批（导出只在 report 时同步发生）。依据 W0：不引 OTel SDK。 | 同 telemetry.session.processor.*：接入 OTel SDK 或自建等价批量导出管道 |
+| `telemetry.host.shutdownTimeoutMillis` | schedule-plugins-account-telemetry | 官方 host 遥测关停冲刷 21000ms；宿主 `Service.Close()` 不冲刷任何队列（同 telemetry.session.shutdownTimeoutMillis 的根因，但 host 侧连 pending 冲刷路径都没有）。依据 W0：不引 OTel SDK。 | 同 telemetry.session.processor.*：接入 OTel SDK 或自建等价批量导出管道 |
+| `telemetry.host.timeoutMillis` | schedule-plugins-account-telemetry | 官方 host 遥测导出传输超时 15000ms；宿主的 host 侧没有独立导出器（与 session 侧共用 `internal/analytics` 的 3s 客户端），该预算无落点。依据 W0：不引 OTel SDK。 | 同 telemetry.session.processor.*：接入 OTel SDK 或自建等价批量导出管道 |
+| `telemetry.session.processor.exportTimeoutMillis` | schedule-plugins-account-telemetry | 官方 OTel 批导出看门狗 1500ms（超时释放 active request slot）；宿主没有批处理器与 active slot，看门狗无落点。依据同 processor 族（W0：不引 OTel SDK）。 | 同 telemetry.session.processor.scheduledDelayMillis：接入 OTel SDK 或自建批处理管道 |
+| `telemetry.session.processor.maxExportBatchSize` | schedule-plugins-account-telemetry | 官方 OTel 批处理单批上限 2048 条；宿主的导出批 = 「pending 全量 + 当前记录」一次发完，没有批大小概念。依据同 processor 族（W0：不引 OTel SDK）。 | 同 telemetry.session.processor.scheduledDelayMillis：接入 OTel SDK 或自建批处理管道 |
+| `telemetry.session.processor.maxQueueSize` | schedule-plugins-account-telemetry | 官方 OTel 批处理队列上限 2048 条；宿主没有内存队列（pending 是磁盘 JSONL，只在下一次 report 时读回），队列上限无落点。依据同 `telemetry.session.processor.scheduledDelayMillis`（W0：不引 OTel SDK）。 | 同 telemetry.session.processor.scheduledDelayMillis：接入 OTel SDK 或自建批处理管道 |
+| `telemetry.session.processor.scheduledDelayMillis` | schedule-plugins-account-telemetry | 这 4 条 `telemetry.session.processor.*` 是官方 **OTel SDK BatchLogRecordProcessor** 的内部预算（定时 10000ms 刷一批）。宿主按 W0 裁定不引 OTel SDK：产品遥测是「本地 JSONL hash 链 + 可选单条 POST（带磁盘 pending 队列）」，没有内存批处理器，定时刷批无落点。 | 引入 OTel SDK 或自建等价的批处理管道（W0「可选导出」的升级），并把 processor 预算接到该管道 |
 
-#### tools-sandbox-approval（13 条）
+### UNREAD-GAP（0 条，真能力缺口 —— 可直接拿去派单）
 
-| # | 官方 key | 缺什么 / 降级 / 替代路径 |
-|---|---|---|
-| 29 | `approval.memory` | 缺“每次请求都重问”的严格语义（宿主默认按会话记忆）。降级：批准一次后同类调用静默放行，审计面收窄（日志里看不到第二次询问）。替代路径：关闭记忆需要改代码，没有反向开关。 |
-| 30 | `fs.diffBasisMaxBytes` | 缺 diff 基线快照（以及随之而来的“基线太大就不做 diff”保护）。降级：编辑直接落盘，没有可回看的基线；大文件编辑不产生 diff 证据。替代路径：靠会话日志里的 write 事件重建。 |
-| 31 | `sandbox.additionalWritableRoots` | 缺工作区外的追加可写根。降级：要写工作区外的目录只能整档升到 danger-full-access（权限一次性放大到全盘），没有“只多这一个目录”的细粒度。替代路径：无。 |
-| 32 | `sandboxLocal.probeTimeoutMs` | 缺外部沙箱 runner（真隔离）。降级：进程内策略闸门 + Job Object 强杀，不是 OS 级隔离；能防误写，防不住恶意代码。替代路径：无（平台项 40/42/43 已登记后置）。 |
-| 33 | `sandboxLocal.runnerCommand` | 缺可配置的沙箱 runner（与 probeTimeoutMs 同一缺口）。降级：无外部 runner，命令直接在宿主进程树里跑。替代路径：无。 |
-| 34 | `skill.collectCacheMaxEntries` | 缺 skill 收集缓存。降级：每次列/找 skill 都打一遍文件系统，skill 多时列表变慢。替代路径：无。 |
-| 35 | `skillFs.watchUsePolling` | 缺 skill 目录监听（原生事件与轮询都没有）。降级：skill 变更在会话内不可见，必须重启。替代路径：无。 |
-| 36 | `terminal.activityPollIntervalMs` | 缺终端活跃度采样与闲置判定。降级：无法区分“有人在用”和“挂着没人管”，回收只能靠人工。替代路径：无。 |
-| 37 | `terminal.cleanupRetryMs` | 缺清理重试节奏。降级：清理失败就泄漏（句柄/临时文件），没有兜底重试。替代路径：重启宿主。 |
-| 38 | `terminal.disposeGraceMs` | 缺销毁宽限。降级：终端被立刻杀掉，shell 里的收尾脚本（写历史、清理临时文件）来不及跑。替代路径：命令自己 trap 也无用（PTY 关闭即收到挂断）。 |
-| 39 | `terminal.maxTerminals` | 缺每会话终端数上限。降级：可以无限开 PTY，每个都占一个 conhost 进程与缓冲，机器资源可被打满。替代路径：无（官方上限 8 可直接移植）。 |
-| 40 | `terminal.unattendedTimeoutMs` | 缺无人值守终端寿命上限。降级：后台终端可永久存活（进程级泄漏），没有人回收。替代路径：人工 kill。 |
-| 41 | `tools.ptc.maxParallelSubCalls` | 缺 PTC 并行子调用池。降级：子调用只能串行（workflow 的 JSON 步骤表 + 串行 for）。替代路径：无。 |
-
-#### transport-http（7 条）
-
-| # | 官方 key | 缺什么 / 降级 / 替代路径 |
-|---|---|---|
-| 42 | `cordis.hostRunner.clientInspectTimeoutMs` | 缺 inspect 专用超时。降级：inspect 挂住时一直等到外层 ctx 取消（可能几分钟）。替代路径：调用方设 deadline。 |
-| 43 | `cordis.hostRunner.vmTimeoutMs` | 缺脚本 VM 默认超时（5s）。降级：脚本死循环只能靠调用方 ctx（外层工具超时）打断；没有 per-script 预算。替代路径：调用方自己设 ctx deadline。 |
-| 44 | `sessionController.listWorkSliceMs` | 缺列会话的工作切片预算。降级：会话多时一次请求同步扫完全部会话文件，HTTP 请求被拖长（没有增量/分片返回）。替代路径：无（可加 ctx 期限近似）。 |
-| 45 | `webserver.compressionLevel` | 缺运行期 gzip 压缩（级别可调）。降级：只有 dist 里预先压好的资源被压缩，API/WS 文本响应（JSON 帧）全程不压缩，长会话历史响应体积翻倍。替代路径：为 dist 预压缩（已有），API 侧无。 |
-| 46 | `webserver.compressionThresholdBytes` | 缺压缩阈值。降级：与 compressionLevel 同一根因（无运行期压缩）。替代路径：无。 |
-| 47 | `webserver.tls` | 缺 HTTPS 监听。降级：只能明文 HTTP（本机环回够用，跨机/隧道场景无 TLS）。替代路径：反向代理（nginx/caddy）终结 TLS。 |
-| 48 | `workspaceController.documentsLookupTimeoutMs` | 缺 Documents 查找超时。降级：域账号/网络重定向的 Documents 目录查询可能阻塞（启动期一次），没有超时兜底。替代路径：无。 |
-
-#### tui-capability（2 条）
-
-| # | 官方 key | 缺什么 / 降级 / 替代路径 |
-|---|---|---|
-| 49 | `context.occupancy.display` | 缺 contextPressure 三数视图。降级：界面能显示“已用/上限”，但没有“prompt 压力”和“下一次请求预计占用”，上下文占用条只能事后看。替代路径：无（与 context.measurement.* 同一缺口族）。 |
-| 50 | `placement.goValuesMapping` | 缺 placement → 官方双队列的**真机会话**等价性验证。降级：映射按字段名实现（turn=旧语义、steer=agent.steer、followup=排队下一轮），queue/now 的真实落点未证；语义错位只会在真机上表现为“消息插错位置”。替代路径：无（需一次真实会话对照实验）。 |
-
-#### env（1 条）
-
-| # | 官方 key | 缺什么 / 降级 / 替代路径 |
-|---|---|---|
-| 51 | `DSH_SYSTEM_PROMPT` | 缺“替换系统提示 persona 前缀”的入口。降级：persona 只能靠改 AGENTS.md（会被拼进提示，但不是替换前缀）；不同 profile 想换人格必须改文件。替代路径：AGENTS.md 覆盖（不精确）。 |
-
-#### live-profile-desktop（3 条）
-
-| # | 官方 key | 缺什么 / 降级 / 替代路径 |
-|---|---|---|
-| 52 | `llmPiAi.providers.magpie.streamIdleTimeoutMs` | 缺 per-provider 流空闲超时（600s）。降级：上游半开连接时请求一直挂着，直到调用方 ctx 或工具超时。替代路径：外层工具超时兜底。 |
-| 53 | `sessionLogDeepseek.enabled` | 缺会话日志上传管道（含开关）。降级：v4 日志只落本地，没有"上传/不上传"的选择——想外传只能自己拷文件。替代路径：无（要上传得先实现出站管道 + 脱敏 + 用户授权）。 |
-| 54 | `subagent.maxActiveSubagents` | 缺并发子代理上限（20）。降级：可无限并行派生，机器资源与 API 配额无背压。替代路径：无。 |
-
-#### schedule-plugins-account-telemetry（42 条）
-
-| # | 官方 key | 缺什么 / 降级 / 替代路径 |
-|---|---|---|
-| 55 | `account.attemptTimeoutMs` | 缺设备登录的单次尝试预算。降级：登录请求受 20s client 超时约束，长流程（等用户在浏览器点授权）会被截断。替代路径：无。 |
-| 56 | `account.balanceTimeoutMs` | 缺余额查询独立超时。降级：与账号 API 共用 20s，余额慢时整条链路一起失败。替代路径：无。 |
-| 57 | `account.inferenceOrigin` | 缺"账号侧推理端点 origin"配置。降级：账号 API 与推理端点各自配置，切到自建/官方端点时不会联动，容易一半指向 A 一半指向 B。替代路径：分别设 DSHD_ACCOUNT_PLATFORM_ORIGIN 与 DSHD_LLM_BASE。 |
-| 58 | `account.logoutMaxRetries` | 缺登出重试。降级：网络抖动时登出失败即返回错误，本地凭据可能已清、服务端会话仍在。替代路径：手动再登出一次。 |
-| 59 | `account.logoutRetryDelayMs` | 缺登出重试间隔（同一缺口族）。降级：无重试。替代路径：无。 |
-| 60 | `account.requestTimeoutMs` | 缺可配的账号请求超时。降级：写死 20s（比官方 30s 更紧），慢网络下的登录/余额查询可能先超时。替代路径：无（external 部分只能改代码）。 |
-| 61 | `agentTeam.disposalTimeoutMs` | 缺团队销毁超时。降级：销毁慢（成员多/文件大）时会一直阻塞调用方。替代路径：无。 |
-| 62 | `agentTeam.maxMembers` | 缺团队人数上限。降级：可以无限加成员，团队拓扑与消息扇出无界。替代路径：无。 |
-| 63 | `agentTeam.maxMessageBytes` | 缺团队消息字节上限。降级：单条消息可无限大，撑爆状态文件。替代路径：无。 |
-| 64 | `agentTeam.maxTasks` | 缺团队任务数上限。降级：任务表可无限增长（内存 + 文件）。替代路径：无。 |
-| 65 | `analytics.environmentQueryMaxOutputBytes` | 缺环境查询输出上限（同一缺口族）。降级：无该通道。替代路径：无。 |
-| 66 | `analytics.environmentQueryTimeoutMillis` | 缺环境采集（os/arch/版本等遥测属性）。降级：事件里没有环境维度，无法按平台切片分析。替代路径：无。 |
-| 67 | `hmr.ignored` | 缺 HMR 忽略清单。降级：插件根下任何文件变动都会触发重载判定（含 node_modules），大插件树下噪声大。替代路径：把插件根限制在无 node_modules 的目录。 |
-| 68 | `pluginManager.detailFetchTimeoutMs` | 缺详情抓取超时（与 detailMaxBytes 同一缺口）。降级：无该通道。替代路径：无。 |
-| 69 | `pluginManager.detailMaxBytes` | 缺包详情抓取（含字节上限）。降级：远程包的 README/元数据拿不到。替代路径：无。 |
-| 70 | `pluginManager.fallbackRegistries` | 缺 registry 源列表（含回退）。降级：无 registry 通道，装不了任何远程包。替代路径：无。 |
-| 71 | `pluginManager.idleTimeoutMs` | 缺空闲子进程回收（pnpm 通道专属）。降级：无子进程可回收。替代路径：无。 |
-| 72 | `pluginManager.inspectTimeoutMs` | 缺 inspect 子进程预算。降级：inspect 只在本地目录上工作，无子进程可管。替代路径：无。 |
-| 73 | `pluginManager.lockWaitMs` | 缺安装锁等待（pnpm 通道专属）。降级：本地目录安装不需要锁等待；并发安装靠 job 串行。替代路径：无（也不需要）。 |
-| 74 | `pluginManager.outputBytes` | 缺安装输出尾部缓冲。降级：安装失败只有结构化错误，没有原始 stdout 尾巴可贴。替代路径：无。 |
-| 75 | `pluginManager.pnpmCommand` | 缺 pnpm 安装通道（子进程 + 参数注入）。降级：只能装本地目录包，registry 规格直接返回结构化未实现。替代路径：无（要真装 npm 包得先做 registry 客户端）。 |
-| 76 | `pluginManager.toolsMounted` | 缺"是否挂载插件工具"的开关（宿主恒挂载，官方默认不挂）。降级：插件一装好工具就出现在模型工具表里，没有下线开关。替代路径：卸载插件。 |
-| 77 | `pluginManager.versionListLimit` | 缺版本列表查询（含条数上限）。降级：插件市场里看不到可安装版本。替代路径：无。 |
-| 78 | `pluginManager.versionLookupConcurrency` | 缺并发版本查询。降级：无该查询通道。替代路径：无。 |
-| 79 | `systemPrompt.includeRuntimeContext` | 缺 runtime context 段（工作目录/时间/环境）。降级：模型不知道"现在几点、在哪个目录"，长会话里这些事实会过期。替代路径：模型自己调工具查（date/pwd）。 |
-| 80 | `systemPrompt.personaPrefix` | 缺可配 persona 前缀。降级：换人格要改 AGENTS.md（全局生效，不能按 profile 切换）。替代路径：AGENTS.md 覆盖（不精确）。 |
-| 81 | `systemPrompt.toolOrder` | 缺工具顺序覆盖。降级：提示里工具顺序只能由装配顺序决定（想调顺序得改代码）。替代路径：无。 |
-| 82 | `telemetry.anonymousUserId` | 缺匿名用户 id。降级：事件无法跨会话去重/统计独立用户数。替代路径：无。 |
-| 83 | `telemetry.host.exportTimeoutMillis` | 缺 host 遥测导出管道（20000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 84 | `telemetry.host.maxExportBatchSize` | 缺 host 遥测导出管道（512）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 85 | `telemetry.host.maxQueueSize` | 缺 host 遥测导出管道（2048）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 86 | `telemetry.host.scheduledDelayMillis` | 缺 host 遥测导出管道（30000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 87 | `telemetry.host.shutdownTimeoutMillis` | 缺 host 遥测导出管道（21000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 88 | `telemetry.host.timeoutMillis` | 缺 host 遥测导出管道（15000）。降级：产品遥测只有本地落盘与可选单次导出，没有队列/批量/定时/关停冲刷。替代路径：本地 JSONL 可外部采集。 |
-| 89 | `telemetry.session.exporter.timeoutMillis` | 缺导出超时（1000ms）。降级：导出挂住时只能等调用方 ctx 取消。替代路径：无。 |
-| 90 | `telemetry.session.maxRequestBytes` | 缺遥测请求字节上限（OTel 批量专属）。降级：无批量，也就没有该限制。替代路径：无。 |
-| 91 | `telemetry.session.processor.exportTimeoutMillis` | 缺 OTel 批处理队列/批量/定时导出（1500）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
-| 92 | `telemetry.session.processor.maxExportBatchSize` | 缺 OTel 批处理队列/批量/定时导出（2048）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
-| 93 | `telemetry.session.processor.maxQueueSize` | 缺 OTel 批处理队列/批量/定时导出（2048）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
-| 94 | `telemetry.session.processor.scheduledDelayMillis` | 缺 OTel 批处理队列/批量/定时导出（10000）。降级：事件逐条落 JSONL，没有内存缓冲，因此没有队列溢出、批量、定时这三种行为。替代路径：无。 |
-| 95 | `telemetry.session.shutdownTimeoutMillis` | 缺 OTel SDK 关停冲刷（3000ms）。降级：进程退出时没有"把队列里的事件刷出去"这一步（因为本来就没有队列）。替代路径：无。 |
-| 96 | `workingDirectory.defaultDirectory` | 缺新会话默认工作目录。降级：新会话一律用进程 cwd（--home 是会话根，不是工作目录），想换目录只能每次进会话后改。替代路径：启动时切 cwd。 |
+> 排序：域 → key。每条含「缺什么 / 现在降级成什么样 / 替代路径」。GO.7 收口后该桶应为空；任何新出现的条目都必须逐条写清缺什么与谁补。
 
 ## 8. 写作用域外：TUI2GO 侧（owner=tui-line）
 
@@ -902,6 +860,8 @@ permission-modes overlay 退场、/T5 play 根自举（`launcher/bootstrap-play.
   三条判据同时成立才改判（能力真存在 / 行是当前工作树的真行 / 差异写进 `note`）。
 - **保持 `UNREAD-GAP` 的两条**（**不虚报**）：`llm.piAi.streamIdleTimeoutMs`、`llmPiAi.providers.magpie.streamIdleTimeoutMs`
   —— 挂死缺口已由全局看门狗关闭（默认 300s，env 可覆盖），但 **per-provider 细分确实没做**，所以只在 `note` 里标注现状。
+  > **GO.7 已改判**：这两条后来都真实现了（per-provider 表 + 按模型 id 前缀解析），
+  > 见 §14（`llm.piAi.streamIdleTimeoutMs`）与 §19（`llmPiAi.providers.magpie.streamIdleTimeoutMs`）。本节保留 GO.6 当时的口径。
   `context.compaction.headroomTokens`（字段在、默认 0 未接线）、`tools.ptc.maxParallelSubCalls`、`terminal.disposeGraceMs` 等未动。
 - **计数**：`UNREAD-GAP` **113 → 96**，`COVERED-EQUIV` **135 → 152**，`COVERED` 63、`N-A` 31 不变，总数仍 342。
 - **行号重锚**：T1/T2/T3/T4 改产品代码后 38 条条目的 `file:line` 整体漂移（acp flag 块 +42 行等），
@@ -911,3 +871,156 @@ permission-modes overlay 退场、/T5 play 根自举（`launcher/bootstrap-play.
   - `validate_register.py --json docs/parameter-register.json` → `OK=306 MISMATCH=0`，EXIT=0；
   - `audit_refs.py --cur docs/parameter-register.json` → 可疑（新行是包声明/空行/注释）**0**，EXIT=0。
 - **全量门禁**：`go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全 0（见 RESULT §2）。
+
+## 14. 本轮更新（GO.7 / T1-gaps：context 6 + llm 3 + tui-capability 2 + env 1）
+
+> 证据：`tmp/GO7-RELEASE/gaps/RESULT.md`；改判脚本 `tmp/GO7-RELEASE/gaps/apply_go7_gaps.py`（只动这 12 条）；
+> 两道闸原文 `tmp/GO7-RELEASE/gaps/logs/`。
+
+- **7 条真实现 / 真接线**（先红后绿，`go test` 逐条钉住）：
+  - `env` `DSH_SYSTEM_PROMPT` → **COVERED**：官方 `systemPrompt.personaPrefix` 真读取，
+    系统提示第一段；没设时逐字节不变。`internal/prompt/prompt.go:99` + `cmd/dshd/acp.go:1223`。
+  - `context.compaction.headroomTokens` → **COVERED-EQUIV**：`--compact-headroom-tokens` /
+    `DSHD_COMPACT_HEADROOM_TOKENS`（默认 65536）进 `min(绝对阈值, floor(min(W×ratio, W−O−B)))`；
+    100K 窗口 → 26272（改前 40000），1M 窗口行为不变。`internal/compact/policy.go:36` + `cmd/dshd/acp.go:1347` + `cmd/dshd/main.go:1649`。
+  - `context.compaction.modelPolicies` → **COVERED-EQUIV**：`--compact-model-policies` JSON 数组，
+    `p/m > p/* > */m > */*` 精确优先，阈值与两条重试预算都按命中策略执行。
+    `internal/compact/policy.go:153` + `cmd/dshd/acp.go:149`。
+  - `context.runtimeContext.perStep` → **COVERED-EQUIV**：`agent.Loop.RuntimeContext` 每步重取时间/目录/平台，
+    作为请求期 `[runtime-context]` system 消息附加，**不落盘、不重组提示**；两个入口默认开启，
+    `--runtime-context=false` / `DSHD_RUNTIME_CONTEXT=false` 可回退。`internal/agent/loop.go:347`。
+  - `llm.piAi.streamIdleTimeoutMs` → **COVERED-EQUIV**：per-provider 流空闲超时
+    （`DSHD_LLM_STREAM_IDLE_TIMEOUT_PROVIDERS_MS={"magpie":600000}`），
+    优先级 Client 字段 > 表 > 全局 env > 官方默认；实测 deepseek 200ms / magpie 600ms 各自触发。
+    `internal/llm/stream_idle.go:179` + `internal/llm/client.go:119`。
+  - `tui-capability` `context.occupancy.display` → **COVERED-EQUIV**：`session.projections.values.contextPressure`
+    三数视图（`contextWindow?` / `pressureTokens?` / `projectedTokens?`，未知整段省略、不补 0），
+    与 `context.usage` 同一份派生。`internal/transport/context_pressure_view.go:42` + `handlers_session_official.go:969`。
+  - `tui-capability` `placement.goValuesMapping` → **COVERED-EQUIV**：`now`=撤旧 inbox+中断+占位、
+    `followup`=空闲等价/忙时 FIFO、`steer`=注入活跃轮不起新 Run；15 条 placement 用例逐条钉住，
+    真机会话对照归 T5 真实链。`cmd/dshd/transport_prompt.go:226/:238/:215`。
+- **5 条 DEFERRED（写清为什么不做 + 条件，不虚报）**：
+  - `context.sessionReference.maxReferences` / `referenceContextFraction` / `maxReferenceBytes`：
+    宿主只有候选发现（`sessionReferenceResolver.candidates` 真实现），没有 mention 解析 → 快照捕获 →
+    有界不可信背景消息这条管线；参数是那条管线的旋钮。条件：产品裁定跨会话正文进提示 + 相关度策略 +
+    `internal/sessionref` 新包与 `serve_turn` 装配落点（三条应同批接）。
+  - `llm.deepseek.fileExpiresAfterSeconds` / `filesApiTimeoutMs`：官方 Files API 上传通道的两个旋钮，
+    宿主没有该通道（图片只有 raw/base64 两种表示）。条件：官方 Files API 端点与契约 +
+    `image_offload` 第三条表示（file_id）+ 真实上传/回收验收环境；当前内联 base64 功能不缺失。
+- **计数**（本成员 12 条）：UNREAD-GAP 12 → 0；COVERED +1、COVERED-EQUIV +6、DEFERRED +5。
+- **两道闸**：`validate_register.py --json docs/parameter-register.json` → `OK=306 MISMATCH=0` **EXIT=0**；
+  `audit_refs.py --cur docs/parameter-register.json` → 可疑 **0** **EXIT=0**。
+- **同轮重锚**：本轮改代码导致 38 条 entries 的 `file:line` 漂移（acp/main 的 flag 块整体下移），
+  另有 34 个 CLI flag 行号漂移；已按 key 重新定位 + 行内容自检写回（`tmp/GO7-RELEASE/gaps/reanchor_flags.py`）。
+
+## 15. 本轮更新（GO.7 / T6：session 与 transport-http 的 18 条收口）
+
+> 证据：`tmp/GO7-RELEASE/gaps-session/RESULT.md`（逐条归属 + 先红后绿日志 + 两道闸原文）。
+
+- **18 条全部有归属**：16 条 `UNREAD-GAP → COVERED-EQUIV`（真实现），2 条 `UNREAD-GAP → DEFERRED`（`jobs.*`，实现点在 `modules/exec/bash`，本任务写作用域外，缺口保留）。
+- **真实现的形状**：每条都是「读点 + 官方默认值 + 行为改变 + 测试」；先红（对 `HEAD` 隔离副本里 `undefined:` 失败）后绿。不接受只加常量或只改映射表。
+  - session（9 条）：列会话并发度 3 / 工作切片 16ms / 投影缓存 write-behind（200 条事件或 5000ms）/ spill 保留期 30 天 / goal 默认上限 256 / 每消息图片 20 张 / 图片归一化（像素 4194304、字节 4194304、压缩并发 2）
+  - transport-http（7 条）：运行期 gzip（level 1、阈值 1024 字节、长度未知立即可压）/ TLS 监听（证书 + 私钥成对，缺一个 fail-loud）/ Documents 查找 10000ms 预算 / cordis 脚本 5000ms 与 inspect 10000ms 预算
+- **语义边界**（写进各条 note，没有隐藏）：图片归一化只重编码 PNG/JPEG（WebP 无标准库解码器 → 显式透传并在结果里标 `Note`）；TLS 只做服务端证书；cordis 预算加在「宿主等结果」那一侧（ctx），不是 JS VM 内部的指令级超时。
+- **测试改动的两处**（不是放宽断言，是跟上 write-behind 的时序）：`TestProjectionCacheChangeNotification` 与 `TestProjectionCacheColdFoldResumes` 在断言前显式 `Flush()`；断言本身（恰好一条 domain 通知 / 落盘切点是 seq 5）不变。
+- **两道闸**（对 `docs/parameter-register.json`）：`validate_register.py --json docs/parameter-register.json` → `OK=306 MISMATCH=0`，EXIT=0；`audit_refs.py --cur docs/parameter-register.json` → 可疑 0，EXIT=0。
+
+## 16. 本轮更新（GO.7 / T12：jobs 两条容量参数落地）
+
+> 证据：`tmp/GO7-RELEASE/gaps-jobs/RESULT.md`（两条先红后绿 + 运行中不被裁用例 + 两道闸原文）。
+
+- **2 条 `DEFERRED` → `COVERED-EQUIV`**（T6 时代因写作用域外而保留，本轮已获 `modules/exec/bash` 写权限并真实现）：
+  `jobs.maxConcurrentJobsPerOwner`（默认 10，`register` 配额闸）、`jobs.settledRetainBytes`（官方默认 16384，结算点裁剪；**默认不启用**以保持 W69 的「结算后 1MiB」契约，设环境变量即生效）。
+- **默认行为边界**：运行中窗口保持 1MiB 不变（`jobs.retainBytes` 单独一条）；已结算那一档**默认不启用**（不设置时零影响，保持 W69 `TestServeJobsOutIntegrationRealW69RetentionWindow` 的「结算后仍按 1MiB 保留」契约），设 `DSHD_SETTLED_RETAIN_BYTES=16384` 即按官方语义裁剪。既有用例一条未改。
+- **不破坏运行中的 job**：裁剪只发生在结算点（哨兵命中 / EOF / close），并有 `TestSettledRetainBytesTrimsOnlySettled` 的「运行中 64KiB 不裁 → finish 后裁到 16384」用例把这条钉住。
+- **两道闸**：`validate_register.py --json docs/parameter-register.json` → `OK=306 MISMATCH=0`，EXIT=0；`audit_refs.py --cur docs/parameter-register.json` → 可疑 0，EXIT=0。
+
+## 19. 本轮更新（GO.7 / T10：agent-loop 面 5 条真缺失收口）
+
+> 证据：`tmp/GO7-RELEASE/gaps-agentloop/RESULT.md`（5 条逐条先红后绿 + 并发闸门计时/计数 + 两道闸原文）；
+> 改判脚本 `tmp/GO7-RELEASE/gaps-agentloop/patch_register.py`（只动这 5 条，改完 assert 其余条目逐字节未变）。
+
+- **5 条 `UNREAD-GAP` → `COVERED-EQUIV`**（真实现，带新 `hostEquivalent` file:line 与差异说明）：
+  - `agentLoop.agents[].id` → 具名子代理：`subagent` 工具新增可选 `id`，宿主按官方
+    `${id}-session-${randomUUID()}`（`dsh-agent-loop/lib/index.js:1351`）派生 `<id>-session-<uuid4>`，
+    并把 `(父会话, agent id) → 子会话 id` 落进 `<home>/state/subagent-agents.json`，
+    跨轮（另一个 `dshd run` 子进程）按同一个名字指回同一个子代理。`description` 永不参与派生
+    （`TestDescriptionNeverBecomesAgentID`）。`internal/agent/child_session.go:113` + `cmd/dshd/subagent.go:89/:186/:199`。
+  - `retry.pluginConfig` → 每 provider 一份 `retryPolicy`：模型目录条目上的官方形状
+    （`mode` / `maxRetries` / `retryableCodes` / `backoff{initialDelayMs,maxDelayMs,jitterRatio}`，
+    默认值逐个与官方相同），经 `DSHD_LLM_RETRY_POLICY` 交给 `dshd run` 子进程装到那一条 Client；
+    `retryableCodes` 真参与判定，`mode: always` 无次数上限。`internal/llm/retry_policy.go:148` + `cmd/dshd/llm_retry_wiring.go:23`。
+  - `subagent.maxActiveSubagents`（agent-loop）→ 真并发闸门：`subRunner.RunSub` 入口的信号量
+    （默认 8，`DSHD_SUBAGENT_MAX_ACTIVE_SUBAGENTS` 覆盖），槽满即等、失败还槽；
+    6 并发 + 上限 2 时实测在飞峰值 = 2。`cmd/dshd/subagent_gate.go:78` + `cmd/dshd/subagent.go:67`。
+  - `subagent.maxActiveSubagents`（live-profile-desktop）→ 与上一条**同源**：desktop profile 的 20 走同一处
+    env 解析（`cmd/dshd/subagent_gate.go:100`），不出现两套真值。
+  - `llmPiAi.providers.magpie.streamIdleTimeoutMs` → per-provider 流空闲超时（与 §14 的 `llm.piAi.streamIdleTimeoutMs`
+    是同一条实现的两个域条目）：按模型 id 前缀（`magpie/…`）查表，desktop profile 的 600s 由
+    `DSHD_LLM_STREAM_IDLE_TIMEOUT_PROVIDERS_MS={"magpie":600000}` 表达；基准默认仍是官方 300000。
+    `internal/llm/stream_idle.go:179` + `internal/llm/client.go:119`。
+- **诚实边界（写进 reason，不虚报）**：① 官方 `agents[]` 是启动配置里一次性铸好并常驻，宿主是按需委派——
+  派生规则逐字符相同、生命周期不同；② 并发池是**进程级**的（serve 每轮是新子进程），多会话各开子进程时
+  各有各的额度，全机共享需要跨进程租约；③ 宿主能**产生**的重试 code 只有 `RATE_LIMIT` / `SERVER` / `TRANSPORT`
+  （没有请求级超时 → 不产生 `TIMEOUT`；空回答由上层 empty-response 策略处理 → 不产生 `EMPTY_RESPONSE`）。
+- **不设时零影响**：5 条全部是"不配就与改动前逐字节一致"——匿名委派、无 `retryPolicy`、无闸门、
+  无 per-provider 表时行为都不变；`subagent_test.go` 的 `requestGolden` 只因新增 `"AgentID":""` 零值而显式更新
+  （**契约变更，不是为变绿放宽**）。
+- **两道闸**：`validate_register.py --json docs/parameter-register.json` → `OK=306 MISMATCH=0`，EXIT=0；
+  `audit_refs.py --cur docs/parameter-register.json` → 可疑 **0**，EXIT=0。
+
+## 18. 本轮更新（GO.7 / T9：plugin / account / analytics 9 条真缺失收口）
+
+> 任务 `t9`。输入是 `tmp/GO7-RELEASE/gaps-eco/RESULT.md` §4 的 26 条真缺失里的**第 14–22 条**（plugin 3 / account 3 / analytics 3）。
+> 收口后全仓 `UNREAD-GAP` **归零**（9 → 0），`COVERED-EQUIV` 205 → 214。证据目录 `tmp/GO7-RELEASE/gaps-plugins/`。
+
+**9 条逐条（官方默认值 → 宿主落点）**
+
+| # | 官方 key | 官方默认 | 宿主实现（file:line） | 先红后绿 |
+|---:|---|---|---|---|
+| 14 | `pluginManager.versionLookupConcurrency` | `4` | `pluginmgr.VersionLookupConcurrency`（`internal/pluginmgr/official_config.go:54`）+ `MapConcurrent`（`:242`）+ `adapter.enrichVersions`（`internal/pluginmgr/official/adapter.go:209`） | 编译红 → 绿（峰值 4/1/N 三档） |
+| 15 | `pluginManager.fallbackRegistries` | `["https://registry.npmmirror.com/"]` | `FallbackRegistries`（`internal/pluginmgr/official_config.go:99`）+ `RegistryPlan`（`:147`）+ `adapter.listVersions`（`internal/pluginmgr/official/adapter.go:131`） | 编译红 → 绿（主源 404 → 回退源；私有源 0 外溢） |
+| 16 | `pluginManager.toolsMounted` | `false`（官方 `tool-plugin-manager` 行 disabled） | `Manager.SetToolsMounted/ToolsMounted`（`internal/pluginmgr/state.go:253/227`）+ `Loader.pluginTools`（`internal/pluginmgr/loader.go:429`） | 编译红 → 绿（关掉后表空、装载集合不变） |
+| 17 | `account.logoutMaxRetries` | `5` | `Service.revokeOfficialGrant`（`internal/account/account.go:736`）+ `SignOut`（`:703`） | 编译红 → 绿（2 失败 + 1 成功 = 3 次） |
+| 18 | `account.logoutRetryDelayMs` | `1000` | `resolveLogoutPolicy`（`internal/account/account.go:319`）+ 退避展开（`:736`） | 同上一行（第二次间隔 ≈ 2× 第一次） |
+| 19 | `account.attemptTimeoutMs` | `600000` | `attemptContext/attemptDeadlineMs`（`internal/account/providers.go:187/195`）+ 取小值（`:238`）+ `resolveAttemptTimeout`（`internal/account/account.go:353`） | 编译红 → 绿（expires_in=3600 被截到 150ms 且推进为 expired） |
+| 20 | `analytics.environmentQueryTimeoutMillis` | `5000` | `EnvironmentQueryConfig`（`internal/analytics/environment.go:74`）+ `collectEnvironment`（`:144`）+ `Service.environmentSnapshot`（`internal/analytics/service.go:135`） | 编译红 → 绿（固定脚本逐字还原；超时只影响依赖字段） |
+| 21 | `analytics.environmentQueryMaxOutputBytes` | `16384` | 同上（有界 writer + `output-limit` 降级） | 同上（超限用例 reason=output-limit） |
+| 22 | `telemetry.anonymousUserId` | `$DSH_HOME/.anonymous-user-id`（随机 UUID） | `ensureAnonymousUserID`（`internal/analytics/anonymous.go:44`）+ `Service.AnonymousUserID`（`internal/analytics/service.go:123`）+ `Record.AnonymousUserID`（`internal/analytics/redact.go:38`） | 编译红 → 绿（UUIDv4 / 复用 / 删文件重置 / 坏文件重置） |
+
+**口径与边界（不虚报）**
+
+- **默认值按官方**：4 / `["https://registry.npmmirror.com/"]` / 5 / 1000ms / 600000ms / 5000ms / 16384B / UUIDv4；环境变量一律 `DSHD_*` 前缀，options 显式值优先。
+- **不设时零影响**：`toolsMounted` 三态（未设 = 现在行为＝挂载）；`attemptTimeoutMs` 只在不设时等于官方 600s 且不缩短 `auth_init.expires_in`；analytics 两条默认值与官方相同、且采集**只发生在这条事件真的要入库时**（禁用/采样丢弃时连子进程都不起）。
+- **`telemetry.anonymousUserId` 零出网**：生成只用 `crypto/rand` + 本地文件；`TestReportCarriesEnvironmentAndAnonymousIDWithoutNewOutbound` 用 httptest 桩断言 collector 命中 **0**、`OutboundRequests()==0`（默认 mode=local）。
+- **两处有意差异**（都写进 note）：① `memory_total_bytes` / `cpu_model` 不采集（设备指纹级），如实 `missing_fields=unavailable`；② 非 Windows 平台不起子进程（stable 只支持 Windows），字段 `unsupported`。
+- **一处安全相关的强化**：登出撤销从"官方后台 fire-and-forget"改成"同步有界 + 失败写进 `State.Diagnostic`"，让"登出看着成功、服务端会话还在"可见（默认最多 6 次尝试 / 累计约 31s，可被 ctx 取消）。
+
+**两道闸**：`validate_register.py --json docs/parameter-register.json` → `OK=306 MISMATCH=0`，EXIT=0；
+`audit_refs.py --cur docs/parameter-register.json` → 可疑 **0**，EXIT=0。
+
+## 17. 本轮更新（GO.7 / T11：团队 / 提示 / 工作目录 4 条真缺失）
+
+> 证据：`tmp/GO7-RELEASE/gaps-team/RESULT.md`（逐条官方依据 + 先红后绿原文 + 两道闸原文）。
+> 写入器：`tmp/GO7-RELEASE/gaps-team/apply_team_gaps.py`（外科式，只改这 4 条 + `meta.summary` 的派生计数；行号证据**应用时现取**，不手抄）。
+
+- **4 条全部真实现**（`UNREAD-GAP → COVERED-EQUIV`，先红后绿）：
+  - `agentTeam.maxMembers`（默认 16）：闸门加在**唯一的成员登记入口**（`spawn_teammate` 的 `agents.json` 名册，
+    `modules/tool/team/spawn.go:53`/`:62`），到上限拒绝且**不写盘**；`DSHD_TEAM_MAX_MEMBERS` 可覆盖，非法值装配期 fail-loud。
+  - `agentTeam.maxTasks`（默认 256）：`team_task_create` 在 `load → 判上限 → 才 append`，第 257 条被拒且板上仍 256 条
+    （`modules/tool/teamtask/teamtask.go:100`/`:111`，拒绝点 `:483`）；`DSHD_TEAM_MAX_TASKS` 可覆盖。
+  - `systemPrompt.toolOrder`：`internal/prompt/tool_order.go:39` 解析 + `:72` 重排（`<unlisted-tools>` 处插入未列出的工具、
+    按名字 code-unit 排序），入口 `cmd/dshd/acp.go:1262` 从 `DSHD_SYSTEM_PROMPT_TOOL_ORDER` 读；**未配置 = 装配顺序，提示词逐字节不变**；
+    重复名 / 缺 rest 标记 / 未注册工具一律**启动失败**（不静默退回）。
+  - `workingDirectory.defaultDirectory`：`cmd/dshd/workdir.go:41` 解析 + `:56` run 入口；接线 serve（`serve.go:445`，会话 `header.cwd`）
+    与 acp（`acp.go:1033` 提示工作区 / `:1723` 客户端未带 `cwd` 时的兜底）；**run 入口同时把同一个值当作工具的根**
+    （`main.go` 的 `loadModsIn`/`loadModsWithPluginsIn`，否则提示说 Workspace: A、read/edit 在 B）；`DSHD_DEFAULT_WORKDIR` 必须是绝对路径，否则 fail-loud。
+- **默认行为逐字节不变**：未配置时 3 条新配置面分别落到「装配顺序」「进程 cwd」「官方默认 16/256」，都有测试钉住
+  （`TestOrderToolsNilKeepsAssemblyOrder` / `TestToolOrderUnsetKeepsPromptBytes` / `TestDefaultWorkDirUnsetKeepsProcessCwd` / `TestTaskBoardDefaultMaxTasksIs256` / `TestTeamMemberLimitDefaultIs16`）。
+- **「第 257 条被拒」用例**：`modules/tool/teamtask/max_tasks_test.go` `TestTaskBoardRejects257thTask`（建满 256 → 第 257 条 error + Hint 点名 256 →
+  回读仍是 256 条 → 删一条后能再建）。
+- **写作用域外的一处（已说明）**：`agentTeam.maxMembers` 的实现在 `modules/tool/team/`（名册本就在 `spawn_teammate` 的 `agents.json`），
+  该目录本树无其它写者；另做平行名册属假实现，故按「名册在哪、闸就加在哪」落。
+- **两道闸**：`validate_register.py --json docs/parameter-register.json` → `OK=306 MISMATCH=0`，EXIT=0；
+  `audit_refs.py --cur docs/parameter-register.json` → 改过 320 处、可疑 **0**，EXIT=0。
+- **计数**：本成员 4 条 `UNREAD-GAP → COVERED-EQUIV`（全仓 `UNREAD-GAP` 18 → 14；随后 T8/T9/T10 落地使全桶归零）。

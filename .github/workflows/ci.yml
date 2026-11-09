@@ -31,6 +31,36 @@ jobs:
         shell: bash
         run: go install honnef.co/go/tools/cmd/staticcheck@2026.2.2
 
+      # C 工具链：`go test -race` 需要 cgo，而 **Windows 上 CGO_ENABLED 默认是 0**。
+      #
+      # 为什么必须显式探测：默认值下 `go test -race` 只回一句 `-race requires cgo`，
+      # 早期版本的门禁会把它降级成 "SKIP + 普通 go test"——输出里长得像通过，
+      # 实际上这条门禁**一次都没跑**。GO.7/T3 就是在这个状态下漏过了 4 处真实 DATA RACE
+      # （internal/account 的订阅者拿到活结构指针，是真 bug）。
+      # 现在 check.sh 把"`-race` 跑不起来"判成 **FAIL**（见该脚本的决策注释），
+      # 所以这里缺工具链要**当步就红**，而不是等门禁报一句看不懂的 -race 失败。
+      - name: 探测 C 工具链（-race 需要 cgo）
+        if: steps.gate.outputs.go == '1'
+        shell: bash
+        run: |
+          if command -v gcc >/dev/null 2>&1; then
+            echo "PATH 里已有 gcc：$(command -v gcc)"; gcc --version | head -1; exit 0
+          fi
+          for d in /c/mingw64/bin /c/msys64/mingw64/bin "/c/Program Files/mingw64/bin" /c/Strawberry/c/bin; do
+            if [ -x "$d/gcc.exe" ]; then
+              echo "$d" >> "$GITHUB_PATH"
+              echo "找到 gcc：$d"; "$d/gcc.exe" --version | head -1
+              exit 0
+            fi
+          done
+          # 不在这里 exit 1：真正的判定归 check.sh（单一真源），它会把"`-race` 跑不起来"
+          # 判成 FAIL 并打印完整门禁清单。这里只负责把"接下来为什么会红"说清楚。
+          echo "::warning::runner 上找不到 gcc：-race 会跑不起来，接下来的 check.sh 会**因此判 FAIL**（fail-closed，不再降级成 SKIP）。装 MinGW-w64 见 docs/race.md。"
+
       - name: 门禁（build / vet / test -race / R1 / A3 / 文档 / 卫生）
         shell: bash
+        # 显式打开 cgo：不设它，`go test -race` 在 Windows 上会被 Go 直接拒掉，
+        # 而 check.sh 现在把这种情况判 FAIL——设在这里比让每个人记得导环境变量可靠。
+        env:
+          CGO_ENABLED: "1"
         run: ./scripts/check.sh

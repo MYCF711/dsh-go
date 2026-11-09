@@ -37,13 +37,28 @@ else
   unformatted="$(gofmt -l cmd internal modules codecs 2>/dev/null)"
   [ -z "$unformatted" ] && pass "gofmt" || bad "gofmt 未格式化: $(echo "$unformatted" | tr '\n' ' ')"
 
-  # -race 需要 cgo：不可用时降级为普通测试，并明说未验证什么。
+  # -race 需要 cgo。**没有 cgo 不是"跳过"，是这条门禁根本没跑。**
+  #
+  # 决策（2026-11-09，Lead 拍板；触发者 GO.7/T3）：-race 不可用时判 **FAIL**，不再降级成
+  # "SKIP + 普通 go test"。理由：Windows 上 `CGO_ENABLED` 默认是 0，`go test -race` 只回
+  # 一句 `-race requires cgo`，而"降级后跑的普通 go test"在输出里长得像通过——本机事实上
+  # 就这么漏掉了 4 处真实 DATA RACE（其中 internal/account 的 `stateLocked()` 把活结构指针
+  # 交给订阅者，是真 bug；另 3 处是夹具与后台 sweepLoop 抢配置字段）。
+  # 跑法只有一种：按 docs/race.md 装好 MinGW-w64，并显式 `CGO_ENABLED=1`。
+  # CI 侧对应改动见 .github/workflows/ci.yml 的 `env: CGO_ENABLED: "1"`。
   race_out="$(go test ./... -race 2>&1)"; race_rc=$?
   if [ $race_rc -eq 0 ]; then
     pass "go test -race"
   elif echo "$race_out" | grep -qiE 'requires cgo|C compiler|gcc.{0,12}not found|exec: "gcc"'; then
-    skip "-race 不可用（$(echo "$race_out" | head -1)）"
-    go test ./... && pass "go test（未覆盖竞态）" || bad "go test"
+    printf '%s\n' "$race_out" | tail -5
+    bad "-race 没跑起来（$(echo "$race_out" | head -1)）——SKIP 不算通过：装 C 工具链并设 CGO_ENABLED=1（见 docs/race.md）"
+    # 兜底再跑一次不带 -race 的：结果不改变判定（上面已经 FAIL），只是让日志里留下
+    # "普通用例过没过"这条信息，别让读者以为整个测试面都没跑。
+    if go test ./... >/dev/null 2>&1; then
+      printf '  （兜底：普通 go test 通过；竞态仍未被覆盖）\n'
+    else
+      bad "go test（不覆盖竞态的兜底跑）"
+    fi
   else
     printf '%s\n' "$race_out" | tail -25
     bad "go test -race"
@@ -209,24 +224,53 @@ else
     bad "找不到 scripts/race-guard.py —— -race 跑不了时这是唯一的并发检查"
   fi
 
-  # CI 七条第 7 条：二进制体积 ≤ 25 MB（PLAN.md §15）
+  # CI 七条第 7 条：二进制体积 ≤ 25 MB（PLAN.md §15）。
+  #
+  # **口径决策（2026-11-09，Lead 拍板；触发者 GO.7/T3）——量"发布形状"。**
+  #   · PLAN.md:22 与 PLAN.md:628 的规格原文是「≤ 25 MiB（25×1024×1024 字节，-s -w）」；
+  #   · scripts/build.sh:43 真正发出去的那个产物就是
+  #     go build -trimpath -ldflags "-s -w -X main.version=… …"；
+  #   · 这条门禁以前量的是**从不发布的形状**（不带任何 ldflags）。13 MB 时代它相当于
+  #     "更严的下界"，产品长到 28 MB 之后它就只是**假红**——发布件一直是 19.9 MB，达标；
+  #   · 不走"砍能力去瘦身"：用户 2026-11-08 的能力下限裁定写明不许削减能力消错，
+  #     而当前体积大户（wazero / office-pdf / speech）都是真实能力。
+  #   · 两个数字与依据：tmp/GO7-RELEASE/ci/RESULT.md §5。
+  #
+  # 同时**另量一次未裁剪体积**并打 WARN：同一份代码的另一种形状，增长曲线靠它才看得见
+  # （发布件逼近上限时，未裁剪数会先一步说话）。
+  # **不许把这条 WARN 删掉**——删了就等于"体积悄悄涨到一个没人注意的数"，
+  # 那正是这条门禁当初存在的理由。
   #
   # 临时文件名带 PID：共享工作树里可能同时有两个 check.sh 在跑（Lead 与派出去的
   # 子代理各自收尾），固定路径会让两个进程同时写同一个 .exe —— Windows 上后一个
   # 直接 Access denied，然后这条检查报"构建不出二进制"。实测踩过一次：
   # 手动跑同一条命令成功，门禁里却红，红的原因是别人的进程在写同一个文件。
   size_tmp="/tmp/dshd-size-check.$$.exe"
-  if bin_bytes=$(go build -o "$size_tmp" ./cmd/dshd 2>/dev/null && stat -c %s "$size_tmp" 2>/dev/null || wc -c < "$size_tmp" 2>/dev/null); then
-    if [ -n "$bin_bytes" ] && [ "$bin_bytes" -le $((25*1024*1024)) ]; then
-      pass "二进制体积 $((bin_bytes/1024/1024)) MB（上限 25 MB）"
+  plain_tmp="/tmp/dshd-size-plain.$$.exe"
+  size_limit=$((25*1024*1024))
+  # 发布形状：与 scripts/build.sh 同一组旗标（版本号注入串这里不需要，只量体积）。
+  if bin_bytes=$(go build -trimpath -ldflags "-s -w" -o "$size_tmp" ./cmd/dshd 2>/dev/null && stat -c %s "$size_tmp" 2>/dev/null || wc -c < "$size_tmp" 2>/dev/null); then
+    if [ -n "$bin_bytes" ] && [ "$bin_bytes" -le "$size_limit" ]; then
+      pass "二进制体积（发布形状 -trimpath -ldflags 「-s -w」）$((bin_bytes/1024/1024)) MB（上限 25 MB）"
     elif [ -n "$bin_bytes" ]; then
-      bad "二进制体积 $((bin_bytes/1024/1024)) MB，超过 PLAN §15 的 25 MB"
+      bad "二进制体积（发布形状）$((bin_bytes/1024/1024)) MB，超过 PLAN §15 的 25 MB"
     else
-      bad "量不出二进制体积"
+      bad "量不出二进制体积（发布形状）"
     fi
     rm -f "$size_tmp"
   else
-    bad "构建不出二进制，量不了体积"
+    bad "构建不出发布形状的二进制，量不了体积"
+  fi
+  # 未裁剪形状：只做可见性，不参与判定（口径见上面那段决策）。
+  if plain_bytes=$(go build -o "$plain_tmp" ./cmd/dshd 2>/dev/null && stat -c %s "$plain_tmp" 2>/dev/null || wc -c < "$plain_tmp" 2>/dev/null); then
+    if [ -n "$plain_bytes" ]; then
+      warn "二进制体积（未裁剪，仅作可见性不判定）发布形状 $(( ${bin_bytes:-0} /1024/1024 )) MB / 未裁剪 $((plain_bytes/1024/1024)) MB（上限 25 MB 按发布形状算）"
+    else
+      warn "量不出未裁剪体积（发布形状已单独判过）"
+    fi
+    rm -f "$plain_tmp"
+  else
+    warn "构建不出未裁剪二进制，量不了这个可见性数字"
   fi
 
   # PLAN §15 第 4 条：staticcheck。只跑 SA*（真 bug）与 S1*（可疑写法），

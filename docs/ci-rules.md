@@ -5,10 +5,10 @@
 | 1 | kernel 不依赖业务包 | `check.sh` 的 R1 检查 | ✅ |
 | 2 | 隔离副本移出 `modules/` 仍能 `go build ./internal/...` | `check.sh` 的 A3；共享树禁止原地移动 | ✅ |
 | 3 | 每个 `Exec` 的 error 有 Hint | `TestEveryToolErrorHasHint`（扫 32 文件 / 297 处） | ✅ |
-| 4 | `go vet` + `staticcheck` + `-race` | vet ✅ / **staticcheck 已装并接入门禁** / `-race` 缺 C 编译器 | ⚠️ 2/3 |
+| 4 | `go vet` + `staticcheck` + `-race` | vet ✅ / **staticcheck 已装并接入门禁** / **`-race` 已真跑**（GO.7/T3 强制开 cgo，抓到 4 处真实竞态并修掉）；**跑不起来判 FAIL，SKIP 不算通过** | ✅ 3/3 |
 | 5 | 工具 schema 快照 | `TestToolTableSnapshot` + `-update` | ✅ |
 | 6 | 工具表 ≤ 6000 token | **本轮新加** `TestToolTableTokenBudget`（本仓估算器）+ 体积守卫 32 KB | ⚠️ 估算器，非真分词 |
-| 7 | 二进制 ≤ 25 MiB（25×1024×1024 字节） | **本轮新加**：`check.sh` 直接量产物 | ✅ 13 MB（历史显示值） |
+| 7 | 二进制 ≤ 25 MiB（25×1024×1024 字节） | `check.sh` 量**发布形状**（`-trimpath -ldflags "-s -w"`，与 `scripts/build.sh:43` 同形状）；未裁剪体积另打 **WARN** 保留可见性 | ✅ 18 MB（发布形状，2026-11-09 实测 19,837,952 B） |
 
 ## 这轮补的
 
@@ -18,10 +18,38 @@
 顺带说明为什么是 13 MB 而不是文档里的 8.6 MB：那条数是在 `-s -w` 下的，
 门禁量的是**不定裁剪**的产物——它更大，所以是更严的下界。
 
+## 口径变更（2026-11-09，GO.7/T3；Lead 拍板）
+
+**第 7 条改成量"发布形状"，未裁剪体积降为 WARN。**
+
+- **原来**：`check.sh` 量的是 `go build -o x.exe ./cmd/dshd`（**不带任何 ldflags**）。
+  13 MB 时代它相当于"更严的下界"，一直绿；产品长到 28 MB 之后它变成**假红**——
+  而**发布件**（`scripts/build.sh:43` 的 `-trimpath -ldflags "-s -w -X …"`）一直是 **19.9 MB，达标**。
+- **现在**：判定按发布形状（`-trimpath -ldflags "-s -w"`）对 25 MiB；
+  **同时**另量一次未裁剪体积并打 `WARN`（附两个数字），保持增长可见。
+- **为什么不选"砍 3.3 MB 瘦身"**：用户 2026-11-08 的能力下限裁定写明"不许用削减能力消错"，
+  而当前体积大户（wazero / office-pdf / speech）都是真实能力。
+- **不许把那条 WARN 删掉**：删了就等于"体积悄悄涨到一个没人注意的数"，
+  那正是这条门禁当初存在的理由（`check.sh` 里写了同一句话）。
+- 依据与两个数字：`tmp/GO7-RELEASE/ci/RESULT.md` §5 / §10。
+
+## `-race`：从"没跑"改成"跑不起来就红"（2026-11-09，GO.7/T3）
+
+- **病**：Windows 上 `CGO_ENABLED` 默认是 **0**，`go test -race` 只回一句 `-race requires cgo`；
+  旧 `check.sh` 把这种情况降级成 `SKIP -race 不可用` + 普通 `go test`，输出里**长得像通过**。
+  GO.7 期间这条门禁事实上一次没跑——强制开 cgo 之后立刻抓到 **4 处真实 DATA RACE**
+  （`internal/account` 的订阅者拿到活结构指针，是真 bug）。
+- **改法**：`check.sh` 里"`-race` 跑不起来" → **FAIL**（不再 SKIP/PASS）；
+  `.github/workflows/ci.yml` 的那一步显式 `env: CGO_ENABLED: "1"`，
+  并新增一步探测 C 工具链（找不到 gcc 时打 `::warning::` 说明"接下来的 check.sh 会因此判 FAIL"）。
+- **跑法只有一种**：`scripts/race.sh`（它自己把 MinGW 加进 PATH 并设 `CGO_ENABLED=1`），
+  或手工 `CGO_ENABLED=1` + `DSH_MINGW`。见 `docs/race.md`。
+
+
 ## 当前未闭环摘要（2026-11-03 复核）
 
 - staticcheck 已安装并接入门禁；本段后面“没装”的说法是历史记录。
-- `-race` 未实际成功；race-guard 只是结构补偿，不是动态竞态证明。
+- ~~`-race` 未实际成功~~（2026-11-09 起已实际跑通：GO.7/T3 强制开 cgo，抓到 4 处真实竞态并修掉，终态 `go test -race ./...` PASS）；race-guard 仍是结构补偿，与 `-race` 是补充关系不是替代。
 - 工具表每次跑的是估算器；当前版本、当前工具集的同模型真实分词仍需独立测量，旧 42 工具实测不能证明后续 47/49 工具。
 - A3 判据仍成立，但当前 `check.sh` 原地移动 modules，共享工作树不得运行；只在隔离副本验证。
 - 因而不写“七条全满足”或固定几条过关，逐次以实际 PASS/FAIL/SKIP/WARN 输出为准。

@@ -1,13 +1,13 @@
 {
   "goroutines": [
     {
-      "site": "internal/acp/server.go:156",
+      "site": "internal/acp/server.go:176",
       "what": "等 WG 收尾的观察者",
       "sync": "读过：只等 s.wg，不碰共享可写状态；ch 只 close 一次",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/acp/server.go:421",
+      "site": "internal/acp/server.go:441",
       "what": "等 WG 收尾的观察者",
       "sync": "读过：只等 s.wg，不碰共享可写状态；ch 只 close 一次",
       "verified_at": "2026-11-03"
@@ -25,25 +25,25 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:181",
+      "site": "internal/transport/server.go:295",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:264",
+      "site": "internal/transport/server.go:382",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/serve_tools.go:121",
+      "site": "cmd/dshd/serve_tools.go:234",
       "what": "每轮一个 follow",
       "sync": "读过：follow 只读日志，向 hub 推送；prog 仅在 fw.Wait() 之后读，无并发窗口",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/transport_prompt.go:62",
+      "site": "cmd/dshd/transport_prompt.go:223",
       "what": "每轮一个 turn",
       "sync": "读过：promptService 每个入口先 p.mu.Lock（50/72/86/95）；busy 唯一结束点在 defer",
       "verified_at": "2026-11-03"
@@ -67,67 +67,67 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "modules/exec/bash/session.go:98",
+      "site": "modules/exec/bash/session.go:124",
       "what": "后台任务等待",
       "sync": "读过：job 表每次访问先 s.mu.Lock（100/109/122）",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "modules/exec/bash/tools.go:137",
+      "site": "modules/exec/bash/tools.go:195",
       "what": "后台任务启动",
       "sync": "同 session.go，走同一把 s.mu",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/serve_approval.go:309",
+      "site": "cmd/dshd/serve_approval.go:344",
       "what": "等这一次审批的结果（客户端回答 或 超时）",
       "sync": "ch 由 pending[id] 取出、只被结算一次；写子进程走 reply 内的 writeMu 串行；b.mu 只护 map，不在锁内调 emit",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/serve_tools.go:152",
+      "site": "cmd/dshd/serve_tools.go:282",
       "what": "follow 子进程日志并把事件推进 journal",
       "sync": "fw 计数收尾；ctx 取消即退出；写 journal 经 hub 自己的锁",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshtui/app.go:156",
+      "site": "cmd/dshtui/app.go:328",
       "what": "读键盘（stdin → rune/特殊键两个 channel）",
       "sync": "只往带缓冲的 channel 发送；进程退出时 stdin 关闭即返回；不碰 app 的可变状态",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshtui/client.go:224",
+      "site": "cmd/dshtui/client.go:315",
       "what": "WS 收帧 + 断线重连循环",
       "sync": "帧只经 channel 交给渲染循环（channel 满时阻塞，不丢）；lastSeq 是该 goroutine 的局部变量；stop 用 sync.Once 关 done",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshtui/app.go:1087",
+      "site": "cmd/dshtui/app.go:1099",
       "what": "从 stdin 泵字节（读一个发一个，关掉 channel 表示输入结束）",
       "sync": "只往带缓冲 channel 发；Read 出错或 EOF 就 close；不碰 app 的任何可变状态",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/approval_stdio.go:56",
+      "site": "cmd/dshd/approval_stdio.go:57",
       "what": "从 stdin 逐行分发（审批应答 / 后台任务输出请求），进程内只起一次（stdinOnce）",
       "sync": "只向带缓冲 channel 发送（approvalCh 容量 1、jobsOutCh 容量 4）；EOF 即退出；不碰会话状态",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:498",
+      "site": "cmd/dshd/main.go:722",
       "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
       "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/acp.go:601",
+      "site": "cmd/dshd/acp.go:1180",
       "what": "父进程看门狗收尾：watch.Done() 之后关服务",
       "sync": "读过：只做 close/取消，不写会话文件；与主流程之间靠 context 取消 + 单向 channel",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:822",
+      "site": "cmd/dshd/main.go:848",
       "what": "run 的看门狗协程：父进程没了就取消本轮 ctx",
       "sync": "读过：只调 cancel()，不碰会话/日志；runCtx 与主 goroutine 共享，取消是幂等的",
       "verified_at": "2026-11-04"
@@ -137,6 +137,360 @@
       "what": "父进程看门狗主循环：每 interval 探一次父进程是否还在",
       "sync": "读过：只读 probe（OpenProcess 句柄，Close 由 Stop 负责）与自身的 miss 计数；触发时只 close(done) 一次（sync.Once 语义由 doneClosed 布尔保护在同一 goroutine 内）",
       "verified_at": "2026-11-04"
+    },
+    {
+      "site": "internal/account/account.go:791",
+      "what": "Watch 的订阅清理观察者",
+      "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.subs, ch)+close(ch)；订阅表 s.subs 的每次读写都在 s.mu 下（Watch 入口 772-777、stateLocked 同锁），每条 ch 只有一个 watcher，close 只可能一次",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/account/account.go:823",
+      "what": "WatchExpiry 的订阅清理观察者",
+      "sync": "读过：同上，表是 s.expiry；持 s.mu 删订阅并 close(ch)。发布侧（基线/到期两条）在主 goroutine 里、带 default 兜底不阻塞",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/agent/parallel.go:318",
+      "what": "串行车道：等人审批的工具调用顺序执行",
+      "sync": "读过：只写 out[i]（每个下标只被这一条 goroutine 写）与读 calls[i]；wg 等它收尾。不碰共享可变状态",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/agent/parallel.go:339",
+      "what": "并行车道的固定 worker 池（limit 路）",
+      "sync": "读过：从 queue（无缓冲 channel）取下标 i，写 out[i]（下标唯一）、只读 calls；喂队列在调用方做（channel 本身即背压），wg 等全部 worker 退出",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/analytics/service.go:227",
+      "what": "策略变化的 watcher：250ms ticker 推 Enabled 变化",
+      "sync": "读过：watcher 表 s.watchers 全在 s.mu 下（登记在入口、退订在 ctx.Done/stop 分支，delete 前先判存在再 close，保证只 close 一次）",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/cordis/extern/client.go:141",
+      "what": "readLoop：读子进程 stdout 的协议帧",
+      "sync": "读过：c.mu 保护 pending 请求表与协议状态；帧经 channel 交给等待方，不直接写调用方的数据",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/cordis/extern/client.go:142",
+      "what": "stderr 排空（io.Copy）",
+      "sync": "读过：只写 c.stderr 指向的缓冲，不碰协议状态与 pending 表；随进程退出自然结束",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/cordis/extern/client.go:143",
+      "what": "等子进程退出（cmd.Wait）",
+      "sync": "读过：waitErr 写入受自己的锁保护，close(c.waitDone) 只由这一条 goroutine 做一次；等待方用 <-waitDone 同步",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/liveshare/relay/server.go:86",
+      "what": "expireLoop：周期性清理过期分享",
+      "sync": "读过：分享/会话表在 s.mu 下；s.wg.Add(1) 在调用方、loop 内不 Done，靠 Close 停止",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/liveshare/relay/server.go:128",
+      "what": "relay HTTP 服务：Serve 一个 listener",
+      "sync": "读过：s.httpSrv 只读；退出原因写 s.warn（warnMu 保护）；s.wg 在调用方 Add/Done",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/native/windows.go:445",
+      "what": "COM 调用的 STA 线程",
+      "sync": "读过：LockOSThread 独占线程；结果与错误只经 buffered(1) 的 done channel 回传，不共享可变状态",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/officepdf/provider.go:81",
+      "what": "worker：消费渲染任务",
+      "sync": "读过：任务经 channel 进来；p.wg 在构造/调用方 Add，worker 内 Done；渲染产物在任务自带的路径上",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/officialwire/mux.go:147",
+      "what": "writeLoop：mux 出站写序列化",
+      "sync": "读过：出站队列是 channel；streams 表的读写在 s.mu 下；这条 goroutine 独占写端",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/officialwire/mux.go:148",
+      "what": "heartbeatLoop：心跳 ticker",
+      "sync": "读过：只读 s 的配置常量与时间，产生的帧投进同一出站队列（不直写 conn）",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/officialwire/mux.go:149",
+      "what": "等对端 Disposed/done 就 shutdown",
+      "sync": "读过：只调 s.shutdown（幂等）+ 读 done/peer.Disposed 两个只读信号，不写共享表",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/officialwire/mux.go:308",
+      "what": "runStream：每个流一条 goroutine",
+      "sync": "读过：streamState 由这一条独占；streams 表的登记在调用方 s.mu 下完成，s.wg 等收尾；stream.Close 由 defer 做一次",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/officialwire/mux.go:558",
+      "what": "teardown 的收尾观察者：等所有流退出",
+      "sync": "读过：只等 s.wg 然后 close(finished) 一次；带 5s 兜底不永久挂死",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/pluginmgr/jobs.go:145",
+      "what": "后台安装作业",
+      "sync": "读过：job.control 只属于这次作业；结束经 m.finishJob 落账（m 自己的锁）",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/pluginmgr/jobs.go:158",
+      "what": "后台切版（update）作业",
+      "sync": "读过：同上，runUpdateJob → m.finishJob（m 自己的锁）",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/pluginmgr/official_config.go:257",
+      "what": "版本列表并发抓取 worker（limit 路）",
+      "sync": "读过：下标用 atomic next 取，写 out[index]（下标唯一）；wg 等全部退出后才读 out",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/session/list.go:172",
+      "what": "会话列表并发扫描 worker（concurrency 路）",
+      "sync": "读过：work(start, concurrency) 各自只写属于自己的切片区间；wg.Wait 之后才 sort/读",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/terminal/session.go:104",
+      "what": "waitLoop：等子进程真实退出码",
+      "sync": "读过：退出码/错误写 s.mu 下，随后 close(done) 一次；与 pump 分开正是为了不被管道 EOF 拖住",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/terminal/session.go:105",
+      "what": "pump：一直排空输出直到 EOF 或 Close",
+      "sync": "读过：输出缓冲的读写在 s.mu 下；Close 打断读，不碰退出码",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/timer/scope.go:130",
+      "what": "定时器到点执行回调",
+      "sync": "读过：item 自己的状态由这条 goroutine 独占，close(item.exited) 一次；s.wg 在入口 Add、run 内 defer Done；登记表在 s.mu 下",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/transport/handlers_speech_official.go:242",
+      "what": "speech 状态跟随流：把 API 回调转成帧",
+      "sync": "读过：st.ch 只由这条 goroutine 写（消费方读），close(st.done) 一次；ctx 取消即退",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/worktree/worktree.go:516",
+      "what": "异步创建快照",
+      "sync": "读过：s.create 自己拿锁，状态经 s 的登记/状态表发布；调用方不等它（所以必须自己保证锁纪律）",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/acp.go:1180",
+      "what": "父进程看门狗：watch.Done() 就取消本轮并关 stdin",
+      "sync": "读过：只调 cancel() 与 os.Stdin.Close()，两个都幂等；不写共享状态",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/approval_stdio.go:57",
+      "what": "stdin 分发器（进程内只起一次）",
+      "sync": "读过：stdinOnce.Do 保证唯一；扫描到的行按协议投给各 broker 的 channel（broker 自己加锁）",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/attachments_normalize.go:109",
+      "what": "附件归一化 worker 池（conc 路）",
+      "sync": "读过：写 out[idx]（下标唯一），首个错误与结果登记在 mu 下；喂队列在调用方（channel 即背压），wg 等全部退出",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/documents_lookup_timeout.go:55",
+      "what": "带超时的文档目录查找",
+      "sync": "读过：结果只经 buffered(1) 的 done channel 回传（超时后它仍能写完退出，不泄漏）；lookup 是纯读",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/main.go:855",
+      "what": "父进程看门狗：父没了就取消本轮 ctx",
+      "sync": "读过：只调 stopOnParentGone()（cancel 幂等），不碰会话/日志",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/main.go:848",
+      "what": "serveJobsOut：后台任务通道",
+      "sync": "读过：写 stdout 的 @@JOBS@@ 行，写侧有自己的一把锁；读的是 jobs 服务的快照",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/main.go:855",
+      "what": "serveSteerIPC：steer IPC 接收循环",
+      "sync": "读过：收到的请求投进 steerInbox（自己加锁的队列）；runCtx 取消即退",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/serve.go:264",
+      "what": "插件热重载循环",
+      "sync": "读过：hmrCtx 取消即退；pluginRT.HMR() 内部自己串行化，不直写共享表",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/serve_account_provider.go:98",
+      "what": "账号状态桥：in → out",
+      "sync": "读过：out 由这条 goroutine 写并 defer close(out)；in 是上游只读通道；ctx 取消退出",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/serve_loop.go:201",
+      "what": "把子进程 stderr 扫进 broker",
+      "sync": "读过：watchWG 在调用方 Add、这里 Done；broker.WatchSession 自己加锁，写的是它自己的缓冲",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/serve_loop.go:239",
+      "what": "follow：轮询本轮 sess 日志推进进度",
+      "sync": "读过：fw 在调用方 Add、这里 Done；done channel 停止；进度写 &prog（调用方在 cmd.Wait 后统一读）",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/serve_official_wire_events.go:204",
+      "what": "ctx 结束就 stop 订阅",
+      "sync": "读过：只调 stop()（幂等），订阅表在 s.mu 下；不写别的共享状态",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/serve_title_auto.go:748",
+      "what": "自动标题：后台跑一轮标题生成",
+      "sync": "读过：自己带 ctx+timeout；s.wg 在入口 Add、这里 Done；s 的状态读写受 s.mu 保护",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/terminal_pty.go:216",
+      "what": "sweepLoop：周期性回收闲置 PTY 终端",
+      "sync": "读过：终端表在 a 自己的锁下；Close 停止循环",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/transport_prompt.go:230",
+      "what": "now 立即启动一轮（startLocked 之后才 go）",
+      "sync": "读过：p.mu 里只做登记与取 liveTurn，解锁后才 go；p.execute 自己管这一轮的状态",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/transport_prompt.go:247",
+      "what": "followup 在空闲时立即启动",
+      "sync": "读过：同上——p.mu 下取 liveTurn，解锁后启动",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/transport_prompt.go:313",
+      "what": "now 的中断路径：撤旧 inbox 后启动",
+      "sync": "读过：同上，登记在 p.mu 内完成",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/transport_prompt.go:382",
+      "what": "drain：上一轮收工后启动 FIFO 下一项",
+      "sync": "读过：takeNextLocked 在 p.mu 内取项，解锁后才 go",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/transport_prompt.go:396",
+      "what": "abortNow 之后启动下一项",
+      "sync": "读过：同上，取项在 p.mu 内",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/transport_prompt.go:453",
+      "what": "retire 之后启动下一项",
+      "sync": "读过：同上，取项在 p.mu 内",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshd/transport_prompt.go:453",
+      "what": "取消结算后启动下一项",
+      "sync": "读过：同上，取项在 p.mu 内",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshtui/app.go:1694",
+      "what": "键盘解码器",
+      "sync": "读过：只往 keys/specials 两个 channel 写，主循环单消费者；退出即关闭",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "cmd/dshtui/app.go:1694",
+      "what": "从 stdin 逐字节读进 channel",
+      "sync": "读过：只写 ch，EOF/错误时 defer close(ch)；读的是 os.File",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "modules/exec/bash/pty.go:112",
+      "what": "等 PTY 会话结束，把 dead 标出来",
+      "sync": "读过：只写 t.mu 下的 t.dead；等待信号来自 ptySession.Done()",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "modules/exec/bash/session.go:125",
+      "what": "readLoop：排空子进程输出",
+      "sync": "读过：输出缓冲由 s 自己的锁保护；EOF/Close 退出",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "modules/exec/bash/session.go:125",
+      "what": "waitLoop：等子进程退出",
+      "sync": "读过：写 processRC 并 close(waitDone) 一次；读方用 <-waitDone 同步",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "modules/tool/websearch/websearch.go:236",
+      "what": "多查询并发搜索（每条一个）",
+      "sync": "读过：结果经带缓冲的 outcomes channel 回传（带 index），收藏方在调用者 goroutine 上按 index 落位；batchCtx 取消即退",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "modules/tools/mcp.go:399",
+      "what": "看住一个 MCP server 的 client（watch）",
+      "sync": "读过：m.wg 在入口 Add、这里 Done；server 的状态全在 server.mu 下",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "modules/tools/mcp.go:534",
+      "what": "MCP server 重连循环",
+      "sync": "读过：同上；reconnecting 标志在 server.mu 下置/复位",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "modules/tools/mcp_client.go:129",
+      "what": "等 MCP 子进程退出",
+      "sync": "读过：waitErr 在 c.waitMu 下写，close(c.processDone) 一次；等待方用 <-processDone 同步",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "modules/tools/mcp_client.go:136",
+      "what": "pump：读子进程 stdout 的协议帧",
+      "sync": "读过：读侧只有这一条 goroutine；投出去的帧走 channel/回调",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "modules/tools/pipeline.go:391",
+      "what": "单次工具执行（带 panic 兜底与超时）",
+      "sync": "读过：结果只经 buffered(1) 的 done channel 回传（超时后仍能写完退出，不泄漏）；工具本身按 SPI 契约无共享状态",
+      "verified_at": "2026-11-09"
+    },
+    {
+      "site": "modules/tools/repeat_reminder.go:139",
+      "what": "提醒链的回收（ctx 生命周期）",
+      "sync": "读过：g 自己的锁保护链表；ctx.Done 触发，回收前做身份比对（作用域可能已被新一轮同名链替换）",
+      "verified_at": "2026-11-09"
     }
   ]
 }
