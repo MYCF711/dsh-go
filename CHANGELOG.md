@@ -1,8 +1,39 @@
-## 0.2.2-go.1 / 0.2.2-beta.1（2026-11-05，未发布）—— **官方 0.2.2-rc.1 追踪与双渠道**
+## 0.2.2-go.1 / 0.2.2-beta.1（2026-11-08，**Windows-only 稳定版发布候选**）—— **官方 0.2.2-rc.1 追踪与双渠道**
 
 - 上游基线由 `0.2.1-rc.5` 升为 `0.2.2-rc.1`；前缀升级后序号重新从 1 开始，不沿用 go.31/go.32。
 - 主线稳定版为 `0.2.2-go.1`；独立 fork 测试版为 `0.2.2-beta.1`，测试版最终合规后合并主线。
 - 当前最高优先级是 GO 对 dsh-TUI 所需接口的真实兼容：models、placement、trace/export 与完整 TUI capability 矩阵，必须经过真实 dshd + 正式 backend + ConPTY 验收，不把未完成的 TUI 能力写成稳定功能。
+
+### 试玩能力三修（2026-11-09，用户实测暴露）
+
+真实试玩（TUI2GO + dsh-go 后端）暴露三处宿主能力缺陷，已修并真实链复验：
+
+- **每轮步数上限 8 → 2000**：`--max-steps` 的 8/12 是开发默认值（`docs/WORKER.md` 自己写着"派活时显式写，别用默认值"）。官方 40 个真实会话 3060 轮里 **1519 轮 max step ≥ 9**（p50=13 / p90=90 / p95=174 / p99=938 / max=1318），8 步会砍掉一半以上真实轮次。现由 `cmd/dshd/serve.go` 的 `defaultTurnMaxSteps=2000` 单点决定，run/serve/acp/schedule/子代理五处入口共用；死循环仍在 2000 步截断、文案不变。
+- **usage 补缓存计数**：官方 48838 条 assistant usage 里 48636 条带 `cacheReadTokens`；宿主以前只写 input/output/total，状态栏永远是 `缓存 0.0%`。新增 `internal/llm/usage_cache.go`（DeepSeek `prompt_cache_hit_tokens`、OpenAI/网关 `prompt_tokens_details.cached_tokens`、Anthropic `cache_read_input_tokens`；写侧 `cache_creation_input_tokens`/`cache_write_tokens`）与 `cmd/dshd/assistant_usage.go`（v4 usage 唯一投影）。口径按官方样本：`inputTokens = prompt_tokens − cacheRead − cacheWrite`（7930+21760=29690=prompt），provider 没给的键不写、不拿 0 冒充实测。
+- **contextWindow 走模型 catalog**：以前只认 `DSHD_CONTEXT_WINDOW`，没设就恒 0，界面按约定不画上下文占用。现在 env → catalog（`contextWindow`/`context_length`，网关对 `group/deepseek-v4.1-flash-1017` 报 `1000000`）→ 内置容量 → 0；内置表 128K 按网关实测改为 1M。会话模型按 `request/context` → 会话级覆盖 → 宿主默认 `--model` 解析，新会话第一屏即可画占用。
+- **验收**：`go build/vet` 0、`go test ./...` 81 包全绿；真实 TUI 15 步回合 `completed`（`用满` 计数 0）、`usageTotal.cacheReadTokens=112788`、帧内 `缓存 97.0%`、`ctx 0.6% (6.5k/1.0m)`。证据 `tmp/GO2-TEAM/HOST-CAPABILITY-FIX/`。
+- **一条被撤销的“缺陷”**：期间曾判定状态栏 `缓存`/`ctx` 冻结在会话第一条 usage。复查为**测量口径错误**——Ink 增量渲染只重发变化的单元格，字节流里 `缓存` 只出现一次不代表值没变；用最小 VT 重放器把同一份抓包还原成屏幕后，`缓存 97.0% → 97.1%`、`ctx 0.7% (6.9k)`→`(7.2k)→(7.6k)` 每步都在变。状态栏无缺陷，试验性补丁已回滚。教训：TUI 类断言先重放成屏幕再比取值集合，不数字符串出现次数。
+
+### GO.3 参数引用全面排查（2026-11-09）
+
+起因是用户一句「全面排查参数引用，不要再出现写死某个参数」。三路只读审计（官方基线 / Go 宿主 / TUI2GO 链路）交叉比对，产出 **`docs/parameter-register.md`（239 条 + 98 flag）** 与机器可读 `register.json`，每条带 `官方源 | 官方默认 | 读取点 | 使用点 | 我们的默认 | verdict` 与 file:line 证据。
+
+- **官方基线**：解析 `app.asar` 抽取 342 条参数 / 10 域，证据行号由脚本按锚点计算（`validate_official.py` problems=0）。关键发现：官方 **没有 turn budget**（`dsh-agent-loop/README.md:220` "No built-in turn budget"，全树 `maxSteps|stepLimit|maxTurns` 0 命中）；usage 的四桶齐全属**客户端投影**要求，wire 字段可选；`contextWindow` 主路径是**模型目录**，环境变量只是 sdk-minimal 的兜底。
+- **修掉 10 类缺陷**（都先红后绿）：serve→run 六参数透传（`--auto-compact/--max-chars/--workspace-bytes/--context-window/--max-output/--agents`，此前 serve 侧连旗标都没有）；压缩元数据 `Model:"run"` 写死；`acpRunner.keepRecent` 死字段；模型 id 别名不匹配（无前缀 id 走“未声明自定义模型”分支，每轮多带 `max_tokens=128000`）；`agent.Loop.maxSteps` 隐藏的 32 步兜底（现 0=不设上限，安全阀由调用方显式给）；`contextWindow` 优先级反了（env 排在 catalog 前）；ACP `--workspace-bytes` 8000 与 `defaultWorkspaceBytes` 65536 不同源；`doctor --base` 不读 `DSHD_LLM_BASE`；网关 URL 9 处重复；`--home` 两套默认（`./tmp/dshd-home` vs `~/.dshd`，统一为后者）。
+- **TUI2GO 侧**：launcher 模型 id 改全限定 `group/deepseek-v4.1-flash-1017`；调试日志改默认关（`DSH_GO_DEBUG` opt-in + 启动截断，此前一次会话 1.1 MiB 且含完整请求 body）；插件不再替宿主传 `--policy`（`DSH_GO_POLICY` 未设时一个都不传，宿主默认 `allow` 生效，launcher 清空该变量防父环境继承）。
+- **6 条防再犯守卫**（挂在 `go test ./...`）：AST 枚举所有 flag 默认表达式做单源断言、网关 URL 每包唯一字面量、禁止 cwd 相对 home、`hostRunOptions` 六字段必须真进 childArgs、模型别名只许一处实现、容量表与目录对同一别名判据一致。原则是**断言源码形状而不是常量值**。
+- **官方 342 条逐条判定**（不再是“一个大桶”）：COVERED 60 / COVERED-EQUIV 139 / N-A 30（带子类：protocol-shape 14、ui-only 7、telemetry-ui 4、plugin-market-ui 3、desktop-shell 2）/ **UNREAD-GAP 113**，`UNREAD=0`。每条都有具体 reason + evidence；`docs/parameter-register.json` 随仓提交（`tmp/` 是 gitignore 的，文档不指向它）。
+- **113 条缺口按族集中**：插件 registry/pnpm 客户端 11、OTel 导出面 14、图片通道 6、并发（并行工具/子代理/终端）4、团队配额 4、账号超时重试 5，其余单条——这是“官方有、我们没有”的真实能力清单，可直接派单；另发现 **6 条官方 env 名在宿主不生效**（`DSH_TELEMETRY_OTLP_URL`、`DSH_PRODUCT_ANALYTICS_OTLP_URL`、`DSH_MAX_TOKENS_AS_SUCCESS` 等 0 处读取），已在总账里写明实际入口。
+- **明确的偏离**：`defaultTurnMaxSteps=2000` 标 `DEVIATION-SAFETY`——官方无此参数，我们保留它只为挡死循环（官方观测单轮最大 1318 步）。
+- **仍是 HARDCODED 的 15 条全在 TUI 线**（launcher 绝对路径、i18n 文案、overlay 补丁锚点等），在 register §8 逐条列明，不静默；4 条 `UNREAD` 是结构化未实现（子代理墙钟/深度、压缩摘要 maxTokens、question 等待）。
+- **顺带修一个测试竞态**：`TestPerCallDeadlineCancelsProcessTree` 在负载下 `读心跳失败：EOF`——heartbeat 脚本的 300ms 是 Job Object 归属窗口不能删，per-call 预算 1s 余量只剩 1.7~2×；预算改 3s（余量 4.9~5.2×），五条断言一条没动，`-count=20` 与带负载全量均绿。
+
+### GO.2 收口（2026-11-08，Windows-only stable candidate）
+
+- **支持范围（用户 2026-11-08 14:46 决定）**：只支持 Windows；Linux/macOS 不写支持，`lockread_other.go` 仅为 `!windows` 兼容编译 best-effort、不纳入稳定版验收；撤销仅为 Linux 验收新增的 ubuntu CI job。
+- **官方 0.2.2 接口面**：193 方法逐条确定结论（96 IMPLEMENTED / 13 PARTIAL / 64 OFFICIAL_UNSUPPORTED / 8 DEFERRED / 12 DO_NOT_IMPLEMENT，UNVERIFIED 0）；97 插件同序全等（51/28/1/13/4）。
+- **产品修复**：auto-title 生命周期与优雅停止；goal 续轮写锁有界等待 + Windows 锁读取 delete-sharing；ConPTY 长输入根因与吞吐收口；沙盒生产接线（modelOverride Run/RunContent 透传 + 全新 home `<home>/artifacts` 自举，serve 与 `dshd run` 直连）；通用 501 未读请求体 RST 修复（有界 drain 256 KiB/2s，501 四字段语义不变）。
+- **验收**：T17W Windows 全量 build/vet/`go test ./...`/MinGW 全量 `-race` 全 0，真实 dshd 矩阵（fresh-home 5、direct 11、sandbox 13、501 3000、193/97）全绿；发布候选副本由 T19W 复跑并留档。
 
 ## 0.2.1-go.31（2026-11-04）—— **默认完全权限 + 产物改用产品名**
 

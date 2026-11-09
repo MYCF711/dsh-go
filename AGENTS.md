@@ -5,16 +5,30 @@
 
 ## 0. 每次开工按此顺序
 
-0. **GO.1 专项必读（当前封版阻断）**：凡接手 W163/W167/W168/W170/W171/W175/W200，先读并执行 [GO.1 Lead 可执行任务表](docs/go1-lead-execution-task-table-2026-11-07.md)；先核 W200 真实现场，严格按其中轮次、依赖、单 PTY 锁和封版门推进，不重复派写渲染文件。W200 未明确交付前，`LIVE` 对其他人只读。该表是 GO.1 专项入口，不替代 `PLAN.md` §14.1。
+0. **接手先读交接（2026-11-09 归档）**：GO.2 宿主与 TUI2GO 当前现场、已完成门、已闭合阻断与边界，全在 [`docs/handoff-go2-tui2go-2026-11-09.md`](docs/handoff-go2-tui2go-2026-11-09.md)。**宿主 HS-17/HS-18 已 GO=1；TUI2GO 最终 `PLAY-FINAL-INPUT-AUDIT` 已 GO=1（2026-11-09 04:52 两档 20/20，证据 `tmp/GO2-TEAM/PLAY-FINAL-INPUT-AUDIT/`）**——发布/push 仍需用户当次明确授权，且 `TUI-GO.lnk` 要由用户在可见桌面人工确认一次。TUI 选型/GUI 融合/Viva 升级线另见 [`docs/handoff-2026-11-09.md`](docs/handoff-2026-11-09.md)。
+0. **双线并行：自己的产品 + 完善 Viva（用户 2026-11-09 03:30 指令）**：**Viva 是轮子，轮子不稳，产品就不稳。先把轮子做稳，再谈产品。**
+   - **前提事实**：`../dsh-ui` 是 Viva 的**重度使用者**——46,227 行 Go 非测试、260 个测试文件、**234 个文件直接 `import "github.com/vivaui/viva"`**、25 个插件，且 `pluginapi/` 只是薄别名（没有隔离层）。**上游的 bug 就是我们产品的 bug，不存在“他们的我们不管”。**
+   - **遇到 Viva 的缺陷或缺失时，顺序固定**：① 先在**隔离 worktree** 里写出**最小复现**（能独立跑的一段程序或一个测试）；② **提上游 issue**（用 `gh` CLI；本机 `github` 工具的 POST 会返回 422 `links/0/schema`）；③ 能小改的**直接提 PR**（文档修复、平台绑定、**Windows 行为优先**——Viva 自述「macOS 是参考平台」，而**Windows 的真实场景我们最全**）；④ 只有上游明确不做或长期不修，才在本仓做**带标注的兜底**，并在 `docs/` 写清为什么、什么条件下能删。
+   - **禁止**：为绕开上游问题在本仓加私有 shim 却不登记；把 DSH 业务代码当轮子贡献给上游；因为“上游能改”就先把自家 bug 推过去；**对着 release notes 或 GitHub Release 页面下结论而不核 `docs/releases/<version>.md` 仓库原文**（2026-11-09 已因此提错一个 issue：把 v0.2.4 的声明当成 v0.5.1 的）。
+   - **升级纪律**：`go.mod` 里的 Viva 版本是**共享契约**。升级必须在隔离 worktree 跑完整 `CGO_ENABLED=0 go build ./... && go vet ./... && go test ./...`，全绿才合；实测到 breaking change 先记进 `docs/handoff-*.md`，再逐个改调用点，**不许静默删测试、改断言或放宽快照**。
+   - **贡献边界**：优先修 **Windows 相关**（ClearType、文字测量、窗口位置、输入法）——那是上游最缺、我们独有经验的领域；不要为了“有贡献”去改上游的设计决策（例如给已删除的 API 加回兼容包装，属上游取舍）。
+   - **依据**：2026-11-09 的 `v0.2.3 → v0.5.1` 升级（40 处调用点 / 20 文件，build+vet+test 全绿）与 [PR #181](https://github.com/vivaui/viva/pull/181) 证明这条路可执行；交接见 [`docs/handoff-2026-11-09.md`](docs/handoff-2026-11-09.md)，**Viva 线的任务与边界见 [`docs/viva-roadmap.md`](docs/viva-roadmap.md)**（V-01…V-07，先诊断后修复，不主动找活）。
+
+0. **支持范围最新裁定（用户 2026-11-08 14:46）**：**只做 Windows 稳定版，Linux 不写支持。** 非 Windows `lockread_other.go` 仅保留为兼容编译的 best-effort，明确 `OUT_OF_SUPPORT`，不再作为 UNVERIFIED 或发布 blocker；撤销仅为 Linux 验收新增的 ubuntu CI，不推送验证分支。最终验收改走 **T17W：Windows 全量 build/vet/test + MinGW 全量 race + 真实 193/97/fresh-home/沙盒/501**，随后 T19W 准备本地候选；push/发布仍需用户当次明确授权。
+0. **能力下限新规则（用户 2026-11-08）**：**只能比官方宿主更多、更强，不能比官方宿主更少、更弱。** 不得用 HIDE、删能力声明、降低默认步数/超时、删模式或缩小矩阵来消错；官方已有能力必须真实补齐，新增能力可超越但不得破坏官方形状。现有 T19W3 是已发生验收证据，新规则触发的真实试玩缺陷与 PARTIAL/缺失差距必须继续收口，未复核前不得再宣称“全面超越官方”。
+0. **W0 架构裁定（Lead 按新规则执行）**：dynamicCordisRunner 用 **Go核心 + 外部受管Node双轨**，宿主二进制不嵌JS引擎，外部进程必须可杀/超时/取消；仓内新建 **`dsh-relayd`**；productAnalytics 默认**本地零出网**但完整实现采集/落盘/流/可选导出；account 默认 **Local**，支持 Official/OIDC。35项不得再借外部依赖永久豁免。任务 PARITY-CORDIS/RELAY/ANALYTICS/ACCOUNT 并行。
+0. **宿主与 TUI2Go 双绿，GUI 已启动（2026-11-08 19:08）**：T19W3 宿主候选 GO=1；TUI2GO-PLAY 真实 TTY/模型/退出 GO=1。T20 已由 Lead 签收为 READY，**GUI-P0（结构/素材）与 GUI-P1（Transport/APIClient）已并行派出**。P2 必须等 P0/P1，P3/P4 等 P2，P5 最后；不得重拆主库或把 dump 当实玩。
+0. **GO.2 AgentTeams 当前执行入口（用户 2026-11-08）**：先读 [执行方案](docs/go2-team-execution-blueprint.md) 与 [精确 DAG](docs/go2-team-task-dag.md)。T00 后五组产品缺口与两个证据门全部并行；I01–I05 仅 integrator 串行集成；I06 后 HS-17/18 并行；HS-19 Lead 独占。执行成员指定 `group/deepseek-v4.1-flash-1017` + `reasoning_effort=max`，任务数量不设人工上限；当前插件最多 8 名成员，owned paths 不得重叠。宿主与 TUI2Go 双验收后才启动 GUI。
+0. **宿主稳定版专项必读（当前封版阻断）**：先读 [宿主稳定版方案书](docs/architect-official-sync-blueprint.md) 与 [精确任务书](docs/architect-official-sync-taskbooks.md)，严格按 `HS-00`–`HS-19` 的完成→解锁关系派单。**稳定版只验宿主完备；TUI/Ink/官方 Electron/M0/Viva GUI 均不是稳定版门。** 旧 W163/W167/W170/W171/W175/W200 只属于 TUI 线，不得拿来阻塞宿主 stable，也不得在本任务书重复派实现。
 1. **先核源码再领任务**：读 PLAN/MAINTENANCE、git status/log 与相关源码/测试；H 表是证据非派工单，先验证再回填，不回滚/重做。
-2. **入口**：宿主 `PLAN.md` §14.1；界面 `UIPLAN.md` §3–§4 + `../dsh-ui/PLAN.md`。先 H14，再 H6/H13/跨仓验收；H8 可并行。
-3. **Lead 只拆包/派单/验收**：≥2 个独立 READY 同轮外派，派后不 wait/poll，完成方通知；验收后更新任务表并派下一项。任务书写 owner/paths/rev/依赖/红测/验收/证据，同文件单写者，契约/壳串行。**子代理在自身作用域同样是局部 Lead**：可再派独立子任务，但路径只能是父任务子集，默认深度≤3、单父并发≤4；父级必须集成复验后再通知根 Lead，完整规则/正例/反例见 `$DSH_HOME/LEAD.md` §1.5。
+2. **入口**：**宿主稳定版 Lead 派单只看 [docs/architect-official-sync-taskbooks.md](docs/architect-official-sync-taskbooks.md)**（零思考：立即 4 路、完成→解锁、写作用域、模型、验收、产出）；架构理由读 [docs/architect-official-sync-blueprint.md](docs/architect-official-sync-blueprint.md)。`docs/lead-dispatch-playbook.md` 属于 M0/前端独立线，**不是宿主稳定版派单入口**。**Web 接手（2026-11-08）**：web 实例 PID 38484 已关闭；Team Mode T15A/T11/T13 由本 Lead 接手，见 [docs/web-takeover-2026-11-08.md](docs/web-takeover-2026-11-08.md)，不得重开旧 web 会话或把 Team Mode 结果当宿主 stable 证据。宿主 `PLAN.md` §14.1；界面 `UIPLAN.md` §3–§4 + `../dsh-ui/PLAN.md`。先 H14，再 H6/H13/跨仓验收；H8 可并行。
+3. **Lead 只拆包/派单/验收**：**新建 AgentTeams 一律 `approval="automatic"`，任务直接调度，不再设人工审批门（用户 2026-11-08）；已运行团队不重建、不重复派。** ≥2 个独立 READY 同轮外派，派后不 wait/poll，完成方通知；验收后更新任务表并派下一项。任务书写 owner/paths/rev/依赖/红测/验收/证据，同文件单写者，契约/壳串行。**子代理在自身作用域同样是局部 Lead**：可再派独立子任务，但路径只能是父任务子集，默认深度≤3、单父并发≤4；父级必须集成复验后再通知根 Lead，完整规则/正例/反例见 `$DSH_HOME/LEAD.md` §1.5。
 3.1 **本工作区团队编制（Lead 必读，用户 2026-11-07 指定）**：派单前先读 [LEAD.md](LEAD.md) §2 账本与 §3 防重复检查。固定 5+1 角色：`lead`（只拆包/集成/验收）、`architect`（**`group/kimi-k3.1-pro`，只读**）、`backend`/`tui`/`qa`/`gui`（**`group/deepseek-v4.1-flash-1017`**）。**只有方案师用 Kimi，且不得写产品；执行层不得继承 Kimi。** 同一文件同一时刻只允许一个 active writer；派单必须先有 `task_id/owner/model/写作用域/依赖/验收/产出`，账本无行不派、同 scope 已有 IN_PROGRESS 不派、DONE 无产物不重派。本工作区模型分配覆盖 `$DSH_HOME/LEAD.md` §1.1 的默认限制。GUI 按用户 2026-11-07 指令解除“封版前暂停新增任务”，改为执行 UI 插件对齐（见 §0.5），宿主与 TUI 封版门不变。
 
 3.2 **官方 0.2.2 同步是当前最高优先（用户 2026-11-07 指令，三条线缺一不可）**：接口、宿主插件、UI 插件三者都算“同步官方”，只做接口不算完成。
-- **目标口径（用户 2026-11-07 明确）**：要的是**完整功能 + 后续重构 GUI 可用的稳定接口**，不是对接官方 Electron 壳。因此官方 153 个方法必须**逐条有确定结论**（真实现，或官方形状的结构化未实现 + 写清缺什么），禁止留空/假数据/静默成功；**M0（serve 官方前端 dist + index 注入）降为可选**，不再作为目标。
-- **接口面**：唯一清单 [docs/official-desktop-api-parity.md](docs/official-desktop-api-parity.md)（官方 153 个 typert 方法、宿主 58、同名 8、缺 145）。L1 按官方 zod 契约实现参数与结果字段，落在现有 `POST /api/<method>` + 每会话 WS journal；**L2 的 `remote.mux` + typert Connection wire 兼容单列程序，未实现前不得声称与官方桌面端 wire 兼容**。既有 58 个方法不改名，官方同名走新增；缺真实支撑一律四字段未实现错误并登记，禁止假数据、静默成功、假流式。官方契约原件可从 `app.asar`（sha256 `5fa8a6b2…`）重建，镜像在 `/tmp/official-api-src`。
-- **宿主插件面**：唯一清单 [docs/official-plugins-022-map.md](docs/official-plugins-022-map.md)（官方 base 97 项：DONE 37 / PARTIAL 32 / MISSING 28）。按能力逐项 PARTIAL→DONE、MISSING→DONE；平台型（40 sandbox runner、42 bash-sandbox、43 pwsh-sandbox、72 ptc-runtime）按官方平台开关与 R6 显式记录不做或后置，**不得用“生态欠账”一句话带过**。改映射表不算实现。
+- **目标口径（用户 2026-11-07 明确）**：要的是**完整功能 + 后续重构 GUI 可用的稳定接口**，不是对接官方 Electron 壳。HS-00 已纠正官方方法总数为 **193**；这些方法必须**逐条有确定结论**（真实现，或官方形状的结构化未实现 + 写清缺什么），禁止留空/假数据/静默成功；**M0（serve 官方前端 dist + index 注入）降为可选**，不再作为目标。
+- **接口面**：旧清单 [docs/official-desktop-api-parity.md](docs/official-desktop-api-parity.md) 只采到 153 个方法；**HS-00 已对同一 asar 重数为 193，当前缺口以 [docs/host-stable-gap-register.md](docs/host-stable-gap-register.md) 与 `gap-register.json` 为准**（86 IMPLEMENTED / 13 PARTIAL / 64 OFFICIAL_UNSUPPORTED / 17 DEFERRED / 13 DO_NOT_IMPLEMENT）。L1 按官方 zod 契约实现参数与结果字段，落在现有 `POST /api/<method>` + 每会话 WS journal；**L2 的 `remote.mux` + typert Connection wire 已有协议层实现但覆盖面 PARTIAL，未收口前不得声称全方法 wire 兼容**。既有方法不改名，官方同名走新增；缺真实支撑一律四字段未实现错误并登记，禁止假数据、静默成功、假流式。官方契约原件可从 `app.asar`（sha256 `5fa8a6b2…`）重建，HS-00 取证脚本在 `C:/Users/Administrator/AppData/Local/Temp/dsh-official-sync-20261107/HS-00/`。
+- **宿主插件面**：旧清单 [docs/official-plugins-022-map.md](docs/official-plugins-022-map.md) 的 `DONE 37 / PARTIAL 32 / MISSING 28` 是历史快照；**HS-00 当前统计为 IMPLEMENTED 51 / PARTIAL 28 / OFFICIAL_UNSUPPORTED 1 / DEFERRED 13 / DO_NOT_IMPLEMENT 4**，逐项证据见 [docs/host-stable-gap-register.md](docs/host-stable-gap-register.md)。按真实能力逐项收口；平台型（40 sandbox、42 bash-sandbox、43 pwsh-sandbox、72 ptc-runtime）按官方平台开关与 R6 显式记录不做或后置，**不得用“生态欠账”一句话带过，也不得把改映射表当实现**。
 - **UI 插件面**：唯一清单 [docs/official-ui-plugins-parity.md](docs/official-ui-plugins-parity.md)（官方 60 个 `dsh-client-ui-*` + 5 个实验包；本仓 24 个 `ds*`）。P0 首屏与主交互 → P1 面板与 11 个 `ui-settings*`、`plugin-manager` → P2 生态/实验；新部件按官方包名落目录；官方无同名包的 `dstopbar`/`dsstatusbar` 必须有官方结构证据，否则 derived 标注或 HIDE。
 
 3.3 **方案师持续产出（用户 2026-11-07 指令）**：`architect`（`group/kimi-k3.1-pro`，只读）必须**持续**维护两份文档，不得中断：
@@ -41,7 +55,7 @@
 
 宿主线只改 `cmd/dshd/`、`internal/`、`modules/`、`codecs/` 及宿主文档；界面实现/构建都在 `../dsh-ui`，本仓不建 TypeScript UI，不跑 npm。跨线需求只写 `docs/transport-contract.md`。
 
-**沙盒不得冒名**：approval、工具白名单、FS路径边界、Windows Job Object/Unix进程组都不是完整沙盒。当前三档与一次性 `sandbox_permissions` 尚未生产接线；实现与验收严格按 [docs/sandbox-policy.md](docs/sandbox-policy.md)，core、生产策略、OS隔离分层写证据，未到的层级不得写DONE。
+**沙盒不得冒名**：approval、工具白名单、FS路径边界、Windows Job Object/Unix进程组都不是完整沙盒。三档与一次性 `sandbox_permissions` 已在 `serve_sandbox_policy.go` 生产接线（策略层）；实现与验收严格按 [docs/sandbox-policy.md](docs/sandbox-policy.md)，core、生产策略、OS隔离分层写证据，未到的层级不得写DONE。
 
 ## 2. Tool / SPI 摘要
 

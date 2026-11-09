@@ -153,3 +153,7 @@ id      = "tool-skill"
 
 [[module]]
 id      = "tool-hindsight"
+
+[[module]]
+id = "mcp-client"
+backend = "static"

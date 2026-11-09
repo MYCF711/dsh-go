@@ -24,3 +24,6 @@ dist/
 /DSH GO.exe
 /DSH TUI GO.exe
 __pycache__/
+
+# 构建产物：不入库（发版走 Release 附件）
+*.exe
