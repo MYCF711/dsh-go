@@ -1,15 +1,46 @@
-## 0.2.2-go.1（2026-11-09，**Windows-only 稳定版**）—— **官方 0.2.2-rc.1 追踪；双渠道已统一**
+## 0.2.2-go.2（2026-11-09，**Windows-only 稳定版**）—— **官方 342 条缺口分类收口：`UNREAD-GAP` 归零**
 
-- 上游基线由 `0.2.1-rc.5` 升为 `0.2.2-rc.1`；前缀升级后序号重新从 1 开始，不沿用 go.31/go.32。
-- **版本号统一（用户 2026-11-09 指令）**：原 `0.2.2-beta.1` 测试线与主线合并，唯一版本号是 `0.2.2-go.1`；代码常量（`cmd/dshd/main.go`、`cmd/dshtui/brand.go`）与文档同值。
-- 当前最高优先级是 GO 对 dsh-TUI 所需接口的真实兼容：models、placement、trace/export 与完整 TUI capability 矩阵，必须经过真实 dshd + 正式 backend + ConPTY 验收，不把未完成的 TUI 能力写成稳定功能。
+- 版本号唯一出处仍是 `cmd/dshd/main.go` 的 `version` 变量（`0.2.2-go.2`），`cmd/dshtui/brand.go` 同值；
+  `scripts/build.sh` 从前者读出并 `-ldflags -X` 同时注入两个程序，所以 dist 里的两个产物永远是同一个号。
+- **本版包含 GO.6 与 GO.7 两条线的内容**：GO.6（并行工具调用、LLM 采样与观测、上下文测量口径、
+  工具超时与宽限）的提交都在 `v0.2.2-go.1` 的 tag（`99a5473`）**之后**落地（`4460d09…bf56ac0`），
+  因此这些能力是**随本版发布**的——`0.2.2-go.1` 没有发过并行工具调用，别按旧标题去核对。
+
+### GO.7 官方缺口收口（本版的主内容）
+
+从 GO.6 留下的 **96 条 `UNREAD-GAP`** 出发，按域分路并行收口，**收口后全仓 `UNREAD-GAP` = 0**：
+
+- **按覆盖分类**（逐条可核，见 `docs/parameter-register.md` §7）：`COVERED` 64 / `COVERED-EQUIV` 214 /
+  `N-A` 37 / `DEFERRED` 8 / `OFFICIAL_UNSUPPORTED` 19；`UNREAD-GAP` **0**。
+- **真实现的部分**（每一条都先红后绿、带 `file:line` 证据）：
+  - session / transport-http 18 条：列表并发与分片、投影 write-behind、spill 保留期回收、goal 轮数上限、
+    图片像素/字节上限与压缩并发、压缩级别与阈值、TLS、文档/插件/客户端探测超时等。
+  - tools / sandbox 8 条：edit 的 `diff_basis` 原文快照（10 MiB 闸门）、沙盒额外可写根（只放开写）、
+    skill 缓存与监听、terminal 的宽限退出/清理重试/活动采样/闲置回收。
+  - plugin / account / analytics 9 条：版本查询并发池与 registry 回退源（私有源不外溢）、插件工具挂载开关、
+    登出重试与指数退避、设备登录单次尝试预算、环境元数据采集、`$DSH_HOME/.anonymous-user-id` 匿名身份。
+    **匿名身份与环境采集全程本地零出网**（httptest 桩断言 collector 命中 0），默认 `mode=local` 不外发。
+  - agent-loop 5 条：`agents[].id` 稳定标识与子会话复用、per-provider 重试策略、子代理并发闸门、
+    per-provider 流空闲超时。
+  - 团队 / 提示 / 工作目录 4 条：`agentTeam.maxMembers` 名册与 `maxTasks` 闸、`systemPrompt.toolOrder`、
+    `workingDirectory.defaultDirectory`（工具的根与系统提示里的 Workspace 同源）。
+  - jobs 2 条：每 owner 运行中任务配额、已结算保留字节裁剪。
+- **`N-A` / `OFFICIAL_UNSUPPORTED` / `DEFERRED` 逐条写了依据**，不是一句话带过：不适用按子类分组（每条带 `naClass`），
+  明确不做按成文红线写清「什么条件下能做」（每条带 `capableWhen`），后置的写清依赖什么（每条带 `dependsOn`）。
 
 ### GO.6 官方参数面与并发收口（2026-11-09）
 
 从 GO.3 总账的 113 条 `UNREAD-GAP` 里挑出的第一批**能力下限**项，四族并行、每条先红后绿：
 
-- **并行工具调用**（最大的一条）：官方最多 10 路并行，宿主此前是严格串行 for 循环。新增 `internal/agent/parallel.go`（`DSHD_MAX_PARALLEL_TOOL_CALLS` 默认 10、1=严格串行、0/负数/写错字一律 fail-loud 不静默降级），双车道执行（并行道 + 审批道同一时刻仅 1 个、不占名额），`runToolBatch` 按模型顺序结算。**4×200ms：809.86ms → 0.21s**；上限 2 → 0.41s；上限 1 → 0.81s（逐字节回退）。完成顺序被打乱但 messages 与 `tool.result` 事件仍保序。顺带发现 v4 是单写者——并行后两个调用可能各自带子调用同时写 v4（seq 分配与写帧都没锁），写入点抽到 `cmd/dshd/nested_v4.go` 并加锁。
-  - **事件形状变化**：`call,result,call,result` → `call,call,result,result`（官方本就如此）；已确认 TUI 侧 `projection.js` 按 callId 配对、不依赖位置。
+- **并行工具调用**（最大的一条）：官方最多 10 路并行，宿主此前是严格串行 for 循环。新增 `internal/agent/parallel.go`
+  （`DSHD_MAX_PARALLEL_TOOL_CALLS` 默认 10、1=严格串行、0/负数/写错字一律 fail-loud 不静默降级），
+  `runToolBatch` 按模型顺序结算。**4×200ms：809.86ms → 0.21s**；上限 2 → 0.41s；上限 1 → 0.81s（逐字节回退）。
+- **并发口径（按 `verify7` 的真实链结论写，别用错说法）**：同一次响应里的多个工具调用**整批声明**、
+  结果按模型顺序结算——事件形状在两种设置下**都是** `call,call,result,result`，所以**不要写成"两个 bash 会并行"**；
+  **需要审批的工具（`bash`/`pwsh`/`web_fetch` 等）走单条"等人"车道**，同一时刻只有一个
+  （`internal/agent/parallel.go` 的成文不变量，不是性能退化）。并发收益的实测口径：
+  **无需审批的 6×grep 在 60MB 树上，默认 0.6–0.7s vs `DSHD_MAX_PARALLEL_TOOL_CALLS=1` 的 1.4–1.5s**。
+  TUI 侧 `projection.js` 按 callId 配对、不依赖位置。
 - **LLM 采样与观测**：`temperature`/`stop` 进 `Request`（**默认报文逐字节不变**，`temperature=0` 显式零值照发，`DSHD_LLM_TEMPERATURE` 非法/NaN/Inf fail-loud）；300s 流空闲看门狗（200ms 上限实测 **253ms** 返回 `LLM_STREAM_IDLE_TIMEOUT`，旧代码 3s 不返回）；模型列表 TTL 600s（TTL=60s 三次调用 **1 次请求**）；`contextWindow` 负值 **0 次模型请求**直接 `INVALID_MODEL_CONTEXT` fail-closed。
 - **上下文测量与压缩**：`pressureTokens` 从「含输出的 totalTokens」改成官方口径的 **prompt 侧三桶**（input=100/cacheRead=900/output=50 → 1000，旧值 1050 保留在 `used`）；新增 `projectedTokens` 与四桶投影；压缩重试 1 次 + 溢出后再 1 次；预留完成 token 进阈值（与 `--auto-compact` 取小，默认行为不变）。
 - **工具超时与宽限**：`web_search` 自己的 30s 预算（基础包 60s，超时 `WEB_SEARCH_TIMEOUT` + 可执行 Hint；慢 provider 5.001s → **1.00s** 返回）；provider 摘要 **241 字符 → 800**（含省略号）；`bash` 停止改成「先请求退出 → 等 3s → 仍存活才强杀」（**0.04s 强杀/退出码 1 → 1.03s/退出码 42/宽限内自退**），两种结局三重可区分，Job Object 归属未放弃。
@@ -17,7 +48,29 @@
 - **没虚报**：`llm.piAi.streamIdleTimeoutMs` 与 `llmPiAi.providers.magpie.streamIdleTimeoutMs` 的 **per-provider 细分未做**（现在所有 provider 共用一条 `DSHD_LLM_STREAM_IDLE_TIMEOUT_MS`），仍留 `UNREAD-GAP`。
 - **已知红（环境，登记）**：`internal/terminal` 的 PTY 长输入三条（`TestPTYLongInputPacedWrite` / `TestPTYLongPasteExactBytes` / `TestT14ColdNativeSink`）在当前机器上稳定红。**已排除本轮回归**：从 `git archive 99a5473`（GO.6 之前的已推送 main）拉干净副本跑同一个包**同样红**（204.7s）。最可能是 **Git Bash 升级到 5.3.15 / Git 2.55.0.windows.5** 后 readline/终端行为变化（失败现场能看到 `bash-5.3$` 提示符）。已单开任务定位「夹具对版本敏感」还是「宿主 PTY 在 5.3 下真退化」，未定论前不宣称全绿。
 
+### 门禁（本版实跑）
 
+- `go build ./...` / `go vet ./...` / `go test ./... -count=1` **全 EXIT=0**（**81 个包 ok、0 FAIL**）。
+- 参数总账两道闸：`validate_register.py` → `OK=306 MISMATCH=0`（EXIT=0）；`audit_refs.py` → 可疑 **0**（EXIT=0）。
+- 工具表 golden 变化经显式审查：**只有 1 处**（`subagent` 新增可选 `id`，来源 agent-loop 的具名 agent 能力），
+  工具数 58 → 58，其余 57 个工具逐字节未变。
+- GO.6 登记的 `internal/terminal` 三条 PTY 长输入红（Git Bash 5.3.15 环境）在本次全量门禁中**未再出现**。
+
+### 已知缺口（不虚报，逐条在总账里）
+
+- `OFFICIAL_UNSUPPORTED` **19 条**：平台型沙盒族（`sandbox` / `bash-sandbox` / `pwsh-sandbox` / `ptc-runtime`）
+  与按 W0 裁定「换了实现路径而不是做不到」的 OTel 族（遥测走本地零出网管道）。
+- `DEFERRED` **8 条**：steering 取消保留 inbox 选项、DeepSeek 文件 API 两条、会话引用三条（上限/占比/字节）、
+  telemetry session 两条（关停超时与请求体上限）；以及 `jobs.settledRetainBytes` **默认不裁剪**这一处与官方的策略差异
+  （设 `DSHD_SETTLED_RETAIN_BYTES=16384` 才是官方语义）。
+- `N-A` **37 条**：对无头宿主不适用（desktop/Electron 壳、GUI 专属面等）。
+- 完整分类与逐条理由见 `docs/parameter-register.md` §7，机读版 `docs/parameter-register.json`。
+
+## 0.2.2-go.1（2026-11-09，**Windows-only 稳定版**）—— **官方 0.2.2-rc.1 追踪；双渠道已统一**
+
+- 上游基线由 `0.2.1-rc.5` 升为 `0.2.2-rc.1`；前缀升级后序号重新从 1 开始，不沿用 go.31/go.32。
+- **版本号统一（用户 2026-11-09 指令）**：原 `0.2.2-beta.1` 测试线与主线合并，唯一版本号是 `0.2.2-go.1`；代码常量（`cmd/dshd/main.go`、`cmd/dshtui/brand.go`）与文档同值。
+- 当前最高优先级是 GO 对 dsh-TUI 所需接口的真实兼容：models、placement、trace/export 与完整 TUI capability 矩阵，必须经过真实 dshd + 正式 backend + ConPTY 验收，不把未完成的 TUI 能力写成稳定功能。
 
 ### GO.4 工作区考古与收编（2026-11-09，用户指令「那些全是死代码，考古并且用起来」）
 

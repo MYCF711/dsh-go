@@ -41,3 +41,6 @@ __pycache__/
 # 永不参与 build/vet/test；它们只是 apply-patch 的中间产物，不该入库。
 *.orig
 *.rej
+
+# 备份残留（重锚/重构时的 .bak 不入库）
+*.bak
