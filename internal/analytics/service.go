@@ -114,9 +114,16 @@ func (s *Service) Enabled() bool {
 
 // UpdatePolicy 校验并原子落盘策略，同时通知所有 watchPolicy 订阅者。
 //
+// 环境变量端点在这里同样参与：调用方没给 collectorUrl 时用 env 值补齐
+// （显式配置 > env > 默认）。补齐后的值**会落盘**——policy.json 是显式配置的
+// 落点，一旦写下就以配置的身份存在，之后即使清掉 env 端点也不会漂移。
 // policyVersion 单调递增：调用方给的值 <= 当前值时会自动 +1，避免"改回旧版本"
 // 让审计链出现重号。
 func (s *Service) UpdatePolicy(next Policy) (Policy, error) {
+	next, _, err := withEnvCollectorURL(next)
+	if err != nil {
+		return Policy{}, err
+	}
 	normalized, err := next.Normalize()
 	if err != nil {
 		return Policy{}, err
@@ -329,7 +336,15 @@ func (s *Service) Purge() (int, error) {
 			return 0, err
 		}
 	}
-	s.policy = DefaultPolicy()
+	policy, _, err := withEnvCollectorURL(DefaultPolicy())
+	if err != nil {
+		return 0, err
+	}
+	normalized, err := policy.Normalize()
+	if err != nil {
+		return 0, err
+	}
+	s.policy = normalized
 	s.policyStamp = ""
 	s.lastHash = ""
 	s.notifyPolicyLocked()
@@ -360,11 +375,22 @@ func (s *Service) policyFileStampLocked() (string, error) {
 }
 
 // loadPolicyLocked 读策略文件；不存在时保持 DefaultPolicy（不写盘）。
+//
+// 两条分支出口都过 withEnvCollectorURL：环境变量只在**策略里没有显式端点**时
+// 补 CollectorURL（显式配置 > env > 默认），非法端点在 Open 阶段就报错。
 func (s *Service) loadPolicyLocked() (string, error) {
 	raw, err := os.ReadFile(s.policyPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			s.policy = DefaultPolicy()
+			policy, _, err := withEnvCollectorURL(DefaultPolicy())
+			if err != nil {
+				return "", err
+			}
+			normalized, err := policy.Normalize()
+			if err != nil {
+				return "", err
+			}
+			s.policy = normalized
 			return "", nil
 		}
 		return "", err
@@ -373,12 +399,21 @@ func (s *Service) loadPolicyLocked() (string, error) {
 	if err := json.Unmarshal(raw, &policy); err != nil {
 		return "", fmt.Errorf("analytics: policy.json 不是合法 JSON: %w", err)
 	}
+	policy, _, err = withEnvCollectorURL(policy)
+	if err != nil {
+		return "", err
+	}
 	normalized, err := policy.Normalize()
 	if err != nil {
 		return "", err
 	}
 	s.policy = normalized
 	return s.policyFileStampLocked()
+}
+
+// withEnvCollectorURL 是环境变量端点的唯一入口（薄封装，便于测试与阅读）。
+func withEnvCollectorURL(policy Policy) (Policy, string, error) {
+	return WithEnvCollectorURL(policy, nil)
 }
 
 // refreshPolicyLocked 只在文件 stamp 变化时重读，避免每次 report 都读盘。
@@ -391,9 +426,17 @@ func (s *Service) refreshPolicyLocked() error {
 		return nil
 	}
 	if stamp == "" {
-		// 文件被删：回到默认策略（不是沿用旧内存值）。
+		// 文件被删：回到默认策略（不是沿用旧内存值），但环境变量端点仍然生效。
 		if s.policyStamp != "" {
-			s.policy = DefaultPolicy()
+			policy, _, err := withEnvCollectorURL(DefaultPolicy())
+			if err != nil {
+				return err
+			}
+			normalized, err := policy.Normalize()
+			if err != nil {
+				return err
+			}
+			s.policy = normalized
 			s.policyStamp = ""
 			s.notifyPolicyLocked()
 		}

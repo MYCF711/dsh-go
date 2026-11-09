@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -340,6 +341,13 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 		// "模型什么都没说"，而真相是"这个模型不能用"。两种事的下一步完全不同。
 		if err := emptyResponseErr(resp); err != nil {
 			return msgs, fmt.Errorf("第 %d 步模型调用失败: %w", step, err)
+		}
+
+		// 官方 DSH_MAX_TOKENS_AS_SUCCESS：默认把 finish=length 当成功，只有显式
+		// false 才当失败。闸门放在**任何副作用之前**——被截断的响应不写历史、
+		// 不跑工具、不发 assistant/message 之后的收尾事件。
+		if err := maxTokensAsSuccessErr(resp, os.Getenv); err != nil {
+			return msgs, fmt.Errorf("第 %d 步响应终止: %w", step, err)
 		}
 
 		// 这是**整个 completed response** 的执行闸门，不是单个 call 的参数检查。

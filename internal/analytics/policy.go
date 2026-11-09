@@ -19,7 +19,6 @@ package analytics
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
 )
 
@@ -50,6 +49,10 @@ type Policy struct {
 	// Mode 只能是 ModeLocal 或 ModeLocalExport。
 	Mode string `json:"mode"`
 	// CollectorURL 只允许 http/https；mode=local 时即使有值也不使用。
+	//
+	// 来源优先级（见 env.go）：本字段非空 = 显式配置，压过环境变量；
+	// 为空时由 `DSH_PRODUCT_ANALYTICS_OTLP_URL` / `DSH_TELEMETRY_OTLP_URL`
+	// （以及宿主前缀 `DSHD_*`）补齐；都没有就是默认空 = 本地零出网。
 	CollectorURL string `json:"collectorUrl,omitempty"`
 	// RetentionDays 是本地事件保留天数（0/负数表示不自动清理）。
 	RetentionDays int `json:"retentionDays"`
@@ -91,9 +94,8 @@ func (p Policy) Normalize() (Policy, error) {
 	}
 	p.CollectorURL = strings.TrimSpace(p.CollectorURL)
 	if p.CollectorURL != "" {
-		parsed, err := url.Parse(p.CollectorURL)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-			return p, fmt.Errorf("analytics policy: collectorUrl 必须是 http/https URL，收到 %q", p.CollectorURL)
+		if err := validateCollectorURL(p.CollectorURL); err != nil {
+			return p, fmt.Errorf("analytics policy: collectorUrl %w", err)
 		}
 	}
 	if p.Mode == ModeLocalExport && p.CollectorURL == "" {
