@@ -1101,8 +1101,18 @@ func TestOfficialCredentialsSingleTruthWithCatalogUpsert(t *testing.T) {
 	if info["configured"] != true || info["source"] != "catalog" || info["writable"] != true {
 		t.Fatalf("describe 没跟上 upsert 的写入：%v", info)
 	}
-	if len(info) != 3 {
-		t.Fatalf("describe 只允许 configured/source/writable 三个字段：%v", info)
+	// rc.2 契约：describe 允许第四个字段 `masked`（官方 `CredentialInfo.masked?`，
+	// 只在 source=='file' 出现）。除此之外一个键都不许多——尤其不许有 value。
+	// 手算："shared-second-secret-b3d7" 25 码点、providerEnd=7、hidden=9 ≥ 8
+	// → 前 12 个码点 + 9 个 '•' + 末 4 个码点。
+	if len(info) != 4 {
+		t.Fatalf("describe 只允许 configured/source/writable/masked 四个字段：%v", info)
+	}
+	if want := "shared-secon" + strings.Repeat("•", 9) + "b3d7"; info["masked"] != want {
+		t.Fatalf("masked = %v，期望 %q（官方 maskCredential 逐字符）", info["masked"], want)
+	}
+	if _, has := info["value"]; has {
+		t.Fatalf("describe 回了 value 键：%v", info)
 	}
 	raw, err := os.ReadFile(filepath.Join(home, "state", "model-catalog.json"))
 	if err != nil {

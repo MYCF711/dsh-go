@@ -1435,3 +1435,230 @@ func TestSubagentContinuableRealMachine(t *testing.T) {
 	}
 	t.Logf("SUBAGENT_REAL OK=5 FAIL=0 parent=%s child=%s messageId=%s", parent, child, messageID)
 }
+
+// ---------------------------------------------------------------------------
+// rc.2 AgentTeam 面（`agentTeams.setEnabled`）与 `subagents.interruptByUser`
+// ---------------------------------------------------------------------------
+
+// newChildSession 建一条**真的是别人子会话**的 v4 会话：盘上有 durable
+// `subagent/spawn` 父子帧（`internal/agent.FindChild` 的判据同源）。
+func (f *agentAPIFixture) newChildSession(parentID string) string {
+	f.t.Helper()
+	id, err := serveID()
+	if err != nil {
+		f.t.Fatalf("生成子会话 id: %v", err)
+	}
+	lg, err := session.CreateSession(f.home, f.home, id, modes.DefaultID)
+	if err != nil {
+		f.t.Fatalf("建子会话: %v", err)
+	}
+	rec := agent.ChildRecord{
+		ChildSessionID: id, ParentSessionID: parentID, SpawnedAt: time.Now().UnixMilli(),
+	}
+	if err := lg.Append(agent.EventChildSpawn, rec); err != nil {
+		f.t.Fatalf("写 subagent/spawn: %v", err)
+	}
+	if err := lg.Close(); err != nil {
+		f.t.Fatalf("关闭子会话: %v", err)
+	}
+	return id
+}
+
+// teamModeFile 是 Team 选择的落盘文件。
+func (f *agentAPIFixture) teamModeFile() string {
+	return filepath.Join(f.home, "state", "agent-team-mode.json")
+}
+
+// 选择必须**真实持久化**：写盘之后"重启宿主"（重建 core）仍能读回。
+func TestAgentTeamsSetEnabledPersistsAcrossRestart(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	root := f.newSession("", nil)
+
+	// 未设置过 = 官方默认 false。
+	if got, err := f.core.agentTeamsIsEnabled(root); err != nil || got {
+		t.Fatalf("未设置时应当默认关，得到 (%v, %v)", got, err)
+	}
+
+	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{
+		Agent: root, Enabled: true,
+	}); err != nil {
+		t.Fatalf("开 Team: %v", err)
+	}
+	var doc agentTeamModeDoc
+	found, err := agentReadDoc(f.teamModeFile(), &doc)
+	if err != nil || !found {
+		t.Fatalf("Team 选择没落盘：found=%v err=%v", found, err)
+	}
+	entry, ok := doc.Sessions[root]
+	if !ok || !entry.Enabled {
+		t.Fatalf("落盘内容不对：%+v", doc)
+	}
+	if entry.UpdatedAt <= 0 {
+		t.Fatalf("UpdatedAt 必须是真实时间，实际 %d", entry.UpdatedAt)
+	}
+
+	// 模拟进程重启：新 core、新 store，只能从盘上读。
+	f.rebuild()
+	got, err := f.core.agentTeamsIsEnabled(root)
+	if err != nil {
+		t.Fatalf("重启后读选择: %v", err)
+	}
+	if !got {
+		t.Fatal("重启后 Team 选择丢了：这不是真实持久化")
+	}
+}
+
+// 同值不重复写盘（官方 `if (this.isEnabled(root) !== enabled)`）；关闭真的生效。
+func TestAgentTeamsSetEnabledIsIdempotentAndCanDisable(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	root := f.newSession("", nil)
+
+	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: true}); err != nil {
+		t.Fatalf("开 Team: %v", err)
+	}
+	var first agentTeamModeDoc
+	if _, err := agentReadDoc(f.teamModeFile(), &first); err != nil {
+		t.Fatalf("读盘: %v", err)
+	}
+	stamp := first.Sessions[root].UpdatedAt
+
+	// 再设一次同值：状态不变，时间戳也不该被推后（不重复 append）。
+	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: true}); err != nil {
+		t.Fatalf("重复开 Team: %v", err)
+	}
+	var again agentTeamModeDoc
+	if _, err := agentReadDoc(f.teamModeFile(), &again); err != nil {
+		t.Fatalf("读盘: %v", err)
+	}
+	if again.Sessions[root].UpdatedAt != stamp {
+		t.Fatalf("同值重复设置改写了状态：%d → %d", stamp, again.Sessions[root].UpdatedAt)
+	}
+
+	// 关闭：生效，且盘上读回是 false。
+	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: false}); err != nil {
+		t.Fatalf("关 Team: %v", err)
+	}
+	if got, err := f.core.agentTeamsIsEnabled(root); err != nil || got {
+		t.Fatalf("关闭后应当 false，得到 (%v, %v)", got, err)
+	}
+	f.rebuild()
+	if got, err := f.core.agentTeamsIsEnabled(root); err != nil || got {
+		t.Fatalf("重启后关闭状态没保持，得到 (%v, %v)", got, err)
+	}
+}
+
+// 只有树根能改：子会话调用 → ErrOfficialTeamLeadRequired，且**不落盘**。
+func TestAgentTeamsSetEnabledRejectsDescendant(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	root := f.newSession("", nil)
+	child := f.newChildSession(root)
+
+	err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: child, Enabled: true})
+	if !errors.Is(err, transport.ErrOfficialTeamLeadRequired) {
+		t.Fatalf("子会话改 Team 模式应当是 TEAM_LEAD_REQUIRED，实际 %v", err)
+	}
+	var doc agentTeamModeDoc
+	found, rerr := agentReadDoc(f.teamModeFile(), &doc)
+	if rerr != nil {
+		t.Fatalf("读盘: %v", rerr)
+	}
+	if found {
+		if _, ok := doc.Sessions[child]; ok {
+			t.Fatalf("被拒的调用不该落盘：%+v", doc)
+		}
+	}
+
+	// 根会话自己仍然可以改（判据是"自己有没有父"，不是"是不是有子"）。
+	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: true}); err != nil {
+		t.Fatalf("根会话改 Team 模式应当成功：%v", err)
+	}
+}
+
+// 会话不存在 → no_such_session（不建、不猜）。
+func TestAgentTeamsSetEnabledRejectsUnknownSession(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: "no-such-session", Enabled: true})
+	if !errors.Is(err, transport.ErrNoSuchSession) {
+		t.Fatalf("未知会话应当是 no_such_session，实际 %v", err)
+	}
+	if _, statErr := os.Stat(f.teamModeFile()); statErr == nil {
+		t.Fatal("未知会话不该写出 Team 选择文件")
+	}
+}
+
+// interruptByUser：Gateway 按目标会话授权；不存在/空闲/已完成是 accepted no-op。
+func TestAgentTeamInterruptByUser(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	live := f.newSession("", nil)
+
+	var interrupted []string
+	core := newAgentOfficialAPICore(agentOfficialDeps{
+		home: f.home, journals: f.journals, src: f.src,
+		interrupt: func(sessionID string) error {
+			interrupted = append(interrupted, sessionID)
+			return nil
+		},
+	})
+
+	accepted, err := core.agentInterruptByUser(live)
+	if err != nil {
+		t.Fatalf("真实会话中断: %v", err)
+	}
+	if !accepted.Accepted {
+		t.Fatalf("结果必须是 accepted：%+v", accepted)
+	}
+	if len(interrupted) != 1 || interrupted[0] != live {
+		t.Fatalf("取消信号没打到目标会话：%v", interrupted)
+	}
+
+	// 不存在的目标：官方 accepted no-op（信号被接纳，只是没有活的目标）。
+	accepted, err = core.agentInterruptByUser("no-such-session")
+	if err != nil || !accepted.Accepted {
+		t.Fatalf("不存在的目标应当 accepted no-op，得到 (%+v, %v)", accepted, err)
+	}
+
+	// 空闲目标（没有在飞的一轮）也是 accepted：ErrNoSuchTurn 不能被渲染成失败。
+	idle := newAgentOfficialAPICore(agentOfficialDeps{
+		home: f.home, journals: f.journals, src: f.src,
+		interrupt: func(string) error { return ErrNoSuchTurn },
+	})
+	accepted, err = idle.agentInterruptByUser(live)
+	if err != nil || !accepted.Accepted {
+		t.Fatalf("空闲目标应当 accepted，得到 (%+v, %v)", accepted, err)
+	}
+
+	// 取消通道报别的错 → 冒泡（绝不假装 accepted）。
+	broken := newAgentOfficialAPICore(agentOfficialDeps{
+		home: f.home, journals: f.journals, src: f.src,
+		interrupt: func(string) error { return errors.New("取消通道坏了") },
+	})
+	if _, err := broken.agentInterruptByUser(live); err == nil {
+		t.Fatal("取消通道失败必须报错，不能假 accepted")
+	}
+
+	// 没有取消通道 → 响亮未实现。
+	unwired := newAgentOfficialAPICore(agentOfficialDeps{home: f.home, journals: f.journals, src: f.src})
+	if _, err := unwired.agentInterruptByUser(live); !errors.Is(err, transport.ErrOfficialNotImplemented) {
+		t.Fatalf("没有取消通道应当 not_implemented，实际 %v", err)
+	}
+	if _, err := core.agentInterruptByUser("  "); !errors.Is(err, transport.ErrOfficialBadInput) {
+		t.Fatalf("空 childSessionId 应当 bad_input，实际 %v", err)
+	}
+}
+
+// bindTeamRC2 交回的两个方法必须都接上（否则分派面会回 501）。
+func TestAgentTeamBindRC2IsWired(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	core := newAgentOfficialAPICore(agentOfficialDeps{home: f.home, journals: f.journals, src: f.src,
+		interrupt: func(string) error { return nil }})
+	api := core.bindTeamRC2()
+	if api.SetEnabled == nil || api.InterruptByUser == nil {
+		t.Fatalf("Team rc.2 方法表没接全：%+v", api)
+	}
+	agentAPI, teamAPI := newAgentOfficialAPIWithTeamRC2(agentOfficialDeps{
+		home: f.home, journals: f.journals, src: f.src, interrupt: func(string) error { return nil },
+	})
+	if agentAPI.SubagentsPrompt == nil || teamAPI.SetEnabled == nil {
+		t.Fatal("newAgentOfficialAPIWithTeamRC2 必须同时交回两面")
+	}
+}

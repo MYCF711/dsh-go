@@ -84,6 +84,8 @@ func forgeGoodBodies() map[Method]string {
 		MethodLiveshareSharesStop:              `{"request":{"shareId":"sh-1"}}`,
 		MethodLiveshareSharesTestPublish:       `{"request":{"sessionId":"s-1"}}`,
 		MethodLiveshareSharesUpdatePermissions: `{"request":{"shareId":"sh-1","sessionMode":"view"}}`,
+		// rc.2 新增：合法参数（shareId + 非空 sessionIds），保证走到"缺实现"分支。
+		MethodLiveshareSharesAddSessions: `{"request":{"shareId":"sh-1","sessionIds":["s-1"]}}`,
 		MethodLiveshareSharesCapabilities:      `{}`,
 		MethodLiveshareSharesList:              `{}`,
 		MethodLiveshareSharesRelay:             `{}`,
@@ -91,11 +93,13 @@ func forgeGoodBodies() map[Method]string {
 	}
 }
 
-// TestOfficialForgeLiveshareMethodsAreStable 钉住 31 个方法名本身。
+// TestOfficialForgeLiveshareMethodsAreStable 钉住 32 个方法名本身。
+//
+// rc.2 起 liveshareShares 是 13 个（新增 addSessions），forgePanel 19 个。
 func TestOfficialForgeLiveshareMethodsAreStable(t *testing.T) {
 	methods := OfficialForgeLiveshareMethods()
-	if len(methods) != 31 {
-		t.Fatalf("官方 forgePanel/liveshareShares 方法应是 31 个（19+12），实际 %d", len(methods))
+	if len(methods) != 32 {
+		t.Fatalf("官方 forgePanel/liveshareShares 方法应是 32 个（19+13），实际 %d", len(methods))
 	}
 	seen := map[Method]bool{}
 	for _, m := range methods {
@@ -120,6 +124,7 @@ func TestOfficialForgeLiveshareMethodsAreStable(t *testing.T) {
 		"forgePanel.markReady", "forgePanel.merge", "forgePanel.refresh",
 		"forgePanel.requestWorktree", "forgePanel.restoreWorktree", "forgePanel.retryWorktree",
 		"forgePanel.stopCreation", "forgePanel.submitReview", "forgePanel.track",
+		"liveshareShares.addSessions",
 		"liveshareShares.audit", "liveshareShares.capabilities", "liveshareShares.create",
 		"liveshareShares.identity", "liveshareShares.list", "liveshareShares.relay",
 		"liveshareShares.setCapabilities", "liveshareShares.setRelay", "liveshareShares.stop",
@@ -144,17 +149,17 @@ func TestOfficialForgeLiveshareMethodsAreStable(t *testing.T) {
 		"",
 	} {
 		if IsOfficialForgeLiveshareMethod(out) {
-			t.Fatalf("%q 不属于本族的 31 个方法，却被认领了", out)
+			t.Fatalf("%q 不属于本族的 32 个方法，却被认领了", out)
 		}
 	}
 }
 
-// TestOfficialForgeLiveshareAllReturnNotImplemented 是这 31 个方法的主判据：
+// TestOfficialForgeLiveshareAllReturnNotImplemented 是这 32 个方法的主判据：
 // 合法参数 → 501 + not_implemented + 四字段 + 说清缺什么；没有 result。
 func TestOfficialForgeLiveshareAllReturnNotImplemented(t *testing.T) {
 	bodies := forgeGoodBodies()
-	if len(bodies) != 31 {
-		t.Fatalf("测试数据应覆盖 31 个方法，实际 %d", len(bodies))
+	if len(bodies) != 32 {
+		t.Fatalf("测试数据应覆盖 32 个方法（19 forgePanel + 13 liveshareShares），实际 %d", len(bodies))
 	}
 	srv := forgeOfficialTestServer(t)
 	for _, method := range OfficialForgeLiveshareMethods() {

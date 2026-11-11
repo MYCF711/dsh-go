@@ -43,6 +43,15 @@ type NamespaceSpec struct {
 	Title   string
 	Applies string
 	Fields  []FieldSpec
+	// Schema 是声明式 schemastery envelope（官方 schema.toJSON() 的线上形状）。
+	// 与 Fields 二选一：复杂节点（union/嵌套 dict/浮点下界）表达不了的字段走这里。
+	Schema any
+	// Base 是声明式默认值：Store 还没有这个命名空间的数据时 describe 用它，
+	// 同时它也是"这些默认值必须合法"的自检对象（注册期就校验，坏值 fail-loud）。
+	Base map[string]any
+	// Validate 是声明式命名空间的语义校验（schema 表达不了的跨字段规则）。
+	// Base 与 User 两层都要过它：坏值 fail-loud，不静默截断。
+	Validate func(value any) error
 }
 
 // Registry 是已注册命名空间的有序表。
@@ -59,7 +68,27 @@ func (r *Registry) Register(spec NamespaceSpec) (func(), error) {
 	if spec.NS == "" {
 		return nil, &Error{Code: "bad_request", Message: "设置命名空间不能为空", Hint: "给一个稳定的 ns 名字", Status: 400}
 	}
-	if len(spec.Fields) == 0 {
+	if spec.Schema != nil {
+		// 声明式命名空间：字段由 envelope 表达，Flat Fields 可以为空；
+		// 但默认值必须在注册期就合法（坏 schema/default 不许发布上线）。
+		if spec.Base == nil {
+			return nil, &Error{
+				Code:    "bad_request",
+				Message: fmt.Sprintf("声明式命名空间 %q 缺少 Base 默认值", spec.NS),
+				Hint:    "给出 Store 缺失时 describe 用的默认值",
+				Status:  400,
+			}
+		}
+		section := sectionSpec{ns: spec.NS, schema: spec.Schema, validate: spec.Validate}
+		if err := validateDeclaredValue(section, spec.Base); err != nil {
+			return nil, &Error{
+				Code:    "bad_request",
+				Message: fmt.Sprintf("声明式命名空间 %q 的默认值不合法: %v", spec.NS, err),
+				Hint:    "修正 Base 或 schema；坏默认值不许发布给设置表单",
+				Status:  400,
+			}
+		}
+	} else if len(spec.Fields) == 0 {
 		return nil, &Error{
 			Code:    "bad_request",
 			Message: fmt.Sprintf("设置命名空间 %q 没有字段", spec.NS),
@@ -144,6 +173,7 @@ func (r *Registry) Specs() []NamespaceSpec {
 
 func cloneNamespaceSpec(spec NamespaceSpec) NamespaceSpec {
 	clone := spec
+	clone.Base = deepCloneMap(spec.Base)
 	clone.Fields = make([]FieldSpec, len(spec.Fields))
 	for index, field := range spec.Fields {
 		copied := field
@@ -167,6 +197,20 @@ func cloneNamespaceSpec(spec NamespaceSpec) NamespaceSpec {
 		clone.Fields[index] = copied
 	}
 	return clone
+}
+
+// HostRegistry 是宿主对外发布的设置命名空间表：默认两个（model / permission）
+// 加上 rc.2 的 provider 命名空间 `llm`（retryPolicy schema 的落点）。
+//
+// 为什么不塞进 DefaultRegistry：`settings.describe` 是线上 58 个方法之一，
+// 默认 registry 的形状（恰好两个命名空间）已被既有夹具与 cmd/dshd 的断言钉住；
+// 发布 llm 是**显式**的宿主决定，由 serve 装配点选择（见报告"接线行"）。
+func HostRegistry() *Registry {
+	registry := DefaultRegistry()
+	if _, err := registry.Register(buildProviderNamespaceSpec()); err != nil {
+		panic(fmt.Sprintf("settingsform: llm provider 命名空间非法: %v", err))
+	}
+	return registry
 }
 
 // DefaultRegistry 返回宿主当前真实存在的两个命名空间（model / permission）。

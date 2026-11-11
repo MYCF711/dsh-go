@@ -1,6 +1,16 @@
 package transport
 
-// 官方桌面端 0.2.2-rc.1 的 job.*（3）与 terminal.*（8），L1 语义对齐层。
+// 官方桌面端 job.*（3）与 terminal.*（8+1）的 L1 语义对齐层。
+//
+// rc.1 → rc.2 的 terminal 面变化（本文件已按 rc.2 落地）：
+//   - 新增 `terminal/watch`（`dsh-api-terminal-controller/lib/typert.host.js:637-680`
+//     描述符；实现 `lib/index.js:1265 async *watch`；类型
+//     `@Remote({mode:'stream'}) async *watch(sessionId, signal): AsyncIterable<WebTerminalInfo[]>`
+//     见同文件 `TYPERT.model` 的 `"signature"` 行 743）；
+//   - `WebTerminalInfo` 新增 `origin`/`control`/`sandboxMode`
+//     （zod 见 `lib/typert.host.js:41-43`；赋值点 `lib/index.js:1444-1445`（user 终端
+//     origin=user,control=user）与 `lib/index.js:1474-1476`（agent 终端
+//     origin=agent,control=agent,sandboxMode=policy.mode））。
 //
 // # 契约来源（只读镜像，未改安装目录）
 //
@@ -62,7 +72,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
+
+	"dshgo/internal/jobs"
+	"dshgo/internal/terminal"
 )
 
 // 官方 11 个方法名。顺序与 parity 清单一致，方便和 docs/official-desktop-api-parity.md 对读。
@@ -79,9 +94,13 @@ const (
 	MethodTerminalShells      Method = "terminal.shells"
 	MethodTerminalRename      Method = "terminal.rename"
 	MethodTerminalRetain      Method = "terminal.retain"
+	// MethodTerminalWatch 是 rc.2 新增的 **whole-set 流**：按 sessionId 推送
+	// "当前整个终端集合"，不是单终端增量。官方它不是 agent 作用域方法
+	// （描述符里没有 scope，参数是纯 json 的 `sessionId`），所以不解析 Agent。
+	MethodTerminalWatch Method = "terminal.watch"
 )
 
-// OfficialJobTerminalMethods 返回本层负责的 11 个方法。
+// OfficialJobTerminalMethods 返回本层负责的 12 个方法。
 //
 // **它们是 additive 扩展**：不得加入 SessionMethods 的 canonical 25，
 // 也不得进 TaskActionMethods（那是 jobs.stop / schedule.* 的既有扩展面）。
@@ -90,6 +109,7 @@ func OfficialJobTerminalMethods() []Method {
 		MethodJobList, MethodJobKill, MethodJobFollow,
 		MethodTerminalCreate, MethodTerminalAttach, MethodTerminalList, MethodTerminalClose,
 		MethodTerminalEnvironment, MethodTerminalShells, MethodTerminalRename, MethodTerminalRetain,
+		MethodTerminalWatch,
 	}
 }
 
@@ -200,7 +220,22 @@ type OfficialTerminalShell struct {
 	Supported *bool    `json:"supported,omitempty"`
 }
 
-// OfficialWebTerminalInfo 对应 WebTerminalInfo。
+// OfficialWebTerminalInfo 对应 WebTerminalInfo（**rc.2 形状**）。
+//
+// rc.2 与 rc.1 的字段差异（`docs/evidence/official-method-contract-delta-0.2.2-rc.2.md` §3
+// 的 terminal/attach、terminal/create、terminal/list 三张表）：
+//
+//	新增必填 origin   enum user|agent        —— 谁建了这条终端
+//	新增必填 control  enum user|agent        —— 输入所有权（agent 终端被用户首次键入后交还且不回转）
+//	新增可选 sandboxMode enum read-only|workspace-write|danger-full-access
+//	                                        —— **仅 agent 终端有**；user 终端以系统用户权限运行且省略该字段
+//	state 的 enum 顺序变（rc.1 [failed,running,…] → rc.2 [running,failed,exited]），值集合不变
+//
+// origin/control 是**必填**，所以本类型必须保证任何路径序列化出来的对象都带这两个
+// 字段；宿主侧的 terminalInfo 构造点（cmd/dshd/terminal_pty.go:850）暂不填它们，
+// 由 MarshalJSON 在 wire 边界补齐（见 aligned()）。这样做的好处是**所有**出口
+// （create/list 的 unary 结果、attach 的 snapshot/state 帧、watch 的整份集合）
+// 一次对齐，不需要在 4 个地方各补一遍。
 type OfficialWebTerminalInfo struct {
 	ID       string                `json:"id"`
 	Title    string                `json:"title"`
@@ -211,6 +246,105 @@ type OfficialWebTerminalInfo struct {
 	State    string                `json:"state"`
 	ExitCode *int                  `json:"exitCode"`
 	Error    string                `json:"error,omitempty"`
+	// Origin 是谁建的（user|agent）。空 = 由 aligned() 补默认值。
+	Origin string `json:"origin"`
+	// Control 是输入所有权（user|agent）。空 = 跟随 Origin（官方初始态就是这么来的）。
+	Control string `json:"control"`
+	// SandboxMode 只在 agent 终端上出现；user 终端**省略**（官方描述写死）。
+	SandboxMode string `json:"sandboxMode,omitempty"`
+}
+
+// aligned 补齐 rc.2 的必填字段并给出官方默认值。
+//
+// 默认值的**事实依据**：本宿主目前只有用户终端——`terminal.create` 的官方语义是
+// "Allocate a user shell ... without Agent sandbox or approval restrictions"
+// （`lib/index.js:1179` 的 JSDoc），`terminal.open` 也是人开的；本仓没有
+// `openForAgent`/`agentLaunch` 对应的 agent 终端分配路径（官方 `lib/index.js:1474`
+// 那条 origin:"agent" 分支在本宿主不存在）。所以 origin=user、control=user 是
+// **当前事实**，不是编的默认值。将来若接入 agent 终端，宿主只要显式填这两个字段
+// 即可；这里的补齐只填空值，绝不覆盖已有值。
+func (i OfficialWebTerminalInfo) aligned() OfficialWebTerminalInfo {
+	if i.Origin == "" {
+		i.Origin = OfficialTerminalOriginUser
+	}
+	if i.Control == "" {
+		i.Control = i.Origin
+	}
+	if i.Shell.Args == nil {
+		i.Shell.Args = []string{}
+	}
+	return i
+}
+
+// OfficialTerminalOriginUser / OfficialTerminalOriginAgent 是 origin 的两个取值。
+const (
+	OfficialTerminalOriginUser  = "user"
+	OfficialTerminalOriginAgent = "agent"
+)
+
+// OfficialTerminalControlUser / OfficialTerminalControlAgent 是 control 的两个取值。
+const (
+	OfficialTerminalControlUser  = "user"
+	OfficialTerminalControlAgent = "agent"
+)
+
+// officialTerminalStateValues 是 rc.2 的 state 取值集合（顺序与 zod 一致）。
+var officialTerminalStateValues = []string{"running", "failed", "exited"}
+
+// officialTerminalSandboxModes 是 rc.2 的 sandboxMode 取值集合。
+var officialTerminalSandboxModes = []string{"read-only", "workspace-write", "danger-full-access"}
+
+// MarshalJSON 在 wire 边界补齐 rc.2 必填字段（origin/control、shell.args）。
+//
+// 为什么用 MarshalJSON 而不是在每个 handler 里各调一次 aligned()：attach 的
+// snapshot/state 帧由宿主侧的帧机（cmd/dshd/serve_terminal_api.go:742）直接产出
+// `transport.OfficialWebTerminalInfo` 并交给本层原样转发，本层拿到的是
+// json.RawMessage——**改不了字段**。放在序列化边界是唯一能一次覆盖全部出口的位置。
+func (i OfficialWebTerminalInfo) MarshalJSON() ([]byte, error) {
+	// 定义同底层类型的新类型：不继承本方法，避免递归。
+	type wireInfo OfficialWebTerminalInfo
+	return json.Marshal(wireInfo(i.aligned()))
+}
+
+// validateOfficialWebTerminalInfo 校验 rc.2 枚举取值（**不**替宿主猜值）。
+//
+// 为什么要显式校验：schema 是给客户端用的契约，宿主吐出一个不在枚举里的值
+// （例如把 "dead" 当成 state）在 JSON 上是合法的，在客户端是崩溃或静默错分支。
+// 宁可在这里响亮失败，也不要把非法值发上线。
+func validateOfficialWebTerminalInfo(info OfficialWebTerminalInfo) error {
+	normalized := info.aligned()
+	// 这些都是**宿主侧数据**不合约，不是调用方参数错误（400），也不是能力缺失
+	// （501）：如实回 500 internal 才指向该修的地方。
+	if normalized.ID == "" {
+		return errors.New("宿主给出的 WebTerminalInfo 缺 id（官方必填）")
+	}
+	if !officialTerminalEnumHas(officialTerminalStateValues, normalized.State) {
+		return fmt.Errorf("宿主给出的 WebTerminalInfo.state=%q 不在官方枚举 %v 里",
+			normalized.State, officialTerminalStateValues)
+	}
+	if normalized.Origin != OfficialTerminalOriginUser && normalized.Origin != OfficialTerminalOriginAgent {
+		return fmt.Errorf("宿主给出的 WebTerminalInfo.origin=%q 只能是 user|agent", normalized.Origin)
+	}
+	if normalized.Control != OfficialTerminalControlUser && normalized.Control != OfficialTerminalControlAgent {
+		return fmt.Errorf("宿主给出的 WebTerminalInfo.control=%q 只能是 user|agent", normalized.Control)
+	}
+	if normalized.SandboxMode != "" && !officialTerminalEnumHas(officialTerminalSandboxModes, normalized.SandboxMode) {
+		return fmt.Errorf("宿主给出的 WebTerminalInfo.sandboxMode=%q 不在官方枚举 %v 里",
+			normalized.SandboxMode, officialTerminalSandboxModes)
+	}
+	return nil
+}
+
+// officialTerminalEnumHas 判断枚举取值是否合法（避免为 3 个值引 slices）。
+//
+// 名字带 officialTerminal 前缀：本包已有 containsString（api_descriptors.go）。
+func officialTerminalEnumHas(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // OfficialTerminalCreateRequest 对应 TerminalCreateRequest。
@@ -405,6 +539,17 @@ type OfficialJobTerminalStreams interface {
 // 这样 11 个方法一次接上，且**不会**碰到既有 case（jobs.* / terminal.open|input|output）。
 type OfficialJobTerminal struct {
 	Svc OfficialJobTerminalService
+
+	// WatchInterval 是 `terminal.watch` 差分检测的节奏（0 = terminal.DefaultSetWatchInterval）。
+	//
+	// 官方 watch 的事件源是控制器内部的 roster 监听器（推送）。本宿主当前没有
+	// roster 变更通知点，所以用"每会话一个共享轮询器 + 内容差分"实现同一语义
+	// （whole-set，内容变了才发帧）；宿主接线后调 PublishTerminalChange 即可把
+	// 延迟压到 0。这个字段只影响延迟，不影响正确性。
+	WatchInterval time.Duration
+
+	watchOnce sync.Once
+	watch     *terminal.SetWatcher
 }
 
 // Handles 报这个方法名是不是本层的（只认官方 11 个，绝不抢既有方法）。
@@ -412,7 +557,8 @@ func (h *OfficialJobTerminal) Handles(method string) bool {
 	switch Method(method) {
 	case MethodJobList, MethodJobKill, MethodJobFollow,
 		MethodTerminalCreate, MethodTerminalAttach, MethodTerminalList, MethodTerminalClose,
-		MethodTerminalEnvironment, MethodTerminalShells, MethodTerminalRename, MethodTerminalRetain:
+		MethodTerminalEnvironment, MethodTerminalShells, MethodTerminalRename, MethodTerminalRetain,
+		MethodTerminalWatch:
 		return true
 	}
 	return false
@@ -444,6 +590,8 @@ func (h *OfficialJobTerminal) Serve(w http.ResponseWriter, r *http.Request) {
 		h.HandleTerminalRename(w, r)
 	case MethodTerminalRetain:
 		h.HandleTerminalRetain(w, r)
+	case MethodTerminalWatch:
+		h.HandleTerminalWatch(w, r)
 	default:
 		writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented",
 			method+" 不是官方 job.*/terminal.* 方法，本层不接管"))
@@ -532,6 +680,14 @@ func writeJTOfficialVoid(w http.ResponseWriter) {
 // 状态码映射就是语义：400 改参数、403 换会话、404 换 id、409 别重试、
 // 501 换方法、500 可以重试。
 func writeJTOfficialError(w http.ResponseWriter, method string, err error) {
+	// 官方 JobError 码优先（见 officialJobErrorSurface 的三条要求）：先于 sentinel
+	// 分支，避免"更精确的分类被泛化成 internal"。
+	if code, ok := jobs.CodeOf(err); ok {
+		if status, fourField, _ := officialJobErrorSurface(code); status != 0 {
+			writeJSON(w, status, errorBodyFor(fourField, method+"："+err.Error()))
+			return
+		}
+	}
 	switch {
 	case errors.Is(err, ErrJTOfficialBadParam):
 		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", method+"："+err.Error()))
@@ -545,9 +701,11 @@ func writeJTOfficialError(w http.ResponseWriter, method string, err error) {
 		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", method+"："+err.Error()))
 	case errors.Is(err, ErrJTOfficialUnsupported), errors.Is(err, ErrNotImplemented):
 		writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented", method+"："+err.Error()))
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// 调用方自己走了：这不是服务端错误，但也别回 200。
-		writeJSON(w, http.StatusRequestTimeout, errorBodyFor("internal", method+"：调用被取消（"+err.Error()+"）"))
+	case jobs.IsAbort(err), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// 调用方自己走了：这不是服务端错误，但也别回 200。官方把它命名为
+		// AbortError（等待被取消），所以这里用 gateway 词表里的 cancelled，
+		// 而不是把它和真正的宿主 bug 一起塞进 internal。
+		writeJSON(w, http.StatusRequestTimeout, errorBodyFor("cancelled", method+"：调用被取消（"+err.Error()+"）"))
 	default:
 		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", method+"："+err.Error()))
 	}
@@ -822,6 +980,12 @@ func officialJobTerminalFault(method Method, err error) *OfficialStreamFault {
 	fault := func(code string, status int) *OfficialStreamFault {
 		return &OfficialStreamFault{Code: code, Status: status, Message: string(method) + "：" + err.Error()}
 	}
+	// 官方 JobError 码优先：先于 sentinel 分支，避免更精确的分类被泛化。
+	if code, ok := jobs.CodeOf(err); ok {
+		if status, _, gatewayCode := officialJobErrorSurface(code); status != 0 {
+			return fault(gatewayCode, status)
+		}
+	}
 	switch {
 	case errors.Is(err, ErrJTOfficialBadParam), errors.Is(err, ErrBadJobCursor):
 		return fault("gateway/bad-request", http.StatusBadRequest)
@@ -833,8 +997,10 @@ func officialJobTerminalFault(method Method, err error) *OfficialStreamFault {
 		return fault("gateway/job-finished", http.StatusConflict)
 	case errors.Is(err, ErrJTOfficialUnsupported), errors.Is(err, ErrNotImplemented):
 		return fault("gateway/method-unavailable", http.StatusNotImplemented)
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		return fault("gateway/internal", http.StatusRequestTimeout)
+	case jobs.IsAbort(err), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// 官方把"调用方自己的信号中止了等待"命名为 AbortError；gateway 词表里
+		// 对应 gateway/cancelled（不是 internal——那会把取消报成宿主 bug）。
+		return fault("gateway/cancelled", http.StatusRequestTimeout)
 	default:
 		return fault("gateway/internal", http.StatusInternalServerError)
 	}
@@ -859,6 +1025,12 @@ func officialJobTerminalFaultCode(status int) string {
 		return "not_found"
 	case http.StatusConflict:
 		return "job_finished"
+	case http.StatusTooManyRequests:
+		// 官方 JOB_LIMIT_REACHED 的档（见 officialJobErrorSurface）。
+		return "job_limit_reached"
+	case http.StatusRequestTimeout:
+		// 官方 AbortError / 调用方取消的档：取消不是内部错误。
+		return "cancelled"
 	case http.StatusNotImplemented:
 		return "not_implemented"
 	default:
@@ -888,6 +1060,8 @@ func (h *OfficialJobTerminal) OpenFrameStream(ctx context.Context, method string
 		stream, fault = h.openTerminalAttachStream(ctx, args)
 	case MethodTerminalRetain:
 		stream, fault = h.openTerminalRetainStream(ctx, args)
+	case MethodTerminalWatch:
+		stream, fault = h.openTerminalWatchStream(ctx, args)
 	default:
 		if h.Handles(string(normalized)) {
 			return nil, &OfficialStreamFault{
@@ -964,7 +1138,43 @@ func (h *officialUplinkHeadStream) Push(value json.RawMessage) error {
 	if h.uplink == nil {
 		return fmt.Errorf("%w: 这条流不接受上行数据", ErrJTOfficialBadParam)
 	}
+	if err := validateOfficialUplinkTyped(value); err != nil {
+		return err
+	}
 	return h.uplink.Push(value)
+}
+
+// validateOfficialUplinkTyped 校验官方 write 帧里 `typed` 字段的 wire 形状。
+//
+// `typed:true` 是官方**唯一**的控制权接管入口：客户端在"人真的敲了键盘"时置位，
+// 宿主据此把 control 从 agent 交给 user，且**永不回转**
+// （`dsh-api-terminal-controller/lib/index.js:612`：
+// `if (command.typed === true && this.info.control === "agent") { … control: "user" }`）。
+//
+// 本宿主没有 agent 终端（没有 openForAgent/agentLaunch 路径），所以 control
+// 恒为 user —— 接管是**已达成状态**，没有状态可迁。这里因此只做形状校验：
+//
+//   - 合法（bool）：放行，**不**静默丢字段，也不假装迁移；
+//   - 非法（字符串/数字等）：400 拒绝，因为把 typed 写错的客户端一定也在
+//     别的字段上有问题，静默忽略会让它以为接管生效了。
+func validateOfficialUplinkTyped(value json.RawMessage) error {
+	if len(value) == 0 {
+		return nil
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(value, &probe); err != nil {
+		return nil // 形状由下行帧机自己判（这里只关心 typed）
+	}
+	raw, ok := probe["typed"]
+	if !ok {
+		return nil
+	}
+	var typed bool
+	if err := json.Unmarshal(raw, &typed); err != nil {
+		return fmt.Errorf("%w: 上行帧的 typed 必须是布尔值（官方用它表达\"人真的敲了键盘\"），收到 %s",
+			ErrJTOfficialBadParam, string(raw))
+	}
+	return nil
 }
 
 // writeJTOfficialStreamFault 是"还没开始写帧"时的错误出口：状态码 + 四字段。
@@ -1039,6 +1249,12 @@ func (h *OfficialJobTerminal) HandleTerminalCreate(w http.ResponseWriter, r *htt
 		writeJTOfficialError(w, method, err)
 		return
 	}
+	// rc.2 起 origin/control 是**必填**：宿主给出不在枚举里的值时必须响亮失败，
+	// 不许把非法值发上线（客户端会拿去开分支）。
+	if err := validateOfficialWebTerminalInfo(info); err != nil {
+		writeJTOfficialError(w, method, err)
+		return
+	}
 	writeJTOfficialResult(w, info)
 }
 
@@ -1107,6 +1323,12 @@ func (h *OfficialJobTerminal) HandleTerminalList(w http.ResponseWriter, r *http.
 	}
 	if infos == nil {
 		infos = []OfficialWebTerminalInfo{}
+	}
+	for _, info := range infos {
+		if err := validateOfficialWebTerminalInfo(info); err != nil {
+			writeJTOfficialError(w, method, err)
+			return
+		}
 	}
 	writeJTOfficialResult(w, infos)
 }
@@ -1286,6 +1508,170 @@ func (h *OfficialJobTerminal) openTerminalRetainStream(ctx context.Context, raw 
 		return nil, officialJobTerminalFault(method, err)
 	}
 	return stream, nil
+}
+
+// ---------------------------------------------------------------------------
+// terminal.watch（rc.2 新增，whole-set 流）
+// ---------------------------------------------------------------------------
+
+// terminalWatcher 取本层唯一的集合事件源（懒建，进程内单例语义）。
+//
+// 为什么放在 handler 上而不是每次请求新建：差分检测要**每会话一个轮询器**，
+// 10 个客户端看同一个会话时不该有 10 个 goroutine 各取一遍真值。惰性创建保证
+// 没调用过 watch 的宿主不多一个 goroutine。
+func (h *OfficialJobTerminal) terminalWatcher() *terminal.SetWatcher {
+	h.watchOnce.Do(func() {
+		h.watch = terminal.NewSetWatcher(h.terminalSetSource, h.WatchInterval)
+	})
+	return h.watch
+}
+
+// terminalSetSource 是 watch 的**真值来源**：直接读服务面的 terminal.list。
+//
+// 为什么复用 TerminalList 而不是另建一份状态：官方 watch 的载荷本来就是
+// `list(sessionId)` 的结果（`lib/index.js:1173 list()` / `:1285 yield this.list(sessionId)`），
+// 另建一份状态必然与 list 分叉——那种 bug 的表现是"面板上有、列表里没有"。
+func (h *OfficialJobTerminal) terminalSetSource(ctx context.Context, sessionID string) ([]byte, error) {
+	if h == nil || h.Svc == nil {
+		return nil, fmt.Errorf("%w: terminal.watch 未接线：宿主没有 job/terminal 服务面（Svc=nil）",
+			ErrJTOfficialUnsupported)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	infos, err := h.Svc.TerminalList(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if infos == nil {
+		infos = []OfficialWebTerminalInfo{}
+	}
+	for _, info := range infos {
+		if err := validateOfficialWebTerminalInfo(info); err != nil {
+			return nil, err
+		}
+	}
+	// json.Marshal 对固定结构体字段顺序稳定 → 同一份集合必然得到同一串字节，
+	// 这正是差分检测需要的"稳定编码"（元素里有个 MarshalJSON 补 rc.2 必填字段）。
+	payload, err := json.Marshal(infos)
+	if err != nil {
+		return nil, fmt.Errorf("terminal.watch 序列化终端集合失败：%w", err)
+	}
+	return payload, nil
+}
+
+// PublishTerminalChange 报告"这个会话的终端集合可能变了"（**宿主接线用**）。
+//
+// 官方在 roster 变化点直接调 `changed(sessionId)`（`lib/index.js:1388-1389`）唤醒
+// 所有 watch 流；本宿主对应的接线位置是（Lead 集成时各加一行）：
+//
+//	cmd/dshd/serve_terminal_api.go  officialPTYTerminalAPI.TerminalCreate 成功后
+//	cmd/dshd/serve_terminal_api.go  officialPTYTerminalAPI.TerminalClose 之后
+//	cmd/dshd/serve_terminal_api.go  officialPTYTerminalAPI.TerminalRename 之后
+//	cmd/dshd/terminal_pty.go        resize / 进程退出（state=running→exited）之后
+//	cmd/dshd/terminal_pty.go        control 转移（typed 接管）之后
+//
+// 不接线也**正确**：差分检测会按 WatchInterval 发现变化，只慢一个间隔。
+func (h *OfficialJobTerminal) PublishTerminalChange(sessionID string) {
+	if h == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	h.terminalWatcher().Publish(sessionID)
+}
+
+// CloseWatch 释放本层的事件源（幂等；服务面关停时调）。
+func (h *OfficialJobTerminal) CloseWatch() error {
+	if h == nil {
+		return nil
+	}
+	h.watchOnce.Do(func() {}) // 没创建过就不用创建
+	if h.watch == nil {
+		return nil
+	}
+	return h.watch.Close()
+}
+
+// HandleTerminalWatch 是官方 terminal/watch 的**真流**入口（whole-set 帧）。
+//
+// 官方描述（`lib/typert.host.js:639`）：「Stream the Session's retained terminals
+// as whole sets, without resolving or activating an Agent.」结果描述
+// （`:664`）：「the current set, then a new set after creation, removal or any
+// published state change.」所以这条流：
+//
+//   - 首帧 = 当前整份集合（不是空帧、不是心跳）；
+//   - 之后**只在集合真的变了**时再发一整份（不按时间空转）；
+//   - **没有自然结束**（官方 watch 一直开着，直到客户端取消）；
+//   - 参数只有 `sessionId`（json），**不解析 Agent**（官方描述符没有 scope 字段）。
+func (h *OfficialJobTerminal) HandleTerminalWatch(w http.ResponseWriter, r *http.Request) {
+	raw, fault := readOfficialStreamBody(r)
+	if fault != nil {
+		writeJTOfficialStreamFault(w, fault)
+		return
+	}
+	h.serveOfficialStream(w, r, MethodTerminalWatch, func(ctx context.Context) (OfficialFrameStream, *OfficialStreamFault) {
+		return h.openTerminalWatchStream(ctx, raw)
+	})
+}
+
+// openTerminalWatchStream 解析 terminal.watch 参数并打开帧机（HTTP 与 mux 共用）。
+func (h *OfficialJobTerminal) openTerminalWatchStream(ctx context.Context, raw json.RawMessage) (OfficialFrameStream, *OfficialStreamFault) {
+	const method = MethodTerminalWatch
+	var params officialIdentity
+	if fault := decodeOfficialStreamArgs(method, raw, &params); fault != nil {
+		return nil, fault
+	}
+	sessionID, err := params.resolve(string(method))
+	if err != nil {
+		return nil, officialJobTerminalFault(method, err)
+	}
+	// 订阅的寿命跟这条流绑定：流被关（客户端断开/载体关闭）就退订，
+	// 最后一个订阅者走了事件源会自己把该会话的轮询器摘掉。
+	subCtx, cancel := context.WithCancel(ctx)
+	sub, err := h.terminalWatcher().Subscribe(subCtx, sessionID)
+	if err != nil {
+		cancel()
+		return nil, officialJobTerminalFault(method, err)
+	}
+	return &officialTerminalWatchStream{sub: sub, cancel: cancel}, nil
+}
+
+// officialTerminalWatchStream 把集合事件源接成官方帧机（一帧 = 一整份集合）。
+//
+// 背压在这里是**天然**的：帧按需从订阅取（拉模型），消费者慢的时候订阅侧
+// 只会合并中间版本，HTTP 写端也就不可能积压一串过期集合。
+type officialTerminalWatchStream struct {
+	sub    *terminal.SetSubscription
+	cancel context.CancelFunc
+}
+
+var _ OfficialFrameStream = (*officialTerminalWatchStream)(nil)
+
+func (s *officialTerminalWatchStream) Next(ctx context.Context) (json.RawMessage, bool, *OfficialStreamFault) {
+	if s == nil || s.sub == nil {
+		return nil, true, nil
+	}
+	update, ok := s.sub.Next(ctx)
+	if !ok {
+		// 客户端取消/载体关闭：正常结束（不是错误）。
+		return nil, true, nil
+	}
+	if update.Err != nil {
+		return nil, false, officialJobTerminalFault(MethodTerminalWatch,
+			fmt.Errorf("终端集合真值来源连续失败：%w", update.Err))
+	}
+	return json.RawMessage(update.Payload), false, nil
+}
+
+func (s *officialTerminalWatchStream) Close() {
+	if s == nil {
+		return
+	}
+	if s.sub != nil {
+		s.sub.Close()
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
 }
 
 // officialMethodFromRequest 给测试与其他调用方解出方法名（/api/<method> → <method>）。

@@ -25,6 +25,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/agent"
 	"dshgo/internal/modes"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
@@ -108,6 +110,10 @@ type agentOfficialAPI struct {
 	commandsErr      error
 	children         *transport.OfficialChildRegistry
 	questionWaits    *transport.OfficialQuestionWaits
+
+	// teamModes 是 rc.2 `agentTeams.setEnabled` 的**真实持久化**状态
+	// （<home>/state/agent-team-mode.json）。懒建，理由见 agentTeamModeStore。
+	teamModes *agentTeamModeStore
 }
 
 // agentGoalTimes 是某个 goal id 的创建/最后变更时间（epoch 毫秒）。
@@ -819,6 +825,248 @@ func (a *agentOfficialAPI) subagentsInterruptByParent(childSessionID, parentSess
 	}
 	a.adoptChild(childSessionID)
 	return a.childRegistry().InterruptByParent(childSessionID, parentSessionID)
+}
+
+// ---------------------------------------------------------------------------
+// agentTeams.* / subagents.interruptByUser（官方 0.2.2-rc.2 的 Team 分派面）
+// ---------------------------------------------------------------------------
+
+// agentTeamModeDoc 是 `<home>/state/agent-team-mode.json` 的落盘形状。
+//
+// 为什么是**宿主自己的**一份文档：官方把 Team 选择写成会话事件
+// `team/mode {enabled}`（`dsh-agent-team/src/index.ts:116`），而本仓的 v4 事件层
+// 与投影由另一条线负责（`internal/session` 不在本任务写作用域）。在事件落地之前，
+// 这里提供**真实、durable、可跨进程读回**的选择存储：它不假装那是 `team/mode`
+// 事件，也不让 `setEnabled` 变成"只在内存里记一下"。
+//
+// 事件层接上之后，本文件只需要在 setEnabled 里多 append 一条 `team/mode`
+// （接线说明见报告 B2 的"未实现项"），读路径可以继续用这份文档兜底。
+type agentTeamModeDoc struct {
+	Version  int                           `json:"version"`
+	Sessions map[string]agentTeamModeEntry `json:"sessions"`
+}
+
+// agentTeamModeEntry 是一个根会话的 Team 选择。
+type agentTeamModeEntry struct {
+	Enabled bool `json:"enabled"`
+	// UpdatedAt 是最近一次**真的改变**选择的时间（epoch ms）。重复设置同值不写盘
+	// （官方 `if (this.isEnabled(root) !== enabled)` 同义）。
+	UpdatedAt int64 `json:"updatedAt"`
+}
+
+// agentTeamModeStore 是 Team 选择的 durable 存储。
+//
+// 并发模型：一把 mutex 保护"读—比较—写"整段，落盘用同目录 tmp + rename
+// （agentWriteDoc），所以任何时刻盘上要么是旧值要么是新值，不会出现半截文档。
+type agentTeamModeStore struct {
+	mu     sync.Mutex
+	path   string
+	doc    agentTeamModeDoc
+	loaded bool
+}
+
+// newAgentTeamModeStore 造一个指向 <home>/state/agent-team-mode.json 的存储。
+func newAgentTeamModeStore(home string) *agentTeamModeStore {
+	return &agentTeamModeStore{
+		path: filepath.Join(home, "state", "agent-team-mode.json"),
+		doc:  agentTeamModeDoc{Version: agentTeamModeVersion, Sessions: map[string]agentTeamModeEntry{}},
+	}
+}
+
+// agentTeamModeVersion 是落盘文档版本；读到别的版本一律当"看不懂"报错，
+// 不猜（猜错会把用户的 Team 选择悄悄改掉）。
+const agentTeamModeVersion = 1
+
+// load 读一次盘（只读一次，之后走内存；写盘时同步更新内存）。
+func (s *agentTeamModeStore) load() error {
+	if s == nil {
+		return fmt.Errorf("%w: Team 选择存储没有装配", transport.ErrOfficialNotImplemented)
+	}
+	if s.loaded {
+		return nil
+	}
+	var doc agentTeamModeDoc
+	found, err := agentReadDoc(s.path, &doc)
+	if err != nil {
+		return fmt.Errorf("%w: %v", transport.ErrStatePersistence, err)
+	}
+	if found {
+		if doc.Version != agentTeamModeVersion {
+			return fmt.Errorf("%w: %s 的 version=%d，本宿主只认 %d",
+				transport.ErrStatePersistence, s.path, doc.Version, agentTeamModeVersion)
+		}
+		if doc.Sessions == nil {
+			doc.Sessions = map[string]agentTeamModeEntry{}
+		}
+	}
+	s.doc = doc
+	if s.doc.Sessions == nil {
+		s.doc.Sessions = map[string]agentTeamModeEntry{}
+	}
+	s.loaded = true
+	return nil
+}
+
+// get 读一个会话的选择；found=false 表示"从未设置"（官方默认 false）。
+func (s *agentTeamModeStore) get(sessionID string) (enabled, found bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.load(); err != nil {
+		return false, false, err
+	}
+	entry, ok := s.doc.Sessions[sessionID]
+	return entry.Enabled, ok, nil
+}
+
+// effective 是"当前生效的 Team 模式"：从未设置 = 官方默认 false。
+func (s *agentTeamModeStore) effective(sessionID string) (bool, error) {
+	enabled, _, err := s.get(sessionID)
+	return enabled, err
+}
+
+// set 持久化一次选择；同值不写盘（官方不重复 append）。
+// 返回 changed 表示这次是否真的改变了状态。
+func (s *agentTeamModeStore) set(sessionID string, enabled bool, now time.Time) (changed bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.load(); err != nil {
+		return false, err
+	}
+	if cur, ok := s.doc.Sessions[sessionID]; ok && cur.Enabled == enabled {
+		return false, nil
+	} else if !ok && !enabled {
+		// 默认就是 false；把 false 写成一条记录等于伪造一条"用户改过"的历史。
+		return false, nil
+	}
+	s.doc.Sessions[sessionID] = agentTeamModeEntry{Enabled: enabled, UpdatedAt: now.UnixMilli()}
+	if s.doc.Version == 0 {
+		s.doc.Version = agentTeamModeVersion
+	}
+	if err := agentWriteDoc(s.path, s.doc); err != nil {
+		// 写失败要回滚内存，否则内存说"开了"、盘上是旧的。
+		if enabled {
+			delete(s.doc.Sessions, sessionID)
+		} else {
+			s.doc.Sessions[sessionID] = agentTeamModeEntry{Enabled: !enabled, UpdatedAt: now.UnixMilli()}
+		}
+		return false, fmt.Errorf("%w: 写 %s 失败: %v", transport.ErrStatePersistence, s.path, err)
+	}
+	return true, nil
+}
+
+// teamModeStore 懒建 Team 选择存储（第一次用到时按 deps.home 装配）。
+func (a *agentOfficialAPI) teamModeStore() (*agentTeamModeStore, error) {
+	if a == nil {
+		return nil, fmt.Errorf("%w: 没有宿主对象", transport.ErrOfficialNotImplemented)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.teamModes == nil {
+		if strings.TrimSpace(a.deps.home) == "" {
+			return nil, fmt.Errorf("%w: agentTeams.setEnabled 未接线：宿主没有 home 目录",
+				transport.ErrOfficialNotImplemented)
+		}
+		a.teamModes = newAgentTeamModeStore(a.deps.home)
+	}
+	return a.teamModes, nil
+}
+
+// agentTeamsSetEnabled 是官方 `agentTeams.setEnabled` 的宿主实现。
+//
+// 官方语义逐条落地（`dsh-agent-team/src/index.ts:111-118`）：
+//   - **只允许树根改**：root !== agent → TEAM_LEAD_REQUIRED（本宿主用它自己的
+//     durable `subagent/spawn` 记录判"是不是别人的子会话"，与 internal/agent 同源）；
+//   - "选择在持久化之前生效 + flush 后 fulfillment" → 这里写盘成功才算成功，
+//     写失败回 ErrStatePersistence（绝不报成功）；
+//   - 同值不重复 append。
+func (a *agentOfficialAPI) agentTeamsSetEnabled(req transport.OfficialAgentTeamSetEnabledRequest) error {
+	sessionID := strings.TrimSpace(req.Agent)
+	if sessionID == "" {
+		return fmt.Errorf("%w: agent 是空串", transport.ErrOfficialBadInput)
+	}
+	if err := a.agentEnsureSession(sessionID); err != nil {
+		return err
+	}
+	// 树根判定：这条会话自己带 `subagent/spawn` 记录（childSessionId == 自己）
+	// 就说明它是某个父的子会话，不是树根。
+	if _, isChild, err := agent.FindChild(a.deps.home, sessionID); err != nil {
+		return fmt.Errorf("%w: 判树根失败: %v", transport.ErrOfficialBadInput, err)
+	} else if isChild {
+		return transport.ErrOfficialTeamLeadRequired
+	}
+	store, err := a.teamModeStore()
+	if err != nil {
+		return err
+	}
+	if _, err := store.set(sessionID, req.Enabled, time.Now()); err != nil {
+		return err
+	}
+	return nil
+}
+
+// agentTeamsIsEnabled 读一个会话**生效的** Team 模式（官方 `isEnabled` 的宿主投影）。
+// 默认 false：从未设置过就是关（`dsh-agent-team/src/index.ts:94-97`）。
+func (a *agentOfficialAPI) agentTeamsIsEnabled(sessionID string) (bool, error) {
+	store, err := a.teamModeStore()
+	if err != nil {
+		return false, err
+	}
+	return store.effective(strings.TrimSpace(sessionID))
+}
+
+// agentInterruptByUser 是官方 `subagents.interruptByUser` 的宿主实现。
+//
+// 官方口径（`dsh-subagent` 的 interruptByUser 描述逐字）：
+//   - 授权在**目标会话**上由网关完成，所以这里**不再查父**（不跑 catalog/history/
+//     persistence/parent Agent lookup），只把取消信号交给真实的取消通道；
+//   - "不存在 / 空闲 / 已完成的目标是 accepted no-op"——这是官方的明确语义，
+//     不是把错误吞掉：信号确实被接纳了，只是没有在飞的一轮可停；
+//   - accepted 只表示信号被接纳，**不代表目标已静止**。
+func (a *agentOfficialAPI) agentInterruptByUser(childSessionID string) (transport.OfficialAccepted, error) {
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return transport.OfficialAccepted{}, fmt.Errorf("%w: childSessionId 是空串", transport.ErrOfficialBadInput)
+	}
+	if a == nil || a.deps.interrupt == nil {
+		return transport.OfficialAccepted{}, fmt.Errorf(
+			"%w: subagents.interruptByUser 未接线：宿主没有取消通道（cmd/dshd/serve.go 的 agentOfficialDeps.interrupt）",
+			transport.ErrOfficialNotImplemented)
+	}
+	// 目标会话不存在 = 官方 accepted no-op（先判，避免取消通道把"没这条会话"
+	// 当内部错误）。
+	if !a.agentSessionExists(childSessionID) {
+		return transport.OfficialAccepted{Accepted: true}, nil
+	}
+	if err := a.deps.interrupt(childSessionID); err != nil {
+		// 空闲（没有在飞的一轮）也是 accepted：目标本来就静止。
+		if errors.Is(err, ErrNoSuchTurn) || errors.Is(err, transport.ErrNoSuchSession) {
+			return transport.OfficialAccepted{Accepted: true}, nil
+		}
+		return transport.OfficialAccepted{}, err
+	}
+	return transport.OfficialAccepted{Accepted: true}, nil
+}
+
+// bindTeamRC2 把 rc.2 Team 分派面的两个方法交给 Transport（与 bind() 共享同一份
+// 宿主状态：同一个 home、同一个取消通道、同一个 Team 选择存储）。
+func (a *agentOfficialAPI) bindTeamRC2() transport.OfficialAgentTeamRC2API {
+	return transport.OfficialAgentTeamRC2API{
+		SetEnabled:      a.agentTeamsSetEnabled,
+		InterruptByUser: a.agentInterruptByUser,
+	}
+}
+
+// newAgentOfficialAPIWithTeamRC2 同时交回 rc.2 Team 分派面的实现。
+//
+// 接线（Lead 在 cmd/dshd/serve.go 补两行，见报告 B2 的"接线行"）：
+//
+//	core := newAgentOfficialAPICore(agentOfficialDeps{...})
+//	srv.AttachOfficialAgentAPI(core.bind())
+//	srv.AttachOfficialAgentTeamRC2API(core.bindTeamRC2())
+//	srv.DetachOfficialAgentTeamRC2API() // 测试收尾用
+func newAgentOfficialAPIWithTeamRC2(deps agentOfficialDeps) (transport.OfficialAgentAPI, transport.OfficialAgentTeamRC2API) {
+	core := newAgentOfficialAPICore(deps)
+	return core.bind(), core.bindTeamRC2()
 }
 
 // ---------------------------------------------------------------------------

@@ -211,6 +211,12 @@ type sectionSpec struct {
 	title   string
 	applies string
 	fields  []fieldSpec
+	// schema 是声明式 envelope（有则替换 schemaFor 的生成结果）。
+	schema any
+	// base 是声明式默认值：Store 没有这个命名空间时 describe 用它。
+	base map[string]any
+	// validate 是该命名空间的语义校验（schema 表达不了的跨字段规则）。
+	validate func(value any) error
 }
 
 // sectionSpecFromNamespace 把插件声明转成内部的 section 描述。
@@ -232,7 +238,10 @@ func sectionSpecFromNamespace(spec NamespaceSpec) sectionSpec {
 			secret:    field.Secret,
 		})
 	}
-	return sectionSpec{ns: spec.NS, title: spec.Title, applies: applies, fields: fields}
+	return sectionSpec{
+		ns: spec.NS, title: spec.Title, applies: applies, fields: fields,
+		schema: spec.Schema, base: deepCloneMap(spec.Base), validate: spec.Validate,
+	}
 }
 
 // Service 是无网络、无文件系统副作用的 ConfigForm 核心。
@@ -271,30 +280,59 @@ func (s *Service) spec(namespace string) (sectionSpec, error) {
 }
 
 func (s *Service) read(namespace string) (sectionSpec, Document, error) {
+	spec, doc, _, err := s.readOrigin(namespace)
+	return spec, doc, err
+}
+
+// readOrigin 与 read 同一条路径，额外回答"这份文档是不是真的来自 Store"。
+// 声明式命名空间在宿主存储还没接线时回落到声明的 Base，此时 persisted=false
+// ——describe 会据此把 section 标成只读，而不是假装可写。
+func (s *Service) readOrigin(namespace string) (sectionSpec, Document, bool, error) {
 	spec, err := s.spec(namespace)
 	if err != nil {
-		return sectionSpec{}, Document{}, err
+		return sectionSpec{}, Document{}, false, err
 	}
 	if s.store == nil {
-		return sectionSpec{}, Document{}, &Error{Code: "internal", Message: "settings store 未接线", Hint: "检查 dshd serve 装配", Retryable: true, Status: 500}
+		return sectionSpec{}, Document{}, false, &Error{Code: "internal", Message: "settings store 未接线", Hint: "检查 dshd serve 装配", Retryable: true, Status: 500}
 	}
 	doc, err := s.store.Read(namespace)
+	persisted := true
 	if err != nil {
-		return sectionSpec{}, Document{}, AsError(err)
+		if spec.schema == nil || !isNamespaceNotFound(err) {
+			return sectionSpec{}, Document{}, false, AsError(err)
+		}
+		// 声明式命名空间：Store 没有这个 ns 不是错误，用声明默认值投影。
+		persisted = false
+		doc = Document{Base: deepCloneMap(spec.base)}
 	}
 	if doc.Base == nil {
-		return sectionSpec{}, Document{}, &Error{Code: "internal", Message: namespace + " 存储缺少 base", Hint: "检查现有默认设置接线", Retryable: true, Status: 500}
+		if spec.schema != nil {
+			doc.Base = deepCloneMap(spec.base)
+		}
+	}
+	if doc.Base == nil {
+		return sectionSpec{}, Document{}, false, &Error{Code: "internal", Message: namespace + " 存储缺少 base", Hint: "检查现有默认设置接线", Retryable: true, Status: 500}
 	}
 	if doc.Revision < 0 {
-		return sectionSpec{}, Document{}, &Error{Code: "internal", Message: namespace + " revision 不能为负数", Hint: "检查持久设置文件", Retryable: true, Status: 500}
+		return sectionSpec{}, Document{}, false, &Error{Code: "internal", Message: namespace + " revision 不能为负数", Hint: "检查持久设置文件", Retryable: true, Status: 500}
 	}
 	if err := validateUser(spec, doc.Base); err != nil {
-		return sectionSpec{}, Document{}, &Error{Code: "internal", Message: "启动默认值无效: " + err.Error(), Hint: "修正 serve 的 --model/--policy 或既有存储", Retryable: true, Status: 500}
+		return sectionSpec{}, Document{}, false, &Error{Code: "internal", Message: "启动默认值无效: " + err.Error(), Hint: "修正 serve 的 --model/--policy 或既有存储", Retryable: true, Status: 500}
 	}
 	if err := validateUser(spec, doc.User); err != nil {
-		return sectionSpec{}, Document{}, &Error{Code: "internal", Message: "持久默认值无效: " + err.Error(), Hint: "修正既有 session override 文件中的保留默认值", Retryable: true, Status: 500}
+		return sectionSpec{}, Document{}, false, &Error{Code: "internal", Message: "持久默认值无效: " + err.Error(), Hint: "修正既有 session override 文件中的保留默认值", Retryable: true, Status: 500}
 	}
-	return spec, doc, nil
+	if spec.schema != nil {
+		// 声明式命名空间的读路径校验：base 坏 = 宿主装配 bug（internal），
+		// user 坏 = 存进去的值不合法，按参数类错误 fail-loud（不静默回落默认）。
+		if err := validateDeclaredValue(spec, doc.Base); err != nil {
+			return sectionSpec{}, Document{}, false, &Error{Code: "internal", Message: "启动默认值无效: " + err.Error(), Hint: "修正 settingsform 声明或既有存储", Retryable: true, Status: 500}
+		}
+		if err := validateDeclaredValue(spec, doc.User); err != nil {
+			return sectionSpec{}, Document{}, false, AsError(err)
+		}
+	}
+	return spec, doc, persisted, nil
 }
 
 // Describe 读取所有真实命名空间；任何一个存储坏掉都整体报错，不拿旧值冒充现状。
@@ -306,11 +344,11 @@ func (s *Service) Describe() (DescribeResult, error) {
 		Errors:     make([]Error, 0),
 	}
 	for _, spec := range s.specs {
-		_, doc, err := s.read(spec.ns)
+		_, doc, persisted, err := s.readOrigin(spec.ns)
 		if err != nil {
 			return DescribeResult{}, err
 		}
-		view := makeView(spec, doc)
+		view := makeView(spec, doc, persisted)
 		out.Namespaces = append(out.Namespaces, view.Namespace)
 		out.Sections = append(out.Sections, view.Section)
 	}
@@ -319,11 +357,11 @@ func (s *Service) Describe() (DescribeResult, error) {
 
 // Get 返回一个命名空间的机器可读 section。
 func (s *Service) Get(namespace string) (Section, error) {
-	spec, doc, err := s.read(namespace)
+	spec, doc, persisted, err := s.readOrigin(namespace)
 	if err != nil {
 		return Section{}, err
 	}
-	return makeView(spec, doc).Section, nil
+	return makeView(spec, doc, persisted).Section, nil
 }
 
 // Mutate 在一次 revision 栅栏后按顺序应用 ops；任何 op 失败都不写存储。
@@ -331,18 +369,36 @@ func (s *Service) Mutate(namespace string, ops []PathOp, expectedRevision *int64
 	if expectedRevision != nil && *expectedRevision < 0 {
 		return MutationResult{}, &Error{Code: "bad_request", Message: "expectedRevision 不能为负数", Hint: "省略它或使用 describe/get 返回的非负 revision", Status: 400}
 	}
-	spec, doc, err := s.read(namespace)
+	spec, doc, persisted, err := s.readOrigin(namespace)
 	if err != nil {
 		return MutationResult{}, err
 	}
 	if expectedRevision != nil && *expectedRevision != doc.Revision {
 		return MutationResult{}, RevisionConflict(namespace, *expectedRevision, doc.Revision)
 	}
-	user := clone(doc.User)
+	user := deepCloneMap(doc.User)
 	if user == nil {
 		user = map[string]any{}
 	}
 	for _, op := range ops {
+		if spec.schema != nil {
+			// 声明式命名空间的路径由 schema 定义，可以是多段（官方 UI 写
+			// `providers.<route>.retryPolicy` 就是三段 op）。
+			if len(op.Path) == 0 {
+				return MutationResult{}, &Error{Code: "invalid_path", Message: "设置路径不能为空", Hint: "按 schema 的字段路径提交", Status: 400}
+			}
+			switch op.Op {
+			case "set":
+				if err := setNestedValue(user, op.Path, op.Value); err != nil {
+					return MutationResult{}, err
+				}
+			case "unset":
+				deleteNestedValue(user, op.Path)
+			default:
+				return MutationResult{}, &Error{Code: "bad_request", Message: "未知设置 op: " + op.Op, Hint: "op 只能是 set 或 unset", Status: 400}
+			}
+			continue
+		}
 		field, err := spec.field(op.Path)
 		if err != nil {
 			return MutationResult{}, err
@@ -361,11 +417,14 @@ func (s *Service) Mutate(namespace string, ops []PathOp, expectedRevision *int64
 	}
 	revision, err := s.store.Write(namespace, user, expectedRevision)
 	if err != nil {
+		if spec.schema != nil && !persisted && isNamespaceNotFound(err) {
+			return MutationResult{}, readOnlyProviderNamespaceError(namespace)
+		}
 		return MutationResult{}, AsError(err)
 	}
 	doc.User = user
 	doc.Revision = revision
-	return makeView(spec, doc), nil
+	return makeView(spec, doc, true), nil
 }
 
 // Update 是官方 `settings/update` 的语义：把 patch **合并**进一个 namespace 的
@@ -389,7 +448,7 @@ func (s *Service) writeSection(namespace string, input map[string]any, expectedR
 	if expectedRevision != nil && *expectedRevision < 0 {
 		return MutationResult{}, &Error{Code: "bad_request", Message: "expectedRevision 不能为负数", Hint: "省略它或使用 describe/get 返回的非负 revision", Status: 400}
 	}
-	spec, doc, err := s.read(namespace)
+	spec, doc, persisted, err := s.readOrigin(namespace)
 	if err != nil {
 		return MutationResult{}, err
 	}
@@ -400,7 +459,7 @@ func (s *Service) writeSection(namespace string, input map[string]any, expectedR
 	if replace {
 		user = make(map[string]any, len(input))
 	} else {
-		user = clone(doc.User)
+		user = deepCloneMap(doc.User)
 		if user == nil {
 			user = map[string]any{}
 		}
@@ -415,11 +474,14 @@ func (s *Service) writeSection(namespace string, input map[string]any, expectedR
 	}
 	revision, err := s.store.Write(namespace, user, expectedRevision)
 	if err != nil {
+		if spec.schema != nil && !persisted && isNamespaceNotFound(err) {
+			return MutationResult{}, readOnlyProviderNamespaceError(namespace)
+		}
 		return MutationResult{}, AsError(err)
 	}
 	doc.User = user
 	doc.Revision = revision
-	return makeView(spec, doc), nil
+	return makeView(spec, doc, true), nil
 }
 
 // Reset 清一个字段（path 为单段）或整个 namespace（path 为 nil）。
@@ -451,6 +513,10 @@ func (s sectionSpec) field(path []string) (fieldSpec, error) {
 }
 
 func validateUser(spec sectionSpec, user map[string]any) error {
+	if spec.schema != nil {
+		// 声明式命名空间：整份值按同一份 envelope + 语义规则校验（读/写同源）。
+		return validateDeclaredValue(spec, user)
+	}
 	for key := range user {
 		if _, err := spec.field([]string{key}); err != nil {
 			return err
@@ -507,9 +573,9 @@ func validateUser(spec sectionSpec, user map[string]any) error {
 	return nil
 }
 
-func makeView(spec sectionSpec, doc Document) MutationResult {
-	value := clone(doc.Base)
-	user := clone(doc.User)
+func makeView(spec sectionSpec, doc Document, persisted bool) MutationResult {
+	value := deepCloneMap(doc.Base)
+	user := deepCloneMap(doc.User)
 	base := clone(doc.Base)
 	fields := make([]Field, 0, len(spec.fields))
 	for _, fieldSpec := range spec.fields {
@@ -528,21 +594,38 @@ func makeView(spec sectionSpec, doc Document) MutationResult {
 	if len(user) == 0 {
 		user = nil
 	}
+	if spec.schema != nil {
+		// 声明式命名空间没有扁平字段：value 由 base + user 逐顶层键合成，
+		// 与官方 "value 是组合后的 section" 语义一致。
+		value = deepCloneMap(doc.Base)
+		for key, item := range doc.User {
+			value[key] = deepCloneValue(item)
+		}
+	}
 	applies := spec.applies
 	if applies == "" {
 		applies = "live"
+	}
+	writable := true
+	if spec.schema != nil && !persisted {
+		// Store 没有这个 ns：describe 如实标成只读，别让客户端以为存得进去。
+		writable = false
 	}
 	return MutationResult{
 		Namespace: NamespaceView{
 			NS: spec.ns, Schema: schemaFor(spec), Value: value, Base: base, User: user,
 			AutoGenerate: true, Applies: applies, Secrets: secretPaths(spec), Revision: doc.Revision,
 		},
-		Section: Section{NS: spec.ns, Title: spec.title, Writable: true, Revision: doc.Revision, Fields: fields, Errors: []Error{}},
+		Section: Section{NS: spec.ns, Title: spec.title, Writable: writable, Revision: doc.Revision, Fields: fields, Errors: []Error{}},
 	}
 }
 
 // schemaFor 使用官方 SettingsSchemaService 能 rehydrate 的 schemastery envelope。
+// 声明式命名空间直接下发声明（复杂节点表达不了时才走下面两个写死的分支）。
 func schemaFor(spec sectionSpec) any {
+	if spec.schema != nil {
+		return spec.schema
+	}
 	if spec.ns == NamespacePermission {
 		return map[string]any{
 			"uid": 6,
@@ -559,6 +642,74 @@ func schemaFor(spec sectionSpec) any {
 	return map[string]any{"type": "object", "dict": map[string]any{
 		FieldDefaultModel: map[string]any{"type": "string", "meta": map[string]any{}},
 	}}
+}
+
+// deepCloneMap 递归复制 map/array：声明式命名空间的嵌套值不能在 Service 里
+// 与调用方共享底层 map（否则一次写会把 describe 的旧快照一起改掉）。
+func deepCloneMap(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	out := make(map[string]any, len(input))
+	for key, value := range input {
+		out[key] = deepCloneValue(value)
+	}
+	return out
+}
+
+func deepCloneValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return deepCloneMap(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for index, item := range typed {
+			out[index] = deepCloneValue(item)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+// setNestedValue 按路径写值（声明式命名空间的 path op 可以是多段），沿途缺失的
+// 容器按下一段是否数字键决定造 map（本仓 schema 的路径全是对象键）。
+func setNestedValue(root map[string]any, path []string, value any) error {
+	container := root
+	for index, key := range path[:len(path)-1] {
+		next, ok := container[key]
+		if !ok || next == nil {
+			child := map[string]any{}
+			container[key] = child
+			container = child
+			continue
+		}
+		child, ok := next.(map[string]any)
+		if !ok {
+			return &Error{
+				Code:    "invalid_path",
+				Message: fmt.Sprintf("设置路径 %v 在第 %d 段 %q 处不是对象（实际 %T）", path, index, key, next),
+				Hint:    "按 settings.describe 的 schema 路径提交",
+				Status:  400,
+			}
+		}
+		container = child
+	}
+	container[path[len(path)-1]] = deepCloneValue(value)
+	return nil
+}
+
+// deleteNestedValue 按路径删值；路径不存在时什么都不做（unset 是幂等的）。
+func deleteNestedValue(root map[string]any, path []string) {
+	container := root
+	for _, key := range path[:len(path)-1] {
+		next, ok := container[key].(map[string]any)
+		if !ok {
+			return
+		}
+		container = next
+	}
+	delete(container, path[len(path)-1])
 }
 
 func clone(input map[string]any) map[string]any {

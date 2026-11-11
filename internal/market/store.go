@@ -47,6 +47,25 @@ type Version struct {
 	Deprecated  string            `json:"deprecated"`
 	Engines     map[string]string `json:"engines"`
 	Readme      string            `json:"readme"`
+	// Source 是官方索引里"这一版从哪装"（`dsh-plugin-market-index/src/types.ts:52-68`）：
+	// npm → {type, registry?}；git → {type, url, commit, path?}。0.2.2-rc.2 之前本仓
+	// 的索引模型没有它，所以是 additive：老索引缺该字段 = 没有来源信息，行为不变。
+	// 它是市场版本行 `update` 判定与"私有 Git 仓库详情"的唯一来源，不许猜。
+	Source *Source `json:"source,omitempty"`
+}
+
+// Source 是官方索引的每版本安装来源（MarketSource 的宿主形状）。
+type Source struct {
+	// Type 是 "npm" 或 "git"；其它值按"没有来源信息"处理。
+	Type string `json:"type"`
+	// Registry 是 npm 索引地址（缺省 = 客户端配置的 registry）。
+	Registry string `json:"registry,omitempty"`
+	// URL 是 git 仓库的规范 https 地址（无凭据/query/fragment）。
+	URL string `json:"url,omitempty"`
+	// Commit 是小写 40 位 commit SHA（git 来源必填，官方语义只认完整 commit）。
+	Commit string `json:"commit,omitempty"`
+	// Path 是包在仓库里的相对 POSIX 目录（缺省 = 仓库根）。
+	Path string `json:"path,omitempty"`
 }
 
 type Entry struct {
@@ -201,6 +220,28 @@ func (s *Store) Search(ctx context.Context, rawURL string, q Query) (SearchResul
 		next = &n
 	}
 	return SearchResult{Index: doc, Plugins: matched[start:end], Total: total, Offset: q.Offset, NextOffset: next, FetchedAt: time.Now().UnixMilli()}, nil
+}
+
+// FindVersion 返回索引里**确切版本**的插件与版本条目（含每版本 Source）。
+// 与 ReadEntryDetail 的区别：详情回退到真实 Git 仓库时需要的正是 Source，
+// 而 ReadEntryDetail 只回答"有没有内联文档"。找不到时 found=false。
+func (s *Store) FindVersion(ctx context.Context, rawURL, name, version string) (Plugin, Version, bool, error) {
+	doc, err := s.fetch(ctx, rawURL)
+	if err != nil {
+		return Plugin{}, Version{}, false, err
+	}
+	for _, plugin := range doc.Plugins {
+		if plugin.Name != name {
+			continue
+		}
+		for _, entry := range plugin.Versions {
+			if entry.Version == version {
+				return plugin, entry, true, nil
+			}
+		}
+		return Plugin{}, Version{}, false, nil
+	}
+	return Plugin{}, Version{}, false, nil
 }
 
 func (s *Store) ReadEntryDetail(ctx context.Context, rawURL, name, version, language string) (string, bool, error) {

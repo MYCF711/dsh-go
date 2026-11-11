@@ -156,7 +156,10 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 
 	}
 
-	hist, err := loop.Run(ctx, 1, []llm.Message{{Role: "user", Content: prompt}})
+	// 子代理内部标记：官方靠"子代理有自己的会话 + origin=subagent"判定，
+	// 本宿主的嵌套循环沿用父会话 id，只能由发起方把这件事标出来
+	// （`user_terminal_*` 等"只许主代理用"的工具靠它拒绝，见 terminal_bridge.go）。
+	hist, err := loop.Run(withSubagentCallContext(ctx), 1, []llm.Message{{Role: "user", Content: prompt}})
 	if err != nil {
 		return spi.SubagentResult{}, err
 	}

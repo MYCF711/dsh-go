@@ -73,6 +73,10 @@ func New(manager *pluginmgr.Manager) transport.OfficialPluginManagerAPI {
 		ReadBundleDetail:      a.readBundleDetail,
 		WaitForInstall:        a.waitForInstall,
 		CancelInstall:         a.cancelInstall,
+		// 0.2.2-rc.2 `BundleInfo.update` 的 spec 级判据：读的是 install spec 的
+		// 形态（install-spec.ts 的职责），所以实现留在 pluginmgr，而不是复制
+		// 一份到 transport。行级门槛由协议层判（见 transport.OfficialBundleUpdateKind）。
+		BundleUpdateKind: pluginmgr.UpdateKind,
 	}
 }
 
@@ -325,6 +329,17 @@ func (a *adapter) installBundle(p transport.OfficialInstallBundleParams) (transp
 	outcome := job.Wait()
 	result := a.changeFromOutcome(outcome, "install", spec)
 	if outcome.Application == "applied" {
+		// 0.2.2-rc.2 `InstallBundleOptions.expected`：装出来的必须就是它点名的
+		// 包与版本。官方会先撤销这次安装（profile 文件与模块还原）再报
+		// `unexpected-package`；本仓同样回滚，不把"装错东西"报成成功。
+		if diagnostic := expectedMismatch(p.Expected, outcome.Info); diagnostic != "" {
+			if rollbackErr := a.manager.Uninstall(outcome.Info.ID); rollbackErr != nil {
+				return transport.OfficialFailedChange("install", spec, "operation-error",
+					fmt.Sprintf("%s；但撤销这次安装失败：%v", diagnostic, rollbackErr)), nil
+			}
+			return transport.OfficialFailedChange("install", spec,
+				transport.OfficialCodeUnexpectedPackage, diagnostic+"；已撤销这次安装"), nil
+		}
 		result.Bundle = outcome.Info.ID
 		result.Version = outcome.Info.Version
 		if warning := a.exemptionWarningFor(outcome.Info.ID + "@" + outcome.Info.Version); warning != "" {
@@ -347,10 +362,25 @@ func (a *adapter) updateBundle(p transport.OfficialUpdateBundleParams) (transpor
 			fmt.Sprintf("%s 不是已安装的 profile 依赖", p.Name)), nil
 	}
 	from := state.Version
+	// 0.2.2-rc.2：先按官方 `updateRefusal` 的形态判据分流（src/index.ts:185-205）。
+	//   - 完整 commit 钉住的 git 副本 → 只认 `options.spec`（planGitUpdate，:809-823）；
+	//   - 其余形态给 `options.spec` → invalid-spec（官方 "refused for any other"）；
+	//   - 形态判不出来（本地目录装、非完整 commit 的 git 地址…）→ 本仓既有的
+	//     本地 store 切版路径（官方没有的形态，能力只多不少）。
+	if updateKind := pluginmgr.UpdateKind(state.Source, state.Name, state.Version); updateKind == pluginmgr.UpdateGit {
+		return a.updateGitBundle(state, p)
+	}
 	sourceKind := pluginmgr.SourceKind(state.Source)
 	// 从 registry/tarball 装的包，Manager 落盘的是本地缓存目录（真实来源
 	// 已下载）；用缓存根识别它，才能继续从同一 registry 解析新版本。
-	fromRegistryCache := strings.HasPrefix(filepath.Clean(state.Source), filepath.Clean(pluginmgr.CacheDir())+string(os.PathSeparator))
+	fromRegistryCache := pluginmgr.IsDownloadCachePath(state.Source)
+	if p.Spec != nil {
+		diagnostic := fmt.Sprintf("%s 不是从完整 commit 的 git spec 装的，不接受 options.spec", p.Name)
+		if sourceKind == "registry" || sourceKind == "tarball" || fromRegistryCache {
+			diagnostic = fmt.Sprintf("%s 从 registry 装，只能更新到 %s@%s", p.Name, p.Name, p.Version)
+		}
+		return updateRefused(from, p.Name, p.Version, "invalid-spec", diagnostic), nil
+	}
 	if sourceKind == "registry" || sourceKind == "tarball" || p.Registry != nil || fromRegistryCache {
 		target := strings.TrimSpace(p.Version)
 		spec := p.Name + "@latest"
@@ -408,6 +438,61 @@ func (a *adapter) updateBundle(p transport.OfficialUpdateBundleParams) (transpor
 		result.Warnings = append(result.Warnings, warning)
 	}
 	return transport.OfficialUpdateResult{From: from, To: p.Version, Step: "install", Result: result}, nil
+}
+
+// expectedMismatch 判 `InstallBundleOptions.expected`（0.2.2-rc.2）是否被这次
+// 安装满足：空串 = 满足，否则返回给用户看的诊断（点名期望与实际）。
+//
+// 官方语义（src/operations.ts:515,520,543）：装出来的包名或版本不符，
+// 或期望的包没装上，都算 `unexpected-package`，并且先撤销这次安装。
+func expectedMismatch(expected *transport.OfficialExpectedPackage, info pluginmgr.PluginInfo) string {
+	if expected == nil {
+		return ""
+	}
+	if info.ID == expected.Name && info.Version == expected.Version {
+		return ""
+	}
+	return fmt.Sprintf("期望装成 %s@%s，实际装成了 %s@%s", expected.Name, expected.Version, info.ID, info.Version)
+}
+
+// updateGitBundle 处理"已装副本来自完整 commit 钉住的 git spec"的更新目标。
+//
+// 官方顺序（src/index.ts:747-760 与 planGitUpdate :809-823）：先判目标版本必须
+// 是**更新一点的 SemVer**，再要求 `options.spec` 钉住**同一个仓库目录**的
+// 完整 commit；两条都过了才 checkout 那个 commit 并安装。
+//
+// 本仓没有 git 获取器（AGENTS R6：不嵌 pnpm/git 子进程），所以最后一步做不到。
+// 这里先如实完成**契约校验**（拒绝理由与官方逐条一致），校验通过后再回四字段
+// 501 并点名缺 git——不假装更新成功，也不改任何状态。
+func (a *adapter) updateGitBundle(state pluginmgr.BundleState, p transport.OfficialUpdateBundleParams) (transport.OfficialUpdateResult, error) {
+	from := state.Version
+	compare, err := pluginmgr.CompareVersions(p.Version, from)
+	if err != nil {
+		return updateRefused(from, p.Name, p.Version, "invalid-spec",
+			fmt.Sprintf("%q 不是 SemVer 版本", p.Version)), nil
+	}
+	if compare <= 0 {
+		return updateRefused(from, p.Name, p.Version, "invalid-spec",
+			fmt.Sprintf("%s 不新于已安装的 %s", p.Version, from)), nil
+	}
+	const pinnedOnly = "%s 从 git 装，只接受钉住完整 commit（full commit）的 git spec"
+	if p.Spec == nil {
+		return updateRefused(from, p.Name, p.Version, "invalid-spec",
+			fmt.Sprintf(pinnedOnly+"（options.spec）", p.Name)), nil
+	}
+	target, pinned := pluginmgr.PinnedGitOrigin(*p.Spec)
+	if !pinned {
+		return updateRefused(from, p.Name, p.Version, "invalid-spec",
+			fmt.Sprintf(pinnedOnly+"，收到 %q", p.Name, *p.Spec)), nil
+	}
+	origin, _ := pluginmgr.PinnedGitOrigin(state.Source)
+	if target != origin {
+		return updateRefused(from, p.Name, p.Version, "invalid-spec",
+			fmt.Sprintf("%s 不在 %s 装进来的仓库目录 %s 里（收到 %s）", *p.Spec, p.Name, origin, target)), nil
+	}
+	return transport.OfficialUpdateResult{}, fmt.Errorf(
+		"%w: git 更新目标 %s 已通过契约校验（版本、完整 commit、同仓库目录），但本仓没有 git 获取器 checkout 它（已装 %s@%s）；AGENTS R6 不嵌 pnpm/git",
+		transport.ErrOfficialNotImplemented, *p.Spec, p.Name, from)
 }
 
 func updateRefused(from, name, version, code, diagnostic string) transport.OfficialUpdateResult {

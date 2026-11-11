@@ -39,6 +39,7 @@ package main
 //   - `workspaceFiles.changes` 是官方 stream，transport 层如实 501。
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -51,6 +52,7 @@ import (
 	"time"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/fssearch"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
 )
@@ -1567,6 +1569,18 @@ func attachOfficialWorkspace(srv *transport.Server, home string, src *sessionSou
 	}
 	srv.AttachOfficialWorkspaceAPI(host.workspaceAPI())
 	srv.AttachOfficialDirectoryPickerAPI(host.directoryPickerAPI())
+	// 官方 0.2.2-rc.2 `workspaceFiles.search`（内置 ripgrep 语义）。
+	// 工作区根与 list/read/stat 同一条判据（会话日志头里的 cwd），
+	// 搜索实现是 internal/fssearch 的纯 Go 等价物（不启 rg 子进程，见其 doc）。
+	srv.AttachWorkspaceFilesSearchAPI(transport.WorkspaceFilesSearchAPI{
+		Search: func(ctx context.Context, workspaceFileScopeID string, req fssearch.Request) (fssearch.Result, error) {
+			root, err := host.workspaceRootForSession(workspaceFileScopeID)
+			if err != nil {
+				return fssearch.Result{}, err
+			}
+			return fssearch.Search(ctx, root, req)
+		},
+	})
 	return host
 }
 

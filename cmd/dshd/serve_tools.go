@@ -221,6 +221,10 @@ func (r *loopRunner) run(ctx context.Context, sessionID, turnID, text, promptCon
 				cmd.Env = os.Environ()
 			}
 			cmd.Env = append(cmd.Env, "DSHD_JOBS_STDIO=1", "DSHD_STEER_STDIO=1")
+			// rc.2 终端面板的父→子 roster 桥（terminal_bridge.go）：与 jobs/steer 共用
+			// 同一根 stdin/stderr，所以开关也一起给。没有它，工具子进程只能报
+			// "这里读不到终端"——而真 roster 就在本进程里。
+			cmd.Env = append(cmd.Env, "DSHD_USER_TERMINALS_STDIO=1")
 			if r.policy == "ask" {
 				cmd.Env = append(cmd.Env, "DSHD_APPROVAL_STDIO=1")
 				r.broker.useStdin(stdin)
@@ -559,8 +563,9 @@ func (r *loopRunner) settleTurn(ctx context.Context, sessionID string, childPID 
 		return 0, err
 	}
 	defer logw.Close()
-	kind, detail := turnEndForSettle(ctx, cause)
-	if err := logw.Append("turn/end", session.TurnEndData(turn, kind, detail)); err != nil {
+	// rc.2：子进程的失败对象自己可能带稳定码（SUBPROCESS_* / CLEANUP_FAILED 族），
+	// 落盘时不许折叠成 UNKNOWN；拿不到码才退回既有 TurnEndData 形状。
+	if err := logw.Append("turn/end", settleTurnEndPayload(ctx, cause, turn)); err != nil {
 		return 0, fmt.Errorf("写 turn/end 失败：%w", err)
 	}
 	return turn, nil

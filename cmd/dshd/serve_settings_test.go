@@ -244,7 +244,12 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	described := postPluginGlue(t, clientA, serverA.base, "settings.describe", map[string]any{}, http.StatusOK)
 	logSettingsEvidence(t, "REAL_DESCRIBE", described)
 	result := described["result"].(map[string]any)
-	if len(result["namespaces"].([]any)) != 2 || len(result["sections"].([]any)) != 2 || len(result["errors"].([]any)) != 0 {
+	// 3 个命名空间：model / permission / llm。
+	// 第三个是 0.2.2-rc.2 加的 `llm`（发布 `providers.<route>.retryPolicy` 节点，
+	// 官方 UI 的"重试条件/次数/等待时间"就是从这里读候选与正下界的）。
+	// 它当前只读（`writable:false`）：宿主 settings 存储还没有 llm 命名空间的
+	// 写入面，伪造可写会变成"点了保存但没生效"。
+	if len(result["namespaces"].([]any)) != 3 || len(result["sections"].([]any)) != 3 || len(result["errors"].([]any)) != 0 {
 		t.Fatalf("bad real describe: %+v", result)
 	}
 	initialGet := postPluginGlue(t, clientA, serverA.base, "settings.form.get", map[string]any{"ns": "permission"}, http.StatusOK)

@@ -50,6 +50,8 @@ const EventWorkingDirectoryChange = "working-directory/change"
 
 const (
 	eventTurnStart = "turn/start"
+	eventTurnEnd   = "turn/end"
+	eventStepStart = "step/start"
 	eventUserMsg   = "user/message"
 	eventTitle     = "session/title"
 )
@@ -399,6 +401,10 @@ func DefaultProjectionRegistry() *ProjectionRegistry {
 			Apply: applyWorkingDirectoryChange,
 			View:  func(state any) any { return state },
 		},
+		// rc.2 新增：空 prompt 可续跑判定（官方 stateVersion 4）。
+		// 它有真实事件来源（turn/start、user/message、assistant/attempt、turn/end 全是
+		// 宿主真的会写的事件），所以不像其余官方键那样"没有事件来源"。
+		ConversationContinuationUnit(),
 	)
 	if err != nil {
 		// 三台单元是写死的常量；走到这里说明代码坏了，启动即失败。

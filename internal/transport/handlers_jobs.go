@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"dshgo/internal/jobs"
 )
 
 // JobInfo 是 `jobs.list` 返回的一行。
@@ -196,6 +198,15 @@ func decodeTaskActionParams(r *http.Request, target any) error {
 }
 
 func writeTaskActionError(w http.ResponseWriter, err error) {
+	// 官方 rc.2 的 JobError 码优先：它比 sentinel 更精确（并发上限、部署关了后台
+	// 执行这类失败，宿主没有对应的 sentinel）。**不许**让它掉进下面的 default，
+	// 那等于把官方分类折叠成 UNKNOWN。
+	if code, ok := jobs.CodeOf(err); ok {
+		if status, fourField, _ := officialJobErrorSurface(code); status != 0 {
+			writeJSON(w, status, errorBodyFor(fourField, err.Error()))
+			return
+		}
+	}
 	switch {
 	case errors.Is(err, ErrBadJobCursor):
 		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", err.Error()))
@@ -210,6 +221,38 @@ func writeTaskActionError(w http.ResponseWriter, err error) {
 	default:
 		writeJSON(w, http.StatusInternalServerError, errorBodyFor("internal", err.Error()))
 	}
+}
+
+// officialJobErrorSurface 是官方 `JobError` 的 7 个码在本仓**两条 wire 面**上的
+// 投影：unary/任务动作面的 (状态码, 四字段 code)，以及官方 job.* 流面的 gateway 码。
+//
+// 官方 job 码是**分类**（客户端与模型按它选下一步），不是 HTTP 状态；本仓的
+// 四字段 code 与官方 typert 的 `gateway/*` 词表各有自己的档。三条硬要求：
+//
+//  1. **7 个码逐个有档**，任何码都不许落到 internal / gateway/internal
+//     （那等于 UNKNOWN，正是 rc.2 要消灭的东西）；
+//  2. 状态码与语义一致：找不到 404、跨会话 403、并发上限 429、
+//     部署关掉/缺 controller/缺 registry 501（宿主没有这条能力）、owner 没了 409；
+//  3. gateway 码只用官方**已存在**的词（`gateway/cancelled`、`gateway/context-unavailable`
+//     等在 `dsh-api-gateway/lib/*.js` 里都有），不自造新词。
+func officialJobErrorSurface(code jobs.Code) (status int, fourFieldCode, gatewayCode string) {
+	switch code {
+	case jobs.CodeNotFound:
+		return http.StatusNotFound, "not_found", "gateway/session-not-found"
+	case jobs.CodeForeignSession:
+		return http.StatusForbidden, "cross_session", "gateway/forbidden"
+	case jobs.CodeLimitReached:
+		return http.StatusTooManyRequests, "job_limit_reached", "gateway/service-unavailable"
+	case jobs.CodeBackgroundDisabled:
+		return http.StatusNotImplemented, "job_background_disabled", "gateway/method-unavailable"
+	case jobs.CodeControllerUnavailable:
+		return http.StatusNotImplemented, "job_controller_unavailable", "gateway/invocation-unavailable"
+	case jobs.CodeOwnerNotLive:
+		return http.StatusConflict, "job_owner_not_live", "gateway/context-unavailable"
+	case jobs.CodeOwnerRegistryUnavailable:
+		return http.StatusNotImplemented, "job_owner_registry_unavailable", "gateway/context-unavailable"
+	}
+	return 0, "", ""
 }
 
 // handleJobsStop 只停止调用方明确命名的 session+id；不接受进程名、镜像名或全局 PID。

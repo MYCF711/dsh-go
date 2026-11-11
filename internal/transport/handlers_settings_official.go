@@ -108,6 +108,15 @@ type OfficialCredentialInfo struct {
 	Configured bool   `json:"configured"`
 	Source     string `json:"source,omitempty"`
 	Writable   bool   `json:"writable"`
+	// Masked 是 provider 生成的**掩码预览**（官方 0.2.2-rc.2 新增字段，
+	// `dsh-credentials/src/types.ts:62-75`：`masked?: string`，"never the full
+	// value"）。只在 source=="catalog"（官方的 source:'file'）时出现；env 与
+	// dotenv 层没有——与官方 describe 同一条判据。
+	//
+	// 算法与来源：handlers_settings_credential_mask.go 的 officialMaskedPreview
+	// 逐字符复刻官方 maskCredential()；明文只在 internal/llm 包内作为 mask 函数
+	// 的入参出现一次，**不进 JSON、不进错误串、不进日志**。
+	Masked string `json:"masked,omitempty"`
 }
 
 // OfficialCredentialDescribeResult 是 credentials.describe 的结果
@@ -512,6 +521,13 @@ func officialCredentialsDescribe(api OfficialSettingsCredentialAPI, p *officialP
 		}
 		out[ref] = info
 	}
+	// 追加官方 rc.2 的 masked（只有本地存储层有；env/dotenv 层不返回）。
+	// 后端不支持这个可选能力时 masks 是 nil，响应形状与 rc.1 完全一致。
+	masks, err := officialCredentialMasks(api.Credentials, refs)
+	if err != nil {
+		return nil, officialSettingsError(err)
+	}
+	mergeOfficialCredentialMasks(out, masks)
 	return out, nil
 }
 

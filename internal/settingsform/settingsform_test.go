@@ -288,7 +288,7 @@ func TestOfficialViewMatchesOfficialContract(t *testing.T) {
 		Revision: 9,
 	}
 	spec := sectionSpec{ns: "permission", title: "Default permission", fields: []fieldSpec{{name: "defaultPreset", enum: []string{"deny", "ask", "allow", "auto"}}}}
-	view := makeView(spec, doc)
+	view := makeView(spec, doc, true)
 	view.Namespace.Secrets = []string{"apiKey"}
 
 	official := view.Namespace.Official()
@@ -305,7 +305,7 @@ func TestOfficialViewMatchesOfficialContract(t *testing.T) {
 		t.Fatalf("value/base/user 没原样搬: %+v", official)
 	}
 
-	empty := makeView(spec, Document{Base: map[string]any{"defaultPreset": "allow"}})
+	empty := makeView(spec, Document{Base: map[string]any{"defaultPreset": "allow"}}, true)
 	if got := empty.Namespace.Official().Secrets; got == nil || len(got) != 0 {
 		t.Fatalf("无 secret 槽位时 secrets 必须是 []（不是 null）: %#v", got)
 	}

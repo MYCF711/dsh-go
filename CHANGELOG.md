@@ -1,3 +1,32 @@
+## 0.2.2-rc.2-gobeta.1（2026-11-12，**途中测试版**）—— 官方基线切到 `0.2.2-rc.2`
+
+> 版本命名（用户 2026-11-12 指令）：**途中版本 `<上游>-gobeta.<N>`，稳定版 `<上游>-go.<N>`**。
+> 本版是 rc.2 同步的第一版，只保证"基线已切换 + 差异已取证 + 门禁可复跑"，**不宣布 rc.2 能力收口完成**；
+> 收口进度见 `docs/official-baseline-0.2.2-rc.2.md` 与共享任务板。
+
+### 基线切换（本版的主内容）
+
+- **上游基线 `0.2.2-rc.1` → `0.2.2-rc.2`**。取证：`D:/DeepSeek Harness/Desktop-0.2.2-rc.2/resources/app.asar`
+  （sha256 `49fd1b08…`，208,137,981 B）；rc.1 同机保留，sha256 `5fa8a6b2…`（与旧文档逐字一致）。
+- 官方 rc.1→rc.2 的硬数字：**远程方法 193 → 223**（+35/−5）、**base 插件 97 → 99**（+`agent-team`/`+tool-agent-team`）、
+  **包 +13/−7**、客户端 UI 插件 65 → 66、**`hostProtocolVersion` 仍为 4**（wire 主协议未变）、node/pnpm 未变。
+  逐条见 [`docs/official-baseline-0.2.2-rc.2.md`](docs/official-baseline-0.2.2-rc.2.md)。
+- 新增随仓证据（机器可核，不手抄）：
+  - `docs/evidence/official-desktop-api-methods-0.2.2-rc.2.txt`（223）
+  - `docs/evidence/official-base-plugins-0.2.2-rc.2.txt`（99）
+  - `docs/evidence/official-ui-plugins-0.2.2-rc.2.txt`（66）
+  - `docs/evidence/official-method-contract-delta-0.2.2-rc.2.md`（+35/−5 全契约 + 32 条结构变更逐字段）
+
+### 版本形态适配（`-gobeta.` 与 `-go.` 双形态）
+
+- `cmd/dshtui/internal/vsinfo` 的 `fixedVersion` 原只认 `-go.`，遇到 `0.2.2-rc.2-gobeta.1` 会**直接 fail**
+  （构建期生成 VS 版本资源失败 → 整套产物出不来）；`cmd/dshtui/brand_test.go` 的格式判据也只认 `-go.`。
+- 现改为：发布后缀集合 `-gobeta.` / `-go.`（长串优先），语义版本取前三个数字段（`0.2.2-rc.2` 的 patch=2，不被 `2-rc` 骗过）；
+  形态判据改为正则 `^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?-(go|gobeta)\.\d+$`。
+- 测试夹具用**假版本**（`9.8.7-rc.6-gobeta.5`）而不是当前真版本：`cmd/dshd/version_guard_test.go` 会把
+  "当前发布前缀出现在别的源文件"判红，夹具里写真版本本身就成了第二版本源。
+- `cmd/dshd/version_guard_test.go` / `internal/pluginmgr/compat.go` / `internal/versiontag` 的版本形态注释同步补上 `-gobeta.`。
+
 ## 0.2.2-go.2（2026-11-09，**Windows-only 稳定版**）—— **官方 342 条缺口分类收口：`UNREAD-GAP` 归零**
 
 - 版本号唯一出处仍是 `cmd/dshd/main.go` 的 `version` 变量（`0.2.2-go.2`），`cmd/dshtui/brand.go` 同值；

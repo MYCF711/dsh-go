@@ -48,6 +48,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"dshgo/codecs/v4"
+	"dshgo/internal/session"
 )
 
 // 官方 session 方法名。既有 58 个方法一个都不改名；这 15 个是新增面。
@@ -732,6 +735,12 @@ func (s *Server) serveOfficialEventPage(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	page, hasMore := officialPaginate(events, req.BeforeSeq, maxMessages, cursor, req.TurnWindow)
+	// rc.2 起：未知类型的事件不许**静默交付**（官方读取路径的准入规则）。
+	// 交付一条我们解释不了的事件，等于让客户端按错误的形状重建会话。
+	if fault := officialAdmitEvents(Method(method), page); fault != nil {
+		writeOfficialStreamFault(w, fault)
+		return
+	}
 	writeJSON(w, http.StatusOK, OfficialEventPage{
 		Cursor:  cursor,
 		Records: officialPageRecords(page),
@@ -942,6 +951,14 @@ func (s *Server) officialProjectionValues(host OfficialSessionHost, sessionID st
 	} else {
 		// 官方：第一次 write 之前是 null（不是"没有这个能力"）。
 		values["todos"] = nil
+	}
+	// rc.2 新增 team/mode：折成宿主自有键 teamMode（见 officialTeamModeFold 的说明）。
+	teamMode, hasTeamMode, teamErr := officialTeamModeFold(events)
+	if teamErr != nil {
+		return OfficialProjections{}, teamErr
+	}
+	if hasTeamMode {
+		values["teamMode"] = teamMode
 	}
 	// 子代理身份与计时只对**本会话自己**的 durable `subagent/spawn` 成立。
 	if identity, spawnSeq, ok := officialSubagentIdentity(events, sessionID); ok {
@@ -2083,4 +2100,115 @@ func officialProjectionChanges(before, after map[string]any) []officialProjectio
 		changes = append(changes, officialProjectionChange{Key: key, Val: nil})
 	}
 	return changes
+}
+
+// ---------------------------------------------------------------------------
+// rc.2：空 content 的 prompt 续跑（官方 conversationContinuation 的下游）
+// ---------------------------------------------------------------------------
+
+// OfficialPromptContinuationReason 是官方 `session/agent-busy` 的 `details.reason`。
+// 取值逐字：`dsh-api-session-controller/lib/index.js:895`。
+const OfficialPromptContinuationReason = "NO_CONTINUABLE_FAILURE_OR_PENDING_INPUT"
+
+// OfficialPromptAdmission 是一次 prompt 的准入结论。
+//
+// 它是**判定**，不是 handler：真正的 prompt 入口在 server.go 的 handleSessionPrompt，
+// 不在本任务的写作用域内，接线行见报告 `B3-session-events.md`。
+type OfficialPromptAdmission struct {
+	// SourceKind 是落盘 `user/message.source.kind`：
+	// 非空 content → `user`；空 content（续跑）→ `retry`（官方 index.js:4152）。
+	SourceKind string
+	// Continuation 表示这是一次"续跑上一次可续失败轮"的空 prompt。
+	Continuation bool
+	// Fault 非 nil 时必须按它拒绝（官方按 `session/agent-busy` + details.reason）。
+	Fault *OfficialStreamFault
+	// Details 是官方 `result.error.details`（fault 非 nil 时给 `{reason: ...}`）。
+	Details map[string]any
+}
+
+// OfficialPromptAdmissionFor 判定一次 prompt 的准入。
+//
+// 官方两处语义合在一起：
+//   - 空 content 不再被 `gateway/bad-request` 拒（`index.js:4147`：只有非空 content 才查正文）；
+//   - 空 content + `mode:"queue"` 时，只有**同时**满足三条才允许续跑（`index.js:891-904`）：
+//     `continuation !== null`、`inbox.nextTurn` 为空、`inbox.nextStep` 里没有 user 来源消息；
+//     否则 `session/agent-busy` + `details.reason = NO_CONTINUABLE_FAILURE_OR_PENDING_INPUT`。
+//
+// `events` 是这一会话的 durable 事件（v4 序），续跑资格由 `session.EvaluateContinuation`
+// 用**同一台折叠**算出——不在 transport 里再折一份。
+func OfficialPromptAdmissionFor(events []DurableEvent, contentLength int, mode string, nextTurnPending, nextStepUserPending bool) OfficialPromptAdmission {
+	if contentLength > 0 {
+		return OfficialPromptAdmission{SourceKind: "user"}
+	}
+	busy := OfficialPromptAdmission{
+		SourceKind: "retry",
+		Fault: &OfficialStreamFault{
+			Code:    "session/agent-busy",
+			Message: "generation continuation is unavailable",
+			Status:  http.StatusConflict,
+		},
+		Details: map[string]any{"reason": OfficialPromptContinuationReason},
+	}
+	if mode != "queue" {
+		return busy
+	}
+	if _, eligible := session.EvaluateContinuation(officialV4Events(events)); !eligible {
+		return busy
+	}
+	if nextTurnPending || nextStepUserPending {
+		return busy
+	}
+	return OfficialPromptAdmission{SourceKind: "retry", Continuation: true}
+}
+
+// OfficialPromptContentRejected 复刻官方 rc.2 的空 content 放宽（index.js:4147）：
+//
+//	request.content.length > 0 && !hasPromptContent(request.content)
+//
+// 也就是：**空** content 合法（它是"续跑"请求），只有非空却全是空白的 content 才拒。
+func OfficialPromptContentRejected(contentLength int, hasNonWhitespaceOrAttachment bool) bool {
+	return contentLength > 0 && !hasNonWhitespaceOrAttachment
+}
+
+// officialV4Events 把官方线上事件信封转成 v4 事件（同一份序号域，只是少了 Raw）。
+func officialV4Events(events []DurableEvent) []v4.Event {
+	out := make([]v4.Event, 0, len(events))
+	for _, ev := range events {
+		out = append(out, v4.Event{
+			Type:            ev.Type,
+			Seq:             ev.Seq,
+			Time:            ev.Time,
+			Data:            ev.Data,
+			SurfaceOp:       ev.SurfaceOp,
+			SourceEventSeqs: ev.SourceEventSeqs,
+			Ignorable:       ev.Ignorable,
+		})
+	}
+	return out
+}
+
+// officialTeamModeFold 折出 rc.2 `team/mode` 的投影值。
+//
+// 键名是**宿主自有**的 `teamMode`：官方把它折进 agent-team 插件的
+// `agentTeam: TeamProjection`（`dsh-agent-team/lib/types/projection.js:72`），
+// 而本宿主没有 agent-team 投影，也拼不出官方 TeamProjection 的
+// `{inheritedEventCount,id,tasks,nextTaskNumber}`。给一个语义单一的自有键，
+// 比伪造官方半个形状安全：官方客户端不认识它就会忽略，而半个 agentTeam 会被 zod 打回。
+//
+// 非法载荷**返回错误**：跳过会让 team 开关状态静默丢失。
+func officialTeamModeFold(events []DurableEvent) (map[string]any, bool, error) {
+	var value map[string]any
+	found := false
+	for _, ev := range events {
+		if ev.Type != "team/mode" {
+			continue
+		}
+		payload, err := session.ParseTeamModePayload(ev.Data)
+		if err != nil {
+			return nil, false, fmt.Errorf("seq %d team/mode 载荷非法: %w", ev.Seq, err)
+		}
+		value = map[string]any{"enabled": payload.Enabled}
+		found = true
+	}
+	return value, found, nil
 }

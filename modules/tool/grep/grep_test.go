@@ -182,3 +182,24 @@ func TestGrepZeroHitMentionsIgnore(t *testing.T) {
 		t.Fatalf("0 命中且有声明时，Hint 必须点出 .dshdignore: %q（summary=%q）", res.Hint, res.Summary)
 	}
 }
+
+// grep 声明 per-call 并发安全（官方 rc.2：`dsh-tool-fs-search/src/grep.ts:1095`
+// `isConcurrencySafe: () => true`）。
+func TestGrepDeclaresConcurrencySafe(t *testing.T) {
+	tl, _ := newTool(t)
+	c, ok := any(tl).(spi.ConcurrencyClassifier)
+	if !ok {
+		t.Fatal("grep 必须实现 spi.ConcurrencyClassifier（官方 isConcurrencySafe）")
+	}
+	for _, raw := range []string{`{"pattern":"TODO"}`, `{"pattern":"x","include":"**/*.go","ignore_case":true}`} {
+		if !c.ConcurrencySafe(json.RawMessage(raw)) {
+			t.Fatalf("grep 对参数 %s 判成了独占；官方是 () => true", raw)
+		}
+		if !spi.ConcurrencySafe(tl, json.RawMessage(raw)) {
+			t.Fatalf("分类器判安全，但 spi.ConcurrencySafe 对参数 %s 仍判独占", raw)
+		}
+	}
+	if tl.Caps().NeedsApproval() {
+		t.Fatal("grep 是只读工具，不该要审批")
+	}
+}

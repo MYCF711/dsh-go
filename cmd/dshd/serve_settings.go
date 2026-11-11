@@ -216,7 +216,11 @@ var settingsMethodParams = map[string][]string{
 }
 
 func newSettingsFormHTTPHandler(store *serveSettingsStore) http.Handler {
-	return newSettingsFormHTTPHandlerWithService(settingsform.New(store))
+	// 官方 0.2.2-rc.2 起 `settings.describe` 要发布 `llm` 命名空间里的
+	// `providers.<route>.retryPolicy` 节点（重试条件/次数/等待时间的可选项就是
+	// 从这份 schema 读的）。HostRegistry 在默认两命名空间之上补 `llm`；
+	// 默认 Registry 保持不变（单独用它的人行为一字未变）。
+	return newSettingsFormHTTPHandlerWithService(settingsform.NewService(store, settingsform.HostRegistry()))
 }
 
 // newSettingsFormHTTPHandlerWithService 用显式 Service 构造 handler。

@@ -24,7 +24,7 @@ func TestInterruptMarksAgentAndKeepsOtherFields(t *testing.T) {
 	}
 
 	tool := &interruptTool{dir: dir}
-	res, err := tool.Exec(context.Background(), json.RawMessage(`{"target":"alice"}`))
+	res, err := tool.Exec(context.Background(), json.RawMessage(`{"agent":"alice"}`))
 	if err != nil {
 		t.Fatalf("标记失败：%v", err)
 	}
@@ -56,7 +56,7 @@ func TestInterruptMarksAgentAndKeepsOtherFields(t *testing.T) {
 func TestInterruptUnknownAgentDoesNotCreateIt(t *testing.T) {
 	dir := t.TempDir()
 	tool := &interruptTool{dir: dir}
-	res, err := tool.Exec(context.Background(), json.RawMessage(`{"target":"nobody"}`))
+	res, err := tool.Exec(context.Background(), json.RawMessage(`{"agent":"nobody"}`))
 	if err == nil {
 		t.Fatal("不存在的队友应当报错")
 	}

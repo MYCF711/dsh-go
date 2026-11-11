@@ -10,7 +10,9 @@ package main
 // 这条守卫把四件事钉死（前两条是"扫全仓"，后两条是"注入真的接上了"）：
 //
 //	A. 字面量唯一：`cmd/ internal/ modules/ codecs/ scripts/` 里的源码/脚本出现**当前发布前缀**
-//	   （从 main.go 现读，形态是 `<major>.<minor>.<patch>-go.`）时，只允许两个文件——
+//	   （从 main.go 现读；形态是 `<major>.<minor>.<patch>-go.`（稳定版）或
+//	   `<major>.<minor>.<patch>-gobeta.`（任务途中的测试版），由 `versiontag.ReleasePrefix`
+//	   取"最后一个点之前"得到）时，只允许两个文件——
 //	   `cmd/dshd/main.go`（唯一出处）与 `cmd/dshtui/brand.go`（`build.sh` 用同一个 `VER`
 //	   同时 `-ldflags -X main.version` 注入的两个 main 包之一）。其余任何文件都算"第二个版本源"。
 //	B. 两处同值：`cmd/dshtui/brand.go` 的 version 必须逐字节等于 `cmd/dshd/main.go` 的 version。

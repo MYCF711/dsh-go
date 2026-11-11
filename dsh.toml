@@ -155,5 +155,12 @@ id      = "tool-skill"
 id      = "tool-hindsight"
 
 [[module]]
+id      = "tool-office"
+
+[[module]]
 id = "mcp-client"
+backend = "static"
+
+[[module]]
+id      = "tool-terminalpanel"
 backend = "static"
