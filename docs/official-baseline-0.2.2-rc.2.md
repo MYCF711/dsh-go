@@ -145,6 +145,20 @@
 | `workspace/session-unarchiving` | ✅ 事件 + 工作树恢复协同（WS 可见） | `tmp/GO8-RC2/reports/F3-unarchive-event.md` |
 | `-race` 全量 | ✅ **MinGW 路径下 90 包全绿 / RACE=0 / 0 FAIL**（第一轮 89 包 + 本轮新增 `internal/settings`） | `/tmp/g8-race.log`、`/tmp/g8i-race.log`（命令见下） |
 
+### 5.3 发布链路已验证（2026-11-12 08:2x，未改版本号）
+
+`bash scripts/build.sh` 在 `0.2.2-rc.2-gobeta.1` 下**实跑通过**（这是 `-gobeta.` 形态第一次走完整发布链）：
+
+| 产物 | 大小 | 自检 |
+|---|---|---|
+| `dist/windows-amd64/dsh-0.2.2-rc.2-gobeta.1.exe` | 21 MiB（≤25 MiB 规则内） | `DSH GO 0.2.2-rc.2-gobeta.1` / commit `731f247` |
+| `dist/linux-amd64/…`、`dist/darwin-arm64/…` | 20 / 19 MiB | 交叉编译通过 |
+| `dist/windows-amd64/DSH TUI GO.exe`（及另两平台） | 7.6 MiB | `DSH TUI GO 0.2.2-rc.2-gobeta.1 (731f247)` |
+
+- 8 行 `dist/SHA256SUMS`（6 个平台产物 + 2 份无平台目录副本），`dist/` 已被 `.gitignore` 忽略，不入库。
+- `.syso` 版本资源随 `build.sh` 重新生成（`gobeta.1`），已提交保持一致（提交 `89208b4`）。
+- 也就是说：**要出稳定版只需改版本号再跑同一条命令**，链路本身不再是未知数。
+
 `-race` 的正确命令（MinGW 不在 PATH，子代理会误报 "gcc not found"）：
 
 ```bash
