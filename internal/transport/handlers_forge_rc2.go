@@ -50,7 +50,8 @@ package transport
 //     不适用，我们显式走 writeForgeRC2NullResult 并注释理由）。
 //   - `changeRequestReviewWrite` 的官方结果是 `{ok:false,code}` union：能力缺失是
 //     `code:"unsupported"` 的 **200 结果**，不是 HTTP 错误。
-//   - 其余方法的缺失能力是 501 + 官方码（如 `forgePanel/review-unsupported`）。
+//   - 其余方法的缺失能力是 501 + 官方码（如 `forgePanel/review-unsupported`），
+//     并在线上多一个兄弟字段 `capableWhen`（补上什么就能用：当前即 GitHub 凭据）。
 //
 // # 接线（WIRING，server.go 不动）
 //
@@ -330,6 +331,10 @@ type ForgeRC2Error struct {
 	Status  int
 	Code    string
 	Message string
+	// CapableWhen 是"缺什么条件才能用"的补救说明，只对 501（能力缺失）有意义。
+	// 它在线上是 **error 的兄弟字段** `capableWhen`（与 cua/office 的 501 同形），
+	// 不进 error 的四字段本身（四字段契约不变）。
+	CapableWhen string
 }
 
 func (e *ForgeRC2Error) Error() string { return e.Code + ": " + e.Message }
@@ -342,6 +347,35 @@ func ForgeRC2Errorf(status int, code, format string, args ...any) *ForgeRC2Error
 // ForgeRC2Unsupported 是"这条能力本宿主没有"的结构化 501（码由调用方点名）。
 func ForgeRC2Unsupported(code, format string, args ...any) *ForgeRC2Error {
 	return &ForgeRC2Error{Status: http.StatusNotImplemented, Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
+// ForgeRC2UnsupportedWhen 与 ForgeRC2Unsupported 相同，但显式给出 capableWhen
+// （"补上什么就能用"）。没给时本层按官方码用 forgeRC2CapableWhen 的默认文案。
+func ForgeRC2UnsupportedWhen(capableWhen, code, format string, args ...any) *ForgeRC2Error {
+	err := ForgeRC2Unsupported(code, format, args...)
+	err.CapableWhen = capableWhen
+	return err
+}
+
+// forgeRC2CapableWhen 是官方"缺能力"码的默认补救说明。
+//
+// 为什么放在 transport：`capableWhen` 是**线上信封**的一部分（四字段之外的兄弟
+// 字段），由本层决定怎么出；而"缺哪项能力、补什么就能用"正是官方码的语义
+// （review-unsupported = provider 不读评审线程；viewed-failed = 不保存已读标记）。
+// 当前生产实现里这两个 501 的共同原因都是"本机没有 GitHub GraphQL 凭据"，
+// 所以文案点明凭据；将来换 provider 时按码改这一张表即可。
+func forgeRC2CapableWhen(code string) string {
+	switch code {
+	case CodeForgeReviewUnsupported:
+		return "本机配好 GitHub 凭据（GITHUB_TOKEN / GH_TOKEN，或 `gh auth login` 后由 forge 取 " +
+			"`gh auth token`）即可经 GraphQL reviewThreads 真读评审线程；未配凭据时如实报缺能力，" +
+			"绝不返回空线程列表。"
+	case CodeForgeViewedFailed:
+		return "本机配好 GitHub 凭据（GITHUB_TOKEN / GH_TOKEN，或 `gh auth login`）即可经 GraphQL " +
+			"`PullRequest.files.viewerViewedState` 真读已读标记；缺凭据时按官方语义报 null/失败，" +
+			"不伪造标记。"
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -789,6 +823,16 @@ func writeForgeRC2Error(w http.ResponseWriter, err error, status int, fallbackCo
 		s := typed.Status
 		if s <= 0 {
 			s = status
+		}
+		// 501（能力缺失）额外带 capableWhen：说清"补上什么就能用"。
+		// 它是 error 的兄弟字段，四字段本身不动（与 cua/office kit 的 501 同形）。
+		capableWhen := typed.CapableWhen
+		if capableWhen == "" && s == http.StatusNotImplemented {
+			capableWhen = forgeRC2CapableWhen(code)
+		}
+		if capableWhen != "" {
+			writeJSON(w, s, errorBodyFor(code, typed.Message, map[string]any{"capableWhen": capableWhen}))
+			return
 		}
 		writeJSON(w, s, errorBodyFor(code, typed.Message))
 		return

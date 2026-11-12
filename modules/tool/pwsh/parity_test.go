@@ -115,7 +115,11 @@ func TestTimeoutMsTakesEffect(t *testing.T) {
 	if err == nil {
 		t.Fatal("300ms 超时的 8 秒命令必须失败")
 	}
-	if took > 5*time.Second {
+	// 判据：8 秒的命令必须**早于** 8 秒返回。留 7 秒而不是 5 秒，
+	// 是因为这条会真的起 PowerShell：机器满载（并行包 + race 构建）时
+	// 启动+杀进程本身可能吃掉好几秒，5 秒会误报；而"超时没生效"的表现是
+	// 命令自己睡完 8 秒并成功返回（下面 err==nil 那条会先抓住），所以 7 秒仍能区分。
+	if took > 7*time.Second {
 		t.Fatalf("timeoutMs 没生效：等了 %s", took)
 	}
 	if !strings.Contains(err.Error(), "超时") && !strings.Contains(res.Hint, "超过") {
@@ -142,7 +146,8 @@ func TestTimeoutMsWinsOverLegacySeconds(t *testing.T) {
 	if err == nil {
 		t.Fatal("250ms 超时的 8 秒命令必须失败")
 	}
-	if took > 5*time.Second {
+	// 同上：8 秒命令必须早于 8 秒返回；慢机器上 5 秒会误报。
+	if took > 7*time.Second {
 		t.Fatalf("timeout_seconds 抢先生效了：等了 %s", took)
 	}
 	d, ok := res.Data.(data)

@@ -285,8 +285,9 @@ func (s *Service) read(namespace string) (sectionSpec, Document, error) {
 }
 
 // readOrigin 与 read 同一条路径，额外回答"这份文档是不是真的来自 Store"。
-// 声明式命名空间在宿主存储还没接线时回落到声明的 Base，此时 persisted=false
-// ——describe 会据此把 section 标成只读，而不是假装可写。
+// 声明式命名空间遇到不支持的 Store（测试替身/漏接线）时回落到声明的 Base，
+// 此时 persisted=false ——describe 会据此把 section 标成只读，而不是假装可写。
+// 生产 serve 的 Store 已为 `llm` 接线，所以线上 `sections.llm.writable=true`。
 func (s *Service) readOrigin(namespace string) (sectionSpec, Document, bool, error) {
 	spec, err := s.spec(namespace)
 	if err != nil {
@@ -490,6 +491,12 @@ func (s *Service) Reset(namespace string, path []string, expectedRevision *int64
 		spec, err := s.spec(namespace)
 		if err != nil {
 			return MutationResult{}, err
+		}
+		if spec.schema != nil {
+			// 声明式命名空间没有扁平字段：整段 reset = user 段整段替换成空，
+			// 值回落到声明的默认值（官方 settings/reset 语义）。空 ops 的
+			// Mutate 只会把旧 user 原样再写一遍，不是一次真的清空。
+			return s.writeSection(namespace, nil, expectedRevision, true)
 		}
 		ops := make([]PathOp, 0, len(spec.fields))
 		for _, field := range spec.fields {

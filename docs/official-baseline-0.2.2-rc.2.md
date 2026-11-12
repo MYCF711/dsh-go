@@ -114,9 +114,40 @@
 
 ### 5.1 未收口的已知项（不虚报）
 
-1. **GraphQL 专有能力**：Forge 的 review threads / viewed marks 只有 GraphQL 有，宿主当前只有 REST 客户端 → 4 条方法结构化 501 + `capableWhen: 需要 GraphQL 客户端`。
+> 2026-11-12 第二轮（gobeta.1 之后的收口轮）关掉了前三项，见 §5.2。
+
+1. ~~**GraphQL 专有能力**~~ → **已关闭**：`internal/forge/graphql.go` 补了最小 GraphQL 客户端（零新依赖），
+   `changeRequestReview` / `changeRequestReviewWrite` / `changeRequestViewed` / `setFileViewed` **4 条全部真做**；
+   真机只读验收：对 `cli/cli#15001` 读到 2 条 review thread（真实行号/评论/`viewerCanReview`）与 5 个文件的 viewed 状态，
+   换 head 后返回官方 `stale`。写路径（7 个 mutation）只有离线桩证据——**写会改远端，本轮不做真机写入**，
+   这是明确的未取证项。
 2. **CUA 的 AX/窗口控制**：官方在 Windows 上没有任何 CUA provider（`dsh-cua-bundle` 只挂 darwin），宿主如实报告平台不支持；能做的（系统状态、应用决策、图标、设置页、审批状态机）都是真的。
-3. **`retryPolicy` 只读**：`llm` 命名空间的 `providers.<route>.retryPolicy` 节点已发布（8 个 code 候选 + 正下界），但宿主 settings 存储还没有 llm 写入面 → `writable:false` + 结构化 `read_only`，不假成功。
+3. ~~**`retryPolicy` 只读**~~ → **已关闭**：新增 `internal/settings` 命名空间存储（revision 栅栏 + 原子写 + 损坏 fail-loud），
+   `settings.mutate`/`form.set|reset` 可写 `llm.providers.<route>.retryPolicy` 且**下一轮真生效**；
+   假网关计数证明 `maxRetries=1 → 2 次请求`、`maxRetries=3 → 4 次请求`（口径：官方式 `maxRetries`，尝试次数 = +1）。
+   8 类非法值 → 四字段错误 + Hint；`expectedRevision` 过期 → 409 `revision_conflict`。
 4. **`workspaceFiles.search.graceMs`**：官方是 ripgrep 子进程的宽限时间；宿主是纯 Go 实现（不启子进程），该配置没有对应层，登记为 `OFFICIAL_UNSUPPORTED`。
-5. **`-race` 未跑**：本机无 C 工具链（`gcc not found`），MinGW 未装；按 AGENTS.md 记 UNVERIFIED，不当作通过。
-6. **反归档取消**（官方 `workspace/session-unarchiving` 事件）未实现，已登记在 E5 报告 §6。
+5. ~~**`-race` 未跑**~~ → **已补跑（2026-11-12 07:4x）**：MinGW 在 `C:/toolchains/mingw64`（不在 PATH 里，子代理一律报 "gcc not found"）。用
+   `export PATH="/c/Program Files/Go/bin:/c/toolchains/mingw64/bin:$PATH"; CGO_ENABLED=1 go test -race ./... -count=1`
+   全量通过：**89 包 ok / RACE=0 / 0 FAIL**（日志 `/tmp/g8-race.log`）。后续门禁必须继续用这条命令，别再用"本机无 gcc"当理由。
+6. ~~**反归档取消**~~ → **已关闭**：`workspace/session-unarchiving` 事件已实现并在 WS/journal 可见（真 `/ws` 收到帧）；
+   与归档清理状态机协同：checkout 已被清理 → 走官方 `worktree.Service.RestoreWorktree`，成功打印重建行、
+   失败 500 且 message 含真实目录/git 错误/当前归档集，可 `forgePanel.restoreWorktree` 重试（不静默成功）。
+   **仍缺**：`internal/worktree` 没有 `CancelArchiveCleanup`（官方 `archive.ts:87-93` 会取消未准入的移除并 await 结算），
+   该窗口现用"先落盘 + 官方恢复 + 如实报告"兜住，已登记。
+
+### 5.2 第二轮收口（2026-11-12 07:4x–07:5x）
+
+| 缺口 | 结论 | 证据 |
+|---|---|---|
+| Forge 审阅面（4 方法） | ✅ 真做（GraphQL 客户端，零新依赖）；真机只读已取证 | `tmp/GO8-RC2/reports/F1-forge-graphql.md` |
+| `retryPolicy` 写入面 | ✅ 可写并真生效（重试次数实测变化） | `tmp/GO8-RC2/reports/F2-retrypolicy-write.md` |
+| `workspace/session-unarchiving` | ✅ 事件 + 工作树恢复协同（WS 可见） | `tmp/GO8-RC2/reports/F3-unarchive-event.md` |
+| `-race` 全量 | ✅ **MinGW 路径下 89 包全绿 / RACE=0** | `/tmp/g8-race.log`（命令见下） |
+
+`-race` 的正确命令（MinGW 不在 PATH，子代理会误报 "gcc not found"）：
+
+```bash
+export PATH="/c/Program Files/Go/bin:/c/toolchains/mingw64/bin:$PATH"
+CGO_ENABLED=1 go test -race ./... -count=1
+```

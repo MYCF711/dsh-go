@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dshgo/internal/transport"
@@ -28,6 +29,24 @@ type ChangeRequestProvider struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+
+	// TokenLookup 是 GraphQL 面的额外凭据解析（生产是 `gh auth token`）；
+	// nil 时用默认实现。测试注入空串即可确定性地覆盖"没有凭据"的分支。
+	TokenLookup func() string
+	// CLICredential 强制启用 `gh auth token` 兜底（默认按进程类型判断：
+	// 测试二进制不启用，见 graphql.go 的 cliCredentialEnabled）。
+	CLICredential bool
+
+	// 下面三个是官方 provider config 的对应项（0 = 官方默认）：
+	// maxReviewThreads 1000 / maxOutputBytes 8MiB / maxViewedFiles 3000。
+	// 只有 GraphQL 面用它们；测试把它调小以覆盖截断与超限分支。
+	MaxReviewThreads int
+	MaxReviewBytes   int
+	MaxViewedFiles   int
+
+	// tokenOnce/tokenValue 让 `gh auth token` 这类凭据解析只做一次（并发安全）。
+	tokenOnce  sync.Once
+	tokenValue string
 }
 
 func NewChangeRequestProviderFromEnv() *ChangeRequestProvider {
@@ -37,6 +56,18 @@ func NewChangeRequestProviderFromEnv() *ChangeRequestProvider {
 	}
 	base := strings.TrimRight(strings.TrimSpace(os.Getenv("DSHD_GITHUB_API_URL")), "/")
 	return &ChangeRequestProvider{BaseURL: base, Token: token, HTTP: &http.Client{Timeout: 45 * time.Second}}
+}
+
+// NewChangeRequestProviderWithCLICredential 与 NewChangeRequestProviderFromEnv
+// 相同，但显式启用 `gh auth token` 兜底（生产装配点可显式选用）。
+//
+// 说明：GraphQL 面的默认构造**已经**会在生产进程里走这条链（见
+// cliCredentialEnabled）；这个构造器是给"我就是要它、别管进程类型"的装配点用的
+// （例如把宿主二进制改个名字再跑的部署）。
+func NewChangeRequestProviderWithCLICredential() *ChangeRequestProvider {
+	provider := NewChangeRequestProviderFromEnv()
+	provider.CLICredential = true
+	return provider
 }
 
 type changeRequestRef struct {

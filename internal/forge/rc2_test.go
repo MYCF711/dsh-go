@@ -311,13 +311,29 @@ func TestChangeRequestUpdateBranch(t *testing.T) {
 
 // ---- 6. GraphQL-only 能力：结构化 unsupported ----
 
-func TestChangeRequestViewedUnsupported(t *testing.T) {
+// noForgeCredential 把 provider 钉成"没有 GraphQL 凭据"：不读本机 `gh` 登录态，
+// 也不读环境变量。这样"没有凭据"的分支在任何机器上都是确定的，且**不会出网**。
+func noForgeCredential(t *testing.T, provider *ChangeRequestProvider) {
+	t.Helper()
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	provider.Token = ""
+	provider.TokenLookup = func() string { return "" }
+}
+
+// TestChangeRequestViewedWithoutCredential：没有 GraphQL 凭据时，viewed 读仍是
+// 结构化 unsupported（501），**不许**返回空 Files 冒充"没有已读文件"，也不许出网。
+//
+// 有凭据时的真读（viewerViewedState + 分页 + head 校验）由 graphql_test.go 的
+// TestGraphQLViewedReadsMarks 覆盖——那条用例证明这不再是"未实现"。
+func TestChangeRequestViewedWithoutCredential(t *testing.T) {
 	_, provider, rawURL := newRC2Fixture(t)
+	noForgeCredential(t, provider)
 	ctx := context.Background()
 	viewed, err := provider.ChangeRequestViewed(ctx, transport.OfficialForgeChangeRequestParams{URL: rawURL}, headA)
 	var httpErr *ForgeHTTPError
 	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusNotImplemented || httpErr.Code != FailureUnsupported {
-		t.Fatalf("viewedFiles 应 501 unsupported，实际 %v", err)
+		t.Fatalf("没有凭据时 viewedFiles 应 501 unsupported，实际 %v", err)
 	}
 	if code, _ := ForgeFailureOf(err); code != FailureUnsupported {
 		t.Fatalf("ForgeFailureOf = %q，期望 unsupported", code)
@@ -326,24 +342,34 @@ func TestChangeRequestViewedUnsupported(t *testing.T) {
 	if viewed.HeadSHA != "" || len(viewed.Files) != 0 || viewed.Truncated {
 		t.Fatalf("unsupported 不许返回数据：%+v", viewed)
 	}
+	// 写侧：请求根本没发出去 → 也是 unsupported（ActionFailureOf 折成官方 failed）。
 	if err := provider.ChangeRequestSetFileViewed(ctx, transport.OfficialForgeChangeRequestParams{URL: rawURL}, "a.go", true, headA); !IsForgeCode(err, FailureUnsupported) {
-		t.Fatalf("setViewed 应 unsupported，实际 %v", err)
+		t.Fatalf("没有凭据时 setViewed 应 unsupported，实际 %v", err)
 	}
 }
 
-func TestChangeRequestReviewUnsupported(t *testing.T) {
+// TestChangeRequestReviewWithoutCredential：没有 GraphQL 凭据时，review 读是
+// 结构化 unsupported（官方 review-unsupported 的来源），写是官方 union 的
+// unsupported 分支——两者都不许变成 Go error，也不许返回空线程表。
+//
+// 有凭据时的真读/真写由 graphql_test.go 的 TestGraphQLReviewReadsThreads /
+// TestGraphQLReviewWriteResolve 等覆盖（review threads 走 GraphQL、7 个 kind 都发
+// 对应 mutation），那组用例证明这不再是"未实现"。
+func TestChangeRequestReviewWithoutCredential(t *testing.T) {
 	_, provider, rawURL := newRC2Fixture(t)
+	noForgeCredential(t, provider)
 	ctx := context.Background()
 	review, err := provider.ChangeRequestReview(ctx, transport.OfficialForgeChangeRequestParams{URL: rawURL}, headA, false)
 	var httpErr *ForgeHTTPError
 	if !errors.As(err, &httpErr) || httpErr.Status != http.StatusNotImplemented || httpErr.Code != FailureUnsupported {
-		t.Fatalf("readReview 应 501 unsupported，实际 %v", err)
+		t.Fatalf("没有凭据时 readReview 应 501 unsupported，实际 %v", err)
 	}
 	// nil,nil 会被上层当成"没有 thread"（假数据），必须禁止。
 	if review != nil {
 		t.Fatalf("unsupported 必须返回 nil review，实际 %+v", review)
 	}
-	result, err := provider.ChangeRequestReviewWrite(ctx, transport.OfficialForgeChangeRequestParams{URL: rawURL}, json.RawMessage(`{"headSha":"`+headA+`"}`))
+	write := json.RawMessage(`{"headSha":"` + headA + `","kind":"resolve","thread":"PRRT_1","resolved":true}`)
+	result, err := provider.ChangeRequestReviewWrite(ctx, transport.OfficialForgeChangeRequestParams{URL: rawURL}, write)
 	if err != nil {
 		t.Fatalf("writeReview 的 unsupported 走官方 union，不应是 Go error：%v", err)
 	}

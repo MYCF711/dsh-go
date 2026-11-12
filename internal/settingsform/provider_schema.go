@@ -436,13 +436,18 @@ func validateDeclaredValue(spec sectionSpec, value any) error {
 	if spec.schema == nil {
 		return nil
 	}
-	if err := validateEnvelopeValue(spec.schema, value, []string{spec.ns}); err != nil {
-		return err
-	}
+	// 顺序是"先语义、后 envelope"：官方 RetryPolicySchema 是 union，而 union
+	// 分支失败在 envelope 里只能汇总成一条 `invalid_value`（把
+	// `backoff.initialDelayMs 越界` 这类精确原因埋进长串里）。语义校验
+	// （ValidateRetryPolicyValue，对齐 resolveRetryPolicy）能把原因说成
+	// out_of_range/unknown_field/invalid_enum + 精确字段路径。两层都跑，
+	// envelope 继续兜语义规则没表达的类型/边界（例如数值 vs 字符串）。
 	if spec.validate != nil {
-		return spec.validate(value)
+		if err := spec.validate(value); err != nil {
+			return err
+		}
 	}
-	return nil
+	return validateEnvelopeValue(spec.schema, value, []string{spec.ns})
 }
 
 // validateEnvelopeValue 是 schemastery envelope 的最小 Go 侧解释器：只覆盖本仓
@@ -681,8 +686,8 @@ func newOutOfRangeError(path []string, value any, minimum, maximum string) *Erro
 	}
 }
 
-// isNamespaceNotFound 判断 Store 是否"没有这个命名空间"（声明式命名空间在
-// 宿主存储接线前就是这种情形）。
+// isNamespaceNotFound 判断 Store 是否"没有这个命名空间"（声明式命名空间遇到
+// 不支持它的 Store 时就是这种情形；生产 serve 已为 llm 接线，不会再命中）。
 func isNamespaceNotFound(err error) bool {
 	var apiErr *Error
 	return errors.As(err, &apiErr) && apiErr.Code == "not_found"
@@ -702,14 +707,17 @@ func buildProviderNamespaceSpec() NamespaceSpec {
 	}
 }
 
-// readOnlyProviderNamespaceError 是宿主存储还没接线 llm 时写路径的结构化错误：
-// 明确"没写进去"和"该去哪写"，不静默丢弃、不假成功。
+// readOnlyProviderNamespaceError 是**注入的 Store 不支持该命名空间**时写路径的
+// 结构化错误：明确"没写进去"和"该去哪写"，不静默丢弃、不假成功。
+//
+// 生产路径不再触发它：serve 的 settings 存储已为 `llm` 接上真实读写面
+// （cmd/dshd/serve_settings.go，落 <home>/state/settings-namespaces.json）。
+// 出现这条说明注入的 Store（测试替身或漏接线的装配）没有该 ns 的写面。
 func readOnlyProviderNamespaceError(namespace string) *Error {
 	return &Error{
-		Code: "read_only",
-		Message: fmt.Sprintf("%s 是声明式只读命名空间：当前 home 的设置存储没有 %q，写入没有落点", namespace, namespace),
-		Hint: "provider retryPolicy 在宿主由模型目录承载（models.catalog.upsert 的 model.retryPolicy）；" +
-			"要让该命名空间可写，需要 serve 侧设置存储为 llm 增加读写分支",
-		Status: 405,
+		Code:    "read_only",
+		Message: fmt.Sprintf("%s 是声明式命名空间：注入的设置存储没有 %q 的持久段，写入没有落点", namespace, namespace),
+		Hint:    "检查注入的 Store 是否实现了该 ns 的读写；生产入口见 cmd/dshd/serve_settings.go 的 llm 分支",
+		Status:  405,
 	}
 }

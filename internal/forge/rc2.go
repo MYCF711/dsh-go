@@ -557,33 +557,57 @@ func (p *ChangeRequestProvider) ChangeRequestUpdateBranch(ctx context.Context, p
 	return nil
 }
 
-// ---- GraphQL-only 能力：结构化 unsupported ----
+// ---- GraphQL 面（review threads / viewed 标记）----
+//
+// 这四条是 rc.2 里**只能走 GraphQL** 的能力：REST 没有 review thread 的解析态，
+// 也没有 viewed 标记的读写入口。实现见 graphql.go（客户端）/ graphql_review.go
+// （readReview / writeReview）/ graphql_viewed.go（viewedFiles / setViewed）；
+// 下面四项只是把既有 provider 方法转进去，签名与官方 ForgeProvider 对齐：
+//
+//	readReview(ref, headSha)            → map 形状的 ForgeReviewData
+//	writeReview(ref, write)             → ForgeReviewWriteResult union
+//	viewedFiles(ref, headSha)           → ForgeViewedFiles
+//	setViewed(ref, request)             → 错误（ActionFailureOf 折官方码）
+//
+// `fresh` 在本层恒为"真读"：provider 没有缓存（官方 UI 侧的 reviewRefreshMs
+// 缓存不在 provider 里），所以 fresh=true/false 都是现读一次，语义上满足
+// 官方"fresh 时强制从 host 读"的要求。
 
-// ChangeRequestViewed 对应官方 viewedFiles：viewed 标记存在 GraphQL 的
-// PullRequestFile.viewerViewedState 上，REST 没有读取入口 → 501 unsupported。
-// 不返回空 Files 冒充"没有已读文件"。
+// ChangeRequestViewed 对应官方 viewedFiles：读当前登录用户的 viewed 标记。
+//
+// 没有 GraphQL 凭据时返回结构化 unsupported（501，官方 `unsupported` 语义：
+// 这条能力本宿主当前不可用），**不返回空 Files 冒充"没有已读文件"**；调用方
+// （cmd/dshd 的 rc.2 适配器）按官方口径把它折成 null。
 func (p *ChangeRequestProvider) ChangeRequestViewed(ctx context.Context, params transport.OfficialForgeChangeRequestParams, headSHA string) (ViewedFiles, error) {
-	return ViewedFiles{}, Unsupported("viewedFiles")
+	return p.graphqlChangeRequestViewed(ctx, params, headSHA)
 }
 
-// ChangeRequestSetFileViewed 对应官方 setViewed：GraphQL 的
-// markFileAsViewed / unmarkFileAsViewed，REST 无入口 → 501 unsupported。
+// ChangeRequestSetFileViewed 对应官方 setViewed：GraphQL mark/unmarkFileAsViewed。
+//
+// 没有 GraphQL 凭据时是 unsupported（ActionFailureOf → failed，官方
+// "provider keeps no viewed marks" 的同义结果：什么都没改）。
 func (p *ChangeRequestProvider) ChangeRequestSetFileViewed(ctx context.Context, params transport.OfficialForgeChangeRequestParams, path string, viewed bool, headSHA string) error {
-	return Unsupported("setViewed")
+	return p.graphqlChangeRequestSetViewed(ctx, params, path, viewed, headSHA)
 }
 
-// ChangeRequestReview 对应官方 readReview：review threads 的解析态只能从
-// GraphQL 的 reviewThreads 读，REST 只能拿到 review 列表/评论 → 501
-// unsupported（返回 nil, err，不返回空 review 冒充"没有 thread"）。
+// ChangeRequestReview 对应官方 readReview：review threads 的**真实**读取
+// （GraphQL reviewThreads + 评论分页，逐页确认 head）。
+//
+// 结果形状是官方 ForgeReviewData 的 JSON 形状；head 已移动 → stale，PR 不存在
+// → not-found，没有凭据 → unsupported。**绝不返回空线程表冒充"没有 thread"**。
 func (p *ChangeRequestProvider) ChangeRequestReview(ctx context.Context, params transport.OfficialForgeChangeRequestParams, headSHA string, fresh bool) (map[string]any, error) {
-	return nil, Unsupported("readReview")
+	_ = fresh // provider 无缓存：每次都是真读（见本节开头）。
+	return p.graphqlChangeRequestReview(ctx, params, headSHA)
 }
 
-// ChangeRequestReviewWrite 对应官方 writeReview：写 review threads / 待发布
-// review 只能走 GraphQL mutation → 官方 union 的失败分支
-// {ok:false,code:"unsupported",message:...}，**不是** Go error、也不是空成功。
+// ChangeRequestReviewWrite 对应官方 writeReview：7 个 kind 的 GraphQL mutation。
+//
+// 返回官方 union：成功 {ok:true}；GitHub 明确拒绝/校验不成立 → failed（或
+// stale）；答复不确认结果 → unknown；没有 GraphQL 凭据 → unsupported（能力缺失，
+// 不是"写失败"，因为请求根本没发出去）。**不抛 Go error**：写的结果只能由
+// union 说清，调用方据此决定是否去 host 上核对。
 func (p *ChangeRequestProvider) ChangeRequestReviewWrite(ctx context.Context, params transport.OfficialForgeChangeRequestParams, write json.RawMessage) (ReviewWriteResult, error) {
-	return ReviewWriteResult{OK: false, Code: FailureUnsupported, Message: unsupportedMessage("writeReview")}, nil
+	return p.graphqlChangeRequestWrite(ctx, params, write)
 }
 
 // ---- compare 读取（rc.2 diff 复用）----

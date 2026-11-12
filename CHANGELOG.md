@@ -17,6 +17,19 @@
   - `docs/evidence/official-ui-plugins-0.2.2-rc.2.txt`（66）
   - `docs/evidence/official-method-contract-delta-0.2.2-rc.2.md`（+35/−5 全契约 + 32 条结构变更逐字段）
 
+### 第二轮收口（同日）：三个已知缺口关闭 + 全量 `-race` 转绿
+
+- **Forge 审阅面**：补最小 GraphQL 客户端（**零新依赖**），`changeRequestReview` / `changeRequestReviewWrite` /
+  `changeRequestViewed` / `setFileViewed` 从"结构化 501"改为**真做**。真机只读验收：`cli/cli#15001` 读到 2 条 review
+  thread 与 5 个文件的 viewed 状态，换 head 返回官方 `stale`。**写路径只有离线桩证据**（写会改远端，本轮不做真机写入）。
+- **`retryPolicy` 写入面**：新增 `internal/settings` 命名空间存储（revision 栅栏 + 原子写 + 损坏 fail-loud），
+  `settings.mutate` 可写 `llm.providers.<route>.retryPolicy` 并**下一轮真生效**；假网关计数证明
+  `maxRetries=1 → 2 次请求`、`maxRetries=3 → 4 次请求`。8 类非法值 → 四字段错误 + Hint，`expectedRevision` 过期 → 409。
+- **反归档事件**：`workspace/session-unarchiving` 已实现且 WS/journal 可见；checkout 已被清理时走官方
+  `RestoreWorktree`，失败如实报 500 + 真实 git 错误，不假装恢复。
+- **`-race` 转绿**：MinGW 在 `C:/toolchains/mingw64`（不在 PATH，之前一律误报 "gcc not found"），
+  `CGO_ENABLED=1 go test -race ./... -count=1` → **89 包全绿**。后续门禁不许再用"本机无 gcc"当理由。
+
 ### 版本形态适配（`-gobeta.` 与 `-go.` 双形态）
 
 - `cmd/dshtui/internal/vsinfo` 的 `fixedVersion` 原只认 `-go.`，遇到 `0.2.2-rc.2-gobeta.1` 会**直接 fail**

@@ -105,9 +105,21 @@ func TestSettingsDescribeOfficialWireEnvelope(t *testing.T) {
 		t.Fatalf("result.value 不是官方 SettingsDescribeValue：%s", payload)
 	}
 	// 三行：model / permission / llm。第三行是 0.2.2-rc.2 加的（发布
-	// `providers.<route>.retryPolicy`，官方 UI 的重试选项从这里读）。
-	if namespaces, ok := value["namespaces"].([]any); !ok || len(namespaces) != 3 {
+	// `providers.<route>.retryPolicy`，官方 UI 的重试选项从这里读；F2 起该命名
+	// 空间可写，设置存储带 revision 乐观锁）。
+	namespaces, ok := value["namespaces"].([]any)
+	if !ok || len(namespaces) != 3 {
 		t.Fatalf("result.value.namespaces 应是三行：%s", payload)
+	}
+	for _, rawNamespace := range namespaces {
+		namespace := rawNamespace.(map[string]any)
+		if namespace["ns"] != "llm" {
+			continue
+		}
+		schema, ok := namespace["schema"].(map[string]any)
+		if !ok || schema["refs"] == nil {
+			t.Fatalf("llm 命名空间必须发布 schemastery envelope（providers.<route>.retryPolicy）：%v", namespace["schema"])
+		}
 	}
 }
 

@@ -626,3 +626,70 @@ func TestForgeRC2ReachableThroughHTTP(t *testing.T) {
 		t.Fatalf("worktreeCleanup 应回 {\"result\":null}，实际 %q", rec.Body.String())
 	}
 }
+
+// TestForgeRC2UnsupportedCarriesCapableWhen：能力缺失（501）必须在四字段之外
+// 多一个 sibling `capableWhen`，说清"补上什么就能用"。
+//
+// 依据：rc.2 的 `forgePanel/review-unsupported` 与 `forgePanel/viewed-failed`
+// 就是"provider 缺这条读"（本机当前原因是缺 GitHub GraphQL 凭据）。四字段本身
+// 不能变，capableWhen 只做兄弟字段（与 cua / office kit 的 501 同形）。
+func TestForgeRC2UnsupportedCarriesCapableWhen(t *testing.T) {
+	srv := forgeOfficialTestServer(t)
+	srv.AttachOfficialForgeRC2API(OfficialForgeRC2API{
+		ChangeRequestReview: func(context.Context, string, string, string, bool) (*OfficialForgeReviewData, error) {
+			// 与 cmd/dshd 适配器同形：provider 的 unsupported → ForgeRC2Unsupported。
+			return nil, ForgeRC2Unsupported(CodeForgeReviewUnsupported, "provider 不读 review threads")
+		},
+		ChangeRequestViewed: func(context.Context, string, string, string) (*OfficialForgeViewedFiles, error) {
+			return nil, ForgeRC2UnsupportedWhen("配好 GitHub 凭据后可用（自定义文案）",
+				CodeForgeViewedFailed, "provider 不保存已读标记")
+		},
+	})
+	defer srv.DetachOfficialForgeRC2API()
+	bodies := forgeRC2GoodBodies()
+
+	status, out := forgeRC2Call(t, srv, MethodForgePanelChangeRequestReview, bodies[MethodForgePanelChangeRequestReview])
+	if status != http.StatusNotImplemented {
+		t.Fatalf("review 状态码 %d，期望 501", status)
+	}
+	assertFourFieldError(t, status, out, http.StatusNotImplemented, CodeForgeReviewUnsupported)
+	capableWhen, _ := out["capableWhen"].(string)
+	if strings.TrimSpace(capableWhen) == "" {
+		t.Fatalf("501 必须带 capableWhen：%v", out)
+	}
+	// 默认文案要能指路（当前这条能力缺的就是 GraphQL 凭据）。
+	for _, want := range []string{"GITHUB_TOKEN", "GraphQL"} {
+		if !strings.Contains(capableWhen, want) {
+			t.Fatalf("capableWhen 没说清怎么补（缺 %q）：%q", want, capableWhen)
+		}
+	}
+
+	status, out = forgeRC2Call(t, srv, MethodForgePanelChangeRequestViewed, bodies[MethodForgePanelChangeRequestViewed])
+	if status != http.StatusNotImplemented {
+		t.Fatalf("viewed 状态码 %d，期望 501", status)
+	}
+	assertFourFieldError(t, status, out, http.StatusNotImplemented, CodeForgeViewedFailed)
+	if got, _ := out["capableWhen"].(string); got != "配好 GitHub 凭据后可用（自定义文案）" {
+		t.Fatalf("显式给的 capableWhen 应原样出手，实际 %q", got)
+	}
+}
+
+// TestForgeRC2NonUnsupportedHasNoCapableWhen：capableWhen 只服务"能力缺失"。
+// stale（409）之类的失败不得带它，否则客户端会把可重试失败当成"没这能力"。
+func TestForgeRC2NonUnsupportedHasNoCapableWhen(t *testing.T) {
+	srv := forgeOfficialTestServer(t)
+	srv.AttachOfficialForgeRC2API(OfficialForgeRC2API{
+		ChangeRequestReview: func(context.Context, string, string, string, bool) (*OfficialForgeReviewData, error) {
+			return nil, ForgeRC2Errorf(http.StatusConflict, CodeForgeStaleHead, "head 已移动")
+		},
+	})
+	defer srv.DetachOfficialForgeRC2API()
+	status, out := forgeRC2Call(t, srv, MethodForgePanelChangeRequestReview,
+		forgeRC2GoodBodies()[MethodForgePanelChangeRequestReview])
+	if status != http.StatusConflict {
+		t.Fatalf("状态码 %d，期望 409", status)
+	}
+	if _, has := out["capableWhen"]; has {
+		t.Fatalf("409 不该带 capableWhen：%v", out)
+	}
+}
