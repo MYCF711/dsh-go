@@ -26,11 +26,46 @@
   3. `workspaceFiles.search.graceMs`：纯 Go 实现没有子进程宽限层（`OFFICIAL_UNSUPPORTED`）；
   4. `dsh-client-ui-primitives` 在 rc.2 仍只发 `lib/`（无 `src/` 行号可锚），证据锚调用点。
 
-### 发布产物（本地构建，未 push）
+### 发布产物（**已发布**）
 
-`bash scripts/build.sh` 实跑通过：6 个产物（windows/linux/darwin × 宿主/TUI）+ `dist/SHA256SUMS`；
-宿主 21 MiB（≤25 MiB 规则内）；`--version` 自检输出 `DSH GO 0.2.2-rc.2-go.1`。
-push 与正式发布需要用户在当次明确授权。
+`bash scripts/build.sh` 在合并后的 `34c5b7d` 上重跑通过：6 个产物（windows/linux/darwin × 宿主/TUI）
++ `dist/SHA256SUMS`（8 行，`sha256sum -c` 全 OK）；宿主 21,372,416 B（≤25 MiB 规则内）；
+`--version` 自检输出 `DSH GO 0.2.2-rc.2-go.1` / commit `34c5b7d`。
+
+- **Tag**：`v0.2.2-rc.2-go.1`（annotated）
+- **Release**：https://github.com/MYCF711/dsh-go/releases/tag/v0.2.2-rc.2-go.1
+- **7 个附件**：三平台宿主 + 三平台 TUI + `SHA256SUMS`；远端大小与本地逐字节一致
+  （Windows 宿主 21,372,416 B / TUI 7,976,448 B）
+- **PR**：#11 已合并（`34c5b7d`）
+- **CI**：run `43201820915` 与 `43203617875` 均 **SUCCESS**（12m24s）
+
+> 附件名加平台后缀（GitHub 要求唯一）；`SHA256SUMS` 记的是构建时的原始相对路径，
+> 对应关系写在 Release 正文里。
+
+### CI 转绿修了什么（两轮，都记在案）
+
+**第一轮（形状/登记类，5 类）**：`blocksOnHuman` → `executionMode` 改名同步（**不删条目**）；
+`maxParallelToolCalls` 登记为**真权限分支**（并发上限＝多少调用能同时动盘/网，调大就是放宽放行）；
+text-only **16 处全是形状误报**（6 条白名单因 rc.2 行号漂移、4 处新代码是官方同义的形状函数），
+逐条登记理由，**无一处真丢 presence**；race-guard 9 个新 goroutine 逐个写清「碰什么共享状态/靠什么同步」；
+staticcheck S1016 + S1040。
+
+**第二轮（环境依赖类，6 包）—— 没有一个是代码逻辑坏了**：
+`internal/schedule` 时区（用例把 `+08:00` 写死却让 `time.Local` 决定，runner 是 UTC）；
+`officekit`/`officepdf` 缺原生 LibreOfficeKit 引擎、`speech` 缺 Windows TTS 语音包
+（**探测不到就 skip 并打印缺什么**，不是静默通过）；`worktree` 缺全局 git 身份（测试内造）；
+`cmd/dshd` 两条负载下抢调度的 flaky（时序收敛，未放宽断言）。
+顺带**抓到 1 处真实产品缺陷**：`officekit` 文档承诺的"传可执行文件本身"形态从未实现，
+被"回落扫到本机已装引擎"长期掩盖；顺带接 wazero 进程级编译缓存（`cmd/dshd` 438.6s → 280.0s）。
+
+### 两个门禁环境的坑（后人别再踩）
+
+1. **`-race` 别给短超时**：`cmd/dshd` 的 subprocess 用例在 `-race` 下每个约 28s，
+   而 `go test` **单包默认超时 10m**——2 核 runner 上必然撞穿，日志里只剩一句 `FAIL`。
+   已在 `scripts/check.sh` 加 `-timeout 20m`（放宽等待时长，**不放宽断言**）。
+2. **Go 1.27 在 Windows 完全忽略 `TZ`**：`zoneinfo_windows.go` 的 `initLocal()` 只调
+   `syscall.GetTimeZoneInformation`，不读 `os.Getenv("TZ")`。所以"`TZ=UTC` 跑一遍"是**空操作**；
+   要复现时区相关红必须在进程内钉 `time.Local = time.UTC`。
 
 ### 已知问题（本版接受，已登记）
 
