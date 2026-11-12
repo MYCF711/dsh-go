@@ -164,7 +164,21 @@ python scripts/structure-refs.py --official-tree "<rc.2 树根>" --require-struc
 | **GC/GD** 父容器 | 4 个缺失的父容器 + 数据接线（通知入口 / 子代理目录 / 模型菜单 / chat 命令节点） | ✅ 4 个容器全部**真渲染**；每容器四态断言（未授权/未启用/数据缺失/正常） |
 | **GU** `-race` 清理 | 全仓 `-race` 查出 5 条真实 DATA RACE | ✅ 归因 **产品 4 / 测试 1 / Viva 上游 1 类**，现 **RACE=0（35 包 / 0 条 WARNING）** |
 | 门禁 | `CGO_ENABLED=0 go build/vet/test` + `CGO_ENABLED=1 go test -race` | 0 / 0 / **0（35 包）** / **RACE=0**，gofmt 干净 |
-| 提交 | `fe264a7` → `1d7f664` → `fded4dd`（分支 `feat/gui-rc2`，本地未 push） | — |
+| **GT** transcript 结构树 | 主区消息流**先出证据树**再实现（20 种节点类型 / 146 行几何 / **409 处锚点** / 11 个官方包） | ✅ 三闸 PASS（`structure-refs --require-structure-clean` / `update-manifest-files` / `verify-resync` **876/876**） |
+| **GS** 设置面板 | rc.2 五 section / 四区（CSS Grid 2×2 求解器）/ **13 个 general item**（含条件项 `desktop-update-channel`） | ✅ 14 新增文件 + 66 测试；`retryPolicy` 8 码 + 正下界渲染断言；失败态（409/read_only/4xx/5xx）各有断言 |
+| 提交 | `fe264a7` → `1d7f664` → `fded4dd` → `e2584af`（分支 `feat/gui-rc2`，本地未 push） | — |
+
+**GT 的关键结构结论**（决定了 transcript 怎么实现）：
+
+- **主体不是虚拟列表**：逐条真实挂载（`ChatView.module.css:100-104`）；虚拟化只在 Turn rail 与 Trajectory 表
+  （阈值 100 / overscan 12）——所以"为了性能先上虚拟列表"是**错的方向**。
+- **双层滚动口**：`ConversationRoot .scrollBody[data-conversation-scroll]` → `ChatView .scroll`
+  （降级 `overflow-y:visible`）；z-index 阶梯固定 **6/7/8/9**。
+- **20 种节点类型**：17 由 `ui-chat` 注册，3 由 goal/user-questions/workflow-run 注册；
+  `submitted-plan` 恒 `visibility:'hidden'` 且无渲染器——**是官方真值，不是漏实现**。
+- **未取证 5 条**（如实登记）：`ui-primitives` 在 rc.2 无 `src/` 也无包目录（`DisclosureRow`/`MarkdownText`/
+  `CodeBlock` 几何只能二手断言，**不得反推像素**）；Markdown 块级几何同因；`submitted-plan` 无渲染器；
+  3 个外部包节点内部几何未逐类取证；`@tanstack/react-virtual` 版本未记录。
 
 **GU 的三处关键发现**
 
