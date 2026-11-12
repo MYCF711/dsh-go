@@ -76,7 +76,7 @@ func scanFunc(fset *token.FileSet, body *ast.BlockStmt) []string {
 	walk = func(block *ast.BlockStmt) {
 		for i, stmt := range block.List {
 			if ret, ok := stmt.(*ast.ReturnStmt); ok && returnsError(ret) {
-				ok2 := hasHintLiteral(ret.Results[0]) ||
+				ok2 := exprContainsHintLiteral(ret.Results[0]) ||
 					hintedBefore(block.List[:i], ret.Results[0]) ||
 					hintedAnywhere(body, ret.Results[0])
 				if !ok2 {
@@ -168,6 +168,34 @@ func countErrorReturns(body *ast.BlockStmt) int {
 		return true
 	})
 	return n
+}
+
+// exprContainsHintLiteral 判"这条 return 出去的表达式里**含有**一个带 Hint 的字面量"。
+//
+// 认的三种真实形状（0.2.2-rc.2 的工具错误身份让后两种变成常态）：
+//
+//	return spi.Result{Hint: "…"}, err                       // 直接字面量
+//	return spi.Result{Hint: "…"}.WithErrorInfo(n, c), err   // 链式补错误身份
+//	return withJobErrorInfo(spi.Result{Hint: "…"}, err), err // 包一层 helper 再补
+//
+// 第三种为什么也算合规：返出去的就是那个带 Hint 的结果（helper 只改 error.info，
+// 不碰 Hint）。第一版扫描只认裸 CompositeLit，把后两种判成"没设 Hint"——
+// 那是误报；误报的守卫最后一定被人加豁免，然后没人再看它。
+//
+// 仍然被拦住的：`return res, err`（res 在这条 return 之前没被赋过 Hint）。
+func exprContainsHintLiteral(e ast.Expr) bool {
+	if e == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.CompositeLit); ok && hasHintLiteral(lit) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func hasHintLiteral(e ast.Expr) bool {

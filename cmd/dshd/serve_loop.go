@@ -188,6 +188,10 @@ func runProviderLoop(ctx context.Context, r *loopRunner, provider llm.ModelProvi
 		if serr == nil {
 			jobStdin = stdin
 			cmd.Env = append(cmd.Env, "DSHD_JOBS_STDIO=1", "DSHD_STEER_STDIO=1")
+			// rc.2 终端面板的父→子 roster 桥（terminal_bridge.go）：与 jobs/steer 共用
+			// 同一根 stdin/stderr，所以开关也一起给。没有它，工具子进程只能报
+			// "这里读不到终端"——而真 roster 就在本进程里。
+			cmd.Env = append(cmd.Env, "DSHD_USER_TERMINALS_STDIO=1")
 			if r.policy == "ask" {
 				cmd.Env = append(cmd.Env, "DSHD_APPROVAL_STDIO=1")
 				r.broker.useStdin(stdin)

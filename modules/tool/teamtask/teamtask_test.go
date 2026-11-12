@@ -22,7 +22,9 @@ func TestClaimDefaultsToSessionID(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := taskID(t, res)
-	if _, err := mk(dir, kindUpdate).Exec(ctx, json.RawMessage(`{"task_id":"`+id+`","action":"claim"}`)); err != nil {
+	// expected_revision 必填（官方 dsh-tool-agent-team/src/index.ts:205）：新建任务 revision = 1。
+	if _, err := mk(dir, kindUpdate).Exec(ctx, json.RawMessage(
+		`{"task_id":"`+id+`","expected_revision":1,"action":"claim"}`)); err != nil {
 		t.Fatalf("claim 不带 owner 应当认领会话 id: %v", err)
 	}
 	got, _ := mk(dir, kindGet).Exec(ctx, json.RawMessage(`{"task_id":"`+id+`"}`))
@@ -52,7 +54,9 @@ func TestClaimWithoutOwnerOrSessionRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mk(dir, kindUpdate).Exec(ctx, json.RawMessage(`{"task_id":"`+taskID(t, res)+`","action":"claim"}`)); err == nil {
+	// 带上合法 expected_revision 1（官方 index.ts:205），确保拒绝的原因**只是**缺身份。
+	if _, err := mk(dir, kindUpdate).Exec(ctx, json.RawMessage(
+		`{"task_id":"`+taskID(t, res)+`","expected_revision":1,"action":"claim"}`)); err == nil {
 		t.Fatal("没有身份来源时必须拒绝")
 	}
 }

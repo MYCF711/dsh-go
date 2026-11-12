@@ -637,7 +637,10 @@ type OfficialSubagentPromptContent struct {
 	Name      string `json:"name,omitempty"`
 }
 
-// OfficialSubagentPromptRequest 是官方 `SubagentPromptRequest`。
+// OfficialSubagentPromptRequest 是官方 `subagents/prompt` 的请求形状。
+//
+// rc.2 删除了 `parentSessionId` 与 `mode:"continuable"`；本仓保留 ParentSessionID
+// 作为**可选**字段（空 = 不声明父，由网关按目标会话授权；非空 = rc.1 兼容的父授权）。
 type OfficialSubagentPromptRequest struct {
 	RequestID       string
 	ParentSessionID string
@@ -1325,14 +1328,22 @@ func officialSubagentsPrompt(api OfficialAgentAPI, p *officialParams) (any, erro
 	if !hasRequestID || requestID == "" {
 		return nil, officialBadRequest("request.requestId 必填且非空")
 	}
-	if !hasParent || parentID == "" {
-		return nil, officialBadRequest("request.parentSessionId 必填且非空")
+	// rc.2 的 `subagents/prompt` **删掉了** `parentSessionId` 与 `mode:"continuable"` 两个必填
+	// （`docs/evidence/official-method-contract-delta-0.2.2-rc.2.md` §3 `subagents/prompt`：
+	// required 从 [requestId,parentSessionId,childSessionId,mode,delivery,content]
+	// 变成 [requestId,childSessionId,delivery,content]）。
+	//
+	// 本仓两种形状都收：带 parent 的（rc.1 兼容，父授权）与不带 parent 的（rc.2，
+	// 网关在目标会话上授权）。**给了就必须对**——父 id 不匹配仍是 403 cross_session，
+	// 那是真实授权边界，不能因为"新形状可以不给"就放过一个错的父。
+	if hasParent && parentID == "" {
+		return nil, officialBadRequest("request.parentSessionId 给了但是空串：不想声明父就整个省略")
 	}
 	if !hasChild || childID == "" {
 		return nil, officialBadRequest("request.childSessionId 必填且非空")
 	}
-	if !hasMode || mode != "continuable" {
-		return nil, officialBadRequest("request.mode 必须是 \"continuable\"")
+	if hasMode && mode != "continuable" {
+		return nil, officialBadRequest("request.mode 只接受 \"continuable\"（rc.2 已删除该字段，可省略）")
 	}
 	if !hasDelivery || (delivery != "queue" && delivery != "steer") {
 		return nil, officialBadRequest("request.delivery 必须是 \"queue\" 或 \"steer\"")

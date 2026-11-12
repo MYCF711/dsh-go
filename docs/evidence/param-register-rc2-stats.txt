@@ -1,0 +1,180 @@
+# 参数总账 rc.2 统计快照（GO.8 / D1）
+
+生成：`tmp/GO8-RC2/register/emit_report.py`（数字现算自 docs/parameter-register.json 与两道闸日志）
+官方基线：0.2.2-rc.2，asar sha256 49fd1b087190d594b15c44fe6394c6ffd591200aba76e209b5769498f83076ae
+官方树：tmp/GO8-RC2/official-rc2/dsh/node_modules/@deepseek-ai
+
+## 条目
+
+entries=239 flags=98
+官方参数覆盖率轴：405 条 = rc.1 期间 342 + rc.2 新增 63（另 1 条既有条目改判）
+
+## 官方轴状态
+
+status                  rc1-342  rc2-new    total
+COVERED                      65       11       76
+COVERED-EQUIV               211       19      230
+N-A                          40        9       49
+DEFERRED                      8        0        8
+OFFICIAL_UNSUPPORTED         18        0       18
+UNREAD-GAP                    0       24       24
+TOTAL                       342       63      405
+
+## 锚点
+
+rc.2 生成器：entries=342 anchors=379 alive=327 lost=15 lineDrift=124
+rc.1 自校验：entries=342 anchors=379 alive=379 lost=0
+丢失锚点：
+  tool.web.searchMaxResults                dsh-tool-web/lib/index.js:880 默认值 8→10
+  tool.web.searchMaxQueries                dsh-tool-web/lib/index.js:881 默认值 4→10
+  usage.placeholderPolicy                  dsh-client-ui-chat/lib/client.js:19 压缩成 20 行 bundle，语义逐字保留
+  account.platformOrigin                   dsh-deepseek-account/lib/index.js:696 包删除并入 dsh-deepseek-account
+  account.inferenceOrigin                  dsh-deepseek-account/lib/index.js:704 同上
+  account.allowLoopbackHttp                dsh-deepseek-account/lib/index.js:705 同上
+  account.requestTimeoutMs                 dsh-deepseek-account/lib/index.js:709 同上
+  account.balanceTimeoutMs                 dsh-deepseek-account/lib/index.js:710 同上
+  account.logoutMaxRetries                 dsh-deepseek-account/lib/index.js:711 同上
+  account.logoutRetryDelayMs               dsh-deepseek-account/lib/index.js:712 同上
+  account.attemptTimeoutMs                 dsh-deepseek-account/lib/index.js:713 同上
+  agentTeam.maxMembers                     dsh-agent-team/lib/index.js:698 参数删除：写入即抛 TEAM_INVALID_CONFIG；dsh-agent-team/lib/index.js:753 执行点
+  agentTeam.maxTasks                       dsh-agent-team/lib/index.js:696 包 dsh-experimental-agent-team 删除→dsh-agent-team，默认值不变；dsh-agent-team/lib/index.js:743 schema
+  agentTeam.maxMessageBytes                dsh-agent-team/lib/index.js:700 在 REMOVED_CONFIG_KEYS 里；dsh-agent-team/lib/index.js:753 执行点
+  agentTeam.disposalTimeoutMs              dsh-agent-team/lib/index.js:701 在 REMOVED_CONFIG_KEYS 里；dsh-agent-team/lib/index.js:753 执行点
+
+## rc.1→rc.2 默认值/参数变化
+
+  tool.web.searchMaxResults              8                        -> 10                         [DEFAULT]
+      证据：app.asar:dsh/node_modules/@deepseek-ai/dsh-tool-web/lib/index.js:880 `searchMaxResults: z.number().default(10)`
+      宿主：已跟随：modules/tool/websearch/websearch.go:36 `defaultMaxResults = 10`
+  tool.web.searchMaxQueries              4                        -> 10                         [DEFAULT]
+      证据：app.asar:dsh/node_modules/@deepseek-ai/dsh-tool-web/lib/index.js:881 `searchMaxQueries: z.number().default(10)`
+      宿主：已跟随：modules/tool/websearch/websearch.go:37 `defaultMaxQueries = 10`
+  web.searchProvider                     deepseek-official        -> deepseek-search-api        [DEFAULT]
+      证据：app.asar:dsh/node_modules/@deepseek-ai/dsh-base/cordis.patch.yml:487 `searchProvider: deepseek-search-api`
+      宿主：部分跟随：宿主有 provider 注册表与基线名（internal/transport/handlers_web_providers_rc2.go:81），出厂默认项仍是 `deepseek-official`（modules/search/deepseek.go:30）
+  web-deepseek-api.apiKeyEnv             DEEPSEEK_API_KEY         -> （整块 config 删除）             [REMOVED-DEFAULT]
+      证据：app.asar:dsh/node_modules/@deepseek-ai/dsh-base/cordis.patch.yml:493-495 `- id: web-deepseek-api` 下已无 config 块
+      宿主：可等价：凭据解析在 internal/spi/keys.go，按会话路由；宿主不依赖该键
+  DSH_PRIMARY_RUNTIME                    DSH_PRIMARY_RUNTIME ?? DSH_BUNDLED_PRIMARY_RUNTIME -> DSH_PRIMARY_RUNTIME ?? ''  [DEFAULT]
+      证据：app.asar:dsh/node_modules/@deepseek-ai/dsh-sdk-app/cordis.patch.yml:49 `resolve(process.env.DSH_PRIMARY_RUNTIME ?? '')`；rc.2 全树 `DSH_BUNDLED_PRIMARY_RUNTIME` 0 命中
+      宿主：不适用：Electron 打包器注入的兜底变量，Go 宿主没有打包器
+  agentTeam.maxMembers / maxMessageBytes / disposalTimeoutMs -> 真删除（TEAM_INVALID_CONFIG），记 N-A/official-removed
+  agentTeam.maxTasks -> 包搬家，默认仍 256，宿主已跟随
+
+## 按域分布
+
+domain                                    all    COV    EQV    N-A    DEF  UNSUP    GAP
+agent-loop                                 67     18     38      6      1      4      0
+context                                    21      4     14      0      3      0      0
+env                                        15      4      6      5      0      0      0
+live-profile-desktop                       24     10     10      3      0      1      0
+llm                                        34      2     29      1      2      0      0
+schedule-plugins-account-telemetry         76     14     32     14      2     10      4
+session                                    37      6     27      4      0      0      0
+tools-sandbox-approval                     76      7     39      9      0      3     18
+transport-http                             29      4     22      1      0      0      2
+tui-capability                             26      7     13      6      0      0      0
+
+## UNREAD-GAP 逐条（24）
+
+  1. mcpManager.ServerEntry[].headers               streamable-http 请求头注入未实现
+  2. mcpManager.ServerEntry[].startupTimeoutMs      per-server startupTimeoutMs 未实现（只有 probe 的整场 TimeoutMs）
+  3. mcpManager.ServerEntry[].transport             streamable-http 传输（连接/重连/鉴权头/SSE）未实现
+  4. mcpManager.ServerEntry[].url                   streamable-http 端点连接未实现
+  5. apiTerminalController.maxAgentTerminals        Agent 终端独立车道（4）未实现
+  6. officeKit.fontDirectories                      字体根目录配置未实现
+  7. officeKit.fontFallbacks                        字体回退链配置未实现
+  8. officeKit.maxArchiveEntries                    OOXML ZIP 条目上限未实现
+  9. officeKit.maxCachedBytes                       cache 预算（128MiB）未与 store 预算分开
+ 10. officeKit.maxCachedEntries                     产物仓条数上限未实现
+ 11. officeKit.maxFontFileBytes                     单个字体文件字节上限未实现
+ 12. officeKit.maxFontFiles                         字体文件数量上限未实现
+ 13. officeKit.maxLoadedFontBytes                   单次转换字体字节上限未实现
+ 14. officeKit.maxReaders                           reader 席位上限未实现
+ 15. officeKit.maxSourceBytes                       跨任务源字节总预算未实现
+ 16. officeKit.maxSourceEntries                     源版本别名上限未实现
+ 17. officeKit.maxUncompressedBytes                 OOXML 解压总字节上限未实现
+ 18. terminalPanel.maxReadBytes                     单次屏幕读取字节上限未实现
+ 19. terminalPanel.readUserTerminals                user_terminal_list / user_terminal_read 未注册
+ 20. terminalPanel.timeoutMs                        单次 send 超时预算未实现
+ 21. toolOffice.activationSkills                    dsh-tool-office 工具面未落地（activationSkills 随该工具接线）
+ 22. toolOffice.maxImageBytes                       渲染输出 PNG 总字节上限未实现
+ 23. workspaceFiles.search.graceMs                  搜索子进程终止宽限未实现（宿主无子进程）
+ 24. workspaceFiles.search.stderrMaxBytes           stderr 诊断字节上限未实现
+
+## 两道闸（EXIT 均为 0）
+
+validate_register.py:
+  entries=239 flags=98 refs=354 window=±2 min-len=4
+  OK=306 MISMATCH=0 NO-REF=4 N/A=0 SKIP-NO-IDENT=20 SKIP-WHITELIST=7
+  CWD-SELFCHECK=ok（另在 C:\Users\ADMINI~1\AppData\Local\Temp\register-cwdcheck-ljo299ux 复算：OK=306 MISMATCH=0）
+audit_refs.py:
+  改过的引用 335 处（行号变了 305 + 仅补目录 30）；可疑（新行是包声明/空行/注释）0 处
+  CWD-SELFCHECK=ok（另在 C:\Users\ADMINI~1\AppData\Local\Temp\audit-cwdcheck-kow71yrh 复算：改过 335 处，可疑 0 处）
+
+## rc.2 新增参数候选的宿主判定（64）
+
+agentTeam.defaultEnabled                                   COVERED            dsh-agent-team
+agentTeam.maxTasks                                         COVERED            dsh-agent-team [既有条目改判]
+apiTerminalController.maxAgentTerminals                    UNREAD-GAP         dsh-api-terminal-controller
+workspaceFiles.search.graceMs                              UNREAD-GAP         dsh-api-workspace-files
+workspaceFiles.search.maxEntries                           COVERED-EQUIV      dsh-api-workspace-files
+workspaceFiles.search.maxResults                           COVERED-EQUIV      dsh-api-workspace-files
+workspaceFiles.search.stderrMaxBytes                       UNREAD-GAP         dsh-api-workspace-files
+workspaceFiles.search.timeoutMs                            COVERED-EQUIV      dsh-api-workspace-files
+accountNotifications.notificationPollIntervalMs            N-A                dsh-client-ui-account-notifications
+mcpManager.ServerEntry[].args                              COVERED            dsh-mcp-manager
+mcpManager.ServerEntry[].closeTimeoutMs                    COVERED            dsh-mcp-manager
+mcpManager.ServerEntry[].command                           COVERED            dsh-mcp-manager
+mcpManager.ServerEntry[].cwd                               COVERED            dsh-mcp-manager
+mcpManager.ServerEntry[].enabled                           COVERED            dsh-mcp-manager
+mcpManager.ServerEntry[].env                               COVERED            dsh-mcp-manager
+mcpManager.ServerEntry[].headers                           UNREAD-GAP         dsh-mcp-manager
+mcpManager.ServerEntry[].reconnect                         COVERED            dsh-mcp-manager
+mcpManager.ServerEntry[].startupTimeoutMs                  UNREAD-GAP         dsh-mcp-manager
+mcpManager.ServerEntry[].toolCallTimeoutMs                 COVERED            dsh-mcp-manager
+mcpManager.ServerEntry[].transport                         UNREAD-GAP         dsh-mcp-manager
+mcpManager.ServerEntry[].url                               UNREAD-GAP         dsh-mcp-manager
+mcpManager.servers                                         COVERED            dsh-mcp-manager
+officeKit.fontDirectories                                  UNREAD-GAP         dsh-office-kit
+officeKit.fontFallbacks                                    UNREAD-GAP         dsh-office-kit
+officeKit.maxArchiveEntries                                UNREAD-GAP         dsh-office-kit
+officeKit.maxBackgroundConversions                         COVERED-EQUIV      dsh-office-kit
+officeKit.maxCachedBytes                                   UNREAD-GAP         dsh-office-kit
+officeKit.maxCachedEntries                                 UNREAD-GAP         dsh-office-kit
+officeKit.maxConcurrentConversions                         COVERED-EQUIV      dsh-office-kit
+officeKit.maxFontFileBytes                                 UNREAD-GAP         dsh-office-kit
+officeKit.maxFontFiles                                     UNREAD-GAP         dsh-office-kit
+officeKit.maxImageResolution                               COVERED-EQUIV      dsh-office-kit
+officeKit.maxInputBytes                                    COVERED-EQUIV      dsh-office-kit
+officeKit.maxLoadedFontBytes                               UNREAD-GAP         dsh-office-kit
+officeKit.maxOutputBytes                                   COVERED-EQUIV      dsh-office-kit
+officeKit.maxOutputStoreBytes                              COVERED-EQUIV      dsh-office-kit
+officeKit.maxQueuedJobs                                    COVERED-EQUIV      dsh-office-kit
+officeKit.maxReaders                                       UNREAD-GAP         dsh-office-kit
+officeKit.maxSourceBytes                                   UNREAD-GAP         dsh-office-kit
+officeKit.maxSourceEntries                                 UNREAD-GAP         dsh-office-kit
+officeKit.maxUncompressedBytes                             UNREAD-GAP         dsh-office-kit
+officeKit.outputDirectory                                  COVERED-EQUIV      dsh-office-kit
+officeKit.outputRetentionMs                                COVERED-EQUIV      dsh-office-kit
+officeKit.timeoutMs                                        COVERED-EQUIV      dsh-office-kit
+terminalPanel.backendType                                  N-A                dsh-terminal-panel
+terminalPanel.cols                                         COVERED-EQUIV      dsh-terminal-panel
+terminalPanel.environment                                  N-A                dsh-terminal-panel
+terminalPanel.idleSilenceMs                                N-A                dsh-terminal-panel
+terminalPanel.maxReadBytes                                 UNREAD-GAP         dsh-terminal-panel
+terminalPanel.preferredShells                              N-A                dsh-terminal-panel
+terminalPanel.probeIntervalMs                              N-A                dsh-terminal-panel
+terminalPanel.promptSilenceMs                              N-A                dsh-terminal-panel
+terminalPanel.readUserTerminals                            UNREAD-GAP         dsh-terminal-panel
+terminalPanel.rows                                         COVERED-EQUIV      dsh-terminal-panel
+terminalPanel.startupSilenceMs                             N-A                dsh-terminal-panel
+terminalPanel.startupTimeoutMs                             N-A                dsh-terminal-panel
+terminalPanel.timeoutMs                                    UNREAD-GAP         dsh-terminal-panel
+toolOffice.activationSkills                                UNREAD-GAP         dsh-tool-office
+toolOffice.maxImageBytes                                   UNREAD-GAP         dsh-tool-office
+toolOffice.maxImageDimension                               COVERED-EQUIV      dsh-tool-office
+toolOffice.maxImagePixels                                  COVERED-EQUIV      dsh-tool-office
+toolOffice.maxImages                                       COVERED-EQUIV      dsh-tool-office
+toolSubagentControl.interrupt                              COVERED            dsh-tool-subagent-control
+web.searchProvider                                         COVERED-EQUIV      dsh-web

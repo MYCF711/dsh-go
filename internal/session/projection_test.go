@@ -284,6 +284,15 @@ func TestProjectionRestoreFloor(t *testing.T) {
 		ProjectionKeyTitle:               {Ver: 1, Seq: 7, Val: "x"},
 		ProjectionKeySessionListMetadata: {Ver: 1, Seq: 2, Val: map[string]any{"blank": true, "lastPromptAt": nil}},
 		ProjectionKeyWorkingDirectory:    {Ver: 1, Seq: 2, Val: cwd},
+		// rc.2 的新单元也必须有可用行，否则 floor 被它拖到 0（全量重读）。
+		ProjectionKeyConversationContinuation: {Ver: 4, Seq: 2, Val: map[string]any{
+			"admitted": false, "failedAttempt": false, "ending": nil,
+		}},
+		ProjectionKeySessionStats: {Ver: 1, Seq: 2, Val: map[string]any{
+			"turns": 0, "steps": 0, "llmMs": 0, "toolMs": 0, "ttftMs": 0,
+			"ttftSteps": 0, "decodeMs": 0, "decodeTokens": 0,
+			"lastTurn": nil, "openStep": nil, "pendingCalls": map[string]any{},
+		}},
 	}
 	// 最低可用 watermark = 2 → 尾部读从 2 开始（那一格是锚点：Restore 会
 	// 把它当已折叠事件跳过，但它证明日志还延伸到这里）。
@@ -373,7 +382,19 @@ func TestProjectionRestoreRejectsMalformedCheckpoint(t *testing.T) {
 func TestProjectionUnitsAreOfficialShapes(t *testing.T) {
 	registry := DefaultProjectionRegistry()
 	keys := registry.Keys()
-	want := []string{ProjectionKeySessionListMetadata, ProjectionKeyTitle, ProjectionKeyWorkingDirectory}
+	// 默认注册表 = 宿主真有事件来源的键。rc.2 起多一个 conversationContinuation
+	// （官方 stateVersion 4，事件来源 turn/start、user/message、assistant/attempt、turn/end
+	// 全是宿主真会写的事件）：dsh-api-session-controller/lib/index.js:479-513。
+	// 再加 sessionStats（官方 stateVersion 1，事件来源 step/start、step/end、
+	// assistant/message、tool/call、tool/result、turn/end + 宿主自有的
+	// assistant/text | assistant/reasoning 增量）：dsh-session-stats/lib/types/projection.js:66-77。
+	want := []string{
+		ProjectionKeySessionListMetadata,
+		ProjectionKeyTitle,
+		ProjectionKeyWorkingDirectory,
+		ProjectionKeyConversationContinuation,
+		ProjectionKeySessionStats,
+	}
 	if len(keys) != len(want) {
 		t.Fatalf("units = %v，期望 %v", keys, want)
 	}

@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
+	"dshgo/internal/settings"
 	"dshgo/internal/settingsform"
 )
 
@@ -29,6 +32,10 @@ type serveSettingsStore struct {
 	basePolicy        string
 	modelLoadErr      error
 	permissionLoadErr error
+	// llm 是 rc.2 的 `llm` 命名空间存储（`providers.<route>.retryPolicy`）。
+	// 值与 revision 落在 <home>/state/settings-namespaces.json；internal/llm 解析 provider
+	// 时读**同一份**文档，所以这里写进去的策略下一轮真生效。
+	llm *settings.Store
 }
 
 // setLoadErrors 在 serve 启动装配时记录既有 store 的真实读盘结果。
@@ -39,7 +46,14 @@ func (s *serveSettingsStore) setLoadErrors(modelErr, permissionErr error) {
 }
 
 func newServeSettingsStore(baseModel, basePolicy string, models *modelOverrideStore, permissions *permissionOverrideStore) *serveSettingsStore {
-	return &serveSettingsStore{models: models, permissions: permissions, baseModel: baseModel, basePolicy: basePolicy}
+	store := &serveSettingsStore{models: models, permissions: permissions, baseModel: baseModel, basePolicy: basePolicy}
+	if models != nil {
+		// home = <home>/state/session-model.json 的上两级；llm 持久段落在同一
+		// state 目录下的 settings-namespaces.json。这样 llm 命名空间与既有
+		// override 文件同源同 home，不需要在装配点再传一份 home。
+		store.llm = settings.Open(filepath.Dir(filepath.Dir(models.path)))
+	}
+	return store
 }
 
 func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, error) {
@@ -64,8 +78,19 @@ func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, erro
 			return settingsform.Document{}, fmt.Errorf("既有 permission 设置存储读取失败: %w", s.permissionLoadErr)
 		}
 		return readSettingsDocumentLocked(s.permissions.m, s.basePolicy, settingsform.FieldDefaultPreset)
+	case settingsform.NamespaceLLM:
+		if s.llm == nil {
+			return settingsform.Document{}, settingsStoreNotWiredError(namespace)
+		}
+		// Base 由 settingsform 的声明默认值补（readOrigin 的 doc.Base==nil 分支）：
+		// 这里只给持久段的 user 与 revision。
+		value, revision, err := s.llm.Read(settingsform.NamespaceLLM)
+		if err != nil {
+			return settingsform.Document{}, fmt.Errorf("既有 llm 设置存储读取失败: %w", err)
+		}
+		return settingsform.Document{User: value, Revision: revision}, nil
 	default:
-		return settingsform.Document{}, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 model 或 permission", Status: http.StatusNotFound}
+		return settingsform.Document{}, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 describe 返回的 model / permission / llm", Status: http.StatusNotFound}
 	}
 }
 
@@ -106,8 +131,34 @@ func (s *serveSettingsStore) Write(namespace string, user map[string]any, expect
 			return 0, fmt.Errorf("既有 permission 设置存储读取失败，拒绝写入: %w", s.permissionLoadErr)
 		}
 		return writeSettingsDocumentLocked(&s.permissions.m, user, expected, settingsform.NamespacePermission, settingsform.FieldDefaultPreset, s.permissions.flushLocked)
+	case settingsform.NamespaceLLM:
+		if s.llm == nil {
+			return 0, settingsStoreNotWiredError(namespace)
+		}
+		revision, err := s.llm.Write(settingsform.NamespaceLLM, user, expected)
+		if err != nil {
+			var conflict *settings.RevisionConflictError
+			if errors.As(err, &conflict) {
+				// 与 model/permission 逐字同形的 409：客户端只需重新 describe。
+				return 0, settingsform.RevisionConflict(namespace, conflict.Expected, conflict.Actual)
+			}
+			return 0, fmt.Errorf("llm 设置存储写入失败: %w", err)
+		}
+		return revision, nil
 	default:
-		return 0, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 model 或 permission", Status: http.StatusNotFound}
+		return 0, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 describe 返回的 model / permission / llm", Status: http.StatusNotFound}
+	}
+}
+
+// settingsStoreNotWiredError 是 llm 文档存储没接线时的结构化错误（装配 bug）：
+// 说清"没写进去"，不假装成功。
+func settingsStoreNotWiredError(namespace string) error {
+	return &settingsform.Error{
+		Code:      "internal",
+		Message:   fmt.Sprintf("%s 命名空间的设置文档存储未接线（serve 装配缺 settings.Open）", namespace),
+		Hint:      "检查 newServeSettingsStore 的 models override store 是否接线",
+		Retryable: true,
+		Status:    http.StatusInternalServerError,
 	}
 }
 
@@ -216,7 +267,11 @@ var settingsMethodParams = map[string][]string{
 }
 
 func newSettingsFormHTTPHandler(store *serveSettingsStore) http.Handler {
-	return newSettingsFormHTTPHandlerWithService(settingsform.New(store))
+	// 官方 0.2.2-rc.2 起 `settings.describe` 要发布 `llm` 命名空间里的
+	// `providers.<route>.retryPolicy` 节点（重试条件/次数/等待时间的可选项就是
+	// 从这份 schema 读的）。HostRegistry 在默认两命名空间之上补 `llm`；
+	// 默认 Registry 保持不变（单独用它的人行为一字未变）。
+	return newSettingsFormHTTPHandlerWithService(settingsform.NewService(store, settingsform.HostRegistry()))
 }
 
 // newSettingsFormHTTPHandlerWithService 用显式 Service 构造 handler。
@@ -239,7 +294,7 @@ func newSettingsFormHTTPHandlerWithService(service *settingsform.Service) http.H
 			return
 		}
 		if method != "settings.describe" && method != "settings.form.describe" && params.NS == "" {
-			writeSettingsFormError(w, &settingsform.Error{Code: "bad_request", Message: method + " 缺 ns", Hint: "ns 必须是 describe 返回的 model 或 permission", Status: http.StatusBadRequest})
+			writeSettingsFormError(w, &settingsform.Error{Code: "bad_request", Message: method + " 缺 ns", Hint: "ns 必须是 describe 返回的 model / permission / llm", Status: http.StatusBadRequest})
 			return
 		}
 		var result any

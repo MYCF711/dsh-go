@@ -624,7 +624,9 @@ docs/              设计文档（cordis-alignment、tool-spi 等）
 3. 每个 `Tool.Exec` 的 error 路径必须给 `Hint`（AST 扫描）。
 4. 完整 CI 目标为 `go vet` + `staticcheck` + `-race` 全绿；共享树未实际跑成的项必须标未验证，不得用 race-guard 或普通 test 冒充。
 5. 工具 schema 快照：变更必须显式更新 `cmd/dshd/testdata/tools.snapshot.json`（防缓存击穿）。
-6. 工具表 token 总量 ≤ 6000（分词实测，不估算）。
+6. 工具表 token 总量 ≤ **6400**（分词实测，不估算）。
+   为 0.2.2-rc.2 起上调：官方工具面净增 7 个（`team_task_*`、`office_*`、`user_terminal_*`、`schedule_view/edit`），
+   逐个都有官方 `docs/tool-catalog.md` 依据；再涨就要先裁自撰描述，而不是继续抬上限。
 7. `dshd` 二进制体积 ≤ 25 MiB（25×1024×1024 字节，`-s -w`）。
 
 | R3 | DONE · 01:08 定时复核 | Lead；宿主 `9cfe2f4` / UI `3925e84` | 只读两仓、任务表、worktree、进程 | 方向未偏离：Go 宿主+Viva 原生；无 Electron/WebView 回退；TUI 0.19 适配器 BLOCKED；HS-09/12 在途；T13 APPROVE；宿主 stable NO-GO。报告 `docs/scheduled-review-2026-11-08-0108.md` |

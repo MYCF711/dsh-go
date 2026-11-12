@@ -18,14 +18,17 @@ import (
 	"encoding/binary"
 
 	"dshgo/internal/config"
+	"dshgo/internal/cua"
 	"dshgo/internal/llm"
 	"dshgo/internal/modes"
 	"dshgo/internal/native"
+	"dshgo/internal/officekit"
 	"dshgo/internal/pluginmgr"
 	"dshgo/internal/session"
 	"dshgo/internal/settingsform"
 	"dshgo/internal/transport"
 	"dshgo/modules/exec/bash"
+	"dshgo/modules/tool/websearch/providerapi"
 )
 
 // errNoModel 是 serve 的 turnRunner 给出的回答：**故意**失败。
@@ -462,6 +465,13 @@ func cmdServe(args []string) error {
 	}
 	defer officialJT.Close()
 
+	// rc.2 `dsh-terminal-panel` 的两个只读工具（`user_terminal_list` / `user_terminal_read`）
+	// 跑在**每轮的工具子进程**里，而真 roster 只在这个进程里。装一条父→子 stdio 帧桥：
+	// 子进程问、这里答，答的就是 `terminal.list` / `terminal.watch` 那一份（见 terminal_bridge.go）。
+	if _, err := installUserTerminalBridge(broker, officialJT, *home); err != nil {
+		return fmt.Errorf("终端面板桥安装失败: %w", err)
+	}
+
 	// 配置树（HS-14）：`config.patch.*` 的唯一真值。启动即打开，损坏 fail-loud。
 	configTree, err := config.OpenStore(filepath.Join(*home, "state", "config-tree.json"))
 	if err != nil {
@@ -491,12 +501,19 @@ func cmdServe(args []string) error {
 		// 静态前端必须在**最外层**：GET /?token= 要先到前端，再到 wire。
 		// 未设置 DSHD_FRONTEND_DIR（或目录不存在）时 front == nil，包装退化成
 		// 原样，既有行为逐字节不变。
-		HandlerWrap: frontendMount(front, officialWireMount(officialWireDeps{
+		HandlerWrap: transport.MCPManagerMountAround(transport.MCPManagerDeps{
+			// 三个 mcpManager.*（probe/restart/watch）与 mcp.list/reconnect/toggle
+			// 共用**同一份**服务状态：都取自 mcpServers 的嵌入式 tools.MCPManager。
+			List:      mcpServers.MCPManager.List,
+			Probe:     mcpServers.MCPManager.Probe,
+			Restart:   mcpServers.MCPManager.Restart,
+			Subscribe: mcpServers.MCPManager.Subscribe,
+		}, frontendMount(front, officialWireMount(officialWireDeps{
 			Home:        *home,
 			Journals:    journals,
 			Attachments: attachments,
 			Events:      approvalEvents,
-		})),
+		}))),
 		ContextUsage: src.ContextUsage,
 		MCPList: func(sessionID string) ([]transport.MCPServerView, error) {
 			if _, err := src.resolve(sessionID); err != nil {
@@ -769,9 +786,14 @@ func cmdServe(args []string) error {
 	}
 	// 其余官方 0.2.2 方法接线（additive；宿主实现全在 cmd/dshd 与
 	// internal/pluginmgr/official，Transport 只做协议翻译）。
-	srv.AttachOfficialAgentAPI(newAgentOfficialAPI(agentOfficialDeps{
+	// rc.2：同一个 core 同时提供 `subagents.*` 与 `agentTeams.setEnabled` /
+	// `subagents.interruptByUser`（Team 分派面），两边共享同一份进程内状态。
+	agentAPICore := newAgentOfficialAPICore(agentOfficialDeps{
 		home: *home, goals: goalOverrides, journals: journals, src: src,
 		sandboxPresets: sandboxPresets, sandboxStore: sandboxStore,
+		// Team 选择变更（`team/mode`）要同时进每会话 journal（可恢复）与 WS
+		// （在线订阅者立刻看到同一帧）。不接的话在线界面要等下一次轮询。
+		pub: srv.Publish,
 		submit: func(sessionID, text string) (transport.PromptResult, error) {
 			return prompts.Submit(context.Background(), sessionID, text)
 		},
@@ -786,15 +808,31 @@ func cmdServe(args []string) error {
 			_, err := prompts.CancelPlacement(sessionID, "interrupt", "")
 			return err
 		},
-	}))
+	})
+	srv.AttachOfficialAgentAPI(agentAPICore.bind())
+	srv.AttachOfficialAgentTeamRC2API(agentAPICore.bindTeamRC2())
+	// 官方 0.2.2-rc.2 电脑操作面（9 个 cuaAccess.*）。默认实现就是真 Service：
+	// 平台/权限状态、应用决策、图标、设置页、审批状态机都是真的；AX/窗口控制在
+	// 无 provider 的平台按官方形状回结构化未实现。
+	srv.AttachOfficialCUARc2API(transport.NewOfficialCUARc2APIFromService(cua.NewService(cua.Options{HomeDir: *home})))
 	srv.AttachOfficialSettingsCredentialAPI(transport.OfficialSettingsCredentialAPI{
-		Settings:    settingsform.New(settingsStore),
+		// rc.2 起 describe 要带 `llm` 命名空间（`providers.<route>.retryPolicy`），
+		// 所以用 HostRegistry 的 Service；默认 Registry 的行为一字未变。
+		Settings:    settingsform.NewService(settingsStore, settingsform.HostRegistry()),
 		Credentials: transport.NewCatalogCredentialStore(modelCatalog),
 	})
 	wsHost := attachOfficialWorkspace(srv, *home, src, prompts)
 	attachOfficialWorkspaceFollow(srv, wsHost)
 	worktreeSvc := attachOfficialWorktree(srv, src)
 	prompts.worktree = worktreeSvc
+	// 官方 rc.2「归档会话时清理工作树」：给**同一个** worktree 服务注入 ArchiveHost
+	// （保留策略 / 是否仍被引用 / 创建者会话的沙箱策略），并在
+	// workspace.archiveSession 成功之后自动排期清理（inspection 在后台）。
+	attachWorktreeArchive(srv, worktreeArchiveDeps{
+		Home: *home, Workspace: wsHost, Service: worktreeSvc,
+		Sessions: &worktreeSessionStore{src: src},
+		Presets:  sandboxPresets, Modes: sandboxStore,
+	})
 	nativeSvc := attachOfficialNative(srv, native.NewService(), func() (string, error) {
 		return ensureSettingsDocument(*home, settingsStore)
 	})
@@ -824,14 +862,34 @@ func cmdServe(args []string) error {
 	srv.AttachOfficialForgeGitAPI(newForgeGitAPI(func(sessionID string) (string, error) {
 		return src.Cwd(sessionID)
 	}))
+	// rc.2 Forge 面 12 个方法（internal/transport/handlers_forge_rc2.go）。
+	// 第二个参数与 worktree 面板共用**同一个** *worktree.Service 实例（清理状态、
+	// revision 必须同源）；会话目录解析器与上面的 forgePanel git 族同源（src.Cwd）。
+	srv.AttachOfficialForgeRC2API(newForgeRC2API(func(sessionID string) (string, error) {
+		return src.Cwd(sessionID)
+	}, worktreeSvc))
 	if forgeHost, ferr := newForgePanelHost(*home); ferr == nil && forgeHost != nil {
 		srv.AttachOfficialForgePanelAPI(forgeHost.api())
 	}
 	srv.AttachOfficialLLMProviderAPI(newLLMProviderAPI(modelCatalog))
+	// 官方 0.2.2-rc.2 `web.listProviders`：清单来自 web 接缝的**真实注册表**
+	// （谁注册了、谁现在可用、配置钉的是哪个），不是写死的一份。
+	srv.AttachOfficialWebProviderAPI(providerapi.ProviderAPI(os.Getenv))
 	accountAPI := newAccountOfficialAPI(accountOfficialDeps{home: *home, catalog: modelCatalog})
 	accountAPI.ActionCardAct = actionCardAct(*home)
 	srv.AttachOfficialAccountAPI(accountAPI)
-	srv.AttachOfficialOfficePDFAPI(newOfficePDFAPI(*home))
+	// Office 面（rc.2 新权威面 officeKit.* + 兼容保留的 officeToPdf.*）共用**同一个**
+	// provider：同一引擎、同一准入队列、同一 generation、同一产物仓。
+	// provider 没有引擎也照样建（官方语义「It now registers without Kit」），
+	// 具体操作才按 unavailable 失败 → Transport 出 501 + capableWhen。
+	officeKitProvider := officekit.Open(officekit.Options{Home: *home,
+		OutputDirectory: filepath.Join(*home, "office-kit", "outputs")})
+	defer officeKitProvider.Close()
+	// 登记为进程内共享实例：工具面（office_convert/recalculate/render）从这一份取，
+	// 避免「Transport 一套引擎状态、工具又一套」（见 cmd/dshd/serve_office_kit.go）。
+	shareOfficeKitProvider(*home, officeKitProvider)
+	srv.AttachOfficialOfficeKitAPI(newOfficeKitAPI(officeKitProvider, *home).withSessionCwd(src.Cwd))
+	srv.AttachOfficialOfficePDFAPI(newOfficePDFAPIWith(*home, officeKitProvider))
 	srv.AttachOfficialSpeechAPI(newSpeechAPI())
 	attachActionCardsView(srv, *home)
 	if err := attachOfficialAnalytics(srv, *home); err != nil {

@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"dshgo/internal/jobs"
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
 )
@@ -158,8 +159,13 @@ func (s *Service) register(cmd string, sess *session, t *task) (string, error) {
 			}
 		}
 		if running >= limit {
-			return "", fmt.Errorf("同一 owner 已有 %d 个运行中的后台任务（上限 %d，可用 %s 调整）：先等它们结束，或停掉其中一个",
-				running, limit, EnvMaxConcurrentJobsPerOwner)
+			// 官方 `jobs.maxConcurrentJobsPerOwner` 超限抛
+			// `JobError(..., 'JOB_LIMIT_REACHED')`（dsh-jobs-local/src/index.ts:234-237）。
+			// 码必须带上：模型的下一步由码决定（job_kill 停一个 / 等结束再重试），
+			// 而不是从一句中文里猜。
+			return "", jobs.New(jobs.CodeLimitReached, fmt.Sprintf(
+				"同一 owner 已有 %d 个运行中的后台任务（上限 %d，可用 %s 调整）：先等它们结束，或停掉其中一个",
+				running, limit, EnvMaxConcurrentJobsPerOwner), nil)
 		}
 	}
 	s.seq++

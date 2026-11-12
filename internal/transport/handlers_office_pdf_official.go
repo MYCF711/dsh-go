@@ -36,6 +36,8 @@ type OfficePDFError struct {
 	Status  int
 	Code    string
 	Message string
+	// CapableWhen 只在渲染器不可用时出现（RC2-C4）：说明装/配什么就能用。
+	CapableWhen string
 }
 
 func (e *OfficePDFError) Error() string { return e.Message }
@@ -155,6 +157,12 @@ func (s *Server) ServeOfficialOfficePDFAPI(w http.ResponseWriter, r *http.Reques
 func writeOfficePDFError(w http.ResponseWriter, err error) {
 	var e *OfficePDFError
 	if ok := errorsAsOfficePDF(err, &e); ok {
+		// RC2-C4：渲染器不可用时附带 capableWhen（说清装/配什么），
+		// 形状与 officeKit 面的 501 一致，客户端不必为两个方法写两套解析。
+		if e.CapableWhen != "" {
+			writeJSON(w, e.Status, errorBodyFor(e.Code, e.Message, map[string]any{"capableWhen": e.CapableWhen}))
+			return
+		}
 		writeJSON(w, e.Status, errorBodyFor(e.Code, e.Message))
 		return
 	}

@@ -50,6 +50,8 @@ const EventWorkingDirectoryChange = "working-directory/change"
 
 const (
 	eventTurnStart = "turn/start"
+	eventTurnEnd   = "turn/end"
+	eventStepStart = "step/start"
 	eventUserMsg   = "user/message"
 	eventTitle     = "session/title"
 )
@@ -360,9 +362,9 @@ var cwdSchema = storage.Nullable(storage.SchemaFunc(func(value any) error {
 	return nil
 }))
 
-// DefaultProjectionRegistry 返回宿主真实注册的三台投影单元。
+// DefaultProjectionRegistry 返回宿主真实注册的五台投影单元。
 //
-// 为什么只有三个：其余官方键（modelSelection / todos / inbox / actionCards /
+// 为什么只有五个：其余官方键（modelSelection / todos / inbox / actionCards /
 // agentPreset / subagent / imageLimits / subagentCatalog / subagentTiming）
 // 在本宿主要么没有事件来源、要么事件字段不足（例如 `model/selection` 没有
 // 官方 `ModelSelection.provider`），注册一个推不出真值的单元就是伪造。
@@ -399,6 +401,15 @@ func DefaultProjectionRegistry() *ProjectionRegistry {
 			Apply: applyWorkingDirectoryChange,
 			View:  func(state any) any { return state },
 		},
+		// rc.2 新增：空 prompt 可续跑判定（官方 stateVersion 4）。
+		// 它有真实事件来源（turn/start、user/message、assistant/attempt、turn/end 全是
+		// 宿主真的会写的事件），所以不像其余官方键那样"没有事件来源"。
+		ConversationContinuationUnit(),
+		// 官方 `sessionStats`（stateVersion 1，`@deepseek-ai/dsh-session-stats`）：
+		// 整份日志的轮/步计数与墙钟。事件来源同样齐全（step/start、step/end、
+		// assistant/message、tool/call、tool/result、turn/end，加上宿主自有的
+		// assistant/text | assistant/reasoning 增量），见 session_stats.go。
+		SessionStatsUnit(),
 	)
 	if err != nil {
 		// 三台单元是写死的常量；走到这里说明代码坏了，启动即失败。

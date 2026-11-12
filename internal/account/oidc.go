@@ -142,7 +142,8 @@ func (s *Service) completeOIDC(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	s.resetTimerLocked()
-	s.notifyLocked()
+	// OIDC 令牌落盘 = 凭据写入 → credentials-changed。
+	s.notifyKindLocked(UpdateCredentialsChanged)
 	return s.stateLocked(), nil
 }
 

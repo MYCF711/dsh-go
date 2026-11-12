@@ -118,11 +118,23 @@ func (b *modelTurnInbox) close() {
 
 func modelSteerKey(sessionID, turnID string) string { return sessionID + "\x00" + turnID }
 
-func (r *modelRunner) signalModelSteerLocked() {
-	if r.steerWake != nil {
-		close(r.steerWake)
-	}
-	r.steerWake = make(chan struct{})
+// pendingSteer 是一条"Run goroutine 还没注册就先到"的 model steer。
+//
+// 为什么要有它（而不是"等 steerWake 通知再看 inbox"）：wake 只是**通知**，
+// 被唤醒的 goroutine 什么时候被调度不由我们决定。如果它的 submit 输给了
+// 首步 drain，这条早到 steer 就只能落在**第一次响应之后**的边界上——
+// 多一次模型往返，而且与"早到 steer 在首步边界接管"的承诺不符。
+// 2026-11-12 的 CI（2 核 + 全包并行）上就是这样红的：
+// TestModelRunnerSteerWaitsForRunRegistration 时红时绿，本地 40/40 全绿。
+//
+// 改成**同步搬运**：Steer 在自己的临界区里把输入挂进 pending 队列，
+// registerModelSteer 在注册的同一临界区里把它搬进新 inbox。首步 drain 在解锁
+// 之后才跑，所以不需要任何"谁先被调度"的假设；调用方只等一个回执（投递成功
+// 或"这一轮已经结束/超时"），不再自旋等 wake。
+type pendingSteer struct {
+	input *modelTurnInput
+	// done 由注册方（或 unregisterModelSteer）投递一次：nil = 已进 inbox。
+	done chan error
 }
 
 func (r *modelRunner) registerModelSteer(sessionID, turnID string) (*modelTurnInbox, error) {
@@ -136,8 +148,12 @@ func (r *modelRunner) registerModelSteer(sessionID, turnID string) (*modelTurnIn
 		r.steers = map[string]*modelTurnInbox{}
 	}
 	inbox := &modelTurnInbox{}
+	// 早到 steer **同步**搬进新 inbox：首步 drain 发生在解锁之后，一定看得到它们。
+	for _, ready := range r.pending[key] {
+		ready.done <- inbox.submit(ready.input)
+	}
+	delete(r.pending, key)
 	r.steers[key] = inbox
-	r.signalModelSteerLocked()
 	return inbox, nil
 }
 
@@ -148,11 +164,16 @@ func (r *modelRunner) unregisterModelSteer(sessionID, turnID string, inbox *mode
 	if r.steers[key] == inbox {
 		delete(r.steers, key)
 	}
+	// 防御：正常路径下 pending 在 register 时已经搬空。若还有（注册与取消交错），
+	// 这一轮已经结束，明确回 late，而不是让调用方干等到超时。
+	for _, ready := range r.pending[key] {
+		ready.done <- fmt.Errorf("%w: session=%s turn=%s", ErrSteerLate, sessionID, turnID)
+	}
+	delete(r.pending, key)
 	if r.finished == nil {
 		r.finished = map[string]string{}
 	}
 	r.finished[sessionID] = turnID
-	r.signalModelSteerLocked()
 	r.steerMu.Unlock()
 }
 
@@ -164,26 +185,51 @@ func (r *modelRunner) modelSteer(ctx context.Context, sessionID, turnID string, 
 	}
 	defer cancel()
 	key := modelSteerKey(sessionID, turnID)
-	for {
-		r.steerMu.Lock()
-		inbox := r.steers[key]
-		finished := r.finished[sessionID] == turnID
-		if r.steerWake == nil {
-			r.steerWake = make(chan struct{})
-		}
-		wake := r.steerWake
+	ready := &pendingSteer{input: input, done: make(chan error, 1)}
+
+	r.steerMu.Lock()
+	// 已经注册：直接进 inbox（这条走的是"轮次在飞"的普通路径）。
+	if inbox := r.steers[key]; inbox != nil {
 		r.steerMu.Unlock()
-		if inbox != nil {
-			return inbox.submit(input)
+		return inbox.submit(input)
+	}
+	if r.finished[sessionID] == turnID {
+		r.steerMu.Unlock()
+		return fmt.Errorf("%w: session=%s turn=%s", ErrSteerLate, sessionID, turnID)
+	}
+	if r.pending == nil {
+		r.pending = map[string][]*pendingSteer{}
+	}
+	r.pending[key] = append(r.pending[key], ready)
+	r.steerMu.Unlock()
+
+	select {
+	case err := <-ready.done:
+		return err
+	case <-waitCtx.Done():
+		// 超时/取消：把这一条从 pending 里摘掉，别让它在注册时被投递给一个
+		// 已经不再等的调用方（channel 有缓冲不会阻塞，但那条输入会凭空多出来）。
+		r.steerMu.Lock()
+		queue := r.pending[key]
+		removed := false
+		for i, candidate := range queue {
+			if candidate != ready {
+				continue
+			}
+			r.pending[key] = append(append([]*pendingSteer{}, queue[:i]...), queue[i+1:]...)
+			removed = true
+			break
 		}
-		if finished {
-			return fmt.Errorf("%w: session=%s turn=%s", ErrSteerLate, sessionID, turnID)
+		if len(r.pending[key]) == 0 {
+			delete(r.pending, key)
 		}
-		select {
-		case <-wake:
-		case <-waitCtx.Done():
-			return fmt.Errorf("%w: 等当前 model turn 注册失败: %v", ErrSteerLate, waitCtx.Err())
+		r.steerMu.Unlock()
+		if !removed {
+			// 摘不到 = 注册方已经在同一把锁里把它搬进 inbox 了。那就当**成功**：
+			// 报"过晚"但输入实际生效，是比失败更难查的那种错。
+			return <-ready.done
 		}
+		return fmt.Errorf("%w: 等当前 model turn 注册失败: %v", ErrSteerLate, waitCtx.Err())
 	}
 }
 

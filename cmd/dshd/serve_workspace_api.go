@@ -39,6 +39,7 @@ package main
 //   - `workspaceFiles.changes` 是官方 stream，transport 层如实 501。
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -51,8 +52,10 @@ import (
 	"time"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/fssearch"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
+	"dshgo/internal/worktree"
 )
 
 const (
@@ -124,6 +127,28 @@ type officialWorkspaceHost struct {
 	// 的默认根）。生产实现按平台解析已知文件夹；测试注入临时目录。
 	documentsDir func() (string, error)
 
+	// prompts 是 serve 注入的轮次服务：反归档要顺着它拿 worktree 服务
+	// （`prompts.worktree`，serve.go 装配时挂上，见 :823-824）。
+	prompts *promptService
+
+	// projectEvent 是 transport 注入的官方 cordis 事件投影口
+	// （`(*transport.Server).ProjectOfficialWorkspaceEvent`）。
+	// nil = 这次调用没有可见通道（测试/嵌入式直接调 `workspaceAPI()`）：
+	// 此时不广播，但也不伪造一条"发过了"。
+	projectEvent func(sessionID, event string) error
+
+	// worktreeOverride 让测试注入假 worktree 能力（生产走 prompts.worktree）。
+	worktreeOverride officialWorkspaceWorktree
+
+	// archiveOps 串行化 archive/unarchive 的"检查 → 广播 → 落盘"整段。
+	//
+	// 官方 registry 用写队列（`enqueueOperation`）达到同样效果：check-then-write
+	// 不会被另一次归档插进来，所以"不在集合里就直接解析、不广播"这条语义才成立。
+	// 不加它的话，两次并发反归档都会看到"还在集合里"，于是各广播一条
+	// `workspace/session-unarchiving`、各做一次工作树恢复。
+	// 锁序固定：archiveOps → h.mu（h.mu 内部只碰内存与磁盘，不回头拿它）。
+	archiveOps sync.Mutex
+
 	mu     sync.Mutex
 	path   string
 	doc    officialWorkspaceDocument
@@ -137,9 +162,10 @@ func newOfficialWorkspaceHost(home string, src *sessionSource, prompts *promptSe
 		return nil
 	}
 	h := &officialWorkspaceHost{
-		home: home,
-		src:  src,
-		now:  time.Now,
+		home:    home,
+		src:     src,
+		prompts: prompts,
+		now:     time.Now,
 		newID: func() (string, error) {
 			id, err := serveID()
 			if err != nil {
@@ -968,6 +994,8 @@ func (h *officialWorkspaceHost) unpinSession(sessionID string) ([]string, error)
 // 活动会话默认拒绝（官方 `workspace/session-active`）；`stopActivity` 为真时
 // **先请求停止**（不等待），再落盘归档。
 func (h *officialWorkspaceHost) archiveSession(sessionID string, stopActivity bool) ([]string, error) {
+	h.archiveOps.Lock()
+	defer h.archiveOps.Unlock()
 	if !h.knownSession(sessionID) {
 		return nil, transport.OfficialWorkspaceError("session/not-found", "没有这个会话：%q", sessionID)
 	}
@@ -985,9 +1013,11 @@ func (h *officialWorkspaceHost) archiveSession(sessionID string, stopActivity bo
 		}
 	}
 	var out []string
+	newlyArchived := false
 	err := h.withDocumentWrite(func() error {
 		if !officialContains(h.doc.ArchivedSessionIDs, sessionID) {
 			h.doc.ArchivedSessionIDs = append([]string{sessionID}, h.doc.ArchivedSessionIDs...)
+			newlyArchived = true
 		}
 		out = append([]string(nil), h.doc.ArchivedSessionIDs...)
 		return nil
@@ -998,12 +1028,77 @@ func (h *officialWorkspaceHost) archiveSession(sessionID string, stopActivity bo
 	if out == nil {
 		out = []string{}
 	}
+	// 官方只在**真的新归档**时广播 `workspace/session-archived`（index.ts:390 提前 return、
+	// :403 才广播），而且广播在落盘与停止请求之后。follow-up 准入失败只记日志、
+	// **不回滚归档**（index.ts:399-406），所以这里不让投递失败改归档结果，但不静默。
+	if newlyArchived {
+		if emitErr := h.projectWorkspaceEvent(sessionID, transport.OfficialWorkspaceEventArchived); emitErr != nil {
+			fmt.Fprintf(os.Stderr,
+				"workspace: 会话 %s 已归档，但 %s 没能投递（官方语义：订阅者失败不回滚归档）: %v\n",
+				sessionID, transport.OfficialWorkspaceEventArchived, emitErr)
+		}
+	}
 	return out, nil
 }
 
+// unarchiveSession 把会话移出 registry-global 归档集。
+//
+// 官方顺序（`dsh-workspace/src/index.ts:420-432`）：
+//
+//  1. 不在归档集 → 直接解析，**不写盘、不广播**（官方 "An id that is not archived
+//     resolves without writing."）；
+//  2. 在集合里 → 先广播 `workspace/session-unarchiving`：官方 worktree 清理服务在这里
+//     取消未准入的移除、等已准入的结算（`dsh-experimental-worktree/src/archive.ts:87-93`）；
+//     监听者拒绝 = **保留归档态**（官方 "A rejection retains the archived state."）；
+//     2.5 本仓的取消点：广播之后、落盘之前调 `worktree.Service.CancelArchiveCleanup`，
+//     把官方监听器的三件事（置 cancelled / await 结算 / 收走 attempt）做掉。
+//     取消及时 → 移除根本不发生（checkout、`git worktree list` 注册、分支都不变）；
+//     取消来晚 → 不打断正在跑的 git，等它结算，然后由第 4 步的恢复路径接手。
+//  3. 再把 id 移出归档集并落盘。
+//
+// 第 4 步是本仓补的协同：rc.2 的归档清理状态机（E5）可能已经把 checkout 移除了。
+// 官方恢复路径是 forgePanel.restoreWorktree 背后的
+// `worktree.Service.RestoreWorktree`（`docs/upgrade-guide/v0.2.2-rc.1/archive-worktrees/
+// guide.md` §Migration 2："unarchive it and use Restore worktree"）。恢复失败必须
+// **响亮**报错——"会话回到列表但工作树没了"绝不能静默当成功。
 func (h *officialWorkspaceHost) unarchiveSession(sessionID string) ([]string, error) {
+	h.archiveOps.Lock()
+	defer h.archiveOps.Unlock()
+	wasArchived, err := h.archivedLocally(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if !wasArchived {
+		// 官方：不在归档集的 id 直接解析（幂等，无事件）。
+		return h.archivedSnapshot()
+	}
+	if emitErr := h.projectWorkspaceEvent(sessionID, transport.OfficialWorkspaceEventUnarchiving); emitErr != nil {
+		// 官方 "A rejection retains the archived state."：事件没送到监听者就不落盘，
+		// 把真实原因交给客户端（不能静默成功）。
+		return nil, transport.OfficialWorkspaceError("workspace/internal",
+			"%s 没能投递给监听者，归档态保留：%v",
+			transport.OfficialWorkspaceEventUnarchiving, emitErr)
+	}
+
+	// 2.5 官方 archive.ts:87-93 的监听器：取消尚未准入的移除，await 已准入的结算。
+	// 放在落盘**之前**——一旦落盘移出归档集，E5 的 `unused()` 判据就看不到「还在
+	// 归档」这件事，移除已经跑完（或正在跑）就没有第二次机会取消。
+	cancellation, cancelErr := h.cancelArchivedCleanup(sessionID)
+	if cancelErr != nil {
+		// 取消没做成 = 事件监听者拒绝，官方语义下归档态保留。
+		return nil, transport.OfficialWorkspaceError("workspace/internal",
+			"取消会话 %q 的在途归档清理失败，归档态保留：%v", sessionID, cancelErr)
+	}
+	if cancellation.Cancelled {
+		// 官方监听器唯一的可观察结果就是这次结算：如实打出来（retained = 取消及时，
+		// checkout 没动；removed = 取消来晚，第 4 步的恢复路径接手）。
+		fmt.Fprintf(os.Stderr,
+			"workspace: 反归档 %s：已取消归档清理 revision %d，结算为 %s\n",
+			sessionID, cancellation.Revision, cancellation.Status)
+	}
+
 	var out []string
-	err := h.withDocumentWrite(func() error {
+	err = h.withDocumentWrite(func() error {
 		h.doc.ArchivedSessionIDs = officialRemove(h.doc.ArchivedSessionIDs, sessionID)
 		out = append([]string(nil), h.doc.ArchivedSessionIDs...)
 		return nil
@@ -1011,6 +1106,143 @@ func (h *officialWorkspaceHost) unarchiveSession(sessionID string) ([]string, er
 	if err != nil {
 		return nil, err
 	}
+	if out == nil {
+		out = []string{}
+	}
+	// 先落盘再恢复：落盘后并发中的归档清理读到的归档集已经不含这条会话（E5 的
+	// `unused()` 判据读同一份 registry），它会保留 checkout 而不是删除。
+	if restoreErr := h.restoreArchivedWorktree(sessionID, cancellation); restoreErr != nil {
+		return nil, transport.OfficialWorkspaceError("workspace/internal",
+			"会话 %q 已移出归档集（现为 %v），但工作树没能按官方恢复路径恢复：%v（可用 forgePanel.restoreWorktree 重试）",
+			sessionID, out, restoreErr)
+	}
+	return out, nil
+}
+
+// officialWorkspaceWorktree 是反归档要用的 worktree 能力。
+//
+// 生产实现是 `*worktree.Service`（`internal/worktree`）；测试注入假实现以覆盖
+// "checkout 已被清理 / 仍在 / 恢复失败"三条分支。**只声明用得上的方法**：
+// 反归档不该顺手做别的工作树操作。
+type officialWorkspaceWorktree interface {
+	State(sessionID string) (worktree.State, error)
+	// CancelArchiveCleanup 是官方 archive.ts:87-93 的取消点：取消尚未准入的移除，
+	// await 已准入的结算，并把结算终态交回来。
+	CancelArchiveCleanup(sessionID string) (worktree.CleanupCancellation, error)
+	RestoreWorktree(sessionID string) error
+}
+
+// 编译期钉住：生产实现就是 `*worktree.Service`。它改签名（比如 RestoreWorktree
+// 换参数）这里就先红，而不是等真机反归档时才发现恢复路径接不上。
+var _ officialWorkspaceWorktree = (*worktree.Service)(nil)
+
+// worktreeCapability 取反归档要用的 worktree 能力。
+//
+// 按**调用时**读、不缓存指针：装配顺序是 workspace 宿主先建（serve.go:821）、
+// worktree 服务后挂到 promptService 上（serve.go:823-824）。
+func (h *officialWorkspaceHost) worktreeCapability() officialWorkspaceWorktree {
+	if h.worktreeOverride != nil {
+		return h.worktreeOverride
+	}
+	if h.prompts == nil || h.prompts.worktree == nil {
+		return nil
+	}
+	return h.prompts.worktree
+}
+
+// cancelArchivedCleanup 取消这个会话尚未准入的归档清理（官方 archive.ts:87-93）。
+//
+// 没有 worktree 服务时是 no-op：没有服务就没有在途清理可取消，而 `Cancelled=false`
+// 让调用方**不**声称取消过（官方 `attempt === undefined → return`）。
+func (h *officialWorkspaceHost) cancelArchivedCleanup(sessionID string) (worktree.CleanupCancellation, error) {
+	svc := h.worktreeCapability()
+	if svc == nil {
+		return worktree.CleanupCancellation{}, nil
+	}
+	return svc.CancelArchiveCleanup(sessionID)
+}
+
+// projectWorkspaceEvent 调 transport 注入的事件投影口。
+//
+// 官方两个事件的失败语义不同（归档只记日志、反归档保留归档态），所以这里只把
+// 错误原样交回去，由两个调用点各自决定。
+func (h *officialWorkspaceHost) projectWorkspaceEvent(sessionID, event string) error {
+	if h.projectEvent == nil {
+		return nil
+	}
+	return h.projectEvent(sessionID, event)
+}
+
+// restoreArchivedWorktree 让反归档与 rc.2 的"归档时清理工作树"状态机对齐。
+//
+// 官方指南把恢复入口写死在 **Restore worktree**
+// （`docs/upgrade-guide/v0.2.2-rc.1/archive-worktrees/guide.md` §Migration 2），也就是
+// `forgePanel.restoreWorktree` 背后的 `worktree.Service.RestoreWorktree`。这里只做
+// 三件事，**不复刻那段逻辑**：
+//
+//   - 记录里没有创建过 checkout（状态不是 created）→ 无恢复可做；
+//   - 目录还在（清理被跳过 / 保留策略生效 / 用户只是归档了一下）→ 无恢复可做；
+//   - 目录没了（被归档清理移除了）→ 真的调官方恢复路径；成功记一行，失败**返回错误**。
+//
+// 返回 nil 不等于"恢复过"：只有真的调了 RestoreWorktree 且成功才打那行 stderr。
+//
+// cancellation 是第 2.5 步取消的结果，只用来**如实说明原因**：取消来晚
+// （`removed`）意味着目录是被归档清理删掉的，不是"本来就没有"。
+func (h *officialWorkspaceHost) restoreArchivedWorktree(sessionID string, cancellation worktree.CleanupCancellation) error {
+	svc := h.worktreeCapability()
+	if svc == nil {
+		// 没有 worktree 服务（不带 serve 循环的入口 / 单测）：不能声称检查过。
+		// 反归档本身是官方语义上的独立操作，不因此拒绝，但要把"没查"说出来。
+		fmt.Fprintf(os.Stderr,
+			"workspace: 反归档 %s：宿主没有 worktree 服务，无法确认 checkout 是否已被归档清理（本次未做恢复检查）\n",
+			sessionID)
+		return nil
+	}
+	state, err := svc.State(sessionID)
+	if err != nil {
+		return fmt.Errorf("读 worktree 状态失败：%w", err)
+	}
+	if state.Status != worktree.StatusCreated || strings.TrimSpace(state.Directory) == "" {
+		return nil
+	}
+	if st, statErr := os.Stat(state.Directory); statErr == nil && st.IsDir() {
+		// checkout 还在：不是"被清理掉了"，不碰它（官方恢复路径在目录存在时也是 409）。
+		return nil
+	}
+	if err := svc.RestoreWorktree(sessionID); err != nil {
+		// 取消来晚（removed）只是"为什么没了"，必须出现在错误里：否则排查时看不出
+		// 是归档清理删的，还是用户自己删的。
+		late := ""
+		if cancellation.Removed() {
+			late = fmt.Sprintf("（取消来晚：归档清理 revision %d 已准入并结算为 removed）", cancellation.Revision)
+		}
+		return fmt.Errorf("checkout %s 已被归档清理移除%s，官方恢复路径 restoreWorktree 失败：%w",
+			state.Directory, late, err)
+	}
+	fmt.Fprintf(os.Stderr,
+		"workspace: 反归档 %s：checkout %s 已被归档清理移除，已按官方恢复路径重建\n",
+		sessionID, state.Directory)
+	return nil
+}
+
+// archivedLocally 读"这条会话此刻是否在归档集里"（只读，不写盘）。
+func (h *officialWorkspaceHost) archivedLocally(sessionID string) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.ensureLoadedLocked(); err != nil {
+		return false, transport.OfficialWorkspaceError("workspace/internal", "读工作区 registry 失败：%v", err)
+	}
+	return officialContains(h.doc.ArchivedSessionIDs, sessionID), nil
+}
+
+// archivedSnapshot 读当前归档集副本（只读，不写盘）。
+func (h *officialWorkspaceHost) archivedSnapshot() ([]string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.ensureLoadedLocked(); err != nil {
+		return nil, transport.OfficialWorkspaceError("workspace/internal", "读工作区 registry 失败：%v", err)
+	}
+	out := append([]string(nil), h.doc.ArchivedSessionIDs...)
 	if out == nil {
 		out = []string{}
 	}
@@ -1565,8 +1797,24 @@ func attachOfficialWorkspace(srv *transport.Server, home string, src *sessionSou
 	if host == nil || srv == nil {
 		return host
 	}
+	// 官方 `dsh-workspace` 两个 cordis 事件（归档/反归档）的投递口：宿主按官方
+	// 时机调用，transport 负责投影到该会话 journal 与 `/ws` 的 `session:<id>` topic
+	// （既有 official stream 通道，不新开协议面）。
+	host.projectEvent = srv.ProjectOfficialWorkspaceEvent
 	srv.AttachOfficialWorkspaceAPI(host.workspaceAPI())
 	srv.AttachOfficialDirectoryPickerAPI(host.directoryPickerAPI())
+	// 官方 0.2.2-rc.2 `workspaceFiles.search`（内置 ripgrep 语义）。
+	// 工作区根与 list/read/stat 同一条判据（会话日志头里的 cwd），
+	// 搜索实现是 internal/fssearch 的纯 Go 等价物（不启 rg 子进程，见其 doc）。
+	srv.AttachWorkspaceFilesSearchAPI(transport.WorkspaceFilesSearchAPI{
+		Search: func(ctx context.Context, workspaceFileScopeID string, req fssearch.Request) (fssearch.Result, error) {
+			root, err := host.workspaceRootForSession(workspaceFileScopeID)
+			if err != nil {
+				return fssearch.Result{}, err
+			}
+			return fssearch.Search(ctx, root, req)
+		},
+	})
 	return host
 }
 

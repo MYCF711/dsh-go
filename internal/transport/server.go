@@ -82,6 +82,12 @@ type Options struct {
 	PromptBlocks func(sessionID string, blocks []ContentBlock) (PromptResult, error)
 	// PromptBlocksPlacement 是 content 的 additive placement 入口。
 	PromptBlocksPlacement func(sessionID string, blocks []ContentBlock, placement string) (PromptResult, error)
+	// PromptContinuation 是官方 rc.2「空 content 续跑」的提交入口（additive）。
+	//
+	// sourceKind 是官方 `user/message.source.kind`：空 content 时固定是 `retry`
+	// （`dsh-api-session-controller/lib/index.js:4152`），持久消息的 content 是空数组。
+	// nil 时退回 PromptPlacement（仍然续跑，只是 durable source.kind 由既有 runner 决定）。
+	PromptContinuation func(sessionID, sourceKind, placement string) (PromptResult, error)
 	// Attachments 提供授权读取与受控字节存储；nil 时两个 additive 方法回 501。
 	Attachments AttachmentStore
 	// OfficialJobTerminal 是官方 job.*/terminal.* 11 个方法的路由层（0.2.2 对齐）。
@@ -492,6 +498,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.ServeOfficialLLMProviderAPI(w, r)
 		return
 	}
+	// 官方 0.2.2-rc.2 `web.listProviders`（dsh-web 升级为 TypertRemoteService 后新增）。
+	// 无参方法、结果含每一项的可用性诊断；未接线时结构化 501（不返回空清单假成功）。
+	if IsOfficialWebProviderMethod(name) {
+		s.ServeOfficialWebProviderAPI(w, r)
+		return
+	}
 	// PARITY-W1-STREAMS：两条 no-param 流不属于既有方法族，必须在
 	// workspace 族前缀之前直通到流面。
 	if Method(name) == MethodWorkspaceFollow || Method(name) == MethodRemoteAccessFollow {
@@ -506,10 +518,26 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveOfficialAgentAPI(w, r, name)
 		return
 	}
+	// 官方 0.2.2-rc.2 Team 分派面：`agentTeams.setEnabled` / `subagents.interruptByUser`。
+	if IsOfficialAgentTeamRC2Method(name) {
+		s.ServeOfficialAgentTeamRC2API(w, r, name)
+		return
+	}
+	// 官方 0.2.2-rc.2 电脑操作面（`cuaAccess.*` 9 个方法）。
+	if IsOfficialCUARc2Method(name) {
+		s.ServeOfficialCUARc2API(w, r, name)
+		return
+	}
 	// 5 个 Windows 原生方法：真实实现在 internal/native，宿主在 serve_native_api.go。
 	// 必须早于 settings/session/workspace 族，避免旧 501 占位吞掉真实实现。
 	if IsOfficialNativeMethod(name) {
 		s.ServeOfficialNativeAPI(w, r, name)
+		return
+	}
+	// 官方 0.2.2-rc.2 `workspaceFiles.search`：官方把它单独加在
+	// dsh-api-workspace-files，不属于既有 workspace 族 17 个方法（那些在
+	// OfficialWorkspaceMethods() 里被顺序钉住），所以自成一条且必须早于族分支。
+	if s.serveWorkspaceFilesSearchIfMatch(w, r, name) {
 		return
 	}
 	if IsOfficialWorkspaceMethod(name) {
@@ -546,6 +574,13 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	if IsOfficialAccountMethod(name) {
 		s.serveOfficialAccountAPI(w, r, name)
+		return
+	}
+	// officeKit 两方法（rc.2 取代 officeToPdf）：真实引擎在 internal/officekit。
+	// 必须早于下面 officeToPdf 与 media 的旧分支：officeKit 是 rc.2 起的权威面，
+	// 两者方法名不重叠，但顺序上仍让新面先认领（旧面只是兼容保留）。
+	if IsOfficialOfficeKitMethod(name) {
+		s.ServeOfficialOfficeKitAPI(w, r, name)
 		return
 	}
 	// officeToPdf 两方法：真实渲染器在 internal/officepdf；必须早于 media 的旧 501。
@@ -834,6 +869,13 @@ func (s *Server) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionPrompt 是 /api/session.prompt。placement 是 additive 请求字段；
 // canonical 成功结果仍只有 accepted/turnId，模型回答与 runner 错误走 WS。
+//
+// rc.2 有两条新语义（官方 `dsh-api-session-controller/lib/index.js:4147,4152,891-904`）：
+//  1. **空 content 合法**：它不是"空消息"，而是"续跑上一次可续的失败轮"。
+//     只有"非空却全空白"的 content 才是 400（`OfficialPromptContentRejected`）；
+//  2. 官方 `mode`（`queue` | `steer`）是投递语义：`queue` = 排到下一轮（本仓 followup
+//     的别名），`steer` = 注入当前轮的下一步边界。placement 缺省时由 mode 推导；
+//     显式 placement 优先，因而 canonical 客户端（TUI/旧壳）行为不变。
 func (s *Server) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		SessionID string `json:"sessionId"`
@@ -842,17 +884,38 @@ func (s *Server) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
 		Text      string         `json:"text"`
 		Content   []ContentBlock `json:"content"`
 		Placement string         `json:"placement"`
+		// Mode 是官方 rc.2 SessionPromptRequest 的投递语义（`queue` | `steer`）。
+		Mode string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "session.prompt 需要合法 JSON"))
 		return
 	}
-	placement, err := NormalizeSubmitPlacement(in.Placement)
+	placementValue, err := promptPlacementOf(in.Placement, in.Mode)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", err.Error()))
+		return
+	}
+	placement, err := NormalizeSubmitPlacement(placementValue)
 	if err != nil {
 		writePromptError(w, err)
 		return
 	}
 	sid := fillID(in.SessionID, in.ID)
+
+	// rc.2：content 的"空"是有语义的（续跑），不能被当成空白消息拒掉。
+	contentLength, hasPromptContent := promptContentShape(in.Content, in.Text)
+	if OfficialPromptContentRejected(contentLength, hasPromptContent) {
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request",
+			"prompt content must include non-whitespace text or an attachment"))
+		return
+	}
+	if contentLength == 0 {
+		if s.serveEmptyPromptContinuation(w, sid, in.Mode, placement) {
+			return
+		}
+		// 宿主没有官方会话数据源：判不了续跑资格，保持旧路径（不静默改写语义）。
+	}
 	if in.Content != nil {
 		var res PromptResult
 		switch {
@@ -896,6 +959,163 @@ func (s *Server) handleSessionPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// promptPlacementOf 把 canonical placement 与官方 rc.2 的 `mode` 折成一个提交落点。
+//
+// 显式 placement 优先：canonical 客户端（TUI/旧壳）不认识 mode，行为一个字节都不变。
+// mode 只补 placement 缺省的情形，值域逐字照官方 `SessionPromptRequest.mode`
+// （`'queue' | 'steer'`，typert.host.js:1512）。
+func promptPlacementOf(placement, mode string) (string, error) {
+	if placement != "" {
+		return placement, nil
+	}
+	switch mode {
+	case "":
+		return "", nil
+	case "queue":
+		// 官方 queue 与本仓 followup 是同一语义（NormalizeSubmitPlacement 的别名）。
+		return string(PlacementQueue), nil
+	case "steer":
+		return string(PlacementSteer), nil
+	default:
+		return "", fmt.Errorf("mode 只能是 queue 或 steer，收到 %q", mode)
+	}
+}
+
+// promptContentShape 给出 (content 长度, 是否含正文或附件)。
+//
+// 官方判据是 `content.length > 0 && !hasPromptContent(content)`；本仓另有 text 兼容
+// 形状，所以非空 text 按"一个块"计：**空 content** 只可能是 blocks 与 text 都为空
+// （官方对它的语义是"续跑"，不是"空消息"）。
+func promptContentShape(blocks []ContentBlock, text string) (int, bool) {
+	length := len(blocks)
+	if length == 0 {
+		if strings.TrimSpace(text) == "" {
+			return 0, false
+		}
+		return 1, true
+	}
+	for _, block := range blocks {
+		if block.Type == "text" {
+			if strings.TrimSpace(block.Text) != "" {
+				return length, true
+			}
+			continue
+		}
+		if block.Type != "" {
+			// attachment / reference / 未来块：非文字载荷也算内容（官方 hasPromptContent
+			// 同样把附件当内容，见 `index.js:4147` 那句 "non-whitespace text or an attachment"）。
+			return length, true
+		}
+	}
+	return length, false
+}
+
+// serveEmptyPromptContinuation 处理官方 rc.2 的"空 content 续跑"
+// （`conversationContinuation` 的下游：`index.js:891-904`）。
+//
+// 返回 false = 本宿主判不了（没有官方会话数据源），调用方按旧路径继续；
+// 返回 true = 已经写过响应（接受或拒绝）。
+func (s *Server) serveEmptyPromptContinuation(w http.ResponseWriter, sessionID, mode, placement string) bool {
+	host := s.officialHost()
+	if host == nil {
+		return false
+	}
+	events, _, err := host.DurableEvents(sessionID)
+	if err != nil {
+		writeSessionOfficialError(w, err, "session.prompt 读不到 durable 事件：")
+		return true
+	}
+	nextTurnPending, nextStepUserPending := s.officialPromptInboxPending(host, sessionID, events)
+	admission := OfficialPromptAdmissionFor(events, 0, mode, nextTurnPending, nextStepUserPending)
+	if admission.Fault != nil {
+		// 官方把这些附加信息放在 `details` 里（`{reason:"NO_CONTINUABLE_FAILURE_OR_PENDING_INPUT"}`）。
+		// 本仓的 `error` 对象**必须恰好四字段**（`TestEveryHTTPErrorHasFourFieldEnvelope`），
+		// 附加信息一律平铺在信封顶层——`stale_epoch` 的 journalEpoch/lastSeq 是同一先例。
+		writeJSON(w, admission.Fault.Status, errorBodyFor(admission.Fault.Code, admission.Fault.Message,
+			map[string]any{"details": admission.Details}))
+		return true
+	}
+	res, err := s.submitPromptContinuation(sessionID, admission.SourceKind, placement)
+	if err != nil {
+		writePromptError(w, err)
+		return true
+	}
+	writeJSON(w, http.StatusOK, res)
+	return true
+}
+
+// submitPromptContinuation 把一次**已获准入**的空 content 续跑交给宿主。
+//
+// 优先 `Options.PromptContinuation`：只有它能按官方 `source.kind = "retry"` 落一条
+// **空 content** 的 user/message（`index.js:4152`）。没有这个入口时退回普通 prompt
+// 入口——仍然续跑，只是 durable 消息的 source.kind 由既有 runner 决定（不是官方形状，
+// 见报告 `tmp/GO8-RC2/reports/E3-session-wiring.md` 的未接线项）；两者都没有 → 501。
+func (s *Server) submitPromptContinuation(sessionID, sourceKind, placement string) (PromptResult, error) {
+	if s.opt.PromptContinuation != nil {
+		return s.opt.PromptContinuation(sessionID, sourceKind, placement)
+	}
+	if s.opt.PromptPlacement != nil {
+		return s.opt.PromptPlacement(sessionID, "", placement)
+	}
+	if s.opt.Prompt != nil {
+		return s.opt.Prompt(sessionID, "")
+	}
+	return PromptResult{}, fmt.Errorf(
+		"%w: 宿主没有续跑入口（Options.PromptContinuation / PromptPlacement）", ErrPlacementUnsupported)
+}
+
+// officialPromptInboxPending 取官方 `inbox.nextTurn` / `inbox.nextStep` 的宿主真值。
+//
+//   - nextTurn：promptService 的**真实** next-turn 队列（`LiveState.QueueIDs` 来自
+//     `promptService.queues` + now 保留项），不是写死的 false；
+//   - nextStep：官方语义是"等到下一个 step 边界才交出去的用户消息"。本宿主没有独立的
+//     next-step inbox 投影（`cmd/dshd/serve_queue_official.go` 顶部写明了这一点），
+//     但注入中的 steer 消息是 durable 的：本轮最后一个 `step/start` 之后还有一条
+//     `source.kind = "user"` 的 user/message，就说明它还没被任何一步消费。
+//     判据只读 durable 事件，不猜进程内状态。
+func (s *Server) officialPromptInboxPending(host OfficialSessionHost, sessionID string, events []DurableEvent) (nextTurnPending, nextStepUserPending bool) {
+	if live, err := host.LiveState(sessionID); err == nil {
+		nextTurnPending = len(live.QueueIDs) > 0
+	}
+	return nextTurnPending, officialNextStepUserPending(events)
+}
+
+// officialNextStepUserPending 判断"下一步边界上是否还有未消费的用户消息"。
+func officialNextStepUserPending(events []DurableEvent) bool {
+	var lastTurnStart, lastTurnEnd, lastStepStart, lastUser int64 = -1, -1, -1, -1
+	for _, event := range events {
+		switch event.Type {
+		case "turn/start":
+			lastTurnStart = event.Seq
+		case "turn/end":
+			lastTurnEnd = event.Seq
+		case "step/start":
+			lastStepStart = event.Seq
+		case "user/message":
+			if officialUserMessageSourceKind(event.Data) == "user" {
+				lastUser = event.Seq
+			}
+		}
+	}
+	if lastTurnStart <= lastTurnEnd {
+		return false // 没有在跑的一轮
+	}
+	return lastUser > lastStepStart && lastUser > lastTurnStart
+}
+
+// officialUserMessageSourceKind 读一条 user/message 的 `source.kind`（读不懂按空串）。
+func officialUserMessageSourceKind(data json.RawMessage) string {
+	var payload struct {
+		Source struct {
+			Kind string `json:"kind"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return ""
+	}
+	return payload.Source.Kind
 }
 
 func writePromptError(w http.ResponseWriter, err error) {
@@ -1102,7 +1322,14 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 		gap := !staleEpoch && !tooNew && !win.Covered
 		if staleEpoch || tooNew || gap {
 			msg := "journal 世代或水位对不上，需要重新 load 基线"
+			// 两种来源共用 code `stale_epoch`，靠 `details.reason` 区分：
+			//   换代/水位超前 → stale_epoch    ：丢掉旧水位重建基线；
+			//   历史滑出内存   → history_evicted：这就是"没有更早的了"，**不要**重建。
+			// 界面（`dsh-ui/cmd/app/frames.go`）按 reason 分支；字符串匹配只留给
+			// 老宿主兜底（见那边的 `journalEvictedError` 注释）。
+			reason := ConflictReasonStaleEpoch
 			if gap {
+				reason = ConflictReasonHistoryEvicted
 				msg = fmt.Sprintf("sinceSeq=%d 之前的历史已经滑出内存 journal（只保留最近 %d 帧）："+
 					"继续按 seq 补会缺一段，而且缺口看不出来", in.SinceSeq, win.LastSeq-win.Oldest+1)
 			}
@@ -1113,6 +1340,7 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, errorBodyFor("stale_epoch", msg, map[string]any{
 				"journalEpoch": win.Epoch,
 				"lastSeq":      win.LastSeq,
+				"details":      map[string]any{"reason": reason},
 			}))
 			return
 		}
@@ -1266,6 +1494,127 @@ func errorBodyFor(code, msg string, extra ...map[string]any) map[string]any {
 	return body
 }
 
+// 409 的 `details.reason` 取值表（GP 报告 §5 第 3 条）。
+//
+// # 为什么不在 error 四字段里加
+//
+// 四字段是**冻结契约**（`TestEveryHTTPErrorHasFourFieldEnvelope` 钉住"恰好四个键"，
+// 客户端按它写解析器）。附加信息一律平铺在信封顶层——`stale_epoch` 的
+// journalEpoch/lastSeq、官方 `session/agent-busy` 的 `details.reason` 都是同一先例。
+// `details` 是其中唯一**有稳定 schema** 的那一格：
+//
+//	{"error":{code,message,hint,retryable}, "details":{"reason":"<下面的取值>"}}
+//
+// 为什么需要它：409 的**两种来源**（journal 换代 / 历史滑出内存）曾经共用同一个
+// code `stale_epoch`，界面只能字符串匹配 message 里的"滑出内存"来区分——文案一改
+// 就失效，而且判错的代价是"点了永远在转圈"或"少一页"。`reason` 把语义搬到结构里。
+//
+// # 取值与语义一一对应
+//
+// 客户端只认这些字面量；**加新语义就加新常量**，不许复用别的值。
+// 取值一旦发布就不再改名字（`details.reason` 是稳定机器字段，不是给人看的）。
+const (
+	// ConflictReasonStaleEpoch：journal 换代、或客户端水位比当前还大——
+	// 丢掉旧水位重新 load 基线就能接着收。
+	ConflictReasonStaleEpoch = "stale_epoch"
+	// ConflictReasonHistoryEvicted：`sinceSeq` 之前的历史已经滑出内存 journal。
+	// 这不是失败：它就是"可加载的最早处"，**不要**重建基线
+	// （重建只会把尾窗再拉一遍，然后同一次点击又能再点）。
+	ConflictReasonHistoryEvicted = "history_evicted"
+	// ConflictReasonRevisionConflict：乐观并发 revision 过期（读到的是旧版本）。
+	ConflictReasonRevisionConflict = "revision_conflict"
+	// ConflictReasonJobFinished：任务已结束，不能重复停止/操作。
+	ConflictReasonJobFinished = "job_finished"
+	// ConflictReasonJobOwnerNotLive：任务 owner 已不在（官方 `gateway/context-unavailable`）。
+	ConflictReasonJobOwnerNotLive = "job_owner_not_live"
+	// ConflictReasonStaleHead：forge 写入基于旧 head（远端已经前进）。
+	ConflictReasonStaleHead = "stale_head"
+	// ConflictReasonAgentBusy：会话/管理器正忙（上一轮还没结束），等 turn/done 再来。
+	ConflictReasonAgentBusy = "agent_busy"
+	// ConflictReasonConflict：兜底——叫不出更细名字的 409。
+	ConflictReasonConflict = "conflict"
+)
+
+// ConflictReasons 返回全部 409 reason 取值（固定顺序，不是字典序）。
+//
+// 给契约快照与断言用：**取值表本身就是契约**，加值必须同时出现在这里，
+// 否则客户端按词表写 switch 时会漏掉那一支。
+func ConflictReasons() []string {
+	return []string{
+		ConflictReasonStaleEpoch,
+		ConflictReasonHistoryEvicted,
+		ConflictReasonRevisionConflict,
+		ConflictReasonJobFinished,
+		ConflictReasonJobOwnerNotLive,
+		ConflictReasonStaleHead,
+		ConflictReasonAgentBusy,
+		OfficialPromptContinuationReason,
+		ConflictReasonConflict,
+	}
+}
+
+// conflictReasonFor 是"四字段 code → 409 reason"的**唯一**默认推导。
+//
+// 何时用：调用点没有给出更细的 reason 时（绝大多数 409 的语义就等于 code）。
+// 更细的调用点显式传 `details.reason` 覆盖它——journal 滑出内存的
+// `history_evicted` 与官方 `session/agent-busy` 的逐字 reason 都是这么来的。
+//
+// 为什么按 code 推导而不是让每个 handler 自己写 reason：手写的那几处迟早会漏，
+// 漏掉的 409 就退化成"界面只能猜 message"——这正是本字段要消灭的东西。
+func conflictReasonFor(code string) string {
+	switch code {
+	case "stale_epoch":
+		return ConflictReasonStaleEpoch
+	case "revision_conflict":
+		return ConflictReasonRevisionConflict
+	case "job_finished":
+		return ConflictReasonJobFinished
+	case "job_owner_not_live":
+		return ConflictReasonJobOwnerNotLive
+	case "stale_head":
+		return ConflictReasonStaleHead
+	case "busy":
+		// 四字段 code 叫 busy，语义是"agent 正忙"：等当前轮/队列消化完再发就行。
+		return ConflictReasonAgentBusy
+	case "session/agent-busy":
+		// 官方 `session/agent-busy` 的 details.reason 是**官方逐字**值
+		// （`dsh-api-session-controller/lib/index.js:895`），不能换成 agent_busy。
+		return OfficialPromptContinuationReason
+	}
+	return ConflictReasonConflict
+}
+
+// withConflictReason 给 409 的错误信封补 `details.reason`（**纯 additive**）。
+//
+// 单个出口：`writeJSON` 在 status==409 时调用它。这样"所有 409 都带稳定标记"
+// 不靠每个 handler 记得加——漏一个就是"界面只能猜 message"，而漏掉的那个
+// 永远不会有人写测试。
+//
+// 调用点已经给了 reason（history 的 `history_evicted`、官方 `session/agent-busy`）
+// 时**保留调用点的**：reason 的粒度由最了解那次 409 语义的那一层决定。
+// `details` 里其它键（将来的扩展）原样保留，不覆盖。
+func withConflictReason(v any) any {
+	body, ok := v.(map[string]any)
+	if !ok {
+		// 409 只可能来自 errorBody/errorBodyFor（都是 map）。走到这里说明有人
+		// 在写手写信封——那种出口没有四字段保证，宁可不改它的形状。
+		return v
+	}
+	code := ""
+	if obj, ok := body["error"].(map[string]any); ok {
+		code, _ = obj["code"].(string)
+	}
+	if details, ok := body["details"].(map[string]any); ok {
+		if reason, _ := details["reason"].(string); reason != "" {
+			return body
+		}
+		details["reason"] = conflictReasonFor(code)
+		return body
+	}
+	body["details"] = map[string]any{"reason": conflictReasonFor(code)}
+	return body
+}
+
 // errorObject 就是那四个字段本身，也是唯一的构造点。
 // hint 是必需的：客户端要知道**下一步怎么办**，而这正是 DSH 错误契约的意义。
 func errorObject(code, msg string) map[string]any {
@@ -1289,7 +1638,9 @@ func errorObject(code, msg string) map[string]any {
 // 还是同一个结果，让客户端自动重试只是把错误刷屏。
 func retryableFor(code string) bool {
 	switch code {
-	case "internal", "busy", "stale_epoch":
+	// session/agent-busy：官方"续跑不可用"——等当前轮/队列消化完再发同一条请求就能过，
+	// 与 busy 同类（`dsh-api-session-controller/lib/index.js:895`）。
+	case "internal", "busy", "stale_epoch", "session/agent-busy":
 		return true
 	}
 	return false
@@ -1311,6 +1662,9 @@ func errorHint(code string) string {
 		return "这个审批请求已经不在了（已应答或已超时）；等下一次 approval/request"
 	case "busy":
 		return "上一轮还没结束：等 turn/done（或先 session.cancel），再发下一条"
+	case "session/agent-busy":
+		return "空 prompt 只能续跑可续失败（RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT/EMPTY_RESPONSE/STREAM_CLOSED）" +
+			"且 mode=queue、没有排队项时才能用；否则先等当前轮 / 排队项消化完，或带上正文重发"
 	case "bad_option":
 		return "optionId 必须是 allow_once / allow_always / reject_once 之一"
 	case "bad_request":
@@ -1376,6 +1730,15 @@ func errorCode(msg string) string {
 // 只在 /api 的 handler 里用，所以可以在这里一把收口——
 // 逐个 handler 改的话，总有一个会漏，而漏掉的那个就是"界面看到 0 条"。
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	// 409 一律补 `details.reason`（**纯 additive**，见 withConflictReason）。
+	//
+	// 收口在这里而不是逐个 handler：409 有十几个产出点（journal/stale_epoch、
+	// 乐观并发 revision_conflict、job 生命周期、forge stale_head、cua/settings 的
+	// 冲突……），逐点改必然漏；而"没有 reason 的 409"在界面上退化成字符串匹配
+	// message——正是本字段要消灭的脆弱面。
+	if status == http.StatusConflict {
+		v = withConflictReason(v)
+	}
 	// 成功响应不许是空值。
 	//
 	// `{"result":null}` 的形状是"HTTP 200 + 没有任何载荷"：客户端拿到的是 null，

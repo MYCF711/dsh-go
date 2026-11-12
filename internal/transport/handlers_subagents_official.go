@@ -222,7 +222,10 @@ func (r *OfficialChildRegistry) Prompt(ctx context.Context, req OfficialSubagent
 	if !ok {
 		return OfficialSubagentPromptReceipt{}, officialNoSuchSession(req.ChildSessionID)
 	}
-	if child.ParentSessionID != req.ParentSessionID {
+	// 父授权是**可选**的（rc.2 删除了该字段）：给了就必须对，不给则由网关按
+	// 目标会话授权（官方 "Access is checked on the target Session before
+	// attachment admission or restoration"）。
+	if req.ParentSessionID != "" && child.ParentSessionID != req.ParentSessionID {
 		return OfficialSubagentPromptReceipt{}, &officialError{
 			status: 403, code: "cross_session",
 			msg: fmt.Sprintf("子会话 %q 属于父会话 %q，不是 %q",
@@ -288,7 +291,12 @@ func (r *OfficialChildRegistry) Prompt(ctx context.Context, req OfficialSubagent
 	return OfficialSubagentPromptReceipt{MessageID: messageID}, nil
 }
 
-// InterruptByParent 按父授权中断子会话当前轮。
+// InterruptByParent 按**父授权**中断子会话当前轮。
+//
+// Deprecated: 官方 0.2.2-rc.2 用 `subagents.interruptByUser` 取代它（授权口径从
+// "调用方声称的父权威"改成"网关在**目标会话**上授权"，参数从三个减到一个）。
+// 本方法**保留为兼容别名**（能力下限：官方旧形状继续可用，不许比官方更少），
+// 新代码请用 [OfficialChildRegistry.InterruptByUser]。
 func (r *OfficialChildRegistry) InterruptByParent(childSessionID, parentSessionID string) (OfficialAccepted, error) {
 	if r == nil {
 		return OfficialAccepted{}, officialNotImplemented("subagents.interruptByParent 未接线：宿主没有子会话注册表")
@@ -304,9 +312,37 @@ func (r *OfficialChildRegistry) InterruptByParent(childSessionID, parentSessionI
 				childSessionID, child.ParentSessionID, parentSessionID),
 		}
 	}
+	return r.interruptChild(childSessionID, "subagents.interruptByParent")
+}
+
+// InterruptByUser 按**目标会话**授权中断子会话当前轮（官方 `subagents/interruptByUser`）。
+//
+// 官方语义（`dsh-subagent` 的 interruptByUser 描述逐字）：
+//   - 授权由网关在**目标会话**上完成；本层不跑 catalog / history / persistence /
+//     parent Agent lookup，所以这里**不查父**；
+//   - "不存在 / 空闲 / 已完成的目标是 accepted no-op"——不是把错误吞掉：
+//     信号确实被接纳了，只是没有可停的目标；
+//   - accepted 只表示取消信号被接纳，**不代表目标已静止**。
+//
+// 因此与 InterruptByParent 的差别是**授权口径**而不是取消动作本身：
+// 未知目标在 interruptByUser 下是 accepted，在 interruptByParent 下仍是
+// no_such_session（父授权必须能证明归属，Gateway 授权不需要）。
+func (r *OfficialChildRegistry) InterruptByUser(childSessionID string) (OfficialAccepted, error) {
+	if r == nil {
+		return OfficialAccepted{}, officialNotImplemented("subagents.interruptByUser 未接线：宿主没有子会话注册表")
+	}
+	if _, ok := r.Lookup(childSessionID); !ok {
+		// 官方 accepted no-op：目标不存在。
+		return OfficialAccepted{Accepted: true}, nil
+	}
+	return r.interruptChild(childSessionID, "subagents.interruptByUser")
+}
+
+// interruptChild 是两条中断入口共用的**取消动作**（授权判定留给调用方）。
+func (r *OfficialChildRegistry) interruptChild(childSessionID, method string) (OfficialAccepted, error) {
 	if r.opts.Interrupt == nil {
 		return OfficialAccepted{}, officialNotImplemented(
-			"subagents.interruptByParent 未接线：宿主没有取消子会话当前轮的通道")
+			"%s 未接线：宿主没有取消子会话当前轮的通道", method)
 	}
 	// 官方：accepted 只表示取消信号已被接受，不代表目标已静止。
 	// 所以"没有在飞的一轮"也是 accepted——那是真实的当前状态，不是失败。

@@ -1,9 +1,12 @@
 # AGENTS.md · DSH-GO
 
-> Go 重写 DSH 宿主；上游基线 `0.2.2-rc.1`，当前版本读源码与 `CHANGELOG.md`。
+> Go 重写 DSH 宿主；上游基线 **`0.2.2-rc.2`**（rc.1 基线作为历史对照保留），当前版本读源码与 `CHANGELOG.md`。
 > 原目标：低占用、高性能、可替换能力、还原 DSH 使用体验并接管真实工作。界面在独立 `../dsh-ui` 用 Go+Viva；Web 仅可关闭过渡件。
 
 ## 0. 每次开工按此顺序
+
+0. **官方基线已是 `0.2.2-rc.2`（用户 2026-11-12 指令）**：先读 [`docs/official-baseline-0.2.2-rc.2.md`](docs/official-baseline-0.2.2-rc.2.md) —— rc.1→rc.2 的硬数字（方法 193→**223**、base 插件 97→**99**、包 +13/−7、`hostProtocolVersion` 仍 4）、新增/删除方法逐条、官方 19 条升级指南索引；机器可核证据在 `docs/evidence/official-{desktop-api-methods,base-plugins,ui-plugins}-0.2.2-rc.2.txt` 与 `docs/evidence/official-method-contract-delta-0.2.2-rc.2.md`。**不要再用 rc.1 的 193/97 口径下结论。**
+
 
 0. **接手先读交接（2026-11-09 归档）**：GO.2 宿主与 TUI2GO 当前现场、已完成门、已闭合阻断与边界，全在 [`docs/handoff-go2-tui2go-2026-11-09.md`](docs/handoff-go2-tui2go-2026-11-09.md)。**宿主 HS-17/HS-18 已 GO=1；TUI2GO 最终 `PLAY-FINAL-INPUT-AUDIT` 已 GO=1（2026-11-09 04:52 两档 20/20，证据 `tmp/GO2-TEAM/PLAY-FINAL-INPUT-AUDIT/`）**——发布/push 仍需用户当次明确授权，且 `TUI-GO.lnk` 要由用户在可见桌面人工确认一次。TUI 选型/GUI 融合/Viva 升级线另见 [`docs/handoff-2026-11-09.md`](docs/handoff-2026-11-09.md)。
 0. **双线并行：自己的产品 + 完善 Viva（用户 2026-11-09 03:30 指令）**：**Viva 是轮子，轮子不稳，产品就不稳。先把轮子做稳，再谈产品。**
@@ -134,4 +137,4 @@ go list -deps ./internal/kernel   # 不含 modules/ 与业务包
 
 - 稳定规则在本文件与 PLAN；宿主顺序只在 `PLAN.md` §14.1，跨线契约/证据只在 `docs/transport-contract.md`。
 - 决策先改 PLAN；代码冲突先判文档过期还是代码越约。委派附完整任务书，不假设对方读过全文。
-- 版本：稳定版 `<上游版本>-go.<N>`，测试版 `<上游版本>-beta.<N>`；前缀升级后各自从 1 开始；仓库 LF；只 ack 完成项；定时唤醒不能操作 goal 就直接推进。
+- 版本：**稳定版 `<上游版本>-go.<N>`，任务途中的测试版 `<上游版本>-gobeta.<N>`**（用户 2026-11-12 指令；`-gobeta.` 与 `-go.` 两种形态都由 `cmd/dshtui/internal/vsinfo` 与 `cmd/dshtui/brand_test.go` 的形态判据支持）；前缀升级后各自从 1 开始；仓库 LF；只 ack 完成项；定时唤醒不能操作 goal 就直接推进。

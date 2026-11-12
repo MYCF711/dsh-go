@@ -1,3 +1,97 @@
+## 0.2.2-rc.2-go.1（2026-11-12，**稳定版**）—— 宿主完成官方 `0.2.2-rc.2` 同步
+
+> 版本命名（用户 2026-11-12 指令）：途中版本 `<上游>-gobeta.<N>`，**稳定版 `<上游>-go.<N>`**。
+> 本版是 rc.2 的**第一个稳定版**：方法面 223 条逐条有结论、参数总账 405 条、门禁四项全绿（含全量 `-race`）。
+> 与 `0.2.2-rc.2-gobeta.1` 的差别只有版本号与下面这份"稳定版口径"——功能集相同，收口轮的提交都在
+> `gobeta.1` 之后落地（详见下方各节）。
+
+### 稳定版判据（四条，逐条有证据）
+
+| 判据 | 结论 | 证据 |
+|---|---|---|
+| 方法面 223 条 | **逐条有结论**：真实现 / 官方形状结构化未实现（带 `capableWhen`），0 MISSING、0 TEST_ONLY | `docs/evidence/official-method-coverage-0.2.2-rc.2.md` |
+| base 插件 99 个 | 新增 `agent-team`、`tool-agent-team` 已实现（任务板制 + 按名寻址 + `agentTeams.setEnabled`） | `docs/evidence/official-base-plugins-0.2.2-rc.2.txt` |
+| 参数总账 | **405 条**（官方轴 342 + rc.2 新增 63），`validate_register.py` / `audit_refs.py` 双闸 EXIT=0 | `docs/parameter-register.md` |
+| 门禁 | `build`=0、`vet`=0、`test`=**0（90 包）**、`-race`=**0（90 包）** | 本轮实跑 |
+
+### 与官方宿主的能力对照（只能更多，不能更少）
+
+- **官方有、我们有**：223 个方法全部有落点；5 个删除方法保留为兼容别名（`Deprecated`）并转发到官方新方法。
+- **我们比官方多做的真实能力**（不是桩）：Office 真渲染（随包原生 LibreOffice，docx→PDF 21,379 B）、
+  terminal-panel 父→子 roster 桥（真 PTY 11/11）、CUA 在 Windows 上的系统状态/应用决策/真图标提取/设置页/审批状态机、
+  工具并发 per-call 分类器（6×grep 实测 5.6×）。
+- **官方有、我们如实报缺**（4 条平台/外部边界，不是没做）：
+  1. GraphQL **写**路径（7 个 mutation）只有离线桩证据——写会改远端，未做真机写入；
+  2. CUA 的 AX/窗口控制：官方在 Windows 上也没有 provider；
+  3. `workspaceFiles.search.graceMs`：纯 Go 实现没有子进程宽限层（`OFFICIAL_UNSUPPORTED`）；
+  4. `dsh-client-ui-primitives` 在 rc.2 仍只发 `lib/`（无 `src/` 行号可锚），证据锚调用点。
+
+### 发布产物（本地构建，未 push）
+
+`bash scripts/build.sh` 实跑通过：6 个产物（windows/linux/darwin × 宿主/TUI）+ `dist/SHA256SUMS`；
+宿主 21 MiB（≤25 MiB 规则内）；`--version` 自检输出 `DSH GO 0.2.2-rc.2-go.1`。
+push 与正式发布需要用户在当次明确授权。
+
+### 已知问题（本版接受，已登记）
+
+- `Ctrl+O` 全展开后 `/quit` 迟滞（GO.7 起登记，进 GO.8 以"展开态按键延迟"度量测试先红后绿）。
+- `TUI-GO.lnk` 桌面双击入口仍需用户在可见桌面人工确认一次。
+- 非 Windows 平台未验（支持范围裁定：只做 Windows 稳定版）。
+
+---
+
+## 0.2.2-rc.2-gobeta.1（2026-11-12，**途中测试版**）—— 官方基线切到 `0.2.2-rc.2`
+
+> 版本命名（用户 2026-11-12 指令）：**途中版本 `<上游>-gobeta.<N>`，稳定版 `<上游>-go.<N>`**。
+> 本版是 rc.2 同步的第一版，只保证"基线已切换 + 差异已取证 + 门禁可复跑"，**不宣布 rc.2 能力收口完成**；
+> 收口进度见 `docs/official-baseline-0.2.2-rc.2.md` 与共享任务板。
+
+### 基线切换（本版的主内容）
+
+- **上游基线 `0.2.2-rc.1` → `0.2.2-rc.2`**。取证：`D:/DeepSeek Harness/Desktop-0.2.2-rc.2/resources/app.asar`
+  （sha256 `49fd1b08…`，208,137,981 B）；rc.1 同机保留，sha256 `5fa8a6b2…`（与旧文档逐字一致）。
+- 官方 rc.1→rc.2 的硬数字：**远程方法 193 → 223**（+35/−5）、**base 插件 97 → 99**（+`agent-team`/`+tool-agent-team`）、
+  **包 +13/−7**、客户端 UI 插件 65 → 66、**`hostProtocolVersion` 仍为 4**（wire 主协议未变）、node/pnpm 未变。
+  逐条见 [`docs/official-baseline-0.2.2-rc.2.md`](docs/official-baseline-0.2.2-rc.2.md)。
+- 新增随仓证据（机器可核，不手抄）：
+  - `docs/evidence/official-desktop-api-methods-0.2.2-rc.2.txt`（223）
+  - `docs/evidence/official-base-plugins-0.2.2-rc.2.txt`（99）
+  - `docs/evidence/official-ui-plugins-0.2.2-rc.2.txt`（66）
+  - `docs/evidence/official-method-contract-delta-0.2.2-rc.2.md`（+35/−5 全契约 + 32 条结构变更逐字段）
+
+### 第三轮收口（同日）：归档清理取消 + Forge 线程数改真值
+
+- **归档清理取消**：`internal/worktree` 新增 `CancelArchiveCleanup`（官方 `archive.ts:87-93` 语义：
+  置 `cancelled` → await 结算 → 收走 attempt），与准入判据共用同一把锁，取消与准入不可能同时为真；
+  反归档顺序改为「广播 `session-unarchiving` → 取消/结算 → 落盘移出 → 必要时恢复工作树」。
+  真 git 三条端到端：取消成功不改任何东西 / 取消来晚走 `RestoreWorktree` 恢复 / 来晚且恢复失败如实 500。
+- **Forge `unresolvedThreads`、`threadsTruncated`**：从 REST 下界改为 **GraphQL 真值**，与 `changeRequestReview`
+  共用同一份 thread 读取实现（GraphQL 文档逐字相同）；降级时只允许 `0 + true`（下界），绝不允许 `0 + false`。
+  真机核对 `cli/cli#15001`：`unresolvedThreads=0`、`threadsTruncated=false`，与 `gh api graphql` 独立查询一致。
+
+### 第二轮收口（同日）：三个已知缺口关闭 + 全量 `-race` 转绿
+
+- **Forge 审阅面**：补最小 GraphQL 客户端（**零新依赖**），`changeRequestReview` / `changeRequestReviewWrite` /
+  `changeRequestViewed` / `setFileViewed` 从"结构化 501"改为**真做**。真机只读验收：`cli/cli#15001` 读到 2 条 review
+  thread 与 5 个文件的 viewed 状态，换 head 返回官方 `stale`。**写路径只有离线桩证据**（写会改远端，本轮不做真机写入）。
+- **`retryPolicy` 写入面**：新增 `internal/settings` 命名空间存储（revision 栅栏 + 原子写 + 损坏 fail-loud），
+  `settings.mutate` 可写 `llm.providers.<route>.retryPolicy` 并**下一轮真生效**；假网关计数证明
+  `maxRetries=1 → 2 次请求`、`maxRetries=3 → 4 次请求`。8 类非法值 → 四字段错误 + Hint，`expectedRevision` 过期 → 409。
+- **反归档事件**：`workspace/session-unarchiving` 已实现且 WS/journal 可见；checkout 已被清理时走官方
+  `RestoreWorktree`，失败如实报 500 + 真实 git 错误，不假装恢复。
+- **`-race` 转绿**：MinGW 在 `C:/toolchains/mingw64`（不在 PATH，之前一律误报 "gcc not found"），
+  `CGO_ENABLED=1 go test -race ./... -count=1` → **89 包全绿**。后续门禁不许再用"本机无 gcc"当理由。
+
+### 版本形态适配（`-gobeta.` 与 `-go.` 双形态）
+
+- `cmd/dshtui/internal/vsinfo` 的 `fixedVersion` 原只认 `-go.`，遇到 `0.2.2-rc.2-gobeta.1` 会**直接 fail**
+  （构建期生成 VS 版本资源失败 → 整套产物出不来）；`cmd/dshtui/brand_test.go` 的格式判据也只认 `-go.`。
+- 现改为：发布后缀集合 `-gobeta.` / `-go.`（长串优先），语义版本取前三个数字段（`0.2.2-rc.2` 的 patch=2，不被 `2-rc` 骗过）；
+  形态判据改为正则 `^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?-(go|gobeta)\.\d+$`。
+- 测试夹具用**假版本**（`9.8.7-rc.6-gobeta.5`）而不是当前真版本：`cmd/dshd/version_guard_test.go` 会把
+  "当前发布前缀出现在别的源文件"判红，夹具里写真版本本身就成了第二版本源。
+- `cmd/dshd/version_guard_test.go` / `internal/pluginmgr/compat.go` / `internal/versiontag` 的版本形态注释同步补上 `-gobeta.`。
+
 ## 0.2.2-go.2（2026-11-09，**Windows-only 稳定版**）—— **官方 342 条缺口分类收口：`UNREAD-GAP` 归零**
 
 - 版本号唯一出处仍是 `cmd/dshd/main.go` 的 `version` 变量（`0.2.2-go.2`），`cmd/dshtui/brand.go` 同值；

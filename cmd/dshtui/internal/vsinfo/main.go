@@ -77,21 +77,41 @@ func versionFromSource(path string) (string, error) {
 	return string(m[1]), nil
 }
 
-// fixedVersion 把 `0.2.1-go.30` 拆成 VS_FIXEDFILEINFO 的两个 DWORD：
-// 前三段是语义版本，`-go.N` 里的 N 落在最低 16 位。
+// releaseSuffixes 是"发布号后缀"→"构建号"的分隔符全集，按长度从长到短排。
+//
+// 为什么有两个：仓规是稳定版 `<上游>-go.<N>`、任务途中的测试版 `<上游>-gobeta.<N>`
+// （用户 2026-11-12 指令）。两者都不能让 `.syso` 的版本资源退化成整串——
+// 资源管理器里那三列数字是这一整套功能存在的理由，写错不报错、只是悄悄变空。
+var releaseSuffixes = []string{"-gobeta.", "-go."}
+
+// fixedVersion 把发布号拆成 VS_FIXEDFILEINFO 的两个 DWORD：
+// 前三段是语义版本（ms = major<<16|minor，ls = patch<<16|build），发布号里的 N 落在最低 16 位。
+//
+// 接受的形态（都要能拆，"拆不出来"一律报错，不猜）：
+//
+//	0.2.1-go.30            老形态（上游版本无 rc）
+//	0.2.2-go.2             稳定版：<上游>-go.<N>
+//	0.2.2-rc.2-go.1        上游带 rc 的稳定版
+//	<x.y.z-rc.N>-gobeta.<N> 任务途中的测试版：<上游>-gobeta.<N>
+//	0.2.2 / 0.2.2-rc.2     没有发布号后缀时构建号记 0（vsinfo 也被人手工拿去给别的产物盖章）
+//
+// 语义版本只取**前三个数字段**：`0.2.2-rc.2` 的 patch 是 2，不能因为第 3 段长成 `2-rc` 就放弃。
 func fixedVersion(v string) (ms, ls uint32, err error) {
 	release := v
 	build := "0"
-	if i := strings.Index(v, "-go."); i >= 0 {
-		release, build = v[:i], v[i+len("-go."):]
+	for _, suffix := range releaseSuffixes {
+		if i := strings.Index(v, suffix); i >= 0 {
+			release, build = v[:i], v[i+len(suffix):]
+			break
+		}
 	}
-	parts := strings.Split(release, ".")
-	if len(parts) < 3 {
+	m := semverPrefix.FindStringSubmatch(release)
+	if m == nil {
 		return 0, 0, fmt.Errorf("版本号 %q 不是 x.y.z 形式", v)
 	}
 	var n [4]uint32
 	for i := 0; i < 3; i++ {
-		x, e := strconv.ParseUint(parts[i], 10, 16)
+		x, e := strconv.ParseUint(m[i+1], 10, 16)
 		if e != nil {
 			return 0, 0, fmt.Errorf("版本号 %q 的第 %d 段不是数字：%v", v, i+1, e)
 		}
@@ -104,6 +124,9 @@ func fixedVersion(v string) (ms, ls uint32, err error) {
 	n[3] = uint32(b)
 	return n[0]<<16 | n[1], n[2]<<16 | n[3], nil
 }
+
+// semverPrefix 取版本串开头的 `major.minor.patch`，后面的 `-rc.2` 之类的预发布段不参与数字拆分。
+var semverPrefix = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)`)
 
 // --- VERSIONINFO 结构（MS 文档的 BLOCK/StringFileInfo/VarFileInfo） ---
 

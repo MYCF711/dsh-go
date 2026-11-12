@@ -104,8 +104,22 @@ func TestSettingsDescribeOfficialWireEnvelope(t *testing.T) {
 	if len(value) != 3 || value["writable"] != true || value["hasDocument"] != false {
 		t.Fatalf("result.value 不是官方 SettingsDescribeValue：%s", payload)
 	}
-	if namespaces, ok := value["namespaces"].([]any); !ok || len(namespaces) != 2 {
-		t.Fatalf("result.value.namespaces 应是两行：%s", payload)
+	// 三行：model / permission / llm。第三行是 0.2.2-rc.2 加的（发布
+	// `providers.<route>.retryPolicy`，官方 UI 的重试选项从这里读；F2 起该命名
+	// 空间可写，设置存储带 revision 乐观锁）。
+	namespaces, ok := value["namespaces"].([]any)
+	if !ok || len(namespaces) != 3 {
+		t.Fatalf("result.value.namespaces 应是三行：%s", payload)
+	}
+	for _, rawNamespace := range namespaces {
+		namespace := rawNamespace.(map[string]any)
+		if namespace["ns"] != "llm" {
+			continue
+		}
+		schema, ok := namespace["schema"].(map[string]any)
+		if !ok || schema["refs"] == nil {
+			t.Fatalf("llm 命名空间必须发布 schemastery envelope（providers.<route>.retryPolicy）：%v", namespace["schema"])
+		}
 	}
 }
 
@@ -152,15 +166,17 @@ func TestSettingsDescribeOfficialWireShape(t *testing.T) {
 		t.Fatalf("hasDocument 应为 false（本宿主没有配置编辑器的本地文档）：%v", out["hasDocument"])
 	}
 	namespaces, ok := out["namespaces"].([]any)
-	if !ok || len(namespaces) != 2 {
-		t.Fatalf("namespaces 应是 model/permission 两行，实际：%v", out["namespaces"])
+	if !ok || len(namespaces) != 3 {
+		t.Fatalf("namespaces 应是 model/permission/llm 三行，实际：%v", out["namespaces"])
 	}
 	for _, raw := range namespaces {
 		namespace, ok := raw.(map[string]any)
 		if !ok {
 			t.Fatalf("namespace 不是对象：%v", raw)
 		}
-		if namespace["ns"] != "model" && namespace["ns"] != "permission" {
+		switch namespace["ns"] {
+		case "model", "permission", "llm":
+		default:
 			t.Fatalf("未知 namespace：%v", namespace["ns"])
 		}
 		if namespace["applies"] != "live" {

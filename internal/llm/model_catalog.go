@@ -159,8 +159,12 @@ type modelCatalogDocument struct {
 // ModelCatalogStore 是单个 home 的目录真相。active model 故意不在这里：
 // 它仍由 W61 的 session-model.json 默认键唯一持有。
 type ModelCatalogStore struct {
-	mu      sync.Mutex
-	path    string
+	mu   sync.Mutex
+	path string
+	// home 是本 catalog 所属的 home：provider 路由级的重试策略（官方
+	// `providers.<route>.retryPolicy`）落在 `<home>/state/settings-namespaces.json`，
+	// 解析 provider 时要读同一份（见 ProviderSettingsRetryPolicy）。
+	home    string
 	doc     modelCatalogDocument
 	loadErr error
 	// missing 只表示启动读盘时文件物理不存在；存在的 models=[] 不是 missing。
@@ -174,6 +178,7 @@ type ModelCatalogStore struct {
 func OpenModelCatalog(home string) *ModelCatalogStore {
 	store := &ModelCatalogStore{
 		path: filepath.Join(home, "state", "model-catalog.json"),
+		home: home,
 		doc: modelCatalogDocument{
 			Version: modelCatalogVersion, Models: []json.RawMessage{}, Credentials: map[string]string{},
 		},
@@ -756,9 +761,18 @@ func (s *ModelCatalogStore) ResolveProvider(id string) (ModelProviderConfig, err
 	if info.APIKeyEnv != "" && credential == "" {
 		return ModelProviderConfig{}, modelCatalogError("credential_missing", "模型 %q 引用的 credential %s 未配置", id, info.APIKeyEnv)
 	}
+	retry := info.Retry
+	// 官方设置面的 `providers.<route>.retryPolicy` 优先于本仓旧的 per-model
+	// `retryPolicy`（官方位置才是 UI 写的那个）；设置里没配该路由时为零影响。
+	if routePolicy, policyErr := ProviderSettingsRetryPolicy(s.home, info.API); policyErr != nil {
+		return ModelProviderConfig{}, modelCatalogError("invalid_config",
+			"模型 %q 的 provider 路由 %q 的 retryPolicy 非法: %v", id, info.API, policyErr)
+	} else if routePolicy != nil {
+		retry = routePolicy
+	}
 	return ModelProviderConfig{
 		BaseURL: info.BaseURL, API: info.API, APIKeyEnv: info.APIKeyEnv, credential: credential,
-		Retry: info.Retry,
+		Retry: retry,
 	}, nil
 }
 

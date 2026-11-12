@@ -60,6 +60,16 @@ func (t *Tool) Description() string {
 }
 func (t *Tool) Schema() json.RawMessage { return schema }
 
+// ConcurrencySafe 声明 grep 可以和同批其它调用并发（官方 rc.2：
+// `dsh-tool-fs-search/src/grep.ts:1095` `isConcurrencySafe: () => true`）。
+//
+// 为什么敢声明：grep 只读文件系统（`Caps` 为空），每次调用自带 pattern/path/include/limit，
+// 不写任何共享状态。一次响应里"搜 6 个关键词"是最常见的形状，串行跑要白等 6 份耗时。
+func (t *Tool) ConcurrencySafe(args json.RawMessage) bool {
+	_ = args // 逐调用签名保留：以后若加了"会写"的参数，在这里按 args 判
+	return true
+}
+
 type args struct {
 	Pattern    string `json:"pattern"`
 	Path       string `json:"path"`

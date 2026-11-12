@@ -10,7 +10,9 @@ package main
 // 这条守卫把四件事钉死（前两条是"扫全仓"，后两条是"注入真的接上了"）：
 //
 //	A. 字面量唯一：`cmd/ internal/ modules/ codecs/ scripts/` 里的源码/脚本出现**当前发布前缀**
-//	   （从 main.go 现读，形态是 `<major>.<minor>.<patch>-go.`）时，只允许两个文件——
+//	   （从 main.go 现读；形态是 `<major>.<minor>.<patch>-go.`（稳定版）或
+//	   `<major>.<minor>.<patch>-gobeta.`（任务途中的测试版），由 `versiontag.ReleasePrefix`
+//	   取"最后一个点之前"得到）时，只允许两个文件——
 //	   `cmd/dshd/main.go`（唯一出处）与 `cmd/dshtui/brand.go`（`build.sh` 用同一个 `VER`
 //	   同时 `-ldflags -X main.version` 注入的两个 main 包之一）。其余任何文件都算"第二个版本源"。
 //	B. 两处同值：`cmd/dshtui/brand.go` 的 version 必须逐字节等于 `cmd/dshd/main.go` 的 version。
@@ -22,6 +24,8 @@ package main
 // 反例（把守卫自己弄坏会红）见文件末尾的 `TestVersionGuardCatchesARegression`。
 
 import (
+	"go/scanner"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +51,50 @@ var (
 	scanRoots    = []string{"cmd", "internal", "modules", "codecs", "scripts"}
 	scanSuffixes = []string{".go", ".sh", ".py", ".ps1", ".cmd"}
 )
+
+// codeText 返回一个文件里**除注释以外**的文本，用来判断"代码里有没有版本字面量"。
+//
+//   - `.go`：用 go/scanner 逐 token 取字面量，跳过 COMMENT（字符串/raw string 仍然算，
+//     因为它们是真的会进产物的值）；解析失败就退回原文，宁可多报也不漏报。
+//   - `.sh` / `.py` / `.ps1` / `.cmd`：按行剔除 `#` / `//` / `REM` 开头的注释行。
+//     （脚本里真正的赋值仍然会被扫到，例如 `VER=0.2.2-rc.2-go.1`。）
+func codeText(path string, raw []byte) string {
+	// 用 rune 拼换行，避免在测试源码里再出现被工具层转义的转义序列。
+	newline := string(rune(10))
+	if !strings.HasSuffix(path, ".go") {
+		var b strings.Builder
+		for _, line := range strings.Split(string(raw), newline) {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") ||
+				strings.HasPrefix(strings.ToUpper(trimmed), "REM ") {
+				continue
+			}
+			b.WriteString(line)
+			b.WriteString(newline)
+		}
+		return b.String()
+	}
+	fset := token.NewFileSet()
+	file := fset.AddFile(path, fset.Base(), len(raw))
+	var sc scanner.Scanner
+	sc.Init(file, raw, nil, 0)
+	var b strings.Builder
+	for {
+		_, tok, lit := sc.Scan()
+		if tok == token.EOF {
+			break
+		}
+		if tok == token.COMMENT {
+			continue
+		}
+		b.WriteString(lit)
+		b.WriteString(newline)
+	}
+	if sc.ErrorCount > 0 {
+		return string(raw)
+	}
+	return b.String()
+}
 
 func repoRootFromCmdDshd(t *testing.T) string {
 	t.Helper()
@@ -106,7 +154,11 @@ func TestHostVersionHasExactlyOneSourceOutsideBuildInjectedMains(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if !strings.Contains(string(raw), prefix) {
+			// 只认**代码**里的字面量：注释里写一行版本号示例（例如
+			// `// 0.2.2-rc.2-go.1  上游带 rc 的稳定版`）不会让产物说谎，
+			// 把它算成"第二个版本源"是误报。误报的守卫最后一定被加豁免，
+			// 然后没人再看它——所以在这里就把注释剔掉，判据反而更准。
+			if !strings.Contains(codeText(path, raw), prefix) {
 				return nil
 			}
 			rel, err := filepath.Rel(root, path)

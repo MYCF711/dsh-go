@@ -237,6 +237,73 @@ W48 先完成管理器与适配器，W50 已把真实 dshd CLI 与 serve 主分�
 
 真实 dshd + 临时 home 的 ready token→cookie 已验 schedule A/B、删除/重开、重复删除、冲突、clear-ended/readback；W69/W70 又以 Job Object/process group 与有界 Pager 完成 parent/child/grandchild 进程树停止和输出回读。W73 已由真实 UI apiclient/壳/自动化与后台任务页消费删除、clear-ended、rune 分页、truncated 与 stop/readback，证据 `../dsh-ui/docs/task-actions-ui.md`。完整命令、先红输出、日志与未验项见 [`docs/task-actions.md`](task-actions.md)；**可见 live GUI 与完整工作日仍未验**。
 
+## 3D. 409 的 `details.reason`（2026-11-12，additive）
+
+GP 报告 §5 第 3 条：409 的**两种来源**曾经只能靠 message 文本区分（界面里就是
+`strings.Contains(err.Error(), "滑出内存")`），文案一改就失效，而且判错的代价两个方向
+都难看——当成换代会重建基线（同一次点击又能再点），当成到头了会少一页。本层给 409 加一个
+**稳定机器字段** `details.reason`，**纯 additive**：`error` 仍然恰好四字段（`code`/
+`message`/`hint`/`retryable`，`TestEveryHTTPErrorHasFourFieldEnvelope` 钉住），
+reason 放在**信封顶层**的 `details` 里（与 `journalEpoch`/`lastSeq`/`capableWhen`
+平铺同一层，不是 error 对象的一部分）。
+
+### 线上形状
+
+```json
+{"error":{"code":"stale_epoch","message":"…","hint":"…","retryable":true},
+ "journalEpoch":7,"lastSeq":1024,
+ "details":{"reason":"history_evicted"}}
+```
+
+### 取值表（`ConflictReasons()` 是宿主侧唯一来源）
+
+| `details.reason` | 四字段 `code` | 语义 | 客户端下一步 |
+|---|---|---|---|
+| `stale_epoch` | `stale_epoch` | journal 换代，或客户端水位比当前还大 | 丢掉旧水位，重新 `session.load` 拿基线 |
+| `history_evicted` | `stale_epoch` | `sinceSeq` 之前的历史已滑出内存 journal | **不要重建**：这就是"没有更早的了"（分页到头） |
+| `revision_conflict` | `revision_conflict` | 乐观并发 revision 过期（读到的是旧版本） | 重新读最新 revision，再基于新内容重试 |
+| `job_finished` | `job_finished` | 任务已结束，不能重复停止/操作 | 只读 `jobs.output` |
+| `job_owner_not_live` | `job_owner_not_live` | 任务 owner 已不在（官方 `JOB_OWNER_NOT_LIVE`） | 换会话 / 等 owner 恢复 |
+| `stale_head` | `stale_head` | forge 写入基于旧 head（远端已前进） | 重新读 PR head 再提交 |
+| `agent_busy` | `busy` | 会话/管理器正忙（上一轮还没结束） | 等 `turn/done`，或先 `session.cancel` |
+| `NO_CONTINUABLE_FAILURE_OR_PENDING_INPUT` | `session/agent-busy` | 官方续跑不可用（**官方逐字值**，`dsh-api-session-controller/lib/index.js:895`） | 看 `hint`：先等当前轮/排队项消化完 |
+| `conflict` | 其它（`conflict`/`unsupported`/`error` 等兜底） | 叫不出更细名字的 409 | 按 `hint` |
+
+产出点（每个都有一条断言，见 `TestConflictProducersCarryReason` 与
+`TestHistoryConflictReasons`）：`server.go` 的 `handleSessionHistory`（两种 reason）、
+`serveEmptyPromptContinuation`（官方 reason）、`writePromptError`；`handlers_agent_official.go`；
+`handlers_config_patch.go`；`handlers_jobs.go`；`handlers_job_terminal_official.go`；
+`handlers_forge_write_official.go` / `handlers_forge_rc2.go`；`handlers_session_official.go`；
+`context_mcp_sidequery.go`；`handlers_mcp_manager_rc2.go`；`handlers_cua_rc2.go`。
+收口在**唯一出口** `writeJSON`（`withConflictReason`）：任何 409 都带 reason，
+不靠每个 handler 记得加。
+
+### 兼容规则（老客户端 / 老宿主）
+
+- **老客户端**：忽略顶层 `details` 即可。`error` 四字段、状态码、`message` 文案、
+  `journalEpoch`/`lastSeq` 等兄弟字段**全部没变**——这是 additive，不是破坏性变更。
+- **老宿主**（本字段之前）：响应里没有 `details`。客户端必须**先判结构、再兜底文本**，
+  且兜底只用于跨版本过渡；支持的最低宿主版本 ≥ 本字段之后，文本匹配即可删
+  （界面侧判据写在 `../dsh-ui/cmd/app/frames.go` 的 `journalEvictedError` 注释里）。
+- **两个 reason 共用一个 code 是刻意的**：`stale_epoch` 是既有客户端的码分支，
+  不能为了细分改码；细分只在 `details.reason` 里做。同理 `busy` → `agent_busy`、
+  `session/agent-busy` → 官方逐字值。
+- **`details` 里其它键**原样保留；调用点显式给的 reason 优先于按 code 的默认推导。
+
+### 机器快照与断言
+
+- 宿主快照 `internal/transport/testdata/api.snapshot.json` 的 `conflict_reasons`
+  是取值表本身（从 `ConflictReasons()` 反推，不手抄）；UI 侧
+  `testdata/api.snapshot.json` 的 `envelope.details.reason` 是**可选**字段
+  （老宿主不带，别写成必填）。
+- `TestConflictReasonsTable`（取值非空/不重名/三个必需语义都在）、
+  `TestConflictReasonForCode`（code → reason 逐行 + 产出点）、
+  `TestWithConflictReason`（信封合并规则：调用点优先、兄弟字段不丢、error 仍四字段）、
+  `TestConflictProducersCarryReason`（每个 409 产出点一条断言）、
+  `TestHistoryConflictReasons`（两种 `stale_epoch` 真的分得开、成功响应不带 `details`）。
+- 出口不变量：`TestEveryHTTPErrorHasFourFieldEnvelope` 对**每一条 409 响应**断言
+  `details.reason` 存在且取值在 `ConflictReasons()` 内。
+
 ## 4. H 表（需求 + 最近证据快照）
 
 | # | 状态快照 | 需求、已有证据与剩余完成判据 |

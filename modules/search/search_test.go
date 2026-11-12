@@ -192,7 +192,8 @@ func TestDeepSeekUnavailableWithoutKey(t *testing.T) {
 	}
 }
 
-// 环境装配：没配 SearxNG、只配了 DeepSeek key 时，搜索用 DeepSeek；钉死规则生效。
+// 环境装配：rc.2 的两个 DeepSeek API provider 注册进来，基线默认 provider 真正生效，
+// 而"只有 SearxNG"的部署仍然能用（不硬钉不可用的默认值）。
 func TestNewWebProvidersFromEnv(t *testing.T) {
 	env := map[string]string{
 		"DEEPSEEK_API_KEY":      "k",
@@ -204,25 +205,33 @@ func TestNewWebProvidersFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	ids := seam.SearchProviderIDs()
-	if strings.Join(ids, ",") != "deepseek-official,searxng" {
+	if strings.Join(ids, ",") != "deepseek-official,deepseek-search-api,searxng" {
 		t.Fatalf("注册的 provider 不对: %v", ids)
+	}
+	if got := strings.Join(seam.FetchProviderIDs(), ","); got != DeepSeekFetchAPIProviderID {
+		t.Fatalf("抓取侧注册的 provider 不对: %q", got)
 	}
 	if !seam.SearchReady() {
 		t.Fatal("有 key 时搜索应该就绪")
 	}
+	// rc.2 基线默认 provider（deepseek-search-api）可用时直接生效（cordis.patch.yml:487）。
+	if seam.SearchPin() != BaseBundleSearchProviderID {
+		t.Fatalf("有凭据时该钉 rc.2 基线默认 %q；实际 %q", BaseBundleSearchProviderID, seam.SearchPin())
+	}
 	selected, err := seam.SelectSearch()
-	if err != nil || selected.ID() != DeepSeekProviderID {
-		t.Fatalf("应自动选中 DeepSeek: %v %v", err, selected)
+	if err != nil || selected.ID() != DeepSeekSearchAPIProviderID {
+		t.Fatalf("应选中 DeepSeek Search API: %v %v", err, selected)
 	}
 
-	// 两个都配了但没钉死 → ambiguous（官方选择语义）。
+	// rc.2 基线默认可用 → 即使 SearxNG 也配了也不会 ambiguous（官方基础组合就是这么钉的）。
 	env["DSHD_SEARCH_URL"] = "http://127.0.0.1:1/search?q={query}"
 	seam, err = NewWebProvidersFromEnv(getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := seam.SelectSearch(); spi.WebErrorCode(err) != spi.WebProviderAmbiguous {
-		t.Fatalf("两个可用 provider 应 ambiguous: %v", err)
+	selected, err = seam.SelectSearch()
+	if err != nil || selected.ID() != DeepSeekSearchAPIProviderID {
+		t.Fatalf("基线默认优先于自动选择: %v %v", err, selected)
 	}
 
 	// 钉死 searxng → 选它。
@@ -234,5 +243,36 @@ func TestNewWebProvidersFromEnv(t *testing.T) {
 	selected, err = seam.SelectSearch()
 	if err != nil || selected.ID() != SearxNGProviderID {
 		t.Fatalf("钉死的 provider 没生效: %v %v", err, selected)
+	}
+
+	// 没有 DeepSeek 凭据时不硬钉（否则"只用 SearxNG"的部署会退化成配置错误）。
+	noKey := map[string]string{"DSHD_SEARCH_URL": "http://127.0.0.1:1/search?q={query}"}
+	seam, err = NewWebProvidersFromEnv(func(name string) string { return noKey[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seam.SearchPin() != "" {
+		t.Fatalf("没有凭据时不该钉死默认 provider；实际 %q", seam.SearchPin())
+	}
+	selected, err = seam.SelectSearch()
+	if err != nil || selected.ID() != SearxNGProviderID {
+		t.Fatalf("没有 DeepSeek 凭据时该自动选中唯一的 SearxNG: %v %v", err, selected)
+	}
+
+	// 抓取侧：有 DeepSeek 凭据时钉 rc.2 基线默认 http（官方 cordis.patch.yml:488），
+	// 否则会与 deepseek-fetch-api 撞成 WEB_PROVIDER_AMBIGUOUS。
+	withKey := map[string]string{"DEEPSEEK_API_KEY": "k"}
+	seam, err = NewWebProvidersFromEnv(func(name string) string { return withKey[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seam.FetchPin() != BaseBundleFetchProviderID {
+		t.Fatalf("有凭据时抓取侧该钉 %q；实际 %q", BaseBundleFetchProviderID, seam.FetchPin())
+	}
+	if _, err := seam.SelectFetch(); spi.WebErrorCode(err) != spi.WebProviderConfiguredMissing {
+		// http provider 由 modules/tool/webfetch 注册；本函数只造搜索侧 + Search/Fetch API。
+		// 组合里它一定在（见 websearch.HostProviders 与 cmd/dshd 的模块表）。
+		t.Fatalf("只造搜索侧时 http 还没注册，该报 %s；实际 %q",
+			spi.WebProviderConfiguredMissing, spi.WebErrorCode(err))
 	}
 }

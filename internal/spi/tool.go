@@ -31,6 +31,65 @@ type Tool interface {
 	Exec(ctx context.Context, args json.RawMessage) (Result, error)
 }
 
+// ConcurrencyClassifier 是工具**可选**的逐调用并发分类器（官方 0.2.2-rc.2 新增契约）。
+//
+// 官方原件（@deepseek-ai/dsh-tools，本机解包在
+// `tmp/GO8-RC2/official-rc2/dsh/node_modules/@deepseek-ai/dsh-tools/`）：
+//
+//	// src/contracts.ts:84 —— 声明形状
+//	isConcurrencySafe?(args: unknown): boolean
+//
+//	// src/pipeline.ts:107-114 —— 唯一判定点（lib/pipeline.js:279-291 是同一段的运行时）
+//	executionMode(exec) {
+//	  const tool = this.resolveExecution(exec.name, ...)
+//	  if (!tool?.isConcurrencySafe) return { kind: 'exclusive' }
+//	  try {
+//	    return tool.isConcurrencySafe(exec.arguments) === true
+//	      ? { kind: 'parallel' } : { kind: 'exclusive' }
+//	  } catch { return { kind: 'exclusive' } }
+//	}
+//
+// # 三个要点，缺一个就不算同步
+//
+//  1. **逐调用**：判据是这次调用的参数，不是工具名、也不是静态 Caps。同一个工具
+//     换个参数可以有不同副作用（office_convert 写输出目录、office_render 只渲染），
+//     一刀切要么白等要么撞车。
+//  2. **fail-closed**：没声明、返回非 true、或抛错 ⇒ 独占。默认值必须是"不安全"：
+//     新工具忘了接线只会变慢，不会跟别的工具一起写同一个文件。
+//  3. **不是 Tool 的必选方法**：Tool 是全仓所有工具（含 wasm 插件样本）的公共形状，
+//     往上加方法会让所有既有实现编译不过；而这条语义的缺省值本来就是独占，
+//     所以做成可选接口，工具逐个接线（已接线/待接线清单见
+//     `tmp/GO8-RC2/reports/D3-tool-pipeline.md`）。
+//
+// 实现必须是**纯同步、无副作用**的：它在工具体真正执行之前由调度器调用，官方
+// 文档原话是 "Opted-in executions must not mutate parent-owned state"。声明安全的
+// 工具还必须自己扛得住并发（同一个工具被同批调用多次时，不得写共享可变状态）。
+type ConcurrencyClassifier interface {
+	// ConcurrencySafe 报告**这一次**调用（按 args）能否与同批其它调用并发。
+	// args 是模型给的原始参数（与 Exec 收到的是同一份字节）；解析失败请返回 false。
+	ConcurrencySafe(args json.RawMessage) bool
+}
+
+// ConcurrencySafe 是**唯一**的分类判定入口（fail-closed）。
+//
+// 调度器只许用它，不许自己 type-assert 后裸调分类器：这里有 recover，
+// 分类器写错（panic/解析崩）时最坏结果是"这条变慢"，而不是整批工具调度带崩。
+func ConcurrencySafe(t Tool, args json.RawMessage) (safe bool) {
+	if t == nil {
+		return false
+	}
+	c, ok := t.(ConcurrencyClassifier)
+	if !ok {
+		return false
+	}
+	defer func() {
+		if recover() != nil {
+			safe = false
+		}
+	}()
+	return c.ConcurrencySafe(args)
+}
+
 // Caps 是工具的能力声明。
 type Caps struct {
 	Writes      bool `json:"writes,omitempty"`      // 会改文件系统
@@ -43,6 +102,57 @@ type Caps struct {
 func (c Caps) NeedsApproval() bool {
 	return c.Writes || c.Executes || c.Network || c.Destructive
 }
+
+// ErrorInfo 是失败结果上的**错误身份**（官方 `error.info{name,code}`，rc.2 新增）。
+//
+// 官方原件：
+//   - 内存里的结果对象：`{ content, isError, error: { message, info: { name, code } } }`
+//     （`lib/types/batch.js:232-245`；`lib/pipeline.js:841-856` 的 errorInfo/approvalDenial）
+//   - 落盘的 `tool/result` 事件里，`error` 字段就是这个 `info`（`lib/types/batch.js:238`）
+//
+// 为什么模型需要它：同一句 "Error: ..." 背后是**不同的下一步**——人拒绝了要重新
+// 征求同意；没有审批通道时换问法永远没用；这轮被取消要重新发起；缺上下文说明
+// 是接线问题、改参数也救不了。只有文本时，模型只能从措辞里猜。
+type ErrorInfo struct {
+	Name string `json:"name"`
+	Code string `json:"code"`
+}
+
+// 官方错误身份原词（逐字，不要"顺手改顺眼"）。
+//
+// 来源：`lib/types/error-codes.js:6-16`、`lib/types/contracts.js:19-21`。
+// 这些值是**持久化契约**：它们会落进 v4 `tool/result.error.{name,code}`，
+// 客户端按 code 分支，拼错一个字符只在很远的将来表现为"模型老做错事"。
+const (
+	// ErrorNameApproval 是审批未通过时记录的错误类名。
+	ErrorNameApproval = "ApprovalError"
+	// CodeApprovalRejected 表示人看过并拒绝了这次调用。下一步是重新征求同意或换只读方式。
+	CodeApprovalRejected = "APPROVAL_REJECTED"
+	// CodeApprovalCancelled 表示审批请求被取消（**不是**有人拒绝）。可以重新发起。
+	CodeApprovalCancelled = "APPROVAL_CANCELLED"
+	// CodeApprovalUnavailable 表示需要审批但没有任何通道能回答（无审批服务/无会话/
+	// 无人值守策略）。对模型来说换问法没用，必须让用户先改变环境。
+	CodeApprovalUnavailable = "APPROVAL_UNAVAILABLE"
+
+	// ErrorNameToolContextUnavailable 是工具缺上下文（调用方 Agent、注入的服务、
+	// 打开的轮次）时的错误类名（`lib/types/contracts.js:42-56`）。
+	ErrorNameToolContextUnavailable = "ToolContextUnavailableError"
+	// CodeToolContextUnavailable 是上面那个类的码。这类失败**不是参数问题**，
+	// 模型改参数也没用，应该报告接线问题而不是重试。
+	CodeToolContextUnavailable = "TOOL_CONTEXT_UNAVAILABLE"
+
+	// ErrorNameAbort 是被取消时记录的错误类名。
+	ErrorNameAbort = "AbortError"
+	// CodeAborted 是"工具体已被调用、随后这轮被取消"的码。
+	//
+	// 注意官方**常量名**与**值**不同：`export const TOOL_ABORTED = 'ABORTED'`
+	// （`lib/types/contracts.js:19`）。消费方比较的是值，所以这里必须是 "ABORTED"。
+	CodeAborted = "ABORTED"
+	// CodeAbortedBeforeDispatch 是"取消发生在工具体调用之前"的码
+	// （`lib/types/contracts.js:21`；本仓的派发前取消在 modules/tools 的
+	// BeforeDispatch 钩子里产生）。
+	CodeAbortedBeforeDispatch = "ABORTED_BEFORE_DISPATCH"
+)
 
 // Result 是宿主内部的工具结果契约。
 //
@@ -57,7 +167,16 @@ type Result struct {
 	Artifacts []Artifact  // 大结果外置后的引用
 	Truncated *Truncation // 发生截断时的证据
 	Hint      string      // 失败或为空时的下一步建议
-	View      *ViewSpec   // 客户端渲染契约
+	// Info 是失败结果的**错误身份**（官方 `error.info{name,code}`）。
+	//
+	// 成功结果留 nil；失败时也不是必填（很多失败就是工具自己的一句话，
+	// 没有专用身份）。但凡是"人能说清、模型下一步不一样"的失败都该带：
+	// 审批三态、取消、缺上下文（码表见上面的 ErrorName*/Code* 常量）。
+	//
+	// 它**不替代** Hint：Hint 是给人话看的下一步，Info 是给代码分支/模型
+	// 做结构性判断的身份，两者同时存在。
+	Info *ErrorInfo
+	View *ViewSpec // 客户端渲染契约
 	// Images 是这次结果附带的图片。宿主会把它们**挪进一条用户消息**再发给模型——
 	// 因为 OpenAI 兼容接口的 tool 消息不支持图片，只有 user 消息能带。
 	// 不写进会话日志：图片是二进制，塞进 append-only 的日志会把文件撑爆，
@@ -66,6 +185,16 @@ type Result struct {
 	// Stop 为 true 时，agent 循环在这一步之后**结束本轮**，把控制权交回人。
 	// 给 ask_user_question 这类"必须等人回答"的工具用：模型不能自己编一个答案往下走。
 	Stop bool
+}
+
+// WithErrorInfo 给失败结果补上错误身份，其余字段一个都不动。
+//
+// 为什么是"补"而不是"新建"：失败结果里的 Text/Data/Artifacts/Truncated 是工具
+// **真实产出**——"它到底吐了什么"恰恰是模型判断下一步的唯一依据（见
+// `internal/agent/parallel.go` 的 execToolCall 注释）。Hint 同理，是 R3 的下一步。
+func (r Result) WithErrorInfo(name, code string) Result {
+	r.Info = &ErrorInfo{Name: name, Code: code}
+	return r
 }
 
 // Image 是一张要送给模型看的图片。

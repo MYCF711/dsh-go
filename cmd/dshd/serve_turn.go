@@ -39,10 +39,12 @@ type modelRunner struct {
 	// 存活期间登记，最终边界原子 drain-or-close，过晚提交不会变成新 turn。
 	steerMu sync.Mutex
 	steers  map[string]*modelTurnInbox
-	// wake/finished 处理 prompt ACK 后 Run goroutine 尚未注册的早到 steer；
+	// pending 是"Run goroutine 还没注册就先到"的 steer 队列（按 sessionID+turnID）：
+	// 注册方在**同一临界区**里把它们搬进新 inbox，首步 drain 因此一定看得到。
+	// 只等 wake 通知的话，"早到"会不会被首步接管取决于调度——2 核 runner 上会输。见 pendingSteer。
+	pending map[string][]*pendingSteer
 	// finished 每会话只记最新 turn，避免无限积累历史 turnID。
-	steerWake chan struct{}
-	finished  map[string]string
+	finished map[string]string
 }
 
 func (r *modelRunner) Run(ctx context.Context, sessionID, turnID, text string) error {

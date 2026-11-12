@@ -459,8 +459,9 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 			} else {
 				blocks = []spi.Block{{Type: "text", Text: "（无结果）"}}
 			}
+			// rc.2：失败结果的 code 不能被折叠（见 turn_error_codes.go）。
 			if err := logw.Append("tool/result",
-				session.ToolResultEventWithView(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}, viewOf(e.Result))); err != nil {
+				toolResultEventOf(e, blocks, cwd, []int64{lastCallSeq})); err != nil {
 				return err
 			}
 		case agent.EventTurnEnd:

@@ -45,6 +45,12 @@ type OfficialMarketPluginVersion struct {
 	Deprecated  string            `json:"deprecated,omitempty"`
 	Engines     map[string]string `json:"engines,omitempty"`
 	Compatible  bool              `json:"compatible"`
+	// Update 是官方 0.2.2-rc.2 市场版本行新增的 `update: boolean`
+	// （`dsh-plugin-market/src/index.ts:481-487`、`types.ts` 的
+	// MarketListingVersion.update）：已装副本来自**完整 commit 钉住的 git spec**、
+	// 这一版更新、且钉住同仓库同 `path:` 目录时才是 true。**总是显式下发**：
+	// 缺席与 false 在客户端语义不同（缺席会被读成"老宿主，别显示升级按钮"）。
+	Update bool `json:"update"`
 }
 
 type OfficialMarketSearchResult struct {

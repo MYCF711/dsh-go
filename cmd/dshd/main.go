@@ -39,6 +39,7 @@ import (
 	"dshgo/modules/tool/hindsight"
 	"dshgo/modules/tool/history"
 	"dshgo/modules/tool/nowline"
+	officetool "dshgo/modules/tool/office"
 	planmod "dshgo/modules/tool/plan"
 	pluginmod "dshgo/modules/tool/plugin"
 	"dshgo/modules/tool/present"
@@ -52,6 +53,7 @@ import (
 	subagentfork "dshgo/modules/tool/subagentfork"
 	team "dshgo/modules/tool/team"
 	teamtask "dshgo/modules/tool/teamtask"
+	"dshgo/modules/tool/terminalpanel"
 	todo "dshgo/modules/tool/todo"
 	unlagmod "dshgo/modules/tool/unlag"
 	watch "dshgo/modules/tool/watch"
@@ -66,7 +68,7 @@ import (
 
 // 这三个由 -ldflags 覆盖（scripts/build.sh），默认值给 go run 用。
 var (
-	version   = "0.2.2-go.2"
+	version   = "0.2.2-rc.2-go.1"
 	commit    = "dev"
 	buildTime = "unknown"
 )
@@ -166,11 +168,23 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		schedule.Module(filepath.Join(home, "state", "schedules")),
 		watch.Module(filepath.Join(home, "state", "watch")),
 		nowline.Module(),
+		// rc.2 新包 `dsh-terminal-panel` 的两个只读工具（user_terminal_list / read）。
+		//
+		// 数据源按入口形态解析（见 terminal_bridge.go）：serve 起的工具子进程走 stdio 桥，
+		// 独立 run/exec 如实报"这里读不到终端"，子代理会话给官方原文拒绝。
+		// `readUserTerminals:false` 时两个工具都不注册（ModuleFromEnv 从宿主环境解析）。
+		terminalpanel.ModuleFromEnv(os.Getenv),
 		subagentModule(sub),
 		subagenttool.Module(),
 		subagentfork.Module(inheritFromCtx(home)),
 		skill.Module(filepath.Join(home, "skills")),
 		hindsight.Module(home),
+		// Office 三工具（office_convert / office_recalculate / office_render）。
+		// provider 从共享槽取：serve 进程里就是 cmdServe 建的那一份，run/tools/exec
+		// 里则由这里建一份 —— 关键是**同一进程只此一份**（同一引擎/同一准入队列/
+		// 同一 generation），否则工具面与 Transport 面各排队一半、generation 打架。
+		// 见 cmd/dshd/serve_office_kit.go 的 sharedOfficeKitProvider。
+		officetool.Module(sharedOfficeKitProvider(home)),
 		// MCP 客户端：把 mcp.json 里声明的 server 的 tools/list 真正注册成 spi.Tool
 		// （此前只数字数、从不注册）。漏掉 dsh.toml 的白名单条目会让它被静默跳过。
 		tools.MCPModule(home),
@@ -838,9 +852,17 @@ func cmdRun(argv []string) (retErr error) {
 	defer logw.Close()
 	jobsStdio := os.Getenv("DSHD_JOBS_STDIO") == "1"
 	steerStdio := os.Getenv("DSHD_STEER_STDIO") == "1"
-	if jobsStdio || steerStdio {
+	// rc.2 终端面板的父→子 roster 桥（`user_terminal_list` / `user_terminal_read`）。
+	// 应答走**同一根 stdin**，所以缺了 startStdinDispatcher 就没人读——工具只能等到超时。
+	termStdio := userTerminalsViaStdio()
+	if jobsStdio || steerStdio || termStdio {
 		// 所有父→子请求共享唯一 stdin 读端，避免 buffered reader 抢读/丢行。
 		startStdinDispatcher()
+	}
+	// 数据源无条件挂上（不只是有桥时）：没有桥时 list/read 结构化说明"要 serve"，
+	// 但**子代理判定**仍走本地真实谱系——子代理必须在任何形态下都被拒绝。
+	if err := provideUserTerminalBridge(root, *home); err != nil {
+		return fmt.Errorf("终端面板数据源挂载失败: %w", err)
 	}
 	if jobsStdio {
 		// jobs 通道必须在 agent loop 开始前建立；旧实现到 loop 结束才启动，
@@ -1165,8 +1187,9 @@ func cmdRun(argv []string) (retErr error) {
 				} else {
 					blocks = []spi.Block{{Type: "text", Text: "（无结果）"}}
 				}
+				// rc.2：失败结果的 code 不能被折叠（见 turn_error_codes.go）。
 				if err := logw.Append("tool/result",
-					session.ToolResultEventWithView(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}, viewOf(e.Result))); err != nil {
+					toolResultEventOf(e, blocks, cwd, []int64{lastCallSeq})); err != nil {
 					return err
 				}
 				emitJobs(root)
@@ -1257,6 +1280,11 @@ func (c *turnCloser) Exit(ctx context.Context, err error) error {
 	if c == nil || c.closed {
 		return nil
 	}
+	// rc.2：真失败且错误对象自带稳定码时，落盘要保留 code（不折叠成 UNKNOWN）；
+	// 取消/超时与无码错误仍走既有的 aborted/error + turnEndForExit 判定。
+	if failure, ok := turnEndFailureOfExit(ctx, err); ok {
+		return c.writeFailure(failure)
+	}
 	kind, detail := turnEndForExit(ctx, err)
 	return c.write(kind, detail)
 }
@@ -1274,6 +1302,21 @@ func (c *turnCloser) write(kind, detail string) error {
 		return nil
 	}
 	if err := c.logw.Append("turn/end", session.TurnEndData(c.turn, kind, detail)); err != nil {
+		return err
+	}
+	c.closed = true
+	return nil
+}
+
+// writeFailure 写一条**保留 code** 的失败轮（rc.2）。
+//
+// 与 write 共用 closed 幂等：同一轮只能有一条 turn/end，否则只读日志的消费者
+// 会把一轮数成两轮。
+func (c *turnCloser) writeFailure(failure session.TurnEndError) error {
+	if c == nil || c.closed {
+		return nil
+	}
+	if err := c.logw.Append("turn/end", session.TurnEndErrorData(c.turn, failure)); err != nil {
 		return err
 	}
 	c.closed = true

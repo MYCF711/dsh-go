@@ -46,7 +46,14 @@ else
   # 交给订阅者，是真 bug；另 3 处是夹具与后台 sweepLoop 抢配置字段）。
   # 跑法只有一种：按 docs/race.md 装好 MinGW-w64，并显式 `CGO_ENABLED=1`。
   # CI 侧对应改动见 .github/workflows/ci.yml 的 `env: CGO_ENABLED: "1"`。
-  race_out="$(go test ./... -race 2>&1)"; race_rc=$?
+  #
+  # `-timeout 20m`：`go test` 的**单包**默认超时是 10m，而 cmd/dshd 的 subprocess 用例
+  # 在 -race 下每个约 28s（几十个），2 核 CI runner 上光这一个包就撞 10m。撞超时的输出
+  # 只留 `panic: test timed out`，check.sh 又只打 tail -25，于是 CI 上看到的就是光秃秃一句
+  # `FAIL go test -race`——那不是"测试挂了"，是门禁被自己的默认超时掐死（2026-11-12
+  # run 43180483371 起连续复现；本地 16 核 535s 刚好擦线）。放宽的是**等待时长**，不是断言：
+  # 照样要求全绿，只是给它跑完的时间。
+  race_out="$(go test ./... -race -timeout 20m 2>&1)"; race_rc=$?
   if [ $race_rc -eq 0 ]; then
     pass "go test -race"
   elif echo "$race_out" | grep -qiE 'requires cgo|C compiler|gcc.{0,12}not found|exec: "gcc"'; then
@@ -60,8 +67,19 @@ else
       bad "go test（不覆盖竞态的兜底跑）"
     fi
   else
+    # 只打 tail -25 会把"哪个包挂了 / 为什么挂"整段切掉。2026-11-12 在 CI 上踩过两次：
+    # 日志里先只剩一句 `FAIL go test -race`，补了包名/用例名之后仍然看不到失败**消息**
+    # （哪一行断言、什么错误），于是每一轮都要靠本地复现去猜。
+    # 所以：先按 `--- FAIL` 打出每条的完整上下文（含失败消息），再打 tail 25 供收尾。
+    # **不是**放宽判定——判定仍然只看 race_rc，这里只是把已经发生的事实打全。
+    printf '%s\n' "$race_out" | grep -B 1 -A 12 -E '^[[:space:]]*--- FAIL' | head -400
+    printf '%s\n' "$race_out" | grep -E '^(WARNING: DATA RACE|panic:)' | head -20
     printf '%s\n' "$race_out" | tail -25
-    bad "go test -race"
+    # 环境面：CI 上这批失败是"很多包同时快速失败"的形状，先看磁盘/临时目录/进程数有没有被打满
+    # （race 跑 15 分钟会留一堆 t.TempDir 与子进程；磁盘满了就会满屏 "no space"）。
+    { echo "  ---- 环境 ----"; df -h . 2>/dev/null | tail -1; df -h /tmp 2>/dev/null | tail -1
+      echo "  TMP 条目数: $(ls -1 "${TMPDIR:-/tmp}" 2>/dev/null | wc -l)"; } || true
+    bad "go test -race（$(printf '%s' "$race_out" | grep -E '^(FAIL[[:space:]]+[^[:space:]]+)' | head -6 | awk '{print $2}' | tr '\n' ' ')）"
   fi
 
   # 权限分支守卫：每个"放不放行"的函数都得有测试钉着。

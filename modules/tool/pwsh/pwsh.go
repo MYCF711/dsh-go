@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,15 +30,28 @@ import (
 	"dshgo/internal/spi"
 )
 
+// schema 是模型看到的那张表，**逐字对齐官方 rc.2**（`@deepseek-ai/dsh-tool-pwsh`）：
+//
+//	properties: description / command / timeoutMs / workdir / run_in_background
+//	required:   description / command
+//
+// 两条与官方的差异都是"只加不减"（能力下限规则，见 AGENTS.md）：
+//   - `timeout_seconds` 是我们的旧参数，保留为**兼容别名**；同时给时以官方名
+//     `timeoutMs` 为准（官方名优先，见 resolveTimeout）。
+//   - `sandbox_permissions` 是本仓的 per-call 沙箱请求，官方 pwsh 工具没有
+//     （官方把它放在 bash 那一侧），删掉会让三档沙箱在这条路上失效。
 var schema = json.RawMessage(`{
   "type": "object",
   "properties": {
+    "description": {"type": "string", "description": "这段命令干什么，5-10 个字，给用户看的（例如「列出当前目录」「查看进程列表」）"},
     "command": {"type": "string", "description": "要执行的 PowerShell 命令（一条或多条，用分号分隔）"},
+    "timeoutMs": {"type": "number", "description": "超时毫秒数；省略用默认 120000，上限 600000"},
     "workdir": {"type": "string", "description": "可选：工作目录（相对当前工作目录），默认当前目录"},
-    "timeout_seconds": {"type": "integer", "description": "可选：超时秒数，默认 120，上限 600"},
+    "run_in_background": {"type": "boolean", "description": "立刻转后台并返回 job_id，不等命令结束（长任务用这个）：用 job_output 取输出、job_kill 终止"},
+    "timeout_seconds": {"type": "integer", "description": "已废弃：旧版超时秒数；与 timeoutMs 同时给时以 timeoutMs 为准"},
     "sandbox_permissions": {"type": "string", "enum": ["workspace-write", "danger-full-access"], "description": "可选：仅本次调用的 sandbox 请求。danger-full-access 需要先经审批；不会改变会话档位"}
   },
-  "required": ["command"],
+  "required": ["description", "command"],
   "additionalProperties": false
 }`)
 
@@ -63,6 +77,12 @@ type Tool struct {
 	gate *sandbox.Gate
 	// lastDecision 只保留给错误结果的结构化 Data；授权判断本身不读它。
 	lastDecision *sandbox.Decision
+	// scope 是装配期捕获的作用域：`run_in_background` 要把命令登记进宿主的
+	// jobs 运行时，而工具模块不许直接 import 别的模块（R2），只能经 spi.Exec 接缝。
+	// 惰性 inject（Exec 时才取）：装配顺序变了也不会把工具装配搞红。
+	scope *kernel.Scope
+	// execSeam 是测试注入的执行接缝；nil 时按 scope 取 spi.Exec。
+	execSeam spi.Exec
 }
 
 // Option 是 Tool 的可选项（测试注入与将来宿主接线用）。
@@ -73,6 +93,16 @@ func WithSandboxGate(g *sandbox.Gate) Option {
 	return func(t *Tool) {
 		if g != nil {
 			t.gate = g
+		}
+	}
+}
+
+// WithExecSeam 注入执行接缝（spi.Exec）。只给测试与"宿主自建 scope"用：
+// 生产由 Module 把装配作用域交给工具，Exec 时从中取 spi.Exec。
+func WithExecSeam(e spi.Exec) Option {
+	return func(t *Tool) {
+		if e != nil {
+			t.execSeam = e
 		}
 	}
 }
@@ -107,20 +137,60 @@ func (t *Tool) Description() string {
 }
 
 type args struct {
-	Command            string `json:"command"`
-	Workdir            string `json:"workdir"`
-	TimeoutSeconds     int    `json:"timeout_seconds"`
-	SandboxPermissions string `json:"sandbox_permissions"`
+	// Description 是官方 required 参数：给人看的一句话（UI 展示）。
+	// 缺省不拒绝调用（旧调用方没有它），但 Summary/Data 会如实带上。
+	Description        string  `json:"description"`
+	Command            string  `json:"command"`
+	TimeoutMs          float64 `json:"timeoutMs"` // 官方名（毫秒）
+	Workdir            string  `json:"workdir"`
+	RunInBackground    bool    `json:"run_in_background"`
+	TimeoutSeconds     int     `json:"timeout_seconds"` // 旧别名，官方名优先
+	SandboxPermissions string  `json:"sandbox_permissions"`
 }
 
 type data struct {
-	Shell      string `json:"shell"`
-	Command    string `json:"command"`
-	Workdir    string `json:"workdir,omitempty"`
-	ExitCode   int    `json:"exit_code"`
-	DurationMS int64  `json:"duration_ms"`
-	Truncated  bool   `json:"truncated,omitempty"`
-	Bytes      int    `json:"bytes"`
+	Shell       string `json:"shell"`
+	Description string `json:"description,omitempty"`
+	Command     string `json:"command"`
+	Workdir     string `json:"workdir,omitempty"`
+	ExitCode    int    `json:"exit_code"`
+	DurationMS  int64  `json:"duration_ms"`
+	Truncated   bool   `json:"truncated,omitempty"`
+	Bytes       int    `json:"bytes"`
+	// TimeoutMS 是这次调用**实际生效**的超时（毫秒）。
+	// 模型给了 timeoutMs / timeout_seconds 里哪个生效，一眼能看出来。
+	TimeoutMS int64 `json:"timeout_ms,omitempty"`
+	// JobID 非空表示已转后台：用 job_output 取输出、job_kill 终止。
+	JobID      string `json:"job_id,omitempty"`
+	Background bool   `json:"background,omitempty"`
+}
+
+// resolveTimeout 决定这次调用的超时。
+//
+// 官方名 timeoutMs 优先；旧的 timeout_seconds 保留为兼容别名（能力下限：老调用
+// 仍然按秒生效）。两者都没给就用默认 120s；一律夹到上限 600s。
+func resolveTimeout(a args) (time.Duration, int64) {
+	pick := func(d time.Duration) (time.Duration, int64) {
+		if d <= 0 {
+			d = defaultTimeout
+		}
+		if d > maxTimeout {
+			d = maxTimeout
+		}
+		return d, d.Milliseconds()
+	}
+	if a.TimeoutMs > 0 {
+		// 官方类型是 number（可以是小数毫秒）：四舍五入到毫秒，不静默截断成 0。
+		ms := math.Round(a.TimeoutMs)
+		if ms < 1 {
+			ms = 1
+		}
+		return pick(time.Duration(ms) * time.Millisecond)
+	}
+	if a.TimeoutSeconds > 0 {
+		return pick(time.Duration(a.TimeoutSeconds) * time.Second)
+	}
+	return pick(defaultTimeout)
 }
 
 func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
@@ -132,6 +202,9 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	if cmdline == "" {
 		return spi.Result{Hint: "command 不能为空：给一条要执行的 PowerShell 命令"}, fmt.Errorf("command 为空")
 	}
+	// description 是官方 required 的"给人看的一句话"。缺失不拒绝（旧调用方本来就没有
+	// 这个参数），但 Summary/Data 里如实体现：UI 拿它当标题。
+	desc := strings.TrimSpace(a.Description)
 
 	dir := strings.TrimSpace(a.Workdir)
 	if dir != "" {
@@ -163,21 +236,27 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	if err != nil {
 		return spi.Result{Hint: "找不到 PowerShell：装 PowerShell 7（提供 pwsh）或改用 bash 工具"}, err
 	}
-
-	timeout := defaultTimeout
-	if a.TimeoutSeconds > 0 {
-		timeout = time.Duration(a.TimeoutSeconds) * time.Second
-		if timeout > maxTimeout {
-			timeout = maxTimeout
-		}
-	}
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	script := cmdline
 	if isLegacy {
 		script = legacyPrologue + cmdline
 	}
+
+	// 立刻转后台：官方语义是"注册进 jobs 运行时、马上回 job id、无超时"。
+	// 走的是与 bash 工具**同一个** jobs 表（spi.Exec 接缝），见 background.go。
+	if a.RunInBackground {
+		return t.startBackground(backgroundSpec{
+			shell:       shell,
+			script:      script,
+			workdir:     dir,
+			description: desc,
+			command:     cmdline,
+		})
+	}
+
+	timeout, timeoutMS := resolveTimeout(a)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	// 注意：这里一个参数传整条脚本。命令里带双引号时，Go 会按 argv 规则转义，
 	// PowerShell 多数情况下能正确还原；极复杂的嵌套引号建议写进 .ps1 再执行。
 	cmd := execCommandContext(runCtx, shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
@@ -201,22 +280,28 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		body = "（无输出）"
 	}
 
+	head := filepath.Base(shell)
+	if desc != "" {
+		head = desc + " · " + head
+	}
 	res := spi.Result{
-		Summary: fmt.Sprintf("%s 退出码 %d（%d 毫秒，%d 字节）", filepath.Base(shell), exitCodeOf(runErr), elapsed.Milliseconds(), out.Len()),
+		Summary: fmt.Sprintf("%s 退出码 %d（%d 毫秒，%d 字节）", head, exitCodeOf(runErr), elapsed.Milliseconds(), out.Len()),
 		Text:    body,
 		Data: data{
-			Shell:      filepath.Base(shell),
-			Command:    cmdline,
-			Workdir:    dir,
-			ExitCode:   exitCodeOf(runErr),
-			DurationMS: elapsed.Milliseconds(),
-			Truncated:  trunc,
-			Bytes:      out.Len(),
+			Shell:       filepath.Base(shell),
+			Description: desc,
+			Command:     cmdline,
+			Workdir:     dir,
+			ExitCode:    exitCodeOf(runErr),
+			DurationMS:  elapsed.Milliseconds(),
+			Truncated:   trunc,
+			Bytes:       out.Len(),
+			TimeoutMS:   timeoutMS,
 		},
 	}
 
 	if runCtx.Err() == context.DeadlineExceeded || runCtx.Err() == context.Canceled {
-		res.Hint = fmt.Sprintf("命令超过 %s 未结束已终止：拆成更小的步骤，或把长任务丢给后台任务工具", timeout)
+		res.Hint = fmt.Sprintf("命令超过 %s 未结束已终止：拆成更小的步骤，或把长任务改成 run_in_background: true", timeout)
 		return res, fmt.Errorf("命令超时（%s）: %s", timeout, firstLine(body))
 	}
 	if runErr != nil {
@@ -371,6 +456,9 @@ func Module(opts ...Option) kernel.Module {
 			if err != nil {
 				return err
 			}
+			// 装配期捕获作用域：Exec 时用它 inject spi.Exec，把 run_in_background
+			// 登记进宿主的 jobs 运行时。装配顺序不影响（注入发生在调用时）。
+			tool.scope = s
 			return reg.Register(tool)
 		},
 	}

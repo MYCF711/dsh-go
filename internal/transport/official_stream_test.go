@@ -822,3 +822,175 @@ func TestJournalWaitWakesOnAppend(t *testing.T) {
 		t.Fatal("追加之后等待者没被唤醒")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// rc.2：team/mode 与事件准入（R1-G01）
+// ---------------------------------------------------------------------------
+
+// rc.2 新增 `team/mode`（`dsh-session/lib/types/known-event-types.js:68`），
+// 载荷 `{enabled:boolean}`（`dsh-agent-team/lib/types/projection.js:52`）。
+// WS 翻译路径必须**把它翻成一个键**，而不是"没有改动的空数组"——
+// 空数组在官方语义里等于"这条事件没有客户端可见效果"，也就是把 team 开关静默丢了。
+func TestOfficialStreamTeamModeEmitsProjectionKey(t *testing.T) {
+	src := newMutableOfficialSource(officialFixtureEvents())
+	s := officialStreamTestServer(t, src)
+
+	rec, _ := runStream(t, s.handleSessionObserveProjections, `{"sessionId":"s1"}`)
+	if frames := rec.waitFrames(t, 1); frames[0]["type"] != "ready" {
+		t.Fatalf("首帧必须是 ready：%v", frames[0])
+	}
+
+	src.append(eventAt(7, "team/mode", `{"enabled":true}`))
+	frames := rec.waitFrames(t, 2)
+	if frames[1]["type"] != "projection" || frames[1]["seq"] != float64(7) {
+		t.Fatalf("team/mode 必须产出一帧 projection：%v", frames[1])
+	}
+	changes, _ := frames[1]["changes"].([]any)
+	if len(changes) != 1 {
+		t.Fatalf("team/mode 必须改一个键（静默空数组 = 吞事件）：%v", frames[1]["changes"])
+	}
+	change, _ := changes[0].(map[string]any)
+	if change["key"] != "teamMode" {
+		t.Fatalf("team/mode 的投影键 = %v，want teamMode（宿主自有键；官方把它折进 agent-team 插件的 agentTeam，本宿主没有那个投影）", change["key"])
+	}
+	val, ok := change["val"].(map[string]any)
+	if !ok || val["enabled"] != true {
+		t.Fatalf("投影值必须是 {enabled:true}：%v", change["val"])
+	}
+
+	// 关掉：同一个键 last-wins。
+	src.append(eventAt(8, "team/mode", `{"enabled":false}`))
+	frames = rec.waitFrames(t, 3)
+	changes, _ = frames[2]["changes"].([]any)
+	if len(changes) != 1 {
+		t.Fatalf("关掉 team 也必须报改动：%v", frames[2]["changes"])
+	}
+	change, _ = changes[0].(map[string]any)
+	if val, _ = change["val"].(map[string]any); val["enabled"] != false {
+		t.Fatalf("关掉后投影值必须是 {enabled:false}：%v", change["val"])
+	}
+}
+
+// 已有 team/mode 的会话：baseline（follow 的 projections.values）里必须带这个键，
+// 否则重连后的客户端看不到当前 team 状态。
+func TestOfficialStreamTeamModeInBaselineProjections(t *testing.T) {
+	events := append(officialFixtureEvents(), eventAt(7, "team/mode", `{"enabled":true}`))
+	src := newMutableOfficialSource(events)
+	s := officialStreamTestServer(t, src)
+
+	rec, _ := runStream(t, s.handleSessionFollow, `{"address":{"kind":"session","sessionId":"s1"}}`)
+	frames := rec.waitFrames(t, 1)
+	projections, ok := frames[0]["projections"].(map[string]any)
+	if !ok {
+		t.Fatalf("snapshot 必须带 projections：%v", frames[0])
+	}
+	values, _ := projections["values"].(map[string]any)
+	team, ok := values["teamMode"].(map[string]any)
+	if !ok || team["enabled"] != true {
+		t.Fatalf("baseline 的 teamMode 必须是 {enabled:true}：%v", values["teamMode"])
+	}
+}
+
+// 读不懂的 `team/mode` 载荷必须**报错**，不能静默当成"这条没改任何键"。
+func TestOfficialStreamReportsMalformedTeamMode(t *testing.T) {
+	for _, data := range []string{`{"enabled":"yes"}`, `{}`, `{"enabled":true,"extra":1}`} {
+		t.Run(data, func(t *testing.T) {
+			src := newMutableOfficialSource(officialFixtureEvents())
+			s := officialStreamTestServer(t, src)
+
+			rec, _ := runStream(t, s.handleSessionObserveProjections, `{"sessionId":"s1"}`)
+			rec.waitFrames(t, 1)
+			src.append(eventAt(7, "team/mode", data))
+			frames := rec.waitFrames(t, 2)
+			if frames[1]["type"] != "error" {
+				t.Fatalf("非法 team/mode 必须结束在 error 帧，得到：%v", frames[1])
+			}
+			envelope, _ := frames[1]["error"].(map[string]any)
+			if msg, _ := envelope["message"].(string); !strings.Contains(msg, "team/mode") {
+				t.Fatalf("错误帧必须点名 team/mode：%v", frames[1])
+			}
+		})
+	}
+}
+
+// 未知类型**不得静默吞掉**（官方 reading path 的准入规则）。
+// 非 ignorable → 流以 error 帧结束；ignorable → 照录不解释。
+func TestOfficialStreamEventAdmission(t *testing.T) {
+	t.Run("未知且非 ignorable 拒绝", func(t *testing.T) {
+		events := append(officialFixtureEvents(), eventAt(7, "future/protocol-event", `{"x":1}`))
+		src := newMutableOfficialSource(events)
+		s := officialStreamTestServer(t, src)
+
+		rec, _ := runStream(t, s.handleSessionFollow, `{"address":{"kind":"session","sessionId":"s1"}}`)
+		// opening 之前的准入失败：还没开始写帧，所以是 HTTP 500 + 四字段错误体
+		// （writeOfficialStreamFault 的出口），不是 NDJSON 的 error 帧。
+		if status := rec.waitStatus(t); status != http.StatusInternalServerError {
+			t.Fatalf("未知 required 事件必须报错（500），得到 %d：%v", status, rec.frames())
+		}
+		var envelope map[string]any
+		if err := json.Unmarshal([]byte(rawBody(rec)), &envelope); err != nil {
+			t.Fatalf("错误体不是 JSON：%v", err)
+		}
+		errObj, _ := envelope["error"].(map[string]any)
+		if msg, _ := errObj["message"].(string); !strings.Contains(msg, "future/protocol-event") {
+			t.Fatalf("错误必须点名未知类型：%v", envelope)
+		}
+	})
+
+	t.Run("未知但 ignorable 照录", func(t *testing.T) {
+		unknown := eventAt(7, "future/protocol-event", `{"x":1}`)
+		unknown.Ignorable = true
+		events := append(officialFixtureEvents(), unknown)
+		src := newMutableOfficialSource(events)
+		s := officialStreamTestServer(t, src)
+
+		rec, _ := runStream(t, s.handleSessionFollow, `{"address":{"kind":"session","sessionId":"s1"}}`)
+		frames := rec.waitFrames(t, 1)
+		if frames[0]["type"] != "snapshot" {
+			t.Fatalf("ignorable 未知事件必须放行（官方保留未解释载荷），得到：%v", frames[0])
+		}
+		records, _ := frames[0]["records"].([]any)
+		if len(records) != len(events) {
+			t.Fatalf("ignorable 未知事件必须原样在 records 里：%d != %d", len(records), len(events))
+		}
+		last, _ := records[len(records)-1].(map[string]any)
+		event, _ := last["event"].(map[string]any)
+		if event["type"] != "future/protocol-event" || event["ignorable"] != true {
+			t.Fatalf("未知事件必须原样交付（带 ignorable:true）：%v", last)
+		}
+	})
+}
+
+// 失败码**不得被折叠**：durable 事件原样交付，`turn/end.reason.error.code` 与
+// `tool/result.error.code` 必须逐字到客户端（官方 rc.2 起这些码是真的机器码，
+// 客户端按它分支——折成 UNKNOWN 或丢掉就等于"看不出是什么失败"）。
+func TestOfficialStreamKeepsErrorCodes(t *testing.T) {
+	events := append(officialFixtureEvents(),
+		eventAt(7, "turn/end", `{"turn":2,"reason":{"kind":"error","error":{"name":"AttachmentError","code":"ATTACHMENT_NOT_FOUND","message":"读不到附件"}}}`),
+		eventAt(8, "tool/result", `{"turn":2,"step":1,"message":{"role":"tool","isError":true,"content":[]},"error":{"name":"AttachmentError","code":"ATTACHMENT_CORRUPT"}}`),
+	)
+	src := newMutableOfficialSource(events)
+	s := officialStreamTestServer(t, src)
+
+	rec, _ := runStream(t, s.handleSessionFollow, `{"address":{"kind":"session","sessionId":"s1"}}`)
+	frames := rec.waitFrames(t, 1)
+	records, _ := frames[0]["records"].([]any)
+	if len(records) != len(events) {
+		t.Fatalf("records = %d，want %d", len(records), len(events))
+	}
+	turnEnd, _ := records[len(records)-2].(map[string]any)
+	turnEndEvent, _ := turnEnd["event"].(map[string]any)
+	turnEndData, _ := turnEndEvent["data"].(map[string]any)
+	reason, _ := turnEndData["reason"].(map[string]any)
+	turnEndErr, _ := reason["error"].(map[string]any)
+	if turnEndErr["code"] != "ATTACHMENT_NOT_FOUND" {
+		t.Fatalf("turn/end.reason.error.code 被折叠了：%v", reason)
+	}
+	toolResult, _ := records[len(records)-1].(map[string]any)
+	toolEvent, _ := toolResult["event"].(map[string]any)
+	toolData, _ := toolEvent["data"].(map[string]any)
+	toolErr, _ := toolData["error"].(map[string]any)
+	if toolErr["code"] != "ATTACHMENT_CORRUPT" {
+		t.Fatalf("tool/result.error.code 被折叠了：%v", toolData["error"])
+	}
+}

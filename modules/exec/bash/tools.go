@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"dshgo/internal/jobs"
 	"dshgo/internal/kernel"
 	"dshgo/internal/sandbox"
 	"dshgo/internal/spi"
@@ -17,6 +18,57 @@ import (
 
 // envGraceMS 是停止宽限的宿主环境变量（官方 `bash.graceMs` 的接线）。
 const envGraceMS = "DSHD_BASH_GRACE_MS"
+
+// EnvRunInBackground 是"后台执行"的部署级开关。
+//
+// 官方 rc.2 把它做成工具配置 `enableRunInBackground`（默认 true）；命中 false 时
+// `run_in_background:true` 抛 `JobError(JOB_BACKGROUND_DISABLED)`，消息逐字：
+//
+//	throw new JobError('run_in_background is disabled for this deployment (enableRunInBackground: false)',
+//	                   'JOB_BACKGROUND_DISABLED')   // dsh-tool-bash/src/index.ts:525
+//
+// 宿主的配置面是环境变量（与 EnvMaxConcurrentJobsPerOwner / envGraceMS 同一约定），
+// 所以这里用 **0/false/off/no = 关闭**，缺省（或其它值）= 打开。
+const EnvRunInBackground = "DSHD_RUN_IN_BACKGROUND"
+
+// runInBackgroundEnabled 解析上面的开关。默认**打开**：官方默认也是 true，
+// 把默认写成关闭会让所有依赖后台任务的玩法当场失效。
+func runInBackgroundEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvRunInBackground))) {
+	case "0", "false", "off", "no":
+		return false
+	default:
+		return true
+	}
+}
+
+// asJobError 把执行层的既有失败升级成带官方码的 JobError。
+//
+// 认不出来时原样返回（宁可不带码，也不许折成 UNKNOWN）。映射保留原错误文本与
+// cause，所以既有按 `spi.ErrJob*` sentinel 分支的调用点不需要改。
+func asJobError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := jobs.CodeOf(err); ok {
+		return err
+	}
+	if mapped, ok := jobs.From(err); ok {
+		return mapped
+	}
+	return err
+}
+
+// withJobErrorInfo 给失败结果补官方错误身份；没有码的错误一个字段都不动。
+func withJobErrorInfo(res spi.Result, err error) spi.Result {
+	if code, ok := jobs.CodeOf(err); ok {
+		return res.WithErrorInfo(jobs.ErrorName, string(code))
+	}
+	if jobs.IsAbort(err) {
+		return res.WithErrorInfo(jobs.ErrorNameAbort, spi.CodeAborted)
+	}
+	return res
+}
 
 // Options 是执行层的可调参数。
 type Options struct {
@@ -154,11 +206,28 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 	// 立刻转后台：不走"等 idle 超时"那条路。
 	// 语义与官方一致——调用方马上拿到 job_id，用 job_output 去取。
 	if a.RunInBackground {
+		// 部署级开关先判：被关掉时**一个进程都不许起**（否则模型拿到错误
+		// 之后还能在 job_list 里看到一个没人认领的任务表）。
+		if !runInBackgroundEnabled() {
+			err := jobs.New(jobs.CodeBackgroundDisabled,
+				"run_in_background 在本部署被关闭（"+EnvRunInBackground+"=0）；把命令放前台跑，或让用户打开这个开关", nil)
+			return spi.Result{
+				Hint: "去掉 run_in_background 在前台跑一次；要长期用后台任务就让用户把 " + EnvRunInBackground + " 去掉或设成 1",
+			}.WithErrorInfo(jobs.ErrorName, string(jobs.CodeBackgroundDisabled)), err
+		}
 		res, err := t.svc.RunBackground(a.Command)
 		if err != nil {
-			return spi.Result{
+			err = asJobError(err)
+			out := spi.Result{
 				Hint: "后台启动失败：看 job_list 有没有残留，或去掉 run_in_background 在前台跑一次看真实报错",
-			}, err
+			}
+			if code, ok := jobs.CodeOf(err); ok {
+				out = out.WithErrorInfo(jobs.ErrorName, string(code))
+				if code == jobs.CodeLimitReached {
+					out.Hint = "同一 owner 的后台任务已经到上限：先 job_kill 停掉不需要的，或等它们结束再重试"
+				}
+			}
+			return out, err
 		}
 		if res.JobID == "" {
 			// 1ms 内就跑完的命令（echo/true 这类）：这不是错误，如实说它在后台跑完了。
@@ -317,12 +386,23 @@ func (t *jobOutputTool) Schema() json.RawMessage { return jobOutputSchema }
 
 func (t *jobOutputTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
 	var a struct {
-		JobID     string `json:"job_id"`
-		Wait      bool   `json:"wait"`
-		TimeoutMS int    `json:"timeout_ms"`
+		JobID string `json:"job_id"`
+		Wait  bool   `json:"wait"`
+		// TimeoutMS 用指针判"给了没"：官方只校验**显式给出**的 timeout_ms
+		// （`args.timeout_ms !== undefined`），缺省时走默认等待时长。
+		TimeoutMS *int `json:"timeout_ms"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return spi.Result{Hint: `参数不合法：期望 {"job_id": "job-1", "wait"?: false, "timeout_ms"?: 30000}`}, err
+	}
+	// 官方 rc.2 的 timeout_ms 校验（dsh-tool-jobs/src/index.ts:460-461）：
+	// 给了就必须是**正的有限数**；0/负数抛 ToolArgsError，不是"改成默认值"。
+	if a.TimeoutMS != nil {
+		if err := jobs.ValidateWaitTimeout(float64(*a.TimeoutMS)); err != nil {
+			return spi.Result{
+				Hint: "timeout_ms 是正数毫秒（例如 30000）；不想等就把 wait 去掉",
+			}.WithErrorInfo(jobs.ErrorNameToolArgs, jobs.CodeInvalidArgs), err
+		}
 	}
 	// 空 id 是**参数没给**，不是"任务不存在"。两者的下一步完全不同：
 	// 前者是补参数，后者是去 job_list 里找 id。别把前者报成后者。
@@ -333,15 +413,23 @@ func (t *jobOutputTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Resu
 	a.JobID = id
 	wait := time.Duration(0)
 	if a.Wait {
-		ms := a.TimeoutMS
-		if ms <= 0 {
-			ms = 30000
+		ms := 30000
+		if a.TimeoutMS != nil {
+			ms = *a.TimeoutMS
 		}
 		wait = time.Duration(ms) * time.Millisecond
 	}
-	out, err := t.svc.Output(a.JobID, wait)
+	out, err := t.waitJobOutput(ctx, a.JobID, wait)
 	if err != nil {
-		return spi.Result{Hint: "用 job_list 看有哪些任务 id"}, err
+		err = asJobError(err)
+		res := spi.Result{Hint: "用 job_list 看有哪些任务 id"}
+		if jobs.IsAbort(err) {
+			res = res.WithErrorInfo(jobs.ErrorNameAbort, spi.CodeAborted)
+			res.Hint = "这次等待被取消（任务仍在后台跑）：重新调 job_output 取当前输出，或 job_kill 终止"
+		} else {
+			res = withJobErrorInfo(res, err)
+		}
+		return res, err
 	}
 	summary := fmt.Sprintf("%s 输出 %d 字节（%s）", out.ID, len(out.Output), doneText(out.Done))
 	hint := ""
@@ -352,6 +440,52 @@ func (t *jobOutputTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Resu
 		hint = fmt.Sprintf("任务已结束，退出码 %d；读输出里的报错再决定下一步", out.ExitCode)
 	}
 	return spi.Result{Summary: summary, Data: out, Hint: hint}, nil
+}
+
+// waitJobOutput 在 wait 预算内等任务输出，并让 **ctx 取消立刻结束等待**。
+//
+// 官方把"调用方自己的信号中止了等待"报成名为 `AbortError` 的取消
+// （`dsh-jobs-local/src/index.ts:121` 的 waitAborted()），而不是普通失败：
+// 模型据此知道这次没有结果、可以重新发起。宿主的 `spi.Job.Output` 没有 ctx 参数，
+// 所以这里用"短轮询 + ctx 选择"实现同一语义——不能把取消吞掉当成一次超时，
+// 那会让模型以为任务卡住了。
+//
+// 轮询粒度 100ms：比 wait 本身（默认 30s、上限 30s）小两个数量级，取消延迟
+// 可忽略；同时不引入第二个后台 goroutine 去抢同一个 job 表的锁。
+func (t *jobOutputTool) waitJobOutput(ctx context.Context, id string, wait time.Duration) (spi.JobOutput, error) {
+	out, err := t.svc.Output(id, 0)
+	if err != nil {
+		return out, err
+	}
+	if wait <= 0 || out.Done {
+		return out, nil
+	}
+	deadline := time.Now().Add(wait)
+	const poll = 100 * time.Millisecond
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return out, nil
+		}
+		tick := poll
+		if remaining < tick {
+			tick = remaining
+		}
+		timer := time.NewTimer(tick)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return out, jobs.WaitAborted()
+		case <-timer.C:
+		}
+		out, err = t.svc.Output(id, 0)
+		if err != nil {
+			return out, err
+		}
+		if out.Done {
+			return out, nil
+		}
+	}
 }
 
 func doneText(done bool) string {
@@ -417,7 +551,8 @@ func (t *jobKillTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result
 	}
 	a.JobID = id
 	if err := t.svc.Kill(a.JobID); err != nil {
-		return spi.Result{Hint: "用 job_list 确认 id；已结束的任务不需要终止"}, err
+		err = asJobError(err)
+		return withJobErrorInfo(spi.Result{Hint: "用 job_list 确认 id；已结束的任务不需要终止"}, err), err
 	}
 	summary := "已终止 " + a.JobID
 	data := map[string]any{"job_id": a.JobID, "killed": true}

@@ -168,7 +168,16 @@ type Provider interface {
 	SignOut(ctx context.Context) (State, error)
 	RunningTasks(ctx context.Context) ([]Task, error)
 	Watch(ctx context.Context) (<-chan State, error)
+	// WatchUpdates 是官方 0.2.2-rc.2 的 `account/watch`（AccountUpdate 流）。
+	// Watch 保留为 rc.1 形状（扁平 AccountView），只由兼容路径使用。
+	WatchUpdates(ctx context.Context) (<-chan Update, error)
 	WatchExpiry(ctx context.Context) (<-chan string, error)
+
+	// 官方 0.2.2-rc.2 新增的通知三件套（数据来自 harnessOrigin 的云端，
+	// 没有本地缓存）。不支持的 provider 返回 ErrNoNotificationBackend。
+	Notifications(ctx context.Context, client Client) (*NotificationBatch, error)
+	NotificationContent(ctx context.Context, id string, client Client) (*Notification, error)
+	ReportNotificationEvent(ctx context.Context, id, event string, client Client) (bool, error)
 }
 
 // OIDCConfig 是 self-hosted OIDC 的真实端点/客户端配置。
@@ -187,9 +196,15 @@ type Options struct {
 	Home           string
 	Mode           Source
 	PlatformOrigin string
-	OIDC           OIDCConfig
-	HTTPClient     *http.Client
-	LocalLease     time.Duration
+	// HarnessOrigin 是**通知专用** origin（官方 `harnessOrigin`，默认
+	// https://harness.deepseek.com；见 dsh-deepseek-account/lib/index.js:696-697）。
+	// 只用于 notifications 的 list/content/events；登录/资料/余额/登出仍走
+	// PlatformOrigin（官方迁移指南 v0.2.2-rc.1/account-notification-fields 第 4 条）。
+	// 空 = 先看 EnvHarnessOrigin，再看 DefaultHarnessOrigin。
+	HarnessOrigin string
+	OIDC          OIDCConfig
+	HTTPClient    *http.Client
+	LocalLease    time.Duration
 
 	// LogoutMaxRetries / LogoutRetryDelay 是官方 `logoutMaxRetries`(:515) 与
 	// `logoutRetryDelayMs`(:516)。nil / 0 = 走默认（先看环境变量，再看官方默认）。
@@ -212,9 +227,11 @@ type Service struct {
 	doc     document
 	client  *http.Client
 	origin  string
+	harness string
 	oidc    OIDCConfig
 	lease   time.Duration
 	subs    map[chan State]struct{}
+	updates map[*updateSub]struct{}
 	expiry  map[chan string]struct{}
 	timer   *time.Timer
 	timerAt int64
@@ -223,6 +240,34 @@ type Service struct {
 	logoutMaxRetries int
 	logoutRetryDelay time.Duration
 	attemptTimeout   time.Duration
+}
+
+// Update 是官方 0.2.2-rc.2 `AccountUpdate`（见
+// dsh-deepseek-account/lib/typert.host.js:640-651 与 types/index.js 的
+// `interface AccountUpdate { type: 'snapshot' | 'credentials-changed'; state: AccountView }`）。
+//
+// 为什么必须区分 type：官方客户端在 `credentials-changed` 时要清掉通知态并
+// 重启轮询（官方迁移指南第 1 条），而登录进度（snapshot）要**保留**通知态。
+// 把两者混成一种帧，客户端就只能保守地每次都清——那是真实可见的行为差异。
+type Update struct {
+	Type  string `json:"type"`
+	State State  `json:"state"`
+}
+
+// 官方 AccountUpdate.type 的两个值（typert.host.js:648 的 enum）。
+const (
+	UpdateSnapshot           = "snapshot"
+	UpdateCredentialsChanged = "credentials-changed"
+)
+
+// updateSub 是一个 AccountUpdate 订阅者。
+//
+// pending 只在 s.mu 下读写；wake 是容量 1 的唤醒信号。官方用同一套结构做
+// 合并（observeUpdates：pending 只留一份，且 credentials-changed 优先），
+// 这里照抄，避免"高频状态变化把凭据变更挤掉"这种真实丢帧。
+type updateSub struct {
+	wake    chan struct{}
+	pending *Update
 }
 
 // 官方默认值（app.asar:dsh/node_modules/@deepseek-ai/dsh-deepseek-account-platform/lib/index.js:515-517）。
@@ -292,7 +337,8 @@ func New(opts Options) (*Service, error) {
 		home: home, mode: mode, path: path,
 		client: opts.HTTPClient, origin: strings.TrimRight(opts.PlatformOrigin, "/"),
 		oidc: opts.OIDC, lease: opts.LocalLease,
-		subs: map[chan State]struct{}{}, expiry: map[chan string]struct{}{},
+		subs: map[chan State]struct{}{}, updates: map[*updateSub]struct{}{},
+		expiry: map[chan string]struct{}{},
 	}
 	s.logoutMaxRetries, s.logoutRetryDelay = resolveLogoutPolicy(opts)
 	s.attemptTimeout = resolveAttemptTimeout(opts)
@@ -301,6 +347,17 @@ func New(opts Options) (*Service, error) {
 	}
 	if s.origin == "" {
 		s.origin = "https://platform.deepseek.com"
+	}
+	// harnessOrigin 只给通知用，默认值与 platformOrigin **不同**
+	// （官方 lib/index.js:696-697）。两者刻意不互相推导：私有部署只配了
+	// platformOrigin 时，通知仍然走官方默认域名——那是官方行为，
+	// 要改就用 DSHD_ACCOUNT_HARNESS_ORIGIN 显式指定。
+	s.harness = strings.TrimRight(strings.TrimSpace(opts.HarnessOrigin), "/")
+	if s.harness == "" {
+		s.harness = strings.TrimRight(strings.TrimSpace(os.Getenv(EnvHarnessOrigin)), "/")
+	}
+	if s.harness == "" {
+		s.harness = DefaultHarnessOrigin
 	}
 	if s.lease <= 0 {
 		s.lease = 30 * 24 * time.Hour
@@ -435,11 +492,36 @@ func (s *Service) saveLocked() error {
 	return os.Rename(name, s.path)
 }
 
+// notifyLocked 推一次状态变化，类型按 snapshot 处理（登录进度/一般状态）。
 func (s *Service) notifyLocked() {
+	s.notifyKindLocked(UpdateSnapshot)
+}
+
+// notifyKindLocked 推一次状态变化，并标明官方 AccountUpdate.type。
+//
+// kind 只有两个合法值：UpdateSnapshot（初始快照与登录进度）与
+// UpdateCredentialsChanged（凭据写入/移除）。凭据变更**优先**：若某个订阅者
+// 还有未读帧，就把它的类型提到 credentials-changed，绝不因为后来的 snapshot
+// 把"凭据变了"这件事挤掉（官方 observeUpdates 的同一口径，lib/index.js:1400-1404）。
+func (s *Service) notifyKindLocked(kind string) {
+	if kind != UpdateCredentialsChanged {
+		kind = UpdateSnapshot
+	}
 	st := s.stateLocked()
 	for ch := range s.subs {
 		select {
 		case ch <- st:
+		default:
+		}
+	}
+	for sub := range s.updates {
+		next := kind
+		if sub.pending != nil && sub.pending.Type == UpdateCredentialsChanged {
+			next = UpdateCredentialsChanged
+		}
+		sub.pending = &Update{Type: next, State: st}
+		select {
+		case sub.wake <- struct{}{}:
 		default:
 		}
 	}
@@ -490,7 +572,8 @@ func (s *Service) expireLocked(now time.Time) error {
 		if err := s.saveLocked(); err != nil {
 			return err
 		}
-		s.notifyLocked()
+		// 租约到期 = 本地凭据被移除 → 官方 AccountUpdate 的 credentials-changed。
+		s.notifyKindLocked(UpdateCredentialsChanged)
 		for ch := range s.expiry {
 			select {
 			case ch <- "session-expired":
@@ -672,7 +755,8 @@ func (s *Service) startLocal() (State, error) {
 		return State{}, err
 	}
 	s.resetTimerLocked()
-	s.notifyLocked()
+	// 这一步真的写入了凭据 → credentials-changed（官方 AccountUpdate 语义）。
+	s.notifyKindLocked(UpdateCredentialsChanged)
 	return s.stateLocked(), nil
 }
 
@@ -721,7 +805,8 @@ func (s *Service) SignOut(ctx context.Context) (State, error) {
 		return State{}, err
 	}
 	s.resetTimerLocked()
-	s.notifyLocked()
+	// 登出 = 凭据被移除 → credentials-changed。
+	s.notifyKindLocked(UpdateCredentialsChanged)
 	st := s.stateLocked()
 	s.mu.Unlock()
 	if s.mode == SourceOfficial && token != "" {
@@ -798,22 +883,67 @@ func (s *Service) Watch(ctx context.Context) (<-chan State, error) {
 	return ch, nil
 }
 
+// WatchUpdates 订阅官方 0.2.2-rc.2 的 AccountUpdate 流。
+//
+// 与 `Watch` 的区别不是命名：每帧都带 type（snapshot / credentials-changed），
+// 客户端据此决定"要不要清通知态并重启轮询"（官方迁移指南第 1 条）。
+//
+// 合并口径照官方 observeUpdates（lib/index.js:1395-1418）：订阅者只保留**一帧**
+// 待读状态，且 credentials-changed 优先——凭据变更绝不被后来的 snapshot 挤掉。
+func (s *Service) WatchUpdates(ctx context.Context) (<-chan Update, error) {
+	ch := make(chan Update, 8)
+	sub := &updateSub{wake: make(chan struct{}, 1)}
+	s.mu.Lock()
+	sub.pending = &Update{Type: UpdateSnapshot, State: s.stateLocked()}
+	s.updates[sub] = struct{}{}
+	s.mu.Unlock()
+	select {
+	case sub.wake <- struct{}{}:
+	default:
+	}
+	go func() {
+		defer close(ch)
+		for {
+			select {
+			case <-ctx.Done():
+				s.mu.Lock()
+				delete(s.updates, sub)
+				s.mu.Unlock()
+				return
+			case <-sub.wake:
+			}
+			s.mu.Lock()
+			pending := sub.pending
+			sub.pending = nil
+			s.mu.Unlock()
+			if pending == nil {
+				continue
+			}
+			select {
+			case ch <- *pending:
+			case <-ctx.Done():
+				s.mu.Lock()
+				delete(s.updates, sub)
+				s.mu.Unlock()
+				return
+			}
+		}
+	}()
+	return ch, nil
+}
+
 func (s *Service) WatchExpiry(ctx context.Context) (<-chan string, error) {
 	ch := make(chan string, 4)
 	s.mu.Lock()
 	s.expiry[ch] = struct{}{}
 	expired := s.doc.ExpiresAt > 0 && time.Now().UnixMilli() >= s.doc.ExpiresAt
-	baseline := ""
-	if s.doc.ExpiresAt > 0 {
-		baseline = time.UnixMilli(s.doc.ExpiresAt).UTC().Format(time.RFC3339)
-	}
 	s.mu.Unlock()
-	// 订阅即给**基线**（当前到期时刻；未登录为空串）：否则 HTTP/mux 客户端
-	// 在首个到期事件前连响应头都拿不到（open 挂到超时）。基线是真实状态。
-	select {
-	case ch <- baseline:
-	default:
-	}
+	// **不发基线帧**：官方 `account/watchExpiry` 的结果 schema 是
+	// `{"type":"string","const":"session-expired"}`（typert.host.js:658-668），
+	// 只有一个合法值。旧实现先发一帧"当前到期时刻/空串"保证客户端能拿到
+	// 响应头，但那是**违反官方 const** 的非法 wire（rc.1 的同一个 const 也在）。
+	// 现在由 transport 在开流时就写响应头并 flush（见 serveAccountWatchExpiry），
+	// 既保证 open 不挂，又不发非法帧。
 	if expired {
 		select {
 		case ch <- "session-expired":

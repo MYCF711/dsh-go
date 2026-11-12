@@ -45,11 +45,16 @@ func createTask(t *testing.T, dir, session, subject string) string {
 
 // claimTask 让 session 认领任务。不传 owner 键：实现按会话 id 署名，
 // 而 delete 的"是不是本人"判定看的正是这个身份（ownerOf -> SessionFrom）。
+//
+// CAS（官方 0.2.2-rc.2）：team_task_update 的 expected_revision 是必填前置
+// （dsh-tool-agent-team/src/index.ts:205；服务侧比对 task-board.ts:128-133），
+// 所以这里先 get 拿当前 revision 再 claim。测试的断言没有放宽，只是补上必填参数。
 func claimTask(t *testing.T, dir, session, id string) {
 	t.Helper()
 	if _, err := execTool(t, dir, kindUpdate, session, map[string]any{
-		"task_id": id,
-		"action":  "claim",
+		"task_id":           id,
+		"expected_revision": revisionOf(t, dir, session, id),
+		"action":            "claim",
 	}); err != nil {
 		t.Fatalf("claim %s as %s: %v", id, session, err)
 	}
@@ -63,7 +68,9 @@ func TestDeleteRefusesOtherOwnersTask(t *testing.T) {
 	// bob 是另一个会话，没带 force，应当被拒。
 	res, err := execTool(t, dir, kindUpdate, "session-bob", map[string]any{
 		"task_id": id,
-		"action":  "delete",
+		// expected_revision 必填（官方 index.ts:205）：先拿最新 revision，再验证授权拒绝。
+		"expected_revision": revisionOf(t, dir, "session-bob", id),
+		"action":            "delete",
 	})
 	if err == nil {
 		t.Fatalf("delete by other session succeeded, want refusal")
@@ -82,9 +89,10 @@ func TestDeleteForceRemovesClaimedTask(t *testing.T) {
 	claimTask(t, dir, "session-alice", id)
 
 	res, err := execTool(t, dir, kindUpdate, "session-bob", map[string]any{
-		"task_id": id,
-		"action":  "delete",
-		"force":   true,
+		"task_id":           id,
+		"expected_revision": revisionOf(t, dir, "session-bob", id),
+		"action":            "delete",
+		"force":             true, // 宿主扩展（官方 schema 没有 force）
 	})
 	if err != nil {
 		t.Fatalf("forced delete by other session: %v (hint: %s)", err, res.Hint)
@@ -103,8 +111,9 @@ func TestDeleteOwnTaskAllowed(t *testing.T) {
 	claimTask(t, dir, "session-alice", id)
 
 	res, err := execTool(t, dir, kindUpdate, "session-alice", map[string]any{
-		"task_id": id,
-		"action":  "delete",
+		"task_id":           id,
+		"expected_revision": revisionOf(t, dir, "session-alice", id),
+		"action":            "delete",
 	})
 	if err != nil {
 		t.Fatalf("owner delete without force: %v (hint: %s)", err, res.Hint)
@@ -116,8 +125,9 @@ func TestDeleteArchivesTask(t *testing.T) {
 	id := createTask(t, dir, "session-alice", "task to be archived")
 
 	if _, err := execTool(t, dir, kindUpdate, "session-alice", map[string]any{
-		"task_id": id,
-		"action":  "delete",
+		"task_id":           id,
+		"expected_revision": revisionOf(t, dir, "session-alice", id),
+		"action":            "delete",
 	}); err != nil {
 		t.Fatalf("delete: %v", err)
 	}

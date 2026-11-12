@@ -36,7 +36,22 @@ func TestManagedHelperRealCatalogPrepareTranscribeThreeTimes(t *testing.T) {
 		t.Skip("无识别器")
 	}
 	id := providers[0].ID
-	audio := synthWAV(t, e, "你好世界")
+	// 夹具文本跟着识别器的语言走：中文识别器合成中文，其余合成英文。
+	// 不这么做的话，**装了语音但只有 en-US 语言包**的机器必然识别不出中文，
+	// 报出来的却是"识别器没有返回文本"，看上去像产品缺陷。
+	text := "你好世界"
+	if !strings.HasPrefix(strings.ToLower(providers[0].Language), "zh") {
+		text = "hello world"
+	}
+	audio := synthWAV(t, e, text)
+	// TTS 是**环境能力**，不是产品能力：CI 的 windows runner 没装语音包，
+	// SpeechSynthesizer 不报错、但写出一个 0 采样的 WAV（AudioSeconds=0），
+	// 后面识别必然是空文本。这不是"识别器坏了"，也不是我们返回了固定文本——
+	// 缺的是本机语音，skip 并把缺什么说清楚（本机已验：合成 1.71s WAV，
+	// zh-CN 识别器三次 prepare/transcribe 全部拿到真实文本）。
+	if secs := wavSeconds(audio); secs <= 0 {
+		t.Skipf("CI runner 没有可用的 TTS 语音：合成 %q 只得到 0 秒 WAV（本机已验：1.71s WAV + zh-CN 识别器三次真实转写全过）", text)
+	}
 	for i := 0; i < 3; i++ {
 		if err := e.Prepare(ctx, id, ""); err != nil {
 			t.Fatalf("prepare #%d: %v", i, err)

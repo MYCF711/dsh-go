@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"dshgo/internal/session"
+	"dshgo/internal/terminal"
 )
 
 // 审批的"父子通道"（H13）。
@@ -77,6 +78,11 @@ func startStdinDispatcher() {
 				case strings.HasPrefix(line, steerIPCRequestTag):
 					// steer 不能静默丢弃：背压挡住读端比父进程等一个永不到的 ACK 好。
 					steerReqCh <- line
+				case strings.HasPrefix(line, terminal.BridgeResponseTag):
+					// rc.2 终端 roster 桥的应答（`user_terminal_list` / `user_terminal_read`
+					// 的数据来自 serve 父进程，见 terminal_bridge.go）。**不排队、不阻塞**：
+					// 投给等待中的那次调用就完事，没人等（已超时）就丢掉。
+					deliverUserTerminalBridgeResponse(line)
 				}
 				// 其它行（诊断输出、手敲的东西）一律忽略——这里不是人读的终端。
 			}

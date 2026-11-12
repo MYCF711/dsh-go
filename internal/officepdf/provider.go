@@ -1,143 +1,192 @@
-// Package officepdf 把 Office 文档真实转换成 PDF。
+// Package officepdf 是官方 `officeToPdf`（rc.1 名字）方法的宿主适配层。
 //
-// 渲染器按顺序选择：显式 DSHD_OFFICE_RENDERER（LibreOffice soffice）→ PATH 里的
-// soffice → Windows 上已安装的 Microsoft Word（COM）。没有渲染器时返回结构化
-// 错误，不生成空 PDF；转换进程有超时/取消，临时目录每次回收。
+// 从官方 0.2.2-rc.2 起，真正的渲染器是 `@deepseek-ai/dsh-office-kit` + 随包预编译的
+// 原生 LibreOfficeKit 引擎（`libreoffice-kit-win32-x64/bin/dsoffice.exe`）。本包因此
+// 不再自己找 soffice / Word COM，而是把调用转给 internal/officekit：
+//
+//   - 保留既有对外形状（Open / Render / GenerationID / Close / Rendered / Error），
+//     所以 `cmd/dshd/serve_office_pdf.go` 无需改动即可拿到真渲染；
+//   - 错误码继续用旧调用方认识的字符串（`serve_office_pdf.go` 的 HTTP 映射依赖它），
+//     但 **unavailable 时会附带 capableWhen**，说清装/配什么就能用。
+//
+// 官方对照：docs/upgrade-guide/v0.2.2-alpha.3/office-kit-package/guide.md
+// （`OfficeToPdf*` → `OfficeKit*`；`officeToPdf/render` → `officeKit/render`）。
 package officepdf
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
-	"time"
+
+	"dshgo/internal/officekit"
 )
 
+// Rendered 与官方 RenderedDocumentBytes 同形；类型别名让旧调用点零改动。
+type Rendered = officekit.Rendered
+
+// Error 是旧调用方认识的结构化错误（Code 沿用 officeToPdf 时代的字符串）。
 type Error struct {
 	Code    string
 	Message string
+	// CapableWhen 只在 Code==renderer_unavailable 时出现：说明怎么才能用。
+	CapableWhen string
 }
 
 func (e *Error) Error() string { return e.Message }
 
-var ErrNoRenderer = &Error{Code: "renderer_unavailable", Message: "没有可用的 Office 渲染器：安装 LibreOffice（soffice）或 Microsoft Word，或设置 DSHD_OFFICE_RENDERER"}
-
-type Rendered struct {
-	MissingFonts []string `json:"missingFonts"`
-	Generation   string   `json:"generation"`
-	Offset       int      `json:"offset"`
-	Data         []byte   `json:"data"`
-	Eof          bool     `json:"eof"`
-	AbsolutePath string   `json:"absolutePath"`
-	Version      string   `json:"version"`
-	Bytes        *int     `json:"bytes,omitempty"`
+// ErrNoRenderer 在没有引擎时返回（保留旧名字）。
+var ErrNoRenderer = &Error{
+	Code:        "renderer_unavailable",
+	Message:     "没有可用的 Office 渲染器：" + officekit.CapableWhen(),
+	CapableWhen: officekit.CapableWhen(),
 }
 
-type request struct {
-	ctx      context.Context
-	path     string
-	priority string
-	result   chan result
+// CodeOf 取结构化错误码。
+func CodeOf(err error) string {
+	var target *Error
+	if errors.As(err, &target) {
+		return target.Code
+	}
+	var kitErr *officekit.Error
+	if errors.As(err, &kitErr) {
+		return string(kitErr.Code)
+	}
+	return ""
 }
 
-type result struct {
-	doc Rendered
-	err error
-}
+// CapableWhen 透出「装/配什么就能用」。
+func CapableWhen() string { return officekit.CapableWhen() }
 
+// Provider 是 officeToPdf 方法面的 provider。
 type Provider struct {
-	Home       string
-	Renderer   string
-	Generation string
-	queue      chan *request
+	Home string
+	// Renderer 保留旧字段：显式引擎路径（等价于 officekit 的 Options.EnginePath）。
+	Renderer string
+
 	mu         sync.Mutex
-	closed     bool
-	wg         sync.WaitGroup
+	kit        *officekit.Provider
+	searchRoot []string
 }
 
+// Open 构造 provider；home 用于产物目录与相对路径解析基准。
 func Open(home string) *Provider {
-	p := &Provider{Home: home, queue: make(chan *request, 32)}
-	if exe := strings.TrimSpace(os.Getenv("DSHD_OFFICE_RENDERER")); exe != "" {
-		p.Renderer = exe
-	}
-	if p.Renderer == "" {
-		if path, err := exec.LookPath("soffice"); err == nil {
-			p.Renderer = path
-		} else if runtime.GOOS == "windows" {
-			const word = `C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE`
-			if _, err := os.Stat(word); err == nil {
-				p.Renderer = "word-com"
-			}
-		}
-	}
-	p.Generation = generationFor(p.Renderer)
-	p.wg.Add(1)
-	go p.worker()
+	p := &Provider{Home: home}
+	p.attach(officekit.Options{Home: home})
 	return p
 }
 
-func generationFor(renderer string) string {
-	sum := sha256.Sum256([]byte("officepdf|" + renderer + "|v1"))
-	return "officepdf-" + hex.EncodeToString(sum[:8])
+// Wrap 用已存在的 officeKit provider 复用同一份引擎与队列（推荐给宿主接线用）。
+func Wrap(home string, kit *officekit.Provider) *Provider {
+	p := &Provider{Home: home, kit: kit}
+	return p
 }
 
-func (p *Provider) GenerationID() string {
+func (p *Provider) attach(opts officekit.Options) {
+	opts.Home = p.Home
+	if opts.EnginePath == "" {
+		opts.EnginePath = strings.TrimSpace(os.Getenv(officekit.EngineEnvVar))
+	}
+	// 旧变量 DSHD_OFFICE_RENDERER 若指向引擎包根，也当作显式配置认。
+	if opts.EnginePath == "" {
+		if legacy := strings.TrimSpace(os.Getenv("DSHD_OFFICE_RENDERER")); legacy != "" {
+			if info, err := os.Stat(legacy); err == nil && (info.IsDir() || strings.EqualFold(filepath.Base(legacy), "dsoffice.exe")) {
+				opts.EnginePath = legacy
+			}
+		}
+	}
+	p.mu.Lock()
+	p.kit = officekit.Open(opts)
+	p.mu.Unlock()
+}
+
+func (p *Provider) kitProvider() *officekit.Provider {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.Generation
+	return p.kit
 }
 
-func (p *Provider) Close() {
+// Engine 返回已发现的引擎（没有则 nil）——给测试与状态面板用。
+func (p *Provider) Engine() *officekit.Engine { return p.kitProvider().Engine() }
+
+// Tried 返回引擎发现试过的路径（排障用）。
+func (p *Provider) Tried() []string { return p.kitProvider().Capability().Tried }
+
+// Capability 报告能力与补救方法。
+func (p *Provider) Capability() officekit.Capability { return p.kitProvider().Capability() }
+
+// GenerationID 是 provider 生命周期标识（引擎一变就变）。
+func (p *Provider) GenerationID() string { return p.kitProvider().GenerationID() }
+
+// Close 回收 provider。
+func (p *Provider) Close() { p.kitProvider().Close() }
+
+// SetEngineUnavailableForTest 把发现范围收窄到一个没有引擎的目录，
+// 用来验证「没有引擎时必须是结构化 501，不许假渲染」。
+func (p *Provider) SetEngineUnavailableForTest(dir string) {
 	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return
-	}
-	p.closed = true
-	close(p.queue)
+	p.searchRoot = []string{dir}
 	p.mu.Unlock()
-	p.wg.Wait()
+	p.attach(officekit.Options{
+		Home:        p.Home,
+		EnginePath:  filepath.Join(dir, "no-such-engine"),
+		SearchRoots: []string{dir},
+	})
 }
 
-func (p *Provider) worker() {
-	defer p.wg.Done()
-	for req := range p.queue {
-		doc, err := p.renderNow(req.ctx, req.path, req.priority)
-		req.result <- result{doc: doc, err: err}
-	}
-}
-
+// Render 把文档真实转成 PDF。scope 为会话/工作区标识，path 可为相对路径。
 func (p *Provider) Render(ctx context.Context, scope, rawPath, priority string) (Rendered, error) {
-	if p.Renderer == "" {
-		return Rendered{}, ErrNoRenderer
-	}
-	if priority != "foreground" && priority != "background" {
-		return Rendered{}, &Error{Code: "bad_request", Message: "priority 只能是 foreground / background"}
-	}
-	path, err := p.resolve(scope, rawPath)
+	abs, err := p.resolve(scope, rawPath)
 	if err != nil {
 		return Rendered{}, err
 	}
-	req := &request{ctx: ctx, path: path, priority: priority, result: make(chan result, 1)}
-	select {
-	case p.queue <- req:
-	case <-ctx.Done():
-		return Rendered{}, ctx.Err()
+	doc, err := p.kitProvider().Render(ctx, abs, priority)
+	if err != nil {
+		return Rendered{}, translate(err)
 	}
-	select {
-	case out := <-req.result:
-		return out.doc, out.err
-	case <-ctx.Done():
-		return Rendered{}, ctx.Err()
-	}
+	return doc, nil
 }
 
+// translate 把 officekit 的官方错误码映射回旧调用方认识的字符串，
+// 并把 capableWhen 拼进 Message（Transport 只透出 code + message）。
+func translate(err error) error {
+	var kitErr *officekit.Error
+	if !errors.As(err, &kitErr) {
+		return err
+	}
+	message := kitErr.Error()
+	code := "render_failed"
+	switch kitErr.Code {
+	case officekit.CodeUnavailable:
+		code = "renderer_unavailable"
+		if kitErr.CapableWhen != "" && !strings.Contains(message, kitErr.CapableWhen) {
+			message += "；补救方式：" + kitErr.CapableWhen
+		}
+	case officekit.CodeTimeout:
+		code = "render_timeout"
+	case officekit.CodeInvalidRequest, officekit.CodeInvalidDocument, officekit.CodeSourceChanged:
+		code = "bad_request"
+	case officekit.CodeUnsupportedFormat:
+		code = "unsupported"
+	case officekit.CodeInputTooLarge, officekit.CodeOutputTooLarge, officekit.CodeInvalidOutput:
+		code = "bad_request"
+	case officekit.CodeBusy:
+		code = "render_failed"
+	}
+	converted := &Error{Code: code, Message: message, CapableWhen: kitErr.CapableWhen}
+	if kitErr.Code == officekit.CodeUnavailable {
+		return &Error{Code: code, Message: converted.Message, CapableWhen: kitErr.CapableWhen}
+	}
+	return converted
+}
+
+// resolve 把 scope+相对路径归一成绝对路径，并核验存在性与类型白名单。
+//
+// 白名单与官方一致（doc/docx/xls/xlsx/ppt/pptx；rc.1 还认 odt/ods/odp/rtf，
+// rc.2 的 officeKit 只认 OOXML，所以这里与官方对齐）。
 func (p *Provider) resolve(scope, raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -152,93 +201,23 @@ func (p *Provider) resolve(scope, raw string) (string, error) {
 	}
 	abs, err := filepath.Abs(raw)
 	if err != nil {
-		return "", err
+		return "", &Error{Code: "bad_request", Message: "路径无法解析：" + err.Error()}
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return "", &Error{Code: "not_found", Message: "Office 文件不存在：" + abs}
+		if os.IsNotExist(err) {
+			return "", &Error{Code: "not_found", Message: "Office 文件不存在：" + abs}
+		}
+		return "", &Error{Code: "render_failed", Message: "无法读取文件状态：" + err.Error()}
 	}
 	if info.IsDir() {
 		return "", &Error{Code: "bad_request", Message: "path 是目录，不是 Office 文件"}
 	}
 	ext := strings.ToLower(filepath.Ext(abs))
 	switch ext {
-	case ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods", ".ppt", ".pptx", ".odp":
+	case ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx":
 	default:
-		return "", &Error{Code: "unsupported", Message: "不支持的 Office 文件类型：" + ext}
+		return "", &Error{Code: "unsupported", Message: fmt.Sprintf("不支持的 Office 文件类型：%s（官方 rc.2 只认 doc/docx/xls/xlsx/ppt/pptx）", ext)}
 	}
 	return abs, nil
-}
-
-func (p *Provider) renderNow(ctx context.Context, src, priority string) (Rendered, error) {
-	dir, err := os.MkdirTemp("", "dsh-officepdf-*")
-	if err != nil {
-		return Rendered{}, err
-	}
-	defer os.RemoveAll(dir)
-	out := filepath.Join(dir, "rendered.pdf")
-	var renderErr error
-	if strings.EqualFold(p.Renderer, "word-com") {
-		renderErr = renderWord(ctx, src, out)
-	} else {
-		renderErr = renderLibreOffice(ctx, p.Renderer, src, out)
-	}
-	if renderErr != nil {
-		return Rendered{}, renderErr
-	}
-	raw, err := os.ReadFile(out)
-	if err != nil {
-		return Rendered{}, &Error{Code: "render_failed", Message: "读 PDF 失败：" + err.Error()}
-	}
-	if len(raw) < 5 || string(raw[:5]) != "%PDF-" {
-		return Rendered{}, &Error{Code: "render_failed", Message: "渲染器没有产出合法 PDF"}
-	}
-	sum := sha256.Sum256(raw)
-	info, _ := os.Stat(src)
-	version := hex.EncodeToString(sum[:8])
-	if info != nil {
-		version = fmt.Sprintf("%s-%d", version, info.ModTime().UnixNano())
-	}
-	n := len(raw)
-	return Rendered{MissingFonts: []string{}, Generation: p.Generation, Offset: 0, Data: raw, Eof: true,
-		AbsolutePath: src, Version: version, Bytes: &n}, nil
-}
-
-func renderLibreOffice(ctx context.Context, exe, src, out string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, exe, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", filepath.Dir(out), src)
-	cmd.Env = append(os.Environ(), "HOME="+filepath.Dir(out), "SAL_USE_VCLPLUGIN=svp")
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return &Error{Code: "render_timeout", Message: "LibreOffice 渲染超时/取消"}
-		}
-		return &Error{Code: "render_failed", Message: fmt.Sprintf("LibreOffice 失败：%v %s", err, strings.TrimSpace(stderr.String()))}
-	}
-	base := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src)) + ".pdf"
-	produced := filepath.Join(filepath.Dir(out), base)
-	if produced != out {
-		return os.Rename(produced, out)
-	}
-	return nil
-}
-
-func renderWord(ctx context.Context, src, out string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	ps := `$ErrorActionPreference='Stop'; $w=New-Object -ComObject Word.Application; $w.Visible=$false; $d=$null; try { $d=$w.Documents.Open($env:DSH_OFFICE_SRC,$false,$true); $d.ExportAsFixedFormat($env:DSH_OFFICE_OUT,17) } finally { if ($d -ne $null) { $d.Close($false) }; $w.Quit() }`
-	const powershell = `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
-	cmd := exec.CommandContext(ctx, powershell, "-NoProfile", "-NonInteractive", "-Command", ps)
-	cmd.Env = append(os.Environ(), "DSH_OFFICE_SRC="+src, "DSH_OFFICE_OUT="+out)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return &Error{Code: "render_timeout", Message: "Word 渲染超时/取消"}
-		}
-		return &Error{Code: "render_failed", Message: fmt.Sprintf("Word COM 失败：%v %s", err, strings.TrimSpace(stderr.String()))}
-	}
-	return nil
 }

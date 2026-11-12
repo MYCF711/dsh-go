@@ -1,9 +1,15 @@
 package main
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// versionShape 是发布号的唯一形态判据：`<上游>-go.<N>` / `<上游>-gobeta.<N>`。
+//
+// 上游段允许带预发布（`0.2.2-rc.2`），因为官方就是一个 rc 线接一个 rc 线地发。
+var versionShape = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?-(go|gobeta)\.\d+$`)
 
 // `--version` 的输出必须以产品名开头：脚本和人都是先认这个名字再看版本。
 func TestVersionLineStartsWithProductName(t *testing.T) {
@@ -19,11 +25,14 @@ func TestVersionLineStartsWithProductName(t *testing.T) {
 	}
 }
 
-// 版本号形如 `<上游>-go.<N>`。格式错了不会有人报错，只会在发布件里出现
-// 一个和 CHANGELOG 对不上的号。
+// 版本号形如 `<上游>-go.<N>`（稳定版）或 `<上游>-gobeta.<N>`（任务途中的测试版）。
+// 格式错了不会有人报错，只会在发布件里出现一个和 CHANGELOG 对不上的号。
+//
+// 判据用正则而不是 `strings.Contains(version, "-go.")`：后者在 `-gobeta.` 上不成立，
+// 而那正是"途中版本"要用的形态（用户 2026-11-12 指令：途中 gobeta、稳定版 go）。
 func TestVersionFormat(t *testing.T) {
-	if !strings.Contains(version, "-go.") {
-		t.Fatalf("版本号应形如 0.2.1-go.30，得到 %q", version)
+	if !versionShape.MatchString(version) {
+		t.Fatalf("版本号应形如 <上游>-go.<N> 或 <上游>-gobeta.<N>，得到 %q", version)
 	}
 }
 
