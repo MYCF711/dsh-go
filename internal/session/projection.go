@@ -362,9 +362,9 @@ var cwdSchema = storage.Nullable(storage.SchemaFunc(func(value any) error {
 	return nil
 }))
 
-// DefaultProjectionRegistry 返回宿主真实注册的五台投影单元。
+// DefaultProjectionRegistry 返回宿主真实注册的六台投影单元。
 //
-// 为什么只有五个：其余官方键（modelSelection / todos / inbox / actionCards /
+// 为什么只有六个：其余官方键（modelSelection / todos / inbox / actionCards /
 // agentPreset / subagent / imageLimits / subagentCatalog / subagentTiming）
 // 在本宿主要么没有事件来源、要么事件字段不足（例如 `model/selection` 没有
 // 官方 `ModelSelection.provider`），注册一个推不出真值的单元就是伪造。
@@ -410,9 +410,14 @@ func DefaultProjectionRegistry() *ProjectionRegistry {
 		// assistant/message、tool/call、tool/result、turn/end，加上宿主自有的
 		// assistant/text | assistant/reasoning 增量），见 session_stats.go。
 		SessionStatsUnit(),
+		// 官方 `tokenUsage`（stateVersion 2，`@deepseek-ai/dsh-token-meter`）：
+		// 整份日志累计的 provider 用量四桶。事件来源是 `assistant/message` 的
+		// `usage`（宿主写侧见 cmd/dshd/assistant_usage.go）与 `llm/retry-started`，
+		// 见 token_usage.go。界面用量弹窗只认这个键。
+		TokenUsageUnit(),
 	)
 	if err != nil {
-		// 三台单元是写死的常量；走到这里说明代码坏了，启动即失败。
+		// 这些单元是写死的常量；走到这里说明代码坏了，启动即失败。
 		panic(fmt.Sprintf("session: 默认投影单元声明非法: %v", err))
 	}
 	return registry

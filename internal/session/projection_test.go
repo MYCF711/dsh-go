@@ -293,6 +293,14 @@ func TestProjectionRestoreFloor(t *testing.T) {
 			"ttftSteps": 0, "decodeMs": 0, "decodeTokens": 0,
 			"lastTurn": nil, "openStep": nil, "pendingCalls": map[string]any{},
 		}},
+		// 官方 tokenUsage（stateVersion 2）：四桶全 0 + 没有样本。
+		ProjectionKeyTokenUsage: {Ver: 2, Seq: 2, Val: map[string]any{
+			"totals": map[string]any{
+				"uncachedInputTokens": 0, "outputTokens": 0,
+				"cacheReadTokens": 0, "cacheWriteTokens": 0,
+			},
+			"last": nil,
+		}},
 	}
 	// 最低可用 watermark = 2 → 尾部读从 2 开始（那一格是锚点：Restore 会
 	// 把它当已折叠事件跳过，但它证明日志还延伸到这里）。
@@ -388,12 +396,15 @@ func TestProjectionUnitsAreOfficialShapes(t *testing.T) {
 	// 再加 sessionStats（官方 stateVersion 1，事件来源 step/start、step/end、
 	// assistant/message、tool/call、tool/result、turn/end + 宿主自有的
 	// assistant/text | assistant/reasoning 增量）：dsh-session-stats/lib/types/projection.js:66-77。
+	// 最后是 tokenUsage（官方 stateVersion 2，事件来源 assistant/message.usage 与
+	// llm/retry-started）：dsh-token-meter/src/usage-projection.ts:111-144。
 	want := []string{
 		ProjectionKeySessionListMetadata,
 		ProjectionKeyTitle,
 		ProjectionKeyWorkingDirectory,
 		ProjectionKeyConversationContinuation,
 		ProjectionKeySessionStats,
+		ProjectionKeyTokenUsage,
 	}
 	if len(keys) != len(want) {
 		t.Fatalf("units = %v，期望 %v", keys, want)

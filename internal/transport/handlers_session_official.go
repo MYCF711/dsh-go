@@ -890,6 +890,7 @@ func (s *Server) serveOfficialState(w http.ResponseWriter, r *http.Request, meth
 //	agentPreset         会话运行的 preset           宿主 state/session-preset.json
 //	subagentCatalog     直接子代理清单               宿主扫描 durable 子会话
 //	sessionStats        轮/步计数与墙钟              v4 step/* + assistant/* + tool/* 折叠
+//	tokenUsage          整份日志累计的用量四桶        v4 assistant/message.usage 折叠
 //
 // **仍然不出现**的三个键（官方 values 里都是 optional，缺失 = 该能力不存在）：
 //
@@ -986,6 +987,10 @@ func (s *Server) officialProjectionValues(host OfficialSessionHost, sessionID st
 	// 见 session_stats_view.go）。客户端 stats 面板的合计行就取这个键，
 	// 缺了它只能退化到按已加载窗口聚合——那就是状态栏「活动」恒为「未知」。
 	values["sessionStats"] = officialSessionStatsView(events)
+	// 官方 `tokenUsage`：整份日志累计的 provider 用量四桶（全部必填、非负，
+	// 见 token_usage_view.go）。用量弹窗（`UsagePill`）与统计面板合计行只认这个
+	// 键，缺了它界面就只能把用量画成「未知」。
+	values["tokenUsage"] = officialTokenUsageView(events)
 
 	if ph, ok := host.(OfficialProjectionHost); ok {
 		lastUsed, next, err := ph.ModelSelection(sessionID)
