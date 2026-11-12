@@ -1322,7 +1322,14 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 		gap := !staleEpoch && !tooNew && !win.Covered
 		if staleEpoch || tooNew || gap {
 			msg := "journal 世代或水位对不上，需要重新 load 基线"
+			// 两种来源共用 code `stale_epoch`，靠 `details.reason` 区分：
+			//   换代/水位超前 → stale_epoch    ：丢掉旧水位重建基线；
+			//   历史滑出内存   → history_evicted：这就是"没有更早的了"，**不要**重建。
+			// 界面（`dsh-ui/cmd/app/frames.go`）按 reason 分支；字符串匹配只留给
+			// 老宿主兜底（见那边的 `journalEvictedError` 注释）。
+			reason := ConflictReasonStaleEpoch
 			if gap {
+				reason = ConflictReasonHistoryEvicted
 				msg = fmt.Sprintf("sinceSeq=%d 之前的历史已经滑出内存 journal（只保留最近 %d 帧）："+
 					"继续按 seq 补会缺一段，而且缺口看不出来", in.SinceSeq, win.LastSeq-win.Oldest+1)
 			}
@@ -1333,6 +1340,7 @@ func (s *Server) handleSessionHistory(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, errorBodyFor("stale_epoch", msg, map[string]any{
 				"journalEpoch": win.Epoch,
 				"lastSeq":      win.LastSeq,
+				"details":      map[string]any{"reason": reason},
 			}))
 			return
 		}
@@ -1486,6 +1494,127 @@ func errorBodyFor(code, msg string, extra ...map[string]any) map[string]any {
 	return body
 }
 
+// 409 的 `details.reason` 取值表（GP 报告 §5 第 3 条）。
+//
+// # 为什么不在 error 四字段里加
+//
+// 四字段是**冻结契约**（`TestEveryHTTPErrorHasFourFieldEnvelope` 钉住"恰好四个键"，
+// 客户端按它写解析器）。附加信息一律平铺在信封顶层——`stale_epoch` 的
+// journalEpoch/lastSeq、官方 `session/agent-busy` 的 `details.reason` 都是同一先例。
+// `details` 是其中唯一**有稳定 schema** 的那一格：
+//
+//	{"error":{code,message,hint,retryable}, "details":{"reason":"<下面的取值>"}}
+//
+// 为什么需要它：409 的**两种来源**（journal 换代 / 历史滑出内存）曾经共用同一个
+// code `stale_epoch`，界面只能字符串匹配 message 里的"滑出内存"来区分——文案一改
+// 就失效，而且判错的代价是"点了永远在转圈"或"少一页"。`reason` 把语义搬到结构里。
+//
+// # 取值与语义一一对应
+//
+// 客户端只认这些字面量；**加新语义就加新常量**，不许复用别的值。
+// 取值一旦发布就不再改名字（`details.reason` 是稳定机器字段，不是给人看的）。
+const (
+	// ConflictReasonStaleEpoch：journal 换代、或客户端水位比当前还大——
+	// 丢掉旧水位重新 load 基线就能接着收。
+	ConflictReasonStaleEpoch = "stale_epoch"
+	// ConflictReasonHistoryEvicted：`sinceSeq` 之前的历史已经滑出内存 journal。
+	// 这不是失败：它就是"可加载的最早处"，**不要**重建基线
+	// （重建只会把尾窗再拉一遍，然后同一次点击又能再点）。
+	ConflictReasonHistoryEvicted = "history_evicted"
+	// ConflictReasonRevisionConflict：乐观并发 revision 过期（读到的是旧版本）。
+	ConflictReasonRevisionConflict = "revision_conflict"
+	// ConflictReasonJobFinished：任务已结束，不能重复停止/操作。
+	ConflictReasonJobFinished = "job_finished"
+	// ConflictReasonJobOwnerNotLive：任务 owner 已不在（官方 `gateway/context-unavailable`）。
+	ConflictReasonJobOwnerNotLive = "job_owner_not_live"
+	// ConflictReasonStaleHead：forge 写入基于旧 head（远端已经前进）。
+	ConflictReasonStaleHead = "stale_head"
+	// ConflictReasonAgentBusy：会话/管理器正忙（上一轮还没结束），等 turn/done 再来。
+	ConflictReasonAgentBusy = "agent_busy"
+	// ConflictReasonConflict：兜底——叫不出更细名字的 409。
+	ConflictReasonConflict = "conflict"
+)
+
+// ConflictReasons 返回全部 409 reason 取值（固定顺序，不是字典序）。
+//
+// 给契约快照与断言用：**取值表本身就是契约**，加值必须同时出现在这里，
+// 否则客户端按词表写 switch 时会漏掉那一支。
+func ConflictReasons() []string {
+	return []string{
+		ConflictReasonStaleEpoch,
+		ConflictReasonHistoryEvicted,
+		ConflictReasonRevisionConflict,
+		ConflictReasonJobFinished,
+		ConflictReasonJobOwnerNotLive,
+		ConflictReasonStaleHead,
+		ConflictReasonAgentBusy,
+		OfficialPromptContinuationReason,
+		ConflictReasonConflict,
+	}
+}
+
+// conflictReasonFor 是"四字段 code → 409 reason"的**唯一**默认推导。
+//
+// 何时用：调用点没有给出更细的 reason 时（绝大多数 409 的语义就等于 code）。
+// 更细的调用点显式传 `details.reason` 覆盖它——journal 滑出内存的
+// `history_evicted` 与官方 `session/agent-busy` 的逐字 reason 都是这么来的。
+//
+// 为什么按 code 推导而不是让每个 handler 自己写 reason：手写的那几处迟早会漏，
+// 漏掉的 409 就退化成"界面只能猜 message"——这正是本字段要消灭的东西。
+func conflictReasonFor(code string) string {
+	switch code {
+	case "stale_epoch":
+		return ConflictReasonStaleEpoch
+	case "revision_conflict":
+		return ConflictReasonRevisionConflict
+	case "job_finished":
+		return ConflictReasonJobFinished
+	case "job_owner_not_live":
+		return ConflictReasonJobOwnerNotLive
+	case "stale_head":
+		return ConflictReasonStaleHead
+	case "busy":
+		// 四字段 code 叫 busy，语义是"agent 正忙"：等当前轮/队列消化完再发就行。
+		return ConflictReasonAgentBusy
+	case "session/agent-busy":
+		// 官方 `session/agent-busy` 的 details.reason 是**官方逐字**值
+		// （`dsh-api-session-controller/lib/index.js:895`），不能换成 agent_busy。
+		return OfficialPromptContinuationReason
+	}
+	return ConflictReasonConflict
+}
+
+// withConflictReason 给 409 的错误信封补 `details.reason`（**纯 additive**）。
+//
+// 单个出口：`writeJSON` 在 status==409 时调用它。这样"所有 409 都带稳定标记"
+// 不靠每个 handler 记得加——漏一个就是"界面只能猜 message"，而漏掉的那个
+// 永远不会有人写测试。
+//
+// 调用点已经给了 reason（history 的 `history_evicted`、官方 `session/agent-busy`）
+// 时**保留调用点的**：reason 的粒度由最了解那次 409 语义的那一层决定。
+// `details` 里其它键（将来的扩展）原样保留，不覆盖。
+func withConflictReason(v any) any {
+	body, ok := v.(map[string]any)
+	if !ok {
+		// 409 只可能来自 errorBody/errorBodyFor（都是 map）。走到这里说明有人
+		// 在写手写信封——那种出口没有四字段保证，宁可不改它的形状。
+		return v
+	}
+	code := ""
+	if obj, ok := body["error"].(map[string]any); ok {
+		code, _ = obj["code"].(string)
+	}
+	if details, ok := body["details"].(map[string]any); ok {
+		if reason, _ := details["reason"].(string); reason != "" {
+			return body
+		}
+		details["reason"] = conflictReasonFor(code)
+		return body
+	}
+	body["details"] = map[string]any{"reason": conflictReasonFor(code)}
+	return body
+}
+
 // errorObject 就是那四个字段本身，也是唯一的构造点。
 // hint 是必需的：客户端要知道**下一步怎么办**，而这正是 DSH 错误契约的意义。
 func errorObject(code, msg string) map[string]any {
@@ -1601,6 +1730,15 @@ func errorCode(msg string) string {
 // 只在 /api 的 handler 里用，所以可以在这里一把收口——
 // 逐个 handler 改的话，总有一个会漏，而漏掉的那个就是"界面看到 0 条"。
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	// 409 一律补 `details.reason`（**纯 additive**，见 withConflictReason）。
+	//
+	// 收口在这里而不是逐个 handler：409 有十几个产出点（journal/stale_epoch、
+	// 乐观并发 revision_conflict、job 生命周期、forge stale_head、cua/settings 的
+	// 冲突……），逐点改必然漏；而"没有 reason 的 409"在界面上退化成字符串匹配
+	// message——正是本字段要消灭的脆弱面。
+	if status == http.StatusConflict {
+		v = withConflictReason(v)
+	}
 	// 成功响应不许是空值。
 	//
 	// `{"result":null}` 的形状是"HTTP 200 + 没有任何载荷"：客户端拿到的是 null，

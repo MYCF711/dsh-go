@@ -191,8 +191,13 @@ func assertPluginGlueList(t *testing.T, envelope map[string]any, want int) []any
 
 func assertPluginGlueError(t *testing.T, envelope map[string]any, wantCode string) {
 	t.Helper()
-	if len(envelope) != 1 {
-		t.Fatalf("error envelope has extra keys: %+v", envelope)
+	// 顶层只允许 `error` 与**已登记**的附加信息 `details`
+	// （409 的 `details.reason`，见 DSH-GO docs/transport-contract.md §3D；
+	// 它是 error 的兄弟，四字段本身不变）。其它键仍然算契约漂移。
+	for key := range envelope {
+		if key != "error" && key != "details" {
+			t.Fatalf("error envelope has extra keys: %+v", envelope)
+		}
 	}
 	errorObject, ok := envelope["error"].(map[string]any)
 	if !ok || len(errorObject) != 4 {
@@ -208,6 +213,18 @@ func assertPluginGlueError(t *testing.T, envelope map[string]any, wantCode strin
 	}
 	if wantCode != "" && errorObject["code"] != wantCode {
 		t.Fatalf("error code=%v want=%s: %+v", errorObject["code"], wantCode, errorObject)
+	}
+	// `details` 是**可选**的（老宿主不带）。带的时候必须是带非空 reason 的对象：
+	// 空对象/空串等于没给，界面又会退回去猜 message 文本。
+	if details, ok := envelope["details"]; ok {
+		object, ok := details.(map[string]any)
+		if !ok {
+			t.Fatalf("details is not an object: %+v", envelope)
+		}
+		reason, _ := object["reason"].(string)
+		if reason == "" {
+			t.Fatalf("details.reason is empty: %+v", envelope)
+		}
 	}
 }
 
