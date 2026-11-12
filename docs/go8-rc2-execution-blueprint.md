@@ -170,7 +170,19 @@ python scripts/structure-refs.py --official-tree "<rc.2 树根>" --require-struc
 | **GT3** 接产品绘制路径 | `Snapshot.Frames` + per-session 原始 journal 帧（去重/分页基线/换代重建）；painter 挂 `conversation.view` | ✅ **真宿主 + 真 apiclient 渲染出真实帧** |
 | **GP** 分页 + 审批卡 | 历史向前翻页**五态**实测；审批卡搬到官方 `conversation.composer` 座位（真机 `Y=569 > 消息流末行 138`） | ✅ 真宿主 255 帧翻页 seq `[1..255]` 严格递增 |
 | **GQ** 代码块 + markdown | 真接 `mdlite.CodeBlock`（两阶段 + banner + 高亮 + 横滚 + 复制）；markdown 8 类元素 / 13 种块级 | ✅ 修掉"单测绿、真机代码块整块消失"的真 bug |
-| 提交 | `fe264a7` → `1d7f664` → `fded4dd` → `e2584af` → `d5d0c4b` → `4079647` → `0656cf4`（分支 `feat/gui-rc2`，本地未 push） | — |
+| **GR** 官方座位 | `-shell official` 下 `conversation.composer` **每帧真 dispatch 1 次**、`main.composer` 0 次；输入卡片 **10/10** 元素按官方几何 | ✅ 真机 Enter 发送落盘（`user/message` + 模型回复，`PASS 2.70s`） |
+| **GS2** 409 结构化 | 宿主 15 个 409 产出点收口到 `details.reason`（**9 个取值**）；`error` 仍恰好四字段（纯 additive） | ✅ UI 改判结构字段，文本匹配降为老宿主兜底 |
+| 提交 | `fe264a7` → `1d7f664` → `fded4dd` → `e2584af` → `d5d0c4b` → `4079647` → `0656cf4` → `7ee776e`（GUI 分支）；宿主 `4325e4f` | — |
+
+**GR/GS2 的关键点**
+
+- **GR 的几何修正有据**：`official_geometry.go` 行高 36→**42**、座位 122→**128**——官方 `.row` 被 34px
+  主钮撑开的真值（并行单 GS2 报的「座高度 128≠122」红就是这条，已按官方值收敛）。
+- **GS2 的 R4 守卫更新已复核**：错误信封守卫原要求"恰好 1 个顶层键"，改为"`error` + 已登记 `details`，
+  且 `details.reason` **必须非空**"；其它键仍报漂移。**是"允许一个已登记字段 + 加一条非空断言"，不是删检查**。
+- **`-race` 诊断纠错（Lead 自己踩的坑）**：我一度把 `cmd/dshd` 的 `-race` 判成"挂死"，
+  实际是 **subprocess 类测试在 race 下每个要 ~28s**（`TestPluginCLIRealProcessLifecycle` 单独跑 27.8s 通过），
+  我给的 180s 包级超时太短。正确做法是 `-timeout 20m` 跑，别把"慢"误报成"死锁"。
 
 **GP/GQ 的真机证据**
 
