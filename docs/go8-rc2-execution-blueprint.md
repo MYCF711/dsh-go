@@ -152,6 +152,22 @@ python scripts/structure-refs.py --official-tree "<rc.2 树根>" --require-struc
 > `structure-refs.py` 新增 `--require-structure-clean`：**structure/ 内 rc.1 行号必须为 0**；
 > `SOURCES.md` 里那 73 条是 rc.5→rc.1 的历史 diff 记录，只追加不改写，单独计数、不入门禁。
 
+### 5.2 GUI 实现波次（dsh-ui 仓，worktree `dsh-ui-rc2` / 分支 `feat/gui-rc2`）
+
+> 为什么另开 worktree：`dsh-ui` 主 checkout 在 `feat/naming-fulltime` 上有 339 个**非本线**的未提交改动，
+> 直接在原树写会互相覆盖（本仓历史事故根因）。worktree 从 `3925e84` 起，互不影响。
+
+| 波次 | 内容 | 结果 |
+|---|---|---|
+| **GA** 首屏结构骨架 | rc.2 官方槽表 + 几何常量表 + 类表 + L0 接线（`-shell auto\|legacy\|official`） | **54 条官方槽 100% 有实现节点**（74 节点，四种布局逐一断言）；145 行单一几何表（aligned/derived/deviation）；182 个 rc.2 锚点由测试真实打开官方解包树核过；rc.2 三处真变各一条专门用例 |
+| **GB** 新增两插件 | `plugins/dsnotifications`（NoticeCard + 官方控制器）、`plugins/dsagentteam`（四棵树） | **5 槽全部注册**；`api.snapshot.json` 方法 25→29；三种降级逐槽都测 |
+| **GC/GD** 父容器 | 4 个缺失的父容器 + 数据接线（通知入口 / 子代理目录 / 模型菜单 / chat 命令节点） | 🔄 在跑（槽位已注册但没有父级 `drawSlot` 时界面看不到，这两波是让它真渲染） |
+| 门禁 | `CGO_ENABLED=0 go build/vet/test` | 0 / 0 / **0（35 包）**，gofmt 干净 |
+| 提交 | `fe264a7`（分支 `feat/gui-rc2`，本地未 push） | — |
+
+**诚实差距**：transcript 渲染、设置表单、拖拽把手、view tabs 数据仍未接；旧部件仍在旧槽（3 行 deviation 等迁槽后删）；
+默认 `-shell auto` 不改变现网外观（无 `shell.root` 占用方时走官方骨架）。
+
 H1 的硬结论（决定了后面怎么派单）：
 - **rc.2 把 `lib/client.js` 压成 3–27 行 bundle**，rc.1 的行号引用**全面失效**——这就是 H2–H4 必须在
   实现之前先做完的原因（否则等于照错代码复刻）。
