@@ -161,12 +161,12 @@ func SearchWithConfig(ctx context.Context, root string, req Request, cfg Config)
 	}
 
 	w := &walker{
-		cfg:          cfg,
-		query:        strings.ToLower(query),
-		byPath:       strings.Contains(query, "/"),
-		exclusions:   newLiteralExclusions(req.ExcludedPaths),
+		cfg:           cfg,
+		query:         strings.ToLower(query),
+		byPath:        strings.Contains(query, "/"),
+		exclusions:    newLiteralExclusions(req.ExcludedPaths),
 		includeHidden: req.IncludeHidden,
-		entries:      make(map[string]EntryType),
+		entries:       make(map[string]EntryType),
 	}
 	if w.cfg.Timeout > 0 {
 		w.deadline = time.Now().Add(w.cfg.Timeout)
@@ -186,8 +186,8 @@ func trimQuery(s string) string {
 	return strings.TrimFunc(s, func(r rune) bool {
 		switch r {
 		case '\t', '\n', '\v', '\f', '\r', ' ',
-			0x00A0, // NBSP
-			0x1680, // OGHAM SPACE MARK
+			0x00A0,         // NBSP
+			0x1680,         // OGHAM SPACE MARK
 			0x2028, 0x2029, // LINE/PARAGRAPH SEPARATOR
 			0x202F, // NARROW NO-BREAK SPACE
 			0x205F, // MEDIUM MATHEMATICAL SPACE

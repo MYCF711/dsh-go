@@ -199,6 +199,86 @@ func (s *Service) ScheduleArchiveCleanup(sessionID string) error {
 	return nil
 }
 
+// CleanupCancellation 是"取消一次在途归档清理"的结果。
+//
+// 官方 `archive.ts:87-93` 的监听器不返回任何东西（它只是 `await attempt.done`），
+// 但宿主必须知道**取消到底来没来得及**：来晚了 checkout 已经没了，得走官方恢复
+// 路径；来早了什么都没动，不能乱恢复。所以这里把结算终态如实交回去。
+type CleanupCancellation struct {
+	// Cancelled 报告是否真的有一个在途尝试被取消（官方 `attempt === undefined →
+	// return`：没有 attempt 就什么都不做）。
+	Cancelled bool
+	// Revision 是被取消尝试的 revision（Cancelled 为 false 时是 0）。
+	Revision int64
+	// Status 是**结算后**的终态：retained = 取消及时，checkout 一个字都没动；
+	// removed = 取消来晚，`git worktree remove` 已经跑完（调用方必须走恢复路径）；
+	// failed = 移除报错（可能留半个目录）。
+	Status CleanupStatus
+}
+
+// Removed 报告这次取消是不是"来晚了"（checkout 真的已经被删掉）。
+func (c CleanupCancellation) Removed() bool {
+	return c.Cancelled && c.Status == CleanupRemoved
+}
+
+// CancelArchiveCleanup 取消这个会话**尚未准入**的归档清理，并 await 结算。
+//
+// 逐条对齐官方 `archive.ts:87-93`（`workspace/session-unarchiving` 监听器）：
+//
+//	attempt := this.attempts.get(sessionId)
+//	if (attempt === undefined) return          // ① 没有在途尝试 → 什么都不做
+//	attempt.cancelled = true                   // ② 置取消位
+//	await attempt.done                         // ③ 等它结算（已准入的 git 不打断）
+//	this.attempts.delete(sessionId)            // ④ 收走 attempt（cleanupOf 之后为 null）
+//
+// 为什么置位就够：`inspectAndRemove` 在 inspection 之前、`removeCheckout` 在拿锁
+// 之后与 `git worktree remove` 之前各判一次 `archiveAborted`（官方同位的
+// `admit()`）。置位与这两处判定共用 `reclaim.mu`，所以**取消与准入不可能同时为
+// 真**——两者只可能一前一后：
+//
+//   - 取消落在准入之前 → 移除根本不执行，结算为 retained：目录、`git worktree
+//     list` 注册、分支全都不变；
+//   - 取消落在准入之后（`git worktree remove` 已经在跑）→ 我们不打断它（官方
+//     也不打断），等它结算；成功即 removed，此时 checkout 真的没了，调用方必须
+//     走官方恢复路径 `RestoreWorktree`，不许假装没删。
+//
+// 返回 error 只表示"没资格取消"（会话 id 为空）；没有在途尝试不是错误。
+func (s *Service) CancelArchiveCleanup(sessionID string) (CleanupCancellation, error) {
+	if err := s.requireSession(sessionID); err != nil {
+		return CleanupCancellation{}, err
+	}
+	rec := s.reclaim
+	if rec == nil {
+		return CleanupCancellation{}, nil
+	}
+	rec.mu.Lock()
+	attempt := rec.attempts[sessionID]
+	if attempt == nil {
+		rec.mu.Unlock()
+		return CleanupCancellation{}, nil
+	}
+	// ② 置取消位：与 inspectAndRemove/removeCheckout 的准入判据在同一把锁下判定。
+	attempt.cancelled = true
+	revision := attempt.revision
+	done := attempt.done
+	rec.mu.Unlock()
+
+	// ③ await 结算。已准入的 `git worktree remove` 跑完才关 done，所以这里返回
+	// 时终态是**确定的**：要么没删（retained），要么真的删了（removed）。
+	<-done
+
+	// ④ 收走 attempt（官方 `this.attempts.delete`）。并发取消者都等同一个 done，
+	// 都读到同一个终态，只有第一个能把它删掉——不会出现"一个说 retained、另一个
+	// 说 removed"的分裂报告，也不会重复触发恢复。
+	rec.mu.Lock()
+	status := attempt.status
+	if rec.attempts[sessionID] == attempt {
+		delete(rec.attempts, sessionID)
+	}
+	rec.mu.Unlock()
+	return CleanupCancellation{Cancelled: true, Revision: revision, Status: status}, nil
+}
+
 // CleanupOf 读（或等）一个会话最近一次清理尝试。
 //
 // revision 为 nil 时立刻读；非 nil 且等于当前尝试时等它结算后再读（不启动新
@@ -250,7 +330,19 @@ func (s *Service) Close() {
 // ---------------------------------------------------------------------------
 
 func (s *Service) runArchiveCleanup(attempt *cleanupAttempt) {
-	status := s.inspectAndRemove(attempt)
+	// 结算必须发生：CancelArchiveCleanup（取消反归档）与 CleanupOf(&revision) 都在
+	// await 这个 attempt（官方 archive.ts:91 同样 await attempt.done）。宿主注入的
+	// 回调（Unused/ReadOnly/Exclusive）panic 不许把等待者永远挂住 —— 官方那里是
+	// try/catch 结算为 failed，这里同义。
+	status := CleanupFailed
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				fmt.Fprintf(os.Stderr, "worktree: 归档清理 %s 崩溃，结算为 failed: %v\n", attempt.sessionID, recovered)
+			}
+		}()
+		status = s.inspectAndRemove(attempt)
+	}()
 	rec := s.reclaim
 	settledAt := nowOf(s.hostSnapshot())
 	rec.mu.Lock()

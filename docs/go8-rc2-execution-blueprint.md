@@ -94,6 +94,11 @@
 | **task-21 / E7** | Office 接线（officeKit 方法路由 + 工具注册 + 共享 provider） | `cmd/dshd/serve_office_kit.go`、`serve.go`、`main.go`、`server.go` | ✅ 真 dshd serve 出 21379 B PDF | E7-office-wiring.md |
 | **task-22 / E8** | terminal-panel 父→子 roster 桥 | `cmd/dshd/`、`internal/terminal/` | 🔄 | — |
 | **task-23 / E9** | `liveshareShares.addSessions`（rc.2 唯一未落点方法） | `handlers_liveshare_official.go`、`serve_liveshare_api.go` | 🔄 | — |
+| **task-24 / F1** | Forge GraphQL 审阅面（4 方法 501 → 真做，零新依赖） | `internal/forge/**`、`handlers_forge_rc2.go` | ✅ 真机只读取证 | F1-forge-graphql.md |
+| **task-25 / F2** | `retryPolicy` 写入面（`llm` ns 可写并真生效） | `internal/settings/`、`internal/settingsform/`、`internal/llm/` | ✅ 重试次数实测变化 | F2-retrypolicy-write.md |
+| **task-26 / F3** | `workspace/session-unarchiving` 事件 + 工作树恢复协同 | `handlers_workspace_official.go`、`serve_workspace_api.go` | ✅ WS 可见 | F3-unarchive-event.md |
+| **task-27 / G1** | 归档清理取消 `CancelArchiveCleanup` | `internal/worktree/`、`serve_workspace_api.go` | ✅ 真 git 三条端到端 | G1-cancel-cleanup.md |
+| **task-28 / G2** | Forge `unresolvedThreads`/`threadsTruncated` 改 GraphQL 真值 | `internal/forge/` | ✅ 真机与 `gh api graphql` 一致 | G2-checks-threads.md |
 | **S5** | 门禁汇总：全量 build/vet/test、参数两闸复跑、工具表快照、证据落文档 | `docs/host-stable-gap-register.md` 等 | ⏳ | — |
 | **S6** | 稳定版 `0.2.2-rc.2-go.1` 发布件（本地；push 需用户当次授权） | `dist/`、CHANGELOG | ⏳ | — |
 | **S7** | GUI 线（宿主完备后） | `../dsh-ui` | ⏳ | — |

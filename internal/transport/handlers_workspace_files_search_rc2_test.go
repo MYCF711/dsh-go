@@ -310,9 +310,9 @@ func TestWorkspaceFilesSearchRootFaults(t *testing.T) {
 	escape := base + string(os.PathSeparator) + "ws" + string(os.PathSeparator) + ".." +
 		string(os.PathSeparator) + "ws"
 	api := searchTestAPI(map[string]string{
-		"sess-escape": escape,
+		"sess-escape":  escape,
 		"sess-missing": filepath.Join(base, "nope"),
-		"sess-file":   filepath.Join(base, "afile.txt"),
+		"sess-file":    filepath.Join(base, "afile.txt"),
 	})
 	const body = `{"workspaceFileScopeId":"%s","request":{"query":"x","excludedPaths":[],"includeHidden":false,"respectGitignore":false}}`
 

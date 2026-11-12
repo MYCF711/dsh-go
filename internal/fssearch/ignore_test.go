@@ -59,15 +59,15 @@ func TestSearchRespectGitignoreSwitch(t *testing.T) {
 	writeFileText(t, filepath.Join(root, ".ignore"), "dotignored.txt\n")
 	writeFileText(t, filepath.Join(root, "sub", ".gitignore"), "nested-ignored.txt\n")
 	writeTree(t, root, map[string]string{
-		"ignored.txt":             "x",
-		"ignored-dir/a.txt":       "x",
-		"kept.txt":                "x",
-		"sub/nested-ignored.txt":  "x",
-		"sub/kept2.txt":           "x",
-		"dotignored.txt":          "x",
-		"sub/ignored.txt":         "x", // 不含 `/` 的模式在任意深度生效
-		"sub/ignored-dir/b.txt":   "x",
-		"other/kept3.txt":         "x",
+		"ignored.txt":            "x",
+		"ignored-dir/a.txt":      "x",
+		"kept.txt":               "x",
+		"sub/nested-ignored.txt": "x",
+		"sub/kept2.txt":          "x",
+		"dotignored.txt":         "x",
+		"sub/ignored.txt":        "x", // 不含 `/` 的模式在任意深度生效
+		"sub/ignored-dir/b.txt":  "x",
+		"other/kept3.txt":        "x",
 	})
 
 	res := searchGit(t, root, Request{Query: "txt", RespectGitignore: true})
@@ -254,9 +254,9 @@ func TestSkipIgnoredDirectoryPrunesChildren(t *testing.T) {
 	markRepo(t, root)
 	writeFileText(t, filepath.Join(root, ".gitignore"), "vendor/\n")
 	writeTree(t, root, map[string]string{
-		"vendor/a.txt":       "x",
-		"vendor/deep/b.txt":  "x",
-		"kept.txt":           "x",
+		"vendor/a.txt":      "x",
+		"vendor/deep/b.txt": "x",
+		"kept.txt":          "x",
 	})
 	res := searchGit(t, root, Request{Query: "txt", RespectGitignore: true})
 	assertMatches(t, res, "file kept.txt")

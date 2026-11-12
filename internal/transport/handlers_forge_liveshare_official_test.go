@@ -85,11 +85,11 @@ func forgeGoodBodies() map[Method]string {
 		MethodLiveshareSharesTestPublish:       `{"request":{"sessionId":"s-1"}}`,
 		MethodLiveshareSharesUpdatePermissions: `{"request":{"shareId":"sh-1","sessionMode":"view"}}`,
 		// rc.2 新增：合法参数（shareId + 非空 sessionIds），保证走到"缺实现"分支。
-		MethodLiveshareSharesAddSessions: `{"request":{"shareId":"sh-1","sessionIds":["s-1"]}}`,
-		MethodLiveshareSharesCapabilities:      `{}`,
-		MethodLiveshareSharesList:              `{}`,
-		MethodLiveshareSharesRelay:             `{}`,
-		MethodLiveshareSharesTestRelay:         `{}`,
+		MethodLiveshareSharesAddSessions:  `{"request":{"shareId":"sh-1","sessionIds":["s-1"]}}`,
+		MethodLiveshareSharesCapabilities: `{}`,
+		MethodLiveshareSharesList:         `{}`,
+		MethodLiveshareSharesRelay:        `{}`,
+		MethodLiveshareSharesTestRelay:    `{}`,
 	}
 }
 

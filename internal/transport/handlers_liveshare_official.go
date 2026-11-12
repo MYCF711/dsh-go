@@ -789,7 +789,7 @@ func parseLiveshareCreate(p *officialParams) (OfficialLiveshareCreateRequest, er
 // 官方实现（`owner-share-operations.ts:408-449`）的三条前置校验在这里就已经
 // 落成 400，宿主拿到的一定是"有 shareId + 至少一个非空 sessionId"的请求：
 //
-//   - `shareId === ''` → `liveshareShares/missing-share-id`；
+//   - `shareId === ”` → `liveshareShares/missing-share-id`；
 //   - 去重后为空 → `liveshareShares/missing-session-ids`；
 //   - 任一项是空串 → 同上。
 //

@@ -206,12 +206,174 @@ type graphqlReviewLimits struct {
 	bytes   int
 }
 
-// graphqlChangeRequestReview 是官方 readReview 的真实实现。
+// gqlReviewThreadRead 是一条读完的 review thread：节点 + 它的全部评论。
+type gqlReviewThreadRead struct {
+	Node     gqlReviewThread
+	Comments []gqlReviewComment
+}
+
+// gqlReviewThreadsRead 是一次 review thread 读的完整结果。
+//
+// **ChangeRequestReview 与 ChangeRequestChecks 共用它**（G2 要求）：review thread
+// 的文档、分页、每页再报 head 的校验、字节预算与截断口径只有这一份实现，不存在
+// 第二套查询。
+type gqlReviewThreadsRead struct {
+	// Threads 是读到的 thread（每条的评论都已读全；官方只收有评论的 thread）。
+	Threads []gqlReviewThreadRead
+	// Truncated 是官方 `truncated`：达到 maxReviewThreads 或字节预算而还有
+	// thread 没读（为真时 Threads 里数出的未解决数只是下界）。
+	Truncated bool
+	// HeadRefOID 是这次读看到的 head（首页与每个 thread 后续页都报）。
+	HeadRefOID string
+	// Viewer 是当前登录名（没有时 nil）。
+	Viewer any
+	// PendingReview 是当前用户的 pending review（没有时 nil）。
+	PendingReview any
+	// ViewerCanReview 是"能不能评审"（归档 / 锁定的仓库权限规则）。
+	ViewerCanReview bool
+}
+
+// Unresolved 是官方 unresolvedThreads 的口径（graphql.ts:554）：读到的 thread 里
+// 未 resolve 的条数。Truncated 为真时它是下界——官方 types.ts:169-171 就是拿它
+// 定义 threadsTruncated 的。
+func (r gqlReviewThreadsRead) Unresolved() int {
+	count := 0
+	for _, thread := range r.Threads {
+		if !thread.Node.IsResolved {
+			count++
+		}
+	}
+	return count
+}
+
+// graphqlReadReviewThreads 是 review thread 读的**唯一实现**。
 //
 // 与官方 threads.ts:145-200 同构：首页确认 head；每条 thread 的评论读全；
 // thread 分页每页再确认 head；达到 maxReviewThreads 或没有下一页就收尾，
 // truncated 取"任务还没读完"的那个事实（达到页数上限时看 pageInfo.hasNextPage，
 // 字节预算用完时恒 true）。字节预算按每次应答的原始 JSON 计。
+func (p *ChangeRequestProvider) graphqlReadReviewThreads(ctx context.Context, ref changeRequestRef, headSHA string) (gqlReviewThreadsRead, error) {
+	limits := graphqlReviewLimits{threads: p.graphqlMaxThreads(), bytes: p.graphqlMaxBytes()}
+	raw, used, err := p.graphqlReadSized(ctx, ref, graphqlReviewQuery, map[string]any{
+		"owner": ref.Owner, "name": ref.Repo, "number": ref.Number,
+		"first": min(graphqlPageSize, limits.threads),
+	})
+	if err != nil {
+		return gqlReviewThreadsRead{}, err
+	}
+	var page gqlReviewFirstPage
+	if err := json.Unmarshal(raw, &page); err != nil {
+		return gqlReviewThreadsRead{}, graphqlUnexpected("review thread read")
+	}
+	if page.Repository == nil || page.Repository.PullRequest == nil {
+		return gqlReviewThreadsRead{}, graphqlNotFound(ref.Number)
+	}
+	pull := page.Repository.PullRequest
+	if moved := graphqlStale(headSHA, pull.HeadRefOID); moved != nil {
+		return gqlReviewThreadsRead{}, moved
+	}
+	var viewer any
+	if page.Viewer != nil {
+		viewer = page.Viewer.Login
+	}
+	var pendingReview any
+	for _, review := range pull.Reviews.Nodes {
+		if review.ViewerDidAuthor {
+			pendingReview = map[string]any{"id": review.ID, "comments": review.Comments.TotalCount}
+			break
+		}
+	}
+	permission := ""
+	if page.Repository.ViewerPermission != nil {
+		permission = *page.Repository.ViewerPermission
+	}
+	read := gqlReviewThreadsRead{
+		Threads:    []gqlReviewThreadRead{},
+		HeadRefOID: pull.HeadRefOID,
+		Viewer:     viewer, PendingReview: pendingReview,
+		ViewerCanReview: !page.Repository.IsArchived && (!pull.Locked || graphqlReviewWriters[permission]),
+	}
+	// 首页本身就超预算：官方按 too-large 失败（不能只给半页冒充读到了）。
+	if used > limits.bytes {
+		return gqlReviewThreadsRead{}, graphqlReviewTooLarge(limits.bytes)
+	}
+	current := pull.ReviewThreads
+	cursors := map[string]bool{}
+	for {
+		for index := range current.Nodes {
+			if len(read.Threads) >= limits.threads {
+				break
+			}
+			node := current.Nodes[index]
+			comments := make([]gqlReviewComment, 0, len(node.Comments.Nodes))
+			comments = append(comments, node.Comments.Nodes...)
+			more := node.Comments.PageInfo
+			commentCursors := map[string]bool{}
+			for more.HasNextPage {
+				cursor := more.EndCursor
+				if cursor == nil || commentCursors[*cursor] {
+					return gqlReviewThreadsRead{}, &ForgeHTTPError{Status: http.StatusBadGateway, Code: "provider_error",
+						Message: "GitHub review comment pagination did not advance"}
+				}
+				commentCursors[*cursor] = true
+				next, size, err := p.graphqlReadSized(ctx, ref, graphqlReviewCommentsQuery, map[string]any{
+					"id": node.ID, "cursor": *cursor,
+				})
+				if err != nil {
+					return gqlReviewThreadsRead{}, err
+				}
+				var commentPage gqlReviewCommentNextPage
+				if err := json.Unmarshal(next, &commentPage); err != nil || commentPage.Node == nil {
+					return gqlReviewThreadsRead{}, graphqlUnexpected("review comment read")
+				}
+				used += size
+				if used > limits.bytes {
+					read.Truncated = true
+					return read, nil
+				}
+				comments = append(comments, commentPage.Node.Comments.Nodes...)
+				more = commentPage.Node.Comments.PageInfo
+			}
+			if len(comments) > 0 {
+				read.Threads = append(read.Threads, gqlReviewThreadRead{Node: node, Comments: comments})
+			}
+		}
+		if len(read.Threads) >= limits.threads || !current.PageInfo.HasNextPage {
+			read.Truncated = current.PageInfo.HasNextPage
+			return read, nil
+		}
+		cursor := current.PageInfo.EndCursor
+		if cursor == nil || cursors[*cursor] {
+			return gqlReviewThreadsRead{}, &ForgeHTTPError{Status: http.StatusBadGateway, Code: "provider_error",
+				Message: "GitHub review thread pagination did not advance"}
+		}
+		cursors[*cursor] = true
+		next, size, err := p.graphqlReadSized(ctx, ref, graphqlReviewThreadsQuery, map[string]any{
+			"id": pull.ID, "cursor": *cursor,
+			"first": min(graphqlPageSize, limits.threads-len(read.Threads)),
+		})
+		if err != nil {
+			return gqlReviewThreadsRead{}, err
+		}
+		var following gqlReviewThreadNextPage
+		if err := json.Unmarshal(next, &following); err != nil || following.Node == nil {
+			return gqlReviewThreadsRead{}, graphqlUnexpected("review thread page read")
+		}
+		// 后续页必须再报 head：读的过程中 head 动了就是 stale（不许混两个 head）。
+		if moved := graphqlStale(headSHA, following.Node.HeadRefOID); moved != nil {
+			return gqlReviewThreadsRead{}, moved
+		}
+		used += size
+		if used > limits.bytes {
+			read.Truncated = true
+			return read, nil
+		}
+		current = following.Node.ReviewThreads
+	}
+}
+
+// graphqlChangeRequestReview 是官方 readReview 的真实实现：校验入参后走共用的
+// thread 读，再映射成官方 ForgeReviewData 的 JSON 形状。
 func (p *ChangeRequestProvider) graphqlChangeRequestReview(ctx context.Context, params transport.OfficialForgeChangeRequestParams, headSHA string) (map[string]any, error) {
 	ref, err := parseChangeRequestURL(params.URL)
 	if err != nil {
@@ -229,117 +391,15 @@ func (p *ChangeRequestProvider) graphqlChangeRequestReview(ctx context.Context, 
 		return nil, &ForgeHTTPError{Status: http.StatusBadRequest, Code: "invalid_spec",
 			Message: "headSha 不是完整 commit object name: " + headSHA}
 	}
-	limits := graphqlReviewLimits{threads: p.graphqlMaxThreads(), bytes: p.graphqlMaxBytes()}
-	raw, used, err := p.graphqlReadSized(ctx, ref, graphqlReviewQuery, map[string]any{
-		"owner": ref.Owner, "name": ref.Repo, "number": ref.Number,
-		"first": min(graphqlPageSize, limits.threads),
-	})
+	read, err := p.graphqlReadReviewThreads(ctx, ref, headSHA)
 	if err != nil {
 		return nil, err
 	}
-	var page gqlReviewFirstPage
-	if err := json.Unmarshal(raw, &page); err != nil {
-		return nil, graphqlUnexpected("review thread read")
+	threads := make([]any, 0, len(read.Threads))
+	for _, thread := range read.Threads {
+		threads = append(threads, gqlReviewThreadValue(thread.Node, thread.Comments, headSHA))
 	}
-	if page.Repository == nil || page.Repository.PullRequest == nil {
-		return nil, graphqlNotFound(ref.Number)
-	}
-	pull := page.Repository.PullRequest
-	if moved := graphqlStale(headSHA, pull.HeadRefOID); moved != nil {
-		return nil, moved
-	}
-	var viewer any
-	if page.Viewer != nil {
-		viewer = page.Viewer.Login
-	}
-	var pendingReview any
-	for _, review := range pull.Reviews.Nodes {
-		if review.ViewerDidAuthor {
-			pendingReview = map[string]any{"id": review.ID, "comments": review.Comments.TotalCount}
-			break
-		}
-	}
-	permission := ""
-	if page.Repository.ViewerPermission != nil {
-		permission = *page.Repository.ViewerPermission
-	}
-	viewerCanReview := !page.Repository.IsArchived && (!pull.Locked || graphqlReviewWriters[permission])
-	// 首页本身就超预算：官方按 too-large 失败（不能只给半页冒充读到了）。
-	if used > limits.bytes {
-		return nil, graphqlReviewTooLarge(limits.bytes)
-	}
-	threads := []any{}
-	current := pull.ReviewThreads
-	cursors := map[string]bool{}
-	for {
-		for index := range current.Nodes {
-			if len(threads) >= limits.threads {
-				break
-			}
-			node := current.Nodes[index]
-			comments := make([]gqlReviewComment, 0, len(node.Comments.Nodes))
-			comments = append(comments, node.Comments.Nodes...)
-			more := node.Comments.PageInfo
-			commentCursors := map[string]bool{}
-			for more.HasNextPage {
-				cursor := more.EndCursor
-				if cursor == nil || commentCursors[*cursor] {
-					return nil, &ForgeHTTPError{Status: http.StatusBadGateway, Code: "provider_error",
-						Message: "GitHub review comment pagination did not advance"}
-				}
-				commentCursors[*cursor] = true
-				next, size, err := p.graphqlReadSized(ctx, ref, graphqlReviewCommentsQuery, map[string]any{
-					"id": node.ID, "cursor": *cursor,
-				})
-				if err != nil {
-					return nil, err
-				}
-				var commentPage gqlReviewCommentNextPage
-				if err := json.Unmarshal(next, &commentPage); err != nil || commentPage.Node == nil {
-					return nil, graphqlUnexpected("review comment read")
-				}
-				used += size
-				if used > limits.bytes {
-					return graphqlReviewValue(headSHA, viewer, threads, true, pendingReview, viewerCanReview), nil
-				}
-				comments = append(comments, commentPage.Node.Comments.Nodes...)
-				more = commentPage.Node.Comments.PageInfo
-			}
-			if len(comments) > 0 {
-				threads = append(threads, gqlReviewThreadValue(node, comments, headSHA))
-			}
-		}
-		if len(threads) >= limits.threads || !current.PageInfo.HasNextPage {
-			return graphqlReviewValue(headSHA, viewer, threads, current.PageInfo.HasNextPage,
-				pendingReview, viewerCanReview), nil
-		}
-		cursor := current.PageInfo.EndCursor
-		if cursor == nil || cursors[*cursor] {
-			return nil, &ForgeHTTPError{Status: http.StatusBadGateway, Code: "provider_error",
-				Message: "GitHub review thread pagination did not advance"}
-		}
-		cursors[*cursor] = true
-		next, size, err := p.graphqlReadSized(ctx, ref, graphqlReviewThreadsQuery, map[string]any{
-			"id": pull.ID, "cursor": *cursor,
-			"first": min(graphqlPageSize, limits.threads-len(threads)),
-		})
-		if err != nil {
-			return nil, err
-		}
-		var following gqlReviewThreadNextPage
-		if err := json.Unmarshal(next, &following); err != nil || following.Node == nil {
-			return nil, graphqlUnexpected("review thread page read")
-		}
-		// 后续页必须再报 head：读的过程中 head 动了就是 stale（不许混两个 head）。
-		if moved := graphqlStale(headSHA, following.Node.HeadRefOID); moved != nil {
-			return nil, moved
-		}
-		used += size
-		if used > limits.bytes {
-			return graphqlReviewValue(headSHA, viewer, threads, true, pendingReview, viewerCanReview), nil
-		}
-		current = following.Node.ReviewThreads
-	}
+	return graphqlReviewValue(headSHA, read.Viewer, threads, read.Truncated, read.PendingReview, read.ViewerCanReview), nil
 }
 
 // graphqlReviewValue 收敛官方 ForgeReviewData 的 JSON 形状（camelCase）。

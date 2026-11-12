@@ -1517,6 +1517,11 @@ type fakeArchiveWorktree struct {
 	stateErr   error
 	restoreErr error
 	restored   []string
+
+	// 取消点（官方 archive.ts:87-93）：默认"没有在途尝试"（零值 = no-op）。
+	cancelErr    error
+	cancellation worktree.CleanupCancellation
+	cancelled    []string
 }
 
 func (f *fakeArchiveWorktree) State(string) (worktree.State, error) {
@@ -1524,6 +1529,11 @@ func (f *fakeArchiveWorktree) State(string) (worktree.State, error) {
 		return worktree.State{}, f.stateErr
 	}
 	return f.state, nil
+}
+
+func (f *fakeArchiveWorktree) CancelArchiveCleanup(sessionID string) (worktree.CleanupCancellation, error) {
+	f.cancelled = append(f.cancelled, sessionID)
+	return f.cancellation, f.cancelErr
 }
 
 func (f *fakeArchiveWorktree) RestoreWorktree(sessionID string) error {
@@ -1723,5 +1733,11 @@ func TestOfficialWorkspaceConcurrentUnarchiveBroadcastsOnce(t *testing.T) {
 	requireJournalEvent(t, f.journals, sessionID, "workspace/session-unarchiving")
 	if len(fake.restored) != 1 {
 		t.Fatalf("并发反归档只该恢复一次工作树，实际 %d 次：%v", len(fake.restored), fake.restored)
+	}
+	// 取消点同样只准入一次：并发里第二个调用看到的是"已经不在归档集"，直接解析
+	// （官方 index.ts:426 的提前 return），不会再去取消/恢复第二遍。
+	if len(fake.cancelled) != 1 {
+		t.Fatalf("并发反归档只该调一次 CancelArchiveCleanup，实际 %d 次：%v",
+			len(fake.cancelled), fake.cancelled)
 	}
 }

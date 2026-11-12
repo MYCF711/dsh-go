@@ -398,8 +398,13 @@ func TestSnapshotRC2Fields(t *testing.T) {
 	if !snapshot.CanRequestReviews {
 		t.Fatal("open + token 应 canRequestReviews=true")
 	}
+	// 这台桩没有 /graphql：GraphQL 不可用 → 退回 REST 下界（unresolvedThreads=0
+	// 且 threadsTruncated=true）。真值路径由 graphql_checks_test.go 覆盖。
 	if !snapshot.ThreadsTruncated {
-		t.Fatal("REST 无 review-thread 解析态，threadsTruncated 必须 true（unresolvedThreads 只是下界）")
+		t.Fatal("GraphQL 不可用时 threadsTruncated 必须 true（unresolvedThreads 只是下界）")
+	}
+	if snapshot.UnresolvedThreads != 0 {
+		t.Fatalf("GraphQL 不可用时 unresolvedThreads 只能是下界 0，实际 %d", snapshot.UnresolvedThreads)
 	}
 	if snapshot.ReviewersTruncated {
 		t.Fatal("reviews/requested_reviewers 一次拿全，不该声称截断")

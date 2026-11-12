@@ -417,7 +417,6 @@ func mapLiveshareError(err error) error {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // addSessions：一条已发布 share 的"源会话集合"
 // ---------------------------------------------------------------------------
@@ -474,7 +473,7 @@ type liveshareOwnerShare struct {
 }
 
 type liveshareOwnerStateDoc struct {
-	Version int                  `json:"version"`
+	Version int                   `json:"version"`
 	Shares  []liveshareOwnerShare `json:"shares"`
 }
 

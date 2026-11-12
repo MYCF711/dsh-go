@@ -70,8 +70,8 @@ func toStringKey(value any) string {
 	}
 }
 
-func itoa(value int) string      { raw, _ := json.Marshal(value); return string(raw) }
-func itoa64(value int64) string  { raw, _ := json.Marshal(value); return string(raw) }
+func itoa(value int) string     { raw, _ := json.Marshal(value); return string(raw) }
+func itoa64(value int64) string { raw, _ := json.Marshal(value); return string(raw) }
 
 // resolveEnvelopeNode 解析 int 形式的 ref（envelope 走 JSON 后 uid 是数字，Go 侧
 // 构造时可能是 int，两者都要认）。

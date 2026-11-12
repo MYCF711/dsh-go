@@ -435,6 +435,18 @@ func rerunIdentity(run githubCheckRun) *string {
 	return nil
 }
 
+// ThreadsCapableWhen 说明 `unresolvedThreads` / `threadsTruncated` 什么时候才是
+// **真值**（能力面说明，不是错误面）。
+//
+// 官方 ChangeRequestSnapshot 的这两个字段都取自 GraphQL 的 `reviewThreads`
+// （graphql.ts:554-555），而 threadsTruncated 的官方语义正是"unresolvedThreads
+// 只是下界"（dsh-experimental-forge/src/types.ts:169-171）。本 provider 在
+// GraphQL 不可用（没有凭据 / 请求失败 / head 在读的过程中移动）时退回 REST 下界：
+// `unresolvedThreads=0` 且 `threadsTruncated=true`。这条文案是给上层与报告展示
+// 的补救方式，绝不把下界伪装成已统计。
+const ThreadsCapableWhen = "unresolvedThreads 需要 GitHub GraphQL 读取 review threads：" +
+	"设置 GITHUB_TOKEN/GH_TOKEN，或先 `gh auth login`（REST 没有 review thread 解析态）"
+
 func (p *ChangeRequestProvider) checks(ctx context.Context, ref changeRequestRef, headSHA string) (OfficialChecks, error) {
 	pr, err := p.fetchPR(ctx, ref)
 	if err != nil {
@@ -529,6 +541,17 @@ func (p *ChangeRequestProvider) checks(ctx context.Context, ref changeRequestRef
 			pending = true
 		}
 	}
+	// unresolvedThreads / threadsTruncated 只有 GraphQL 能给出真值：官方
+	// ChangeRequestSnapshot 的这两个字段都取自 reviewThreads
+	// （graphql.ts:554-555）。这里与 changeRequestReview **共用同一份 thread 读取
+	// 实现**（graphqlReadReviewThreads），不是两套查询。读不到就退回 REST 下界：
+	// unresolvedThreads=0、threadsTruncated=true —— 官方 threadsTruncated 的语义
+	// 就是"unresolvedThreads 是下界"（types.ts:169-171），所以降级必须置真，
+	// 绝不把下界伪装成已统计（补救方式见 ThreadsCapableWhen）。
+	unresolvedThreads, threadsTruncated := 0, true
+	if threads, err := p.graphqlReadReviewThreads(ctx, ref, pr.Head.SHA); err == nil {
+		unresolvedThreads, threadsTruncated = threads.Unresolved(), threads.Truncated
+	}
 	res := transport.OfficialForgeChangeRequestChecks{
 		Ref: transport.OfficialForgeChangeRequestRef{Forge: "github", Host: ref.Host, Owner: ref.Owner, Name: ref.Repo, Number: pr.Number},
 		URL: pr.HTMLURL, Title: pr.Title, State: state, Draft: pr.Draft, Author: author,
@@ -536,7 +559,7 @@ func (p *ChangeRequestProvider) checks(ctx context.Context, ref changeRequestRef
 		Additions: pr.Additions, Deletions: pr.Deletions, Mergeability: mergeability,
 		MergeReady:     state == "open" && !pr.Draft && mergeability == "mergeable" && decision != "changes-requested" && rollup != "failure",
 		ReviewDecision: decision, Checks: checks, ChecksRollup: rollup,
-		ChecksTruncated: runs.TotalCount > len(checks), UnresolvedThreads: 0,
+		ChecksTruncated: runs.TotalCount > len(checks), UnresolvedThreads: unresolvedThreads,
 		UpdatedAt: pr.UpdatedAt, ClosedAt: closedAt,
 
 		BaseSHA:       baseSHA,
@@ -548,9 +571,9 @@ func (p *ChangeRequestProvider) checks(ctx context.Context, ref changeRequestRef
 		// 派生能力位，不是权限位：open + 有 token（官方同样只按可否调用判断）。
 		CanRequestReviews: state == "open" && strings.TrimSpace(p.Token) != "",
 		CanRerunChecks:    canRerun && !pending,
-		// 官方 threadsTruncated：REST 没有 review-thread 的解析态，unresolvedThreads
-		// 只能是下界 0，因此**必须**报截断，不能把它说成"已统计"。
-		ThreadsTruncated: true,
+		// 官方 threadsTruncated 的口径（graphql.ts:555）：只有还有 review thread
+		// 没读到时才为真。GraphQL 不可用 → 上面的降级分支固定 true。
+		ThreadsTruncated: threadsTruncated,
 		// closingIssues 只能来自 GraphQL 的 closingIssuesReferences；官方 migration
 		// 允许 host 不给时用空数组 + false，这里不编造 issue。
 		ClosingIssues:          []transport.OfficialForgeChangeRequestIssue{},

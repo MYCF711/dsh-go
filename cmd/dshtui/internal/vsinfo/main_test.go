@@ -58,7 +58,6 @@ func TestResourceSectionAligned(t *testing.T) {
 	}
 }
 
-
 // 版本形态：宿主/界面每次发布都会换号，而 `.syso` 的 VS 版本资源是**构建期**生成的。
 // 三代形态都要能拆：`0.2.1-go.30`（老）、`0.2.2-go.2`（无上游 rc）、
 // `<x.y.z-rc.N>-gobeta.<N>` 与 `<x.y.z-rc.N>-go.<N>`（上游带 rc，任务途中用 gobeta、稳定版用 go）。

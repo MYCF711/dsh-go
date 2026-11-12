@@ -132,13 +132,13 @@ func TestSearchNameVersusPath(t *testing.T) {
 func TestSearchExcludedPathsAreLiteral(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
-		"build/out.txt":     "a",
+		"build/out.txt":      "a",
 		"sub/build/keep.txt": "b",
-		"gen/out.txt":       "c",
-		"other/gen/out.txt": "d",
-		"a[b].txt":          "e",
-		"ab.txt":            "f",
-		"!bang.txt":         "g",
+		"gen/out.txt":        "c",
+		"other/gen/out.txt":  "d",
+		"a[b].txt":           "e",
+		"ab.txt":             "f",
+		"!bang.txt":          "g",
 	})
 	// 1) 不含 `/`：任意深度同名（目录命中即整棵子树排除）。
 	res := searchNoIgnore(t, root, Request{Query: "txt", ExcludedPaths: []string{"build"}})
@@ -214,12 +214,12 @@ func TestSearchHiddenSwitch(t *testing.T) {
 func TestSearchVCSAlwaysExcluded(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
-		".git/a.txt":  "t",
-		".svn/b.txt":  "t",
-		".hg/c.txt":   "t",
-		".bzr/d.txt":  "t",
-		".jj/e.txt":   "t",
-		".sl/f.txt":   "t",
+		".git/a.txt":   "t",
+		".svn/b.txt":   "t",
+		".hg/c.txt":    "t",
+		".bzr/d.txt":   "t",
+		".jj/e.txt":    "t",
+		".sl/f.txt":    "t",
 		"normal/g.txt": "t",
 	})
 	res := searchNoIgnore(t, root, Request{Query: "txt", IncludeHidden: true})
@@ -235,10 +235,10 @@ func TestSearchVCSAlwaysExcluded(t *testing.T) {
 func TestSearchSortDepthThenPath(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
-		"b/a/z.txt":  "t",
-		"b/z2.txt":   "t",
-		"a.txt":      "t",
-		"z/y.txt":    "t",
+		"b/a/z.txt":   "t",
+		"b/z2.txt":    "t",
+		"a.txt":       "t",
+		"z/y.txt":     "t",
 		"alpha/q.txt": "q", // 目录 alpha 只由文件推导，但 "q.txt" 不含 "t"?? 它含 t
 	})
 	res := searchNoIgnore(t, root, Request{Query: "txt"})

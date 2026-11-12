@@ -169,8 +169,8 @@ func TestMarketSearchRowsAlwaysCarryUpdate(t *testing.T) {
 // fakeRepositoryReader 是仓库读取的最小替身：只验 market 侧编排，真实 git 与
 // SSH 回退的证据在 internal/pluginmgr/official/repository_cache_test.go。
 type fakeRepositoryReader struct {
-	files    map[string]string
-	failures error
+	files     map[string]string
+	failures  error
 	requested []string
 }
 

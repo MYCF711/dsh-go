@@ -17,6 +17,16 @@
   - `docs/evidence/official-ui-plugins-0.2.2-rc.2.txt`（66）
   - `docs/evidence/official-method-contract-delta-0.2.2-rc.2.md`（+35/−5 全契约 + 32 条结构变更逐字段）
 
+### 第三轮收口（同日）：归档清理取消 + Forge 线程数改真值
+
+- **归档清理取消**：`internal/worktree` 新增 `CancelArchiveCleanup`（官方 `archive.ts:87-93` 语义：
+  置 `cancelled` → await 结算 → 收走 attempt），与准入判据共用同一把锁，取消与准入不可能同时为真；
+  反归档顺序改为「广播 `session-unarchiving` → 取消/结算 → 落盘移出 → 必要时恢复工作树」。
+  真 git 三条端到端：取消成功不改任何东西 / 取消来晚走 `RestoreWorktree` 恢复 / 来晚且恢复失败如实 500。
+- **Forge `unresolvedThreads`、`threadsTruncated`**：从 REST 下界改为 **GraphQL 真值**，与 `changeRequestReview`
+  共用同一份 thread 读取实现（GraphQL 文档逐字相同）；降级时只允许 `0 + true`（下界），绝不允许 `0 + false`。
+  真机核对 `cli/cli#15001`：`unresolvedThreads=0`、`threadsTruncated=false`，与 `gh api graphql` 独立查询一致。
+
 ### 第二轮收口（同日）：三个已知缺口关闭 + 全量 `-race` 转绿
 
 - **Forge 审阅面**：补最小 GraphQL 客户端（**零新依赖**），`changeRequestReview` / `changeRequestReviewWrite` /

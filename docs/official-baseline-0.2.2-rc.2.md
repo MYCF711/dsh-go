@@ -133,8 +133,11 @@
 6. ~~**反归档取消**~~ → **已关闭**：`workspace/session-unarchiving` 事件已实现并在 WS/journal 可见（真 `/ws` 收到帧）；
    与归档清理状态机协同：checkout 已被清理 → 走官方 `worktree.Service.RestoreWorktree`，成功打印重建行、
    失败 500 且 message 含真实目录/git 错误/当前归档集，可 `forgePanel.restoreWorktree` 重试（不静默成功）。
-   **仍缺**：`internal/worktree` 没有 `CancelArchiveCleanup`（官方 `archive.ts:87-93` 会取消未准入的移除并 await 结算），
-   该窗口现用"先落盘 + 官方恢复 + 如实报告"兜住，已登记。
+   **取消语义已补齐**（第三轮）：`internal/worktree` 新增 `CancelArchiveCleanup`，逐条对齐官方 `archive.ts:87-93`
+   （无 attempt → 置 `cancelled` → `await done` → 收走 attempt），置位与两处准入判据共用同一把锁 →
+   **取消与准入不可能同时为真**；真 git 端到端三条：取消成功（目录/`worktree list`/分支全不变）、
+   取消来晚（已删 → `RestoreWorktree` 恢复，注册回 1 条且 HEAD 是原分支）、来晚+恢复失败（500 带真实
+   `fatal: … is already used by worktree`）。
 
 ### 5.2 第二轮收口（2026-11-12 07:4x–07:5x）
 
@@ -144,6 +147,16 @@
 | `retryPolicy` 写入面 | ✅ 可写并真生效（重试次数实测变化） | `tmp/GO8-RC2/reports/F2-retrypolicy-write.md` |
 | `workspace/session-unarchiving` | ✅ 事件 + 工作树恢复协同（WS 可见） | `tmp/GO8-RC2/reports/F3-unarchive-event.md` |
 | `-race` 全量 | ✅ **MinGW 路径下 90 包全绿 / RACE=0 / 0 FAIL**（第一轮 89 包 + 本轮新增 `internal/settings`） | `/tmp/g8-race.log`、`/tmp/g8i-race.log`（命令见下） |
+
+### 5.2b 第三轮收口（2026-11-12 08:3x）
+
+| 缺口 | 结论 | 证据 |
+|---|---|---|
+| `CancelArchiveCleanup`（归档清理取消） | ✅ 官方语义对齐 + 真 git 三条端到端 | `tmp/GO8-RC2/reports/G1-cancel-cleanup.md` |
+| Forge `unresolvedThreads`/`threadsTruncated` REST 下界 | ✅ 改 GraphQL 真值；与 `changeRequestReview` 共用同一份 thread 读取（查询文档逐字相同）；降级时只允许 `0+true`，绝不允许 `0+false` | `tmp/GO8-RC2/reports/G2-checks-threads.md` |
+
+真机取证（`cli/cli#15001`，head `ebec7950…`）：`unresolvedThreads=0`、`threadsTruncated=false`（9 checks / rollup success），
+与 `gh api graphql` 独立核对的 `reviewThreads.totalCount=2`（全 resolved）一致。
 
 ### 5.3 发布链路已验证（2026-11-12 08:2x，未改版本号）
 
