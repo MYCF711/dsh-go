@@ -63,13 +63,24 @@ func gitRun(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func newRepo(t *testing.T) string {
+// initRepo 建一个仓库，并把提交身份**写在仓库本地配置里**。
+//
+// 不能依赖 runner 的全局 user.name/user.email：GitHub Windows runner 没有全局身份，
+// 新建仓库里的第一次 `git commit` 会以 `Author identity unknown` 128 退出
+// （2026-11-12 run 43191452874 的 TestArchiveCleanupFailedReportsStructured 就是这么红的：
+// 它自己 `git init` 了一个嵌套仓库，全局配置在本机有、在 CI 没有）。
+func initRepo(t *testing.T, dir string) {
 	t.Helper()
-	dir := t.TempDir()
 	gitRun(t, dir, "init", "-q")
 	gitRun(t, dir, "config", "user.email", "t103@example.com")
 	gitRun(t, dir, "config", "user.name", "T103")
 	gitRun(t, dir, "config", "commit.gpgsign", "false")
+}
+
+func newRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	initRepo(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello worktree\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

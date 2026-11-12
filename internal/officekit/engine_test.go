@@ -11,7 +11,13 @@ import (
 // writeFakeEngine 造一个结构合法的引擎包（不真的能跑，只验发现/校验逻辑）。
 func writeFakeEngine(t *testing.T, mutate func(manifest map[string]any)) string {
 	t.Helper()
-	root := t.TempDir()
+	return writeFakeEngineAt(t, t.TempDir(), mutate)
+}
+
+// writeFakeEngineAt 在指定包根写一个结构合法的引擎包（给"包在 node_modules 里"的
+// 布局用：那种用例必须自己带完整包，不能靠本机已装的真引擎兜底）。
+func writeFakeEngineAt(t *testing.T, root string, mutate func(manifest map[string]any)) string {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -63,25 +69,30 @@ func TestDiscoverValidEngine(t *testing.T) {
 }
 
 // 四种显式写法都必须认：包根、@deepseek-ai 目录、node_modules 根、可执行文件本身。
+//
+// **夹具必须自成一个完整引擎包，并且把自动发现关掉**（SearchRoots 指向空目录 +
+// 清掉 DSHD_OFFICE_KIT_ENGINE）。旧写法只在临时目录里 mkdir 了一层空包目录，
+// 四种写法里三种其实解析不出来，靠的是 `Discover` 失败后回落到默认自动发现、
+// 在本开发机上扫到了已安装的真引擎才"绿"——CI 的 runner 没有那份安装，
+// 于是 2026-11-12 run 43191452874 上红。测试自己假设了本机环境，改的就是这里。
 func TestDiscoverExplicitForms(t *testing.T) {
-	root := writeFakeEngine(t, nil)
-	deepseek := filepath.Join(root, "node_modules", "@deepseek-ai")
-	if err := os.MkdirAll(deepseek, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	packageRoot := filepath.Join(deepseek, "libreoffice-kit-"+TargetPlatformSuffix())
-	if err := os.MkdirAll(packageRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	root := t.TempDir()
+	packageRoot := filepath.Join(root, "node_modules", "@deepseek-ai", "libreoffice-kit-"+TargetPlatformSuffix())
+	writeFakeEngineAt(t, packageRoot, nil)
+	t.Setenv(EngineEnvVar, "")
+	noAutoDiscovery := t.TempDir()
 	for _, path := range []string{
-		root,
-		deepseek,
 		packageRoot,
-		filepath.Join(root, "bin", "dsoffice.exe"),
+		filepath.Dir(packageRoot), // @deepseek-ai
+		root,                      // node_modules 根
+		filepath.Join(packageRoot, "bin", "dsoffice.exe"),
 	} {
-		engine, _ := Discover(DiscoverOptions{Explicit: path})
+		engine, tried := Discover(DiscoverOptions{Explicit: path, SearchRoots: []string{noAutoDiscovery}})
 		if engine == nil {
-			t.Fatalf("显式配置 %q 没被认出", path)
+			t.Fatalf("显式配置 %q 没被认出（自动发现已关掉，不能靠本机安装兜底）：tried=%v", path, tried)
+		}
+		if !strings.EqualFold(filepath.Clean(engine.Root), filepath.Clean(packageRoot)) {
+			t.Fatalf("显式配置 %q 解析到 %q，期望包根 %q", path, engine.Root, packageRoot)
 		}
 	}
 }

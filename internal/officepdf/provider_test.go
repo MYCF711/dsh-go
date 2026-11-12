@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"dshgo/internal/officekit"
 )
 
 // fixture 是 internal/officekit/testdata 里随测试一起进版本库的真 docx（985 字节）。
@@ -22,13 +24,27 @@ func fixture(t *testing.T) string {
 	return src
 }
 
+// requireEngine 是"真实原生引擎"用例的前置检查。
+//
+// 引擎是**本机安装件**（官方 `libreoffice-kit-<platform>/bin/dsoffice.exe`），
+// 不是仓内资产：开发机装了，GitHub windows-latest runner 没有。缺件时 skip 并
+// 把"试过哪些路径 + 怎么补救"打出来——这不是放宽断言：一旦发现引擎，下面的
+// 转换结果与字段断言一条都不少；缺件是环境事实，不是产品缺陷
+// （2026-11-12 run 43191452874：本机绿、CI 红，根因就是这里假定了本机安装）。
+func requireEngine(t *testing.T, p *Provider) {
+	t.Helper()
+	if p.Engine() != nil {
+		return
+	}
+	t.Skipf("本机没有 LibreOfficeKit 原生引擎（本机已验；CI runner 常缺 libreoffice-kit-%s/bin/dsoffice.exe）：tried=%v capableWhen=%s",
+		officekit.TargetPlatform(), p.Tried(), CapableWhen())
+}
+
 // TestEngineDiscovered 要求本机找到官方原生引擎（rc.2 起不再是 soffice/Word COM）。
 func TestEngineDiscovered(t *testing.T) {
 	p := Open(t.TempDir())
 	defer p.Close()
-	if p.Engine() == nil {
-		t.Fatalf("没发现 LibreOfficeKit 原生引擎：tried=%v capableWhen=%s", p.Tried(), CapableWhen())
-	}
+	requireEngine(t, p)
 	if p.GenerationID() == "" || strings.Contains(p.GenerationID(), "unavailable") {
 		t.Fatalf("generation 不合法：%q", p.GenerationID())
 	}
@@ -39,9 +55,7 @@ func TestRenderRealDocument(t *testing.T) {
 	src := fixture(t)
 	p := Open(t.TempDir())
 	defer p.Close()
-	if p.Engine() == nil {
-		t.Fatalf("没发现引擎：%v", p.Tried())
-	}
+	requireEngine(t, p)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	doc, err := p.Render(ctx, "", src, "foreground")

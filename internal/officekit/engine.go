@@ -282,6 +282,11 @@ func candidateRoots(abs string) []string {
 	}
 	add(abs)
 	if !isDir {
+		// 文件形态：<包根>/bin/dsoffice.exe（官方包里的可执行文件本身）→ 上两级才是包根。
+		// 只看父目录名是不是 bin：不钉文件名，省的换引擎名字时显式配置突然不认。
+		if parent := filepath.Dir(abs); strings.EqualFold(filepath.Base(parent), "bin") {
+			add(filepath.Dir(parent))
+		}
 		return roots
 	}
 	add(filepath.Join(abs, "@deepseek-ai", enginePackageDir))

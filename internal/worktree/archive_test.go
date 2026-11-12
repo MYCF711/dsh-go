@@ -323,7 +323,9 @@ func TestArchiveCleanupFailedReportsStructured(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(nested, "x.txt"), []byte("nested\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitRun(t, nested, "init", "-q")
+	// 嵌套仓库也要自带身份：runner 没有全局 user.name/user.email 时，
+	// 裸 `git init` + `git commit` 会以 "Author identity unknown" 128 退出。
+	initRepo(t, nested)
 	gitRun(t, nested, "add", "x.txt")
 	gitRun(t, nested, "commit", "-q", "-m", "nested init")
 	gitRun(t, dir, "add", "embedded")
