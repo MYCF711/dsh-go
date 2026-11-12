@@ -21,6 +21,9 @@ package transport
 //	       已在用的出口约定一致（该差异登记在报告里）。
 //	 语义：选择在 await 持久化**之前**生效；重复设置同值不重复 append
 //	       （`if (this.isEnabled(root) !== enabled)`）；非根 → TEAM_LEAD_REQUIRED。
+//	       **事件落盘不在这一层**：Transport 只做形状/错误信封，`team/mode`
+//	       的 v4 追加与 Transport journal 投影在宿主实现
+//	       （`cmd/dshd/serve_agent_api.go` 的 `agentTeamsSetEnabled`）。
 //	subagents/interruptByUser
 //	 参数：childSessionId（json string，**唯一参数**）——rc.1 的 parentSessionId/mode
 //	       是未知字段，必须被 strict 参数校验拒掉。

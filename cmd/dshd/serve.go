@@ -791,6 +791,9 @@ func cmdServe(args []string) error {
 	agentAPICore := newAgentOfficialAPICore(agentOfficialDeps{
 		home: *home, goals: goalOverrides, journals: journals, src: src,
 		sandboxPresets: sandboxPresets, sandboxStore: sandboxStore,
+		// Team 选择变更（`team/mode`）要同时进每会话 journal（可恢复）与 WS
+		// （在线订阅者立刻看到同一帧）。不接的话在线界面要等下一次轮询。
+		pub: srv.Publish,
 		submit: func(sessionID, text string) (transport.PromptResult, error) {
 			return prompts.Submit(context.Background(), sessionID, text)
 		},

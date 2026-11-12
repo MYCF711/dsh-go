@@ -85,6 +85,10 @@ type agentOfficialDeps struct {
 	// 必须清 **这份实例** 的覆盖，只清盘上新 store 不会生效（t143）。
 	sandboxPresets *modes.Registry
 	sandboxStore   *sandboxModeStore
+	// pub 是 WS 推送通道（`transport.Server.Publish`）。Team 选择变更要同时进
+	// 每会话 Transport journal（可恢复）与 WS（在线订阅者立刻看到）；为 nil 时
+	// 只入 journal（测试夹具用），生产由 serve.go 接上 `srv.Publish`。
+	pub func(topic string, frame transport.ServerFrame)
 }
 
 // agentOfficialAPI 持有进程内（**不持久化**）的 goal activation。
@@ -111,9 +115,11 @@ type agentOfficialAPI struct {
 	children         *transport.OfficialChildRegistry
 	questionWaits    *transport.OfficialQuestionWaits
 
-	// teamModes 是 rc.2 `agentTeams.setEnabled` 的**真实持久化**状态
-	// （<home>/state/agent-team-mode.json）。懒建，理由见 agentTeamModeStore。
-	teamModes *agentTeamModeStore
+	// teamModeMu 串行化 `agentTeams.setEnabled` 的"读投影 → 比较 → append"。
+	// 官方用 TeamJournal.transact 按 Lead 串行化同一件事；没有它，两个并发调用
+	// 会都看到旧值，各写一条同值 `team/mode`（投影幂等，但"用户改过一次"的事实
+	// 与 journal 帧都会多一份）。
+	teamModeMu sync.Mutex
 }
 
 // agentGoalTimes 是某个 goal id 的创建/最后变更时间（epoch 毫秒）。
@@ -831,144 +837,83 @@ func (a *agentOfficialAPI) subagentsInterruptByParent(childSessionID, parentSess
 // agentTeams.* / subagents.interruptByUser（官方 0.2.2-rc.2 的 Team 分派面）
 // ---------------------------------------------------------------------------
 
-// agentTeamModeDoc 是 `<home>/state/agent-team-mode.json` 的落盘形状。
+// agentTeamMode 读一个会话**官方投影**的 Team 模式（官方 `isEnabled` 的宿主投影）。
 //
-// 为什么是**宿主自己的**一份文档：官方把 Team 选择写成会话事件
-// `team/mode {enabled}`（`dsh-agent-team/src/index.ts:116`），而本仓的 v4 事件层
-// 与投影由另一条线负责（`internal/session` 不在本任务写作用域）。在事件落地之前，
-// 这里提供**真实、durable、可跨进程读回**的选择存储：它不假装那是 `team/mode`
-// 事件，也不让 `setEnabled` 变成"只在内存里记一下"。
+// 真相是**会话事件**：官方 `isEnabled`（`dsh-agent-team/src/index.ts:94-97`）读的是
+// `team/mode {enabled}` 的投影，从未出现过就是 false（`src/projection.ts:107` 的
+// `enabled: state.enabled === true`）。
 //
-// 事件层接上之后，本文件只需要在 setEnabled 里多 append 一条 `team/mode`
-// （接线说明见报告 B2 的"未实现项"），读路径可以继续用这份文档兜底。
-type agentTeamModeDoc struct {
-	Version  int                           `json:"version"`
-	Sessions map[string]agentTeamModeEntry `json:"sessions"`
-}
-
-// agentTeamModeEntry 是一个根会话的 Team 选择。
-type agentTeamModeEntry struct {
-	Enabled bool `json:"enabled"`
-	// UpdatedAt 是最近一次**真的改变**选择的时间（epoch ms）。重复设置同值不写盘
-	// （官方 `if (this.isEnabled(root) !== enabled)` 同义）。
-	UpdatedAt int64 `json:"updatedAt"`
-}
-
-// agentTeamModeStore 是 Team 选择的 durable 存储。
-//
-// 并发模型：一把 mutex 保护"读—比较—写"整段，落盘用同目录 tmp + rename
-// （agentWriteDoc），所以任何时刻盘上要么是旧值要么是新值，不会出现半截文档。
-type agentTeamModeStore struct {
-	mu     sync.Mutex
-	path   string
-	doc    agentTeamModeDoc
-	loaded bool
-}
-
-// newAgentTeamModeStore 造一个指向 <home>/state/agent-team-mode.json 的存储。
-func newAgentTeamModeStore(home string) *agentTeamModeStore {
-	return &agentTeamModeStore{
-		path: filepath.Join(home, "state", "agent-team-mode.json"),
-		doc:  agentTeamModeDoc{Version: agentTeamModeVersion, Sessions: map[string]agentTeamModeEntry{}},
-	}
-}
-
-// agentTeamModeVersion 是落盘文档版本；读到别的版本一律当"看不懂"报错，
-// 不猜（猜错会把用户的 Team 选择悄悄改掉）。
-const agentTeamModeVersion = 1
-
-// load 读一次盘（只读一次，之后走内存；写盘时同步更新内存）。
-func (s *agentTeamModeStore) load() error {
-	if s == nil {
-		return fmt.Errorf("%w: Team 选择存储没有装配", transport.ErrOfficialNotImplemented)
-	}
-	if s.loaded {
-		return nil
-	}
-	var doc agentTeamModeDoc
-	found, err := agentReadDoc(s.path, &doc)
+// 为什么不再保留 `<home>/state/agent-team-mode.json`：B2 那份文档是"v4 事件层还没
+// 落地"时的临时替代品。事件层（B3 的已知事件表/投影/WS 翻译）已经就绪，两份真值
+// 只会分叉，而界面 `session.projections` 读的是事件那份——分叉时用户看到的就是错的。
+func (a *agentOfficialAPI) agentTeamMode(sessionID string) (bool, error) {
+	events, err := a.agentReadEvents(sessionID)
 	if err != nil {
-		return fmt.Errorf("%w: %v", transport.ErrStatePersistence, err)
+		return false, err
 	}
-	if found {
-		if doc.Version != agentTeamModeVersion {
-			return fmt.Errorf("%w: %s 的 version=%d，本宿主只认 %d",
-				transport.ErrStatePersistence, s.path, doc.Version, agentTeamModeVersion)
+	enabled := false
+	for _, ev := range events {
+		if ev.Type != session.EventTeamMode {
+			continue
 		}
-		if doc.Sessions == nil {
-			doc.Sessions = map[string]agentTeamModeEntry{}
+		payload, err := session.ParseTeamModePayload(ev.Data)
+		if err != nil {
+			// 读不懂的历史事件不能当成"没设置过"：那会把用户打开的开关静默关掉。
+			return false, fmt.Errorf("%w: 会话 %s 的 team/mode（seq %d）载荷非法: %v",
+				transport.ErrStatePersistence, sessionID, ev.Seq, err)
 		}
+		enabled = payload.Enabled
 	}
-	s.doc = doc
-	if s.doc.Sessions == nil {
-		s.doc.Sessions = map[string]agentTeamModeEntry{}
+	return enabled, nil
+}
+
+// agentAppendTeamMode 把一次选择写成 durable `team/mode` 事件。
+//
+// 对应官方 `root.session.append('team/mode', {enabled})`
+// （`dsh-agent-team/src/index.ts:116`）；载荷用唯一构造点 `session.TeamModeEvent`
+// （形状 `{enabled:boolean}`——官方 `teamModeSchema` 是 strict，多一个键都不合法）。
+//
+// 落盘语义：`Log.Append` 把整帧交给 v4 codec（zstd 帧一次写完），返回 nil 就是
+// "已经在文件里"；返回错误时**没有**任何事件被追加，调用方据此不投影任何帧
+// （绝不出现"事件说开了但状态没变"）。
+func (a *agentOfficialAPI) agentAppendTeamMode(sessionID string, enabled bool) (err error) {
+	path, err := a.agentSessionPath(sessionID)
+	if err != nil {
+		return err
 	}
-	s.loaded = true
+	logw, err := session.OpenSessionAt(path)
+	if err != nil {
+		return fmt.Errorf("%w: 打开会话 %s 写 team/mode 失败: %v", transport.ErrStatePersistence, sessionID, err)
+	}
+	defer func() {
+		if closeErr := logw.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("%w: 关闭会话 %s 失败: %v", transport.ErrStatePersistence, sessionID, closeErr)
+		}
+	}()
+	if err := logw.Append(session.EventTeamMode, session.TeamModeEvent(enabled)); err != nil {
+		return fmt.Errorf("%w: 追加 team/mode 失败: %v", transport.ErrStatePersistence, err)
+	}
 	return nil
 }
 
-// get 读一个会话的选择；found=false 表示"从未设置"（官方默认 false）。
-func (s *agentTeamModeStore) get(sessionID string) (enabled, found bool, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.load(); err != nil {
-		return false, false, err
+// agentProjectTeamMode 把同一次选择投影进**每会话 Transport journal**（并推 WS）。
+//
+// 为什么 v4 之外还要这一步：v4 事件只让 `session.projections` / `session.page`
+// 看见；而 `session.history` 与 `/ws` 的 `session:<id>` 读的是 Transport journal
+// （docs/transport-contract.md §2：WS 与 history 必须是同一个 seq 域）。不投影，
+// 断线重连的客户端按 seq 补洞时就会**少一帧**，而且缺口看不出来。
+func (a *agentOfficialAPI) agentProjectTeamMode(sessionID string, enabled bool) error {
+	data, err := json.Marshal(session.TeamModeEvent(enabled))
+	if err != nil {
+		return fmt.Errorf("%w: 序列化 team/mode 载荷: %v", transport.ErrStatePersistence, err)
 	}
-	entry, ok := s.doc.Sessions[sessionID]
-	return entry.Enabled, ok, nil
-}
-
-// effective 是"当前生效的 Team 模式"：从未设置 = 官方默认 false。
-func (s *agentTeamModeStore) effective(sessionID string) (bool, error) {
-	enabled, _, err := s.get(sessionID)
-	return enabled, err
-}
-
-// set 持久化一次选择；同值不写盘（官方不重复 append）。
-// 返回 changed 表示这次是否真的改变了状态。
-func (s *agentTeamModeStore) set(sessionID string, enabled bool, now time.Time) (changed bool, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.load(); err != nil {
-		return false, err
+	if _, err := emitFrameResult(a.deps.journals, a.deps.pub, sessionID, session.EventTeamMode, data); err != nil {
+		// v4 事件已经落盘（官方语义：appended selection remains active）；这里失败
+		// 只说明**投影**没进 journal。报错让调用方知道，重试不会再 append 一条
+		// 重复事件（判据是 v4 投影，不是这份 journal）。
+		return fmt.Errorf("%w: team/mode 进 transport journal 失败: %v", transport.ErrStatePersistence, err)
 	}
-	if cur, ok := s.doc.Sessions[sessionID]; ok && cur.Enabled == enabled {
-		return false, nil
-	} else if !ok && !enabled {
-		// 默认就是 false；把 false 写成一条记录等于伪造一条"用户改过"的历史。
-		return false, nil
-	}
-	s.doc.Sessions[sessionID] = agentTeamModeEntry{Enabled: enabled, UpdatedAt: now.UnixMilli()}
-	if s.doc.Version == 0 {
-		s.doc.Version = agentTeamModeVersion
-	}
-	if err := agentWriteDoc(s.path, s.doc); err != nil {
-		// 写失败要回滚内存，否则内存说"开了"、盘上是旧的。
-		if enabled {
-			delete(s.doc.Sessions, sessionID)
-		} else {
-			s.doc.Sessions[sessionID] = agentTeamModeEntry{Enabled: !enabled, UpdatedAt: now.UnixMilli()}
-		}
-		return false, fmt.Errorf("%w: 写 %s 失败: %v", transport.ErrStatePersistence, s.path, err)
-	}
-	return true, nil
-}
-
-// teamModeStore 懒建 Team 选择存储（第一次用到时按 deps.home 装配）。
-func (a *agentOfficialAPI) teamModeStore() (*agentTeamModeStore, error) {
-	if a == nil {
-		return nil, fmt.Errorf("%w: 没有宿主对象", transport.ErrOfficialNotImplemented)
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.teamModes == nil {
-		if strings.TrimSpace(a.deps.home) == "" {
-			return nil, fmt.Errorf("%w: agentTeams.setEnabled 未接线：宿主没有 home 目录",
-				transport.ErrOfficialNotImplemented)
-		}
-		a.teamModes = newAgentTeamModeStore(a.deps.home)
-	}
-	return a.teamModes, nil
+	return nil
 }
 
 // agentTeamsSetEnabled 是官方 `agentTeams.setEnabled` 的宿主实现。
@@ -976,9 +921,12 @@ func (a *agentOfficialAPI) teamModeStore() (*agentTeamModeStore, error) {
 // 官方语义逐条落地（`dsh-agent-team/src/index.ts:111-118`）：
 //   - **只允许树根改**：root !== agent → TEAM_LEAD_REQUIRED（本宿主用它自己的
 //     durable `subagent/spawn` 记录判"是不是别人的子会话"，与 internal/agent 同源）；
-//   - "选择在持久化之前生效 + flush 后 fulfillment" → 这里写盘成功才算成功，
-//     写失败回 ErrStatePersistence（绝不报成功）；
-//   - 同值不重复 append。
+//   - `signal?.throwIfAborted()`：本仓方法没有 signal 参数，wire 层也不接受；
+//   - `if (this.isEnabled(root) !== enabled) root.session.append('team/mode', {enabled})`
+//     → **同值不重复 append**。判据就是 v4 投影本身（`agentTeamMode`），所以重复
+//     调用不会写出第二条同值事件，也不会在 journal 里多一帧；
+//   - `await this.ctx.sessions.flush(root.session)`：v4 追加是同步落盘，写失败回
+//     ErrStatePersistence 且**不**投影任何帧。
 func (a *agentOfficialAPI) agentTeamsSetEnabled(req transport.OfficialAgentTeamSetEnabledRequest) error {
 	sessionID := strings.TrimSpace(req.Agent)
 	if sessionID == "" {
@@ -994,24 +942,26 @@ func (a *agentOfficialAPI) agentTeamsSetEnabled(req transport.OfficialAgentTeamS
 	} else if isChild {
 		return transport.ErrOfficialTeamLeadRequired
 	}
-	store, err := a.teamModeStore()
+	// 串行化"读投影 → 比较 → append"（官方 TeamJournal.transact 的宿主对应物）。
+	a.teamModeMu.Lock()
+	defer a.teamModeMu.Unlock()
+	current, err := a.agentTeamMode(sessionID)
 	if err != nil {
 		return err
 	}
-	if _, err := store.set(sessionID, req.Enabled, time.Now()); err != nil {
+	if current == req.Enabled {
+		return nil
+	}
+	if err := a.agentAppendTeamMode(sessionID, req.Enabled); err != nil {
 		return err
 	}
-	return nil
+	return a.agentProjectTeamMode(sessionID, req.Enabled)
 }
 
 // agentTeamsIsEnabled 读一个会话**生效的** Team 模式（官方 `isEnabled` 的宿主投影）。
 // 默认 false：从未设置过就是关（`dsh-agent-team/src/index.ts:94-97`）。
 func (a *agentOfficialAPI) agentTeamsIsEnabled(sessionID string) (bool, error) {
-	store, err := a.teamModeStore()
-	if err != nil {
-		return false, err
-	}
-	return store.effective(strings.TrimSpace(sessionID))
+	return a.agentTeamMode(strings.TrimSpace(sessionID))
 }
 
 // agentInterruptByUser 是官方 `subagents.interruptByUser` 的宿主实现。

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -1464,19 +1465,48 @@ func (f *agentAPIFixture) newChildSession(parentID string) string {
 	return id
 }
 
-// teamModeFile 是 Team 选择的落盘文件。
-func (f *agentAPIFixture) teamModeFile() string {
-	return filepath.Join(f.home, "state", "agent-team-mode.json")
+// teamModeEvents 读会话 v4 日志里**全部** `team/mode` 事件（按 seq 顺序）。
+func (f *agentAPIFixture) teamModeEvents(sessionID string) []session.TeamModePayload {
+	f.t.Helper()
+	events, err := f.core.agentReadEvents(sessionID)
+	if err != nil {
+		f.t.Fatalf("读会话 %s 的 v4 事件: %v", sessionID, err)
+	}
+	out := make([]session.TeamModePayload, 0, 1)
+	for _, ev := range events {
+		if ev.Type != session.EventTeamMode {
+			continue
+		}
+		payload, perr := session.ParseTeamModePayload(ev.Data)
+		if perr != nil {
+			f.t.Fatalf("seq %d 的 team/mode 载荷非法: %v", ev.Seq, perr)
+		}
+		out = append(out, payload)
+	}
+	return out
 }
 
-// 选择必须**真实持久化**：写盘之后"重启宿主"（重建 core）仍能读回。
-func TestAgentTeamsSetEnabledPersistsAcrossRestart(t *testing.T) {
+// journalFrames 读该会话 Transport journal 里的**全部**原始帧（`session.history`
+// 读的就是这一份）。
+func (f *agentAPIFixture) journalFrames(sessionID string) []transport.ServerFrame {
+	f.t.Helper()
+	return f.journals.Get(sessionID).Window(transport.SinceNothing, 0).Frames
+}
+
+// 状态变化 → **恰有一条** `team/mode` 事件（v4）与**恰有一帧**（Transport journal）。
+func TestAgentTeamsSetEnabledAppendsTeamModeEvent(t *testing.T) {
 	f := newAgentAPIFixture(t)
 	root := f.newSession("", nil)
 
-	// 未设置过 = 官方默认 false。
+	// 从未设置过 = 官方默认 false，且没有任何事件（不是"写了一条 false"）。
 	if got, err := f.core.agentTeamsIsEnabled(root); err != nil || got {
 		t.Fatalf("未设置时应当默认关，得到 (%v, %v)", got, err)
+	}
+	if evs := f.teamModeEvents(root); len(evs) != 0 {
+		t.Fatalf("未设置时不该有 team/mode 事件：%+v", evs)
+	}
+	if frames := f.journalFrames(root); len(frames) != 0 {
+		t.Fatalf("未设置时不该有 journal 帧：%+v", frames)
 	}
 
 	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{
@@ -1484,31 +1514,33 @@ func TestAgentTeamsSetEnabledPersistsAcrossRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("开 Team: %v", err)
 	}
-	var doc agentTeamModeDoc
-	found, err := agentReadDoc(f.teamModeFile(), &doc)
-	if err != nil || !found {
-		t.Fatalf("Team 选择没落盘：found=%v err=%v", found, err)
-	}
-	entry, ok := doc.Sessions[root]
-	if !ok || !entry.Enabled {
-		t.Fatalf("落盘内容不对：%+v", doc)
-	}
-	if entry.UpdatedAt <= 0 {
-		t.Fatalf("UpdatedAt 必须是真实时间，实际 %d", entry.UpdatedAt)
-	}
 
-	// 模拟进程重启：新 core、新 store，只能从盘上读。
-	f.rebuild()
-	got, err := f.core.agentTeamsIsEnabled(root)
-	if err != nil {
-		t.Fatalf("重启后读选择: %v", err)
+	// 官方形状：`team/mode {enabled:boolean}`，一条。
+	evs := f.teamModeEvents(root)
+	if len(evs) != 1 || !evs[0].Enabled {
+		t.Fatalf("team/mode 事件 = %+v，want 恰好一条 {enabled:true}", evs)
 	}
-	if !got {
-		t.Fatal("重启后 Team 选择丢了：这不是真实持久化")
+	// Transport journal：`session.history` 能读到的原始帧。
+	frames := f.journalFrames(root)
+	if len(frames) != 1 {
+		t.Fatalf("journal 帧数 = %d，want 1：%+v", len(frames), frames)
+	}
+	if frames[0].Seq != 1 || frames[0].Type != "team/mode" || frames[0].Time <= 0 {
+		t.Fatalf("journal 帧 = %+v，want {seq:1,type:team/mode,time>0}", frames[0])
+	}
+	var payload struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(frames[0].Data, &payload); err != nil || !payload.Enabled {
+		t.Fatalf("journal 帧载荷 = %s（err=%v），want {\"enabled\":true}", frames[0].Data, err)
+	}
+	if got, err := f.core.agentTeamsIsEnabled(root); err != nil || !got {
+		t.Fatalf("开 Team 后 isEnabled = (%v, %v)，want true", got, err)
 	}
 }
 
-// 同值不重复写盘（官方 `if (this.isEnabled(root) !== enabled)`）；关闭真的生效。
+// 同值重复设置**不重复 append**（官方 `if (this.isEnabled(root) !== enabled)`）；
+// 关闭真的生效，且再关一次也不重复。
 func TestAgentTeamsSetEnabledIsIdempotentAndCanDisable(t *testing.T) {
 	f := newAgentAPIFixture(t)
 	root := f.newSession("", nil)
@@ -1516,38 +1548,68 @@ func TestAgentTeamsSetEnabledIsIdempotentAndCanDisable(t *testing.T) {
 	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: true}); err != nil {
 		t.Fatalf("开 Team: %v", err)
 	}
-	var first agentTeamModeDoc
-	if _, err := agentReadDoc(f.teamModeFile(), &first); err != nil {
-		t.Fatalf("读盘: %v", err)
-	}
-	stamp := first.Sessions[root].UpdatedAt
-
-	// 再设一次同值：状态不变，时间戳也不该被推后（不重复 append）。
+	// 再设一次同值：状态不变，事件与帧都不该多。
 	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: true}); err != nil {
 		t.Fatalf("重复开 Team: %v", err)
 	}
-	var again agentTeamModeDoc
-	if _, err := agentReadDoc(f.teamModeFile(), &again); err != nil {
-		t.Fatalf("读盘: %v", err)
+	if evs := f.teamModeEvents(root); len(evs) != 1 {
+		t.Fatalf("同值重复设置 append 了额外事件：%+v", evs)
 	}
-	if again.Sessions[root].UpdatedAt != stamp {
-		t.Fatalf("同值重复设置改写了状态：%d → %d", stamp, again.Sessions[root].UpdatedAt)
+	if frames := f.journalFrames(root); len(frames) != 1 {
+		t.Fatalf("同值重复设置多推了 journal 帧：%+v", frames)
 	}
 
-	// 关闭：生效，且盘上读回是 false。
+	// 关闭：生效，且只多一条。
 	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: false}); err != nil {
 		t.Fatalf("关 Team: %v", err)
+	}
+	evs := f.teamModeEvents(root)
+	if len(evs) != 2 || !evs[0].Enabled || evs[1].Enabled {
+		t.Fatalf("关 Team 后事件 = %+v，want [{true} {false}]", evs)
+	}
+	if frames := f.journalFrames(root); len(frames) != 2 || frames[0].Seq != 1 || frames[1].Seq != 2 {
+		t.Fatalf("关 Team 后 journal 帧 = %+v，want seq 连续 1,2", frames)
 	}
 	if got, err := f.core.agentTeamsIsEnabled(root); err != nil || got {
 		t.Fatalf("关闭后应当 false，得到 (%v, %v)", got, err)
 	}
-	f.rebuild()
-	if got, err := f.core.agentTeamsIsEnabled(root); err != nil || got {
-		t.Fatalf("重启后关闭状态没保持，得到 (%v, %v)", got, err)
+	// 再关一次：仍然只有两条。
+	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: false}); err != nil {
+		t.Fatalf("重复关 Team: %v", err)
+	}
+	if evs := f.teamModeEvents(root); len(evs) != 2 {
+		t.Fatalf("同值重复关闭 append 了额外事件：%+v", evs)
 	}
 }
 
-// 只有树根能改：子会话调用 → ErrOfficialTeamLeadRequired，且**不落盘**。
+// 选择必须**真实持久化**：写盘之后"重启宿主"（重建 core + 从盘恢复 journal）仍能读回。
+func TestAgentTeamsSetEnabledPersistsAcrossRestart(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	root := f.newSession("", nil)
+
+	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{
+		Agent: root, Enabled: true,
+	}); err != nil {
+		t.Fatalf("开 Team: %v", err)
+	}
+
+	// 模拟进程重启：新 core、新 journal 表，只能从盘上读。
+	f.rebuild()
+	got, err := f.core.agentTeamsIsEnabled(root)
+	if err != nil {
+		t.Fatalf("重启后读选择: %v", err)
+	}
+	if !got {
+		t.Fatal("重启后 Team 选择丢了：这不是真实持久化（v4 事件必须落盘）")
+	}
+	// journal 也要能恢复同一帧（`session.history` 断线补洞靠它）。
+	frames := f.journalFrames(root)
+	if len(frames) != 1 || frames[0].Type != "team/mode" || frames[0].Seq != 1 {
+		t.Fatalf("重启后 journal 帧 = %+v，want 一条 team/mode seq=1", frames)
+	}
+}
+
+// 只有树根能改：子会话调用 → ErrOfficialTeamLeadRequired，且**不 append 事件/帧**。
 func TestAgentTeamsSetEnabledRejectsDescendant(t *testing.T) {
 	f := newAgentAPIFixture(t)
 	root := f.newSession("", nil)
@@ -1557,15 +1619,11 @@ func TestAgentTeamsSetEnabledRejectsDescendant(t *testing.T) {
 	if !errors.Is(err, transport.ErrOfficialTeamLeadRequired) {
 		t.Fatalf("子会话改 Team 模式应当是 TEAM_LEAD_REQUIRED，实际 %v", err)
 	}
-	var doc agentTeamModeDoc
-	found, rerr := agentReadDoc(f.teamModeFile(), &doc)
-	if rerr != nil {
-		t.Fatalf("读盘: %v", rerr)
+	if evs := f.teamModeEvents(child); len(evs) != 0 {
+		t.Fatalf("被拒的调用不该 append 事件：%+v", evs)
 	}
-	if found {
-		if _, ok := doc.Sessions[child]; ok {
-			t.Fatalf("被拒的调用不该落盘：%+v", doc)
-		}
+	if frames := f.journalFrames(child); len(frames) != 0 {
+		t.Fatalf("被拒的调用不该推 journal 帧：%+v", frames)
 	}
 
 	// 根会话自己仍然可以改（判据是"自己有没有父"，不是"是不是有子"）。
@@ -1574,16 +1632,146 @@ func TestAgentTeamsSetEnabledRejectsDescendant(t *testing.T) {
 	}
 }
 
-// 会话不存在 → no_such_session（不建、不猜）。
+// 会话不存在 → no_such_session（不建、不猜、不 append）。
 func TestAgentTeamsSetEnabledRejectsUnknownSession(t *testing.T) {
 	f := newAgentAPIFixture(t)
 	err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: "no-such-session", Enabled: true})
 	if !errors.Is(err, transport.ErrNoSuchSession) {
 		t.Fatalf("未知会话应当是 no_such_session，实际 %v", err)
 	}
-	if _, statErr := os.Stat(f.teamModeFile()); statErr == nil {
-		t.Fatal("未知会话不该写出 Team 选择文件")
+	if frames := f.journalFrames("no-such-session"); len(frames) != 0 {
+		t.Fatalf("未知会话不该有 journal 帧：%+v", frames)
 	}
+}
+
+// 写入失败**不 append**：v4 打不开写入时，既没有事件也没有 journal 帧——
+// 绝不能出现"事件说开了但状态没变"。
+func TestAgentTeamsSetEnabledWriteFailureAppendsNothing(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	root := f.newSession("", nil)
+
+	path, err := f.src.resolve(root)
+	if err != nil {
+		t.Fatalf("解析会话路径: %v", err)
+	}
+	// 只读：`OpenSessionAt` 的 O_WRONLY 打不开（Windows 上就是 read-only 属性）。
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatalf("把会话文件设成只读: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+
+	err = f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: true})
+	if !errors.Is(err, transport.ErrStatePersistence) {
+		t.Fatalf("写入失败应当是 ErrStatePersistence，实际 %v", err)
+	}
+	if evs := f.teamModeEvents(root); len(evs) != 0 {
+		t.Fatalf("写入失败却 append 了事件：%+v", evs)
+	}
+	if frames := f.journalFrames(root); len(frames) != 0 {
+		t.Fatalf("写入失败却推了 journal 帧：%+v", frames)
+	}
+	if got, err := f.core.agentTeamsIsEnabled(root); err != nil || got {
+		t.Fatalf("写入失败后状态必须仍是关，得到 (%v, %v)", got, err)
+	}
+}
+
+// 历史里读不懂的 `team/mode` 不能当成"没设置过"：那会把用户的开关静默关掉。
+func TestAgentTeamsSetEnabledRejectsMalformedTeamModeEvent(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	root := f.newSession("", func(lg *session.Log) {
+		if err := lg.Append(session.EventTeamMode, map[string]any{"enabled": "yes"}); err != nil {
+			t.Fatalf("写坏载荷: %v", err)
+		}
+	})
+	err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: true})
+	if !errors.Is(err, transport.ErrStatePersistence) {
+		t.Fatalf("坏载荷应当响亮 ErrStatePersistence，实际 %v", err)
+	}
+}
+
+// 真 HTTP 验收：`session.history` 读到 `team/mode` 原始帧，`session.projections`
+// 折出 `teamMode`（官方 Team 开关的 GUI 依赖）。
+func TestAgentTeamsSetEnabledSessionHistoryAndProjectionsReadTeamMode(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	root := f.newSession("", nil)
+	if err := f.core.agentTeamsSetEnabled(transport.OfficialAgentTeamSetEnabledRequest{Agent: root, Enabled: true}); err != nil {
+		t.Fatalf("开 Team: %v", err)
+	}
+
+	srv := startTeamModeHTTPServer(t, f.home, f.journals)
+	defer srv.close()
+
+	// `session.history`：原始帧，seq 与 journal 同一份（不是 v4 seq）。
+	var history transport.HistoryResult
+	raw := callW145HTTP(t, srv, "session.history", map[string]any{"id": root, "sinceSeq": 0}, http.StatusOK)
+	if err := json.Unmarshal(raw, &history); err != nil {
+		t.Fatalf("解 session.history: %v", err)
+	}
+	if len(history.Frames) != 1 || history.Frames[0].Type != "team/mode" || history.Frames[0].Seq != 1 {
+		t.Fatalf("session.history 帧 = %+v，want 一条 team/mode seq=1", history.Frames)
+	}
+	if history.LastSeq != 1 || history.JournalEpoch == 0 {
+		t.Fatalf("session.history 水位 = %+v，want lastSeq=1、epoch 非零", history)
+	}
+
+	// `session.projections`：GUI 读的那个键。
+	var projections struct {
+		AsOfSeq int64                      `json:"asOfSeq"`
+		Values  map[string]json.RawMessage `json:"values"`
+	}
+	raw = callW145HTTP(t, srv, "session.projections", map[string]any{"sessionId": root}, http.StatusOK)
+	if err := json.Unmarshal(raw, &projections); err != nil {
+		t.Fatalf("解 session.projections: %v", err)
+	}
+	teamMode, ok := projections.Values["teamMode"]
+	if !ok {
+		t.Fatalf("session.projections 没有 teamMode 键（GUI 官方 Team 开关不会渲染）：%+v", projections.Values)
+	}
+	var mode struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(teamMode, &mode); err != nil || !mode.Enabled {
+		t.Fatalf("teamMode 投影 = %s（err=%v），want {\"enabled\":true}", teamMode, err)
+	}
+}
+
+// startTeamModeHTTPServer 起一个真 HTTP server（同一份 home + **同一份** journal 表），
+// 并挂上官方会话宿主——`session.history` / `session.projections` 走真 handler。
+func startTeamModeHTTPServer(t *testing.T, home string, journals *transport.Journals) w145HTTPServer {
+	t.Helper()
+	opts := withOfficialSessionOptions(home, transport.Options{
+		Source:   newSessionSource(home, ""),
+		List:     func() ([]transport.SessionSummary, error) { return listSessions(home, "") },
+		Journals: journals,
+	}, nil)
+	srv, err := transport.NewServer(opts)
+	if err != nil {
+		t.Fatalf("建 server: %v", err)
+	}
+	base, err := srv.Start()
+	if err != nil {
+		_ = srv.Close()
+		t.Fatalf("起 server: %v", err)
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		_ = srv.Close()
+		t.Fatalf("cookie jar: %v", err)
+	}
+	client := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(base + "/connect?token=" + srv.Token())
+	if err != nil {
+		_ = srv.Close()
+		t.Fatalf("connect: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		_ = srv.Close()
+		t.Fatalf("connect status=%d", resp.StatusCode)
+	}
+	return w145HTTPServer{base: base, client: client, close: srv.Close}
 }
 
 // interruptByUser：Gateway 按目标会话授权；不存在/空闲/已完成是 accepted no-op。

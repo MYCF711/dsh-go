@@ -889,6 +889,7 @@ func (s *Server) serveOfficialState(w http.ResponseWriter, r *http.Request, meth
 //	modelSelection      {lastUsed,next}             宿主覆盖存储 + v4 model/selection
 //	agentPreset         会话运行的 preset           宿主 state/session-preset.json
 //	subagentCatalog     直接子代理清单               宿主扫描 durable 子会话
+//	sessionStats        轮/步计数与墙钟              v4 step/* + assistant/* + tool/* 折叠
 //
 // **仍然不出现**的三个键（官方 values 里都是 optional，缺失 = 该能力不存在）：
 //
@@ -981,6 +982,10 @@ func (s *Server) officialProjectionValues(host OfficialSessionHost, sessionID st
 	// 官方 `contextPressure`：三数各自"未知就省略"（见 context_pressure_view.go）。
 	// 键**总是**出现（官方 SessionProjectionMap 里它没有 optional），没有实测时是 {}。
 	values["contextPressure"] = officialContextPressureView(events)
+	// 官方 `sessionStats`：整份日志的轮/步计数与墙钟（八个字段全部必填、非负，
+	// 见 session_stats_view.go）。客户端 stats 面板的合计行就取这个键，
+	// 缺了它只能退化到按已加载窗口聚合——那就是状态栏「活动」恒为「未知」。
+	values["sessionStats"] = officialSessionStatsView(events)
 
 	if ph, ok := host.(OfficialProjectionHost); ok {
 		lastUsed, next, err := ph.ModelSelection(sessionID)
