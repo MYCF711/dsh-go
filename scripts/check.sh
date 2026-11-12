@@ -67,8 +67,13 @@ else
       bad "go test（不覆盖竞态的兜底跑）"
     fi
   else
+    # 只打 tail -25 会把"哪个包挂了"整段切掉。2026-11-12 在 CI 上踩过：日志里只剩
+    # 一句 `FAIL go test -race`，包名与失败用例全在被切掉的那几十行里，于是"哪条红了"
+    # 只能靠猜。所以先把三类关键行挑出来（失败包 / 失败用例 / DATA RACE），再打 tail
+    # 供上下文——**不是**放宽判定，判定仍然只看 race_rc。
+    printf '%s\n' "$race_out" | grep -E '^(--- FAIL|FAIL[[:space:]]+[^[:space:]]+|WARNING: DATA RACE|panic:)' | head -40
     printf '%s\n' "$race_out" | tail -25
-    bad "go test -race"
+    bad "go test -race（$(printf '%s' "$race_out" | grep -E '^(FAIL[[:space:]]+[^[:space:]]+|--- FAIL)' | head -3 | tr '\n' ' ' | sed 's/  */ /g')）"
   fi
 
   # 权限分支守卫：每个"放不放行"的函数都得有测试钉着。
