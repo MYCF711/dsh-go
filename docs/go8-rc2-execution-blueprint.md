@@ -166,7 +166,17 @@ python scripts/structure-refs.py --official-tree "<rc.2 树根>" --require-struc
 | 门禁 | `CGO_ENABLED=0 go build/vet/test` + `CGO_ENABLED=1 go test -race` | 0 / 0 / **0（35 包）** / **RACE=0**，gofmt 干净 |
 | **GT** transcript 结构树 | 主区消息流**先出证据树**再实现（20 种节点类型 / 146 行几何 / **409 处锚点** / 11 个官方包） | ✅ 三闸 PASS（`structure-refs --require-structure-clean` / `update-manifest-files` / `verify-resync` **876/876**） |
 | **GS** 设置面板 | rc.2 五 section / 四区（CSS Grid 2×2 求解器）/ **13 个 general item**（含条件项 `desktop-update-channel`） | ✅ 14 新增文件 + 66 测试；`retryPolicy` 8 码 + 正下界渲染断言；失败态（409/read_only/4xx/5xx）各有断言 |
-| 提交 | `fe264a7` → `1d7f664` → `fded4dd` → `e2584af`（分支 `feat/gui-rc2`，本地未 push） | — |
+| **GT2** transcript 渲染 | 按 GT 树实现消息流：**19/20 节点真渲染**（`submitted-plan` 按官方零渲染）；129 行几何表（**110 aligned / 15 derived / 4 deviation**）；双层滚动口三态 + z-index 6<7=7<8<9 各断言 | ✅ 51 测试全 PASS |
+| 提交 | `fe264a7` → `1d7f664` → `fded4dd` → `e2584af` → `d5d0c4b`（分支 `feat/gui-rc2`，本地未 push） | — |
+
+**GT2 的诚实差距（下一波入口）**
+
+1. **没接产品绘制路径**：`Snapshot` 缺 `frames []apiclient.Frame` → painter 挂不上 `conversation.view`
+   （这是"渲染器写好了但界面看不到"的唯一硬阻塞）。
+2. 浮动控件（回到底部 / Turn rail / 选区浮层）只有常量+断言，未接绘制。
+3. 代码块只做 banner + 等宽正文（未接 `mdlite.CodeBlock`）。
+4. markdown 标题/列表/引用块几何是二手（`ui-primitives` 在 rc.2 无 `src/`）。
+5. 历史分页（`loadOlder` 五态）未实现。
 
 **GT 的关键结构结论**（决定了 transcript 怎么实现）：
 
