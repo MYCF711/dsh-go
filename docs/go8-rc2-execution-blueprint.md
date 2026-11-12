@@ -167,7 +167,20 @@ python scripts/structure-refs.py --official-tree "<rc.2 树根>" --require-struc
 | **GT** transcript 结构树 | 主区消息流**先出证据树**再实现（20 种节点类型 / 146 行几何 / **409 处锚点** / 11 个官方包） | ✅ 三闸 PASS（`structure-refs --require-structure-clean` / `update-manifest-files` / `verify-resync` **876/876**） |
 | **GS** 设置面板 | rc.2 五 section / 四区（CSS Grid 2×2 求解器）/ **13 个 general item**（含条件项 `desktop-update-channel`） | ✅ 14 新增文件 + 66 测试；`retryPolicy` 8 码 + 正下界渲染断言；失败态（409/read_only/4xx/5xx）各有断言 |
 | **GT2** transcript 渲染 | 按 GT 树实现消息流：**19/20 节点真渲染**（`submitted-plan` 按官方零渲染）；129 行几何表（**110 aligned / 15 derived / 4 deviation**）；双层滚动口三态 + z-index 6<7=7<8<9 各断言 | ✅ 51 测试全 PASS |
-| 提交 | `fe264a7` → `1d7f664` → `fded4dd` → `e2584af` → `d5d0c4b`（分支 `feat/gui-rc2`，本地未 push） | — |
+| **GT3** 接产品绘制路径 | `Snapshot.Frames` + per-session 原始 journal 帧（去重/分页基线/换代重建）；painter 挂 `conversation.view` | ✅ **真宿主 + 真 apiclient 渲染出真实帧** |
+| 提交 | `fe264a7` → `1d7f664` → `fded4dd` → `e2584af` → `d5d0c4b` → `4079647`（分支 `feat/gui-rc2`，本地未 push） | — |
+
+**GT3 的真机证据（GUI 线第一个"真机可见"里程碑）**
+
+- 真 `dshd serve`（临时 home / `--addr 127.0.0.1:0` / ready+token）+ 真 apiclient → **83 条真实帧**（text/tool/reasoning 全有）；
+  官方 `conversation.view` 槽经 `DrawSlot` 真派发；画布断言出现真实回答正文 `GT3-REAL-RENDER-OK`。
+- 真产品窗口截图 `tmp/GO8-RC2/_gt3/gt3-real-main2.png`（1180×800）：系统披露行 → 过程头 →
+  用户气泡「Reply with exactly one line: GT3-REAL-MAIN-OK」→ 助手正文「GT3-REAL-MAIN-OK」+ 时间戳；
+  顶部 toast「ds-demo 插件已接入」、左栏工作区文件列表、底部「完全权限 / 已连接 / 就绪」都是真实状态。
+- **断线重连**：真宿主 409 `stale_epoch` → 整段丢弃重建 **72 帧**，seq 严格递增 `[1..72]` 且与重建前逐条相同；
+  真 WS 增量 90 事件 → 90 帧无重复。
+
+> 结论：GUI 线不再是"骨架 + 断言"，**真宿主数据能一路渲染到画布**。剩下的都是"某个具体能力还没搬"，不是"链路不通"。
 
 **GT2 的诚实差距（下一波入口）**
 
