@@ -135,9 +135,21 @@ python tmp/GO3-PARAMS/register/audit_refs.py
 | 任务 | 内容 | 状态 |
 |---|---|---|
 | **H1** | 官方 UI 结构树/素材主库 `dsh-ui-official` 从 **rc.1 → rc.2**（65 → 66 包）；来源重钉到开源 tag `dsh-v0.2.2-rc.2`（commit `ddac9676…`）；新增两包结构树；`verify-resync.py` 872/872、`structure-refs.py`、`asar-facts.py` 全 PASS | ✅ |
-| **H2** | `official-shell-tree.md` **60 条** rc.1 行号重锚到 rc.2 `src/**.tsx` | 🔄 |
-| **H3** | `official-settings-tree.md` **50 条**重锚（11 个 `ui-settings*` 包 + 5 section，禁止跨包错位） | 🔄 |
-| **H4** | `gui-structure-gap.md`（39）+ `official-ui-plugins-coverage`（1）重锚，并同步缺口/覆盖率结论 | 🔄 |
+| **H2** | `official-shell-tree.md` **60/60** 重锚（新增 99 处 rc.2 `src/**` 锚点 / 87 个去重目标）；撞到 3 处真变（`.crumbSubagent` 消失、`flash*` 改 `data-*` 选择器、`headerActions.gap` 8→10px） | ✅ |
+| **H3** | `official-settings-tree.md` **50/50** + 补 38 条**裸行号**的包名（真混包风险点）；9 条 rc.1→rc.2 真变（panel 改 CSS Grid、general item 12→**13** 新增 `desktop-update-channel`、弃 primitives Modal 改 `createPortal`+`useModalLayer` 等），并纠正 3 条 rc.1 台账笔误 | ✅ |
+| **H4** | `gui-structure-gap.md` 39 + `ui-packs-coverage` 1 **全换锚**；G-01 由"全部失效"→"部分闭环"；覆盖率统计不变（DEEP 8 / MENTION 25 / NONE 33，判据是"有专题文档"） | ✅ |
+
+**主库门禁（实跑）**
+
+```bash
+python scripts/update-manifest-files.py          # 重算 files[] 指纹（新增，配合只读的 verify-resync）
+python scripts/verify-resync.py                  # PASS (874/874 checks)
+python scripts/structure-refs.py --official-tree "<rc.2 树根>" --require-structure-clean
+# PASS · rc.1 行号 73 条（其中 structure/ 门禁口径 0 条）· rc.2 src 行号 340 · WARN 0
+```
+
+> `structure-refs.py` 新增 `--require-structure-clean`：**structure/ 内 rc.1 行号必须为 0**；
+> `SOURCES.md` 里那 73 条是 rc.5→rc.1 的历史 diff 记录，只追加不改写，单独计数、不入门禁。
 
 H1 的硬结论（决定了后面怎么派单）：
 - **rc.2 把 `lib/client.js` 压成 3–27 行 bundle**，rc.1 的行号引用**全面失效**——这就是 H2–H4 必须在
