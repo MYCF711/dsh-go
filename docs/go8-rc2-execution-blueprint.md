@@ -168,7 +168,19 @@ python scripts/structure-refs.py --official-tree "<rc.2 树根>" --require-struc
 | **GS** 设置面板 | rc.2 五 section / 四区（CSS Grid 2×2 求解器）/ **13 个 general item**（含条件项 `desktop-update-channel`） | ✅ 14 新增文件 + 66 测试；`retryPolicy` 8 码 + 正下界渲染断言；失败态（409/read_only/4xx/5xx）各有断言 |
 | **GT2** transcript 渲染 | 按 GT 树实现消息流：**19/20 节点真渲染**（`submitted-plan` 按官方零渲染）；129 行几何表（**110 aligned / 15 derived / 4 deviation**）；双层滚动口三态 + z-index 6<7=7<8<9 各断言 | ✅ 51 测试全 PASS |
 | **GT3** 接产品绘制路径 | `Snapshot.Frames` + per-session 原始 journal 帧（去重/分页基线/换代重建）；painter 挂 `conversation.view` | ✅ **真宿主 + 真 apiclient 渲染出真实帧** |
-| 提交 | `fe264a7` → `1d7f664` → `fded4dd` → `e2584af` → `d5d0c4b` → `4079647`（分支 `feat/gui-rc2`，本地未 push） | — |
+| **GP** 分页 + 审批卡 | 历史向前翻页**五态**实测；审批卡搬到官方 `conversation.composer` 座位（真机 `Y=569 > 消息流末行 138`） | ✅ 真宿主 255 帧翻页 seq `[1..255]` 严格递增 |
+| **GQ** 代码块 + markdown | 真接 `mdlite.CodeBlock`（两阶段 + banner + 高亮 + 横滚 + 复制）；markdown 8 类元素 / 13 种块级 | ✅ 修掉"单测绿、真机代码块整块消失"的真 bug |
+| 提交 | `fe264a7` → `1d7f664` → `fded4dd` → `e2584af` → `d5d0c4b` → `4079647` → `0656cf4`（分支 `feat/gui-rc2`，本地未 push） | — |
+
+**GP/GQ 的真机证据**
+
+- **分页**（真宿主 + 真 apiclient + 真模型，`PASS 76.57s`）：255 帧 → 基线 200 帧（最早 `seq=56`）→ 翻 1 页 →
+  255 帧 `seq [1..255]` 严格递增 → 画布画出最早用户消息。
+- **审批卡**（`PASS 3.87s`）：`requestId=perm-5379… options=3` → 卡片 `Y=569.0` **> 消息流末行 `Y=138.0`**
+  （这就是"归 composer 而不是消息流"的机器证据）→ 三动作在画布上 → 决定后 `status="已审批（reject_once）"`。
+- **代码块**（截图 `_gq/gq-real-markdown.png`）：banner `go` + 折行 + 复制 + 等宽正文；顺带修掉一个只有真画才暴露的 bug——
+  `OfficialTranscript()` 每次新建实例导致覆画阶段拿到空实例、代码块整块消失（**单测全绿也照样消失**）。
+- 几何三态统计：153 行 = **110 aligned / 39 derived / 4 deviation**（GQ +24 行全 derived，因 `ui-primitives` 在 rc.2 无 `src/`）。
 
 **GT3 的真机证据（GUI 线第一个"真机可见"里程碑）**
 
