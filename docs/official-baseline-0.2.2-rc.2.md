@@ -143,7 +143,7 @@
 | Forge 审阅面（4 方法） | ✅ 真做（GraphQL 客户端，零新依赖）；真机只读已取证 | `tmp/GO8-RC2/reports/F1-forge-graphql.md` |
 | `retryPolicy` 写入面 | ✅ 可写并真生效（重试次数实测变化） | `tmp/GO8-RC2/reports/F2-retrypolicy-write.md` |
 | `workspace/session-unarchiving` | ✅ 事件 + 工作树恢复协同（WS 可见） | `tmp/GO8-RC2/reports/F3-unarchive-event.md` |
-| `-race` 全量 | ✅ **MinGW 路径下 89 包全绿 / RACE=0** | `/tmp/g8-race.log`（命令见下） |
+| `-race` 全量 | ✅ **MinGW 路径下 90 包全绿 / RACE=0 / 0 FAIL**（第一轮 89 包 + 本轮新增 `internal/settings`） | `/tmp/g8-race.log`、`/tmp/g8i-race.log`（命令见下） |
 
 `-race` 的正确命令（MinGW 不在 PATH，子代理会误报 "gcc not found"）：
 
