@@ -67,13 +67,19 @@ else
       bad "go test（不覆盖竞态的兜底跑）"
     fi
   else
-    # 只打 tail -25 会把"哪个包挂了"整段切掉。2026-11-12 在 CI 上踩过：日志里只剩
-    # 一句 `FAIL go test -race`，包名与失败用例全在被切掉的那几十行里，于是"哪条红了"
-    # 只能靠猜。所以先把三类关键行挑出来（失败包 / 失败用例 / DATA RACE），再打 tail
-    # 供上下文——**不是**放宽判定，判定仍然只看 race_rc。
-    printf '%s\n' "$race_out" | grep -E '^(--- FAIL|FAIL[[:space:]]+[^[:space:]]+|WARNING: DATA RACE|panic:)' | head -40
+    # 只打 tail -25 会把"哪个包挂了 / 为什么挂"整段切掉。2026-11-12 在 CI 上踩过两次：
+    # 日志里先只剩一句 `FAIL go test -race`，补了包名/用例名之后仍然看不到失败**消息**
+    # （哪一行断言、什么错误），于是每一轮都要靠本地复现去猜。
+    # 所以：先按 `--- FAIL` 打出每条的完整上下文（含失败消息），再打 tail 25 供收尾。
+    # **不是**放宽判定——判定仍然只看 race_rc，这里只是把已经发生的事实打全。
+    printf '%s\n' "$race_out" | grep -B 1 -A 12 -E '^[[:space:]]*--- FAIL' | head -400
+    printf '%s\n' "$race_out" | grep -E '^(WARNING: DATA RACE|panic:)' | head -20
     printf '%s\n' "$race_out" | tail -25
-    bad "go test -race（$(printf '%s' "$race_out" | grep -E '^(FAIL[[:space:]]+[^[:space:]]+|--- FAIL)' | head -3 | tr '\n' ' ' | sed 's/  */ /g')）"
+    # 环境面：CI 上这批失败是"很多包同时快速失败"的形状，先看磁盘/临时目录/进程数有没有被打满
+    # （race 跑 15 分钟会留一堆 t.TempDir 与子进程；磁盘满了就会满屏 "no space"）。
+    { echo "  ---- 环境 ----"; df -h . 2>/dev/null | tail -1; df -h /tmp 2>/dev/null | tail -1
+      echo "  TMP 条目数: $(ls -1 "${TMPDIR:-/tmp}" 2>/dev/null | wc -l)"; } || true
+    bad "go test -race（$(printf '%s' "$race_out" | grep -E '^(FAIL[[:space:]]+[^[:space:]]+)' | head -6 | awk '{print $2}' | tr '\n' ' ')）"
   fi
 
   # 权限分支守卫：每个"放不放行"的函数都得有测试钉着。
