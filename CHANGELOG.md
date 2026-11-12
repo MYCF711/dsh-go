@@ -1,3 +1,45 @@
+## 0.2.2-rc.2-go.1（2026-11-12，**稳定版**）—— 宿主完成官方 `0.2.2-rc.2` 同步
+
+> 版本命名（用户 2026-11-12 指令）：途中版本 `<上游>-gobeta.<N>`，**稳定版 `<上游>-go.<N>`**。
+> 本版是 rc.2 的**第一个稳定版**：方法面 223 条逐条有结论、参数总账 405 条、门禁四项全绿（含全量 `-race`）。
+> 与 `0.2.2-rc.2-gobeta.1` 的差别只有版本号与下面这份"稳定版口径"——功能集相同，收口轮的提交都在
+> `gobeta.1` 之后落地（详见下方各节）。
+
+### 稳定版判据（四条，逐条有证据）
+
+| 判据 | 结论 | 证据 |
+|---|---|---|
+| 方法面 223 条 | **逐条有结论**：真实现 / 官方形状结构化未实现（带 `capableWhen`），0 MISSING、0 TEST_ONLY | `docs/evidence/official-method-coverage-0.2.2-rc.2.md` |
+| base 插件 99 个 | 新增 `agent-team`、`tool-agent-team` 已实现（任务板制 + 按名寻址 + `agentTeams.setEnabled`） | `docs/evidence/official-base-plugins-0.2.2-rc.2.txt` |
+| 参数总账 | **405 条**（官方轴 342 + rc.2 新增 63），`validate_register.py` / `audit_refs.py` 双闸 EXIT=0 | `docs/parameter-register.md` |
+| 门禁 | `build`=0、`vet`=0、`test`=**0（90 包）**、`-race`=**0（90 包）** | 本轮实跑 |
+
+### 与官方宿主的能力对照（只能更多，不能更少）
+
+- **官方有、我们有**：223 个方法全部有落点；5 个删除方法保留为兼容别名（`Deprecated`）并转发到官方新方法。
+- **我们比官方多做的真实能力**（不是桩）：Office 真渲染（随包原生 LibreOffice，docx→PDF 21,379 B）、
+  terminal-panel 父→子 roster 桥（真 PTY 11/11）、CUA 在 Windows 上的系统状态/应用决策/真图标提取/设置页/审批状态机、
+  工具并发 per-call 分类器（6×grep 实测 5.6×）。
+- **官方有、我们如实报缺**（4 条平台/外部边界，不是没做）：
+  1. GraphQL **写**路径（7 个 mutation）只有离线桩证据——写会改远端，未做真机写入；
+  2. CUA 的 AX/窗口控制：官方在 Windows 上也没有 provider；
+  3. `workspaceFiles.search.graceMs`：纯 Go 实现没有子进程宽限层（`OFFICIAL_UNSUPPORTED`）；
+  4. `dsh-client-ui-primitives` 在 rc.2 仍只发 `lib/`（无 `src/` 行号可锚），证据锚调用点。
+
+### 发布产物（本地构建，未 push）
+
+`bash scripts/build.sh` 实跑通过：6 个产物（windows/linux/darwin × 宿主/TUI）+ `dist/SHA256SUMS`；
+宿主 21 MiB（≤25 MiB 规则内）；`--version` 自检输出 `DSH GO 0.2.2-rc.2-go.1`。
+push 与正式发布需要用户在当次明确授权。
+
+### 已知问题（本版接受，已登记）
+
+- `Ctrl+O` 全展开后 `/quit` 迟滞（GO.7 起登记，进 GO.8 以"展开态按键延迟"度量测试先红后绿）。
+- `TUI-GO.lnk` 桌面双击入口仍需用户在可见桌面人工确认一次。
+- 非 Windows 平台未验（支持范围裁定：只做 Windows 稳定版）。
+
+---
+
 ## 0.2.2-rc.2-gobeta.1（2026-11-12，**途中测试版**）—— 官方基线切到 `0.2.2-rc.2`
 
 > 版本命名（用户 2026-11-12 指令）：**途中版本 `<上游>-gobeta.<N>`，稳定版 `<上游>-go.<N>`**。

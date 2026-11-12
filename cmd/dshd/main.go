@@ -68,7 +68,7 @@ import (
 
 // 这三个由 -ldflags 覆盖（scripts/build.sh），默认值给 go run 用。
 var (
-	version   = "0.2.2-rc.2-gobeta.1"
+	version   = "0.2.2-rc.2-go.1"
 	commit    = "dev"
 	buildTime = "unknown"
 )
