@@ -146,7 +146,7 @@
 | Forge 审阅面（4 方法） | ✅ 真做（GraphQL 客户端，零新依赖）；真机只读已取证 | `tmp/GO8-RC2/reports/F1-forge-graphql.md` |
 | `retryPolicy` 写入面 | ✅ 可写并真生效（重试次数实测变化） | `tmp/GO8-RC2/reports/F2-retrypolicy-write.md` |
 | `workspace/session-unarchiving` | ✅ 事件 + 工作树恢复协同（WS 可见） | `tmp/GO8-RC2/reports/F3-unarchive-event.md` |
-| `-race` 全量 | ✅ **MinGW 路径下 90 包全绿 / RACE=0 / 0 FAIL**。已在 **3 个时间点**复跑（第一轮 89 包 + `internal/settings`；G1/G2 落地后；**稳定版 `0.2.2-rc.2-go.1` 发布前**）| `/tmp/g8-race.log`、`/tmp/g8l-race.log`、`/tmp/go1b-race.log`（命令见下） |
+| `-race` 全量 | ✅ **MinGW 路径下 90 包全绿 / RACE=0 / 0 FAIL**。已在 **4 个时间点**复跑（第一轮 89 包 + `internal/settings`；G1/G2 落地后；稳定版发布前；**409 结构化落地后**）| `/tmp/g8-race.log`、`/tmp/g8l-race.log`、`/tmp/go1b-race.log`、`/tmp/host-race-final.log`（命令见下） |
 
 ### 5.2b 第三轮收口（2026-11-12 08:3x）
 
@@ -176,5 +176,9 @@
 
 ```bash
 export PATH="/c/Program Files/Go/bin:/c/toolchains/mingw64/bin:$PATH"
-CGO_ENABLED=1 go test -race ./... -count=1
+CGO_ENABLED=1 go test -race -timeout 20m ./... -count=1
 ```
+
+> **别给短超时**：`cmd/dshd` 里有若干 subprocess 类测试，`-race` 下单个就要 ~28s
+> （`TestPluginCLIRealProcessLifecycle` 单独跑 27.8s 通过）。给 `-timeout 180s` 会被判成"挂死"，
+> 那是**慢**不是**死锁**——2026-11-12 我自己误判过一次，记在这里免得后人再踩。
