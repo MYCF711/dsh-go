@@ -127,6 +127,26 @@ python tmp/GO3-PARAMS/register/audit_refs.py
 3. **最小自制**：只补官方没有的最小必要件；缺证据就 HIDE，不自造交互与文案。
 4. 交付顺序：结构树冻结（官方证据 file:line）→ 逐部件实现 → 几何/行为断言 → 真机截图对比。
 
+### 5.1 GUI 线已开工（2026-11-12，宿主侧收口后）
+
+宿主侧四项判据成立（build/vet/test/`-race` 全 0；方法面 223 条逐条有落点；缺口只剩平台边界），
+已按"结构树复刻、素材复用、最小自制"启动 GUI 线：
+
+| 任务 | 内容 | 状态 |
+|---|---|---|
+| **H1** | 官方 UI 结构树/素材主库 `dsh-ui-official` 从 **rc.1 → rc.2**（65 → 66 包）；来源重钉到开源 tag `dsh-v0.2.2-rc.2`（commit `ddac9676…`）；新增两包结构树；`verify-resync.py` 872/872、`structure-refs.py`、`asar-facts.py` 全 PASS | ✅ |
+| **H2** | `official-shell-tree.md` **60 条** rc.1 行号重锚到 rc.2 `src/**.tsx` | 🔄 |
+| **H3** | `official-settings-tree.md` **50 条**重锚（11 个 `ui-settings*` 包 + 5 section，禁止跨包错位） | 🔄 |
+| **H4** | `gui-structure-gap.md`（39）+ `official-ui-plugins-coverage`（1）重锚，并同步缺口/覆盖率结论 | 🔄 |
+
+H1 的硬结论（决定了后面怎么派单）：
+- **rc.2 把 `lib/client.js` 压成 3–27 行 bundle**，rc.1 的行号引用**全面失效**——这就是 H2–H4 必须在
+  实现之前先做完的原因（否则等于照错代码复刻）。
+- `dsh-experimental-client-ui-agent-team` 在 rc.2 **不是改名而是重做**：rc.1 是 1 槽 500px 锚定弹层，
+  rc.2 是 4 槽（footer / 模型菜单开关 / 停用确认 / 命令回执）+ 面板交给 `ui-subagent`。**禁止照 rc.1 做**。
+- rc.2 图标改 sprite 表（`M(name,weight)` + `<use>`），`info-outline` 是 14×14（别套 16×16）。
+- 主库 manifest 现在 `officialVersion: 0.2.2-rc.2`、`packages: 66`，每包带 `clientSha256`。
+
 ## 6. 风险与反例
 
 - **把 rc.1 的数字当 rc.2 用**：193/97 是历史口径；本仓所有新结论必须引 rc.2 证据文件。
