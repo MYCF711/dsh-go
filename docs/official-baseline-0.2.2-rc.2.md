@@ -179,6 +179,13 @@ export PATH="/c/Program Files/Go/bin:/c/toolchains/mingw64/bin:$PATH"
 CGO_ENABLED=1 go test -race -timeout 20m ./... -count=1
 ```
 
+> **别指望 `TZ` 环境变量**：Go 1.27 在 Windows 上**完全忽略 `TZ`**
+> （`$GOROOT/src/time/zoneinfo_windows.go` 的 `initLocal()` 只调 `syscall.GetTimeZoneInformation`，
+> 不读 `os.Getenv("TZ")`）。所以"`TZ=UTC` 下跑一遍"是**空操作**——本地永远 +08:00，
+> 而 GitHub runner 是 UTC。要复现时区相关红，必须在进程内钉死：
+> 临时 `_test.go` 里 `func init() { time.Local = time.UTC }`。
+> 2026-11-12 我自己就误判过一次（以为 `TZ=UTC` 绿了就没问题），记在这里。
+>
 > **别给短超时**：`cmd/dshd` 里有若干 subprocess 类测试，`-race` 下单个就要 ~28s
 > （`TestPluginCLIRealProcessLifecycle` 单独跑 27.8s 通过）。给 `-timeout 180s` 会被判成"挂死"，
 > 那是**慢**不是**死锁**——2026-11-12 我自己误判过一次，记在这里免得后人再踩。
