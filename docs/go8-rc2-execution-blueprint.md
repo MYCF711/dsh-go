@@ -172,6 +172,8 @@ python scripts/structure-refs.py --official-tree "<rc.2 树根>" --require-struc
 | **GQ** 代码块 + markdown | 真接 `mdlite.CodeBlock`（两阶段 + banner + 高亮 + 横滚 + 复制）；markdown 8 类元素 / 13 种块级 | ✅ 修掉"单测绿、真机代码块整块消失"的真 bug |
 | **GR** 官方座位 | `-shell official` 下 `conversation.composer` **每帧真 dispatch 1 次**、`main.composer` 0 次；输入卡片 **10/10** 元素按官方几何 | ✅ 真机 Enter 发送落盘（`user/message` + 模型回复，`PASS 2.70s`） |
 | **GS2** 409 结构化 | 宿主 15 个 409 产出点收口到 `details.reason`（**9 个取值**）；`error` 仍恰好四字段（纯 additive） | ✅ UI 改判结构字段，文本匹配降为老宿主兜底 |
+| **GX** composer 子槽 | 官方档 `conversation.input.*` **10/10 每帧各派发 1 次**；模型标签**恰好 1 个**（三条独立断言）；降级只读 chip/「未知」 | ✅ 真机菜单展开截图 |
+| **GY** 三部件迁槽 | goal / questions / statusbar 挂官方 chain 座位（Order 3/5/10/20），每帧各 1 次、不双画；「活动/用量 未知」不编 0 | ✅ 真机截图（活跃 goal + 待答问题 + 状态栏） |
 | 提交 | `fe264a7` → `1d7f664` → `fded4dd` → `e2584af` → `d5d0c4b` → `4079647` → `0656cf4` → `7ee776e`（GUI 分支）；宿主 `4325e4f` | — |
 
 **GR/GS2 的关键点**
