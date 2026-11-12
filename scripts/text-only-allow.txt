@@ -52,7 +52,7 @@ internal/session/compact.go:Compact | 判"摘要是不是空的"只看 text 块�
 # ACP session/load 的正文 chunk：思考块在紧邻的上一个循环里已按
 # session.ReasoningBlocksBySeq 逐块 emit（顺序 思考→正文→调用，与 fork/serve 一致）。
 # 正文为空只表示"这条没有正文 chunk"，不决定消息是否消失。
-cmd/dshd/acp.go:1534 | 思考块在上一循环已按 ReasoningBlocksBySeq emit（tool/call 走 ACP 自己的调用事件）；正文空只表示没有正文 chunk，不决定消息存亡
+cmd/dshd/acp.go:1535 | 思考块在上一循环已按 ReasoningBlocksBySeq emit（tool/call 走 ACP 自己的调用事件）；正文空只表示没有正文 chunk，不决定消息存亡
 
 # history_search 的检索过滤：判据来自 eventText，而 eventText 已经把
 # text / reasoning / tool-call 三样拼起来。text 为空 = 三样都没有，确实搜不到东西。
@@ -72,7 +72,7 @@ cmd/dshd/subagent_inherit.go:118 | user/tool 只有正文能带信息；assistan
 
 # History 的产物是 []llm.Message（请求形状），没有 reasoning 字段。
 # "有没有内容"的判据在 serve_turn.historyForModel；SurfaceMsg.Reasoning 只服务 Meter。
-internal/session/history.go:24 | 产物是 []llm.Message（请求形状，无 reasoning 字段）；判空在 historyForModel，Reasoning 只服务 Meter
+internal/session/history.go:29 | 产物是 []llm.Message（请求形状，无 reasoning 字段）；判空在 historyForModel，Reasoning 只服务 Meter
 
 # CharsOf 是诊断用的字符统计（doctor/info 打印），不参与压缩决策。
 # 真正算 token 的是 rawEstimate，那里已经逐条加 m.Reasoning。
@@ -95,11 +95,11 @@ cmd/dshtui/script.go:183 | send 步的语义就是发文字；空 text 是脚本
 # ---- 入站请求的协议校验：空 text 是**非法输入**，不是"消息没内容" ----
 
 # 官方 PromptContent 的 text 部件必须非空，否则 400（官方请求校验的一部分）。
-internal/transport/handlers_agent_official.go:1352 | 官方 request.content[i].text 空串要 400（io 校验），判的是"参数合法吗"，不是"消息存不存在"
-internal/transport/handlers_agent_official.go:1353 | 同上：这个 case 只负责把 text 部件取出来；image 在下一个 case 单独校验
+internal/transport/handlers_agent_official.go:1363 | 官方 SubagentPrompt 的 content 只认 text/image 两种部件（同函数里 image 在下一个 case 单独校验 mediaType/data），所以这不是"只认 text 的投影"
+internal/transport/handlers_agent_official.go:1364 | 官方 request.content[i].text 空串要 400（官方请求校验），判的是"参数合法吗"，不是"消息存不存在"
 
 # 官方 QUEUE_EDIT_NON_TEXT：queue 的 edit 只接受 text 块，别的类型要 400。
-internal/transport/handlers_session_official.go:1697 | 官方 QUEUE_EDIT_NON_TEXT：edit 的非 text 块是**协议错误**，要 400 而不是静默过滤
+internal/transport/handlers_session_official.go:1719 | 官方 QUEUE_EDIT_NON_TEXT：edit 的非 text 块是**协议错误**，要 400 而不是静默过滤
 cmd/dshd/serve_queue_official.go:274 | 同上（本地入口同判据）：edit 的非 text 块直接报 ErrPlacementInvalid
 
 # 译文接口：空文的译文就是空文（显式写明的语义，不是丢内容）。
@@ -118,7 +118,7 @@ cmd/dshd/serve_title_auto.go:245 | autoTitleUserMessage：自动标题**只取�
 cmd/dshd/serve_session_api.go:137 | officialSnippetOf：搜索片段只可能来自正文（思考与调用不参与检索），空正文就是没有可搜的
 internal/session/image_offload.go:677 | joinTextWithPlaceholders：把 text 块与图片占位拼成**一段文本**（产物本身就是字符串）
 modules/search/deepseek.go:262 | mapDeepSeekSearch：snippet 来自 text 块的 citations，别的块类型没有 citations
-modules/tools/mcp.go:881 | mcpExtractText：MCP 内容块的 text 提取（函数名与用途就是"取文本"）
+modules/tools/mcp.go:1064 | mcpExtractText：MCP 内容块的 text 提取（函数名与用途就是"取文本"；同函数 image/audio/resource_link 各有分支）
 internal/agent/side_query.go:43 | side query 的流回调：只消费正文增量（EventContent），别的 kind 本就不该进这一路
 
 # ---- 非"内容块"：同名/同形状的误报，写清它判的到底是什么 ----
@@ -128,7 +128,7 @@ internal/llm/discover.go:266 | normalizeInputModalities：这是模型 input 词
 # cron 字段名恰好叫 text。
 internal/schedule/cron.go:108 | parseCronField：参数名 text 是 cron 字段字符串，判空是配置校验
 # GitHub 文件正文的 base64 解码：空 content 表示"这个字段没给"，与消息投影无关。
-internal/forge/change_request.go:388 | changeRequest 的文件正文解码：content 空 = 该字段没给，判的是工具入参
+internal/forge/change_request.go:700 | ChangeRequestText 的文件正文解码：content 空 = 该字段没给（GitHub contents 对大文件根本不发 content），判的是工具入参
 # 渲染层：空行不画。
 cmd/dshtui/thinking.go:46 | renderThinkingLines：markdown 渲染出的空行不画（画出来是空行噪声）
 # 构造投影（不是判存亡）：思考块已经走上一条 session.ReasoningText；这条只管 text 块。
@@ -138,7 +138,21 @@ cmd/dshtui/messages.go:117 | blocksFromContent：把内容块**构造**成排版
 cmd/dshd/prompt_content.go:62 | 同 loadPromptContentForRun 的 text 分支（拼正文），判据见上面那条
 cmd/dshd/prompt_content.go:147 | promptPartsFromBlocks 的 text 分支（switch 的操作数是 block.Type）
 cmd/dshd/prompt_content.go:148 | 同一分支里的"空正文块不产出 part"：text 之外没有正文可给，图片另走 pendingImage
-cmd/dshd/serve_agent_api.go:892 | userQuestionsAnswer：把答案渲染成文本；空串是渲染失败 → 官方 ErrOfficialBadInput（fail-loud），不是丢消息
+cmd/dshd/serve_agent_api.go:1090 | userQuestionsAnswer：把答案渲染成文本；空串是渲染失败 → 官方 ErrOfficialBadInput（fail-loud），不是丢消息
 cmd/dshd/serve_queue_official.go:295 | joinQueueTextBlocks：把已校验为 text 的块拼回一段正文（产物是字符串）
 cmd/dshd/serve_subagents_api.go:182 | renderChildPromptContent：拼完的正文是空串要报错（fail-loud），不是静默投空提示
 cmd/dshd/serve_title_auto.go:246 | autoTitleUserMessage：只取用户消息的 text 块（同 245 那条）
+
+# ---- rc.2 同步新增的四处形状误报（2026-11-12，逐条读过代码）----
+#
+# 四处的共同点：变量名里带 text、或者字面量恰好是 "text"，但它们判的都不是
+# "一条会话消息有没有内容"。
+
+# versionParts 的 text 是版本号字符串（"v0.2.2-rc.2" 之类），空串 = 版本号非法。
+internal/officekit/engine.go:231 | versionParts：text 是版本号字符串，空 = 版本号非法 → 返回 (nil,false)；不投影任何消息
+# planRegions 的 switch 操作数是文档类型（pdf/presentation/text/sheet），不是消息块。
+internal/officekit/images.go:368 | planRegions：switch 的操作数是 ready.DocumentType（文档类型 pdf/presentation/text/sheet），不是消息内容块；同 switch 里没有 reasoning/tool-call 这一路
+# ServeOfficialOfficeKitAPI 的参数抽取闭包：空串 = 客户端没给这个参数（随后 400）。
+internal/transport/handlers_office_kit_rc2.go:150 | ServeOfficialOfficeKitAPI 的 str 闭包：空串 = 客户端没给这个参数（随后 400），判的是入参完整性，不是消息存亡
+# promptContentShape 本身就是官方 hasPromptContent 的投影：非 text 块在下面另算内容。
+internal/transport/server.go:1000 | promptContentShape：函数本身就是官方 hasPromptContent 的投影——非 text 块在下面（1006-1010）直接算内容（attachment/reference），text 分支只额外要求文本非全空白

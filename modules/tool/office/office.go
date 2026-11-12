@@ -316,10 +316,7 @@ func Module(provider *officekit.Provider) kernel.Module {
 				return err
 			}
 			for _, operation := range []string{ToolRender, ToolConvert, ToolRecalculate} {
-				tool := &Tool{operation: operation, kit: provider}
-				if fs, ok := fsValue.(spi.FS); ok {
-					tool.fs = fs
-				}
+				tool := &Tool{operation: operation, kit: provider, fs: fsValue}
 				if err := registry.Register(tool); err != nil {
 					return err
 				}

@@ -121,10 +121,9 @@ func bridgeTerminalsOf(in []PanelTerminal) []BridgeTerminal {
 	}
 	out := make([]BridgeTerminal, 0, len(in))
 	for _, t := range in {
-		out = append(out, BridgeTerminal{
-			ID: t.ID, Title: t.Title, Cwd: t.Cwd,
-			Control: t.Control, State: t.State, Running: t.Running, ExitCode: t.ExitCode,
-		})
+		// 字段名与类型逐字相同（panel.go:79 与 bridge.go:96），所以是类型转换，
+		// 不是逐字段搬运：任何一个字段改名/改类型，这一行会编译失败而不是静默丢字段。
+		out = append(out, BridgeTerminal(t))
 	}
 	return out
 }
@@ -136,10 +135,8 @@ func panelTerminalsOf(in []BridgeTerminal) []PanelTerminal {
 	}
 	out := make([]PanelTerminal, 0, len(in))
 	for _, t := range in {
-		out = append(out, PanelTerminal{
-			ID: t.ID, Title: t.Title, Cwd: t.Cwd,
-			Control: t.Control, State: t.State, Running: t.Running, ExitCode: t.ExitCode,
-		})
+		// 反向同理：线上形状与工具面形状字段完全一致，用转换而不是重铺一遍。
+		out = append(out, PanelTerminal(t))
 	}
 	return out
 }
