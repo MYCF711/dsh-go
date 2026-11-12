@@ -251,6 +251,24 @@ H1 的硬结论（决定了后面怎么派单）：
 - rc.2 图标改 sprite 表（`M(name,weight)` + `<use>`），`info-outline` 是 14×14（别套 16×16）。
 - 主库 manifest 现在 `officialVersion: 0.2.2-rc.2`、`packages: 66`，每包带 `clientSha256`。
 
+### 5.3 Viva 轮子线（用户 2026-11-12 指令：注意 viva 动向、及时更新、有必要可提 is/pr）
+
+| 动作 | 结果 |
+|---|---|
+| 上游 issue #239 | `text.(*Editor).String()` 写缓存 → `Field.Text()` + `Field.SetText()` 并发是数据竞争。发前核对 **v0.6.0 仍未修**，附最小复现 + 两种修法取舍 |
+| 上游 issue #240 | `docs/upgrading.md` 漏写 v0.6.0 的两处包重组（`flex`→`ui`、`ui`→`gfx` 74 个标识符）。该文档 82 行、最新条目只到 v0.4.0 |
+| 引擎升级 | GUI 仓 `v0.2.3 → v0.5.1`（PR #45 已合并）：breaking 2 条、19 处/13 文件；门禁全 0 + `RACE=0`；真机 25 插件全装配 |
+| v0.6.0 | **不是版本跃迁而是编写模型重写**：`flex` 并入 `ui`、81 个 `ui` 类型搬 `gfx`（本仓 74 标识符/1225 处/144 文件）、`flex.Frame`→`ui.C`（112 形参）、`flex.View`→`ui.Page`（109 处）；已拆 **V-06-1…5** 五阶段（`dsh-ui-viva/docs/handoff-viva-0.6.0.md`） |
+
+**两个只有真机/真 CI 才暴露的坑**
+
+1. **合并顺序的隐性红**：Viva 升级分支从旧 `main` 切出，而 `main` 之后合入了新代码（用旧 API）→
+   `git archive` 干净副本编译失败、CI 对照组红。**依赖升级分支必须把最新 main 合进来再跑门禁**。
+2. **上游三角化策略会打穿测试断言**：`TestConnectionIndicatorThreeStates` 原本用
+   `len(canvas.Triangles()) == 0` 代表"没画图标"；v0.5.1 起**圆角填充也三角化进同一条 mesh**
+   （未知态胶囊底色 α=0.12 就是 64 个三角形）→ 假红。改成按**不透明度**判（图标描边 α=1 / 底色 α=0.12），
+   既钉住语义又不会随上游渲染策略变化假红。
+
 ## 6. 风险与反例
 
 - **把 rc.1 的数字当 rc.2 用**：193/97 是历史口径；本仓所有新结论必须引 rc.2 证据文件。
