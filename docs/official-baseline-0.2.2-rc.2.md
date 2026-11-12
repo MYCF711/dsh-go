@@ -146,7 +146,7 @@
 | Forge 审阅面（4 方法） | ✅ 真做（GraphQL 客户端，零新依赖）；真机只读已取证 | `tmp/GO8-RC2/reports/F1-forge-graphql.md` |
 | `retryPolicy` 写入面 | ✅ 可写并真生效（重试次数实测变化） | `tmp/GO8-RC2/reports/F2-retrypolicy-write.md` |
 | `workspace/session-unarchiving` | ✅ 事件 + 工作树恢复协同（WS 可见） | `tmp/GO8-RC2/reports/F3-unarchive-event.md` |
-| `-race` 全量 | ✅ **MinGW 路径下 90 包全绿 / RACE=0 / 0 FAIL**（第一轮 89 包 + 本轮新增 `internal/settings`）。第三轮（G1/G2 落地 + 两条误报修复）后**再次全量复跑仍为 RACE=0 / 90 包** | `/tmp/g8-race.log`、`/tmp/g8i-race.log`、`/tmp/g8l-race.log`（命令见下） |
+| `-race` 全量 | ✅ **MinGW 路径下 90 包全绿 / RACE=0 / 0 FAIL**。已在 **3 个时间点**复跑（第一轮 89 包 + `internal/settings`；G1/G2 落地后；**稳定版 `0.2.2-rc.2-go.1` 发布前**）| `/tmp/g8-race.log`、`/tmp/g8l-race.log`、`/tmp/go1b-race.log`（命令见下） |
 
 ### 5.2b 第三轮收口（2026-11-12 08:3x）
 
