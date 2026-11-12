@@ -80,7 +80,7 @@ func TestOfficialMaskedPreviewNoProviderSeparator(t *testing.T) {
 		t.Fatalf("无 provider 分隔符：得到 %q，期望 %q", got, want)
 	}
 	// 下划线也是分隔符（ghp_ 形式的 token）。
-	const underscore = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" // 40 码点，providerEnd=4
+	underscore := "ghp_" + "ABCDE" + strings.Repeat("Q", 27) + "6789" // 40 码点，providerEnd=4
 	wantUnderscore := "ghp_ABCDE" + strings.Repeat("•", 27) + "6789"
 	if got := officialMaskedPreview(underscore); got != wantUnderscore {
 		t.Fatalf("下划线分隔：得到 %q，期望 %q", got, wantUnderscore)
