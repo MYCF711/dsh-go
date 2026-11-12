@@ -161,9 +161,21 @@ python scripts/structure-refs.py --official-tree "<rc.2 树根>" --require-struc
 |---|---|---|
 | **GA** 首屏结构骨架 | rc.2 官方槽表 + 几何常量表 + 类表 + L0 接线（`-shell auto\|legacy\|official`） | **54 条官方槽 100% 有实现节点**（74 节点，四种布局逐一断言）；145 行单一几何表（aligned/derived/deviation）；182 个 rc.2 锚点由测试真实打开官方解包树核过；rc.2 三处真变各一条专门用例 |
 | **GB** 新增两插件 | `plugins/dsnotifications`（NoticeCard + 官方控制器）、`plugins/dsagentteam`（四棵树） | **5 槽全部注册**；`api.snapshot.json` 方法 25→29；三种降级逐槽都测 |
-| **GC/GD** 父容器 | 4 个缺失的父容器 + 数据接线（通知入口 / 子代理目录 / 模型菜单 / chat 命令节点） | 🔄 在跑（槽位已注册但没有父级 `drawSlot` 时界面看不到，这两波是让它真渲染） |
-| 门禁 | `CGO_ENABLED=0 go build/vet/test` | 0 / 0 / **0（35 包）**，gofmt 干净 |
-| 提交 | `fe264a7`（分支 `feat/gui-rc2`，本地未 push） | — |
+| **GC/GD** 父容器 | 4 个缺失的父容器 + 数据接线（通知入口 / 子代理目录 / 模型菜单 / chat 命令节点） | ✅ 4 个容器全部**真渲染**；每容器四态断言（未授权/未启用/数据缺失/正常） |
+| **GU** `-race` 清理 | 全仓 `-race` 查出 5 条真实 DATA RACE | ✅ 归因 **产品 4 / 测试 1 / Viva 上游 1 类**，现 **RACE=0（35 包 / 0 条 WARNING）** |
+| 门禁 | `CGO_ENABLED=0 go build/vet/test` + `CGO_ENABLED=1 go test -race` | 0 / 0 / **0（35 包）** / **RACE=0**，gofmt 干净 |
+| 提交 | `fe264a7` → `1d7f664` → `fded4dd`（分支 `feat/gui-rc2`，本地未 push） | — |
+
+**GU 的三处关键发现**
+
+1. **`*-shell official` 下槽位可能永不 dispatch**：旧部件占槽时骨架走 `BridgeLegacy`，官方子槽不被派发。
+   新增 `ShellTier.OfficialSlotsLive()` 每帧发布，容器按"这一帧真被 dispatch 的槽"挂载。
+2. **Viva 控件不是并发安全的**：`dispatchSend.func1 → restoreDraftIfEmpty` 在后台 goroutine 里
+   `Text()`/`SetText()` → 改为 `pendingDraft` 排队 + Paint（UI 线程）消费 + `writeDraft()` 唯一写点。
+3. **Viva 上游缺陷**：`text.(*Editor).String()` 名为取值却写 `editor.text`/`textValid`，`Editor` 零同步。
+   按上游纪律落了三样：最小复现 `spike/vivaeditor/`（`-tags viva_race_repro`，默认不进门禁）、
+   `docs/viva-upstream-editor-string-race.md`（含删除条件）、本仓带标注兜底。
+   **issue 草稿已写但未发**（`$DSH_HOME/outbox/vivaui-viva-editor-string-race.md`；对外动作需用户当次授权）。
 
 **诚实差距**：transcript 渲染、设置表单、拖拽把手、view tabs 数据仍未接；旧部件仍在旧槽（3 行 deviation 等迁槽后删）；
 默认 `-shell auto` 不改变现网外观（无 `shell.root` 占用方时走官方骨架）。
