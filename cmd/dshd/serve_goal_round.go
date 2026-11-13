@@ -116,12 +116,19 @@ type goalArm struct {
 	Armed  bool
 }
 
-func newGoalRoundDriver(goals *goalOverrideStore, home string) *goalRoundDriver {
+// newGoalRoundDriver 装配驱动。
+//
+// agents 是**进程内唯一的**活体注册表（`serve.go` 里造一次，同时交给
+// `agentOfficialDeps`，见 `serve_agent_api.go` 的 `agents` 字段）：
+// 驱动只读它判"是不是 whole-agent idle"，不再自己造第二张表。
+// nil = 这次装配没有活体状态（测试夹具/无 agent 面的入口）：状态登记与
+// `subagent/*` 结算都跳过，其余判据照旧。
+func newGoalRoundDriver(goals *goalOverrideStore, home string, agents *agent.Registry) *goalRoundDriver {
 	return &goalRoundDriver{
 		goals:   goals,
 		home:    home,
 		path:    filepath.Join(home, "state", "session-goal-rounds.json"),
-		agents:  agent.NewRegistry(agent.RegistryOptions{}),
+		agents:  agents,
 		cursors: map[string]goalRoundCursor{},
 		arms:    map[string]goalArm{},
 	}
@@ -472,9 +479,17 @@ func nextArm(previous goalArm, seen bool, goal *transport.GoalSnapshot, lastOp s
 //
 // 失败只打日志：状态登记失败不该让一轮 turn 失败（那是可观测性问题，
 // 不是执行问题），但也不能静默——静默会让"状态没有真值"永远查不出来。
+//
+// 这是 `agent/created` 与 `agent/status` 的**真实发射点**：serve 进程里
+// 每条真的跑了一轮的会话（根会话、`subagents.prompt` 投进来的子会话）都从这里过。
 func (d *goalRoundDriver) agentStarted(sessionID string) {
 	if d == nil || d.agents == nil {
 		return
+	}
+	// 先登记（幂等）再 Start：`Start` 对未知会话的自动登记只发 status 边，
+	// 而"这个 agent 什么时候出现的"只有 `Create` 答得了。
+	if err := ensureAgentRegistered(d.agents, d.home, sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "agent 登记失败（session=%s）：%v\n", sessionID, err)
 	}
 	if _, err := d.agents.Start(sessionID); err != nil {
 		fmt.Fprintf(os.Stderr, "agent 状态登记失败（session=%s）：%v\n", sessionID, err)
@@ -487,6 +502,38 @@ func (d *goalRoundDriver) agentSettled(sessionID string) {
 	}
 	if _, err := d.agents.Stop(sessionID); err != nil {
 		fmt.Fprintf(os.Stderr, "agent 状态收工失败（session=%s）：%v\n", sessionID, err)
+	}
+	d.settleSubagent(sessionID)
+}
+
+// settleSubagent 在一条**子会话**的那一轮真的收工之后结算它的委派 epoch
+// （发 `subagent/end`，并把 child 从注册表里摘掉）。
+//
+// 为什么结算点在这里：`subagents.prompt` 把消息投进子会话就返回（官方 delivery
+// 是异步的），serve 进程里唯一能观察到"这个 child 的那一轮跑完了"的地方，
+// 就是包在 runner 外面的这一层。start 由 `agentOfficialAPI.beginChildRun`
+// 在**投递真的被接受之后**发（`serve_agent_api.go`），两条边成对。
+//
+// 根会话（没有在册的委派）在这里是 no-op。
+func (d *goalRoundDriver) settleSubagent(sessionID string) {
+	if d == nil || d.agents == nil || sessionID == "" {
+		return
+	}
+	runID, open := d.agents.RunForChild(sessionID)
+	if !open {
+		return
+	}
+	kind, found, err := d.lastTurnEndKind(sessionID)
+	if err != nil {
+		// 读不到子会话日志就**不结算**：编一个 stopReason 等于替子代理宣布结果。
+		fmt.Fprintf(os.Stderr, "子代理结算读会话失败（session=%s run=%s）：%v\n", sessionID, runID, err)
+		return
+	}
+	// lastAssistantMessage 显式留空：注册表这一层只有子会话的 v4 载荷，在这里挑
+	// "text 块"拼正文正是 text-only 那个病（scripts/text-only-guard.py）。官方这个
+	// 字段也是可省的，宁缺勿假。
+	if _, err := d.agents.EndSubagent(runID, subagentStopReasonFromTurnEnd(kind, found), ""); err != nil {
+		fmt.Fprintf(os.Stderr, "子代理结算失败（session=%s run=%s）：%v\n", sessionID, runID, err)
 	}
 }
 
@@ -527,7 +574,7 @@ func (d *goalRoundDriver) decideAfterTurn(sessionID string) (goalDecision, goalC
 	if d.agents != nil && !d.agents.Idle(sessionID) {
 		return goalStop, goalContinuation{}, nil
 	}
-	kind, err := d.lastTurnKind(sessionID)
+	kind, _, err := d.lastTurnEndKind(sessionID)
 	if err != nil {
 		return goalStop, goalContinuation{}, err
 	}
@@ -587,23 +634,28 @@ func (d *goalRoundDriver) blockRoundLimit(sessionID string) error {
 	return err
 }
 
-// lastTurnKind 读这份会话**最后一条** turn/end 的 reason.kind。
+// lastTurnEndKind 读这份会话**最后一条** turn/end 的 reason.kind。
 //
 // 为什么不用 completedTurns：那个只数"正常收工"，而这里要区分"正常"
 // 与"被 max tokens 截断"——两者都不该继续续轮，但后者要先 disarm。
-func (d *goalRoundDriver) lastTurnKind(sessionID string) (string, error) {
+//
+// found 与 kind 分开报：**没有闭合的 turn** 和"闭合了但 reason.kind 是空"
+// 是两件不同的事（早期日志形状的空 kind 表示"这一轮结束了"）。子代理结算
+// 靠这个区分才不会把"根本没跑完"报成 completed。
+func (d *goalRoundDriver) lastTurnEndKind(sessionID string) (string, bool, error) {
 	path, err := newSessionSource(d.home, "").resolve(sessionID)
 	if err != nil {
 		if errors.Is(err, transport.ErrNoSuchSession) {
-			return "", nil // 会话文件还没建：没有轮次，不是失败
+			return "", false, nil // 会话文件还没建：没有轮次，不是失败
 		}
-		return "", fmt.Errorf("goal 续轮读会话 %s: %v", sessionID, err)
+		return "", false, fmt.Errorf("goal 续轮读会话 %s: %v", sessionID, err)
 	}
 	log, err := v4.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("goal 续轮读 v4 %s: %v", path, err)
+		return "", false, fmt.Errorf("goal 续轮读 v4 %s: %v", path, err)
 	}
 	kind := ""
+	found := false
 	for _, event := range log.Events {
 		if event.Type != "turn/end" {
 			continue
@@ -614,11 +666,12 @@ func (d *goalRoundDriver) lastTurnKind(sessionID string) (string, error) {
 			} `json:"reason"`
 		}
 		if err := json.Unmarshal(event.Data, &data); err != nil {
-			return "", fmt.Errorf("解析 %s seq=%d 的 turn/end: %v", path, event.Seq, err)
+			return "", false, fmt.Errorf("解析 %s seq=%d 的 turn/end: %v", path, event.Seq, err)
 		}
 		kind = data.Reason.Kind
+		found = true
 	}
-	return kind, nil
+	return kind, found, nil
 }
 
 // Reconcile 在 serve 启动时把"上次进程结束前已经完成、但没来得及记账"的轮次补上。

@@ -89,6 +89,14 @@ type agentOfficialDeps struct {
 	// 每会话 Transport journal（可恢复）与 WS（在线订阅者立刻看到）；为 nil 时
 	// 只入 journal（测试夹具用），生产由 serve.go 接上 `srv.Publish`。
 	pub func(topic string, frame transport.ServerFrame)
+	// agents 是**进程内唯一的**活体 agent 注册表（官方 `ctx.agents` 的宿主落点，
+	// `serve.go` 里造一次，同一份也交给 goal-round 驱动）。
+	//
+	// 为什么 agent 面需要它：子代理的 residency epoch（`subagent/start` /
+	// `subagent/end`）与"这个 child 现在在不在跑"只有一个真值，就是这张表。
+	// 这里**不**再存一份影子状态；nil = 这次装配没有活体状态（测试夹具），
+	// 此时委派登记明确跳过，绝不编一条边出来。
+	agents *agent.Registry
 }
 
 // agentOfficialAPI 持有进程内（**不持久化**）的 goal activation。
@@ -821,7 +829,51 @@ func (a *agentOfficialAPI) subagentsPrompt(req transport.OfficialSubagentPromptR
 	// 子代理工具在 `dshd run` 子进程里 spawn，本进程只认盘上的父子帧
 	// （见 serve_subagents_api.go 的 adoptChild）。
 	a.adoptChild(req.ChildSessionID)
-	return a.childRegistry().Prompt(context.Background(), req)
+	receipt, err := a.childRegistry().Prompt(context.Background(), req)
+	if err != nil {
+		// 投递没被接受 = 没有这次委派，也就没有 `subagent/start` 边。
+		return receipt, err
+	}
+	// 投递**真的被宿主投递通道接受**之后才登记 residency epoch：这一步发
+	// `subagent/start`（官方 `subagent/start` 的语义就是"provider 发布了这个 child"）。
+	// 结算（`subagent/end`）在 runner 那一层——serve 进程里只有它看得到 child 那一轮跑完
+	// （`serve_goal_round.go` 的 settleSubagent）。
+	a.beginChildRun(req.ParentSessionID, req.ChildSessionID)
+	return receipt, nil
+}
+
+// beginChildRun 登记一次真实的子代理 residency epoch。
+//
+// provider 用官方的 `spawn`（`agent.ProviderSpawn`，证据在 `internal/agent/registry.go`）：
+// 本宿主只有一种子代理后端，就是"新起一条子会话"的 spawn，不是 fork。
+//
+// 一个 child 同时最多一次激活：已经有未结算的 run 时不重复发边（官方 activation
+// 也是"一个 child 一个 epoch"）。登记失败只记录——投递已经成功，编一条边或回滚
+// 投递都是更糟的选择。
+func (a *agentOfficialAPI) beginChildRun(parentSessionID, childSessionID string) {
+	if a == nil || a.deps.agents == nil {
+		return
+	}
+	reg, home := a.deps.agents, a.deps.home
+	if _, open := reg.RunForChild(childSessionID); open {
+		return
+	}
+	if err := ensureAgentRegistered(reg, home, parentSessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "父会话 agent 登记失败（session=%s）：%v\n", parentSessionID, err)
+		return
+	}
+	// child 的归属用**这次请求里的父**：`childRegistry().Prompt` 已经按 durable 的
+	// `subagent/spawn` 记录校过父子（不匹配就是 403 cross_session），能走到这里
+	// 说明它就是这个 child 的真父。比再查一次盘更直接，也不会把父子关系记反。
+	if _, ok := reg.Get(childSessionID); !ok {
+		if _, err := reg.Create(childSessionID, parentSessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "子会话 agent 登记失败（session=%s）：%v\n", childSessionID, err)
+			return
+		}
+	}
+	if _, err := reg.BeginSubagent(parentSessionID, childSessionID, agent.ProviderSpawn, ""); err != nil {
+		fmt.Fprintf(os.Stderr, "委派登记失败（parent=%s child=%s）：%v\n", parentSessionID, childSessionID, err)
+	}
 }
 
 // subagentsInterruptByParent 按父授权中断子会话当前轮（官方 `interruptByParent`）。
