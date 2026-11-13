@@ -433,7 +433,11 @@ func TestProviderRoutingRealDSHDLoopABAndRestart(t *testing.T) {
 			label = "B"
 		case got = <-fallback.requests:
 			label = "legacy"
-		case <-time.After(15 * time.Second):
+		// 60s 而不是 15s：这个用例等的是**真 dshd 子进程**把一次模型请求送到 mock 端点。
+		// 起进程 + 建 home + 绑端口 + 走一遍 provider 路由，在 2 核 CI runner 上还要套
+		// `-race`（二进制更慢）。15s 在负载高时不够（2026-11-13 连续两轮红在这里）。
+		// 超时是**环境容差**不是行为契约——放宽它不降低"请求必须真的发出去"这条断言，失败仍 fail-closed。
+		case <-time.After(60 * time.Second):
 			t.Fatalf("provider request timeout want=%s stderr=%s", wantLabel, server.stderr.String())
 		}
 		if label != wantLabel {
@@ -478,7 +482,7 @@ func TestProviderRoutingRealDSHDLoopABAndRestart(t *testing.T) {
 			seenConcurrent["B"] = true
 		case got := <-fallback.requests:
 			t.Fatalf("concurrent provider request fell back to legacy: model=%q", got.Model)
-		case <-time.After(15 * time.Second):
+		case <-time.After(60 * time.Second): // 同上：真子进程 + -race 的环境容差
 			t.Fatalf("concurrent provider timeout: seen=%v stderr=%s", seenConcurrent, server.stderr.String())
 		}
 	}
