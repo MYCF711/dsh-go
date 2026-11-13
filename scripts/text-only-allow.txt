@@ -155,7 +155,7 @@ internal/officekit/images.go:368 | planRegions：switch 的操作数是 ready.Do
 # ServeOfficialOfficeKitAPI 的参数抽取闭包：空串 = 客户端没给这个参数（随后 400）。
 internal/transport/handlers_office_kit_rc2.go:150 | ServeOfficialOfficeKitAPI 的 str 闭包：空串 = 客户端没给这个参数（随后 400），判的是入参完整性，不是消息存亡
 # promptContentShape 本身就是官方 hasPromptContent 的投影：非 text 块在下面另算内容。
-internal/transport/server.go:1012 | promptContentShape：函数本身就是官方 hasPromptContent 的投影——非 text 块在下面（1006-1010）直接算内容（attachment/reference），text 分支只额外要求文本非全空白
+internal/transport/server.go:1023 | promptContentShape：函数本身就是官方 hasPromptContent 的投影——非 text 块在下面（1029-1033）直接算内容（attachment/reference），text 分支只额外要求文本非全空白
 
 # ---- workflow 编排面（GO.8 事件面，2026-11-13）----
 #

@@ -124,7 +124,7 @@ func TestLoopRunnerProductionIPCSteerFIFOContentAndABIsolation(t *testing.T) {
 	for _, sid := range []string{"session-loop-a", "session-loop-b"} {
 		select {
 		case <-firstStarted[sid]:
-		case <-time.After(10 * time.Second):
+		case <-time.After(realChainWait):
 			t.Fatalf("%s 第一模型调用未开始", sid)
 		}
 	}
@@ -182,7 +182,7 @@ func TestLoopRunnerProductionIPCSteerFIFOContentAndABIsolation(t *testing.T) {
 				t.Fatalf("turn/done topic=%s turnID=%q，要 %q", item.topic, data.TurnID, want)
 			}
 			doneTurns[item.topic]++
-		case <-time.After(15 * time.Second):
+		case <-time.After(realChainWait):
 			t.Fatalf("等 A/B turn/done 超时: %+v", doneTurns)
 		}
 	}
@@ -370,7 +370,7 @@ func TestLoopRunnerProductionIPCSteerSecondStepErrorAndCancel(t *testing.T) {
 			go func() { runDone <- r.Run(ctx, sid, turnID, "original") }()
 			select {
 			case <-firstStarted:
-			case <-time.After(10 * time.Second):
+			case <-time.After(realChainWait):
 				t.Fatal("子进程第一模型调用未开始")
 			}
 			if err := r.Steer(context.Background(), sid, turnID, "child-steer"); err != nil {
@@ -379,7 +379,7 @@ func TestLoopRunnerProductionIPCSteerSecondStepErrorAndCancel(t *testing.T) {
 			close(releaseFirst)
 			select {
 			case <-secondStarted:
-			case <-time.After(10 * time.Second):
+			case <-time.After(realChainWait):
 				t.Fatal("steer 没有触发同一子进程的第二模型调用")
 			}
 			if tc.cancel {

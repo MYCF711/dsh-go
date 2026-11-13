@@ -305,6 +305,33 @@ func cmdServe(args []string) error {
 		return fmt.Errorf("初始化更新渠道服务: %w", channelErr)
 	}
 	_ = updateChannel // 在 srv 建好后挂上（见下面 AttachDesktopUpdateChannel）
+
+	// 更新状态：渠道服务的**兄弟**——那边管"我选哪个渠道"，这边管"现在有没有新版本、
+	// 更新入口在哪"（官方 `dsh-client-ui-settings-general/src/types.ts:30-35`）。
+	//
+	// 更新来源是**我们自己的 GitHub 仓**：`GET /repos/MYCF711/dsh-go/releases`
+	// （用户 2026-11-13 指令「走我们的 go 仓库更新」），不是官方的 Electron 更新通道。
+	// 运行中版本从 `main.version` 注入——版本号唯一出处是 `cmd/dshd/main.go`。
+	//
+	// 出网策略：进程启动不发请求，只有界面问 `desktopUpdate.status`（观察）或
+	// 用户点 `desktopUpdate.open`（重试）才查；TTL 缓存 + 单飞 + ETag 条件请求。
+	githubToken := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+	if githubToken == "" {
+		githubToken = strings.TrimSpace(os.Getenv("GH_TOKEN"))
+	}
+	updateStatus, statusErr := updater.NewStatusService(updater.StatusOptions{
+		Version: version,
+		Channel: updateChannel,
+		Token:   githubToken,
+	})
+	if statusErr != nil {
+		// 运行版本解析不了 / 没有渠道来源都是装配错误：响亮失败，
+		// 不静默退化成"永远查不到更新"（那种沉默比一条启动错误难查十倍）。
+		return fmt.Errorf("初始化更新状态服务: %w", statusErr)
+	}
+	// 渠道一变过滤规则就变了（stable 不看 prerelease），缓存的结论立刻作废。
+	unsubscribeChannelChange := updateChannel.Subscribe(func(updater.State) { updateStatus.Invalidate() })
+	defer unsubscribeChannelChange()
 	// 持久模型目录与 active 默认共用 W61 store；目录本身不保存第二个 active。
 	// 损坏目录只让目录 API fail-loud，绝不拿空目录覆盖原文件。
 	modelCatalog := llm.OpenModelCatalog(*home)
@@ -829,6 +856,8 @@ func cmdServe(args []string) error {
 	srv.AttachOfficialAgentTeamRC2API(agentAPICore.bindTeamRC2())
 	// 壳侧更新渠道：官方归壳配置，不走 settings 命名空间。
 	srv.AttachDesktopUpdateChannel(updateChannel)
+	// 壳侧更新状态：与渠道是兄弟，同样是官方 preload 桥的 Go 等价物。
+	srv.AttachDesktopUpdateStatus(updateStatus)
 	// 官方 0.2.2-rc.2 电脑操作面（9 个 cuaAccess.*）。默认实现就是真 Service：
 	// 平台/权限状态、应用决策、图标、设置页、审批状态机都是真的；AX/窗口控制在
 	// 无 provider 的平台按官方形状回结构化未实现。

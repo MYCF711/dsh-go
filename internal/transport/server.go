@@ -62,6 +62,12 @@ type Options struct {
 	// 「UI choices persist in the shell configuration, independently of Host settings」。
 	// nil 时 `desktopUpdate.channel` 回 501 并说清原因（不假装有渠道可选）。
 	UpdateChannel UpdateChannelService
+	// UpdateStatus 是**壳侧**的更新状态服务（官方 `DesktopUpdateBridge` 的 Go 等价物）。
+	//
+	// 与 UpdateChannel 是兄弟：那个管"我选哪个渠道"，这个管"现在有没有新版本、
+	// 更新入口在哪"（官方 `dsh-client-ui-settings-general/src/types.ts:30-35`）。
+	// nil 时 `desktopUpdate.status` / `.open` / `.subscribe` 回 501 并说清原因。
+	UpdateStatus UpdateStatusService
 	// Policy 是宿主这一进程实际用的审批策略（deny/ask/allow/auto）。
 	//
 	// 它是**进程级事实**，不是会话级"预设"——H5 要的是"当前权限状态"，
@@ -528,6 +534,11 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	// 壳侧更新渠道（官方 Electron preload 桥的 Go 等价物）。
 	if IsOfficialDesktopUpdateChannelMethod(name) {
 		s.ServeOfficialDesktopUpdateChannel(w, r, name)
+		return
+	}
+	// 壳侧更新状态（同一个官方桥的 `status`/`open`/`subscribe` 三个方法）。
+	if IsOfficialDesktopUpdateStatusMethod(name) {
+		s.ServeOfficialDesktopUpdateStatus(w, r, name)
 		return
 	}
 	// 官方 0.2.2-rc.2 Team 分派面：`agentTeams.setEnabled` / `subagents.interruptByUser`。
@@ -1850,4 +1861,23 @@ type UpdateChannelService interface {
 	WireSet(channel string) map[string]any
 	// WireSubscribe 订阅变更；返回取消函数。
 	WireSubscribe(fn func(map[string]any)) func()
+}
+
+// UpdateStatusService 是壳侧更新状态服务（官方 `DesktopUpdateBridge` 的 Go 等价物）。
+//
+// 三个方法逐条对应官方（`types.ts:30-35`）：
+//
+//	status()            -> StatusView()        当前状态；**不阻塞**（结论走订阅推）
+//	open()              -> OpenView(ctx)       用户点了：交出更新入口（绕过 TTL 真查一次）
+//	subscribe(listener) -> WireSubscribe()     状态变化的帧通道 + 取消函数
+//
+// 与 `UpdateChannelService` 一样，定义在 transport 侧而不是直接依赖 internal/updater，
+// 是为了让 handler 只依赖它真正需要的三件事（也让测试能塞一个假的）。
+type UpdateStatusService interface {
+	// StatusView 返回官方 `DesktopUpdatePresentation` 的线上形状。
+	StatusView() map[string]any
+	// OpenView 返回更新入口（`url` 一定非空）+ 当前状态 + 实际用的渠道。
+	OpenView(ctx context.Context) map[string]any
+	// WireSubscribe 订阅状态变化；首帧是当前状态。
+	WireSubscribe() (<-chan map[string]any, func())
 }

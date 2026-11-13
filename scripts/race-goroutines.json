@@ -25,13 +25,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:308",
+      "site": "internal/transport/server.go:314",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:395",
+      "site": "internal/transport/server.go:401",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
@@ -569,6 +569,12 @@
       "what": "把壳更新渠道的状态变更通知给订阅者（其中一个是 desktopUpdate.channel.subscribe 的 NDJSON 流）",
       "sync": "读过：在锁内先 snapshotLocked() 复制状态、append 复制订阅者切片，再出锁起 goroutine 逐个回调；回调只拿到**值拷贝**，不碰 Service 的任何字段。listen 切片的增删都在锁内，所以并发订阅/取消不会与这次遍历竞争。",
       "verified_at": "2026-11-13"
+    },
+    {
+      "site": "internal/updater/status.go:480",
+      "what": "更新检查的单飞 worker（一次出网查 GitHub releases，结果写回缓存并推给订阅者）",
+      "sync": "读过：起之前调用方持锁并已置 s.inflight=flight，所以同一时刻只有一个 worker。worker 出网前**不持锁**；回来后持锁写 s.cache / 置 s.inflight=nil / 推订阅帧，然后**出锁**才 close(flight.done)。等它的人只 select done/ctx.Done，醒来必在 done 关闭之后（close 建立 happens-before），再持锁读缓存——读到的要么是它写的结论，要么是之后别人起的新一轮（那时如实回 checking）。订阅通道是带缓冲的，投递在锁内非阻塞，不碰任何外部代码。",
+      "verified_at": "2026-11-14"
     }
   ]
 }
