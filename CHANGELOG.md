@@ -1,4 +1,4 @@
-## 0.2.2-rc.2-go.1（2026-11-12，**稳定版**）—— 宿主完成官方 `0.2.2-rc.2` 同步
+## 0.2.2-go.3（2026-11-12，**稳定版**）—— 宿主完成官方 `0.2.2-rc.2` 同步
 
 > 版本命名（用户 2026-11-12 指令）：途中版本 `<上游>-gobeta.<N>`，**稳定版 `<上游>-go.<N>`**。
 > 本版是 rc.2 的**第一个稳定版**：方法面 223 条逐条有结论、参数总账 405 条、门禁四项全绿（含全量 `-race`）。
@@ -30,10 +30,10 @@
 
 `bash scripts/build.sh` 在合并后的 `34c5b7d` 上重跑通过：6 个产物（windows/linux/darwin × 宿主/TUI）
 + `dist/SHA256SUMS`（8 行，`sha256sum -c` 全 OK）；宿主 21,372,416 B（≤25 MiB 规则内）；
-`--version` 自检输出 `DSH GO 0.2.2-rc.2-go.1` / commit `34c5b7d`。
+`--version` 自检输出 `DSH GO 0.2.2-go.3` / commit `34c5b7d`。
 
-- **Tag**：`v0.2.2-rc.2-go.1`（annotated）
-- **Release**：https://github.com/MYCF711/dsh-go/releases/tag/v0.2.2-rc.2-go.1
+- **Tag**：`v0.2.2-go.3`（annotated）
+- **Release**：https://github.com/MYCF711/dsh-go/releases/tag/v0.2.2-go.3
 - **7 个附件**：三平台宿主 + 三平台 TUI + `SHA256SUMS`；远端大小与本地逐字节一致
   （Windows 宿主 21,372,416 B / TUI 7,976,448 B）
 - **PR**：#11 已合并（`34c5b7d`）

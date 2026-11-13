@@ -13,7 +13,7 @@
 | base 插件面 | **99** 个，新增 `agent-team` / `tool-agent-team` 已实现 | `docs/evidence/official-base-plugins-0.2.2-rc.2.txt` |
 | 参数总账 | **405** 条（`officialCoverage`） | `docs/parameter-register.json` |
 | 四门禁 | build / vet / test（90 包）/ `-race`（90 包）**全绿** | `scripts/check.sh` ALL GREEN |
-| 稳定版 | **`0.2.2-rc.2-go.1`** | Tag + [Release](https://github.com/MYCF711/dsh-go/releases/tag/v0.2.2-rc.2-go.1) + 7 附件 |
+| 稳定版 | **`0.2.2-go.3`** | Tag + [Release](https://github.com/MYCF711/dsh-go/releases/tag/v0.2.2-go.3) + 7 附件 |
 
 **rc.1 → rc.2 硬数字**：方法 193→**223**（+35/−5）· base 插件 97→**99** · 客户端 UI 插件 65→**66** · `hostProtocolVersion` **4**（未变）。
 

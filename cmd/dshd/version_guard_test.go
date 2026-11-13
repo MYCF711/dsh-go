@@ -57,7 +57,7 @@ var (
 //   - `.go`：用 go/scanner 逐 token 取字面量，跳过 COMMENT（字符串/raw string 仍然算，
 //     因为它们是真的会进产物的值）；解析失败就退回原文，宁可多报也不漏报。
 //   - `.sh` / `.py` / `.ps1` / `.cmd`：按行剔除 `#` / `//` / `REM` 开头的注释行。
-//     （脚本里真正的赋值仍然会被扫到，例如 `VER=0.2.2-rc.2-go.1`。）
+//     （脚本里真正的赋值仍然会被扫到，例如 `VER=0.2.2-go.3`。）
 func codeText(path string, raw []byte) string {
 	// 用 rune 拼换行，避免在测试源码里再出现被工具层转义的转义序列。
 	newline := string(rune(10))
@@ -155,7 +155,7 @@ func TestHostVersionHasExactlyOneSourceOutsideBuildInjectedMains(t *testing.T) {
 				return err
 			}
 			// 只认**代码**里的字面量：注释里写一行版本号示例（例如
-			// `// 0.2.2-rc.2-go.1  上游带 rc 的稳定版`）不会让产物说谎，
+			// `// 0.2.2-go.3  上游带 rc 的稳定版`）不会让产物说谎，
 			// 把它算成"第二个版本源"是误报。误报的守卫最后一定被加豁免，
 			// 然后没人再看它——所以在这里就把注释剔掉，判据反而更准。
 			if !strings.Contains(codeText(path, raw), prefix) {

@@ -43,7 +43,7 @@ func (r doctorReport) Failed() bool {
 
 // Render 打成人看的报告。
 func (r doctorReport) Render(w io.Writer) {
-	fmt.Fprintf(w, "dshd doctor · home=%s\n\n", r.Home)
+	fmt.Fprintf(w, "dsh-go doctor · home=%s\n\n", r.Home)
 	for _, c := range r.Results {
 		// 警告优先于 ✓：结尾那行说的是"上面 ! 那行"，
 		// 这一行就**必须**是 !，否则人对不上号。
@@ -167,7 +167,7 @@ func checkSessionsReadable(home string) checkResult {
 		c.OK = true
 		c.Warn = true
 		c.Detail = fmt.Sprintf("%d 份可读，其中 %d 份尾部有半帧（断电留下的）", total, torn)
-		c.Next = "不用处理：前面的内容照常可用；`dshd session info --in <file>` 会提示截断位置"
+		c.Next = "不用处理：前面的内容照常可用；`dsh-go session info --in <file>` 会提示截断位置"
 	default:
 		c.OK = true
 		c.Detail = fmt.Sprintf("%d 份全部可读", total)
@@ -251,7 +251,7 @@ func checkManifest(path string) checkResult {
 	}
 	if _, err := loadMods(path, defaultHome(), 0, nil); err != nil {
 		c.Detail = path + ": " + err.Error()
-		c.Next = "manifest 语法或模块名写错了；`dshd modules list` 看能装配哪些"
+		c.Next = "manifest 语法或模块名写错了；`dsh-go modules list` 看能装配哪些"
 		return c
 	}
 	c.OK = true

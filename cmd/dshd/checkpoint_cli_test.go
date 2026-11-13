@@ -226,11 +226,11 @@ func TestCheckpointCLIRunSurvivesKill(t *testing.T) {
 	defer close(release)
 
 	_, kill := ckptCLIStartChild(t, ckptCLIRunMode, home, cwd, sid, gateway.URL, marker)
-	ckptCLIWaitMarker(t, marker, 90*time.Second, "dshd run 没有把模型请求发出去")
+	ckptCLIWaitMarker(t, marker, 90*time.Second, "dsh-go run 没有把模型请求发出去")
 	kill()
 
 	rec := ckptCLIRecoverAndVerify(t, home, sid, ckptCLIPrompt,
-		fmt.Sprintf("dshd run 的请求已发出（标记=%s），进程已被杀", marker))
+		fmt.Sprintf("dsh-go run 的请求已发出（标记=%s），进程已被杀", marker))
 	// 前缀必须停在请求之前：最后一帧是 user/message（请求载荷），绝不能是
 	// assistant/message（那意味着请求已经产生过回答）。
 	last := rec.Events[len(rec.Events)-1].Type
@@ -329,11 +329,11 @@ func TestCheckpointCLIACPSurvivesKill(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("写 session/prompt: %v", err)
 	}
-	ckptCLIWaitMarker(t, marker, 90*time.Second, "dshd acp 没有把模型请求发出去")
+	ckptCLIWaitMarker(t, marker, 90*time.Second, "dsh-go acp 没有把模型请求发出去")
 	kill()
 
 	ckptCLIRecoverAndVerify(t, home, sid, ckptCLIPrompt,
-		fmt.Sprintf("dshd acp 的请求已发出（标记=%s），进程已被杀；stderr=%s", marker, childErr.String()))
+		fmt.Sprintf("dsh-go acp 的请求已发出（标记=%s），进程已被杀；stderr=%s", marker, childErr.String()))
 }
 
 // ckptCLIReadRPC 读一条 JSON-RPC 应答；测试框架自己往 stdout 写的非 JSON 行直接跳过。

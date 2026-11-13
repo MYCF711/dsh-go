@@ -37,7 +37,7 @@ import (
 //     能调它们，这就是"wasm 插件真的提供了工具"的落点。
 //     多个 wasm 工具共存时，每个工具一个能力键（理由见 wasmToolCap）。
 //   - **没写** → 行为与这一层落地之前完全一致：Provides 为空、Register 为 nil、
-//     不进工具表，只能 `dshd wasm call` 手动调。这条"不变"是硬要求：
+//     不进工具表，只能 `dsh-go wasm call` 手动调。这条"不变"是硬要求：
 //     没声明要提供工具的人，不该因为升级宿主就多出一个模型可见的工具。
 //
 // 为什么不把 digest 塞进 kernel.Module：kernel 的红线是"不识业务"，
@@ -306,7 +306,7 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 			// 由 Exec 用 ctx 收得更紧（见 wasmTool.Exec）。实例重建之后这两个参数
 			// 继续生效（它们是宿主侧状态，不在客人里）。
 			m.SetTimeout(maxWasmToolTimeout(specs))
-			// 单工具模块顺手把模块级工具名设成它：`dshd wasm call` 这类不经过
+			// 单工具模块顺手把模块级工具名设成它：`dsh-go wasm call` 这类不经过
 			// spi.Tool 的入口仍然需要"这个模块默认是谁"。多工具模块不设——
 			// 每次 Exec 都会在路由锁里把名字写对，模块级那个默认值没有意义。
 			if len(specs) == 1 {
@@ -371,7 +371,7 @@ func loadWasmModules(manifestPath string) ([]kernel.Module, error) {
 			// 不能只靠日志里一句话。
 		})
 
-		slog.Warn("wasm 模块已装载并通过校验，但**不提供任何能力**：不进工具表、模型调不到，只能 `dshd wasm call` 手动调"+
+		slog.Warn("wasm 模块已装载并通过校验，但**不提供任何能力**：不进工具表、模型调不到，只能 `dsh-go wasm call` 手动调"+
 			"（要让它提供工具：单工具在 manifest 里写 provides = [\"tool\"] 并给出 tool_name / tool_description / tool_schema；"+
 			"多工具写 provides = [\"tool:<工具名>\", …] 并为每个工具写一节 [[module.tool]]）",
 			"module", e.ID, "path", p, "digest", shortDigest(actual),
@@ -1066,7 +1066,7 @@ func writeWasmSection(w io.Writer) {
 		return
 	}
 	fmt.Fprintf(w, "\n# wasm 后端（已装载 / 已校验；TOOL 列 = 注册进工具表的工具名（多个用逗号分隔），"+
-		"空表示不提供能力、只能 `dshd wasm call` 手动调）\n")
+		"空表示不提供能力、只能 `dsh-go wasm call` 手动调）\n")
 	fmt.Fprintf(w, "%-22s %-9s %-12s %-18s %-22s %s\n", "MODULE", "BACKEND", "DIGEST", "EXPORTS", "TOOL", "PATH")
 	for _, x := range list {
 		exports := strings.Join(x.exports, ",")
