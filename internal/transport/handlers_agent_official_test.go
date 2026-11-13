@@ -780,3 +780,123 @@ func TestOfficialAgentPresetsListErrorIsLoud(t *testing.T) {
 	code, out := callOfficial(t, srv, "agentPresets.list", map[string]any{})
 	assertFourFieldError(t, code, out, http.StatusBadRequest, "bad_request")
 }
+
+// TestOfficialAgentSkillsErrorsAreFourField 钉住 `skills.list` 两条官方错误码
+// 到四字段信封的映射（官方 `skill-catalog.ts:62-73` 的原文两条）。
+//
+//   - `session/not-found`（会话查不到）→ 404 + `not_found`，details 带 sessionId；
+//   - `gateway/internal`（其它失败）  → 500 + `internal`。
+//
+// 官方码本身留在 message 前缀（`code: message`）：四字段 code 是闭合集合，
+// 客户端按前缀还原官方码——这是 workspace 侧同一张表的先例。
+func TestOfficialAgentSkillsErrorsAreFourField(t *testing.T) {
+	cases := []struct {
+		name       string
+		fault      error
+		wantStatus int
+		wantCode   string
+		wantDetail string
+	}{
+		{
+			name:       "session/not-found",
+			fault:      OfficialAgentError("session/not-found", map[string]any{"sessionId": "s1"}, `session %q not found`, "s1"),
+			wantStatus: http.StatusNotFound,
+			wantCode:   "not_found",
+			wantDetail: "s1",
+		},
+		{
+			name:       "gateway/internal",
+			fault:      OfficialAgentError("gateway/internal", nil, "skill listing failed: 根目录不可读"),
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "internal",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := officialTestServer(t, OfficialAgentAPI{
+				SkillsList: func(string) (OfficialSkillCatalog, error) {
+					return OfficialSkillCatalog{}, tc.fault
+				},
+			})
+			code, out := callOfficial(t, srv, "skills.list",
+				map[string]any{"request": map[string]any{"sessionId": "s1"}})
+			assertFourFieldError(t, code, out, tc.wantStatus, tc.wantCode)
+			message, _ := out["error"].(map[string]any)["message"].(string)
+			if !strings.HasPrefix(message, tc.name+": ") {
+				t.Fatalf("message %q 丢了官方码前缀 %q", message, tc.name)
+			}
+			if tc.wantDetail == "" {
+				if _, has := out["details"]; has {
+					t.Fatalf("官方 details 是 {}，不该出现在信封里：%v", out)
+				}
+				return
+			}
+			details, ok := out["details"].(map[string]any)
+			if !ok {
+				t.Fatalf("缺 details 对象：%v", out)
+			}
+			if details["sessionId"] != tc.wantDetail {
+				t.Fatalf("details.sessionId %v，期望 %q", details["sessionId"], tc.wantDetail)
+			}
+		})
+	}
+}
+
+// TestOfficialAgentSkillsCatalogJSONShape 钉住 GUI 消费的 wire 形状（逐字段）。
+//
+// 消费方：`dsh-ui-wfr/plugins/dsskill`（斜杠候选源用 name/description/
+// modelInvocable，`openSkill` 用 path 打开 SKILL.md）。可选字段的"无"语义靠
+// 省略表达，不能出现 `"whenToUse":""` 这种假值。
+func TestOfficialAgentSkillsCatalogJSONShape(t *testing.T) {
+	srv := officialTestServer(t, OfficialAgentAPI{
+		SkillsList: func(string) (OfficialSkillCatalog, error) {
+			return OfficialSkillCatalog{Skills: []OfficialSkill{
+				{
+					Path: "/abs/skills/demo/SKILL.md", Name: "demo",
+					Description: "演示用", WhenToUse: "当需要演示时", ModelInvocable: true,
+				},
+				{
+					Path: "/abs/skills/user-only/SKILL.md", Name: "user-only",
+					Description: "只给用户", ModelInvocable: false,
+				},
+			}}, nil
+		},
+	})
+	code, out := callOfficial(t, srv, "skills.list",
+		map[string]any{"request": map[string]any{"sessionId": "s1"}})
+	if code != http.StatusOK {
+		t.Fatalf("状态 %d: %v", code, out)
+	}
+	raw, err := json.Marshal(out["result"])
+	if err != nil {
+		t.Fatalf("序列化 result: %v", err)
+	}
+	var value struct {
+		Skills []map[string]any `json:"skills"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("解析 result: %v", err)
+	}
+	if len(value.Skills) != 2 {
+		t.Fatalf("skill 数量 %d（%s）", len(value.Skills), raw)
+	}
+	first := value.Skills[0]
+	if len(first) != 5 {
+		t.Fatalf("SkillEntry 必须恰好五个字段（官方 types.ts:227-239）：%v", first)
+	}
+	if first["path"] != "/abs/skills/demo/SKILL.md" || first["name"] != "demo" ||
+		first["description"] != "演示用" || first["whenToUse"] != "当需要演示时" ||
+		first["modelInvocable"] != true {
+		t.Fatalf("SkillEntry 字段值不对：%v", first)
+	}
+	second := value.Skills[1]
+	if len(second) != 4 {
+		t.Fatalf("没写 whenToUse 就必须**省略**该键（不能给空串）：%v", second)
+	}
+	if _, has := second["whenToUse"]; has {
+		t.Fatalf("没写 whenToUse 就必须省略该键：%v", second)
+	}
+	if second["modelInvocable"] != false {
+		t.Fatalf("modelInvocable 必须是 false（不是省略）：%v", second)
+	}
+}
