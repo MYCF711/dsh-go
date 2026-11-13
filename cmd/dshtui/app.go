@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -176,6 +177,16 @@ type app struct {
 	whaleSeed    uint64
 	whale        *whaleAnimation
 	pendingHeart bool
+
+	// notify 是四类系统通知（完成/授权/提问/计划评审）的跨帧状态。
+	// 见 notify_events.go：它必须能整批作废（切会话时），所以不是散字段。
+	notify notifyState
+	// settings 是 TUI 自己的设置层（目前是两项通知设置），settingsPath 是
+	// 它的落盘位置（`~/.dsh-go-tui/settings.json`，可用环境变量改，见 notify_settings.go）。
+	settings     tuiSettings
+	settingsPath string
+	// completionPending 表示"这一轮已成功结算、等这一批帧处理完再结算通知"。
+	completionPending bool
 }
 
 // 审批倒计时的两档显示与阈值。
@@ -264,8 +275,45 @@ func newApp(addr, token string) (*app, error) {
 	if n := len(splashTips); n > 0 {
 		a.tipIdx = rand.IntN(n)
 	}
+	a.initNotifications()
 	return a, nil
 }
+
+// initNotifications 装好通知的设置、投递器与跨帧状态。
+//
+// 三件事必须一起做，少一件都会让通知"看起来配好了但不工作"：
+//   - 读设置（坏值明确告警，不静默回默认）；
+//   - 建投递器（facts 全部注入：环境、平台、stdout 是不是真终端、焦点怎么读）；
+//   - 清一遍跨帧状态（代际 +1，重放水位归零）。
+func (a *app) initNotifications() {
+	a.settingsPath = settingsPath(os.Getenv)
+	loaded, warnings := loadTUISettings(a.settingsPath)
+	a.settings = loaded
+	a.notify.condition = loaded.condition
+	a.notify.method = loaded.method
+	out := io.Writer(os.Stdout)
+	if a.scr != nil && a.scr.out != nil {
+		out = a.scr.out
+	}
+	a.notify.notifier = newTerminalNotifier(notifierFacts{
+		getenv:   os.Getenv,
+		platform: runtime.GOOS,
+		tty:      isTerminalFile(os.Stdout),
+		focused:  a.terminalFocused,
+	}, out)
+	if err := a.notify.notifier.configure(loaded.condition, loaded.method); err != nil {
+		warnings = append(warnings, err.Error())
+	}
+	a.resetNotifications("", 0)
+	for _, w := range warnings {
+		// 告警进正文而不是只进 stderr：设置读坏了是"用户看得到"的事，
+		// 而 TUI 起来之后 stderr 已经不在视野里。
+		a.push("！" + w)
+	}
+}
+
+// terminalFocused 把焦点状态暴露给投递器（未知算聚焦，见 notifyState）。
+func (a *app) terminalFocused() bool { return a.notify.terminalFocusedNow() }
 
 // applyStats 把 session.load 的真实用量与身份字段搬到界面上。
 // model/cwd 的空字符串不覆盖已知值：宿主暂时不知道，不等于抹掉上一次真值。
@@ -389,6 +437,9 @@ func (a *app) run() error {
 				continue
 			}
 			a.handleFrame(f)
+			// 同一批里可能紧跟下一轮的 turn/start 或排队消息：先把已经到达的
+			// 帧处理完，再决定要不要发"任务完成"（否则会发出一条假消息）。
+			a.drainFrames(frames)
 		case ev, ok := <-events:
 			if !ok {
 				if events == a.connectionEvents {
@@ -399,8 +450,11 @@ func (a *app) run() error {
 			a.handleConnectionEvent(ev)
 		case result := <-a.promptResults:
 			a.handlePromptResult(result)
+			a.settleCompletion()
 		case <-tick.C:
 			a.tickStatus()
+			// 兜底结算：提交失败/重连等路径不会再有帧来触发结算。
+			a.settleCompletion()
 		case <-whaleTicks:
 			// 下一轮开头用 a.now 推进；测试直接调纯 advance，不在此等待。
 		}
@@ -431,6 +485,10 @@ func (a *app) pick(text string) bool {
 
 // switchTo 切到另一个已有会话：换订阅，不新建。
 func (a *app) switchTo(row sessionRow) error {
+	// 先读一次用量再订阅：这次订阅要从 journal 头重放整段历史来画屏幕，
+	// 而"进水线"必须在这之前读到——订阅之后再读，重放期间新产生的帧会被
+	// 误算成历史，真实的任务完成通知就被吞掉了（见 notifyState.replayUntil）。
+	st, loadErr := a.cl.loadStats(row.ID)
 	ch, events, closeFn, err := a.cl.SubscribeWithEvents(row.ID, 0)
 	if err != nil {
 		return err
@@ -452,13 +510,18 @@ func (a *app) switchTo(row sessionRow) error {
 	a.resetSessionSendState()
 	// 先清会话作用域的 effort：B 无记录或 load 失败时也不能继续显示 A 的值。
 	a.effort = ""
-	if st, err := a.cl.loadStats(row.ID); err == nil {
+	replayUntil := 0
+	if loadErr == nil {
 		a.applyStats(st)
+		replayUntil = st.LastSeq
 	}
 	title := row.Title
 	if title == "" {
 		title = "(无标题)"
 	}
+	// 通知状态整批作废：上一个会话的提问/计划评审不能在这里弹出来。
+	// 同时把这次重放的水位钉住：seq ≤ 水位的帧是历史，不产生任何通知。
+	a.resetNotifications(row.Title, replayUntil)
 	a.push("已切到 " + short(row.ID) + " — " + trunc(title, 40))
 	// 动画也是会话作用域：A/B 切换不带上一个会话的层相位或待触发 heart。
 	a.restartWhaleAnimation()
@@ -520,6 +583,8 @@ func (a *app) newSession() error {
 	if st, err := a.cl.loadStats(sid); err == nil {
 		a.applyStats(st)
 	}
+	// 新会话没有历史可重放：水位 0 表示"每一帧都是刚发生的"。
+	a.resetNotifications("", 0)
 	// 新会话是一次新的 logo mount；script 的 animateWhale=false 不会进入这里。
 	a.restartWhaleAnimation()
 	return nil
@@ -704,6 +769,9 @@ func (a *app) promptInputLocked() bool {
 }
 
 func (a *app) handleRune(r rune) {
+	// 收到按键 = 终端此刻是聚焦的（上游 App.js 的 failsafe）：没有这一条，
+	// 焦点上报漏掉一次 focus-in 之后，`unfocused` 档会一直以为你在别处。
+	a.notify.markFocus(true)
 	// 有审批在等时，y/a/n 先给审批用——这时候打字没有意义。
 	if a.pending.id != "" {
 		switch r {
@@ -982,6 +1050,16 @@ func matchCount(lines []string, query string) int {
 //
 // F5/F6/F7/F12 在上游只有解码没有动作，因而这里刻意没有对应 case。
 func (a *app) handleSpecial(k string) {
+	// 终端焦点上报（DECSET 1004 的 `CSI I` / `CSI O`）只改通知门禁，
+	// 不参与任何界面状态：它既不清草稿，也不该被当成 Esc。
+	switch k {
+	case "focus-in":
+		a.notify.markFocus(true)
+		return
+	case "focus-out":
+		a.notify.markFocus(false)
+		return
+	}
 	// 状态区先认领自己实际画出的 hit box；其它鼠标坐标仍交给鲸鱼命中。
 	if a.handleStatusSpecial(k) {
 		return
@@ -1151,7 +1229,7 @@ func (a *app) handlePromptResult(result promptOutcome) []ServerFrame {
 func (a *app) command(text string) {
 	switch strings.Fields(text)[0] {
 	case "/help":
-		a.push("命令：/help 帮助 · /new 新会话 · /clear 清屏 · /quit 退出 · /tools 折叠/展开工具结果")
+		a.push("命令：/help 帮助 · /new 新会话 · /clear 清屏 · /quit 退出 · /tools 折叠/展开工具结果 · /settings 通知设置")
 		a.push("按键：Ctrl+T 工具结果 · Ctrl+O 思考/长代码与长结果 · Ctrl+F 搜索（Esc 退出） · Esc 清输入")
 		a.push("编辑：←/→ 移动 · Ctrl+←/→ 词跳 · Home/End 行首/行尾 · Backspace/Delete 删除")
 		a.push("滚动：PgUp/PgDn 翻一屏 · ↑/↓ 一行 · Ctrl+Home 到最上面 · Ctrl+End 回到底部（继续跟随）")
@@ -1215,6 +1293,10 @@ func (a *app) command(text string) {
 			return
 		}
 		a.push(fmt.Sprintf("已导出 %d 条消息到 %s", len(msgs), path))
+	case "/settings":
+		// 上游是 `/settings` 的 Conversation 组里那两项；本 TUI 只开这一组，
+		// 因此命令就直接接受 `key=value`（无参数时显示当前值与解析结果）。
+		a.commandSettings(strings.Fields(text)[1:])
 	case "/compact":
 		// 宿主有 session.compact 就调；没有就如实说，不假装压过了。
 		res, err := a.cl.post("session.compact", map[string]any{"sessionId": a.sid})
@@ -1302,6 +1384,9 @@ func (a *app) handleFrame(f ServerFrame) {
 
 // handleFrameNow 把一帧变成几行字。只做**看得懂**的映射，不猜结构。
 func (a *app) handleFrameNow(f ServerFrame) {
+	// 通知先观察一帧再渲染：完成通知要看 turn/end 的 reason、提问要看
+	// tool/call 的参数，这些都不该由渲染路径顺手处理（渲染只关心"画什么"）。
+	a.observeNotificationFrame(f, a.frameIsReplay(f))
 	switch f.Type {
 	case "user/message":
 		// submit 从不画用户正文；只有 durable user/message 能进入 transcript。
@@ -1791,6 +1876,17 @@ func decodeKeys(src byteSource, runes chan<- rune, specials chan<- string) {
 			// 终结字节在 0x40–0x7E
 			if !linuxF5Prefix && c >= 0x40 && c <= 0x7e {
 				csi = false
+				// 焦点上报（DECSET 1004）：`CSI I` = 获得焦点，`CSI O` = 失去焦点。
+				// 它们必须在这里认走——否则会被当成未知序列丢掉，而丢了之后
+				// 通知门禁永远停在"未知焦点=聚焦"，`unfocused` 档就再也不会通知。
+				switch string(seq) {
+				case "I":
+					specials <- "focus-in"
+					continue
+				case "O":
+					specials <- "focus-out"
+					continue
+				}
 				if name := keyName(seq); name != "" {
 					specials <- name
 				}
