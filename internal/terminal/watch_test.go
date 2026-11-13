@@ -15,6 +15,7 @@ package terminal_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -161,17 +162,49 @@ func TestSetWatcherCoalescesAndKeepsLatest(t *testing.T) {
 	}
 
 	// 消费者故意不来取：连续三版变化都被合并。
+	//
+	// **不能**假设"三次 Publish 会先全部落进通道、再被取走"。Publish 是非阻塞投递
+	// （`select { case kick<-struct{}{}: default: }`），轮询 goroutine 何时被调度由
+	// 运行环境决定；CI 高负载下它可能在第二次 `src.set` 之前就醒过来，先送 v1、再送 v3。
+	// 那是**合法**语义：whole-set 承诺的是"**收口到最新**"，不是"中间版本一个都不许出现"。
+	// 2026-11-13 CI run 43390852758 正是这么红的（本地 `-count=10` 全过）。
+	// 所以断言形状改为：最多三帧 + 版本单调不减 + 末帧必须是 v3 + 收口后不补发旧版本。
+	versionOf := func(payload []byte) int {
+		t.Helper()
+		var n int
+		if _, err := fmt.Sscanf(string(payload), "v%d", &n); err != nil {
+			t.Fatalf("payload 不是 vN 形态：%q", payload)
+		}
+		return n
+	}
 	for _, v := range []string{"v1", "v2", "v3"} {
 		src.set(v)
 		w.Publish("s1")
 	}
-	got := mustNext(t, sub, 500*time.Millisecond)
-	if string(got.Payload) != "v3" {
-		t.Fatalf("合并之后必须是最新版本 v3（中间版本可以丢，最新版本不许丢），拿到 %q", got.Payload)
+	last := -1
+	for i := 0; i < 3; i++ { // 三次 Publish 最多产出三帧
+		frame, ok, timedOut := nextWithin(t, sub, 500*time.Millisecond)
+		if !ok {
+			if timedOut {
+				break
+			}
+			t.Fatalf("第 %d 帧订阅结束了", i+1)
+		}
+		got := versionOf(frame.Payload)
+		if got < last {
+			t.Fatalf("版本倒退：先 v%d 后 v%d", last, got)
+		}
+		last = got
+		if got == 3 {
+			break
+		}
 	}
-	// v1/v2 被合并掉是合法语义：whole-set 只承诺"现在是什么"。
-	if _, ok, timedOut := nextWithin(t, sub, 80*time.Millisecond); ok || !timedOut {
-		t.Fatalf("合并过的中间版本不许补发：ok=%v timedOut=%v", ok, timedOut)
+	if last != 3 {
+		t.Fatalf("合并之后必须收口到最新版本 v3，最后一帧是 v%d", last)
+	}
+	// 收口之后不许再补发更旧的版本：whole-set 只承诺"现在是什么"。
+	if frame, ok, _ := nextWithin(t, sub, 80*time.Millisecond); ok && versionOf(frame.Payload) < 3 {
+		t.Fatalf("合并过的中间版本不许补发：拿到 %q", frame.Payload)
 	}
 }
 
