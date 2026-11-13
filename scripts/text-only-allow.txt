@@ -113,7 +113,7 @@ cmd/dshd/attachments.go:550 | ResolveBlocks 的 text 分支：登记原文 + 文
 cmd/dshd/prompt_content.go:60 | loadPromptContentForRun：拼 llm.Message 的正文；图片走 images 通道单独归一化
 cmd/dshd/prompt_content.go:145 | promptPartsFromBlocks：把块变成 MessagePart；text 之外的种类由各自 case 处理，图片先占位后回填
 cmd/dshd/prompt_content.go:208 | ResolveBlocksForChild：与附件侧同构的 text 分支
-cmd/dshd/serve_subagents_api.go:168 | renderChildPromptContent：拼子代理的提示正文；image 在下一个 case 里被显式拒绝（"需要真支持时走 SubmitBlocks"）
+cmd/dshd/serve_subagents_api.go:178 | renderChildPromptContent：拼子代理的提示正文；image 在下一个 case 里被显式拒绝（"需要真支持时走 SubmitBlocks"）
 cmd/dshd/serve_title_auto.go:245 | autoTitleUserMessage：自动标题**只取用户正文**，思考/调用不参与起标题
 cmd/dshd/serve_session_api.go:137 | officialSnippetOf：搜索片段只可能来自正文（思考与调用不参与检索），空正文就是没有可搜的
 internal/session/image_offload.go:677 | joinTextWithPlaceholders：把 text 块与图片占位拼成**一段文本**（产物本身就是字符串）
@@ -138,9 +138,9 @@ cmd/dshtui/messages.go:117 | blocksFromContent：把内容块**构造**成排版
 cmd/dshd/prompt_content.go:62 | 同 loadPromptContentForRun 的 text 分支（拼正文），判据见上面那条
 cmd/dshd/prompt_content.go:147 | promptPartsFromBlocks 的 text 分支（switch 的操作数是 block.Type）
 cmd/dshd/prompt_content.go:148 | 同一分支里的"空正文块不产出 part"：text 之外没有正文可给，图片另走 pendingImage
-cmd/dshd/serve_agent_api.go:1090 | userQuestionsAnswer：把答案渲染成文本；空串是渲染失败 → 官方 ErrOfficialBadInput（fail-loud），不是丢消息
+cmd/dshd/serve_agent_api.go:1142 | userQuestionsAnswer：把答案渲染成文本；空串是渲染失败 → 官方 ErrOfficialBadInput（fail-loud），不是丢消息
 cmd/dshd/serve_queue_official.go:295 | joinQueueTextBlocks：把已校验为 text 的块拼回一段正文（产物是字符串）
-cmd/dshd/serve_subagents_api.go:182 | renderChildPromptContent：拼完的正文是空串要报错（fail-loud），不是静默投空提示
+cmd/dshd/serve_subagents_api.go:192 | renderChildPromptContent：拼完的正文是空串要报错（fail-loud），不是静默投空提示
 cmd/dshd/serve_title_auto.go:246 | autoTitleUserMessage：只取用户消息的 text 块（同 245 那条）
 
 # ---- rc.2 同步新增的四处形状误报（2026-11-12，逐条读过代码）----

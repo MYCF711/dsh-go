@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 
+	"dshgo/internal/agent"
 	"dshgo/internal/config"
 	"dshgo/internal/cua"
 	"dshgo/internal/llm"
@@ -468,10 +469,24 @@ func cmdServe(args []string) error {
 		moRunner = &modelOverrideLoopRunner{base: lr, permissions: permissionOverrides, recordEffort: true, catalog: modelCatalog}
 		runner = moRunner
 	}
+	// 活体 agent 注册表（官方 `ctx.agents` 的宿主落点）：**整个 serve 进程一份**，
+	// 注册表的每条边都经 agentEventSink 落进**该会话**的 Transport journal
+	// ——界面读的就是它（`/ws` 与 `session.history` 同一个 seq 域）。
+	//
+	// 以前这里传的是零值 `RegistryOptions{}`：`Emit == nil` 于是五条生命周期边
+	// 一条都不发，界面上 agent 面永远是空的。这一份同时交给 goal-round 驱动
+	// （排轮判据）与 agent 面（`subagents.*`），不再各造一张表。
+	//
+	// pub 晚绑定：注册表必须早于 `NewServer`（runner 要它），而 `srv.Publish`
+	// 只有 `NewServer` 返回之后才有值。
+	agentPub := &agentEventPub{}
+	agents := agent.NewRegistry(agent.RegistryOptions{
+		Emit: agentEventSink{journals: journals, pub: agentPub}.Emit,
+	})
 	// 官方 goal-round-driver（官方插件 #60）：真实 turn 正常收工后按 active goal 推进轮次。
 	// 只包一层 turnRunner（Run/RunContent/Steer/SteerContent 原样透传），不新建 turn、
 	// 不排 prompt；启动先重算一次，把上个进程漏记的轮次补上。
-	goalRounds := newGoalRoundDriver(goalOverrides, *home)
+	goalRounds := newGoalRoundDriver(goalOverrides, *home, agents)
 	if err := goalRounds.Load(); err != nil {
 		fmt.Fprintf(os.Stderr, "goal 轮次游标读盘失败（%v）；修复前不推进轮次\n", err)
 	}
@@ -751,6 +766,14 @@ func cmdServe(args []string) error {
 			return serveWorkspaceList(path)
 		},
 		Delete: func(sessionID string) error {
+			// 先摘活体 agent、**再**删目录：`agent/disposed` 要进的是这条会话**自己的**
+			// Transport journal，而目录删掉之后那个文件就不存在了——顺序反了就成了
+			// "边发了但没人收得到"（写盘按设计 fail-loud，只会在 stderr 刷一行）。
+			// 放在删除之前还有第二个好处：删除中途失败（取消超时等）时，注册表里
+			// 也不会留一个已经没人认领的 agent；下一条消息进来会重新登记。
+			if err := agents.Dispose(sessionID); err != nil {
+				fmt.Fprintf(os.Stderr, "agent 收尾失败（session=%s）：%v\n", sessionID, err)
+			}
 			return serveDelete(*home, sessionID, broker, prompts)
 		},
 		Fork: func(sessionID, title string) (string, error) {
@@ -827,6 +850,9 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 注册表的 WS 推送出口在这里接上：`NewServer` 已返回、服务还没开始收请求，
+	// 所以这一次赋值对所有请求 goroutine 都是 happens-before（壳里另有锁）。
+	agentPub.set(srv.Publish)
 	// 其余官方 0.2.2 方法接线（additive；宿主实现全在 cmd/dshd 与
 	// internal/pluginmgr/official，Transport 只做协议翻译）。
 	// rc.2：同一个 core 同时提供 `subagents.*` 与 `agentTeams.setEnabled` /
@@ -834,6 +860,10 @@ func cmdServe(args []string) error {
 	agentAPICore := newAgentOfficialAPICore(agentOfficialDeps{
 		home: *home, goals: goalOverrides, journals: journals, src: src,
 		sandboxPresets: sandboxPresets, sandboxStore: sandboxStore,
+		// 活体注册表是**同一份**：subagents.* 的委派 epoch（subagent/start|end）
+		// 与排轮判据读的是同一张表，不是第二份影子状态。nil 时那些方法明确
+		// no-op（不编边），不会静默成功。
+		agents: agents,
 		// Team 选择变更（`team/mode`）要同时进每会话 journal（可恢复）与 WS
 		// （在线订阅者立刻看到同一帧）。不接的话在线界面要等下一次轮询。
 		pub: srv.Publish,

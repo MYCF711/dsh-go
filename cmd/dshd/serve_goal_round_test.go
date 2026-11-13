@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"dshgo/internal/agent"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 	"dshgo/internal/transport"
@@ -147,7 +148,7 @@ func newGoalRoundFixture(t *testing.T, home string) *goalRoundFixture {
 	journals := transport.NewJournals(nil)
 	f := &goalRoundFixture{home: home, journals: journals}
 	f.store = openGoalStoreForTest(t, home, journals, &f.pushed)
-	f.driver = newGoalRoundDriver(f.store, home)
+	f.driver = newGoalRoundDriver(f.store, home, agent.NewRegistry(agent.RegistryOptions{}))
 	if err := f.driver.Load(); err != nil {
 		t.Fatalf("读 goal 轮次游标: %v", err)
 	}

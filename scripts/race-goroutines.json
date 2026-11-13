@@ -337,7 +337,7 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve.go:268",
+      "site": "cmd/dshd/serve.go:269",
       "what": "插件热重载循环",
       "sync": "读过：hmrCtx 取消即退；pluginRT.HMR() 内部自己串行化，不直写共享表",
       "verified_at": "2026-11-09"
