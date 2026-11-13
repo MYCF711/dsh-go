@@ -425,7 +425,16 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	t.Log("SETTINGS_FORM_REAL_SUMMARY OK=1 FAIL=0")
 }
 
-const postTimeoutForSettings = 15 * time.Second
+// postTimeoutForSettings 是这些真进程用例的 HTTP 客户端超时。
+//
+// 60s 而不是 15s：这些请求打在**真 dshd 子进程**上（起进程 + 建 home + 绑端口 +
+// 走一遍 settings 写入 + 落盘 + revision 乐观锁）。CI runner 只有 2 核，还套着
+// `-race`（二进制更慢），15s 在负载高时不够——2026-11-13 已两次红在
+// `TestSettingsFormRealDSHD…`（PR #17 round 4、PR #19）。
+//
+// **超时是环境容差，不是行为契约**：放宽它不降低任何断言强度，
+// 等不到照样 fail-closed。
+const postTimeoutForSettings = 60 * time.Second
 
 // ---------------------------------------------------------------------------
 // F2 · `llm` 命名空间写入面（rc.2 已知缺口 #2）
