@@ -95,8 +95,8 @@ cmd/dshtui/script.go:183 | send 步的语义就是发文字；空 text 是脚本
 # ---- 入站请求的协议校验：空 text 是**非法输入**，不是"消息没内容" ----
 
 # 官方 PromptContent 的 text 部件必须非空，否则 400（官方请求校验的一部分）。
-internal/transport/handlers_agent_official.go:1363 | 官方 SubagentPrompt 的 content 只认 text/image 两种部件（同函数里 image 在下一个 case 单独校验 mediaType/data），所以这不是"只认 text 的投影"
-internal/transport/handlers_agent_official.go:1364 | 官方 request.content[i].text 空串要 400（官方请求校验），判的是"参数合法吗"，不是"消息存不存在"
+internal/transport/handlers_agent_official.go:1441 | 官方 SubagentPrompt 的 content 只认 text/image 两种部件（同函数里 image 在下一个 case 单独校验 mediaType/data），所以这不是"只认 text 的投影"
+internal/transport/handlers_agent_official.go:1442 | 官方 request.content[i].text 空串要 400（官方请求校验），判的是"参数合法吗"，不是"消息存不存在"
 
 # 官方 QUEUE_EDIT_NON_TEXT：queue 的 edit 只接受 text 块，别的类型要 400。
 internal/transport/handlers_session_official.go:1719 | 官方 QUEUE_EDIT_NON_TEXT：edit 的非 text 块是**协议错误**，要 400 而不是静默过滤

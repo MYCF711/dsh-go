@@ -285,15 +285,93 @@ func officialRevisionConflict(format string, args ...any) error {
 	return &officialError{status: http.StatusConflict, code: "revision_conflict", msg: fmt.Sprintf(format, args...)}
 }
 
+// OfficialAgentFault 是宿主侧的"官方错误"：`Code` 用官方 session 网关词表
+// （`session/not-found`、`gateway/internal`），`Message` 是给人看的那句话，
+// `Details` 是官方 `RemoteError(code, message, details)` 的第三个参数。
+//
+// 为什么需要它：本仓四字段 code 是**闭合集合**（见 server.go 的 errorHint /
+// retryableFor），不能因为官方 gateway 有码族就长出一堆新码。所以官方码
+// **原样写进 message 前缀**（客户端按官方码分支），HTTP 状态与四字段 code 由
+// officialAgentFaultStatus 统一映射——与 handlers_workspace_official.go 的
+// OfficialWorkspaceFault 同一种形状、同一条判据（"客户端下一步怎么做"）。
+//
+// 官方原件（rc.2 解包树）：
+//
+//	@deepseek-ai/dsh-api-session-controller/src/skill-catalog.ts:56-73
+//	  throw new RemoteError('session/not-found', `session "${id}" not found`, { sessionId })
+//	  throw new RemoteError('gateway/internal', `session "${id}" could not be inspected: …`, {})
+//	  throw new RemoteError('gateway/internal', `skill listing failed: …`, {})
+type OfficialAgentFault struct {
+	// Code 是官方码（`session/not-found` / `gateway/internal`）。
+	Code string
+	// Message 是给人看的那句话（不含码前缀）。
+	Message string
+	// Details 是官方 RemoteError 的 details 对象；nil 与空 map 都不输出。
+	Details map[string]any
+}
+
+// Error 渲染成 `code: message`——官方码因此永远出现在四字段的 message 里，
+// 客户端按 `strings.HasPrefix(msg, code+": ")` 就能还原官方码。
+func (f *OfficialAgentFault) Error() string {
+	if f == nil {
+		return ""
+	}
+	if f.Message == "" {
+		return f.Code
+	}
+	return f.Code + ": " + f.Message
+}
+
+// OfficialAgentError 造一条官方 agent 错误（宿主侧唯一构造点）。
+func OfficialAgentError(code string, details map[string]any, format string, args ...any) error {
+	return &OfficialAgentFault{Code: code, Message: fmt.Sprintf(format, args...), Details: details}
+}
+
+// officialAgentFaultStatus 是官方 agent 码 → (HTTP 状态, 四字段 code) 的**唯一**映射表。
+//
+// 判据与 workspace 表一致：
+//   - 目标不在了（会话）                    → 404 not_found
+//   - 客户端改输入就能过                    → 400 bad_request
+//   - 宿主没这个能力                        → 501 not_implemented
+//   - 调用方自己走了（取消）                → 500 internal（四字段没有 cancelled 码）
+//   - 其它（宿主自己的 bug / 内部故障）      → 500 internal
+//
+// 认不出的官方码**不猜**：一律 500 internal，官方码仍留在 message 里可查。
+func officialAgentFaultStatus(code string) (status int, fourcode string) {
+	switch code {
+	case "session/not-found":
+		return http.StatusNotFound, "not_found"
+	case "gateway/bad-request":
+		return http.StatusBadRequest, "bad_request"
+	case "gateway/method-unavailable", "gateway/unsupported":
+		return http.StatusNotImplemented, "not_implemented"
+	}
+	return http.StatusInternalServerError, "internal"
+}
+
 // writeOfficialError 是官方 agent 方法的唯一错误出口。
 //
 // 码只取本仓既有的那几个（bad_request / not_implemented / not_found /
 // no_such_session / revision_conflict / internal / cross_session），
 // 因而 errorHint 与 retryableFor 不需要新增分支。
+//
+// 宿主想保留官方码时用 OfficialAgentError（`*OfficialAgentFault`）：
+// 状态与四字段 code 由 officialAgentFaultStatus 映射，官方码留在 message 前缀，
+// details 平铺在信封顶层（与 409 的 `details.reason` 同一格）。
 func writeOfficialError(w http.ResponseWriter, err error) {
 	var typed *officialError
 	if errors.As(err, &typed) {
 		writeJSON(w, typed.status, errorBodyFor(typed.code, typed.msg))
+		return
+	}
+	var fault *OfficialAgentFault
+	if errors.As(err, &fault) {
+		status, code := officialAgentFaultStatus(fault.Code)
+		var extra map[string]any
+		if len(fault.Details) > 0 {
+			extra = map[string]any{"details": fault.Details}
+		}
+		writeJSON(w, status, errorBodyFor(code, fault.Error(), extra))
 		return
 	}
 	if errors.Is(err, ErrOfficialNotImplemented) {
@@ -1644,6 +1722,11 @@ const officialQuestionClaimPollInterval = 100 * time.Millisecond
 
 // errorCodeForOfficialError 把宿主错误翻成本仓四字段错误码（流内错误帧用）。
 func errorCodeForOfficialError(err error) string {
+	var fault *OfficialAgentFault
+	if errors.As(err, &fault) {
+		_, code := officialAgentFaultStatus(fault.Code)
+		return code
+	}
 	switch {
 	case errors.Is(err, ErrOfficialBadInput):
 		return "bad_request"

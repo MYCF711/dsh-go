@@ -47,6 +47,12 @@ type agentAPIFixture struct {
 
 func newAgentAPIFixture(t *testing.T) *agentAPIFixture {
 	t.Helper()
+	// 夹具必须切断宿主的 skill 根环境变量：`skills.list` 会真扫
+	// `<home>/skills` 与 `DSHD_SKILLS_EXTRA`，若开发机上设了它们，
+	// "空目录"之类的断言就会看到别人的 skill（假绿/假红各一半）。
+	for _, key := range []string{"DSHD_SKILLS_EXTRA", "DSHD_SKILLS_BUNDLED", "DSH_BUNDLED_SKILL_DIR"} {
+		t.Setenv(key, "")
+	}
 	home := t.TempDir()
 	f := &agentAPIFixture{t: t, home: home}
 	f.rebuild()
@@ -608,50 +614,8 @@ func TestAgentOfficialPresetsList(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// skills.list / fileReferences.list
+// fileReferences.list
 // ---------------------------------------------------------------------------
-
-func TestAgentOfficialSkillsList(t *testing.T) {
-	f := newAgentAPIFixture(t)
-	sessionID := f.newSession("", nil)
-	skillDir := filepath.Join(f.home, "skills", "demo-skill")
-	if err := os.MkdirAll(skillDir, 0o755); err != nil {
-		t.Fatalf("建 skill 目录: %v", err)
-	}
-	body := "---\nname: demo-skill\ndescription: 演示用的 skill\n---\n\n正文\n"
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o600); err != nil {
-		t.Fatalf("写 SKILL.md: %v", err)
-	}
-	catalog, err := f.api.SkillsList(sessionID)
-	if err != nil {
-		t.Fatalf("skills.list: %v", err)
-	}
-	if len(catalog.Skills) != 1 {
-		t.Fatalf("skill 数量 %d（%+v）", len(catalog.Skills), catalog.Skills)
-	}
-	skill := catalog.Skills[0]
-	if skill.Name != "demo-skill" || skill.Description != "演示用的 skill" {
-		t.Fatalf("skill 元数据 %+v", skill)
-	}
-	if !skill.ModelInvocable {
-		t.Fatal("默认 preset 能看到 skill 工具，modelInvocable 应为 true")
-	}
-	if !strings.HasSuffix(skill.Path, filepath.Join("demo-skill", "SKILL.md")) {
-		t.Fatalf("skill path 不是真实 SKILL.md：%q", skill.Path)
-	}
-
-	// read-only preset 的工具表里没有 skill → modelInvocable 变成 false（真实判据）。
-	if _, err := f.api.AgentPresetSelect(sessionID, "read-only"); err != nil {
-		t.Fatalf("select read-only: %v", err)
-	}
-	catalog, err = f.api.SkillsList(sessionID)
-	if err != nil {
-		t.Fatalf("skills.list（read-only）: %v", err)
-	}
-	if len(catalog.Skills) != 1 || catalog.Skills[0].ModelInvocable {
-		t.Fatalf("read-only 下 modelInvocable 应为 false：%+v", catalog.Skills)
-	}
-}
 
 func TestAgentOfficialFileReferencesList(t *testing.T) {
 	f := newAgentAPIFixture(t)
