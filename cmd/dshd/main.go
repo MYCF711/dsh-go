@@ -1070,6 +1070,10 @@ func cmdRun(argv []string) (retErr error) {
 	loop := &agent.Loop{
 		Chat:   chat,
 		Steers: steerInbox,
+		// 工具写的耐久会话事件（workflow 的 4 类 `tool-workflow/*` 帧）落到本会话
+		// 的 v4 日志：serve 的 follow 会把它镜像成 journal 帧，GUI 再投影出节点。
+		// 不给它，workflow 就会"跑得起来但界面上什么都没有"。
+		Events: newSessionEventSink(logw),
 		// 容量声明由调用方给（serve 透传 --context-window/--max-output）；
 		// 循环里唯一的解析点是 llm.ResolveModelCapacity，这里不重复算。
 		Capacity: llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput},

@@ -1760,17 +1760,25 @@
   },
   {
     "name": "workflow",
-    "description": "把一串工具调用写成步骤表一次跑完：前一步结果可用 ${var} 喂给后一步，省掉来回往返。",
+    "description": "在明确要求工作流/大规模多代理编排时用：一份 JSON 操作表，按阶段扇出子代理（并行/流水线）、汇总返回值，前一步结果可喂给后一步。",
     "parameters": {
       "type": "object",
       "properties": {
         "script": {
           "type": "string",
-          "description": "JSON 步骤表：[{\"tool\":\"grep\",\"args\":{…},\"save\":\"hit\"}]；后一步可用 ${hit} 引用前一步结果"
+          "description": "JSON 操作表（不是 JS），按顺序执行：{op:agent,prompt,label,phase,schema,save} 跑一个子代理（失败得 null）；{op:parallel,agents:[…]} 并发一批；{op:pipeline,items,stages:[{prompt}]} 每项独立走完全链（无 barrier，可用 ${item}/${prev}/${index}）；{op:phase,title}；{op:log,message}；{op:tool,tool,args,save}；{op:return,value}。${名} 引用前面 save 的结果。没有 op 的项按旧步骤表 {tool,args,foreach,save} 处理，可混写"
         },
         "meta": {
           "type": "object",
-          "description": "可选的元信息，原样回显在结果里，便于调用方对账"
+          "description": "工作流身份块（官方 meta）：name / description 必填，可带 whenToUse / phases[{title,detail,provider,model}]。用编排操作时必填，只用旧步骤表时可省略（原样回显）"
+        },
+        "args": {
+          "type": "object",
+          "description": "可选输入，原样暴露给脚本（在操作里用 ${args} 引用）"
+        },
+        "run_in_background": {
+          "type": "boolean",
+          "description": "官方参数；本宿主尚未实现工作流后台任务，传 true 会被明确拒绝（不会假装在后台跑）"
         }
       },
       "required": [

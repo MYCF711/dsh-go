@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,6 +55,13 @@ const maxDepth = 1
 var subCwdMu sync.Mutex
 
 func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.SubagentResult, error) {
+	// 同步委派没有两段式面的附加参数（结构化输出只属于 workflow 的 agent()）。
+	return s.runSub(ctx, req, spi.ActivationOptions{})
+}
+
+// runSub 是 RunSub 与 StartActivation 的**唯一**实现：两条入口的并发闸门、
+// 父子会话归属、审批借用必须完全一致，差别只在 options。
+func (s *subRunner) runSub(ctx context.Context, req spi.SubagentRequest, options spi.ActivationOptions) (spi.SubagentResult, error) {
 	if s.depth >= maxDepth {
 		return spi.SubagentResult{}, fmt.Errorf("子代理不能再派子代理")
 	}
@@ -135,6 +143,10 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 	reg := noSubagent{inner: s.tools}
 
 	loop := &agent.Loop{
+		// Events 故意留空：子代理的子会话在**委派结束之后**才物化
+		// （continuation 里才 CreateSession），执行期间没有可写的会话日志。
+		// 硬造一个写入端会写出两段互不相认的 seq；正确的做法是等子会话造好之后
+		// 再回放，那是独立的活儿（见报告"缺口"）。
 		Chat:   s.chat,
 		Tools:  reg,
 		Runner: s.runner,
@@ -154,6 +166,19 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 	if inh := strings.TrimSpace(req.Inherit); inh != "" {
 		prompt = "以下是父会话最近说过的话（供参考，不要照抄）：\n" + inh + "\n\n当前任务：" + prompt
 
+	}
+
+	// 结构化输出（官方 `agent(prompt, {schema})`）：把 schema 明确交给子代理，
+	// 并在拿到正文后按它**解析**。
+	//
+	// 为什么要写进 prompt 而不只是事后解析：不告诉它，模型有一半概率回一段
+	// 自然语言；事后解析失败就等于"委派白跑"。指令里点名"不要代码围栏"，
+	// 因为围栏是模型最常见的加料（解析端也兜一层，见 extractJSONObject）。
+	if options.OutputSchema != nil {
+		if schemaJSON, err := json.Marshal(options.OutputSchema); err == nil {
+			prompt += "\n\n输出要求：只输出一个符合下面 JSON Schema 的 JSON 对象，" +
+				"不要加解释、不要加代码围栏。\n" + string(schemaJSON)
+		}
 	}
 
 	// 子代理内部标记：官方靠"子代理有自己的会话 + origin=subagent"判定，
@@ -180,6 +205,14 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 		// 说清楚这次用的是谁的授权：runner 是主会话那个 guarded，
 		// 审批记忆按会话记——主会话批准过的工具，子代理不会重问。
 		BorrowedApprovals: s.runner != nil,
+	}
+	// 要了 schema 就把正文里的 JSON 对象取出来。解析不出来**不报错**：
+	// "子代理跑完了但结果不合规"是这次委派失败（引擎解成 null），
+	// 不是结果通道坏掉（那才是 AGENT_RESULT）。
+	if options.OutputSchema != nil {
+		if structured, ok := extractJSONObject(text); ok {
+			res.Structured = structured
+		}
 	}
 	// 可续问：把这一趟真实往返落成一条 durable 子会话，官方 `subagents.prompt`
 	// 才有地址可投。**放在成功之后**——委派失败不留孤儿会话（一个空会话既不能
@@ -248,6 +281,35 @@ func (s *subRunner) continuation(ctx context.Context, req spi.SubagentRequest, p
 	return rec.ChildSessionID, nil
 }
 
+// extractJSONObject 从子代理正文里取一个 JSON **对象**。
+//
+// 三种常见形状都要认：纯 JSON、带 ```json 围栏、以及"先解释一句再给 JSON"。
+// 只认对象（schema 是 object-rooted）：数组/标量一律当"没拿到"。
+func extractJSONObject(text string) (json.RawMessage, bool) {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "```") {
+		if newline := strings.IndexByte(trimmed, '\n'); newline >= 0 {
+			trimmed = strings.TrimSpace(trimmed[newline+1:])
+		}
+		trimmed = strings.TrimSpace(strings.TrimSuffix(trimmed, "```"))
+	}
+	candidates := []string{trimmed}
+	if start, end := strings.IndexByte(trimmed, '{'), strings.LastIndexByte(trimmed, '}'); start >= 0 && end > start {
+		candidates = append(candidates, trimmed[start:end+1])
+	}
+	for _, candidate := range candidates {
+		var value map[string]any
+		decoder := json.NewDecoder(strings.NewReader(candidate))
+		if err := decoder.Decode(&value); err != nil || value == nil {
+			continue
+		}
+		if raw, err := json.Marshal(value); err == nil {
+			return raw, true
+		}
+	}
+	return nil, false
+}
+
 const subSystemPrompt = `你是一个子代理。你只负责交给你的那件事，做完就给结论。
 你看不到派你来的那个会话的历史，所以任务描述里的信息就是全部信息。
 - 需要查证就用工具。
@@ -283,6 +345,11 @@ func (n noSubagent) Register(spi.Tool) error {
 
 // subProvider 是"先装配、后绑定"的壳：模块注册时还不知道 chat/工具表/执行器
 // （它们在 Assemble 之后才有），所以先放一个空壳进去，装好再 Bind。
+//
+// 它同时提供两面：同步的 RunSub（`subagent` 工具用）与两段式的
+// StartActivation（workflow 的 `agent()` 用）。两面背后是**同一个** subRunner：
+// 并发闸门、父子会话归属、审批借用必须完全一致，否则"同一个 agent()"在两条
+// 路径上的行为会不一样。
 type subProvider struct{ impl *subRunner }
 
 func (p *subProvider) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.SubagentResult, error) {
@@ -294,14 +361,115 @@ func (p *subProvider) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.
 
 func (p *subProvider) Bind(r *subRunner) { p.impl = r }
 
+// subActivation 是一次"已发布、可等待"的委派（spi.SubagentActivation 的实现）。
+//
+// 为什么字段都在结构体上而不是闭包：Await 会被并发调用（引擎可能在扇出里
+// 等多个 child），而 done 关闭之后读 result/err 是有 happens-before 的
+// （写发生在 close 之前），所以不需要额外加锁。
+type subActivation struct {
+	childID string
+	done    chan struct{}
+	cancel  context.CancelFunc
+	result  spi.SubagentResult
+	err     error
+}
+
+// ChildSessionID 是发布时就定下的子会话 id（官方 childId）。
+func (a *subActivation) ChildSessionID() string { return a.childID }
+
+// Await 等子代理收尾；ctx 取消时立刻返回，不吞掉取消原因。
+func (a *subActivation) Await(ctx context.Context) (spi.SubagentResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-a.done:
+		return a.result, a.err
+	case <-ctx.Done():
+		// 取消是**发得出去的**：先停掉真正在跑的那个 child，再返回。
+		// 只返回不取消会留下一个没人等的 goroutine（它还会继续吃模型配额）。
+		a.cancel()
+		return spi.SubagentResult{}, ctx.Err()
+	}
+}
+
+// StartActivation 发布一个 child 并**立即**返回句柄（job 式两段：先发布再等）。
+//
+// 与 RunSub 的差别只有时序：RunSub 一直阻塞到结果；这里先返回
+// ChildSessionID，让引擎能在子代理**开跑之前**发出 `workflow/agent-start`
+// （官方的顺序，见 dsh-workflow-ptc/src/runtime.ts:192-193）。
+//
+// 三条语义必须成立（否则 childId 就是一个编出来的地址）：
+//   - 强制 Continuable：每个 `agent()` 都是一条真实 durable 子会话；
+//   - 强制 ChildSessionID：id 在**发布时**就定，子会话按它建；
+//   - 父会话 id 取显式值，否则取 ctx 上的会话身份；都没有就响亮失败
+//     （没有父就没有授权边界，编一个父等于没有归属）。
+func (p *subProvider) StartActivation(ctx context.Context, req spi.SubagentRequest, options spi.ActivationOptions) (spi.SubagentActivation, error) {
+	if p.impl == nil {
+		return nil, fmt.Errorf("子代理运行器还没装配好")
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		return nil, fmt.Errorf("prompt 为空")
+	}
+	if strings.TrimSpace(req.ChildSessionID) == "" {
+		req.ChildSessionID = session.NewID()
+	}
+	req.Continuable = true
+	if strings.TrimSpace(req.ParentSessionID) == "" {
+		req.ParentSessionID = strings.TrimSpace(spi.SessionFrom(ctx))
+	}
+	if strings.TrimSpace(req.ParentSessionID) == "" {
+		return nil, fmt.Errorf("可续问委派需要父会话 id：ctx 上没有会话身份，也没有显式 ParentSessionID")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	childCtx, cancel := context.WithCancel(ctx)
+	activation := &subActivation{
+		childID: strings.TrimSpace(req.ChildSessionID),
+		done:    make(chan struct{}),
+		cancel:  cancel,
+	}
+	impl := p.impl
+	go func() {
+		defer close(activation.done)
+		defer cancel()
+		// panic 是**基础设施**故障（child 已发布但结果不可用）→ 作为 error 抛给
+		// 引擎，映射成 AGENT_RESULT。普通失败（模型错误/没产出正文）走
+		// SubagentResult.Failed：那是"子代理没成"，工作流把该项解成 null。
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				activation.err = fmt.Errorf("子代理运行器 panic: %v", recovered)
+			}
+		}()
+		result, err := impl.runSub(childCtx, req, options)
+		if err != nil {
+			if childCtx.Err() != nil {
+				activation.err = childCtx.Err()
+				return
+			}
+			activation.result = spi.SubagentResult{Failed: true}
+			return
+		}
+		activation.result = result
+	}()
+	return activation, nil
+}
+
 // subagentModule 把子代理能力提供给工具层。
 func subagentModule(p *subProvider) kernel.Module {
 	return kernel.Module{
-		ID:       "subagent",
-		Backend:  kernel.BackendStatic,
-		Provides: []string{"subagent"},
+		ID:      "subagent",
+		Backend: kernel.BackendStatic,
+		// 两面都提供：同步 RunSub（subagent 工具）与两段式 StartActivation
+		// （workflow 的 agent()）。分成两个能力名而不是一个接口：用方只需要
+		// 自己那面，实现方（本文件）保证两面同源。
+		Provides: []string{"subagent", "subagent-activation"},
 		Register: func(s *kernel.Scope) error {
-			return kernel.Provide(s, spi.SubagentKey, spi.SubagentRunner(p))
+			if err := kernel.Provide(s, spi.SubagentKey, spi.SubagentRunner(p)); err != nil {
+				return err
+			}
+			return kernel.Provide(s, spi.SubagentActivationKey, spi.SubagentActivator(p))
 		},
 	}
 }
