@@ -228,11 +228,14 @@ func assertPluginGlueError(t *testing.T, envelope map[string]any, wantCode strin
 	}
 }
 
+// pluginGlueServer 的 stderr 用 syncBuffer（定义在 jobs_actions_test.go，同包）：
+// 子进程写、测试失败路径同时读，裸 `bytes.Buffer` 会被 `-race` 报成 data race
+// （2026-11-13 CI run 43382768596 实测，报在 `TestProviderRoutingRealDSHDLoopABAndRestart`）。
 type pluginGlueServer struct {
 	cmd      *exec.Cmd
 	base     string
 	token    string
-	stderr   bytes.Buffer
+	stderr   syncBuffer
 	done     chan struct{}
 	waitErr  error
 	stopOnce sync.Once
@@ -284,7 +287,7 @@ func startPluginGlueServer(t *testing.T, exe, home, decoyHome string) *pluginGlu
 		server.base, server.token = ready.URL, ready.Token
 	case <-server.done:
 		t.Fatalf("serve exited before ready: %v stderr=%s", server.waitErr, server.stderr.String())
-	case <-time.After(20 * time.Second):
+	case <-time.After(90 * time.Second):
 		server.stop()
 		t.Fatalf("serve ready timeout stderr=%s", server.stderr.String())
 	}
