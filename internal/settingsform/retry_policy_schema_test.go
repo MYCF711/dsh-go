@@ -531,7 +531,7 @@ func TestDeclaredProviderNamespaceRegistrationFailsLoud(t *testing.T) {
 }
 
 // TestDefaultRegistryKeepsTwoNamespacesAfterRC2：默认 registry 保持既有形状
-// （settings.describe 是线上方法，provider 命名空间只能显式加）。
+// （settings.describe 是线上方法，provider 与客户端 UI 命名空间只能显式加）。
 func TestDefaultRegistryKeepsTwoNamespacesAfterRC2(t *testing.T) {
 	described, err := New(newMemoryStore()).Describe()
 	if err != nil {
@@ -540,7 +540,18 @@ func TestDefaultRegistryKeepsTwoNamespacesAfterRC2(t *testing.T) {
 	if len(described.Namespaces) != 2 {
 		t.Fatalf("默认 registry 必须仍是 model/permission 两个：%+v", described.Namespaces)
 	}
-	if len(HostRegistry().Specs()) != 3 {
-		t.Fatalf("HostRegistry 必须多出 llm：%+v", HostRegistry().Specs())
+	// HostRegistry = 默认 2 个 + llm + 官方客户端的 4 个 UI 命名空间。
+	specs := HostRegistry().Specs()
+	if len(specs) != 7 {
+		t.Fatalf("HostRegistry 必须是 7 个命名空间（model/permission/llm/locale/ui-theme/ui-chat/ui-settings）：%+v", specs)
+	}
+	published := make(map[string]bool, len(specs))
+	for _, spec := range specs {
+		published[spec.NS] = true
+	}
+	for _, ns := range []string{"model", "permission", "llm", "locale", "ui-theme", "ui-chat", "ui-settings"} {
+		if !published[ns] {
+			t.Fatalf("HostRegistry 缺命名空间 %q：%+v", ns, published)
+		}
 	}
 }

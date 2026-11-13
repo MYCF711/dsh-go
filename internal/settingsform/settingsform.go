@@ -217,6 +217,9 @@ type sectionSpec struct {
 	base map[string]any
 	// validate 是该命名空间的语义校验（schema 表达不了的跨字段规则）。
 	validate func(value any) error
+	// normalize 是读路径的有效值投影（见 NamespaceSpec.Normalize）。只改
+	// describe/get 的 value 与 section 字段的 current，不写回存储。
+	normalize func(value map[string]any)
 }
 
 // sectionSpecFromNamespace 把插件声明转成内部的 section 描述。
@@ -241,6 +244,7 @@ func sectionSpecFromNamespace(spec NamespaceSpec) sectionSpec {
 	return sectionSpec{
 		ns: spec.NS, title: spec.Title, applies: applies, fields: fields,
 		schema: spec.Schema, base: deepCloneMap(spec.Base), validate: spec.Validate,
+		normalize: spec.Normalize,
 	}
 }
 
@@ -581,33 +585,47 @@ func validateUser(spec sectionSpec, user map[string]any) error {
 }
 
 func makeView(spec sectionSpec, doc Document, persisted bool) MutationResult {
+	// value 是"base 被 user 覆盖后"的有效值：两种命名空间同一条合成路径。
+	// 声明式命名空间过去在字段循环之后重算一次，现在提前合成，因为 section 的
+	// 字段投影（current）也必须用同一份**投影后**的值——否则 ui-chat 的
+	// transcriptView 会出现"value 是 detailed、section.current 是 normal"。
 	value := deepCloneMap(doc.Base)
+	if value == nil {
+		value = map[string]any{}
+	}
+	for key, item := range doc.User {
+		if item == nil {
+			// 官方 schemastery 的解析：null + meta.default → 取默认值（等于"没写"）。
+			// base 里已经是默认值，跳过这次覆盖即可；user 段仍原样保留 null。
+			continue
+		}
+		value[key] = deepCloneValue(item)
+	}
+	if spec.normalize != nil {
+		spec.normalize(value)
+	}
 	user := deepCloneMap(doc.User)
 	base := clone(doc.Base)
 	fields := make([]Field, 0, len(spec.fields))
 	for _, fieldSpec := range spec.fields {
-		current, ok := user[fieldSpec.name]
-		overridden := ok
-		if !ok {
-			current = doc.Base[fieldSpec.name]
+		if spec.schema == nil {
+			// 扁平命名空间的既有形状：字段即使 base 里没有也要以 null 出现，
+			// 客户端据此画"没有值"。
+			if _, ok := value[fieldSpec.name]; !ok {
+				value[fieldSpec.name] = nil
+			}
 		}
-		value[fieldSpec.name] = current
+		raw, present := doc.User[fieldSpec.name]
+		overridden := present && raw != nil
 		fields = append(fields, Field{
 			Name: fieldSpec.name, Path: []string{fieldSpec.name}, Type: fieldSpec.fieldType(),
-			Current: current, Default: doc.Base[fieldSpec.name], Overridden: overridden, Writable: true,
+			Current: value[fieldSpec.name], Default: doc.Base[fieldSpec.name],
+			Overridden: overridden, Writable: true,
 			Enum: append([]string(nil), fieldSpec.enum...), MinLength: fieldSpec.minLength, MaxLength: fieldSpec.maxLength,
 		})
 	}
 	if len(user) == 0 {
 		user = nil
-	}
-	if spec.schema != nil {
-		// 声明式命名空间没有扁平字段：value 由 base + user 逐顶层键合成，
-		// 与官方 "value 是组合后的 section" 语义一致。
-		value = deepCloneMap(doc.Base)
-		for key, item := range doc.User {
-			value[key] = deepCloneValue(item)
-		}
 	}
 	applies := spec.applies
 	if applies == "" {
