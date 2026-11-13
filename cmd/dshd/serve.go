@@ -334,7 +334,7 @@ func cmdServe(args []string) error {
 	defer unsubscribeChannelChange()
 	// 持久模型目录与 active 默认共用 W61 store；目录本身不保存第二个 active。
 	// 损坏目录只让目录 API fail-loud，绝不拿空目录覆盖原文件。
-	modelCatalog := llm.OpenModelCatalog(*home)
+	modelCatalog := openHostModelCatalog(*home)
 	if _, err := modelCatalog.List(); err != nil {
 		fmt.Fprintf(os.Stderr, "模型目录读盘失败（%v）；修复前目录 API 会报错\n", err)
 	}

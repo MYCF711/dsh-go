@@ -114,7 +114,7 @@ func resolveServeModel(home, sessionID, fallback string) (string, error) {
 // SetModel/重开后的配置。目录损坏与已声明 provider 的坏配置绝不回退；只有
 // 普通 model id（catalog 未收录或条目三个 provider 字段全缺）保留 legacy。
 func resolveServeProvider(home, model string) (llm.ModelProviderConfig, bool, error) {
-	provider, err := llm.OpenModelCatalog(home).ResolveProvider(model)
+	provider, err := openHostModelCatalog(home).ResolveProvider(model)
 	if llm.ModelCatalogErrorCode(err) == "not_found" {
 		return llm.ModelProviderConfig{}, false, nil
 	}

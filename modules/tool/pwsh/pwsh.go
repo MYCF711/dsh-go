@@ -83,6 +83,11 @@ type Tool struct {
 	scope *kernel.Scope
 	// execSeam 是测试注入的执行接缝；nil 时按 scope 取 spi.Exec。
 	execSeam spi.Exec
+	// envMu / envProvider / envTried 是 `shellEnv` 能力（受管 DSH_* 环境）的惰性缓存，
+	// 见 shellenv.go。
+	envMu       sync.Mutex
+	envProvider spi.ShellEnvProvider
+	envTried    bool
 }
 
 // Option 是 Tool 的可选项（测试注入与将来宿主接线用）。
@@ -232,6 +237,17 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		}, err
 	}
 
+	// 受管 `DSH_*` 环境：在**任何进程动作之前**收集一次。官方语义是"贡献者不合规
+	// → 命令不跑"（`dsh-shell-env/src/index.ts:188-195`），所以它和策略判定一样
+	// 必须发生在起进程之前。nil 表示未接线，子进程照旧继承宿主环境。
+	//
+	// run_in_background 那条路也先收集：命令最终由 jobs 接缝（bash 的 Service）执行，
+	// 受管环境由那一侧真正注入；这里收集只是让同样的违规**照样当场挡住**。
+	envList, err := t.managedEnviron(ctx)
+	if err != nil {
+		return spi.Result{Hint: managedEnvHint(err)}, err
+	}
+
 	shell, isLegacy, err := resolveShell()
 	if err != nil {
 		return spi.Result{Hint: "找不到 PowerShell：装 PowerShell 7（提供 pwsh）或改用 bash 工具"}, err
@@ -244,7 +260,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	// 立刻转后台：官方语义是"注册进 jobs 运行时、马上回 job id、无超时"。
 	// 走的是与 bash 工具**同一个** jobs 表（spi.Exec 接缝），见 background.go。
 	if a.RunInBackground {
-		return t.startBackground(backgroundSpec{
+		return t.startBackground(ctx, backgroundSpec{
 			shell:       shell,
 			script:      script,
 			workdir:     dir,
@@ -262,6 +278,9 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	cmd := execCommandContext(runCtx, shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 	if dir != "" {
 		cmd.Dir = dir
+	}
+	if envList != nil {
+		cmd.Env = envList
 	}
 	out := &limitWriter{max: maxOutput}
 	cmd.Stdout = out

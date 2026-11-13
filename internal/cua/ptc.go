@@ -88,8 +88,12 @@ func (p *profilePTCProbe) Enable() error {
 	}
 	entry, found := p.find()
 	if !found || p.options.Write == nil {
+		// 写路径**保持 501**（码仍是既有的 `unavailable`），但必须把"为什么不可能"讲清楚：
+		// 不是"宿主还没接线"，是 R6 拦住了；缺哪两个官方模块；以及官方默认也关着。
 		return unavailable(ptcCapableWhen,
-			"PTC 运行时没有可编辑的 profile 条目（找的是 %q）：本宿主未装配 ptcRuntime", p.entryID)
+			"PTC 运行时没有可编辑的 profile 条目（找的是 %q），本宿主没有 ptcRuntime：%s。"+
+				"缺的具体模块是 %s（#74，Node VM/worker 评估器）与 %s（#94，生成式 SDK + run_code）；%s",
+			p.entryID, ptcR6Blocker, ptcRuntimeNodeModule, ptcToolExecutorModule, ptcOfficialDefaultNote)
 	}
 	values := map[string]any{"persistent": true}
 	if p.options.PersistentValues != nil {
@@ -127,10 +131,40 @@ func isTrue(value any) bool {
 	return false
 }
 
+// 这一族"没有 PTC 运行时"的说法必须点名三件事，缺一件客户端就只能读到含糊的
+// "暂不支持"，无法判断是"等宿主接线"还是"永远不会有"：
+//
+//	(a) 被 `AGENTS.md` §1 红线 **R6「不嵌 JS 运行时」**（`AGENTS.md:56`）拦住——
+//	    是**设计约束**，不是"暂未实现"；
+//	(b) 缺的具体模块：官方的 `@deepseek-ai/dsh-ptc-runtime-node`（#74，Node 专属实现：
+//	    `evaluators/vm-script.ts:3` 用 `node:vm` 的 createContext/Script、
+//	    `evaluators/async-function.ts:3` 用 `node:vm` 的 compileFunction、
+//	    `evaluators/repl.ts:2` 用 `node:repl`、`worker.ts:1-2` 是受管 Node 进程；
+//	    官方 `dsh-base/cordis.patch.yml:407-408` 把它挂在 `id: ptc-runtime` 上）
+//	    与 `@deepseek-ai/dsh-tool-executor-ptc`（#94，生成式 SDK + `run_code` 工具面；
+//	    官方 `dsh-base/cordis.patch.yml:519-521` 挂在 `id: tool-executor-ptc` 上）；
+//	(c) 官方默认本身就把 #94 关着（`dsh-base/cordis.patch.yml:521` 的 `disabled: true`），
+//	    所以"没有 run_code 工具面"与官方默认形状一致，不是本仓少做了一块。
+//
+// 三件事写成共享常量：`capableWhen` 与 message 都要讲同一套事实，抄两遍迟早漂移。
+const (
+	// ptcRuntimeNodeModule 是官方 #74 的包名（Node VM/worker/REPL 评估器，需要 JS 运行时）。
+	ptcRuntimeNodeModule = "@deepseek-ai/dsh-ptc-runtime-node"
+	// ptcToolExecutorModule 是官方 #94 的包名（生成式 SDK + run_code 工具面）。
+	ptcToolExecutorModule = "@deepseek-ai/dsh-tool-executor-ptc"
+	// ptcR6Blocker 是"被哪条边界拦住的"这一句的唯一起点。
+	ptcR6Blocker = "被 AGENTS.md §1 红线 R6「不嵌 JS 运行时」拦住（设计约束，不是“暂未实现”）"
+	// ptcOfficialDefaultNote 是官方默认形状（file:line 可核）。
+	ptcOfficialDefaultNote = "官方默认也没有这条工具面（dsh-base/cordis.patch.yml:521 `disabled: true`）"
+)
+
 // ptcCapableWhen 是这一族"没有 PTC 运行时"的补救说明。
-const ptcCapableWhen = "当宿主装配官方 @deepseek-ai/dsh-ptc-runtime（共享运行时报告 retainsState）" +
-	"且在 profile 里有可写的 `ptc-runtime` 条目时，PTC 执行才能从内存态改为持久化；" +
-	"官方 rc.2 的 ptcRuntime 属于宿主内建服务，本仓尚未装配该模块"
+const ptcCapableWhen = ptcR6Blocker +
+	"：这条能力要的官方模块是 " + ptcRuntimeNodeModule +
+	"（#74，Node VM/worker/REPL 评估器：`evaluators/vm-script.ts:3` 与 `evaluators/async-function.ts:3` 用 node:vm、" +
+	"`evaluators/repl.ts:2` 用 node:repl）与 " + ptcToolExecutorModule +
+	"（#94，生成式 SDK + run_code 工具面）：两者都要在宿主里嵌/起 JS 运行时，R6 下不在本仓可做范围；" +
+	ptcOfficialDefaultNote + "，所以本仓的形状与官方默认一致"
 
 // DescribePTC 是给报告/诊断用的一句话（不含运行时行为）。
 func DescribePTC(cfg PTCConfiguration) string {
@@ -140,5 +174,6 @@ func DescribePTC(cfg PTCConfiguration) string {
 	if cfg.Writable {
 		return "PTC 运行时未保留状态，但条目可写"
 	}
-	return fmt.Sprintf("PTC 运行时未装配（条目 %q 不存在）", cfg.EntryID)
+	return fmt.Sprintf("PTC 运行时未装配（条目 %q 不存在）：%s，缺 %s（#74）与 %s（#94）",
+		cfg.EntryID, ptcR6Blocker, ptcRuntimeNodeModule, ptcToolExecutorModule)
 }

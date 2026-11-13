@@ -206,6 +206,16 @@ type Options struct {
 	HTTPClient    *http.Client
 	LocalLease    time.Duration
 
+	// InferenceOrigin 是官方 `dsh-deepseek-account` 的 `inferenceOrigin`
+	// （`src/index.ts:78`：`Schema.string().default('https://api.deepseek.com')`，
+	// `:142-147` 校验成"不含凭据/路径/查询/片段的 HTTP(S) origin"）。
+	//
+	// 为什么必须与 PlatformOrigin 分开：账号令牌**只**发给这个 origin 的推理请求
+	// （`resolveToken` 的目的地栅栏，`:457`）。PlatformOrigin 是登录/资料/余额的
+	// 计费站，两者在生产上是两个域名，互相推导就会把令牌发给错的站点。
+	// 空 = 官方默认。
+	InferenceOrigin string
+
 	// LogoutMaxRetries / LogoutRetryDelay 是官方 `logoutMaxRetries`(:515) 与
 	// `logoutRetryDelayMs`(:516)。nil / 0 = 走默认（先看环境变量，再看官方默认）。
 	//
@@ -220,21 +230,22 @@ type Options struct {
 
 // Service 是 local/official/self-hosted 三合一的真实实现。
 type Service struct {
-	mu      sync.Mutex
-	home    string
-	mode    Source
-	path    string
-	doc     document
-	client  *http.Client
-	origin  string
-	harness string
-	oidc    OIDCConfig
-	lease   time.Duration
-	subs    map[chan State]struct{}
-	updates map[*updateSub]struct{}
-	expiry  map[chan string]struct{}
-	timer   *time.Timer
-	timerAt int64
+	mu              sync.Mutex
+	home            string
+	mode            Source
+	path            string
+	doc             document
+	client          *http.Client
+	origin          string
+	inferenceOrigin string
+	harness         string
+	oidc            OIDCConfig
+	lease           time.Duration
+	subs            map[chan State]struct{}
+	updates         map[*updateSub]struct{}
+	expiry          map[chan string]struct{}
+	timer           *time.Timer
+	timerAt         int64
 
 	// 官方 account 平台的三条预算（见 officialPolicyDefaults）。
 	logoutMaxRetries int
@@ -348,6 +359,14 @@ func New(opts Options) (*Service, error) {
 	if s.origin == "" {
 		s.origin = "https://platform.deepseek.com"
 	}
+	// inferenceOrigin 的校验逐条照官方 `src/index.ts:142-147`：必须是 http(s)
+	// origin，且不带凭据、路径、查询、片段。**不在解析失败时静默退回默认值**——
+	// 退回默认会把"配错的私有部署"变成"把令牌发给官方推理站"，那是最坏的失败方向。
+	inference, err := resolveInferenceOrigin(opts.InferenceOrigin)
+	if err != nil {
+		return nil, err
+	}
+	s.inferenceOrigin = inference
 	// harnessOrigin 只给通知用，默认值与 platformOrigin **不同**
 	// （官方 lib/index.js:696-697）。两者刻意不互相推导：私有部署只配了
 	// platformOrigin 时，通知仍然走官方默认域名——那是官方行为，

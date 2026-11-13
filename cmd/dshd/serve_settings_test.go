@@ -247,14 +247,15 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	described := postPluginGlue(t, clientA, serverA.base, "settings.describe", map[string]any{}, http.StatusOK)
 	logSettingsEvidence(t, "REAL_DESCRIBE", described)
 	result := described["result"].(map[string]any)
-	// 7 个命名空间：model / permission / llm + 官方客户端的 4 个 UI 命名空间
-	// （locale / ui-theme / ui-chat / ui-settings，设置面板「语言 / 外观 /
-	// 工作细节 / 开发者工具」行的真值来源）。
+	// 10 个命名空间：model / permission / llm + 官方客户端与插件的 7 个 UI 命名空间
+	// （locale / ui-theme / ui-chat / ui-settings / ui-conversation /
+	// session-log-deepseek / session-telemetry-otel，后两者是本仓"能力上不做但
+	// 结构化拒绝"的开关：声明 true / FEEDBACK_ONLY 会得到 501）。
 	// `llm` 是 0.2.2-rc.2 加的（发布 `providers.<route>.retryPolicy` 节点，
-	// 官方 UI 的"重试条件/次数/等待时间"就是从这里读候选与正下界的）；4 个 UI
+	// 官方 UI 的"重试条件/次数/等待时间"就是从这里读候选与正下界的）；这些 UI
 	// 命名空间与它共用同一份 <home>/state/settings-namespaces.json，
 	// 带 revision 乐观锁。
-	if len(result["namespaces"].([]any)) != 9 || len(result["sections"].([]any)) != 9 || len(result["errors"].([]any)) != 0 {
+	if len(result["namespaces"].([]any)) != 10 || len(result["sections"].([]any)) != 10 || len(result["errors"].([]any)) != 0 {
 		t.Fatalf("bad real describe: %+v", result)
 	}
 	llmSection := f2LLMSection(t, result)
@@ -359,7 +360,7 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	}
 	logSettingsEvidence(t, "REAL_AFTER_RESET_RESTART", afterResetRestart)
 
-	// ── 官方 4 个客户端 UI 设置命名空间：真 dshd 上可读、可写、可重置 ──
+	// ── 官方客户端 / 插件 UI 设置命名空间：真 dshd 上可读、可写、可重置 ──
 	//
 	// 真机截图暴露的缺口就是这 4 行：宿主没发布命名空间时设置面板显示「未知」。
 	// 这里走真实 HTTP + 真实 <home>/state/settings-namespaces.json，并跨一次重启。
@@ -367,6 +368,8 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 		"locale", "ui-theme", "ui-chat", "ui-settings",
 		// 2026-11-13 补：官方另两个 general slot 的命名空间。
 		"ui-conversation", "session-log-deepseek",
+		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的开关。
+		"session-telemetry-otel",
 	}
 	for _, ns := range uiNamespaces {
 		section := f2Section(t, result, ns)

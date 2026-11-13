@@ -215,8 +215,11 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 				Hint: "去掉 run_in_background 在前台跑一次；要长期用后台任务就让用户把 " + EnvRunInBackground + " 去掉或设成 1",
 			}.WithErrorInfo(jobs.ErrorName, string(jobs.CodeBackgroundDisabled)), err
 		}
-		res, err := t.svc.RunBackground(a.Command)
+		res, err := t.svc.RunBackgroundContext(ctx, a.Command)
 		if err != nil {
+			if managedEnvErrorCode(err) != "" {
+				return spi.Result{Hint: managedEnvHint(err)}, err
+			}
 			err = asJobError(err)
 			out := spi.Result{
 				Hint: "后台启动失败：看 job_list 有没有残留，或去掉 run_in_background 在前台跑一次看真实报错",
@@ -262,7 +265,7 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 	}
 	done := make(chan runOut, 1)
 	go func() {
-		r, e := t.svc.Run(a.Command, budget)
+		r, e := t.svc.RunContext(ctx, a.Command, budget)
 		done <- runOut{r, e}
 	}()
 
@@ -277,6 +280,10 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 	}
 
 	if err != nil {
+		if managedEnvErrorCode(err) != "" {
+			// 受管环境构建失败时命令**没有起进程**（官方语义：贡献者不合规，命令不跑）。
+			return spi.Result{Hint: managedEnvHint(err)}, err
+		}
 		if errors.Is(err, ErrSessionEnded) {
 			return spi.Result{Hint: "命令自己结束了 shell（例如 exit）；下一条命令会自动开新会话，但 cwd 会回到起点"}, err
 		}

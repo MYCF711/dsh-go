@@ -146,11 +146,13 @@ func (r *modelOverrideLoopRunner) RunContent(ctx context.Context, sessionID, tur
 // 键（Windows 环境名不区分大小写），避免重复键让子进程读到 decoy/别人的值。
 func providerLoopEnvironment(provider llm.ModelProviderConfig) []string {
 	env := os.Environ()
-	managed := make([]string, 0, len(env)+3)
+	managed := make([]string, 0, len(env)+6)
 	for _, entry := range env {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok && (strings.EqualFold(name, "DSHD_LLM_BASE") || strings.EqualFold(name, "DSHD_LLM_KEY") ||
-			strings.EqualFold(name, "DSHD_LLM_API") || strings.EqualFold(name, llm.RetryPolicyEnv)) {
+			strings.EqualFold(name, "DSHD_LLM_API") || strings.EqualFold(name, llm.RetryPolicyEnv) ||
+			strings.EqualFold(name, envLLMAuthHeader) || strings.EqualFold(name, envLLMAuthOrigin) ||
+			strings.EqualFold(name, envLLMHome)) {
 			continue
 		}
 		managed = append(managed, entry)
@@ -178,7 +180,7 @@ func runProviderLoop(ctx context.Context, r *loopRunner, provider llm.ModelProvi
 	}
 	args := append(r.childArgs(sessionID, text, promptContentFile...), "--turn-id", turnID, "--base", provider.BaseURL)
 	cmd := exec.CommandContext(ctx, exe, args...)
-	cmd.Env = providerLoopEnvironment(provider)
+	cmd.Env = append(providerLoopEnvironment(provider), accountRouteChildEnv(provider.Account, r.home)...)
 	var stderr bytes.Buffer
 
 	var watchWG sync.WaitGroup

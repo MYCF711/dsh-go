@@ -130,7 +130,7 @@ func newAdapterRegistry(builtins ...ProviderAdapter) *adapterRegistry {
 	return r
 }
 
-var providerAdapters = newAdapterRegistry(openAICompletionsAdapter{}, deepSeekCompletionsAdapter{})
+var providerAdapters = newAdapterRegistry(openAICompletionsAdapter{}, deepSeekCompletionsAdapter{}, deepSeekAccountAdapter{})
 
 // RegisterProviderAdapter 注册一条 wire 协议。
 //
@@ -192,6 +192,9 @@ func resetProviderAdapters() {
 	providerAdapters.adapters = map[string]ProviderAdapter{
 		ProviderAPIOpenAICompletions:   openAICompletionsAdapter{},
 		ProviderAPIDeepSeekCompletions: deepSeekCompletionsAdapter{},
+		// 账号路由（官方 #99 llm-deepseek-account）：wire 形状同 DeepSeek 兼容面，
+		// 差别只在认证头，由 Client 的 AccountAuth 承担（见 account_route.go）。
+		ProviderAPIDeepSeekAccount: deepSeekAccountAdapter{},
 	}
 }
 

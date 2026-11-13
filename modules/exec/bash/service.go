@@ -1,6 +1,7 @@
 package bash
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -37,6 +38,14 @@ type Service struct {
 	grace time.Duration
 	// logf 记录停止结局（宽限内退出 / 强杀）；nil 不输出。
 	logf func(format string, args ...any)
+
+	// scope 是装配作用域：执行时用它惰性 inject `shellEnv` 能力（R2：模块只拿
+	// `*Scope`，不拿全局单例）。nil = 测试直接构造，不注入受管环境（旧行为）。
+	scope *kernel.Scope
+	// envMu / envProvider / envTried 是 `shellEnv` 能力的惰性缓存（见 shellenv.go）。
+	envMu       sync.Mutex
+	envProvider spi.ShellEnvProvider
+	envTried    bool
 }
 
 func newOwnerID() string {
@@ -84,7 +93,11 @@ func NewService(cwd string) *Service {
 	return &Service{cwd: cwd, jobs: make(map[string]*job), ownerID: newOwnerID()}
 }
 
-func (s *Service) acquireSession() (*session, error) {
+// acquireSession 取一条能跑命令的会话；必要时应新建。
+//
+// managed 传给 startSession：新建会话时是否按受管环境处理（清掉继承的 DSH_*）。
+// 复用已有会话时不重复处理——它的进程环境在建立时就定下来了。
+func (s *Service) acquireSession(managed bool) (*session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -92,7 +105,7 @@ func (s *Service) acquireSession() (*session, error) {
 	}
 	sess := s.sess
 	if sess == nil || sess.busy() || sess.isDead() {
-		next, err := startSession(s.cwd, s.grace)
+		next, err := startSession(s.cwd, s.grace, managed)
 		if err != nil {
 			return nil, err
 		}
@@ -103,18 +116,37 @@ func (s *Service) acquireSession() (*session, error) {
 }
 
 // Run 实现 spi.Exec。
+//
+// 这条旧接缝没有上下文：受管环境按"这次执行没有会话身份"算——内置事实
+// （`DSH_HOME` / `DSH_SHELL`）照给，`DSH_SESSION_ID` 如实不给（不编一个）。
+// 有上下文的工具走 RunContext。
 func (s *Service) Run(cmd string, idle time.Duration) (spi.ExecResult, error) {
+	return s.RunContext(context.Background(), cmd, idle)
+}
+
+// RunContext 是 Run 的带上下文版本：`shell` 工具走这条，让受管环境带上会话身份
+// （`spi.SessionFrom(ctx)`）。
+func (s *Service) RunContext(ctx context.Context, cmd string, idle time.Duration) (spi.ExecResult, error) {
+	env, managed, err := s.managedEnv(ctx)
+	if err != nil {
+		return spi.ExecResult{}, err
+	}
+	return s.runManaged(cmd, idle, env, managed)
+}
+
+// runManaged 是 Run 的实现体：受管快照由调用方先算好（算不出来就不起进程）。
+func (s *Service) runManaged(cmd string, idle time.Duration, env map[string]string, managed bool) (spi.ExecResult, error) {
 	if strings.TrimSpace(cmd) == "" {
 		return spi.ExecResult{}, fmt.Errorf("命令为空")
 	}
 	if idle <= 0 {
 		idle = 10 * time.Minute
 	}
-	sess, err := s.acquireSession()
+	sess, err := s.acquireSession(managed)
 	if err != nil {
 		return spi.ExecResult{}, err
 	}
-	res, t, err := sess.run(cmd, idle)
+	res, t, err := sess.run(cmd, idle, env, managed)
 	if err != nil {
 		return res, err
 	}
@@ -177,15 +209,27 @@ func (s *Service) register(cmd string, sess *session, t *task) (string, error) {
 
 // RunBackground 起一条命令立刻转后台；即使它在首个调度窗口内结束也保留 job，
 // 使结束后输出与元数据仍可从同一任务表读取。
+//
+// 与 Run 一样，这条旧接缝没有上下文：受管环境按"没有会话身份"算。
 func (s *Service) RunBackground(cmd string) (spi.ExecResult, error) {
+	return s.RunBackgroundContext(context.Background(), cmd)
+}
+
+// RunBackgroundContext 是 RunBackground 的带上下文版本：`shell` 工具的
+// run_in_background 走这条，受管环境带上会话身份。
+func (s *Service) RunBackgroundContext(ctx context.Context, cmd string) (spi.ExecResult, error) {
 	if strings.TrimSpace(cmd) == "" {
 		return spi.ExecResult{}, fmt.Errorf("命令为空")
 	}
-	sess, err := s.acquireSession()
+	env, managed, err := s.managedEnv(ctx)
 	if err != nil {
 		return spi.ExecResult{}, err
 	}
-	res, t, err := sess.run(cmd, time.Millisecond)
+	sess, err := s.acquireSession(managed)
+	if err != nil {
+		return spi.ExecResult{}, err
+	}
+	res, t, err := sess.run(cmd, time.Millisecond, env, managed)
 	if err != nil {
 		return res, err
 	}
@@ -434,6 +478,8 @@ func Module(cwd string, opts Options) kernel.Module {
 			svc.scopeName = s.Name()
 			svc.grace = opts.grace()
 			svc.logf = opts.Logf
+			// 装配作用域留给执行期：受管 `DSH_*` 环境（官方 shell-env）从这里惰性 inject。
+			svc.scope = s
 			s.Effect(svc.Close)
 			if err := kernel.Provide(s, spi.ExecKey, spi.Exec(svc)); err != nil {
 				return err

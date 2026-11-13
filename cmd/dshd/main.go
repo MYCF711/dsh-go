@@ -132,6 +132,10 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 	return []kernel.Module{
 		// 默认实现也是插件（A3）：它们与第三方插件走同一个 Register(scope)。
 		tools.Module(toolsOptions(home, maxChars)),
+		// 官方 base 插件 #46：受管 `DSH_*` 环境注册表。装在这里（shell 工具之前）只是
+		// 为了让模块图读起来是"先有能力再有用它的工具"——工具是**惰性** inject 的，
+		// 真实顺序由能力图决定。装配代码见 shellenv_wiring.go。
+		shellEnvModule(home),
 		bash.Module(wd, bash.Options{}),
 		local.Module(wd, local.WithExtraReadRoot(filepath.Join(home, "artifacts"))),
 		read.Module(),

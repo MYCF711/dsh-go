@@ -48,6 +48,9 @@ func providerDisplayName(api string) string {
 		return "OpenAI-compatible"
 	case ProviderAPIDeepSeekCompletions:
 		return "DeepSeek"
+	case ProviderAPIDeepSeekAccount:
+		// 官方 `displayName: 'DeepSeek Account'`（dsh-llm-deepseek-account/src/index.ts:73）。
+		return "DeepSeek Account"
 	default:
 		return api
 	}

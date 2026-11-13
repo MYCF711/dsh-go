@@ -19,6 +19,7 @@ package pwsh
 // 的引号/换行/$ 一律原样传过去，不让 bash 先解释一遍（否则脚本会被吃掉一层）。
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,15 @@ const backgroundIdle = time.Millisecond
 // 但这个接口**刻意不写进 spi**：接缝的旧实现只有 Run，工具按需断言即可。
 type backgroundRunner interface {
 	RunBackground(cmd string) (spi.ExecResult, error)
+}
+
+// backgroundRunnerContext 是 backgroundRunner 的带上下文版本。
+//
+// 为什么需要它：受管 `DSH_*` 环境（官方 shell-env）是**按这次调用**算的，
+// 没有 ctx 的那条接缝只能给出内置事实，`DSH_SESSION_ID` 就如实拿不到。
+// 接缝实现了带 ctx 的版本就优先走它——后台任务同样是"一次 shell 工具执行"。
+type backgroundRunnerContext interface {
+	RunBackgroundContext(ctx context.Context, cmd string) (spi.ExecResult, error)
 }
 
 // backgroundSpec 是一条要转后台的 pwsh 调用。
@@ -60,7 +70,8 @@ func (t *Tool) jobsSeam() (spi.Exec, error) {
 }
 
 // startBackground 把命令交给 jobs 运行时并返回 job id。
-func (t *Tool) startBackground(spec backgroundSpec) (spi.Result, error) {
+// ctx 带上就交给接缝：受管 `DSH_*` 环境要按这次调用的会话算。
+func (t *Tool) startBackground(ctx context.Context, spec backgroundSpec) (spi.Result, error) {
 	d := data{
 		Shell:       filepath.Base(spec.shell),
 		Description: spec.description,
@@ -78,7 +89,9 @@ func (t *Tool) startBackground(spec backgroundSpec) (spi.Result, error) {
 	}
 	line := backgroundCommandLine(spec)
 	var res spi.ExecResult
-	if bg, ok := seam.(backgroundRunner); ok {
+	if cr, ok := seam.(backgroundRunnerContext); ok {
+		res, err = cr.RunBackgroundContext(ctx, line)
+	} else if bg, ok := seam.(backgroundRunner); ok {
 		res, err = bg.RunBackground(line)
 	} else {
 		// 接缝没有 RunBackground：给它一个 1ms 的 idle 窗口，立刻转后台。

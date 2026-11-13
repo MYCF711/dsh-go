@@ -1,8 +1,13 @@
 package settingsform
 
-// 官方 0.2.2-rc.2 的 4 个客户端 UI 设置命名空间：`locale` / `ui-theme` /
-// `ui-chat` / `ui-settings`。设置面板的「语言 / 外观 / 工作细节 / 开发者工具」
-// 行读的就是这 4 个命名空间（官方 `settings.general.item` 的 NS+Path）。
+import "net/http"
+
+// 官方 0.2.2-rc.2 的客户端 UI / 插件设置命名空间：`locale` / `ui-theme` /
+// `ui-chat` / `ui-settings`（设置面板的「语言 / 外观 / 工作细节 / 开发者工具」
+// 行读的就是这 4 个，官方 `settings.general.item` 的 NS+Path）、
+// `ui-conversation` 与 `session-log-deepseek`（2026-11-13 补的两个 general slot），
+// 以及 2026-11-14 新增的 `session-telemetry-otel`（官方
+// dsh-session-telemetry-otel 的开关；本宿主没有 OTel 后端，见下面第 4 条差异）。
 //
 // # 权威源（随 rc.2 asar 发布的 TypeScript 原件）
 //
@@ -41,16 +46,36 @@ package settingsform
 //
 // 本文件的 envelope 与官方 node_modules 实跑结果逐字段一致
 // （复现脚本：tmp/GO8-RC2/_ns/dump-schema.mjs → _ns/official-envelopes.json）。
+// 唯一例外是下面第 3 条那一个默认值节点（enabled 的 meta.default）。
 //
-// # 与官方有意不同的两处（都是"更严"，并已在报告里登记）
+// # 与官方有意不同的四处（都是"更严 / 更诚实"，并已在报告里登记）
 //
 //  1. `transcriptView` 的官方 schema 是 `.loose()`：坏值在官方会被**静默退回
 //     默认**。本宿主沿用既有 fail-loud 政策（不许静默截断），坏值直接四字段
 //     错误；schema 仍按官方发布 `meta.loose=true`（形状不失真）。
 //  2. 未知字段：官方 object 解析会把额外键原样带过；本宿主拒绝
 //     （`unknown_field`），与 `llm` 命名空间既有行为一致。
+//  3. `session-log-deepseek.enabled` 的默认值是 **false**，官方
+//     `dsh-session-log-deepseek/src/index.ts:60` 是 `z.boolean().default(true)`。
+//     官方那个 `true` 的前提是官方宿主里有 wire 上传方：该插件
+//     `inject: ['deepseekLlmApiExtensions','sessions']`（:44）并
+//     `register('dsh_session_log', {prepare, accept})`（:196-261，accept 在 2xx
+//     后写 `session-log-deepseek/delivery-accepted` 水位），只在官方 DeepSeek
+//     Messages 路由上生效。本仓 `internal/llm` 的 `ResolveProvider` 走的是用户
+//     自配的 OpenAI 兼容端点（默认 magpie 网关），没有这个扩展点，也没有任何
+//     消费 `dsh_session_log` 的生产代码——声明 `true` 而无人消费就是**静默成功**。
+//     因此默认取 `false`（= 本仓真实生效值），并且显式声明 `true` 会被
+//     `not_implemented`（501）拒绝，见 checkSessionLogDeepSeekEnabled。
+//  4. `session-telemetry-otel.mode` 的默认值是 **DISABLED**，官方
+//     `dsh-session-telemetry-otel/src/index.ts:37/:117` 是 `FEEDBACK_ONLY`。
+//     官方那个默认前提是 OTel SDK 管线：`inject = ['sessions','otel']`（:145）、
+//     `ctx.otel.createSessionLogReporter(...)`（:190）与 on-demand 的
+//     `SessionTelemetryCoordinator`（:219-222）。本仓没有 OTel SDK，也没有会话
+//     遥测通道（`internal/analytics` 只有端点环境变量），声明 `FEEDBACK_ONLY`
+//     而无人导出同样是静默成功。因此默认取 `DISABLED`（官方该模式下也只 warn、
+//     不导出，见 :156-163），`FEEDBACK_ONLY` 被 `not_implemented`（501）拒绝。
 
-// 4 个命名空间的名字（官方常量逐字）。
+// 命名空间的名字（官方常量逐字）。
 const (
 	// NamespaceLocale 是 dsh-client-locale 的命名空间。
 	NamespaceLocale = "locale"
@@ -64,6 +89,9 @@ const (
 	NamespaceUIConversation = "ui-conversation"
 	// NamespaceSessionLogDeepSeek 是 dsh-session-log-deepseek 的上传开关命名空间。
 	NamespaceSessionLogDeepSeek = "session-log-deepseek"
+	// NamespaceSessionTelemetryOTel 是 dsh-session-telemetry-otel 的命名空间
+	// （官方插件名逐字：`@deepseek-ai/dsh-session-telemetry-otel`）。
+	NamespaceSessionTelemetryOTel = "session-telemetry-otel"
 )
 
 // 字段名（官方常量逐字）。
@@ -99,6 +127,17 @@ const (
 	// FieldSessionLogEnabled 是 `session-log-deepseek.enabled`
 	// （dsh-session-log-deepseek/src/index.ts:59-61）。
 	FieldSessionLogEnabled = "enabled"
+	// FieldSessionTelemetryMode 是 `session-telemetry-otel.mode`
+	// （dsh-session-telemetry-otel/src/index.ts:117）。
+	FieldSessionTelemetryMode = "mode"
+	// FieldSessionTelemetryExporterURL 是官方 `exporter.url`
+	// （dsh-session-telemetry-otel/src/index.ts:93-96 的 `Omit<LogExporterOptions,'url'> & {url?}`
+	// 里的那一个 url；线上是嵌套对象，本仓 L1 表单只投影这个叶子）。
+	FieldSessionTelemetryExporterURL = "exporterURL"
+	// FieldSessionTelemetryShutdownTimeoutMillis 是官方 `shutdownTimeoutMillis`。
+	FieldSessionTelemetryShutdownTimeoutMillis = "shutdownTimeoutMillis"
+	// FieldSessionTelemetryMaxRequestBytes 是官方 `maxRequestBytes`。
+	FieldSessionTelemetryMaxRequestBytes = "maxRequestBytes"
 )
 
 // 官方默认值（逐条对应上面权威源的 file:line）。
@@ -132,9 +171,40 @@ const (
 	// DefaultBusyEnter 是 submission-settings.ts:19
 	// （DEFAULT_BUSY_ENTER_BEHAVIOR = 'queue'）。
 	DefaultBusyEnter = "queue"
-	// DefaultSessionLogEnabled 是 dsh-session-log-deepseek/src/index.ts:60
-	// （`enabled: z.boolean().default(true)`）。
-	DefaultSessionLogEnabled = true
+	// DefaultSessionLogEnabled 是 `session-log-deepseek.enabled` 的**本仓**默认值。
+	//
+	// 与官方不同：官方 `dsh-session-log-deepseek/src/index.ts:60` 是
+	// `z.boolean().default(true)`，前提是官方宿主里存在 wire 上传方
+	// （:44 `inject: ['deepseekLlmApiExtensions','sessions']` +
+	// :196-261 `register('dsh_session_log', {prepare, accept})`，只在官方
+	// DeepSeek Messages 路由上）。本仓没有这个 sink（生产代码里
+	// `grep -rn "dsh_session_log" --include=*.go` 为 0 处消费），声明 true 就是
+	// 静默成功，所以这里的真实生效默认值是 false；显式写 true 由
+	// checkSessionLogDeepSeekEnabled 以 501 not_implemented 拒绝。
+	DefaultSessionLogEnabled = false
+	// DefaultSessionTelemetryMode 是 `session-telemetry-otel.mode` 的**本仓**默认值。
+	//
+	// 与官方不同：官方 index.ts:37/:117 是 `FEEDBACK_ONLY`，前提是 OTel SDK 的
+	// session-log reporter（:190 `ctx.otel.createSessionLogReporter`）与 on-demand
+	// coordinator（:219-222）。本仓没有 OTel SDK 与会话遥测通道，声明
+	// FEEDBACK_ONLY 无人导出 = 静默成功；官方在 DISABLED 下也只是 warn 不上传
+	// （:156-163），因此本仓默认取那个真实生效值。
+	DefaultSessionTelemetryMode = SessionTelemetryModeDisabled
+	// DefaultShutdownTimeoutMillis 是官方部署配置里的
+	// `shutdownTimeoutMillis: 3000`（dsh-base/cordis.patch.yml:222；官方 schema
+	// 本身无 default，见 index.ts:120 + DEFAULT_SHUTDOWN_TIMEOUT_MILLIS :125）。
+	DefaultShutdownTimeoutMillis = 3000
+	// DefaultMaxRequestBytes 是官方部署配置里的 `maxRequestBytes: 4000000`
+	// （dsh-base/cordis.patch.yml:223，等于官方 schema 的上限
+	// index.ts:121 `.step(1).min(1).max(4_000_000)`）。
+	DefaultMaxRequestBytes = 4000000
+	// MaxRequestBytesLimit 是官方 OTLP 请求体上限（index.ts:106/:121 的 4,000,000）。
+	MaxRequestBytesLimit = 4000000
+	// ShutdownTimeoutMillisMin / ShutdownTimeoutMillisMax 是官方构造期对
+	// `shutdownTimeoutMillis` 的运行时判据：必须是**正的**且不大于 Node 的
+	// 定时器上限 MAX_TIMER_DELAY_MILLIS（index.ts:129/:185-186）。
+	ShutdownTimeoutMillisMin = 1
+	ShutdownTimeoutMillisMax = 2147483647
 	// LegacyTranscriptViewNormal / LegacyTranscriptViewExpanded 是
 	// chat-settings.ts:45/:48 的两代旧值：读作 detailed，不作为选项、不回写。
 	LegacyTranscriptViewNormal   = "normal"
@@ -157,6 +227,19 @@ var (
 	PerformanceUsageModes = []string{"compact", "detailed"}
 	// LinkOpenings 是 chat-settings.ts:68 LinkOpening 的两个分支。
 	LinkOpenings = []string{"sidebar", "new-tab"}
+	// SessionTelemetryModes 是官方 `SessionTelemetryMode` 的两个取值，顺序即官方
+	// enum 定义序（dsh-session-telemetry-otel/src/index.ts:31-34）。
+	SessionTelemetryModes = []string{SessionTelemetryModeFeedbackOnly, SessionTelemetryModeDisabled}
+)
+
+// 官方 `SessionTelemetryMode` 的字面量（index.ts:31-34）。
+const (
+	// SessionTelemetryModeFeedbackOnly 是官方默认模式：只在用户显式提交 feedback
+	// 时捕获会话历史（index.ts:86）。
+	SessionTelemetryModeFeedbackOnly = "FEEDBACK_ONLY"
+	// SessionTelemetryModeDisabled 不构造任何 SDK 状态，只在 feedback 落地时 warn
+	// （index.ts:33/:156-163）。
+	SessionTelemetryModeDisabled = "DISABLED"
 )
 
 // 字段种类（envelope 节点形状）。
@@ -359,6 +442,12 @@ type uiNamespace struct {
 	// normalize 是读路径的有效值投影（官方客户端读取时做的那一步）。
 	// **只影响 describe/get 的 value 与 section.current，从不写回存储。**
 	normalize func(value map[string]any)
+	// check 是 schema 与字段级校验都表达不了的**语义**判据，在字段校验之后跑
+	// （所以坏类型/坏枚举仍先得到 400，不会被语义分支盖掉）。当前用它的两处都是
+	// "这个开关说了一件本宿主做不到的事"：session-log-deepseek.enabled 与
+	// session-telemetry-otel.mode 的真实上传/导出后端不存在，声明"开"就是
+	// 静默成功，因此返回四字段 not_implemented（501）。返回 nil 表示通过。
+	check func(value map[string]any) error
 }
 
 // schema 生成官方 schemastery envelope（根 object 带 meta.default={}，与官方
@@ -416,6 +505,9 @@ func (ns uiNamespace) validate(value any) error {
 		if err := field.validate(ns.ns, raw); err != nil {
 			return err
 		}
+	}
+	if ns.check != nil {
+		return ns.check(object)
 	}
 	return nil
 }
@@ -588,14 +680,105 @@ func clientUINamespaces() []uiNamespace {
 		{
 			// 官方 `dsh-session-log-deepseek/src/index.ts:59-61`：
 			// `session-log-deepseek` 声明 `enabled: z.boolean().default(true).volatile()`。
-			// **默认 true**（照官方，不因"用户关过"就改默认）。
+			// **本仓默认 false**（不是照抄官方）——官方 true 的前提是 wire 上传方，
+			// 本仓没有那个 sink；理由与证据见文件头第 3 条与
+			// DefaultSessionLogEnabled 的注释。`enabled: true` 会被 check 拒绝，
+			// 只有 `false` 能保存成功（那是本仓真实生效值）。
 			ns:    NamespaceSessionLogDeepSeek,
 			title: "Session log upload",
 			fields: []uiField{
 				uiBooleanField(FieldSessionLogEnabled, DefaultSessionLogEnabled),
 			},
-			base: map[string]any{FieldSessionLogEnabled: DefaultSessionLogEnabled},
+			base:  map[string]any{FieldSessionLogEnabled: DefaultSessionLogEnabled},
+			check: checkSessionLogDeepSeekEnabled,
 		},
+		{
+			// 官方 `dsh-session-telemetry-otel/src/index.ts:116-122` 的 Config
+			// （`mode` / `exporter` / `processor` / `shutdownTimeoutMillis` /
+			// `maxRequestBytes`，部署值见 dsh-base/cordis.patch.yml:218-231）是本
+			// 命名空间的权威源。本仓把官方 Config 折成 L1 表单能表达的四条：
+			//   - `mode` 与官方 enum 同值同序（index.ts:31-34/:117），默认 DISABLED；
+			//   - `exporterURL` 只取官方 `exporter.url` 那一个叶子（index.ts:93-96，
+			//     线上 `exporter` 是 `z.any()` 的嵌套对象，L1 表达不了）；
+			//   - `shutdownTimeoutMillis` / `maxRequestBytes` 用官方部署默认值
+			//     （cordis.patch.yml:222-223），后者的上限就是官方 schema 的
+			//     4,000,000（index.ts:121）。
+			// 本仓没有 OTel SDK 与会话遥测通道，所以 `FEEDBACK_ONLY` 由 check 以
+			// 501 not_implemented 拒绝；`DISABLED` 保存成功（官方该模式下也确实
+			// 只 warn、不导出，index.ts:156-163）。
+			ns:    NamespaceSessionTelemetryOTel,
+			title: "Session telemetry",
+			fields: []uiField{
+				uiEnumField(FieldSessionTelemetryMode, SessionTelemetryModes, DefaultSessionTelemetryMode),
+				// exporterURL 的默认值是**空串（未配置）**：官方默认端点来自部署
+				// 环境（cordis.patch.yml:225 `process.env.DSH_TELEMETRY_OTLP_URL ??
+				// 'https://dsh-otel-collector.deepseeksvc.com/v1/logs'`），本仓没有
+				// 导出器，抄那个 collector 就是让界面显示一个不存在的 sink。
+				uiStringField(FieldSessionTelemetryExporterURL, ""),
+				uiIntegerField(FieldSessionTelemetryShutdownTimeoutMillis,
+					ShutdownTimeoutMillisMin, ShutdownTimeoutMillisMax, DefaultShutdownTimeoutMillis),
+				uiIntegerField(FieldSessionTelemetryMaxRequestBytes,
+					1, MaxRequestBytesLimit, DefaultMaxRequestBytes),
+			},
+			base: map[string]any{
+				FieldSessionTelemetryMode:                  DefaultSessionTelemetryMode,
+				FieldSessionTelemetryExporterURL:           "",
+				FieldSessionTelemetryShutdownTimeoutMillis: DefaultShutdownTimeoutMillis,
+				FieldSessionTelemetryMaxRequestBytes:       DefaultMaxRequestBytes,
+			},
+			check: checkSessionTelemetryOTelMode,
+		},
+	}
+}
+
+// checkSessionLogDeepSeekEnabled 拒绝 `session-log-deepseek.enabled = true`。
+//
+// 这不是"参数不合法"（值本身合法、也是官方默认），而是**本宿主没有消费方**：
+// 声明 true 只会让界面显示"已上传"，而增量会话日志一个字节都不会出去。四字段
+// 里的 message 要能让人直接看出缺的是哪一块，hint 给可执行的下一步。
+func checkSessionLogDeepSeekEnabled(value map[string]any) error {
+	enabled, ok := value[FieldSessionLogEnabled].(bool)
+	if !ok || !enabled {
+		return nil
+	}
+	return &Error{
+		Code: "not_implemented",
+		Message: "session-log-deepseek.enabled=true 在本宿主不可用：缺的是把增量会话日志作为 " +
+			"`dsh_session_log` 顶层字段挂到官方 DeepSeek 请求上的**上传方**——官方 " +
+			"dsh-session-log-deepseek/src/index.ts:44 `inject: ['deepseekLlmApiExtensions','sessions']`、" +
+			":196-261 `register('dsh_session_log', {prepare, accept})`，accept 在 2xx 后写 " +
+			"`session-log-deepseek/delivery-accepted` 水位；该扩展点只存在于官方 DeepSeek Messages 路由，" +
+			"而本仓 internal/llm 的 ResolveProvider 走的是用户自配的 OpenAI 兼容端点（默认 magpie 网关），" +
+			"没有任何代码消费 dsh_session_log。",
+		Hint:      "保持 enabled=false（本仓默认，也是真实生效值）；确实要上传会话日志时改用官方宿主。",
+		Retryable: false,
+		Status:    http.StatusNotImplemented,
+	}
+}
+
+// checkSessionTelemetryOTelMode 拒绝 `session-telemetry-otel.mode = FEEDBACK_ONLY`。
+//
+// 同样不是取值问题（官方默认就是它），而是本仓没有导出后端：官方该模式要构造
+// OTel SDK 的 byte-bounded session-log reporter 与 on-demand coordinator
+// （index.ts:145/:190/:219-222），本仓两者都没有，声明 FEEDBACK_ONLY 只会把
+// "已开启会话共享"写进设置而没有任何导出。
+func checkSessionTelemetryOTelMode(value map[string]any) error {
+	mode, _ := value[FieldSessionTelemetryMode].(string)
+	if mode != SessionTelemetryModeFeedbackOnly {
+		return nil
+	}
+	return &Error{
+		Code: "not_implemented",
+		Message: "session-telemetry-otel.mode=FEEDBACK_ONLY 在本宿主不可用：缺的是 OpenTelemetry SDK 的 " +
+			"byte-bounded session-log reporter（官方 dsh-session-telemetry-otel/src/index.ts:190 " +
+			"`ctx.otel.createSessionLogReporter({...})`，含 :184-186 的 shutdown 期限与 :121 的 " +
+			"maxRequestBytes 字节上界）与 on-demand coordinator（:219-222 " +
+			"`new SessionTelemetryCoordinator(..., {capture:'on-demand', includeHistory:true})`）；" +
+			"官方靠 :145 `inject = ['sessions','otel']` 拿到 otel 服务，本仓没有 OTel SDK，也没有会话遥测通道" +
+			"（internal/analytics 只有端点环境变量）。",
+		Hint:      "保持 mode=DISABLED（本仓默认；官方该模式下也只 warn、不上传）；确实要会话遥测时改用官方宿主。",
+		Retryable: false,
+		Status:    http.StatusNotImplemented,
 	}
 }
 
