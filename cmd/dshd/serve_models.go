@@ -287,6 +287,13 @@ func modelCatalogHTTPStatus(code string) int {
 		return http.StatusConflict
 	case "upstream_error":
 		return http.StatusBadGateway
+	case "account_sign_in_required", "account_token_invalid":
+		// 账号路由的认证失败与 HTTP 认证语义一致：调用方要的是"去登录/换令牌"，
+		// 不是"改请求体"。官方码分别是 ACCOUNT_SIGN_IN_REQUIRED / ACCOUNT_TOKEN_INVALID。
+		return http.StatusUnauthorized
+	case "account_route_unavailable":
+		// 宿主没装配账号服务：这是"这一侧还没接线"，不是用户写错了配置。
+		return http.StatusNotImplemented
 	default:
 		return http.StatusInternalServerError
 	}
@@ -316,6 +323,12 @@ func modelCatalogErrorHint(code string) string {
 		return "先 models.catalog.list 核对真实 id"
 	case "upstream_error":
 		return "这是本地端点/协议的真实失败；检查 OpenAI 兼容端点、模型 id 与 credential"
+	case "account_sign_in_required":
+		return "先在本机完成 DeepSeek 账号登录（account.startSignIn）；账号路由只把令牌发给 inferenceOrigin 上的端点"
+	case "account_token_invalid":
+		return "令牌已被端点拒绝并作废：重新登录后再 models.catalog.test；不要把 api key 当账号令牌用"
+	case "account_route_unavailable":
+		return "宿主没装配账号服务（无法解析 x-dsh-auth-token）：这台机器上的账号路由不可用，改用 api key 路由"
 	default:
 		return "检查 state/model-catalog.json 与 W61 session-model.json；失败未覆盖旧值"
 	}

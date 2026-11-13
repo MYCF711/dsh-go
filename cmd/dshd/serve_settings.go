@@ -84,7 +84,10 @@ func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, erro
 		settingsform.NamespaceLocale, settingsform.NamespaceUITheme,
 		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings,
 		// 2026-11-13 补：官方另两个 general slot 的命名空间。
-		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek:
+		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek,
+		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的命名空间（本仓无 OTel 后端，
+		// mode=FEEDBACK_ONLY 由 settingsform 的语义校验回 501）。
+		settingsform.NamespaceSessionTelemetryOTel:
 		if s.namespaces == nil {
 			return settingsform.Document{}, settingsStoreNotWiredError(namespace)
 		}
@@ -141,7 +144,9 @@ func (s *serveSettingsStore) Write(namespace string, user map[string]any, expect
 		settingsform.NamespaceLocale, settingsform.NamespaceUITheme,
 		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings,
 		// 2026-11-13 补：官方另两个 general slot 的命名空间。
-		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek:
+		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek,
+		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的命名空间（见上面 Read 的说明）。
+		settingsform.NamespaceSessionTelemetryOTel:
 		if s.namespaces == nil {
 			return 0, settingsStoreNotWiredError(namespace)
 		}

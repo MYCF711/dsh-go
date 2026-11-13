@@ -8,14 +8,19 @@ package settingsform
 //   - 每个字段都能写、能读回、能重置，默认值与官方逐字相同；
 //   - 非法值（枚举外 / 越界 / 坏 BCP47 / 类型错 / 未知字段）一律四字段错误，
 //     且一次都不写盘；
+//   - 声明了"开"但本仓没有后端的两个开关（session-log-deepseek.enabled=true /
+//     session-telemetry-otel.mode=FEEDBACK_ONLY）一律 not_implemented（501），
+//     不静默成功；真实生效值（false / DISABLED）能保存；
 //   - transcriptView 的旧值 normal/expanded 读作 detailed、不在选项里、不回写。
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -68,6 +73,14 @@ func clientUIService(t *testing.T) (*Service, *declaredNamespaceStore) {
 // 小工具
 // ---------------------------------------------------------------------------
 
+// clientUINamespaceNames 是**有官方 rc.2 envelope 夹具**的 6 个命名空间
+// （testdata/client-ui-official-envelopes.json 逐节点对拍）。
+//
+// 为什么 session-telemetry-otel 不在里面：官方那边的 Config 是
+// `mode / exporter(z.any()) / processor(z.any()) / shutdownTimeoutMillis / maxRequestBytes`，
+// 且后两者没有 `meta.default`（index.ts:116-122），本仓发布的是"折成 L1 表单"的
+// 四字段声明（见 client_ui_schema.go），**不是**官方发布过的 envelope，硬塞夹具
+// 就是假对拍。它的形状由 sessionTelemetryFields + 上面的默认值断言钉住。
 func clientUINamespaceNames() []string {
 	return []string{
 		NamespaceLocale, NamespaceUITheme, NamespaceUIChat, NamespaceUISettings,
@@ -199,7 +212,13 @@ func loadOfficialClientUIEnvelopes(t *testing.T) map[string]any {
 // `volatileForm(Config).toJSON()`（dsh-settings/src/index.ts:338+src/schema.ts:16-60），
 // 夹具 testdata/client-ui-official-envelopes.json 由官方 rc.2 node_modules 的
 // **编译产物**实跑得到（脚本 tmp/GO8-RC2/_ns/dump-official.mjs），所以这条
-// 断言等于"宿主发布的 schema 就是官方发布的 schema"。
+// 断言等于"宿主发布的 schema 就是官方发布的 schema"，只有一处已登记的例外：
+//
+//   - `session-log-deepseek.enabled` 的 `meta.default` 官方是 true
+//     （index.ts:60）、本仓是 false（没有 deepseekLlmApiExtensions 上传方，
+//     见 client_ui_schema.go 文件头第 3 条）。例外由
+//     applyKnownClientUIDefaultDivergence 显式施加，并且它先断言"官方夹具里确实
+//     还是 true"——夹具若被人悄悄改成 false，这条会先红，例外不会烂在这儿。
 func TestClientUINamespaceSchemasMatchOfficialDescribeEnvelopes(t *testing.T) {
 	official := loadOfficialClientUIEnvelopes(t)
 	service, _ := clientUIService(t)
@@ -218,6 +237,7 @@ func TestClientUINamespaceSchemasMatchOfficialDescribeEnvelopes(t *testing.T) {
 		}
 		got := normalizeSchemaEnvelope(t, jsonValue(t, view.Schema))
 		want := normalizeSchemaEnvelope(t, wantEnvelope)
+		applyKnownClientUIDefaultDivergence(t, ns, want)
 		if !reflect.DeepEqual(got, want) {
 			gotJSON, _ := json.MarshalIndent(got, "", " ")
 			wantJSON, _ := json.MarshalIndent(want, "", " ")
@@ -230,6 +250,40 @@ func TestClientUINamespaceSchemasMatchOfficialDescribeEnvelopes(t *testing.T) {
 			t.Fatalf("%s 没有 secret 字段，secrets 必须是空数组：%v", ns, view.Secrets)
 		}
 	}
+}
+
+// applyKnownClientUIDefaultDivergence 只对**已登记的一处**有意差异改夹具副本。
+//
+// 现在只有一处：`session-log-deepseek.enabled` 的 `meta.default`。官方是 true，
+// 本仓是 false——因为官方那个 true 的前提（deepseekLlmApiExtensions wire 上传方）
+// 在本仓不存在，声明 true 就是静默成功。**夹具文件本身不动**（它是官方实跑
+// 产物，改了就成了假证据），差异在比较前显式施加，且先断言官方那边确实还是 true。
+func applyKnownClientUIDefaultDivergence(t *testing.T, ns string, envelope any) {
+	t.Helper()
+	if ns != NamespaceSessionLogDeepSeek {
+		return
+	}
+	root, ok := envelope.(map[string]any)
+	if !ok {
+		t.Fatalf("%s 的归一化 envelope 不是对象：%T", ns, envelope)
+	}
+	dict, ok := root["dict"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s 的归一化 envelope 缺 dict：%v", ns, root)
+	}
+	enabled, ok := dict[FieldSessionLogEnabled].(map[string]any)
+	if !ok {
+		t.Fatalf("%s 的归一化 envelope 缺 %s：%v", ns, FieldSessionLogEnabled, dict)
+	}
+	meta, ok := enabled["meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s.%s 缺 meta：%v", ns, FieldSessionLogEnabled, enabled)
+	}
+	if meta["default"] != true {
+		t.Fatalf("官方夹具里 %s.%s 的默认值不再是 true（现在 %v）：夹具被动过，先核对官方 index.ts:60",
+			ns, FieldSessionLogEnabled, meta["default"])
+	}
+	meta["default"] = DefaultSessionLogEnabled
 }
 
 // TestClientUIFieldSpecsAgreeWithSchemas 是"schema 与 sections 同源"的漂移守卫：
@@ -396,10 +450,21 @@ func TestClientUINamespaceDescribeDefaultsMatchOfficial(t *testing.T) {
 			FieldBusyEnter: DefaultBusyEnter,
 		}, map[string]bool{FieldBusyEnter: true}},
 		// 官方 dsh-session-log-deepseek/src/index.ts:59-61
-		// `enabled: z.boolean().default(true).volatile()` -> 默认 **true**。
+		// `enabled: z.boolean().default(true).volatile()`；**本仓默认 false**
+		// （官方那个 true 的前提是 deepseekLlmApiExtensions 上传方，本仓没有该
+		// sink，理由见 client_ui_schema.go 文件头第 3 条）。
 		{NamespaceSessionLogDeepSeek, map[string]any{
 			FieldSessionLogEnabled: DefaultSessionLogEnabled,
 		}, map[string]bool{FieldSessionLogEnabled: true}},
+		// 本仓新增：官方 dsh-session-telemetry-otel 的开关
+		// （官方 index.ts:116-122 的 Config + cordis.patch.yml:218-231 的部署值）。
+		// 默认 mode=DISABLED 同样是本仓的真实生效值（没有 OTel SDK）。
+		{NamespaceSessionTelemetryOTel, map[string]any{
+			FieldSessionTelemetryMode:                  DefaultSessionTelemetryMode,
+			FieldSessionTelemetryExporterURL:           "",
+			FieldSessionTelemetryShutdownTimeoutMillis: DefaultShutdownTimeoutMillis,
+			FieldSessionTelemetryMaxRequestBytes:       DefaultMaxRequestBytes,
+		}, sessionTelemetryFields()},
 	}
 	service, _ := clientUIService(t)
 	described, err := service.Describe()
@@ -489,6 +554,17 @@ func chatFields() map[string]bool {
 	return map[string]bool{
 		FieldTranscriptView: true, FieldCollapseTiming: true, FieldFoldedReplies: true,
 		FieldPerformanceUsage: true, FieldLinkOpening: true,
+	}
+}
+
+// sessionTelemetryFields 是 session-telemetry-otel 声明的 4 个字段
+// （官方 Config 折成 L1 表单后的形状，见 client_ui_schema.go 该命名空间的注释）。
+func sessionTelemetryFields() map[string]bool {
+	return map[string]bool{
+		FieldSessionTelemetryMode:                  true,
+		FieldSessionTelemetryExporterURL:           true,
+		FieldSessionTelemetryShutdownTimeoutMillis: true,
+		FieldSessionTelemetryMaxRequestBytes:       true,
 	}
 }
 
@@ -645,6 +721,120 @@ func TestClientUINamespacesRejectIllegalValues(t *testing.T) {
 		if section.Revision != 0 {
 			t.Fatalf("%s：拒绝后 revision 必须还是 0，实际 %d", entry.name, section.Revision)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 4b. 声明"开"但没有后端 → not_implemented（501），一个字节都不写
+// ---------------------------------------------------------------------------
+
+// TestClientUINamespacesNotImplementedSwitchesAreLoud 钉住这两个**能力上不做**
+// 的开关不许被静默接受：
+//
+//   - `session-log-deepseek.enabled = true`：本仓没有把增量会话日志挂成
+//     `dsh_session_log` 顶层的上传方（官方 index.ts:44/:196-261）；
+//   - `session-telemetry-otel.mode = FEEDBACK_ONLY`：本仓没有 OTel SDK 的
+//     byte-bounded reporter 与 on-demand coordinator（官方 index.ts:190/:219-222）。
+//
+// 断言的是**四字段 501**（code/message/hint/retryable 齐全、retryable=false、
+// message 点名叫出缺什么），不是"随便报个错"；同时确认拒绝之后 store 没写、
+// revision 没动、默认值仍是真实生效值。
+func TestClientUINamespacesNotImplementedSwitchesAreLoud(t *testing.T) {
+	cases := []struct {
+		name     string
+		ns       string
+		field    string
+		value    any
+		keywords []string
+	}{
+		{
+			"会话日志开关没有上传方",
+			NamespaceSessionLogDeepSeek, FieldSessionLogEnabled, true,
+			[]string{"dsh_session_log", "deepseekLlmApiExtensions", "delivery-accepted"},
+		},
+		{
+			"会话遥测没有 OTel 后端",
+			NamespaceSessionTelemetryOTel, FieldSessionTelemetryMode, SessionTelemetryModeFeedbackOnly,
+			[]string{"OTel", "FEEDBACK_ONLY", "createSessionLogReporter"},
+		},
+	}
+	for _, entry := range cases {
+		service, store := clientUIService(t)
+		revision := int64(0)
+		_, err := service.Mutate(entry.ns, []PathOp{{
+			Op: "set", Path: []string{entry.field}, Value: entry.value,
+		}}, &revision)
+		if err == nil {
+			t.Fatalf("%s：写 %s.%s=%v 必须被拒绝，不许静默接受", entry.name, entry.ns, entry.field, entry.value)
+		}
+		apiErr := AsError(err)
+		if apiErr.Code != "not_implemented" {
+			t.Fatalf("%s：code=%q，want not_implemented（err=%v）", entry.name, apiErr.Code, err)
+		}
+		if apiErr.Status != http.StatusNotImplemented {
+			t.Fatalf("%s：HTTP 状态必须是 501，实际 %d", entry.name, apiErr.Status)
+		}
+		if apiErr.Message == "" || apiErr.Hint == "" {
+			t.Fatalf("%s：四字段错误不允许空 message/hint：%+v", entry.name, apiErr)
+		}
+		if apiErr.Retryable {
+			t.Fatalf("%s：能力缺失不是可重试错误：%+v", entry.name, apiErr)
+		}
+		for _, keyword := range entry.keywords {
+			if !strings.Contains(apiErr.Message, keyword) {
+				t.Fatalf("%s：message 必须点名叫出缺什么，缺关键词 %q：%s", entry.name, keyword, apiErr.Message)
+			}
+		}
+		if len(store.writes) != 0 {
+			t.Fatalf("%s：拒绝的值不许写盘，实际写了 %v", entry.name, store.writes)
+		}
+		section, readErr := service.Get(entry.ns)
+		if readErr != nil {
+			t.Fatalf("%s：拒绝后读取失败 %v", entry.name, readErr)
+		}
+		if section.Revision != 0 {
+			t.Fatalf("%s：拒绝后 revision 必须还是 0，实际 %d", entry.name, section.Revision)
+		}
+	}
+
+	// 官方 `settings/update` 的合并路径走同一条校验：present=true 也一样 501，
+	// 且不写半个字段。
+	service, store := clientUIService(t)
+	if _, err := service.Update(NamespaceSessionLogDeepSeek,
+		map[string]any{FieldSessionLogEnabled: true}, nil); AsError(err).Code != "not_implemented" {
+		t.Fatalf("settings/update 路径必须同样 not_implemented，实际 %v", err)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("settings/update 拒绝后不许写盘：%v", store.writes)
+	}
+
+	// 真实生效值必须能保存：enabled=false / mode=DISABLED 都写成功且读回一致。
+	service, store = clientUIService(t)
+	revision := int64(0)
+	if _, err := service.Mutate(NamespaceSessionLogDeepSeek, []PathOp{{
+		Op: "set", Path: []string{FieldSessionLogEnabled}, Value: false,
+	}}, &revision); err != nil {
+		t.Fatalf("enabled=false 是本仓真实生效值，必须保存成功：%v", err)
+	}
+	// revision 按命名空间各自维护，otel 这一份还是 0。
+	otelRevision := int64(0)
+	if _, err := service.Mutate(NamespaceSessionTelemetryOTel, []PathOp{{
+		Op: "set", Path: []string{FieldSessionTelemetryMode}, Value: SessionTelemetryModeDisabled,
+	}}, &otelRevision); err != nil {
+		t.Fatalf("mode=DISABLED 是本仓真实生效值，必须保存成功：%v", err)
+	}
+	if len(store.writes) != 2 {
+		t.Fatalf("两次合法写入必须真的落到 store：%v", store.writes)
+	}
+	described, err := service.Describe()
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	if got := namespaceViewFor(t, described, NamespaceSessionLogDeepSeek).Value[FieldSessionLogEnabled]; got != false {
+		t.Fatalf("写 enabled=false 后 value=%v，want false", got)
+	}
+	if got := namespaceViewFor(t, described, NamespaceSessionTelemetryOTel).Value[FieldSessionTelemetryMode]; got != SessionTelemetryModeDisabled {
+		t.Fatalf("写 mode=DISABLED 后 value=%v，want %s", got, SessionTelemetryModeDisabled)
 	}
 }
 

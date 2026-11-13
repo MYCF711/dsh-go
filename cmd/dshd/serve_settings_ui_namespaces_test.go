@@ -1,12 +1,15 @@
 package main
 
-// 官方 4 个客户端 UI 设置命名空间（locale / ui-theme / ui-chat / ui-settings）
-// 的 L1 Transport 行为：真 handler + 真 <home>/state/settings-namespaces.json。
+// 官方客户端 UI / 插件设置命名空间（locale / ui-theme / ui-chat / ui-settings /
+// ui-conversation / session-log-deepseek / session-telemetry-otel）的 L1 Transport
+// 行为：真 handler + 真 <home>/state/settings-namespaces.json。
 //
-// 真机截图暴露的缺口正是这 4 行：宿主没发布命名空间时设置面板只能显示「未知」。
+// 真机截图暴露的缺口正是前 4 行：宿主没发布命名空间时设置面板只能显示「未知」。
 // 这里钉的是"接上之后真的能读能写"：describe 报全、form.set 写进去、
 // form.get 读回来、非法值四字段拒绝、form.reset 回官方默认、
-// transcriptView 旧值读作 detailed 且不回写、重启（新 Store）后值还在。
+// transcriptView 旧值读作 detailed 且不回写、重启（新 Store）后值还在；
+// 以及两个**本仓没有后端**的开关（session-log-deepseek.enabled=true /
+// session-telemetry-otel.mode=FEEDBACK_ONLY）在真实 HTTP 面回 501 + 四字段 error。
 
 import (
 	"bytes"
@@ -16,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -132,12 +136,12 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 
 	result := settingsL1Describe(t, handler)
 	namespaces, ok := result["namespaces"].([]any)
-	if !ok || len(namespaces) != 9 {
-		t.Fatalf("settings.describe 必须报 9 个命名空间（model/permission/llm + 6 个客户端 UI）：%v", result["namespaces"])
+	if !ok || len(namespaces) != 10 {
+		t.Fatalf("settings.describe 必须报 10 个命名空间（model/permission/llm + 7 个客户端/插件 UI）：%v", result["namespaces"])
 	}
 	sections, ok := result["sections"].([]any)
-	if !ok || len(sections) != 9 {
-		t.Fatalf("settings.describe 必须报 9 个 section：%v", result["sections"])
+	if !ok || len(sections) != 10 {
+		t.Fatalf("settings.describe 必须报 10 个 section：%v", result["sections"])
 	}
 
 	defaults := []struct {
@@ -164,8 +168,19 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 		{"ui-settings", map[string]any{"enabled": true}},
 		// 2026-11-13 补：官方 submission-settings.ts:19 DEFAULT_BUSY_ENTER_BEHAVIOR='queue'。
 		{"ui-conversation", map[string]any{"busyEnter": "queue"}},
-		// 官方 dsh-session-log-deepseek/src/index.ts:60 `z.boolean().default(true)`。
-		{"session-log-deepseek", map[string]any{"enabled": true}},
+		// 官方 dsh-session-log-deepseek/src/index.ts:60 是 `z.boolean().default(true)`，
+		// 但本仓**没有上传方**（没有 deepseekLlmApiExtensions 扩展点），声明 true
+		// 就是静默成功，所以真实生效默认值是 false（理由见 client_ui_schema.go 头）。
+		{"session-log-deepseek", map[string]any{"enabled": false}},
+		// 本仓 2026-11-14 新增：官方 dsh-session-telemetry-otel 的开关
+		// （官方 index.ts:116-122 + 部署值 cordis.patch.yml:218-231）。
+		// 默认 mode 是 DISABLED（本仓没有 OTel SDK），FEEDBACK_ONLY 由 501 拒绝。
+		{"session-telemetry-otel", map[string]any{
+			"mode":                  "DISABLED",
+			"exporterURL":           "",
+			"shutdownTimeoutMillis": float64(3000),
+			"maxRequestBytes":       float64(4000000),
+		}},
 	}
 	for _, entry := range defaults {
 		namespace := settingsL1Namespace(t, result, entry.ns)
@@ -345,6 +360,128 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 	}
 	if !bytes.Contains(raw, []byte(`"ui-theme"`)) {
 		t.Fatalf("ui-theme 必须落进 <home>/state/settings-namespaces.json：%s", raw)
+	}
+}
+
+// TestSettingsFormNotImplementedSwitchesOverHTTP：两个"能力上不做"的开关在真实
+// L1 HTTP 面上必须回 **501 + 四字段 error**（code=not_implemented，message 点名
+// 叫出缺什么，hint 非空且可执行，retryable=false），并在 settings.form.set 与
+// settings.mutate 两条路径上一致；而两个**真实生效值**必须保存成功。
+func TestSettingsFormNotImplementedSwitchesOverHTTP(t *testing.T) {
+	home := t.TempDir()
+	store, _, _ := openSettingsStores(t, home, "base-model", "allow")
+	handler := newSettingsFormHTTPHandler(store)
+
+	rejections := []struct {
+		name     string
+		params   map[string]any
+		keywords []string
+	}{
+		{
+			"会话日志开关缺上传方",
+			map[string]any{"ns": "session-log-deepseek", "path": []string{"enabled"}, "value": true},
+			[]string{"dsh_session_log", "deepseekLlmApiExtensions"},
+		},
+		{
+			"会话遥测缺 OTel 后端",
+			map[string]any{"ns": "session-telemetry-otel", "path": []string{"mode"}, "value": "FEEDBACK_ONLY"},
+			[]string{"OTel", "FEEDBACK_ONLY", "createSessionLogReporter"},
+		},
+	}
+	for _, entry := range rejections {
+		status, payload := postSettingsL1(t, handler, "settings.form.set", entry.params)
+		if status != http.StatusNotImplemented {
+			t.Fatalf("%s：必须 501，实际 %d：%v", entry.name, status, payload)
+		}
+		if _, hasResult := payload["result"]; hasResult {
+			t.Fatalf("%s：501 不许带 result（那是静默成功的形状）：%v", entry.name, payload)
+		}
+		apiErr, ok := payload["error"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s：必须是四字段 error：%v", entry.name, payload)
+		}
+		for _, key := range []string{"code", "message", "hint", "retryable"} {
+			if _, present := apiErr[key]; !present {
+				t.Fatalf("%s：四字段错误缺 %q：%v", entry.name, key, apiErr)
+			}
+		}
+		if apiErr["code"] != "not_implemented" {
+			t.Fatalf("%s：code=%v，want not_implemented（状态是 501，码不许自相矛盾）：%v", entry.name, apiErr["code"], apiErr)
+		}
+		if apiErr["retryable"] != false {
+			t.Fatalf("%s：能力缺失不是可重试错误：%v", entry.name, apiErr)
+		}
+		message, _ := apiErr["message"].(string)
+		for _, keyword := range entry.keywords {
+			if !strings.Contains(message, keyword) {
+				t.Fatalf("%s：message 必须点名叫出缺什么，缺关键词 %q：%s", entry.name, keyword, message)
+			}
+		}
+		if hint, _ := apiErr["hint"].(string); strings.TrimSpace(hint) == "" {
+			t.Fatalf("%s：hint 必须给出可执行下一步：%v", entry.name, apiErr)
+		}
+	}
+
+	// settings.mutate 与 settings.form.set 必须是同一条翻译（不是只有一条接通）。
+	mutateStatus, mutatePayload := postSettingsL1(t, handler, "settings.mutate", map[string]any{
+		"ns":  "session-log-deepseek",
+		"ops": []map[string]any{{"op": "set", "path": []string{"enabled"}, "value": true}},
+	})
+	if mutateStatus != http.StatusNotImplemented {
+		t.Fatalf("settings.mutate 也必须 501，实际 %d：%v", mutateStatus, mutatePayload)
+	}
+	mutateErr, _ := mutatePayload["error"].(map[string]any)
+	if mutateErr["code"] != "not_implemented" {
+		t.Fatalf("settings.mutate 的 code=%v，want not_implemented：%v", mutateErr["code"], mutatePayload)
+	}
+
+	// 三次拒绝之后磁盘上不许留下这半个值。
+	if raw, err := os.ReadFile(filepath.Join(home, "state", "settings-namespaces.json")); err == nil {
+		if bytes.Contains(raw, []byte("session-log-deepseek")) || bytes.Contains(raw, []byte("session-telemetry-otel")) {
+			t.Fatalf("被拒绝的值不许落盘：%s", raw)
+		}
+	}
+
+	// 真实生效值：enabled=false 保存成功，describe 的 default/current 都是 false。
+	status, payload := postSettingsL1(t, handler, "settings.form.set", map[string]any{
+		"ns": "session-log-deepseek", "path": []string{"enabled"}, "value": false,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("enabled=false 是本仓真实生效值，必须 200，实际 %d：%v", status, payload)
+	}
+	described := settingsL1Describe(t, handler)
+	sessionLog := settingsL1Namespace(t, described, "session-log-deepseek")
+	if value, _ := sessionLog["value"].(map[string]any); value["enabled"] != false {
+		t.Fatalf("session-log-deepseek.value.enabled=%v，want false", sessionLog["value"])
+	}
+	section := settingsL1Section(t, described, "session-log-deepseek")
+	for _, key := range []string{"current", "default"} {
+		if got := settingsL1Field(t, section, "enabled")[key]; got != false {
+			t.Fatalf("session-log-deepseek.enabled 的 %s=%v，want false", key, got)
+		}
+	}
+
+	// 真实生效值：mode=DISABLED 保存成功，且四字段都在 describe 里。
+	status, payload = postSettingsL1(t, handler, "settings.form.set", map[string]any{
+		"ns": "session-telemetry-otel", "path": []string{"mode"}, "value": "DISABLED",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("mode=DISABLED 是本仓真实生效值，必须 200，实际 %d：%v", status, payload)
+	}
+	described = settingsL1Describe(t, handler)
+	telemetry := settingsL1Section(t, described, "session-telemetry-otel")
+	fields, ok := telemetry["fields"].([]any)
+	if !ok || len(fields) != 4 {
+		t.Fatalf("session-telemetry-otel 必须发布 4 个字段：%v", telemetry["fields"])
+	}
+	if got := settingsL1Field(t, telemetry, "mode")["current"]; got != "DISABLED" {
+		t.Fatalf("session-telemetry-otel.mode 写入后 current=%v，want DISABLED", got)
+	}
+	if got := settingsL1Field(t, telemetry, "shutdownTimeoutMillis")["default"]; got != float64(3000) {
+		t.Fatalf("shutdownTimeoutMillis 的默认值必须是 3000，实际 %v", got)
+	}
+	if got := settingsL1Field(t, telemetry, "maxRequestBytes")["default"]; got != float64(4000000) {
+		t.Fatalf("maxRequestBytes 的默认值必须是 4000000，实际 %v", got)
 	}
 }
 

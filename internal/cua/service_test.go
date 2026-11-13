@@ -260,6 +260,76 @@ func TestServicePTCConfigurationTruthfulWithoutRuntime(t *testing.T) {
 	}
 }
 
+// ptcR6Keywords 是"没有 PTC 运行时"这一族错误体里**必须同时出现**的关键词。
+//
+// 这里刻意写**字面量**而不是引用生产常量：生产常量改名时测试必须红，
+// 否则断言就退化成"自己和自己比"，"点名 R6 与两个官方模块"的要求会静默失效。
+func ptcR6Keywords() []string {
+	return []string{"R6", "不嵌 JS 运行时", "@deepseek-ai/dsh-ptc-runtime-node", "@deepseek-ai/dsh-tool-executor-ptc"}
+}
+
+// assertPTCBlockerNamesR6AndModules 钉住三件事同一段里都说了：
+// (a) R6「不嵌 JS 运行时」是设计约束；(b) 缺 #74/#94 两个官方模块；
+// (c) 官方默认同样是关着的（file:line 可核）。
+func assertPTCBlockerNamesR6AndModules(t *testing.T, what, text string) {
+	t.Helper()
+	for _, want := range ptcR6Keywords() {
+		if !strings.Contains(text, want) {
+			t.Fatalf("%s 必须点名 %q（R6 与缺的两个官方模块都要出现）：%s", what, want, text)
+		}
+	}
+	for _, want := range []string{"cordis.patch.yml:521", "disabled: true"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("%s 必须说明官方默认也关着（缺 %q）：%s", what, want, text)
+		}
+	}
+}
+
+// TestServicePTCConfigurationReadsRealStateWithoutEntry 钉住只读探针**如实读**：
+// 没有 ptc-runtime 条目时返回的是真读到的状态（EntryID/EntryFound/Persistent/Writable），
+// 不是编的，也**不是一律报错**——官方 `ptcConfiguration` 就是只读探针
+// （`dsh-cua/src/access.ts:55-61`），必须能读到"没装配"这个事实本身。
+func TestServicePTCConfigurationReadsRealStateWithoutEntry(t *testing.T) {
+	service := NewService(Options{})
+	cfg, err := service.PTCConfiguration(context.Background())
+	if err != nil {
+		t.Fatalf("只读探针不该因为没有 ptc-runtime 条目而报错（读不到就如实报未装配）：%v", err)
+	}
+	if cfg.EntryID != PTCEntryID {
+		t.Fatalf("条目 id 必须报官方 id %q，得到 %q", PTCEntryID, cfg.EntryID)
+	}
+	if cfg.EntryFound {
+		t.Fatalf("没有条目时 entryFound 必须是 false（真话）：%+v", cfg)
+	}
+	if cfg.Persistent || cfg.Writable {
+		t.Fatalf("没有 ptc-runtime 条目时必须如实报 persistent=false/writable=false：%+v", cfg)
+	}
+	if cfg.CapableWhen == "" {
+		t.Fatal("writable=false 时必须给出 capableWhen（说清被什么拦住、缺什么）")
+	}
+	assertPTCBlockerNamesR6AndModules(t, "capableWhen", cfg.CapableWhen)
+}
+
+// TestProfilePTCProbeEnableUnavailableNamesR6AndMissingModules 钉住写路径的形状与文案：
+// 码仍是既有的 501 + unavailable（错误码契约不许动），message 与 capableWhen
+// **同时**点名 R6、不嵌 JS 运行时、#74/#94 两个官方模块，以及官方默认 disabled: true。
+func TestProfilePTCProbeEnableUnavailableNamesR6AndMissingModules(t *testing.T) {
+	probe := NewPTCProbe(PTCProbeOptions{})
+	err := probe.Enable()
+	var typed *Error
+	if !errors.As(err, &typed) {
+		t.Fatalf("没有 PTC 运行时必须返回结构化错误（不是含糊的 error），得到 %v", err)
+	}
+	if typed.Status != 501 || typed.Code != "unavailable" {
+		t.Fatalf("码仍是既有的 501 + unavailable，得到 %d/%s", typed.Status, typed.Code)
+	}
+	assertPTCBlockerNamesR6AndModules(t, "message", typed.Message)
+	assertPTCBlockerNamesR6AndModules(t, "capableWhen", typed.CapableWhen)
+	if !strings.Contains(typed.Message, PTCEntryID) {
+		t.Fatalf("message 要说清找的是哪个 profile 条目：%s", typed.Message)
+	}
+}
+
 func TestServiceEnablePersistentPTCNoOpWhenAlreadyPersistent(t *testing.T) {
 	probe := &fakePTC{cfg: PTCConfiguration{Persistent: true, Writable: true}}
 	service := NewService(Options{PTC: probe})

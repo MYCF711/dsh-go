@@ -104,13 +104,13 @@ func TestSettingsDescribeOfficialWireEnvelope(t *testing.T) {
 	if len(value) != 3 || value["writable"] != true || value["hasDocument"] != false {
 		t.Fatalf("result.value 不是官方 SettingsDescribeValue：%s", payload)
 	}
-	// 九行：model / permission / llm + 官方客户端的 6 个 UI 命名空间
+	// 十行：model / permission / llm + 官方客户端与插件的 7 个 UI 命名空间
 	// （locale / ui-theme / ui-chat / ui-settings / ui-conversation /
-	// session-log-deepseek）。llm 是 0.2.2-rc.2 加的（发布
-	// `providers.<route>.retryPolicy`）；6 个 UI 命名空间是设置面板各行真值来源。
+	// session-log-deepseek / session-telemetry-otel）。llm 是 0.2.2-rc.2 加的（发布
+	// `providers.<route>.retryPolicy`）；7 个 UI 命名空间是设置面板各行真值来源。
 	namespaces, ok := value["namespaces"].([]any)
-	if !ok || len(namespaces) != 9 {
-		t.Fatalf("result.value.namespaces 应是九行：%s", payload)
+	if !ok || len(namespaces) != 10 {
+		t.Fatalf("result.value.namespaces 应是十行：%s", payload)
 	}
 	for _, rawNamespace := range namespaces {
 		namespace := rawNamespace.(map[string]any)
@@ -167,8 +167,8 @@ func TestSettingsDescribeOfficialWireShape(t *testing.T) {
 		t.Fatalf("hasDocument 应为 false（本宿主没有配置编辑器的本地文档）：%v", out["hasDocument"])
 	}
 	namespaces, ok := out["namespaces"].([]any)
-	if !ok || len(namespaces) != 9 {
-		t.Fatalf("namespaces 应是 model/permission/llm + 6 个客户端 UI 命名空间共九行，实际：%v", out["namespaces"])
+	if !ok || len(namespaces) != 10 {
+		t.Fatalf("namespaces 应是 model/permission/llm + 7 个客户端/插件 UI 命名空间共十行，实际：%v", out["namespaces"])
 	}
 	for _, raw := range namespaces {
 		namespace, ok := raw.(map[string]any)
@@ -178,7 +178,9 @@ func TestSettingsDescribeOfficialWireShape(t *testing.T) {
 		switch namespace["ns"] {
 		case "model", "permission", "llm", "locale", "ui-theme", "ui-chat", "ui-settings",
 			// 2026-11-13 补：官方另两个 general slot 的命名空间。
-			"ui-conversation", "session-log-deepseek":
+			"ui-conversation", "session-log-deepseek",
+			// 2026-11-14 补：官方 dsh-session-telemetry-otel 的开关命名空间。
+			"session-telemetry-otel":
 		default:
 			t.Fatalf("未知 namespace：%v", namespace["ns"])
 		}

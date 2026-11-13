@@ -110,6 +110,12 @@ type ModelProviderConfig struct {
 	// Retry 是这个 provider 自己的重试策略（官方 `retryPolicy`）。
 	// nil = 没声明 = 生产默认（retry.go 的 defaultRetryConfig），一个字节都不变。
 	Retry *RetryPolicy
+	// Account 非 nil = 这条 provider 是**账号路由**（官方 #99
+	// `llm-deepseek-account`）：请求带 `x-dsh-auth-token`，不带 Bearer。
+	//
+	// 它随 provider 走，而不是随进程：同一个进程里可以既有 api key 路由、
+	// 又有账号路由，认证方式必须跟着这条请求的 provider 走。
+	Account *AccountAuth
 }
 
 // Credential 返回 stored credential 或 apiKeyEnv 同名环境变量的解析结果。
@@ -121,6 +127,7 @@ func (c ModelProviderConfig) Credential() string { return c.credential }
 // provider 扩展字段归属；漏掉它会把 catalog 里写的 api 静默退化成默认协议。
 func (c ModelProviderConfig) Client() *Client {
 	client := NewWithAPI(c.BaseURL, c.credential, c.API)
+	client.Account = c.Account
 	client.applyRetryPolicy(c.Retry)
 	return client
 }
@@ -171,6 +178,37 @@ type ModelCatalogStore struct {
 	// envModel 是从当前 provider 发现的 ephemeral entry，不会被一次只读 List 落盘。
 	missing  bool
 	envModel json.RawMessage
+	// accountAuth 是宿主注入的账号令牌来源（官方 #99 llm-deepseek-account）。
+	// nil = 本进程没有账号路由：`api=deepseek-account` 的模型在解析与测试时
+	// 明确回"未接线/未登录"，绝不退化成"用 apiKey 试试看"。
+	//
+	// 单独一把锁：s.mu 保护的是目录文档，而账号来源只在装配期写一次、每次请求读；
+	// 共用一把锁会让"在持有 s.mu 的路径上读账号态"变成潜在死锁。
+	authMu      sync.RWMutex
+	accountAuth *AccountAuth
+}
+
+// SetAccountAuth 注入账号令牌来源（宿主装配期调用，见 cmd/dshd）。
+//
+// 为什么是显式 setter 而不是 OpenModelCatalog 的参数：既有调用点（测试、
+// 只读诊断）不需要账号态，多一个构造参数会让它们全部改成传 nil。
+func (s *ModelCatalogStore) SetAccountAuth(auth *AccountAuth) {
+	if s == nil {
+		return
+	}
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	s.accountAuth = auth
+}
+
+// accountAuthSnapshot 取当前注入的账号来源（并发安全，与 s.mu 不共享）。
+func (s *ModelCatalogStore) accountAuthSnapshot() *AccountAuth {
+	if s == nil {
+		return nil
+	}
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	return s.accountAuth
 }
 
 // OpenModelCatalog 读取 <home>/state/model-catalog.json。损坏/非法状态留在
@@ -770,9 +808,21 @@ func (s *ModelCatalogStore) ResolveProvider(id string) (ModelProviderConfig, err
 	} else if routePolicy != nil {
 		retry = routePolicy
 	}
+	var accountAuth *AccountAuth
+	if info.API == ProviderAPIDeepSeekAccount {
+		// 账号路由没有 api key：认证只能来自账号服务（官方 #99
+		// `resolveAuth` → `resolveDeepSeekAccountToken`）。没装配就 fail-loud——
+		// 回落成"不带认证头发出去"会变成一条注定 401 的请求，用户看不懂。
+		accountAuth = s.accountAuthSnapshot()
+		if accountAuth == nil {
+			return ModelProviderConfig{}, modelCatalogError("account_route_unavailable",
+				"模型 %q 走账号路由（api=%s），但本进程没有装配账号服务，解析不出 x-dsh-auth-token",
+				id, ProviderAPIDeepSeekAccount)
+		}
+	}
 	return ModelProviderConfig{
 		BaseURL: info.BaseURL, API: info.API, APIKeyEnv: info.APIKeyEnv, credential: credential,
-		Retry: retry,
+		Retry: retry, Account: accountAuth,
 	}, nil
 }
 
@@ -807,6 +857,31 @@ func (s *ModelCatalogStore) Test(ctx context.Context, id string, override ModelT
 		return ModelTestResult{}, modelCatalogError("credential_missing", "模型 %q 引用的 credential %s 未配置", id, info.APIKeyEnv)
 	}
 
+	// 账号路由（官方 #99 llm-deepseek-account）：测试是一次真实推理请求，因此
+	// 与真实轮次走**同一条**认证判定——目的地栅栏 → 取令牌 → 未登录就是
+	// 官方那条 ACCOUNT_SIGN_IN_REQUIRED。缺任何一步都会变成"测试通过、真跑 401"。
+	accountTok := ""
+	var accountAuth *AccountAuth
+	if info.API == ProviderAPIDeepSeekAccount {
+		accountAuth = s.accountAuthSnapshot()
+		if accountAuth == nil {
+			return ModelTestResult{}, modelCatalogError("account_route_unavailable",
+				"模型 %q 走账号路由（api=%s），但本进程没有装配账号服务，解析不出 x-dsh-auth-token",
+				id, ProviderAPIDeepSeekAccount)
+		}
+		if !accountAuth.AllowsDestination(info.BaseURL) {
+			return ModelTestResult{}, modelCatalogError("account_sign_in_required",
+				"%s（目的地 %s 不是账号推理 origin %s）", AccountSignInRequiredMessage, info.BaseURL, accountAuth.InferenceOrigin)
+		}
+		if accountAuth.Token != nil {
+			accountTok, _ = accountAuth.Token(ctx)
+		}
+		accountTok = strings.TrimSpace(accountTok)
+		if accountTok == "" {
+			return ModelTestResult{}, modelCatalogError("account_sign_in_required", "%s", AccountSignInRequiredMessage)
+		}
+	}
+
 	// 这条诊断请求同样只发标准字段；唯一要谈的可选字段是限制输出的那个
 	// （max_tokens / max_completion_tokens），协商规则与真实会话请求完全一致。
 	profile := defaultWireProfile()
@@ -833,7 +908,10 @@ func (s *ModelCatalogStore) Test(ctx context.Context, id string, override ModelT
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", "dshd/model-catalog-test")
-		if credential != "" {
+		if accountTok != "" {
+			// 账号路由只发 x-dsh-auth-token（官方 index.ts:20），绝不发 Bearer。
+			req.Header.Set(AccountTokenHeader, accountTok)
+		} else if credential != "" {
 			req.Header.Set("Authorization", "Bearer "+credential)
 		}
 		resp, err = testClient.Do(req)
@@ -845,6 +923,17 @@ func (s *ModelCatalogStore) Test(ctx context.Context, id string, override ModelT
 		}
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 		_ = resp.Body.Close()
+		// 官方 `onRequestError`（index.ts:44-47）：401 换码成 ACCOUNT_TOKEN_INVALID，
+		// 并作废那份**仍然匹配**的令牌（不匹配 = 已被更新的登录取代）。
+		if resp.StatusCode == http.StatusUnauthorized && accountTok != "" {
+			if accountAuth.Reject != nil {
+				if rejectErr := accountAuth.Reject(ctx, accountTok); rejectErr != nil {
+					return ModelTestResult{}, modelCatalogError("internal", "作废被拒绝的账号令牌失败: %v", rejectErr)
+				}
+			}
+			return ModelTestResult{}, modelCatalogError("account_token_invalid",
+				"账号令牌被 %s 拒绝（HTTP 401）：%s", info.BaseURL, errorSnippet(responseBody, credential, accountTok))
+		}
 		if next, _, ok := negotiateWire(profile, wireSent{maxTokens: true}, resp.StatusCode, string(responseBody)); ok &&
 			attempt < maxWireAttempts && wireChangeAllowed(adapter, next) {
 			profile = next

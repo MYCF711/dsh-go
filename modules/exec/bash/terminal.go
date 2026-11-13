@@ -42,7 +42,9 @@ func (s *Service) OpenTerminal(cwd string) (*Terminal, error) {
 		cwd = base
 	}
 
-	sess, err := startSession(cwd, s.grace)
+	// 用户终端**不**受受管 shell 环境管辖：官方 shell-env 只服务模型可见的
+	// shell 工具（bash / pwsh），人类开的交互终端不是它的消费者。所以 managed=false。
+	sess, err := startSession(cwd, s.grace, false)
 	if err != nil {
 		return nil, err
 	}

@@ -344,6 +344,124 @@ func TestCUARc2IconsOversizeFailsLoud(t *testing.T) {
 	}
 }
 
+// attachRealCUAService 挂上"没接 ptc-runtime 条目"的真实 cua.Service。
+//
+// PTC 三例共用：读路径要能真读、写路径要保持 501 且文案点名 R6——
+// 用假 API 只能证明错误体形状，证明不了生产装配下就是这样。
+func attachRealCUAService(t *testing.T) *Server {
+	t.Helper()
+	server := newCUATestServer(t)
+	server.AttachOfficialCUARc2API(NewOfficialCUARc2APIFromService(cua.NewService(cua.Options{})))
+	t.Cleanup(server.DetachOfficialCUARc2API)
+	return server
+}
+
+// assertPTCUnavailableEnvelope 钉住 PTC 写路径的线上 501 形状，返回 error 对象与顶层 capableWhen。
+//
+// 四字段是**冻结契约**，就是 `error` 里的 code/message/hint/retryable
+// （`internal/transport/server.go:1483`、`errorObject` :1643-1650）；
+// `capableWhen` 是平铺在信封**顶层**的兄弟字段（`handlers_cua_rc2.go:493-499`），
+// 不塞进 error、不改四字段。断言字段名按本仓既有约定，不按任务书措辞。
+func assertPTCUnavailableEnvelope(t *testing.T, code int, body string) (map[string]any, string) {
+	t.Helper()
+	if code != http.StatusNotImplemented {
+		t.Fatalf("enablePersistentPtc 写路径必须是 501，得到 %d %s", code, body)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("响应不是 JSON 信封：%s（%v）", body, err)
+	}
+	_, errObj := decodeEnvelope(t, body)
+	for _, field := range []string{"code", "message", "hint", "retryable"} {
+		if _, ok := errObj[field]; !ok {
+			t.Fatalf("error 缺四字段里的 %q：%v", field, errObj)
+		}
+	}
+	if errObj["code"] != "unavailable" {
+		t.Fatalf("码必须还是既有的 unavailable（不许改成别的码），得到 %v", errObj["code"])
+	}
+	if errObj["retryable"] != false {
+		t.Fatalf("unavailable 不可重试，retryable 必须是 false：%v", errObj["retryable"])
+	}
+	raw, ok := envelope["capableWhen"]
+	if !ok {
+		t.Fatalf("501 体必须带顶层 capableWhen（说清被什么拦住、缺什么）：%s", body)
+	}
+	var capableWhen string
+	if err := json.Unmarshal(raw, &capableWhen); err != nil || capableWhen == "" {
+		t.Fatalf("capableWhen 必须是非空字符串：%s", body)
+	}
+	return errObj, capableWhen
+}
+
+// assertPTCBlockerWording 钉住 message 与 capableWhen **两处都**点名：
+// R6、不嵌 JS 运行时、两个官方模块、各自的插件号（#74/#94）、官方默认 disabled: true。
+// 只用稳定子串，不断言整段长文案（文案改标点不该让门禁红）。
+func assertPTCBlockerWording(t *testing.T, message, capableWhen, pluginID, module string) {
+	t.Helper()
+	wants := []string{"R6", "不嵌 JS 运行时", "dsh-ptc-runtime-node", "dsh-tool-executor-ptc", pluginID, module, "disabled: true"}
+	for _, field := range []struct {
+		name string
+		text string
+	}{{"message", message}, {"capableWhen", capableWhen}} {
+		for _, want := range wants {
+			if !strings.Contains(field.text, want) {
+				t.Fatalf("%s 必须点名 %q：%s", field.name, want, field.text)
+			}
+		}
+	}
+}
+
+// TestCUARc2EnablePersistentPTC501NamesR6PtcRuntimeNode 是 **#74**（官方 `@deepseek-ai/dsh-ptc-runtime-node`）
+// 那一条：写路径保持 501，错误体点名 R6「不嵌 JS 运行时」与缺的 Node VM/worker 评估器。
+func TestCUARc2EnablePersistentPTC501NamesR6PtcRuntimeNode(t *testing.T) {
+	server := attachRealCUAService(t)
+	code, body := postCUA(server, string(MethodCUAEnablePersistentPTC), `{}`)
+	errObj, capableWhen := assertPTCUnavailableEnvelope(t, code, body)
+	message, _ := errObj["message"].(string)
+	assertPTCBlockerWording(t, message, capableWhen, "#74", "dsh-ptc-runtime-node")
+}
+
+// TestCUARc2EnablePersistentPTC501NamesR6ToolExecutorPtc 是 **#94**（官方 `@deepseek-ai/dsh-tool-executor-ptc`）
+// 那一条：同一个 501，点名缺的生成式 SDK + run_code 工具面，并说明官方默认就 `disabled: true`。
+func TestCUARc2EnablePersistentPTC501NamesR6ToolExecutorPtc(t *testing.T) {
+	server := attachRealCUAService(t)
+	code, body := postCUA(server, string(MethodCUAEnablePersistentPTC), `{}`)
+	errObj, capableWhen := assertPTCUnavailableEnvelope(t, code, body)
+	message, _ := errObj["message"].(string)
+	assertPTCBlockerWording(t, message, capableWhen, "#94", "dsh-tool-executor-ptc")
+}
+
+// TestCUARc2PTCConfigurationReadsRealState 钉住只读探针是**真读**：
+// 没接 ptc-runtime 条目时 200 + persistent=false/writable=false/entryFound=false，
+// 条目 id 报官方 id；capableWhen 说清被 R6 拦住与缺的两个模块。绝不是"一律报错"。
+func TestCUARc2PTCConfigurationReadsRealState(t *testing.T) {
+	server := attachRealCUAService(t)
+	code, body := postCUA(server, string(MethodCUAPTCConfiguration), `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("ptcConfiguration 是只读探针：没条目也要 200 + 真实状态，得到 %d %s", code, body)
+	}
+	result, _ := decodeEnvelope(t, body)
+	var cfg cua.PTCConfiguration
+	if err := json.Unmarshal(result, &cfg); err != nil {
+		t.Fatalf("result 解不出 PTCConfiguration：%v（%s）", err, result)
+	}
+	if cfg.EntryID != cua.PTCEntryID || cfg.EntryFound {
+		t.Fatalf("必须如实报官方条目 id %q 且 entryFound=false：%+v", cua.PTCEntryID, cfg)
+	}
+	if cfg.Persistent || cfg.Writable {
+		t.Fatalf("没有 ptc-runtime 条目时必须如实报 persistent=false/writable=false：%+v", cfg)
+	}
+	if !strings.Contains(body, `"persistent":false`) || !strings.Contains(body, `"writable":false`) {
+		t.Fatalf("线上形状必须如实是 false（不是省略、不是编的 true）：%s", body)
+	}
+	for _, want := range []string{"R6", "不嵌 JS 运行时", "dsh-ptc-runtime-node", "dsh-tool-executor-ptc"} {
+		if !strings.Contains(cfg.CapableWhen, want) {
+			t.Fatalf("只读结果里的 capableWhen 也要说清被 R6 拦住且缺哪个模块（缺 %q）：%s", want, cfg.CapableWhen)
+		}
+	}
+}
+
 // TestCUARc2RunningApplicationsIsAdditive 钉住 additive 方法的形状与非 Windows 行为。
 func TestCUARc2RunningApplicationsIsAdditive(t *testing.T) {
 	server := newCUATestServer(t)

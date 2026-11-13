@@ -15,6 +15,10 @@ id      = "exec"
 backend = "static"
 
 [[module]]
+id      = "shell-env"
+backend = "static"
+
+[[module]]
 id      = "fs"
 backend = "static"
 

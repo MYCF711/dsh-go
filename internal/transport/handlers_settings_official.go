@@ -421,7 +421,9 @@ func officialExpectedRevision(o *officialObject) (*int64, error) {
 //
 // 码只取本仓既有词表里能对上 hint/retryable 的那几个：参数/取值类 → 400
 // bad_request，revision 过期 → 409 revision_conflict，未知 ns → 404，
-// 其余 → 500 internal（绝不渲染成成功）。
+// **能力上不做 → 501 not_implemented**（码与状态必须自洽：早先漏了这一支，
+// not_implemented 会落成 `code=bad_request` + `status=501`），其余 → 500
+// internal（绝不渲染成成功）。
 func officialSettingsError(err error) error {
 	var typed *officialError
 	if errors.As(err, &typed) {
@@ -437,6 +439,11 @@ func officialSettingsError(err error) error {
 			code = "not_found"
 		case "internal":
 			code = "internal"
+		case "not_implemented":
+			// settingsform 的语义校验（session-log-deepseek.enabled=true /
+			// session-telemetry-otel.mode=FEEDBACK_ONLY 这类"本宿主没有后端"）
+			// 返回的就是这个码 + 501；这里原样透出，不许折成参数类 400。
+			code = "not_implemented"
 		}
 		if status == 0 {
 			status = officialStatusForCode(code)

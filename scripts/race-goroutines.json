@@ -67,13 +67,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "modules/exec/bash/session.go:124",
+      "site": "modules/exec/bash/session.go:132",
       "what": "后台任务等待",
       "sync": "读过：job 表每次访问先 s.mu.Lock（100/109/122）",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "modules/exec/bash/tools.go:264",
+      "site": "modules/exec/bash/tools.go:267",
       "what": "后台任务启动",
       "sync": "同 session.go，走同一把 s.mu",
       "verified_at": "2026-11-03"
@@ -115,7 +115,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:736",
+      "site": "cmd/dshd/main.go:740",
       "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
       "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"
@@ -127,7 +127,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:870",
+      "site": "cmd/dshd/main.go:874",
       "what": "run 的看门狗协程：父进程没了就取消本轮 ctx",
       "sync": "读过：只调 cancel()，不碰会话/日志；runCtx 与主 goroutine 共享，取消是幂等的",
       "verified_at": "2026-11-04"
@@ -139,19 +139,19 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "internal/account/account.go:876",
+      "site": "internal/account/account.go:895",
       "what": "Watch 的订阅清理观察者",
       "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.subs, ch)+close(ch)；订阅表 s.subs 的每次读写都在 s.mu 下（Watch 入口 869-875、notifyLocked 同锁），每条 ch 只有一个 watcher，close 只可能一次",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/account/account.go:904",
+      "site": "internal/account/account.go:923",
       "what": "WatchUpdates 的推送循环（rc.2 官方 AccountUpdate 流）",
       "sync": "读过：ch 由这条独占并 defer close(ch)；sub.pending 与 s.updates 表的读写全在 s.mu 下（登记 896-899、取帧 915-918、退出 909-911/925-927）；唤醒走 sub.wake（容量 1，只装『有新帧』信号），合并口径见 observeUpdates",
       "verified_at": "2026-11-12"
     },
     {
-      "site": "internal/account/account.go:953",
+      "site": "internal/account/account.go:972",
       "what": "WatchExpiry 的订阅清理观察者",
       "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.expiry, ch)+close(ch)；发布侧 expireLocked 的 for ch := range s.expiry 是非阻塞 send、同样在 s.mu 下（同一把锁 ⇒ 不会 send on closed）；首帧在起 goroutine 之前就发完了",
       "verified_at": "2026-11-12"
@@ -319,19 +319,19 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:877",
+      "site": "cmd/dshd/main.go:881",
       "what": "父进程看门狗：父没了就取消本轮 ctx",
       "sync": "读过：只调 stopOnParentGone()（cancel 幂等），不碰会话/日志",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:870",
+      "site": "cmd/dshd/main.go:874",
       "what": "serveJobsOut：后台任务通道",
       "sync": "读过：写 stdout 的 @@JOBS@@ 行，写侧有自己的一把锁；读的是 jobs 服务的快照",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:877",
+      "site": "cmd/dshd/main.go:881",
       "what": "serveSteerIPC：steer IPC 接收循环",
       "sync": "读过：收到的请求投进 steerInbox（自己加锁的队列）；runCtx 取消即退",
       "verified_at": "2026-11-09"
@@ -349,13 +349,13 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve_loop.go:205",
+      "site": "cmd/dshd/serve_loop.go:207",
       "what": "把子进程 stderr 扫进 broker",
       "sync": "读过：watchWG 在调用方 Add、这里 Done；broker.WatchSession 自己加锁，写的是它自己的缓冲",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve_loop.go:243",
+      "site": "cmd/dshd/serve_loop.go:245",
       "what": "follow：轮询本轮 sess 日志推进进度",
       "sync": "读过：fw 在调用方 Add、这里 Done；done channel 停止；进度写 &prog（调用方在 cmd.Wait 后统一读）",
       "verified_at": "2026-11-09"
@@ -367,7 +367,7 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve_title_auto.go:748",
+      "site": "cmd/dshd/serve_title_auto.go:749",
       "what": "自动标题：后台跑一轮标题生成",
       "sync": "读过：自己带 ctx+timeout；s.wg 在入口 Add、这里 Done；s 的状态读写受 s.mu 保护",
       "verified_at": "2026-11-09"
@@ -439,13 +439,13 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "modules/exec/bash/session.go:125",
+      "site": "modules/exec/bash/session.go:133",
       "what": "readLoop：排空子进程输出",
       "sync": "读过：输出缓冲由 s 自己的锁保护；EOF/Close 退出",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "modules/exec/bash/session.go:125",
+      "site": "modules/exec/bash/session.go:133",
       "what": "waitLoop：等子进程退出",
       "sync": "读过：写 processRC 并 close(waitDone) 一次；读方用 <-waitDone 同步",
       "verified_at": "2026-11-09"
