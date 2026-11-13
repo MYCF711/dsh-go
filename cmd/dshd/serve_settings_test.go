@@ -254,7 +254,7 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	// 官方 UI 的"重试条件/次数/等待时间"就是从这里读候选与正下界的）；4 个 UI
 	// 命名空间与它共用同一份 <home>/state/settings-namespaces.json，
 	// 带 revision 乐观锁。
-	if len(result["namespaces"].([]any)) != 7 || len(result["sections"].([]any)) != 7 || len(result["errors"].([]any)) != 0 {
+	if len(result["namespaces"].([]any)) != 9 || len(result["sections"].([]any)) != 9 || len(result["errors"].([]any)) != 0 {
 		t.Fatalf("bad real describe: %+v", result)
 	}
 	llmSection := f2LLMSection(t, result)
@@ -363,7 +363,11 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	//
 	// 真机截图暴露的缺口就是这 4 行：宿主没发布命名空间时设置面板显示「未知」。
 	// 这里走真实 HTTP + 真实 <home>/state/settings-namespaces.json，并跨一次重启。
-	uiNamespaces := []string{"locale", "ui-theme", "ui-chat", "ui-settings"}
+	uiNamespaces := []string{
+		"locale", "ui-theme", "ui-chat", "ui-settings",
+		// 2026-11-13 补：官方另两个 general slot 的命名空间。
+		"ui-conversation", "session-log-deepseek",
+	}
 	for _, ns := range uiNamespaces {
 		section := f2Section(t, result, ns)
 		if section["writable"] != true {
@@ -479,7 +483,13 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	t.Log("SETTINGS_FORM_REAL_SUMMARY OK=1 FAIL=0")
 }
 
-const postTimeoutForSettings = 15 * time.Second
+// postTimeoutForSettings 是这些真进程用例的 HTTP 客户端超时。
+//
+// 60s 而不是 15s：请求打在**真 dshd 子进程**上（起进程 + 建 home + 绑端口 +
+// settings 写入 + 落盘 + revision 乐观锁）。CI runner 只有 2 核，还套着 -race
+// （二进制更慢），15s 在负载高时不够——2026-11-13 两次红在 TestSettingsFormRealDSHD。
+// **超时是环境容差，不是行为契约**：等不到照样 fail-closed。
+const postTimeoutForSettings = 60 * time.Second
 
 // ---------------------------------------------------------------------------
 // F2 · `llm` 命名空间写入面（rc.2 已知缺口 #2）

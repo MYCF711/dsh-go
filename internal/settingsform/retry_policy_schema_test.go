@@ -540,18 +540,39 @@ func TestDefaultRegistryKeepsTwoNamespacesAfterRC2(t *testing.T) {
 	if len(described.Namespaces) != 2 {
 		t.Fatalf("默认 registry 必须仍是 model/permission 两个：%+v", described.Namespaces)
 	}
-	// HostRegistry = 默认 2 个 + llm + 官方客户端的 4 个 UI 命名空间。
+	// HostRegistry = 默认 2 个 + llm + 官方客户端的 6 个 UI 命名空间。
+	want := []string{
+		"model", "permission", "llm",
+		"locale", "ui-theme", "ui-chat", "ui-settings",
+		// 官方另两个 general slot 的命名空间（2026-11-13 补）：
+		//   ui-conversation.busyEnter       (dsh-client-ui-conversation/submission-settings.ts)
+		//   session-log-deepseek.enabled    (dsh-session-log-deepseek/src/index.ts:59-61)
+		"ui-conversation", "session-log-deepseek",
+	}
 	specs := HostRegistry().Specs()
-	if len(specs) != 7 {
-		t.Fatalf("HostRegistry 必须是 7 个命名空间（model/permission/llm/locale/ui-theme/ui-chat/ui-settings）：%+v", specs)
+	if len(specs) != len(want) {
+		t.Fatalf("HostRegistry 必须是 %d 个命名空间（%v）：实得 %d 个", len(want), want, len(specs))
 	}
 	published := make(map[string]bool, len(specs))
 	for _, spec := range specs {
 		published[spec.NS] = true
 	}
-	for _, ns := range []string{"model", "permission", "llm", "locale", "ui-theme", "ui-chat", "ui-settings"} {
+	for _, ns := range want {
 		if !published[ns] {
 			t.Fatalf("HostRegistry 缺命名空间 %q：%+v", ns, published)
+		}
+	}
+	// 反向：不许多发（多发就是**凭空造命名空间**，客户端会照着渲染空行）。
+	for ns := range published {
+		found := false
+		for _, w := range want {
+			if ns == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("HostRegistry 多发了未声明的命名空间 %q：%+v", ns, published)
 		}
 	}
 }

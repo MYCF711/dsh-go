@@ -123,8 +123,8 @@ func settingsL1Field(t *testing.T, section map[string]any, name string) map[stri
 	return nil
 }
 
-// TestSettingsFormUIClientNamespacesOverHTTP：4 个命名空间的 describe / set /
-// get / 非法值 / reset 全链路。
+// TestSettingsFormUIClientNamespacesOverHTTP：6 个客户端 UI 命名空间的 describe /
+// set / get / 非法值 / reset 全链路。
 func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 	home := t.TempDir()
 	store, _, _ := openSettingsStores(t, home, "base-model", "allow")
@@ -132,12 +132,12 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 
 	result := settingsL1Describe(t, handler)
 	namespaces, ok := result["namespaces"].([]any)
-	if !ok || len(namespaces) != 7 {
-		t.Fatalf("settings.describe 必须报 7 个命名空间（model/permission/llm/locale/ui-theme/ui-chat/ui-settings）：%v", result["namespaces"])
+	if !ok || len(namespaces) != 9 {
+		t.Fatalf("settings.describe 必须报 9 个命名空间（model/permission/llm + 6 个客户端 UI）：%v", result["namespaces"])
 	}
 	sections, ok := result["sections"].([]any)
-	if !ok || len(sections) != 7 {
-		t.Fatalf("settings.describe 必须报 7 个 section：%v", result["sections"])
+	if !ok || len(sections) != 9 {
+		t.Fatalf("settings.describe 必须报 9 个 section：%v", result["sections"])
 	}
 
 	defaults := []struct {
@@ -162,6 +162,10 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 			"linkOpening":      "sidebar",
 		}},
 		{"ui-settings", map[string]any{"enabled": true}},
+		// 2026-11-13 补：官方 submission-settings.ts:19 DEFAULT_BUSY_ENTER_BEHAVIOR='queue'。
+		{"ui-conversation", map[string]any{"busyEnter": "queue"}},
+		// 官方 dsh-session-log-deepseek/src/index.ts:60 `z.boolean().default(true)`。
+		{"session-log-deepseek", map[string]any{"enabled": true}},
 	}
 	for _, entry := range defaults {
 		namespace := settingsL1Namespace(t, result, entry.ns)
