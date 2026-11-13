@@ -29,3 +29,10 @@ var SearchKey = kernel.NewKey[SearchProvider]("search")
 //
 // 没装这个服务时 `subagent` 工具必须明确报错——不能假装"派了"。
 var SubagentKey = kernel.NewKey[SubagentRunner]("subagent")
+
+// SubagentActivationKey 提供服务：两段式（发布 + 等待）委派子代理。
+//
+// 工作流引擎的 `agent()` 必须走这一面：`workflow/agent-start` 要在子代理
+// **发布时**就发出，而不是等它跑完（见 SubagentActivation 的注释）。
+// 没装这个服务时工作流必须报 AGENT_START，不许退化成"跑完再补发事件"。
+var SubagentActivationKey = kernel.NewKey[SubagentActivator]("subagent-activation")

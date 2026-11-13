@@ -493,6 +493,9 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	}
 
 	loop := &agent.Loop{
+		// ACP 这条入口同样要把 workflow 的耐久帧写进会话日志（否则同一段
+		// workflow 在 run 入口有节点、在 ACP 入口没有——两条路走的是同一个工具）。
+		Events:    newSessionEventSink(logw),
 		Chat:      llm.New(r.base, os.Getenv("DSHD_LLM_KEY")),
 		Tools:     view,
 		Runner:    runner,

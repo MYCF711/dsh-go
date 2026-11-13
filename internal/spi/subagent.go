@@ -1,6 +1,9 @@
 package spi
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // SubagentRunner 是"派一个子代理去干一件独立的事"这一能力的抽象。
 //
@@ -74,6 +77,21 @@ type SubagentResult struct {
 	// 它是**地址**，不是承诺：`subagents.prompt` 能否投进去，还要看投递通道
 	// 是否接受（投不进就出错，不会回一个假的 messageId）。
 	ChildSessionID string
+	// Failed 为真表示**子代理跑完了但没成**（模型错误、被取消、没有产出正文…）。
+	//
+	// 为什么不让调用方从 error 判断：官方 `run.result` **永不 reject**——子代理
+	// 失败会 resolve 成 `stopReason != 'completed'`，工作流把该项解成 null 继续
+	// （dsh-workflow-ptc/src/runtime.ts:207-222）；只有"结果通道坏掉"（provider
+	// 基础设施故障）才是 reject → AGENT_RESULT。两个事实必须分开表达，否则
+	// "子代理失败"会被误报成致命错误，整段脚本白跑。
+	Failed bool
+	// Structured 是子代理交回的、已通过 OutputSchema 校验的结构化对象（JSON 原文）。
+	//
+	// 空表示"没有结构化结果"：可能是没要（OutputSchema 为空），也可能是子代理
+	// 的正文不是合法 JSON / 不满足 schema——调用方据此把这次调用判为失败
+	// （官方 workflow 对"要了 schema 却没拿到 structured"的处理就是失败而非 null
+	// 静默放过，见 dsh-workflow-ptc/src/runtime.ts:208-216）。
+	Structured json.RawMessage
 	// BorrowedApprovals 为真表示子代理**沿用了主会话的审批记忆**：
 	// 主会话里被"永远允许"过的工具，子代理不会再问一次。
 	//
@@ -81,4 +99,49 @@ type SubagentResult struct {
 	// **权限面的扩大**——模型自己派出去的子代理，用的是你刚才批准的授权。
 	// 所以必须回传给调用方，让它出现在 Summary 里，而不是埋在行为里。
 	BorrowedApprovals bool
+}
+
+// SubagentActivation 是一个**已发布、可等待**的子代理。
+//
+// 为什么需要这一层（而不是直接用 SubagentRunner 的同步 RunSub）：
+// 官方工作流的 `agent()` 是两段式的——provider 先**发布**一个 child（拿到
+// childId，此刻就发出 `workflow/agent-start`），再 await 它的结果
+// （`dsh-workflow-ptc/src/host.ts:200-254`：`startChild` 返回 `{callId, childId}`
+// 在前，`childResult` 在后）。同步的 RunSub 只有一个返回点，把它当成"发布"
+// 会让 agent-start 落在子代理**跑完之后**——事件顺序与官方相反，GUI 上就是
+// 分区在 agent 干完活之后才出现。所以这里把"发布"与"等结果"拆成两段。
+type SubagentActivation interface {
+	// ChildSessionID 是宿主在**发布时**就定下的子会话 id（官方 childId）。
+	ChildSessionID() string
+	// Await 等这一次子代理收尾；可重复调用，第二次返回同一结果。
+	// ctx 取消时立即返回，不吞掉取消原因。
+	Await(ctx context.Context) (SubagentResult, error)
+}
+
+// ActivationOptions 是**两段式委派专属**的附加参数。
+//
+// 为什么不让这些字段进 SubagentRequest：那个结构体的 JSON 形状是既有契约
+// （`modules/tool/subagent/subagent_test.go` 的 requestGolden 逐字节钉着
+// "不传 continuable 时形状不变"）。把工作流才用的开关塞进去，等于为了一个新
+// 调用方改所有既有调用方的线上形状——这正是那条 golden 要防的事。
+type ActivationOptions struct {
+	// OutputSchema 是这次委派要求的结构化输出 schema（object-rooted JSON Schema 子集）。
+	//
+	// 语义（对齐官方 workflow 的 `agent(prompt, {schema})`）：给了它，宿主就要求
+	// 子代理返回**符合 schema 的 JSON 对象**，并把它放进 SubagentResult.Structured；
+	// 拿不到就是"这次委派没成"（Failed=true），不是结果通道故障。
+	// nil = 不要结构化输出（既有调用方一个字节都不变）。
+	//
+	// 为什么放在这里而不是让调用方自己解析正文：契约必须只有一份——schema 的
+	// 合法性由调用方（工作流引擎）校验，**是否满足**由宿主在拿到正文时判定。
+	OutputSchema any
+}
+
+// SubagentActivator 是两段式委派面（官方 `subagents.startActivation`）。
+//
+// 与 SubagentRunner 的关系：Runner 是"派一件活、等它跑完"的同步简写；
+// Activator 是它的异步展开。两者由同一个宿主实现提供，语义必须一致
+// （同样的并发闸门、同样的父子会话归属、同样的审批借用）。
+type SubagentActivator interface {
+	StartActivation(ctx context.Context, req SubagentRequest, options ActivationOptions) (SubagentActivation, error)
 }
