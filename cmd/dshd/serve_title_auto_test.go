@@ -714,7 +714,11 @@ func TestAutoTitleFailureWritesNothingAndDoesNotRetry(t *testing.T) {
 			reply: func(autoTitleGatewayRequest) (string, int, time.Duration) {
 				return "Too Late Title", http.StatusOK, 5 * time.Second
 			},
-			timeout:  80 * time.Millisecond,
+			// 80ms 在 CI 高负载下会**先于请求落地**就超时，于是 gateway.count()==0，
+			// 而下面断言"至少 1 次调用"就红了（2026-11-13 run 43379687781 实测）。
+			// 这条测的是"超时后不重试"，不是"调度得多快"：给足 1s 让请求一定落地，
+			// 网关仍要 5s 才回，所以照样超时；`maxCalls=1` 仍然守住"不无界重试"。
+			timeout:  1 * time.Second,
 			maxCalls: 1,
 		},
 	}
