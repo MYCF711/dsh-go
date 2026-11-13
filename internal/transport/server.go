@@ -55,6 +55,13 @@ type Options struct {
 	Source Source
 	// ContentWidth 是会话内容列宽（0 = 不知道，界面自己算）。由壳/宿主注入。
 	ContentWidth int
+	// UpdateChannel 是**壳侧**的更新渠道服务（官方 `DesktopChannelBridge` 的 Go 等价物）。
+	//
+	// 为什么放在壳选项里而不是 settings 命名空间：官方原文
+	// （`dsh-client-ui-settings-general/src/types.ts:60`）——
+	// 「UI choices persist in the shell configuration, independently of Host settings」。
+	// nil 时 `desktopUpdate.channel` 回 501 并说清原因（不假装有渠道可选）。
+	UpdateChannel UpdateChannelService
 	// Policy 是宿主这一进程实际用的审批策略（deny/ask/allow/auto）。
 	//
 	// 它是**进程级事实**，不是会话级"预设"——H5 要的是"当前权限状态"，
@@ -516,6 +523,11 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	if IsOfficialAgentMethod(name) {
 		s.serveOfficialAgentAPI(w, r, name)
+		return
+	}
+	// 壳侧更新渠道（官方 Electron preload 桥的 Go 等价物）。
+	if IsOfficialDesktopUpdateChannelMethod(name) {
+		s.ServeOfficialDesktopUpdateChannel(w, r, name)
 		return
 	}
 	// 官方 0.2.2-rc.2 Team 分派面：`agentTeams.setEnabled` / `subagents.interruptByUser`。
@@ -1820,3 +1832,22 @@ func (r *statusRecorder) Flush() {
 
 // Unwrap 让 http.ResponseController 能取回底层 writer。
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// UpdateChannelService 是壳侧更新渠道服务（官方 `DesktopChannelBridge` 的 Go 等价物）。
+//
+// 三个方法逐条对应官方：
+//
+//	get()       -> State()        当前选择与状态（不重新读盘）
+//	set(c)      -> Set(c)         持久化并应用；失败绝不伪装成成功
+//	subscribe() -> Subscribe(fn)  任何窗口的变更都通知
+//
+// 定义在 transport 侧而不是直接依赖 internal/updater，是为了让 handler 只依赖
+// 它真正需要的三件事（也让 mockd / 测试能塞一个假的）。
+type UpdateChannelService interface {
+	// StateView 返回当前状态（官方 `get()`）。
+	StateView() map[string]any
+	// WireSet 持久化并应用；返回官方 `DesktopChannelChangeResult` 形状。
+	WireSet(channel string) map[string]any
+	// WireSubscribe 订阅变更；返回取消函数。
+	WireSubscribe(fn func(map[string]any)) func()
+}

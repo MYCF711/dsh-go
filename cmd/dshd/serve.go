@@ -27,6 +27,7 @@ import (
 	"dshgo/internal/session"
 	"dshgo/internal/settingsform"
 	"dshgo/internal/transport"
+	"dshgo/internal/updater"
 	"dshgo/modules/exec/bash"
 	"dshgo/modules/tool/websearch/providerapi"
 )
@@ -289,6 +290,21 @@ func cmdServe(args []string) error {
 	// 通用设置直接复用上面两份 runner 已读取的存储，不读 ui-config。
 	settingsStore := newServeSettingsStore(*serveModel, *servePolicy, modelOverrides, permissionOverrides)
 	settingsStore.setLoadErrors(modelLoadErr, permissionLoadErr)
+
+	// 更新渠道：官方把它归**壳配置**（`dsh-client-ui-settings-general/src/types.ts:60`
+	// 「UI choices persist in the shell configuration, independently of Host settings」），
+	// 所以它**不是** settings 命名空间，落 `<home>/state/update-channel.json`。
+	//
+	// 本构建自带的渠道由打包决定；本仓只有 stable 一种产物，所以 Packaged=stable。
+	updateChannel, channelErr := updater.New(updater.Options{
+		Dir:      filepath.Join(*home, "state"),
+		Packaged: updater.ChannelStable,
+	})
+	if channelErr != nil {
+		// 壳配置目录算不出来就是装配错误：响亮失败，不静默退化成"没有更新渠道"。
+		return fmt.Errorf("初始化更新渠道服务: %w", channelErr)
+	}
+	_ = updateChannel // 在 srv 建好后挂上（见下面 AttachDesktopUpdateChannel）
 	// 持久模型目录与 active 默认共用 W61 store；目录本身不保存第二个 active。
 	// 损坏目录只让目录 API fail-loud，绝不拿空目录覆盖原文件。
 	modelCatalog := llm.OpenModelCatalog(*home)
@@ -811,6 +827,8 @@ func cmdServe(args []string) error {
 	})
 	srv.AttachOfficialAgentAPI(agentAPICore.bind())
 	srv.AttachOfficialAgentTeamRC2API(agentAPICore.bindTeamRC2())
+	// 壳侧更新渠道：官方归壳配置，不走 settings 命名空间。
+	srv.AttachDesktopUpdateChannel(updateChannel)
 	// 官方 0.2.2-rc.2 电脑操作面（9 个 cuaAccess.*）。默认实现就是真 Service：
 	// 平台/权限状态、应用决策、图标、设置页、审批状态机都是真的；AX/窗口控制在
 	// 无 provider 的平台按官方形状回结构化未实现。
