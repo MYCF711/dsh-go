@@ -121,7 +121,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/acp.go:1181",
+      "site": "cmd/dshd/acp.go:1184",
       "what": "父进程看门狗收尾：watch.Done() 之后关服务",
       "sync": "读过：只做 close/取消，不写会话文件；与主流程之间靠 context 取消 + 单向 channel",
       "verified_at": "2026-11-04"
@@ -295,7 +295,7 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/acp.go:1181",
+      "site": "cmd/dshd/acp.go:1184",
       "what": "父进程看门狗：watch.Done() 就取消本轮并关 stdin",
       "sync": "读过：只调 cancel() 与 os.Stdin.Close()，两个都幂等；不写共享状态",
       "verified_at": "2026-11-09"
@@ -539,6 +539,30 @@
       "what": "后台跑一次归档清理（inspectAndRemove）",
       "sync": "读过：rec.wg 在调用方 Add、这里 defer Done；只写自己的 attempt——status/settledAt 在 rec.mu 下结算（348-351），attempt.done 用 finish(sync.Once) 只 close 一次（352）；attempts 表读写在 rec.mu 下，结算前用 rec.attempts[sessionID] != attempt 身份比对防止被新 attempt 顶替（584）",
       "verified_at": "2026-11-12"
+    },
+    {
+      "site": "internal/workflow/engine.go:165",
+      "what": "workflow run 的外部取消观察者（ctx 取消 → 走官方同一条取消路径）",
+      "sync": "读过：只 select runCtx.Done() 与 run.settled；命中后调 run.Cancel，取消原因在 run.mu 下**首次生效**，结算由 finish 的 finished 位串行；等待在飞 agent 用 flightMu+flightCond（closing 之后不再接新调用）；不直接写 live/result",
+      "verified_at": "2026-11-13"
+    },
+    {
+      "site": "internal/workflow/engine.go:378",
+      "what": "parallel() 的扇出 worker（每个 agent 规格一个）",
+      "sync": "读过：每个 worker 只写自己下标的 values[i]/errs[i]，不共享写；共享状态全在 r.Agent 内部加锁（run.mu 计数/当前阶段、flightMu 在飞计数、semaphore.mu 额度、recorder.mu 写口）；wg.Wait 收齐后才读结果数组",
+      "verified_at": "2026-11-13"
+    },
+    {
+      "site": "internal/workflow/engine.go:431",
+      "what": "pipeline() 的逐项 worker（每个 item 走完整条 stage 链）",
+      "sync": "读过：每个 worker 只写自己下标的 values[i]/errs[i] 与函数内局部 previous；共享状态同上（r.Agent 内部全加锁）；wg.Wait 收齐后才读结果数组",
+      "verified_at": "2026-11-13"
+    },
+    {
+      "site": "cmd/dshd/subagent.go:434",
+      "what": "两段式委派的 child 执行体（RunSub 跑在 goroutine 里，发布时就能拿到 childId）",
+      "sync": "读过：goroutine 只写 activation.result/err，写完 defer close(done) 建立 happens-before；Await 只 select done/ctx.Done，读 result 一定在 done 关闭之后；childCtx 由 Await 取消或 run 取消传播；panic 被 recover 成 err（AGENT_RESULT）",
+      "verified_at": "2026-11-13"
     }
   ]
 }
