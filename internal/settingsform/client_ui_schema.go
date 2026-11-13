@@ -60,6 +60,10 @@ const (
 	NamespaceUIChat = "ui-chat"
 	// NamespaceUISettings 是 dsh-client-ui-settings（开发者工具）的命名空间。
 	NamespaceUISettings = "ui-settings"
+	// NamespaceUIConversation 是 dsh-client-ui-conversation 的命名空间。
+	NamespaceUIConversation = "ui-conversation"
+	// NamespaceSessionLogDeepSeek 是 dsh-session-log-deepseek 的上传开关命名空间。
+	NamespaceSessionLogDeepSeek = "session-log-deepseek"
 )
 
 // 字段名（官方常量逐字）。
@@ -89,6 +93,12 @@ const (
 	FieldLinkOpening = "linkOpening"
 	// FieldDeveloperToolsEnabled 是开发者工具总开关。
 	FieldDeveloperToolsEnabled = "enabled"
+	// FieldBusyEnter 是 `ui-conversation.busyEnter`（submission-settings.ts:11
+	// `BUSY_ENTER_FIELD = 'busyEnter'`）。
+	FieldBusyEnter = "busyEnter"
+	// FieldSessionLogEnabled 是 `session-log-deepseek.enabled`
+	// （dsh-session-log-deepseek/src/index.ts:59-61）。
+	FieldSessionLogEnabled = "enabled"
 )
 
 // 官方默认值（逐条对应上面权威源的 file:line）。
@@ -119,6 +129,12 @@ const (
 	DefaultLinkOpening      = "sidebar"
 	// DefaultDeveloperToolsEnabled 是 developer-tools-settings.ts:15。
 	DefaultDeveloperToolsEnabled = true
+	// DefaultBusyEnter 是 submission-settings.ts:19
+	// （DEFAULT_BUSY_ENTER_BEHAVIOR = 'queue'）。
+	DefaultBusyEnter = "queue"
+	// DefaultSessionLogEnabled 是 dsh-session-log-deepseek/src/index.ts:60
+	// （`enabled: z.boolean().default(true)`）。
+	DefaultSessionLogEnabled = true
 	// LegacyTranscriptViewNormal / LegacyTranscriptViewExpanded 是
 	// chat-settings.ts:45/:48 的两代旧值：读作 detailed，不作为选项、不回写。
 	LegacyTranscriptViewNormal   = "normal"
@@ -558,8 +574,33 @@ func clientUINamespaces() []uiNamespace {
 			},
 			base: map[string]any{FieldDeveloperToolsEnabled: DefaultDeveloperToolsEnabled},
 		},
+		{
+			// 官方 `submission-settings.ts`：`ui-conversation.busyEnter`
+			// 枚举 {queue, steer}，`DEFAULT_BUSY_ENTER_BEHAVIOR = 'queue'`（:19）。
+			// 语义：智能体忙时按 Enter 是**排队**还是**插话**。
+			ns:    NamespaceUIConversation,
+			title: "Conversation",
+			fields: []uiField{
+				uiEnumField(FieldBusyEnter, BusyEnterBehaviors, DefaultBusyEnter),
+			},
+			base: map[string]any{FieldBusyEnter: DefaultBusyEnter},
+		},
+		{
+			// 官方 `dsh-session-log-deepseek/src/index.ts:59-61`：
+			// `session-log-deepseek` 声明 `enabled: z.boolean().default(true).volatile()`。
+			// **默认 true**（照官方，不因"用户关过"就改默认）。
+			ns:    NamespaceSessionLogDeepSeek,
+			title: "Session log upload",
+			fields: []uiField{
+				uiBooleanField(FieldSessionLogEnabled, DefaultSessionLogEnabled),
+			},
+			base: map[string]any{FieldSessionLogEnabled: DefaultSessionLogEnabled},
+		},
 	}
 }
+
+// BusyEnterBehaviors 是官方 BUSY_ENTER_BEHAVIORS（submission-settings.ts:13）。
+var BusyEnterBehaviors = []string{"queue", "steer"}
 
 // transcriptViewAcceptableValues 是官方 TRANSCRIPT_VIEW_SETTING_VALUES：
 // 当前模式在前、旧值在后（chat-settings.ts:51-53 的拼接顺序）。

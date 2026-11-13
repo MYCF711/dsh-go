@@ -69,7 +69,10 @@ func clientUIService(t *testing.T) (*Service, *declaredNamespaceStore) {
 // ---------------------------------------------------------------------------
 
 func clientUINamespaceNames() []string {
-	return []string{NamespaceLocale, NamespaceUITheme, NamespaceUIChat, NamespaceUISettings}
+	return []string{
+		NamespaceLocale, NamespaceUITheme, NamespaceUIChat, NamespaceUISettings,
+		NamespaceUIConversation, NamespaceSessionLogDeepSeek,
+	}
 }
 
 func namespaceViewFor(t *testing.T, described DescribeResult, ns string) NamespaceView {
@@ -387,6 +390,16 @@ func TestClientUINamespaceDescribeDefaultsMatchOfficial(t *testing.T) {
 		{NamespaceUISettings, map[string]any{
 			FieldDeveloperToolsEnabled: DefaultDeveloperToolsEnabled,
 		}, map[string]bool{FieldDeveloperToolsEnabled: true}},
+		// 官方另两个 general slot 的命名空间（2026-11-13 补：真机上这两行原显示「未知」）。
+		// 官方 submission-settings.ts:19 `DEFAULT_BUSY_ENTER_BEHAVIOR = 'queue'`。
+		{NamespaceUIConversation, map[string]any{
+			FieldBusyEnter: DefaultBusyEnter,
+		}, map[string]bool{FieldBusyEnter: true}},
+		// 官方 dsh-session-log-deepseek/src/index.ts:59-61
+		// `enabled: z.boolean().default(true).volatile()` -> 默认 **true**。
+		{NamespaceSessionLogDeepSeek, map[string]any{
+			FieldSessionLogEnabled: DefaultSessionLogEnabled,
+		}, map[string]bool{FieldSessionLogEnabled: true}},
 	}
 	service, _ := clientUIService(t)
 	described, err := service.Describe()

@@ -82,7 +82,9 @@ func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, erro
 		return readSettingsDocumentLocked(s.permissions.m, s.basePolicy, settingsform.FieldDefaultPreset)
 	case settingsform.NamespaceLLM,
 		settingsform.NamespaceLocale, settingsform.NamespaceUITheme,
-		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings:
+		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings,
+		// 2026-11-13 补：官方另两个 general slot 的命名空间。
+		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek:
 		if s.namespaces == nil {
 			return settingsform.Document{}, settingsStoreNotWiredError(namespace)
 		}
@@ -137,7 +139,9 @@ func (s *serveSettingsStore) Write(namespace string, user map[string]any, expect
 		return writeSettingsDocumentLocked(&s.permissions.m, user, expected, settingsform.NamespacePermission, settingsform.FieldDefaultPreset, s.permissions.flushLocked)
 	case settingsform.NamespaceLLM,
 		settingsform.NamespaceLocale, settingsform.NamespaceUITheme,
-		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings:
+		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings,
+		// 2026-11-13 补：官方另两个 general slot 的命名空间。
+		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek:
 		if s.namespaces == nil {
 			return 0, settingsStoreNotWiredError(namespace)
 		}
