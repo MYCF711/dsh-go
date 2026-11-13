@@ -1377,16 +1377,54 @@ func TestOfficialJobTerminal_TerminalWatchCoalescesToLatest(t *testing.T) {
 	}
 
 	// 连续三版变化，中间不来取：合并成一次，落到最新版本。
+	//
+	// **不能**假设"三次 Publish 会先全部落进通道、再被取走"。Publish 是非阻塞投递，
+	// 轮询 goroutine 何时被调度由运行环境决定；CI 高负载下它可能在第二次 setTerminals
+	// 之前就醒过来，于是先送 v1、再送 v3 —— 那是**合法**的（合并的语义是"收口到最新"，
+	// 不是"中间版本一个都不许出现"）。2026-11-13 CI 正是这么红的（本地 5/5 过）。
+	// 所以断言的形状是：最多三帧 + 版本单调不减 + 最后一帧必须是 v3 + 收口后不补发旧版本。
+	titleVersion := func(line string) int {
+		t.Helper()
+		var set []struct {
+			Title string `json:"title"`
+		}
+		if err := json.Unmarshal([]byte(line), &set); err != nil || len(set) == 0 {
+			t.Fatalf("watch 帧解析不出 title：%v（%s）", err, line)
+		}
+		var n int
+		if _, err := fmt.Sscanf(set[0].Title, "v%d", &n); err != nil {
+			t.Fatalf("title 不是 vN 形态：%q", set[0].Title)
+		}
+		return n
+	}
+
 	for _, v := range []string{"v1", "v2", "v3"} {
 		f.setTerminals(rc2TerminalInfo("t", v, "running"))
 		h.PublishTerminalChange("s1")
 	}
-	line := stream.mustNext(t, time.Second)
-	if !strings.Contains(line, `"title":"v3"`) {
-		t.Fatalf("合并后必须是最新版本 v3（中间版本可以丢），拿到 %s", line)
+	last := -1
+	for i := 0; i < 3; i++ { // 三次 Publish 最多产出三帧
+		line, delivered, closed := stream.next(time.Second)
+		if !delivered {
+			if closed {
+				t.Fatalf("流提前结束（第 %d 帧）", i+1)
+			}
+			break
+		}
+		got := titleVersion(line)
+		if got < last {
+			t.Fatalf("版本倒退：先 v%d 后 v%d（%s）", last, got, line)
+		}
+		last = got
+		if got == 3 {
+			break
+		}
 	}
-	// 合并过的旧版本不许补发。
-	if extra, delivered, _ := stream.next(150 * time.Millisecond); delivered && !strings.Contains(extra, `"title":"v3"`) {
+	if last != 3 {
+		t.Fatalf("合并后必须收口到最新版本 v3，最后一帧是 v%d", last)
+	}
+	// 收口之后不许再补发更旧的版本。
+	if extra, delivered, _ := stream.next(150 * time.Millisecond); delivered && titleVersion(extra) < 3 {
 		t.Fatalf("不许补发已合并的旧版本：%s", extra)
 	}
 }
