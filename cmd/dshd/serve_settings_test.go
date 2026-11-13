@@ -456,7 +456,7 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 			t.Fatalf("runtime request model=%q", got)
 		}
 		t.Logf("REAL_RUNTIME_MODEL session=%s model=%s", runtimeSession, got)
-	case <-time.After(15 * time.Second):
+	case <-time.After(realChainWait):
 		t.Fatalf("model request not received; serve stderr=%s", modelServer.stderr.String())
 	}
 	deadline := time.Now().Add(15 * time.Second)

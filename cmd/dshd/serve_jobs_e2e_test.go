@@ -50,7 +50,7 @@ func TestJobsRealDSHDOutputStopAndOwnedProcessTree(t *testing.T) {
 		} else {
 			select {
 			case <-finish:
-			case <-time.After(15 * time.Second):
+			case <-time.After(realChainWait):
 				t.Error("等待 jobs.stop 后放行模型超时")
 			}
 			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"started\"},\"finish_reason\":\"stop\"}]}\n\n")

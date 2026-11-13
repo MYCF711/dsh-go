@@ -286,7 +286,7 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 				t.Fatalf("runtime session=%s model=%q want=%q", expected.session, got, expected.model)
 			}
 			t.Logf("MODEL_CATALOG_RUNTIME session=%s model=%s", expected.session, got)
-		case <-time.After(15 * time.Second):
+		case <-time.After(realChainWait):
 			t.Fatalf("model request timeout session=%s stderr=%s", expected.session, serverA.stderr.String())
 		}
 		waitModelCatalogTurn(t, clientA, serverA.base, expected.session)
@@ -313,7 +313,7 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 				t.Fatalf("reopened runtime session=%s model=%q want=%q", expected.session, got, expected.model)
 			}
 			t.Logf("MODEL_CATALOG_REOPENED_RUNTIME session=%s model=%s", expected.session, got)
-		case <-time.After(15 * time.Second):
+		case <-time.After(realChainWait):
 			t.Fatalf("reopened model request timeout session=%s stderr=%s", expected.session, serverA.stderr.String())
 		}
 		waitModelCatalogTurn(t, clientA, serverA.base, expected.session)
