@@ -8,7 +8,7 @@
 ## 0. 口径
 
 - **版本号**（用户 2026-11-12 指令）：途中版本 `0.2.2-rc.2-gobeta.<N>`，稳定版 `0.2.2-rc.2-go.<N>`。
-  本版当前 = **`0.2.2-rc.2-go.1`（稳定版）**（唯一出处 `cmd/dshd/main.go`，`cmd/dshtui/brand.go` 同值）。
+  本版当前 = **`0.2.2-go.3`（稳定版）**（唯一出处 `cmd/dshd/main.go`，`cmd/dshtui/brand.go` 同值）。
   途中版本 `0.2.2-rc.2-gobeta.1` 已收口（功能集相同，差别只有版本号与"稳定版判据"一节）。
 - **"宿主层完备"的判据**（四条同时成立才算转入 GUI 线）：
   1. **223 个官方方法逐条有确定结论**：真实现，或官方形状的结构化未实现 + 写清缺什么/什么条件下能做；无空实现、无假数据、无静默成功。
@@ -28,7 +28,7 @@
 | **S3** | 行为差异（R1/R2/R3 研究报告驱动） | 🔄 b3 已覆盖会话事件；其余按报告逐条派 |
 | **S4** | 参数总账 rc.2 重导出（R4） | 🔄 r4 进行中 |
 | **S5** | 门禁与证据：全量 build/vet/test/race、参数两闸、223 方法探针、逐条证据落文档 | ⏳ S1–S4 收口后 |
-| **S6** | 稳定版 `0.2.2-rc.2-go.1`：发布文档、dist、SHA256、门禁复跑 | ⏳ S5 之后；**push/发布需用户当次明确授权** |
+| **S6** | 稳定版 `0.2.2-go.3`：发布文档、dist、SHA256、门禁复跑 | ⏳ S5 之后；**push/发布需用户当次明确授权** |
 | **S7** | **GUI 线**（宿主完备后）：官方结构树复刻、素材复用、最小自制 | ⏳ 等 S0–S6 |
 
 依赖：`S1/S2/S3/S4` 可并行（写作用域互斥）→ `S5` 汇总 → `S6` 出稳定版 → `S7` 转 GUI。
@@ -101,7 +101,7 @@
 | **task-27 / G1** | 归档清理取消 `CancelArchiveCleanup` | `internal/worktree/`、`serve_workspace_api.go` | ✅ 真 git 三条端到端 | G1-cancel-cleanup.md |
 | **task-28 / G2** | Forge `unresolvedThreads`/`threadsTruncated` 改 GraphQL 真值 | `internal/forge/` | ✅ 真机与 `gh api graphql` 一致 | G2-checks-threads.md |
 | **S5** | 门禁汇总：全量 build/vet/test、参数两闸复跑、工具表快照、证据落文档 | `docs/host-stable-gap-register.md` 等 | ⏳ | — |
-| **S6** | 稳定版 `0.2.2-rc.2-go.1` 发布件（本地；push 需用户当次授权） | `dist/`、CHANGELOG | ⏳ | — |
+| **S6** | 稳定版 `0.2.2-go.3` 发布件（本地；push 需用户当次授权） | `dist/`、CHANGELOG | ⏳ | — |
 | **S7** | GUI 线（宿主完备后） | `../dsh-ui` | ⏳ | — |
 
 ## 4. 门禁（每轮收尾跑）

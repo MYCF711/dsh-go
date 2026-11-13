@@ -235,7 +235,7 @@ func cmdWasmTool(argv []string) error {
 		return fmt.Errorf("缺 --module")
 	}
 	if *tool == "" {
-		return fmt.Errorf("缺 --tool：这是信封里的工具名；只看导出函数用 `dshd wasm inspect`")
+		return fmt.Errorf("缺 --tool：这是信封里的工具名；只看导出函数用 `dsh-go wasm inspect`")
 	}
 	if *timeout < 0 {
 		return fmt.Errorf("--timeout 不能是负数")

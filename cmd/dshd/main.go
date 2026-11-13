@@ -68,7 +68,7 @@ import (
 
 // 这三个由 -ldflags 覆盖（scripts/build.sh），默认值给 go run 用。
 var (
-	version   = "0.2.2-rc.2-go.1"
+	version   = "0.2.2-go.3"
 	commit    = "dev"
 	buildTime = "unknown"
 )
@@ -269,7 +269,7 @@ func usage() {
   dshd plugins --root <dir> <action> [flags] 管理受限本地插件包；root 必须显式给出
   dshd wasm inspect --module <path>          魔数/sha256/导出函数名（按名字排序）
   dshd wasm call --module <path> --fn <f>    调用导出函数；--args 2,3 --timeout 2s 可选，返回值打成一行（如 = 5）
-  dshd version                               版本
+  dsh-go version                             版本
 `)
 }
 
