@@ -38,15 +38,40 @@ func TestPluginGlueRealDSHD(t *testing.T) {
 	})
 }
 
+// 真 dshd 二进制**每个包只构建一次**，20 个用例共用。
+//
+// 为什么不是"每个用例建一次"：`go build` 在 -race 下本来就要十几秒，20 次就是三四分钟；
+// 而 CI runner 只有 2 核，这些构建把 runner 拖到饱和，于是**每轮红在不同用例上**
+// （2026-11-13 连续四轮：transport 调度假设 / node 不可用 / data race / 本包超时）。
+// 只有一次构建，既去掉重复开销，也去掉"构建彼此抢 CPU"这个噪声源。
+// 二进制本身只读（测试只 start 它，不写），共用安全。
+var (
+	realDSHDOnce sync.Once
+	realDSHDExe  string
+	realDSHDErr  error
+)
+
 func buildPluginGlueDSHD(t *testing.T) string {
 	t.Helper()
-	exe := filepath.Join(t.TempDir(), "dshd.exe")
-	cmd := exec.Command("go", "build", "-o", exe, ".")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("build real dshd: %v\n%s", err, output)
+	realDSHDOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "dshd-real-")
+		if err != nil {
+			realDSHDErr = err
+			return
+		}
+		exe := filepath.Join(dir, "dshd.exe")
+		cmd := exec.Command("go", "build", "-o", exe, ".")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			realDSHDErr = fmt.Errorf("build real dshd: %v (%s)", err, output)
+			return
+		}
+		realDSHDExe = exe
+	})
+	if realDSHDErr != nil {
+		t.Fatalf("%v", realDSHDErr)
 	}
-	return exe
+	return realDSHDExe
 }
 
 func pluginGlueEnvironment(decoyHome string) []string {
