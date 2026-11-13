@@ -25,13 +25,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:301",
+      "site": "internal/transport/server.go:308",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:388",
+      "site": "internal/transport/server.go:395",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
@@ -337,7 +337,7 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve.go:267",
+      "site": "cmd/dshd/serve.go:268",
       "what": "插件热重载循环",
       "sync": "读过：hmrCtx 取消即退；pluginRT.HMR() 内部自己串行化，不直写共享表",
       "verified_at": "2026-11-09"
@@ -562,6 +562,12 @@
       "site": "cmd/dshd/subagent.go:434",
       "what": "两段式委派的 child 执行体（RunSub 跑在 goroutine 里，发布时就能拿到 childId）",
       "sync": "读过：goroutine 只写 activation.result/err，写完 defer close(done) 建立 happens-before；Await 只 select done/ctx.Done，读 result 一定在 done 关闭之后；childCtx 由 Await 取消或 run 取消传播；panic 被 recover 成 err（AGENT_RESULT）",
+      "verified_at": "2026-11-13"
+    },
+    {
+      "site": "internal/updater/channel.go:294",
+      "what": "把壳更新渠道的状态变更通知给订阅者（其中一个是 desktopUpdate.channel.subscribe 的 NDJSON 流）",
+      "sync": "读过：在锁内先 snapshotLocked() 复制状态、append 复制订阅者切片，再出锁起 goroutine 逐个回调；回调只拿到**值拷贝**，不碰 Service 的任何字段。listen 切片的增删都在锁内，所以并发订阅/取消不会与这次遍历竞争。",
       "verified_at": "2026-11-13"
     }
   ]
