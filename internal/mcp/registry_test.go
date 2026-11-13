@@ -119,18 +119,44 @@ func TestRegistryCoalescesBurst(t *testing.T) {
 	frames := r.Subscribe(ctx)
 	_ = readFrame(t, frames) // 首帧：connecting
 
+	// **不能**假设"五次 Publish 会先全部落进通道、再被取走"。投递是非阻塞的
+	// （`select { case ch<-…: default: }`），投递 goroutine 何时被调度由运行环境决定；
+	// CI 高负载下它可能在第 2、3 次 Publish 之间就醒来，先送中间态再送最终态。
+	// 那是**合法**语义：合并承诺的是"**收口到最新**"，不是"中间态一个都不许出现"。
+	// 2026-11-13 同一类缺陷已在 transport / terminal 上各红过一次，这里一并改掉。
+	// 断言形状：最多 5 帧 + ToolCount 单调不减 + 末帧必须是 5 + 收口后不重放旧态。
 	for i := 1; i <= 5; i++ {
 		if err := r.Publish("a", connected(i)); err != nil {
 			t.Fatalf("Publish: %v", err)
 		}
 	}
-	got := readFrame(t, frames)
-	if got[0].Status.ToolCount != 5 {
-		t.Fatalf("合并后必须是最后一次变化（5），得到 %+v", got)
+	last := -1
+	for i := 0; i < 5; i++ { // 五次 Publish 最多产出五帧
+		select {
+		case got, ok := <-frames:
+			if !ok {
+				t.Fatalf("第 %d 帧时流结束了", i+1)
+			}
+			cur := got[0].Status.ToolCount
+			if cur < last {
+				t.Fatalf("状态倒退：先 %d 后 %d", last, cur)
+			}
+			last = cur
+			if cur == 5 {
+				i = 5 // 收口了，跳出
+			}
+		case <-time.After(3 * time.Second):
+			i = 5 // 不再有帧：下面统一判 last
+		}
+	}
+	if last != 5 {
+		t.Fatalf("合并后必须收口到最后一次变化（5），最后一帧是 %d", last)
 	}
 	select {
 	case extra := <-frames:
-		t.Fatalf("合并后的中间态不该再重放: %+v", extra)
+		if n := extra[0].Status.ToolCount; n < 5 {
+			t.Fatalf("收口之后不该再重放过期中间态: %+v", extra)
+		}
 	case <-time.After(120 * time.Millisecond):
 	}
 }
