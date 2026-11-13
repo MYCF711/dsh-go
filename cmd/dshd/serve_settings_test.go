@@ -247,13 +247,14 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	described := postPluginGlue(t, clientA, serverA.base, "settings.describe", map[string]any{}, http.StatusOK)
 	logSettingsEvidence(t, "REAL_DESCRIBE", described)
 	result := described["result"].(map[string]any)
-	// 3 个命名空间：model / permission / llm。
-	// 第三个是 0.2.2-rc.2 加的 `llm`（发布 `providers.<route>.retryPolicy` 节点，
-	// 官方 UI 的"重试条件/次数/等待时间"就是从这里读候选与正下界的）。
-	// F2 起它**可写**：宿主 settings 存储为 llm 增加了读写面
-	// （<home>/state/settings-namespaces.json，带 revision 乐观锁），写进去的策略
-	// 由 internal/llm 在解析 provider 时读同一份，下一轮真生效。
-	if len(result["namespaces"].([]any)) != 3 || len(result["sections"].([]any)) != 3 || len(result["errors"].([]any)) != 0 {
+	// 7 个命名空间：model / permission / llm + 官方客户端的 4 个 UI 命名空间
+	// （locale / ui-theme / ui-chat / ui-settings，设置面板「语言 / 外观 /
+	// 工作细节 / 开发者工具」行的真值来源）。
+	// `llm` 是 0.2.2-rc.2 加的（发布 `providers.<route>.retryPolicy` 节点，
+	// 官方 UI 的"重试条件/次数/等待时间"就是从这里读候选与正下界的）；4 个 UI
+	// 命名空间与它共用同一份 <home>/state/settings-namespaces.json，
+	// 带 revision 乐观锁。
+	if len(result["namespaces"].([]any)) != 7 || len(result["sections"].([]any)) != 7 || len(result["errors"].([]any)) != 0 {
 		t.Fatalf("bad real describe: %+v", result)
 	}
 	llmSection := f2LLMSection(t, result)
@@ -357,6 +358,59 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 		t.Fatalf("reset restart current=%q revision=%d", current, revision)
 	}
 	logSettingsEvidence(t, "REAL_AFTER_RESET_RESTART", afterResetRestart)
+
+	// ── 官方 4 个客户端 UI 设置命名空间：真 dshd 上可读、可写、可重置 ──
+	//
+	// 真机截图暴露的缺口就是这 4 行：宿主没发布命名空间时设置面板显示「未知」。
+	// 这里走真实 HTTP + 真实 <home>/state/settings-namespaces.json，并跨一次重启。
+	uiNamespaces := []string{"locale", "ui-theme", "ui-chat", "ui-settings"}
+	for _, ns := range uiNamespaces {
+		section := f2Section(t, result, ns)
+		if section["writable"] != true {
+			t.Fatalf("%s 的 section 必须可写：%v", ns, section)
+		}
+		fields, ok := section["fields"].([]any)
+		if !ok || len(fields) == 0 {
+			t.Fatalf("%s 的 section 必须带字段投影（界面按 current 画值）：%v", ns, section)
+		}
+	}
+	uiThemeSet := postPluginGlue(t, clientA, serverA.base, "settings.form.set", map[string]any{
+		"ns": "ui-theme", "path": []string{"fontSize"}, "value": 18, "expectedRevision": 0,
+	}, http.StatusOK)
+	if got := settingsFieldCurrent(t, uiThemeSet, "fontSize"); got != float64(18) {
+		t.Fatalf("ui-theme.fontSize 写入后 current=%v，want 18", got)
+	}
+	logSettingsEvidence(t, "REAL_UI_THEME_SET", uiThemeSet)
+	uiChatLegacy := postPluginGlue(t, clientA, serverA.base, "settings.form.set", map[string]any{
+		"ns": "ui-chat", "path": []string{"transcriptView"}, "value": "normal", "expectedRevision": 0,
+	}, http.StatusOK)
+	if got := settingsFieldCurrent(t, uiChatLegacy, "transcriptView"); got != "detailed" {
+		t.Fatalf("ui-chat 的旧值 normal 必须读作 detailed，实际 %v", got)
+	}
+	logSettingsEvidence(t, "REAL_UI_CHAT_LEGACY", uiChatLegacy)
+
+	serverA.stop()
+	serverA = startPluginGlueServer(t, exe, homeA, decoy)
+	clientA = connectPluginGlueServer(t, serverA)
+	uiThemeReload := postPluginGlue(t, clientA, serverA.base, "settings.form.get", map[string]any{"ns": "ui-theme"}, http.StatusOK)
+	if got := settingsFieldCurrent(t, uiThemeReload, "fontSize"); got != float64(18) {
+		t.Fatalf("重启后 ui-theme.fontSize 必须仍是 18，实际 %v", got)
+	}
+	logSettingsEvidence(t, "REAL_UI_THEME_AFTER_RESTART", uiThemeReload)
+
+	outOfRange := postPluginGlue(t, clientA, serverA.base, "settings.form.set", map[string]any{
+		"ns": "ui-theme", "path": []string{"fontSize"}, "value": 23, "expectedRevision": 1,
+	}, http.StatusBadRequest)
+	assertPluginGlueError(t, outOfRange, "out_of_range")
+	logSettingsEvidence(t, "REAL_UI_THEME_OUT_OF_RANGE", outOfRange)
+
+	uiThemeReset := postPluginGlue(t, clientA, serverA.base, "settings.form.reset", map[string]any{
+		"ns": "ui-theme", "expectedRevision": 1,
+	}, http.StatusOK)
+	if got := settingsFieldCurrent(t, uiThemeReset, "fontSize"); got != float64(14) {
+		t.Fatalf("reset 后 ui-theme.fontSize 必须回到官方默认 14，实际 %v", got)
+	}
+	logSettingsEvidence(t, "REAL_UI_THEME_RESET", uiThemeReset)
 
 	// A real dshd modelRunner must put the persisted new-session default on the
 	// actual OpenAI-compatible request. The endpoint is local and answers one
@@ -511,6 +565,44 @@ func f2AssertSettingsError(t *testing.T, label string, status int, payload []byt
 }
 
 // f2LLMSection 从 describe 结果里取 llm 的 section。
+// f2Section 按 ns 取 describe 的 sections 一项。
+func f2Section(t *testing.T, described map[string]any, ns string) map[string]any {
+	t.Helper()
+	sections, ok := described["sections"].([]any)
+	if !ok {
+		t.Fatalf("describe 缺 sections：%v", described)
+	}
+	for _, raw := range sections {
+		section, ok := raw.(map[string]any)
+		if ok && section["ns"] == ns {
+			return section
+		}
+	}
+	t.Fatalf("describe 没有 %s section：%v", ns, sections)
+	return nil
+}
+
+// settingsFieldCurrent 取一次 settings.form.get/set/reset 结果里某个字段的 current。
+func settingsFieldCurrent(t *testing.T, envelope map[string]any, name string) any {
+	t.Helper()
+	result, ok := envelope["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("envelope 缺 result：%v", envelope)
+	}
+	fields, ok := result["fields"].([]any)
+	if !ok {
+		t.Fatalf("result 缺 fields：%v", result)
+	}
+	for _, raw := range fields {
+		field, ok := raw.(map[string]any)
+		if ok && field["name"] == name {
+			return field["current"]
+		}
+	}
+	t.Fatalf("fields 里没有 %q：%v", name, fields)
+	return nil
+}
+
 func f2LLMSection(t *testing.T, described map[string]any) map[string]any {
 	t.Helper()
 	sections, ok := described["sections"].([]any)

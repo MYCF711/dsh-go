@@ -32,10 +32,12 @@ type serveSettingsStore struct {
 	basePolicy        string
 	modelLoadErr      error
 	permissionLoadErr error
-	// llm 是 rc.2 的 `llm` 命名空间存储（`providers.<route>.retryPolicy`）。
-	// 值与 revision 落在 <home>/state/settings-namespaces.json；internal/llm 解析 provider
-	// 时读**同一份**文档，所以这里写进去的策略下一轮真生效。
-	llm *settings.Store
+	// namespaces 是"由插件声明的命名空间"的通用存储（<home>/state/settings-namespaces.json）。
+	//
+	// rc.2 起落在它上面的是 `llm`（`providers.<route>.retryPolicy`）与官方客户端的
+	// 4 个 UI 命名空间（locale / ui-theme / ui-chat / ui-settings）。internal/llm
+	// 解析 provider 时读**同一份**文档里 `llm` 段的策略，所以这里写进去下一轮真生效。
+	namespaces *settings.Store
 }
 
 // setLoadErrors 在 serve 启动装配时记录既有 store 的真实读盘结果。
@@ -48,10 +50,10 @@ func (s *serveSettingsStore) setLoadErrors(modelErr, permissionErr error) {
 func newServeSettingsStore(baseModel, basePolicy string, models *modelOverrideStore, permissions *permissionOverrideStore) *serveSettingsStore {
 	store := &serveSettingsStore{models: models, permissions: permissions, baseModel: baseModel, basePolicy: basePolicy}
 	if models != nil {
-		// home = <home>/state/session-model.json 的上两级；llm 持久段落在同一
-		// state 目录下的 settings-namespaces.json。这样 llm 命名空间与既有
-		// override 文件同源同 home，不需要在装配点再传一份 home。
-		store.llm = settings.Open(filepath.Dir(filepath.Dir(models.path)))
+		// home = <home>/state/session-model.json 的上两级；声明式命名空间的持久段
+		// 落在同一 state 目录下的 settings-namespaces.json。这样它们与既有 override
+		// 文件同源同 home，不需要在装配点再传一份 home。
+		store.namespaces = settings.Open(filepath.Dir(filepath.Dir(models.path)))
 	}
 	return store
 }
@@ -78,19 +80,21 @@ func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, erro
 			return settingsform.Document{}, fmt.Errorf("既有 permission 设置存储读取失败: %w", s.permissionLoadErr)
 		}
 		return readSettingsDocumentLocked(s.permissions.m, s.basePolicy, settingsform.FieldDefaultPreset)
-	case settingsform.NamespaceLLM:
-		if s.llm == nil {
+	case settingsform.NamespaceLLM,
+		settingsform.NamespaceLocale, settingsform.NamespaceUITheme,
+		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings:
+		if s.namespaces == nil {
 			return settingsform.Document{}, settingsStoreNotWiredError(namespace)
 		}
 		// Base 由 settingsform 的声明默认值补（readOrigin 的 doc.Base==nil 分支）：
 		// 这里只给持久段的 user 与 revision。
-		value, revision, err := s.llm.Read(settingsform.NamespaceLLM)
+		value, revision, err := s.namespaces.Read(namespace)
 		if err != nil {
-			return settingsform.Document{}, fmt.Errorf("既有 llm 设置存储读取失败: %w", err)
+			return settingsform.Document{}, fmt.Errorf("既有 %s 设置存储读取失败: %w", namespace, err)
 		}
 		return settingsform.Document{User: value, Revision: revision}, nil
 	default:
-		return settingsform.Document{}, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 describe 返回的 model / permission / llm", Status: http.StatusNotFound}
+		return settingsform.Document{}, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 settings.describe 返回的命名空间", Status: http.StatusNotFound}
 	}
 }
 
@@ -131,22 +135,24 @@ func (s *serveSettingsStore) Write(namespace string, user map[string]any, expect
 			return 0, fmt.Errorf("既有 permission 设置存储读取失败，拒绝写入: %w", s.permissionLoadErr)
 		}
 		return writeSettingsDocumentLocked(&s.permissions.m, user, expected, settingsform.NamespacePermission, settingsform.FieldDefaultPreset, s.permissions.flushLocked)
-	case settingsform.NamespaceLLM:
-		if s.llm == nil {
+	case settingsform.NamespaceLLM,
+		settingsform.NamespaceLocale, settingsform.NamespaceUITheme,
+		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings:
+		if s.namespaces == nil {
 			return 0, settingsStoreNotWiredError(namespace)
 		}
-		revision, err := s.llm.Write(settingsform.NamespaceLLM, user, expected)
+		revision, err := s.namespaces.Write(namespace, user, expected)
 		if err != nil {
 			var conflict *settings.RevisionConflictError
 			if errors.As(err, &conflict) {
 				// 与 model/permission 逐字同形的 409：客户端只需重新 describe。
 				return 0, settingsform.RevisionConflict(namespace, conflict.Expected, conflict.Actual)
 			}
-			return 0, fmt.Errorf("llm 设置存储写入失败: %w", err)
+			return 0, fmt.Errorf("%s 设置存储写入失败: %w", namespace, err)
 		}
 		return revision, nil
 	default:
-		return 0, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 describe 返回的 model / permission / llm", Status: http.StatusNotFound}
+		return 0, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 settings.describe 返回的命名空间", Status: http.StatusNotFound}
 	}
 }
 
@@ -294,7 +300,7 @@ func newSettingsFormHTTPHandlerWithService(service *settingsform.Service) http.H
 			return
 		}
 		if method != "settings.describe" && method != "settings.form.describe" && params.NS == "" {
-			writeSettingsFormError(w, &settingsform.Error{Code: "bad_request", Message: method + " 缺 ns", Hint: "ns 必须是 describe 返回的 model / permission / llm", Status: http.StatusBadRequest})
+			writeSettingsFormError(w, &settingsform.Error{Code: "bad_request", Message: method + " 缺 ns", Hint: "ns 必须是 settings.describe 返回的命名空间", Status: http.StatusBadRequest})
 			return
 		}
 		var result any

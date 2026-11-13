@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -515,6 +516,9 @@ func (r envelopeResolver) validate(node map[string]any, value any, path []string
 		if !ok {
 			return newInvalidTypeError(path, "string", value)
 		}
+		if err := checkPatternMeta(meta, text, path); err != nil {
+			return err
+		}
 		return checkLengthBounds(meta, len([]byte(text)), path)
 	case "boolean":
 		if _, ok := value.(bool); !ok {
@@ -599,6 +603,56 @@ func (r envelopeResolver) validate(node map[string]any, value any, path []string
 		}
 	}
 	return fmt.Errorf("%s: 未支持的 schema 节点类型 %v", joinPath(path), node["type"])
+}
+
+// checkPatternMeta 解释官方 schemastery 的 `meta.pattern`：`z.string().pattern(/…/)`
+// 在 toJSON 里就是 `{source, flags}`（schemastery/src/index.ts:415-419、670-674
+// 的 string 分支）。没有 pattern 的节点直接通过。
+func checkPatternMeta(meta map[string]any, text string, path []string) error {
+	raw, ok := meta["pattern"]
+	if !ok || raw == nil {
+		return nil
+	}
+	node, ok := raw.(map[string]any)
+	if !ok {
+		// 形状不认识 = 宿主自己造的 envelope 坏了，不是用户输入问题。
+		return fmt.Errorf("%s: schema 的 meta.pattern 不是 {source,flags} 对象", joinPath(path))
+	}
+	source, _ := node["source"].(string)
+	if source == "" {
+		return nil
+	}
+	flags, _ := node["flags"].(string)
+	return matchPattern(source, flags, text, path)
+}
+
+// matchPattern 按 JS 的 flags 语义跑一遍正则：`u` 在 Go 里是默认行为（正则本身就是
+// UTF-8 语义，忽略即可），`i`/`m`/`s` 走内联前缀。别的 flag 属于宿主 schema 的
+// 装配 bug，fail-loud。
+func matchPattern(source, flags, text string, path []string) error {
+	prefix := ""
+	for _, flag := range flags {
+		switch flag {
+		case 'u':
+		case 'i', 'm', 's':
+			prefix += string(flag)
+		default:
+			return fmt.Errorf("%s: schema 的 meta.pattern 用了不支持的 flag %q", joinPath(path), string(flag))
+		}
+	}
+	compiled, err := regexp.Compile(prefix + source)
+	if err != nil {
+		return fmt.Errorf("%s: schema 的 meta.pattern 无法编译: %w", joinPath(path), err)
+	}
+	if compiled.MatchString(text) {
+		return nil
+	}
+	return &Error{
+		Code:    "invalid_value",
+		Message: fmt.Sprintf("%s 的值 %q 不匹配 %s", joinPath(path), text, source),
+		Hint:    "按 schema 的 meta.pattern 提交：语言标识形如 zh / en / zh-Hans / en-US",
+		Status:  400,
+	}
 }
 
 func checkLengthBounds(meta map[string]any, length int, path []string) error {

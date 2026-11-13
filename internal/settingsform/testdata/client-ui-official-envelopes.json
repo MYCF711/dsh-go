@@ -1,0 +1,313 @@
+{
+ "locale": {
+  "uid": 124,
+  "refs": {
+   "123": {
+    "type": "string",
+    "meta": {
+     "pattern": {
+      "source": "^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$",
+      "flags": "u"
+     },
+     "required": false
+    }
+   },
+   "124": {
+    "type": "object",
+    "meta": {
+     "default": {}
+    },
+    "dict": {
+     "preference": 123
+    }
+   }
+  }
+ },
+ "ui-theme": {
+  "uid": 135,
+  "refs": {
+   "125": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "light"
+   },
+   "126": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "dark"
+   },
+   "127": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "system"
+   },
+   "128": {
+    "type": "union",
+    "meta": {
+     "default": "system"
+    },
+    "list": [
+     125,
+     126,
+     127
+    ]
+   },
+   "129": {
+    "type": "number",
+    "meta": {
+     "step": 1,
+     "min": 10,
+     "max": 22,
+     "default": 14
+    }
+   },
+   "130": {
+    "type": "number",
+    "meta": {
+     "step": 1,
+     "min": 10,
+     "max": 16,
+     "default": 11
+    }
+   },
+   "131": {
+    "type": "number",
+    "meta": {
+     "step": 1,
+     "min": 10,
+     "max": 20,
+     "default": 13
+    }
+   },
+   "132": {
+    "type": "string",
+    "meta": {
+     "default": ""
+    }
+   },
+   "133": {
+    "type": "string",
+    "meta": {
+     "default": ""
+    }
+   },
+   "134": {
+    "type": "string",
+    "meta": {
+     "default": ""
+    }
+   },
+   "135": {
+    "type": "object",
+    "meta": {
+     "default": {}
+    },
+    "dict": {
+     "preference": 128,
+     "fontSize": 129,
+     "codeFontSize": 130,
+     "terminalFontSize": 131,
+     "textFontFamily": 132,
+     "codeFontFamily": 133,
+     "terminalFontFamily": 134
+    }
+   }
+  }
+ },
+ "ui-chat": {
+  "uid": 155,
+  "refs": {
+   "136": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "compact"
+   },
+   "137": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "standard"
+   },
+   "138": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "detailed"
+   },
+   "139": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "verbose"
+   },
+   "140": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "normal"
+   },
+   "141": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "expanded"
+   },
+   "142": {
+    "type": "union",
+    "meta": {
+     "loose": true
+    },
+    "list": [
+     136,
+     137,
+     138,
+     139,
+     140,
+     141
+    ]
+   },
+   "143": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "completion"
+   },
+   "144": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "next-input"
+   },
+   "145": {
+    "type": "union",
+    "meta": {
+     "default": "completion"
+    },
+    "list": [
+     143,
+     144
+    ]
+   },
+   "146": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "all"
+   },
+   "147": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "final"
+   },
+   "148": {
+    "type": "union",
+    "meta": {
+     "default": "all"
+    },
+    "list": [
+     146,
+     147
+    ]
+   },
+   "149": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "compact"
+   },
+   "150": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "detailed"
+   },
+   "151": {
+    "type": "union",
+    "meta": {
+     "default": "detailed"
+    },
+    "list": [
+     149,
+     150
+    ]
+   },
+   "152": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "sidebar"
+   },
+   "153": {
+    "type": "const",
+    "meta": {
+     "required": true
+    },
+    "value": "new-tab"
+   },
+   "154": {
+    "type": "union",
+    "meta": {
+     "default": "sidebar"
+    },
+    "list": [
+     152,
+     153
+    ]
+   },
+   "155": {
+    "type": "object",
+    "meta": {
+     "default": {}
+    },
+    "dict": {
+     "transcriptView": 142,
+     "collapseTiming": 145,
+     "foldedReplies": 148,
+     "performanceUsage": 151,
+     "linkOpening": 154
+    }
+   }
+  }
+ },
+ "ui-settings": {
+  "uid": 157,
+  "refs": {
+   "156": {
+    "type": "boolean",
+    "meta": {
+     "default": true
+    }
+   },
+   "157": {
+    "type": "object",
+    "meta": {
+     "default": {}
+    },
+    "dict": {
+     "enabled": 156
+    }
+   }
+  }
+ }
+}
