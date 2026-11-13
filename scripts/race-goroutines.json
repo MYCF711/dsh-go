@@ -91,7 +91,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshtui/app.go:328",
+      "site": "cmd/dshtui/app.go:376",
       "what": "读键盘（stdin → rune/特殊键两个 channel）",
       "sync": "只往带缓冲的 channel 发送；进程退出时 stdin 关闭即返回；不碰 app 的可变状态",
       "verified_at": "2026-11-04"
@@ -103,7 +103,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshtui/app.go:1099",
+      "site": "cmd/dshtui/app.go:1177",
       "what": "从 stdin 泵字节（读一个发一个，关掉 channel 表示输入结束）",
       "sync": "只往带缓冲 channel 发；Read 出错或 EOF 就 close；不碰 app 的任何可变状态",
       "verified_at": "2026-11-04"
@@ -421,13 +421,13 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshtui/app.go:1694",
+      "site": "cmd/dshtui/app.go:1779",
       "what": "键盘解码器",
       "sync": "读过：只往 keys/specials 两个 channel 写，主循环单消费者；退出即关闭",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshtui/app.go:1694",
+      "site": "cmd/dshtui/app.go:1779",
       "what": "从 stdin 逐字节读进 channel",
       "sync": "读过：只写 ch，EOF/错误时 defer close(ch)；读的是 os.File",
       "verified_at": "2026-11-09"
