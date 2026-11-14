@@ -579,6 +579,11 @@ func cmdServe(args []string) error {
 		return err
 	}
 
+	// 官方 deliverables 三条变更路由的后端与"桌面打开"通道：native 服务要在
+	// Options 之前造好，才能让 Changes.Open 与 session.openWorkspacePath 用**同一个**
+	// 实例（两处各造一个服务，行为一致但状态面会分叉）。
+	changesStore := newWorkspaceChangesStore(*home)
+	nativeSvc := native.NewService()
 	srv, err := transport.NewServer(withOfficialSessionOptions(*home, withSessionOperationOptions(*home, transport.Options{
 		Source: src,
 		// 只把适配器交给 Transport；它们在既有 cookie 认证之后才会被调用。
@@ -588,6 +593,14 @@ func cmdServe(args []string) error {
 		SettingsFormHandler: newSettingsFormHTTPHandler(settingsStore),
 		ModelCatalogHandler: newModelCatalogHTTPHandler(modelCatalog, settingsStore),
 		Attachments:         attachments,
+		// 官方 deliverables 的 /api/changes.summary|diff|open。记录与快照对象由
+		// 每一轮的 `dshd run` 子进程写进 <home>/state/workspace-changes/<sid>/，
+		// 这里只读；没有记录的 seq 回 404（不伪造空摘要）。
+		Changes: transport.ChangesAPI{
+			Summary: changesStore.Summary,
+			Diff:    changesStore.Diff,
+			Open:    changesOpenOnDesktop(changesStore, nativeSvc),
+		},
 		// 官方 0.2.2 wire（M1）：默认关，DSHD_OFFICIAL_WIRE=1 才挂载。
 		// 返回 nil 时 transport 一个字节都不变（见 Options.HandlerWrap）。
 		// 静态前端必须在**最外层**：GET /?token= 要先到前端，再到 wire。
@@ -841,14 +854,24 @@ func cmdServe(args []string) error {
 			return prompts.SubmitPlacement(context.Background(), sessionID, text, placement)
 		},
 		PromptBlocks: func(sessionID string, blocks []transport.ContentBlock) (transport.PromptResult, error) {
-			resolved, err := attachments.ResolveBlocks(blocks)
+			// 官方 PromptContentPart（file/receiptId、image/mediaType+data）先解析成
+			// 宿主附件块，再走与旧 attachment 块完全同一条 ResolveBlocks。
+			normalized, err := attachments.NormalizeOfficialContent(sessionID, blocks)
+			if err != nil {
+				return transport.PromptResult{}, err
+			}
+			resolved, err := attachments.ResolveBlocks(normalized)
 			if err != nil {
 				return transport.PromptResult{}, err
 			}
 			return prompts.SubmitBlocks(context.Background(), sessionID, resolved)
 		},
 		PromptBlocksPlacement: func(sessionID string, blocks []transport.ContentBlock, placement string) (transport.PromptResult, error) {
-			resolved, err := attachments.ResolveBlocks(blocks)
+			normalized, err := attachments.NormalizeOfficialContent(sessionID, blocks)
+			if err != nil {
+				return transport.PromptResult{}, err
+			}
+			resolved, err := attachments.ResolveBlocks(normalized)
 			if err != nil {
 				return transport.PromptResult{}, err
 			}
@@ -944,7 +967,7 @@ func cmdServe(args []string) error {
 		Sessions: &worktreeSessionStore{src: src},
 		Presets:  sandboxPresets, Modes: sandboxStore,
 	})
-	nativeSvc := attachOfficialNative(srv, native.NewService(), func() (string, error) {
+	nativeSvc = attachOfficialNative(srv, nativeSvc, func() (string, error) {
 		return ensureSettingsDocument(*home, settingsStore)
 	})
 	_ = nativeSvc

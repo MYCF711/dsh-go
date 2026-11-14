@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"dshgo/codecs/v4"
-	"dshgo/internal/modes"
 	"dshgo/internal/session"
 )
 
@@ -55,7 +54,9 @@ func serveCreate(home, cwd string) (func(mode string) (string, error), error) {
 		// 否则界面左栏的模式列是空白，resume 时也恢复不到任何东西。
 		preset := mode
 		if preset == "" {
-			preset = modes.DefaultID
+			// 官方 defaultId = selectedDefault ?? default：设置里写下的默认 preset
+			// 必须真的决定新会话的 header，否则那个开关就是只显示不生效。
+			preset = selectedAgentPresetDefault(home)
 		}
 		id, err := serveID()
 		if err != nil {

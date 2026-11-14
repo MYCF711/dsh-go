@@ -552,6 +552,9 @@ func TestDefaultRegistryKeepsTwoNamespacesAfterRC2(t *testing.T) {
 		// 本仓 2026-11-14 新增：官方 dsh-session-telemetry-otel 的开关
 		// （官方 index.ts:116-122；mode=FEEDBACK_ONLY 由语义校验回 501）。
 		"session-telemetry-otel",
+		// 本仓 2026-11-15 新增：官方 agent-preset registry 的 selectedDefault
+		// （官方 dsh-agent-preset-registry/src/index.ts:52-59,82）。
+		"agent-preset-registry",
 	}
 	specs := HostRegistry().Specs()
 	if len(specs) != len(want) {

@@ -247,15 +247,16 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	described := postPluginGlue(t, clientA, serverA.base, "settings.describe", map[string]any{}, http.StatusOK)
 	logSettingsEvidence(t, "REAL_DESCRIBE", described)
 	result := described["result"].(map[string]any)
-	// 10 个命名空间：model / permission / llm + 官方客户端与插件的 7 个 UI 命名空间
+	// 11 个命名空间：model / permission / llm + 官方客户端与插件的 7 个 UI 命名空间
 	// （locale / ui-theme / ui-chat / ui-settings / ui-conversation /
 	// session-log-deepseek / session-telemetry-otel，后两者是本仓"能力上不做但
-	// 结构化拒绝"的开关：声明 true / FEEDBACK_ONLY 会得到 501）。
+	// 结构化拒绝"的开关：声明 true / FEEDBACK_ONLY 会得到 501）+ 官方
+	// agent-preset registry 的 selectedDefault（2026-11-15 补）。
 	// `llm` 是 0.2.2-rc.2 加的（发布 `providers.<route>.retryPolicy` 节点，
 	// 官方 UI 的"重试条件/次数/等待时间"就是从这里读候选与正下界的）；这些 UI
 	// 命名空间与它共用同一份 <home>/state/settings-namespaces.json，
 	// 带 revision 乐观锁。
-	if len(result["namespaces"].([]any)) != 10 || len(result["sections"].([]any)) != 10 || len(result["errors"].([]any)) != 0 {
+	if len(result["namespaces"].([]any)) != 11 || len(result["sections"].([]any)) != 11 || len(result["errors"].([]any)) != 0 {
 		t.Fatalf("bad real describe: %+v", result)
 	}
 	llmSection := f2LLMSection(t, result)
@@ -370,6 +371,8 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 		"ui-conversation", "session-log-deepseek",
 		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的开关。
 		"session-telemetry-otel",
+		// 2026-11-15 补：官方 agent-preset registry 的 selectedDefault。
+		"agent-preset-registry",
 	}
 	for _, ns := range uiNamespaces {
 		section := f2Section(t, result, ns)

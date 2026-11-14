@@ -479,3 +479,100 @@ H14 通过后才能做 H6/H13 的线上联调。H8 可与 H14 并行；其余独
 - `session.follow` 的 `assistantStream:true` 被接受但**不产生额外帧**：本宿主没有 process-local 助手呈现帧（助手正文走 `assistant/message` durable 事件）。
 - `session.follow` 的 snapshot `header` 需要宿主提供 `OfficialSessionHeaderSource`（v4 首帧原样）。**没有就 501 点名缺它**，绝不拿 `createdAt:0` 编一个（客户端会显示 1970 年）。
 - 流不重放历史时的 `records` 是**空数组**（不是 `null`），`hasMore=false`。
+
+## 15. 官方 GUI 4 处契约缺口的宿主落点（2026-11-15，additive）
+
+GUI 账本里 4 条 PARTIAL 卡在宿主侧。本节记四条契约的**宿主真实落点**与**已登记裁剪**，
+形状全部照官方 rc.2 随包 TypeScript 原件，不新增自造字段。
+
+### 15.1 `session.prompt` 的官方 `PromptContentPart`（附件入口）
+
+官方形状（`@deepseek-ai/dsh-api-session-controller/src/types.ts:80-92`）：
+
+```ts
+type PromptContentPart =
+  | { type: 'text';  text: string }
+  | { type: 'image'; mediaType: ImageMediaType; data: string; name?: string }
+  | { type: 'file';  receiptId: Branded<'file-upload-receipt-id'> }
+```
+
+官方客户端**不认识**宿主的 `att-…` id：它先 `fileUploads.upload` 拿回执
+（`{receiptId, file:{attachmentId,name,bytes}}`），再把 `file`/`image` 两种 part 放进
+`session.prompt.content`。宿主侧解析点是
+[`cmd/dshd/attachments_official_prompt.go`](../cmd/dshd/attachments_official_prompt.go)
+的 `NormalizeOfficialContent`（在 `serve.go` 的两个 `PromptBlocks*` 回调里先于
+`ResolveBlocks` 执行），解析结果就是既有 attachment 块，后续模型 parts 与旧路径同源。
+
+- `type:"file"`：回执是**会话作用域**的（`<home>/state/uploads/<receiptId>.json`）；
+  读 blob 时重新校验大小/sha256，跨会话使用按 `not_found` 拒绝。
+- `type:"image"`：`mediaType` 只接受官方四个枚举（`image/png|jpeg|webp|gif`），
+  且必须与真实字节嗅探结果一致。
+- 线上新增字段：`ContentBlock.receiptId` / `.mediaType` / `.data`（`internal/transport/api.go`）。
+- 端到端：`TestSessionPromptBindsOfficialFileReceiptToAttachment`、
+  `TestSessionPromptBindsInlineImagePart`、`TestSessionPromptBindsTextReceiptAsText`、
+  `TestSessionPromptRejectsBadOfficialAttachmentParts`（真 HTTP + 真上传 + 真模型 parts）。
+
+### 15.2 设置命名空间 `agent-preset-registry.selectedDefault`
+
+官方 `AgentPresetRegistry.Config`（`dsh-agent-preset-registry/src/index.ts:52-59`）是
+`{default: string, selectedDefault: string(volatile)}`，`defaultId = selectedDefault ?? default`；
+管理界面通过 `settings.update('agent-preset-registry', {selectedDefault}, rev)` 写它。
+
+- 命名空间声明：[`internal/settingsform/agent_preset_schema.go`](../internal/settingsform/agent_preset_schema.go)
+  （注册进 `HostRegistry()`；`base.selectedDefault = modes.DefaultID`）。
+- 读/写落点：[`cmd/dshd/serve_settings.go`](../cmd/dshd/serve_settings.go) 的 `serveSettingsStore`
+  （写路径调用 `validateAgentPresetSelection`，未知 preset id 当场 400，不写进去再回落）。
+- 生效点（同一份解析
+  [`cmd/dshd/agent_preset_default.go`](../cmd/dshd/agent_preset_default.go) 的
+  `selectedAgentPresetDefault`）：`agentPresets.list.isDefault`、`agentPresetSelect` 的
+  未点名回落、`serveCreate` 写进 v4 header 的 `agentPreset`、`run` 的建会话。
+- 端到端：`TestAgentPresetDefaultSettingsNamespaceEndToEnd`（真 `/api/settings.describe|mutate|
+  form.reset` + 真新建会话读 header）、`TestAgentPresetDefaultRejectsUnknownPreset`、
+  `TestAgentPresetFallbackMatchesModesDefault`。
+
+### 15.3 `/api/changes.summary` / `.diff` / `.open`
+
+官方三条**文档相对路由**（`dsh-client-ui-deliverables/src/changes.ts:6-8`），消费端直接
+`fetch` + `response.json()`，**不是** `POST /api/<method>` 的 typert 方法：
+
+| 路由 | 方法 | 查询参数 | 成功体 |
+|---|---|---|---|
+| `/api/changes.summary` | GET | `sessionId`, `seq` | `{turn, files[], total, added, deleted, cwd?, snapshot?}`（裸对象，无 `result` 信封） |
+| `/api/changes.diff` | GET | `sessionId`, `seq`, `index` | `WorkspaceFileDiff`：`{kind:'text',path,display,before,after,hunks[],coarse}` \| `{kind:'binary'\|'oversized',path,display}` |
+| `/api/changes.open` | POST | `sessionId`, `seq`, `index`, `action?=reveal`, `application?` | `{opened:true}` |
+
+状态码语义（客户端只看状态码）：`400` 参数非法、`404` 该 seq/index 没有记录、
+`422` 本机无原生打开通道（客户端显示 `nativeUnavailable`）、`501` 宿主未接线、`500` 读记录/算 diff 失败。
+路由与分派：[`internal/transport/handlers_changes_routes.go`](../internal/transport/handlers_changes_routes.go)
+（在 `ServeHTTP` 里按路径接住，早于 `/api/` 前缀分支）。
+
+数据来源：每一轮 `dshd run` 由
+[`cmd/dshd/workspace_changes_recorder.go`](../cmd/dshd/workspace_changes_recorder.go)
+在 `turn/start` 后拍"开始"快照、收工后拍"结束"快照（工作区取**会话 header 的 `cwd`**，
+与 `session.header.cwd` 同一真值；进程 cwd 只在 header 缺 cwd 时兜底），`git diff-tree --numstat` 求差异，
+追加一条 `workspace/changes` 事件（data 只有 `{turn}`）并把摘要+快照身份写进
+`<home>/state/workspace-changes/<sessionId>/records/<seq>.json`；快照对象在该会话的私有
+git 对象库里（`GIT_OBJECT_DIRECTORY` + 仓库对象库当 alternate，仓库自身 index/refs/work tree 不动）。
+diff 由 `git --no-index --unified=3` 产出（`workspace_changes_diff.go`），路径展示规则逐条复刻官方
+`paths.ts` 的 `displayPathOf`/`durablePathOf`。
+
+**已登记裁剪**（不是静默省略）：
+
+- 非 git 工作目录：官方有"文件工具改动前后各存一份拷贝"的兜底，本仓还没有那条工具级捕获，
+  因此这些会话**没有** changes 记录（路由对这些 seq 回 404，不伪造空摘要）。
+- `coarse` 恒为 `false`：官方是"JS 行比较超过 `diffTimeoutMs` 就整文件替换"；本仓用 git 自己的
+  diff（进程上限 30s），没有对应的"行比较超时"事件可报。
+- 记录与私有对象库**不随会话删除清理**（官方是进程内存 + 会话 dispose 时删临时目录）：
+  这是持久化的代价，清理策略单列。
+- 端到端：`TestWorkspaceChangesRoutesServeRealGitDiff`（真 git 仓库 + 真改文件 + 真 HTTP 取
+  summary/diff/open）、`TestWorkspaceChangesSkipsTurnWithoutChanges`、
+  `TestWorkspaceChangesSkipsSubagentSessions`、`TestChangesRoutesReturnBareJSONAndClassifyErrors`、
+  `TestChangesRoutesRequireCookieAndReportUnwired`。
+
+### 15.4 `workspace.registry` 的会话归属与拖拽顺序
+
+官方 `workspaceView` 的 `sessionIds`（`dsh-api-workspace-controller/src/feed.ts:22-33`）与
+`workspace.insertSessionBefore`（同包 `src/index.ts:149`）在本仓 main 上已按官方形状实现
+（`SessionIDs` + 手动手册序 + `insertSessionBefore` 落盘）。本次只补**registry 级**端到端，
+证明"从 registry 读回来仍然带真实归属与手动顺序，且重启后不丢"：
+`TestWorkspaceRegistryCarriesSessionIDsAndManualOrder`。

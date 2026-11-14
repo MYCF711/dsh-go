@@ -1232,6 +1232,12 @@ func (a *agentOfficialAPI) agentPresetRoster() ([]modes.Mode, error) {
 	return out, nil
 }
 
+// defaultPresetID 是"这个 home 当前生效的默认 preset"：设置里的 selectedDefault，
+// 缺失/失效时回落 modes.DefaultID（解析只有一份实现，见 agent_preset_default.go）。
+func (a *agentOfficialAPI) defaultPresetID() string {
+	return selectedAgentPresetDefault(a.deps.home)
+}
+
 // agentPresetsList 是官方 `agentPresets.list` 的宿主实现（零参数）。
 //
 // 真值来源就是 `agentPresetRoster()`：内置 modes（编译期声明）+ 用户
@@ -1259,7 +1265,7 @@ func (a *agentOfficialAPI) agentPresetsList() (transport.OfficialAgentPresetRost
 		seen[mode.ID] = struct{}{}
 		out = append(out, transport.OfficialAgentPreset{
 			ID:          mode.ID,
-			IsDefault:   mode.ID == modes.DefaultID,
+			IsDefault:   mode.ID == a.defaultPresetID(),
 			Name:        mode.Name,
 			Description: mode.Description,
 		})
@@ -1387,7 +1393,8 @@ func (a *agentOfficialAPI) agentSessionPreset(sessionID string) (string, error) 
 	if value, ok := doc.Sessions[sessionID]; ok && value != "" {
 		return value, nil
 	}
-	return modes.DefaultID, nil
+	// 会话没点名 preset：用设置里写下的默认（官方 defaultId 的语义）。
+	return a.defaultPresetID(), nil
 }
 
 func (a *agentOfficialAPI) agentPresetSelect(sessionID, presetID string) (string, error) {
@@ -1532,7 +1539,7 @@ func agentJoinReference(dirPart, name string) string {
 // ---------------------------------------------------------------------------
 
 func (a *agentOfficialAPI) agentUploadDir() string {
-	return filepath.Join(a.deps.home, "state", "uploads")
+	return uploadStateDir(a.deps.home)
 }
 
 // agentUploadName 把显示名洗成一个安全的叶子名（**从不当作路径**）。
@@ -1588,7 +1595,7 @@ func (a *agentOfficialAPI) fileUploadsUpload(sessionID string, req transport.Off
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
 	dir := a.agentUploadDir()
-	blobPath := filepath.Join(dir, "blobs", digest)
+	blobPath := uploadBlobPath(a.deps.home, digest)
 	if _, statErr := os.Stat(blobPath); statErr != nil {
 		if err := os.MkdirAll(filepath.Dir(blobPath), 0o755); err != nil {
 			return transport.OfficialFileUploadValue{}, fmt.Errorf("%w: 建上传目录: %v", transport.ErrStatePersistence, err)

@@ -25,13 +25,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:314",
+      "site": "internal/transport/server.go:319",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:401",
+      "site": "internal/transport/server.go:411",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
@@ -115,7 +115,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:765",
+      "site": "cmd/dshd/main.go:764",
       "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
       "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"
@@ -127,7 +127,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:899",
+      "site": "cmd/dshd/main.go:898",
       "what": "run 的看门狗协程：父进程没了就取消本轮 ctx",
       "sync": "读过：只调 cancel()，不碰会话/日志；runCtx 与主 goroutine 共享，取消是幂等的",
       "verified_at": "2026-11-04"
@@ -325,19 +325,19 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:906",
+      "site": "cmd/dshd/main.go:905",
       "what": "父进程看门狗：父没了就取消本轮 ctx",
       "sync": "读过：只调 stopOnParentGone()（cancel 幂等），不碰会话/日志",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:899",
+      "site": "cmd/dshd/main.go:898",
       "what": "serveJobsOut：后台任务通道",
       "sync": "读过：写 stdout 的 @@JOBS@@ 行，写侧有自己的一把锁；读的是 jobs 服务的快照",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:906",
+      "site": "cmd/dshd/main.go:905",
       "what": "serveSteerIPC：steer IPC 接收循环",
       "sync": "读过：收到的请求投进 steerInbox（自己加锁的队列）；runCtx 取消即退",
       "verified_at": "2026-11-09"

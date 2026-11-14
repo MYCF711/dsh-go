@@ -223,6 +223,11 @@ func HostRegistry() *Registry {
 			panic(fmt.Sprintf("settingsform: 客户端 UI 命名空间 %q 非法: %v", spec.NS, err))
 		}
 	}
+	// 官方 agent-preset registry 的 selectedDefault：管理界面写"后续会话的默认
+	// preset"的唯一通道（见 agent_preset_schema.go 的权威源）。
+	if _, err := registry.Register(agentPresetNamespaceSpec()); err != nil {
+		panic(fmt.Sprintf("settingsform: agent-preset 命名空间非法: %v", err))
+	}
 	return registry
 }
 
