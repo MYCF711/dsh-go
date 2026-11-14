@@ -98,6 +98,40 @@ func assertModelCatalogOrder(t *testing.T, result map[string]any, want []string)
 	}
 }
 
+// modelCatalogEvidence 把每条证据留到测试收尾时统一输出。
+//
+// 为什么不在拿到响应时立刻 t.Logf：Go 在非 -v 模式下会把测试体里的日志
+// 按调用顺序全部倾倒到 `--- FAIL` 之后，而 scripts/check.sh 只显示其中
+// 12 行（历史上 grep -A 12）。本用例正常有 20+ 条证据，真正的失败消息会被顶出
+// 窗口，CI 上看起来就像"没有任何断言行"。改在 t.Cleanup 里输出后，
+// 失败消息固定成为 `--- FAIL` 之后的第 1 行，证据排在它后面。
+type modelCatalogEvidence struct {
+	entries []string
+}
+
+func (e *modelCatalogEvidence) attach(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, entry := range e.entries {
+			t.Logf("%s", entry)
+		}
+	})
+}
+
+func (e *modelCatalogEvidence) log(t *testing.T, label string, envelope map[string]any) {
+	t.Helper()
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("%s evidence marshal: %v", label, err)
+	}
+	if strings.Contains(string(raw), "catalog-test-secret") || strings.Contains(string(raw), "wrong-secret") {
+		t.Fatalf("credential echoed in %s: %s", label, raw)
+	}
+	e.entries = append(e.entries, label+" "+string(raw))
+}
+
+// logModelCatalogEvidence 是其它用例仍在使用的即时证据输出；本文件新增的
+// modelCatalogEvidence 只服务于上面那条对 CI 日志窗口敏感的真进程用例。
 func logModelCatalogEvidence(t *testing.T, label string, envelope map[string]any) {
 	t.Helper()
 	raw, err := json.Marshal(envelope)
@@ -112,8 +146,13 @@ func logModelCatalogEvidence(t *testing.T, label string, envelope map[string]any
 
 func waitModelCatalogTurn(t *testing.T, client *http.Client, base, sessionID string) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	// realChainWait 是 cmd/dshd 真进程用例的统一等待预算（见 realchain_wait_test.go）。
+	// 这里原来是唯一漏改的 15s 字面量：3701b1a 把 15 处短预算收敛到 realChainWait，
+	// 但漏了本函数；CI 2 核 + -race 下同一用例实测慢 2.4 倍，15s 必然间歇性不够。
+	deadline := time.Now().Add(realChainWait)
+	attempts := 0
 	for {
+		attempts++
 		history := postPluginGlue(t, client, base, "session.history", map[string]any{"id": sessionID, "sinceSeq": 0, "limit": 1000}, http.StatusOK)
 		frames := modelCatalogResult(t, history)["frames"].([]any)
 		for _, raw := range frames {
@@ -126,13 +165,22 @@ func waitModelCatalogTurn(t *testing.T, client *http.Client, base, sessionID str
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("turn/done timeout session=%s frames=%+v", sessionID, frames)
+			types := make([]string, 0, len(frames))
+			for _, raw := range frames {
+				if frame, ok := raw.(map[string]any); ok {
+					types = append(types, fmt.Sprint(frame["type"]))
+				}
+			}
+			t.Fatalf("turn/done timeout after %s (%d polls) session=%s frameTypes=%v frames=%+v",
+				realChainWait, attempts, sessionID, types, frames)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 }
 
 func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T) {
+	evidence := &modelCatalogEvidence{}
+	evidence.attach(t)
 	const secret = "catalog-test-secret"
 	seenModels := make(chan string, 16)
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -203,7 +251,7 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 	for _, accepted := range golden.Accepted {
 		params := expandModelCatalogValue(accepted.Params, gateway.URL+"/v1").(map[string]any)
 		envelope := postPluginGlue(t, clientA, serverA.base, accepted.Method, params, accepted.Status)
-		logModelCatalogEvidence(t, "MODEL_CATALOG_ACCEPT_"+accepted.Name, envelope)
+		evidence.log(t, "MODEL_CATALOG_ACCEPT_"+accepted.Name, envelope)
 		result := modelCatalogResult(t, envelope)
 		if accepted.TestOK {
 			if result["ok"] != true || result["model"] != accepted.TestModel || result["id"] != accepted.TestModel {
@@ -227,14 +275,14 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 		params := expandModelCatalogValue(rejected.Params, gateway.URL+"/v1").(map[string]any)
 		envelope := postPluginGlue(t, clientA, serverA.base, rejected.Method, params, rejected.Status)
 		assertPluginGlueError(t, envelope, rejected.Error)
-		logModelCatalogEvidence(t, "MODEL_CATALOG_REJECT_"+rejected.Name, envelope)
+		evidence.log(t, "MODEL_CATALOG_REJECT_"+rejected.Name, envelope)
 	}
 	wrongCredential := postPluginGlue(t, clientA, serverA.base, "models.catalog.test", map[string]any{"id": "model-a", "credential": "wrong-secret"}, http.StatusBadGateway)
 	assertPluginGlueError(t, wrongCredential, "upstream_error")
-	logModelCatalogEvidence(t, "MODEL_CATALOG_REJECT_wrong credential", wrongCredential)
+	evidence.log(t, "MODEL_CATALOG_REJECT_wrong credential", wrongCredential)
 	emptyCatalog := postPluginGlue(t, clientB, serverB.base, "models.catalog.reorder", map[string]any{"ids": []string{}, "expectedRevision": 0}, http.StatusConflict)
 	assertPluginGlueError(t, emptyCatalog, "empty_catalog")
-	logModelCatalogEvidence(t, "MODEL_CATALOG_REJECT_empty catalog", emptyCatalog)
+	evidence.log(t, "MODEL_CATALOG_REJECT_empty catalog", emptyCatalog)
 
 	settings := modelCatalogResult(t, postPluginGlue(t, clientA, serverA.base, "settings.form.get", map[string]any{"ns": "model"}, http.StatusOK))
 	field := settings["fields"].([]any)[0].(map[string]any)
@@ -300,7 +348,7 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 		t.Fatalf("reopened catalog=%+v", reopened)
 	}
 	assertModelCatalogOrder(t, reopened, []string{"model-b", "model-a"})
-	logModelCatalogEvidence(t, "MODEL_CATALOG_REOPENED", map[string]any{"result": reopened})
+	evidence.log(t, "MODEL_CATALOG_REOPENED", map[string]any{"result": reopened})
 	reopenedSession := modelCatalogResult(t, postPluginGlue(t, clientA, serverA.base, "session.create", map[string]any{}, http.StatusOK))["sessionId"].(string)
 	for _, expected := range []struct {
 		session string

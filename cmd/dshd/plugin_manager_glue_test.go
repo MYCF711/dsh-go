@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -214,41 +215,88 @@ func assertPluginGlueList(t *testing.T, envelope map[string]any, want int) []any
 	return plugins
 }
 
+// pluginGlueHTTPContext 是一次 HTTP 调用失败时用来定位现场的最小上下文。
+//
+// 背景：CI 的 scripts/check.sh 历史上只打印每个 `--- FAIL` 之后的 12 行，
+// 而失败消息是 Go 在测试收尾时最后 append 的一条。之前这里的 Fatal 只说
+// "POST xxx status=... body=..." 或者压根只有 envelope，失败消息被前面的证据日志
+// 顶出窗口，CI 上就表现为"红了但没有断言行"。
+//
+// 现在把 method / 期望状态 / 实际状态 / body 前 400 字节压进**同一个** fatal 行，
+// 不管窗口多窄，第一行就能看到为什么红。
+type pluginGlueHTTPContext struct {
+	method     string
+	wantStatus int
+	gotStatus  int // 0 表示这条调用没有 HTTP 状态（例如 CLI 信封断言）
+	body       []byte
+}
+
+func pluginGlueBodyPrefix(body []byte, limit int) string {
+	if len(body) <= limit {
+		return string(body)
+	}
+	return string(body[:limit]) + "...(truncated)"
+}
+
+func (ctx pluginGlueHTTPContext) prefix() string {
+	if ctx.method == "" {
+		return ""
+	}
+	got := "?"
+	if ctx.gotStatus != 0 {
+		got = strconv.Itoa(ctx.gotStatus)
+	}
+	return fmt.Sprintf("method=%s wantStatus=%d gotStatus=%s body[:400]=%q",
+		ctx.method, ctx.wantStatus, got, pluginGlueBodyPrefix(ctx.body, 400))
+}
+
 func assertPluginGlueError(t *testing.T, envelope map[string]any, wantCode string) {
 	t.Helper()
+	assertPluginGlueErrorContext(t, envelope, wantCode, pluginGlueHTTPContext{})
+}
+
+func assertPluginGlueErrorContext(t *testing.T, envelope map[string]any, wantCode string, ctx pluginGlueHTTPContext) {
+	t.Helper()
+	fail := func(format string, args ...any) {
+		t.Helper()
+		if prefix := ctx.prefix(); prefix != "" {
+			t.Fatalf("%s %s", prefix, fmt.Sprintf(format, args...))
+		}
+		t.Fatalf(format, args...)
+	}
 	// 顶层只允许 `error` 与**已登记**的附加信息 `details`
 	// （409 的 `details.reason`，见 DSH-GO docs/transport-contract.md §3D；
 	// 它是 error 的兄弟，四字段本身不变）。其它键仍然算契约漂移。
 	for key := range envelope {
 		if key != "error" && key != "details" {
-			t.Fatalf("error envelope has extra keys: %+v", envelope)
+			fail("error envelope has extra keys: %+v", envelope)
 		}
 	}
 	errorObject, ok := envelope["error"].(map[string]any)
 	if !ok || len(errorObject) != 4 {
-		t.Fatalf("error is not exactly four fields: %+v", envelope)
+		fail("error is not exactly four fields: %+v", envelope)
 	}
 	for _, key := range []string{"code", "message", "hint"} {
 		if errorObject[key] == "" || errorObject[key] == nil {
-			t.Fatalf("error %s is empty: %+v", key, errorObject)
+			fail("error %s is empty: %+v", key, errorObject)
 		}
 	}
 	if _, ok := errorObject["retryable"].(bool); !ok {
-		t.Fatalf("retryable is not boolean: %+v", errorObject)
+		fail("retryable is not boolean: %+v", errorObject)
 	}
 	if wantCode != "" && errorObject["code"] != wantCode {
-		t.Fatalf("error code=%v want=%s: %+v", errorObject["code"], wantCode, errorObject)
+		fail("error code=%v want=%s: %+v", errorObject["code"], wantCode, errorObject)
 	}
 	// `details` 是**可选**的（老宿主不带）。带的时候必须是带非空 reason 的对象：
 	// 空对象/空串等于没给，界面又会退回去猜 message 文本。
 	if details, ok := envelope["details"]; ok {
 		object, ok := details.(map[string]any)
 		if !ok {
-			t.Fatalf("details is not an object: %+v", envelope)
+			fail("details is not an object: %+v", envelope)
 		}
 		reason, _ := object["reason"].(string)
 		if reason == "" {
-			t.Fatalf("details.reason is empty: %+v", envelope)
+			fail("details.reason is empty: %+v", envelope)
 		}
 	}
 }
@@ -350,7 +398,8 @@ func connectPluginGlueServer(t *testing.T, server *pluginGlueServer) *http.Clien
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusSeeOther || len(resp.Cookies()) == 0 {
-		t.Fatalf("connect status=%d cookies=%d body=%s", resp.StatusCode, len(resp.Cookies()), body)
+		t.Fatalf("GET /connect status=%d wantStatus=%d cookies=%d body[:400]=%q",
+			resp.StatusCode, http.StatusSeeOther, len(resp.Cookies()), pluginGlueBodyPrefix(body, 400))
 	}
 	return client
 }
@@ -359,28 +408,34 @@ func postPluginGlue(t *testing.T, client *http.Client, base, method string, para
 	t.Helper()
 	raw, err := json.Marshal(params)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("POST %s params marshal: %v", method, err)
 	}
 	resp, err := client.Post(base+"/api/"+method, "application/json", bytes.NewReader(raw))
 	if err != nil {
-		t.Fatalf("POST %s: %v", method, err)
+		t.Fatalf("POST %s transport error: %v base=%s", method, err, base)
 	}
 	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if readErr != nil {
-		t.Fatal(readErr)
+		t.Fatalf("POST %s status=%d wantStatus=%d read body: %v",
+			method, resp.StatusCode, wantStatus, readErr)
 	}
 	if resp.StatusCode != wantStatus {
-		t.Fatalf("POST %s status=%d want=%d body=%s", method, resp.StatusCode, wantStatus, body)
+		t.Fatalf("POST %s status=%d wantStatus=%d body[:400]=%q",
+			method, resp.StatusCode, wantStatus, pluginGlueBodyPrefix(body, 400))
 	}
 	var envelope map[string]any
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		t.Fatalf("POST %s non-JSON: %v body=%s", method, err, body)
+		t.Fatalf("POST %s status=%d wantStatus=%d non-JSON: %v body[:400]=%q",
+			method, resp.StatusCode, wantStatus, err, pluginGlueBodyPrefix(body, 400))
 	}
 	if wantStatus >= 400 {
-		assertPluginGlueError(t, envelope, "")
+		assertPluginGlueErrorContext(t, envelope, "", pluginGlueHTTPContext{
+			method: method, wantStatus: wantStatus, gotStatus: resp.StatusCode, body: body,
+		})
 	} else if len(envelope) != 1 || envelope["result"] == nil {
-		t.Fatalf("POST %s success envelope=%+v", method, envelope)
+		t.Fatalf("POST %s status=%d wantStatus=%d success envelope=%+v body[:400]=%q",
+			method, resp.StatusCode, wantStatus, envelope, pluginGlueBodyPrefix(body, 400))
 	}
 	return envelope
 }
