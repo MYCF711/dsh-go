@@ -157,6 +157,10 @@ else
   # 于是越错越久——2026-11-14 盘点查出 **149 条陈旧登记**。
   # GUI 仓那份曾一模一样（分母写死 55 而官方 66，`--check` 却报 PASS），
   # 修法是让它对官方清单逐 id 断言。这里做同一件事。
+  #
+  # 第 4 条断言在同一个脚本里：base 插件面另有一张**逐项表**
+  # （docs/evidence/base-plugins-per-item-0.2.2-rc.2.json，99 条 id+状态+落点）。
+  # 只守三面总数守不住"某一条悄悄改档"——149 条陈旧登记就是这么长出来的。
   if [ -f scripts/gap-register-counts.py ]; then
     if gr_out="$(python scripts/gap-register-counts.py --check 2>&1)"; then
       pass "$(printf '%s' "$gr_out" | grep '^PASS' | sed 's/^PASS  *//')"

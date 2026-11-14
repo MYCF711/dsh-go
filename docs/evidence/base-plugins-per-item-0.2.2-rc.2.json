@@ -1,0 +1,1035 @@
+{
+  "schema": "dsh.base-plugins-per-item/1",
+  "baseline": "0.2.2-rc.2",
+  "official_list": "docs/evidence/official-base-plugins-0.2.2-rc.2.txt",
+  "conclusion_row": "docs/host-stable-gap-register.md",
+  "sources": {
+    "audit_main_table": "tmp/GO8-RC2/_audit/plugin-face.md §2（99 行，权威逐条审计）",
+    "stale_registrations": "tmp/GO8-RC2/_audit/plugin-face.md §4.1（40 行）/ §4.2（6 条反向降级）",
+    "count_row": "docs/host-stable-gap-register.md 顶部结论表",
+    "post_audit_prs": "PR #24/#25/#26/#27/#28：只有 #37/#79 的『清零残余』结论并入状态档"
+  },
+  "counts": {
+    "total": 99,
+    "IMPLEMENTED": 84,
+    "PARTIAL": 11,
+    "MISSING": 4
+  },
+  "stale_register": {
+    "total_stale_entries": 149,
+    "base_plugin_forward_rows": 40,
+    "base_plugin_reverse_rows": 6,
+    "forward_ids": 43,
+    "note": "§4.1 的 40 行里，尾行一行覆盖 4 个 id（tool-result-pruner/spill-local/spill-policy/session-checkpoint-policy），所以按 id 计是 43。"
+  },
+  "known_drift": [],
+  "known_drift_note": "这 9 条（tool-plugin-manager、timer、hmr、typert-loader、authorization、agent、shell-env、command-compact、llm-deepseek-account）已按 PR #24/#25/#26 的收口结论应用为 IMPLEMENTED，逐条见 items[].changes 的 post-audit-pr 一步；known_drift 已清空。",
+  "items": [
+    {
+      "id": "tool-plugin-manager",
+      "status": "IMPLEMENTED",
+      "audit_status": "PARTIAL",
+      "evidence": "`modules/tool/plugin/plugin.go:25`（schema enum=list/enable/disable）、`:40` `Name`；`internal/pluginmgr/state.go:227` `ToolsMounted`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "note": "PR #26 补 plugin_manager 8 action；PR #27 接上工具面本地目录安装 → IMPLEMENTED"
+    },
+    {
+      "id": "plugin-manager",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/pluginmgr/manager.go:135` Install、`:171` Update、`:408` Restore、`:488` Uninstall；`internal/pluginmgr/loader.go:105` Load、`:261` Unload、`:330` SyncAll；`internal/pluginmgr/official/adapter.go:55` New",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "timer",
+      "status": "IMPLEMENTED",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/timer/scope.go:95` `After`、`:100` `Every`、`:213` `Child`、`:236` `Release`、`:79` `NewScope`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "note": "PR #26 补 internal/timer/module.go + cmd/dshd/main.go:142 装配 → IMPLEMENTED"
+    },
+    {
+      "id": "hmr",
+      "status": "IMPLEMENTED",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/pluginmgr/hmr.go:107` `NewHMR`、`cmd/dshd/serve_plugin_loader.go:54` `newPluginRuntimeWithHMR`、`:79` `pluginHMRConfig`、`cmd/dshd/serve.go:252`",
+      "changes": [
+        {
+          "from": "DO_NOT_IMPLEMENT",
+          "to": "PARTIAL",
+          "source": "audit-4.1"
+        },
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "note": "PR #26 补 profile 配置热重载（默认开，DSHD_PROFILE_HMR=0 关）→ IMPLEMENTED"
+    },
+    {
+      "id": "llm",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/llm/client.go:111` `Stream`（SSE）、`internal/llm/compat.go:58` 形状协商"
+    },
+    {
+      "id": "deepseek-llm-api-extensions",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/llm/provider.go:233` `RegisterRequestExtension`、`:273` `PrepareRequestExtensions`、`:217` `requestExtensions`（空 map）",
+      "note": "仍 PARTIAL：dsh_session_log 的所有者随 #8 锁定（partial-rest §1）"
+    },
+    {
+      "id": "session",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/session/log.go:71` `Append`、`internal/session/surface.go`、`codecs/v4`"
+    },
+    {
+      "id": "session-log-deepseek",
+      "status": "MISSING",
+      "audit_status": "MISSING",
+      "evidence": "grep `dsh_session_log` 生产代码 = **0**（只有 `internal/llm/provider.go:21` 注释与 `internal/llm/provider_test.go:191`）；`internal/session/known_events.go:79` 只登记事件类型；`internal/settingsform/client_ui_schema.go:66` 只读 `enabled` 开关",
+      "changes": [
+        {
+          "from": "DEFERRED",
+          "to": "MISSING",
+          "source": "audit-4.2"
+        }
+      ],
+      "note": "结构化不做：settings 命名空间 enabled=true 回 501（missing7 §1）"
+    },
+    {
+      "id": "typert",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/transport/api_descriptors.go:128` `NewRegistry`、`:133` `Register`、`:632` `CanonicalDescriptors`、`:705` `DescriptorSnapshot`；接线 `cmd/dshd/serve.go:523` `transport.NewRegistry()`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "typert-loader",
+      "status": "IMPLEMENTED",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/transport/api_descriptors.go:197/201` `RegisterPackage`（`PackageSchema = dsh.typert-package@1`）",
+      "changes": [
+        {
+          "from": "DEFERRED",
+          "to": "PARTIAL",
+          "source": "audit-4.1"
+        },
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "note": "PR #26 补 internal/transport/typert_loader.go + 装配 → IMPLEMENTED"
+    },
+    {
+      "id": "typert-gateway",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/officialwire/server.go:89` `NewServer`、`internal/officialwire/mux.go:55` `NewMux`、`internal/officialwire/ws.go`、`cmd/dshd/serve_official_wire.go:131` `newOfficialWireServer`"
+    },
+    {
+      "id": "remote-access",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/officialwire/auth.go:77` `NewAuth`、`:292` `Peer`、`:310` `Peers`、`:117` `Fence`；`internal/officialwire/server.go:108`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "session-title",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/session/metadata.go:56` `appendSessionMetadata`、`:99` `AppendSessionColor`；`cmd/dshd/serve_title_auto.go`"
+    },
+    {
+      "id": "session-title-llm",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`cmd/dshd/serve_title_auto.go:195` `autoTitleFromOutput`、`:99` `autoTitleSysPrompt`、`:278` `autoTitlePrompt`；接线 `cmd/dshd/serve_loop.go:97/141` `kickAutoTitle`",
+      "changes": [
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "user-questions",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`cmd/dshd/serve_agent_api.go:1074` `userQuestionsAnswer`、`:1132` `userQuestionsAttachWait`；`internal/transport/handlers_questions_official.go:104` `Arm`、`:138` `Remaining`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "agent",
+      "status": "IMPLEMENTED",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/agent/registry.go:155` `NewRegistry`、`:57-58` `agent/created`/`agent/status`、`:348` `BeginSubagent`、`:401` `EndSubagent`",
+      "changes": [
+        {
+          "from": "IMPLEMENTED",
+          "to": "PARTIAL",
+          "source": "audit-4.2"
+        },
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "note": "审计取样点（零值 RegistryOptions）已被 PR #24 修复（cmd/dshd/serve.go:492 带 Emit）→ IMPLEMENTED"
+    },
+    {
+      "id": "plugin-package-inventory-deepseek",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/transport/handlers_plugin_inventory_official.go:35` `MethodPluginInventoryList`、`:55` `OfficialPluginInventory`；`cmd/dshd/serve_plugins_official.go:50`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "agent-default-model",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/settingsform/settingsform.go:17` `FieldDefaultModel`；`cmd/dshd/serve.go:377` `src.defaultModel`；`cmd/dshd/serve_session_api_t04.go:459`"
+    },
+    {
+      "id": "jobs",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/spi/exec.go:57` `Job` 接口、`internal/jobs/error.go:112` `JobError`（7 码）、`internal/transport/handlers_jobs.go`"
+    },
+    {
+      "id": "llm-retry",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/llm/retry.go:76` `defaultRetryConfig`、`:108` `newRetryState`、`:135` `backoff`、`:223` `retryableStatus`、`:290` `parseRetryAfter`",
+      "changes": [
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "config-editor",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/config/patch.go:84` `ApplyPatch`、`internal/config/store.go:156` `Apply`、`internal/config/tree.go:53` `Tree`；`internal/transport/handlers_config_patch.go:29/31` `config.patch.get`/`apply`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "settings",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/settingsform/settingsform.go:344` `Describe`、`:180` `Namespaces`、`:277` `spec`；`internal/settingsform/client_ui_schema.go:66` 等 6 个客户端 UI 命名空间",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "authorization",
+      "status": "IMPLEMENTED",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/account/account.go:715` `StartSignIn`、`:783` `CancelSignIn`、`:151` `StartOptions`；`internal/account/oidc.go:14` `startOIDC`、`:59` `completeOIDC`",
+      "changes": [
+        {
+          "from": "DEFERRED",
+          "to": "PARTIAL",
+          "source": "audit-4.1"
+        },
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "note": "PR #26 补 internal/authorization/registry.go + wire 面 → IMPLEMENTED"
+    },
+    {
+      "id": "deepseek-account",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/account/account.go:313` `New`、`:40` `Source`；`internal/transport/handlers_account_official.go:77-96`（含 rc.2 通知三件套 `getNotifications`/`getNotificationContent`/`reportNotificationEvent`）、`:175` `MethodAccountGetState`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "credentials",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/llm/model_catalog.go:532` `DescribeCredentials`、`:556` `SetCredential`、`:585` `DeleteCredential`；`internal/transport/handlers_settings_official.go:57-59`；`internal/transport/handlers_settings_credential_mask.go:3` 逐字符复刻官方掩码"
+    },
+    {
+      "id": "llm-pi-ai",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/llm/provider.go:133` `providerAdapters`（内置 `openai-completions` + `deepseek-completions`）、`:139` `RegisterProviderAdapter`、`:158` `LookupProviderAdapter`；`internal/llm/provider_registry.go:68` `ListProviders`、`:79` `ListConfigurableProviders`",
+      "changes": [
+        {
+          "from": "DO_NOT_IMPLEMENT",
+          "to": "PARTIAL",
+          "source": "audit-4.1"
+        }
+      ],
+      "note": "拍板不扩四协议（partial19 §3.2）"
+    },
+    {
+      "id": "session-persistence-jsonl",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`codecs/v4/frame.go`（多帧 zstd）、`codecs/v4/write.go`、`internal/session/log.go:71`"
+    },
+    {
+      "id": "attachment-local",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`cmd/dshd/attachments.go:124` `Put`、`:493` `Get`、`:157/:524` sha256 内容寻址"
+    },
+    {
+      "id": "session-query-sqlite",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/session/query.go:130` `SearchSessions`、`:53` `EncodeQueryCursor`、`:22` 自述 `Engine` 恒为 `scan`；`go.mod` 无 sqlite 依赖",
+      "note": "拍板不做倒排/FTS5（partial19 §3.3）"
+    },
+    {
+      "id": "working-directory",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/session/cwd.go:112` `RecordWorkingDirectory`（durable 事件）、`:50` `FoldWorkingDirectory`、`:172` `CwdFollower`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "tool-working-directory",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/wd/wd.go`（`Name`/`Schema`/`Exec`）"
+    },
+    {
+      "id": "session-projection",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/session/projection.go:152` `NewProjectionRegistry`、`:553` `ProjectionTracker`、`:371` `DefaultProjectionRegistry`、`:199` `Checkpoint`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "storage",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/storage/registry.go:28` `RegisterBackend`、`:52` `Backend`、`:76` `Mount`、`:113` `Domain`、`internal/storage/backend.go`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "storage-json",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/storage/json.go`、`internal/storage/json_per_record.go`、`:1` 两布局",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "storage-domain",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/storage/domain.go:42` `NewFacility`、`:61` `Open`、`:202` `Domain`、`:261` `Subscribe`、`:416` `Put`；`internal/storage/domain_spec.go`",
+      "changes": [
+        {
+          "from": "DEFERRED",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "session-projection-cache",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/session/projection_cache.go:75` `OpenProjectionCache`、`:216` `Checkpoint`、`:235` `Restore`、`:258` `ColdSnapshot`",
+      "changes": [
+        {
+          "from": "DEFERRED",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "otel",
+      "status": "IMPLEMENTED",
+      "audit_status": "PARTIAL",
+      "evidence": "internal/analytics/otlp.go；internal/analytics/otel_channel.go（PR #28 补 gzip）",
+      "changes": [
+        {
+          "from": "DEFERRED",
+          "to": "PARTIAL",
+          "source": "audit-4.1"
+        },
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "note": "PR #28 清零残余（OTLP/HTTP JSON + 每消费者独立通道 + gzip）→ IMPLEMENTED（partial-rest §0/§2）"
+    },
+    {
+      "id": "session-telemetry-otel",
+      "status": "MISSING",
+      "audit_status": "MISSING",
+      "evidence": "grep `telemetry` 生产代码只有 `internal/analytics/env.go`（OTLP 端点环境变量）；无会话遥测通道、无 feedback 触发的会话记录导出",
+      "changes": [
+        {
+          "from": "DEFERRED",
+          "to": "MISSING",
+          "source": "audit-4.2"
+        }
+      ],
+      "note": "结构化不做：mode=FEEDBACK_ONLY 回 501（missing7 §2）"
+    },
+    {
+      "id": "subprocess",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/spi/exec.go:41` `Exec`、`:57` `Job`；`modules/exec/bash/process_windows.go:16` Job Object、`process_linux.go` 进程组"
+    },
+    {
+      "id": "sandbox",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/sandbox/runtime.go:233` `NewGate`、`:122` `NewBoundary`、`:157` `CheckWrite`、`:321` `SetSessionMode`",
+      "changes": [
+        {
+          "from": "DEFERRED",
+          "to": "PARTIAL",
+          "source": "audit-4.1"
+        }
+      ],
+      "note": "拍板不做 Windows ACL partial 隔离（partial19 §3.1）"
+    },
+    {
+      "id": "sandbox-policy",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/sandbox/policy.go:123` `New`、`:197` `evaluate`、`:273` 三档；`cmd/dshd/serve_sandbox_policy.go:213` `resolveSandboxModeForSession`、`:299` `sandboxSetPermission`；`cmd/dshd/serve_permission_override.go`",
+      "drift": {
+        "source": "audit-4.1",
+        "note": "旧 path:line 已过期，状态未变"
+      }
+    },
+    {
+      "id": "bash-sandbox",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`modules/exec/bash/sandbox_scope.go:21` `SandboxCall`、`modules/exec/bash/tools.go:117` `sandbox.GateFromEnv`",
+      "changes": [
+        {
+          "from": "OFFICIAL_UNSUPPORTED",
+          "to": "PARTIAL",
+          "source": "audit-4.1"
+        }
+      ],
+      "note": "官方 Windows 上该行自 disabled；本仓有策略闸门（相对官方是多），partial19 §2 判『不该补』"
+    },
+    {
+      "id": "pwsh-sandbox",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`modules/tool/pwsh/pwsh.go:52` `sandbox_permissions` schema、`:222` `ParsePermission`、`:315` `authorize`",
+      "changes": [
+        {
+          "from": "DEFERRED",
+          "to": "PARTIAL",
+          "source": "audit-4.1"
+        }
+      ],
+      "note": "同 #40：拍板不做 partial 隔离（partial19 §3.1）"
+    },
+    {
+      "id": "approval",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`cmd/dshd/serve_approval.go:28` `approvalBroker`、`internal/approval/store.go`、`approval_view.go`"
+    },
+    {
+      "id": "permission",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/modes/modes.go:66` `Builtins`（四档，每档带 `Sandbox`）、`:37` `SandboxMode`、`:102` `Lookup`；`cmd/dshd/serve_permission_override.go`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "shell-env",
+      "status": "IMPLEMENTED",
+      "audit_status": "MISSING",
+      "evidence": "grep `DSH_SHELL` / `ShellEnv` / `EnvContributor` / `shell-env` 全仓生产代码 = **0**",
+      "changes": [
+        {
+          "from": "DEFERRED",
+          "to": "MISSING",
+          "source": "audit-4.2"
+        },
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "note": "PR #25『真做』：internal/shellenv + bash/pwsh 每执行环境注入 → IMPLEMENTED"
+    },
+    {
+      "id": "tool-bash",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/exec/bash/tools.go:65` 结果收尾、`:48-57` schema（含 `sandbox_permissions`）"
+    },
+    {
+      "id": "tool-pwsh",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/pwsh/pwsh.go:52`（schema 含 `sandbox_permissions`）、`background.go`"
+    },
+    {
+      "id": "tool-jobs",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/exec/bash/tools.go`（`job_output`/`job_kill`/`job_list`）、`internal/spi/exec.go:57`"
+    },
+    {
+      "id": "fs-observation-policy",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/fs/local/local.go:340` `Read`（登记）、`:372` `CheckWritable`、`:423` `Write`、`:467` `mark`"
+    },
+    {
+      "id": "tool-fs",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/read/read.go`、`modules/tool/write/write.go`、`modules/tool/edit/edit.go`"
+    },
+    {
+      "id": "tool-fs-search",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/glob/glob.go`、`modules/tool/grep/grep.go`、`internal/fssearch/search.go:131` `Search`"
+    },
+    {
+      "id": "agent-instructions",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/prompt/prompt.go:159` `GlobalRules`、`:173` `WorkspaceRules`、`:62-63` 每条链 65,536 字节",
+      "note": "仍 PARTIAL：fs 后嵌套发现 + 用户全局双根链（partial-rest §2）"
+    },
+    {
+      "id": "skill",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`modules/tool/skill/skill.go:558` `roots`、`:154` `collect`；`cmd/dshd/serve_agent_api_skills.go:295` `agentSkillRoots`、`:361` `scanAgentSkillRoots`",
+      "note": "仍 PARTIAL：host + per-scope 分层（partial-rest §3）"
+    },
+    {
+      "id": "skill-filesystem",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/skill/skill.go:558` `roots`（多根 + `DSHD_SKILLS_EXTRA` + `DSH_BUNDLED_SKILL_DIR`:733）；`cmd/dshd/serve_agent_api_skills.go:392` `scanAgentSkillRoot`"
+    },
+    {
+      "id": "tool-skill",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/skill/skill.go:215` `Name`、`:226` `Exec`、`:400` `list`、`:437` `search`"
+    },
+    {
+      "id": "commands",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/transport/handlers_commands_official.go:107` `OfficialCommandRegistry`、`:139` `Register`、`:200` `List`、`:251` `Execute`；`cmd/dshd/serve_commands_api.go:58` `newHostCommandRegistry`",
+      "drift": {
+        "source": "audit-4.1",
+        "note": "旧 path:line 已过期，状态未变"
+      }
+    },
+    {
+      "id": "command-feedback",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`cmd/dshd/serve_commands_api.go:43` `hostCommandFeedback`、`:79` 注册；`cmd/dshd/serve_agent_api.go:1789` durable 落盘路径",
+      "changes": [
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "goal",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/goal/goal.go:257` `Name`；`internal/goal/goal.go`（revision 乐观锁）"
+    },
+    {
+      "id": "goal-round-driver",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`cmd/dshd/serve_goal_round.go:119` `newGoalRoundDriver`、`:676` `advance`（`RoundsStarted` 真实自增）、`:523` `decideAfterTurn`、`:628` `Reconcile`",
+      "changes": [
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "command-goal",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/commands/goal.go:63` `GoalDefinition`、`:88` `run` 子命令分派；`cmd/dshd/serve_commands_api.go:69` 注册",
+      "changes": [
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "plan-mode",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/plan/plan.go:164` `enter_plan_mode`、`:132` gate、`exit_plan_mode`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "token-meter",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/session/token_usage.go:145` `ProjectTokenUsage`、`:126` `TokenUsageUnit`；`cmd/dshd/context_usage.go`"
+    },
+    {
+      "id": "compaction-basic",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/compact/compact.go:66` `Plan`、`internal/compact/policy.go`、`cmd/dshd/compactauto.go`"
+    },
+    {
+      "id": "command-compact",
+      "status": "IMPLEMENTED",
+      "audit_status": "MISSING",
+      "evidence": "`cmd/dshd/serve_commands_api.go:58-100` 只注册 goal/feedback/help；全仓 grep `hostCommandCompact` / `/compact` 生产定义 = 0（`serve_commands_api.go:7` 只是一句注释）",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "MISSING",
+          "source": "audit-4.2"
+        },
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "note": "PR #25『真做』：/compact 进宿主命令注册表 → IMPLEMENTED"
+    },
+    {
+      "id": "subagent",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`cmd/dshd/subagent.go`、`internal/agent/registry.go:348` `BeginSubagent`、`:401` `EndSubagent`、`cmd/dshd/serve_subagents_api.go`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "agent-team",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/transport/handlers_agent_team_rc2.go`（`agentTeams.setEnabled`）、`internal/session/known_events.go`、`cmd/dshd/serve_agent_api.go`"
+    },
+    {
+      "id": "tool-agent-team",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/teamtask/teamtask.go:48-51`（`team_task_create`/`list`/`get`/`update`）、`modules/tool/team/rc2_model.go`、`cmd/dshd/tool_merged.go:137`（合并为 `team_task` 一个工具面）"
+    },
+    {
+      "id": "subagent-spawn-in-process",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`cmd/dshd/subagent.go`（同进程 `agent.Loop`）、`internal/agent/child_session.go:113` `RecordAgentChild`"
+    },
+    {
+      "id": "subagent-fork-in-process",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`cmd/dshd/subagent_inherit.go:60` `inheritTranscript`、`:87` `inheritLine`、`:26` `inheritFromCtx`",
+      "note": "仍 PARTIAL：一次性同步 fork 不留 durable 子会话（partial-rest §4）"
+    },
+    {
+      "id": "tool-subagent-control",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/team/team.go:26-28` `send_message`/`wait_agent`/`list_agents`、`modules/tool/team/spawn.go:274` `interrupt_agent`；`cmd/dshd/serve_subagents_api.go`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "tool-subagent",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/subagent/subagent.go:33` `Name`"
+    },
+    {
+      "id": "tool-subagent-fork",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`modules/tool/subagentfork/subagentfork.go:38`",
+      "note": "同 #70（同一实现）"
+    },
+    {
+      "id": "ptc-runtime",
+      "status": "MISSING",
+      "audit_status": "MISSING",
+      "evidence": "`go.mod` 无任何 JS 引擎；grep `run_code` / `PtcRuntime` 生产代码 = 0；`internal/cua/ptc.go:7` `PTCEntryID = \"ptc-runtime\"` 只是\"profile 里有没有这个条目\"的探测，不是运行时",
+      "note": "R6 结构化不做：cuaAccess.* 回 501 并点名 R6（missing7 §0）"
+    },
+    {
+      "id": "workflow-ptc",
+      "status": "PARTIAL",
+      "audit_status": "PARTIAL",
+      "evidence": "`internal/workflow/engine.go:130` `Start`、`:258` `Agent`、`:356` `Parallel`、`:405` `Pipeline`、`:224` `Phase`、`:237` `Log`、`:34` `DefaultLimits`；`modules/tool/workflow/orchestrate.go:107` `workflow.New`",
+      "note": "R6 不嵌 JS 运行时（partial19 §1）"
+    },
+    {
+      "id": "tool-workflow",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/workflow/workflow.go:45` `Name`、`:40` schema"
+    },
+    {
+      "id": "timeout-policy",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tools/pipeline.go:378` `executeWithDeadline`、`:93` `defaultToolTimeout`、`modules/tools/timeout.go` `resolveToolBudget`、`:330` `ToolTimeoutError`"
+    },
+    {
+      "id": "spill-local",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tools/pipeline.go:525` `spill`、`:693` `writeSpill`、`:24` `SpillDir`；`cmd/dshd/spill_cleanup.go`",
+      "drift": {
+        "source": "audit-4.1",
+        "note": "旧 path:line 已过期，状态未变"
+      }
+    },
+    {
+      "id": "spill-policy",
+      "status": "IMPLEMENTED",
+      "audit_status": "PARTIAL",
+      "evidence": "modules/tools/spill_policy.go；modules/tools/pipeline.go:624；--max-inline-tokens（PR #28）",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "drift": {
+        "source": "audit-4.1",
+        "note": "旧 path:line 已过期，状态未变"
+      },
+      "note": "PR #28 清零残余（--max-inline-tokens + 图片可读路径）→ IMPLEMENTED（partial-rest §0/§2）"
+    },
+    {
+      "id": "session-checkpoint-policy",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/session/checkpoint.go:175` `WriteDurableCheckpoint`、`:90` `DurableCheckpoint`、`:503` `RecoverDurableCheckpoint`；`modules/tools/pipeline.go:46-56` `BeforeDispatch`（`tools/execute` 钩子，含 `TOOL_ABORTED_BEFORE_DISPATCH`）",
+      "drift": {
+        "source": "audit-4.1",
+        "note": "旧 path:line 已过期，状态未变"
+      }
+    },
+    {
+      "id": "tool-result-pruner",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/prune/prune.go:67` `Apply`、`:47` `Budget`",
+      "drift": {
+        "source": "audit-4.1",
+        "note": "旧 path:line 已过期，状态未变"
+      }
+    },
+    {
+      "id": "image-offload",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/session/image_offload.go:54` `ImageOffloadEventType`、`:215` `DefaultImageOffloadBudget`、`:289` `OffloadedImageText`；`cmd/dshd/serve_offload_retry.go`",
+      "changes": [
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "tool-todo",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/todo/todo.go:70` `Name`"
+    },
+    {
+      "id": "tool-goal",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/goal/goal.go:257` `Name`"
+    },
+    {
+      "id": "repeat-tool-reminder",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tools/repeat_reminder.go`、`modules/tools/pipeline.go:211` post-execute 收尾、`internal/spi/ctx.go:17` 计数语义",
+      "changes": [
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "web",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/spi/search.go:171` `WebProviders`、`:181` `NewWebProviders`、`:191` `RegisterSearch`、`:209` `RegisterFetch`、`:375/388` pin；`internal/transport/handlers_web_providers_rc2.go:35` `web.listProviders`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "web-search-deepseek",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/search/deepseek.go:46` `DeepSeek`、`:179` `Search`、`:259` `mapDeepSeekSearch`",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "web-deepseek-api",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/search/webapi_search.go:42` `DeepSeekSearchAPI`、`:95` `Search`；`modules/search/webapi_fetch.go:29` `DeepSeekFetchAPI`；`modules/search/webapi_auth.go:124` `resolveWebAPITarget`（official/account/apiKey 三源）",
+      "changes": [
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "web-fetch-http",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/webfetch/provider.go:25` `HTTPProvider`、`:97` `Fetch`、`:44` 512KiB 上限、`:197` `validateFetchURL`、`:150` `client`"
+    },
+    {
+      "id": "tool-web",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tool/websearch/providers.go:158` `HostProviders`、`modules/tool/webfetch/webfetch.go:43`、`cmd/dshd/tool_lazy.go` 工具表"
+    },
+    {
+      "id": "mcp-resources",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tools/mcp.go:1243` `mcpListResourcesToolName`、`:1288-1299` three tools、`:1320` `resourceRequest`、`:541` `hasResources`",
+      "changes": [
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "audit-4.1"
+        }
+      ]
+    },
+    {
+      "id": "tools",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tools/registry.go:36` `Register`、`modules/tools/pipeline.go:189` `Run`"
+    },
+    {
+      "id": "tool-executor-native",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`modules/tools/pipeline.go:189` `Run`（pre→exec→spill→post→广播）、`internal/agent/parallel.go:259` `runToolBatch`、`:99-102` parallel/exclusive 屏障、`:335` `executeToolCalls`（结果按模型顺序）"
+    },
+    {
+      "id": "tool-executor-ptc",
+      "status": "MISSING",
+      "audit_status": "MISSING",
+      "evidence": "同 #72：grep `run_code` / `Executor` / `GeneratedSDK` 生产代码 = 0",
+      "note": "同 #74：R6 结构化不做（missing7 §0）"
+    },
+    {
+      "id": "system-prompt",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/prompt/prompt.go:70` `Assemble`、`:47` `Provider` 段注册、`:91` `Persona`、`:218` `Default`；`internal/prompt/tool_order.go:39` `ParseToolOrder`、`:72` `OrderTools`"
+    },
+    {
+      "id": "agent-loop",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/agent/loop.go:275` `Run`、`internal/agent/parallel.go`、`internal/agent/finish_policy.go`"
+    },
+    {
+      "id": "fs-sandbox",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/sandbox/fs.go:15` `EvaluateFS`、`internal/sandbox/runtime.go:122` `NewBoundary`、`:157` `CheckWrite`；`modules/fs/local/local.go:59` `WithSandboxBoundary`、`:238` `withinBoundary`"
+    },
+    {
+      "id": "llm-deepseek",
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "`internal/llm/client.go:121` Bearer、`internal/llm/provider.go:83` `deepSeekCompletionsAdapter`、`:33` `ProviderAPIDeepSeekCompletions`；`internal/llm/model_catalog.go:744` `ResolveProvider`"
+    },
+    {
+      "id": "llm-deepseek-account",
+      "status": "IMPLEMENTED",
+      "audit_status": "MISSING",
+      "evidence": "grep `llm-deepseek-account` 全仓 = 0；grep `Account`/`accountToken` in `internal/llm/**` 生产代码 = 0；`internal/account/account.go:303` 的 `Token` 只喂 `account.*`（`:639/:661/:679`）",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "MISSING",
+          "source": "audit-4.2"
+        },
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ],
+      "note": "PR #25『真做』：internal/llm 账号路由 + internal/account 令牌 → IMPLEMENTED"
+    }
+  ]
+}
