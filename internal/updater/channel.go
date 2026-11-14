@@ -101,6 +101,18 @@ type Service struct {
 	listeners []func(State)
 	// loaded 表示已经读过一次盘。
 	loaded bool
+
+	// ---------- 通知投递（形状与理由见 notifyLocked） ----------
+
+	// notifyMu 只保护下面两个字段，**刻意不复用 mu**：排空协程在锁外调订阅者，
+	// 订阅者回头调 State()/Set() 时拿的是 mu，两者不会互锁。
+	// 锁序固定为 `mu -> notifyMu`（notifyLocked 持 mu 时取 notifyMu）；
+	// 反方向不存在——排空协程绝不拿 mu。
+	notifyMu sync.Mutex
+	// queue 是待投递的通知，**无界**（为什么不许丢见 notifyLocked 的「背压」段）。
+	queue []notification
+	// dispatching 报告"已经有一条排空协程在跑"。同一时刻最多一条 ⇒ 投递有序。
+	dispatching bool
 }
 
 // Options 是 New 的参数。
@@ -284,18 +296,93 @@ func (s *Service) snapshotLocked() State {
 	return state
 }
 
-// notifyLocked 通知所有订阅者（持锁调用；回调里不许再调本服务）。
+// notification 是一条待投递的通知：**发出时**的状态值拷贝 + **发出时**的订阅者快照。
+//
+// 两者都在入队时定死，所以投递名单不受之后 Subscribe/退订的影响（快照语义）。
+type notification struct {
+	state     State
+	listeners []func(State)
+}
+
+// notifyLocked 把一条通知排进串行投递队列（持锁调用；回调里不许再调本服务）。
+//
+// ## 修掉的是什么
+//
+// 从前的实现是 `go func(){ for _, fn := range listeners { fn(state) } }()` ——
+// **每条通知各起一个 goroutine**。一次 `Set()` 连发两条（先 `changing=true`
+// 开始切换，再收口 `changing=false`），两条各自排队，**谁先跑到由调度器决定**。
+// 收口先到、开始切换后到 ⇒ 界面先被置成「已收口」再被置成「切换中」，
+// 而此后再没有第三条通知把它拉回来 ⇒ **永久停在转圈态**。
+//
+// ## 现在的形状：串行队列 + 惰性启动、排空即退的投递协程
+//
+//   - **顺序**：本函数只做"按调用顺序入队"。调用方持 `s.mu`，所以入队顺序
+//     就是 `notifyLocked` 的调用顺序；同一时刻**最多一条**排空协程在跑
+//     （`dispatching`），它按队列顺序逐个投递 ⇒ 收到的顺序 == 发出的顺序。
+//   - **不阻塞持锁调用方**：入队只是 append + 置标志，不等订阅者；已有排空
+//     协程在跑就直接返回，也不新起协程。订阅者再慢也只拖慢排空协程，
+//     不会把 `Set()` 或 `State()` 卡在锁上。
+//   - **快照语义**：每条通知自带发出时的订阅者快照与状态拷贝，所以之后的
+//     订阅/退订只影响之后发出的通知，不改变已入队那条的投递名单。
+//   - **生命周期**：排空协程**队列一空就自己退出**，不是常驻循环——
+//     惰性启动、自然收尾，所以 `Service` 被丢弃时不留下泄漏的 goroutine，
+//     也就不需要 `Close`。也不存在"通知入了队却没人排空"的窗口：
+//     "看到队列空"与"置回 dispatching=false"在 `notifyMu` 下是同一个原子动作，
+//     之后任何一次入队都会自己起一条新的排空协程。
+//   - **背压：不丢**。队列是**无界**的（`[]notification`），这是刻意的取舍：
+//     本服务的订阅者之一是 `desktopUpdate.channel.subscribe` 的 NDJSON 流，
+//     **丢任何一条都会退回上面那个「永久转圈」的 bug**（收口丢了就是转圈，
+//     开始切换丢了就是漏一次状态）。于是选择让慢订阅者把后续通知排队等它——
+//     顺序保得住、一条不丢；代价是订阅者若永久卡死，队列会一直长（内存换正确）。
+//     生产端只有 `Set()`（一次两条，由用户操作触发），真实负载下队列不会长。
+//   - **锁序**：`s.mu -> s.notifyMu`；排空协程只碰 `notifyMu`、
+//     且**在锁外**调订阅者（回调里调 `State()`/`Set()` 不会自锁）。
 func (s *Service) notifyLocked() {
 	if len(s.listeners) == 0 {
 		return
 	}
 	state := s.snapshotLocked()
 	listeners := append([]func(State){}, s.listeners...)
-	go func() {
-		for _, fn := range listeners {
-			fn(state)
+
+	s.notifyMu.Lock()
+	s.queue = append(s.queue, notification{state: state, listeners: listeners})
+	start := !s.dispatching
+	if start {
+		s.dispatching = true
+	}
+	s.notifyMu.Unlock()
+
+	if start {
+		go s.dispatch()
+	}
+}
+
+// dispatch 按入队顺序**串行**投递，队列排空后自己退出（不留常驻 goroutine）。
+//
+// 出锁才调订阅者：回调在 `s.mu` 与 `notifyMu` 之外跑。
+func (s *Service) dispatch() {
+	for {
+		s.notifyMu.Lock()
+		if len(s.queue) == 0 {
+			// 排空：交回"可再启动"并退出。
+			//
+			// 这一步与 notifyLocked 的"入队 + 看 dispatching"在同一把锁下，
+			// 所以不会漏排空：要么本协程看得见这条通知，要么之后那次
+			// notifyLocked 会看到 dispatching==false 并自己起一条新的。
+			s.dispatching = false
+			s.queue = nil // 让底层数组随最后一条通知一起回收
+			s.notifyMu.Unlock()
+			return
 		}
-	}()
+		item := s.queue[0]
+		s.queue[0] = notification{} // 别让已投递的那条一直被底层数组引用着
+		s.queue = s.queue[1:]
+		s.notifyMu.Unlock()
+
+		for _, fn := range item.listeners {
+			fn(item.state)
+		}
+	}
 }
 
 // 下面三个方法是 transport.UpdateChannelService 的适配层。
