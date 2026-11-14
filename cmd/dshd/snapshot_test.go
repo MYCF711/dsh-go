@@ -30,7 +30,7 @@ func assembleRegistry(t *testing.T) spi.ToolRegistry {
 	t.Setenv(terminalpanel.EnvReadUserTerminals, "true")
 	k := kernel.New("snapshot")
 	t.Cleanup(k.Root().Dispose)
-	if _, err := kernel.Assemble(k.Root(), builtinModules(".", t.TempDir(), 0, nil)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(".", t.TempDir(), 0, 0, nil)); err != nil {
 		t.Fatalf("装配失败: %v", err)
 	}
 	reg, err := kernel.Inject(k.Root(), spi.ToolsKey)

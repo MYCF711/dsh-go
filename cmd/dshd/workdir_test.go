@@ -99,7 +99,7 @@ func TestServeCreateUsesDefaultWorkDir(t *testing.T) {
 // run 入口用的那份），返回 read 工具能不能读到相对路径 marker.txt。
 func readMarkerViaAssembly(t *testing.T, workdir string) error {
 	t.Helper()
-	mods, err := loadModsIn(filepath.Join(t.TempDir(), "no-such-manifest.toml"), t.TempDir(), 0, nil, workdir)
+	mods, err := loadModsIn(filepath.Join(t.TempDir(), "no-such-manifest.toml"), t.TempDir(), 0, 0, nil, workdir)
 	if err != nil {
 		t.Fatalf("装配模块: %v", err)
 	}

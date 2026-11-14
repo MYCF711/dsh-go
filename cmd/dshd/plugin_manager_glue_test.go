@@ -340,7 +340,7 @@ func (s *pluginGlueServer) stop() {
 func connectPluginGlueServer(t *testing.T, server *pluginGlueServer) *http.Client {
 	t.Helper()
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+	client := &http.Client{Jar: jar, Timeout: realChainWait, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
 	resp, err := client.Get(server.base + "/connect?token=" + url.QueryEscape(server.token))
@@ -395,7 +395,7 @@ func testPluginGlueServe(t *testing.T, exe string) {
 
 	serverA := startPluginGlueServer(t, exe, homeA, decoyHome)
 	serverB := startPluginGlueServer(t, exe, homeB, decoyHome)
-	anonymous := &http.Client{Timeout: 15 * time.Second}
+	anonymous := &http.Client{Timeout: realChainWait}
 	for _, method := range []string{"plugin.list", "plugin.install", "plugin.enable", "plugin.disable", "plugin.update", "plugin.restore", "plugin.reconcile", "plugin.uninstall"} {
 		envelope := postPluginGlue(t, anonymous, serverA.base, method, map[string]any{}, http.StatusUnauthorized)
 		assertPluginGlueError(t, envelope, "unauthorized")

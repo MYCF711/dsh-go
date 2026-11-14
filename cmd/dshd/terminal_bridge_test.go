@@ -266,7 +266,7 @@ func TestTerminalPanelToolsReadRealRosterInProcess(t *testing.T) {
 	home := t.TempDir()
 	k := kernel.New("terminalpanel")
 	t.Cleanup(k.Root().Dispose)
-	if _, err := kernel.Assemble(k.Root(), builtinModules(".", home, 0, nil)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(".", home, 0, 0, nil)); err != nil {
 		t.Fatalf("装配失败: %v", err)
 	}
 

@@ -26,7 +26,7 @@ func shellEnvWiringTool(t *testing.T, wd, home, name string) spi.Tool {
 	k := kernel.New("shellenv-wiring")
 	root := k.Root()
 	t.Cleanup(root.Dispose)
-	if _, err := kernel.Assemble(root, builtinModules(wd, home, 0, nil)); err != nil {
+	if _, err := kernel.Assemble(root, builtinModules(wd, home, 0, 0, nil)); err != nil {
 		t.Fatalf("装配 builtinModules: %v", err)
 	}
 	if _, err := kernel.Inject(root, spi.ShellEnvKey); err != nil {

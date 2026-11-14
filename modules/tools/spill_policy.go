@@ -653,26 +653,43 @@ func modelVisibleText(res *spi.Result) string {
 	return strings.Join(parts, "\n")
 }
 
-// imageReadablePath 问装配期注入的解析器要一张图片的**可读**路径。
+// imageReadablePath 拿到一张图片的**可读**路径。
 //
 // 官方把这件事做成注入的 provider（`resolveImageAttachmentAccess`，
 // dsh-llm/lib/types/content.js:13-19）：附件服务给出归一化副本的 host 路径，
-// 文件系统 provider 再把它映进当前工具执行世界。本仓的 `spi.Image` 只有 MIME +
-// base64（internal/spi/tool.go:214-218），没有附件身份，所以这一层同样只留一个
-// 函数值（Options.ImageReadablePath）：谁有附件库/源文件路径谁提供解析器。
+// 文件系统 provider 再把它映进当前工具执行世界。本仓对应两条来源，**按精度取**：
+//
+//  1. `spi.Image.Path`——生产者自己声明的路径（`read_image` 读的就是磁盘上的
+//     哪个文件它当然知道）。这是"附件身份"在宿主侧的等价物，精度最高：
+//     不需要任何解析器，也不会把"别的同内容文件"当成这张图。
+//  2. `Options.ImageReadablePath`——装配期注入的解析器，给那些**结果图片来自
+//     内存**、但宿主另有附件库能反查路径的部署（例如附件服务按 sha256 建索引）。
 //
 // 两条硬约束：
-//   - 解析器缺失（本仓当前装配）或返回空 ⇒ 拿不到路径 ⇒ 调用方按官方
-//     best-effort **保留原内容** + warning，绝不给模型一个读不到的路径；
+//   - 两条来源都拿不到路径 ⇒ 调用方按官方 best-effort **保留原内容** + warning，
+//     绝不给模型一个读不到的路径；
 //   - 路径必须**真的 stat 得到**（且不是目录）：官方原话是 "The policy never
 //     substitutes an unreadable path for an image"。stat 只是本层的代理判据——
-//     模型侧沙箱能不能读是 FS 策略的事，不是这里能验的。
+//     模型侧沙箱能不能读是 FS 策略的事，不是这里能验的。所以生产者声明错了
+//     （文件被删、路径写错）不会让恢复文件里出现一条死链：退回保留原内容。
 func (p *Pipeline) imageReadablePath(img spi.Image) (string, bool) {
+	if path, ok := readableImageFile(img.Path); ok {
+		return path, true
+	}
 	if p.opts.ImageReadablePath == nil {
 		return "", false
 	}
 	path, ok := p.opts.ImageReadablePath(img)
-	if !ok || strings.TrimSpace(path) == "" {
+	if !ok {
+		return "", false
+	}
+	return readableImageFile(path)
+}
+
+// readableImageFile 是上面那条 stat 判据的唯一实现（两条来源共用，避免漂移）。
+func readableImageFile(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" {
 		return "", false
 	}
 	info, err := os.Stat(path)

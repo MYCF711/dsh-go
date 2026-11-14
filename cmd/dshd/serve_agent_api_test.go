@@ -1023,7 +1023,7 @@ func TestSubagentToolContinuableReachesServeAdoption(t *testing.T) {
 	})
 	k := kernel.New("subagent-tool-e2e")
 	defer k.Root().Dispose()
-	if _, err := kernel.Assemble(k.Root(), builtinModules(".", e.home, 0, subp)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(".", e.home, 0, 0, subp)); err != nil {
 		t.Fatalf("装配: %v", err)
 	}
 	reg, err := kernel.Inject(k.Root(), spi.ToolsKey)
@@ -1099,7 +1099,7 @@ func TestSubagentToolWithoutContinuableWritesNoSession(t *testing.T) {
 	})
 	k := kernel.New("subagent-tool-e2e")
 	defer k.Root().Dispose()
-	if _, err := kernel.Assemble(k.Root(), builtinModules(".", e.home, 0, subp)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(".", e.home, 0, 0, subp)); err != nil {
 		t.Fatalf("装配: %v", err)
 	}
 	reg, err := kernel.Inject(k.Root(), spi.ToolsKey)

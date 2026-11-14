@@ -9,6 +9,7 @@ package analytics
 // 接上了"去写一个没人调用的假 feedback 流。
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -666,5 +667,152 @@ func TestProductAnalyticsEmitsOTLPWithResourceIdentity(t *testing.T) {
 	}
 	if attributes["is_success"]["boolValue"] != true {
 		t.Fatalf("布尔属性形状不对：%v", attributes["is_success"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 请求体压缩（官方 `LogExporterOptions.compression`：`none` | `gzip`）
+// ---------------------------------------------------------------------------
+
+// TestChannelGzipCompressionMatchesOfficialShape：配 `gzip` 时按官方
+// `src/event-transport.ts:26,31-32` 的形状——`gzipSync(data)` 压请求体、
+// 带 `content-encoding: gzip`；**默认（不配）逐字节不变**（官方默认不压缩）。
+func TestChannelGzipCompressionMatchesOfficialShape(t *testing.T) {
+	service, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer service.Close()
+
+	t.Run("gzip", func(t *testing.T) {
+		collector := newOTLPTestServer(t)
+		reporter := mustEventReporter(t, service, LogChannelOptions{
+			Endpoint:           collector.url(),
+			Scope:              InstrumentationScope{Name: "scope-gzip"},
+			Compression:        CompressionGzip,
+			MaxExportBatchSize: 1,
+			ScheduledDelay:     10 * time.Millisecond,
+		})
+		t.Cleanup(func() { _ = reporter.Shutdown(context.Background()) })
+
+		reporter.Emit(OTelLogRecord{EventName: "gzip_event", Timestamp: 1730000000000})
+		waitFor(t, "gzip 通道发出请求", func() bool { return collector.hits() >= 1 })
+
+		request := collector.snapshot()[0]
+		if got := request.header.Get("Content-Encoding"); got != "gzip" {
+			t.Fatalf("Content-Encoding = %q，配了 gzip 必须是 gzip", got)
+		}
+		// 请求体必须**真的是** gzip：直接当 JSON 解析必须失败（否则就是"声明了压缩、
+		// 发的还是明文"——collector 侧会 400，而我们会以为发出去了）。
+		if json.Valid([]byte(request.body)) {
+			t.Fatal("配了 gzip 时请求体不能是明文 JSON")
+		}
+		reader, err := gzip.NewReader(strings.NewReader(request.body))
+		if err != nil {
+			t.Fatalf("请求体不是合法 gzip: %v", err)
+		}
+		plain, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatalf("解压请求体失败: %v", err)
+		}
+		if err := reader.Close(); err != nil {
+			t.Fatalf("关闭 gzip reader: %v", err)
+		}
+		records := otlpRecordsOf(t, plain)
+		if len(records) != 1 || records[0]["eventName"] != "gzip_event" {
+			t.Fatalf("解压后的记录不对：%v", records)
+		}
+		if len(request.body) >= len(plain) {
+			t.Fatalf("压缩后 %d 字节不小于明文 %d 字节，说明根本没压", len(request.body), len(plain))
+		}
+		t.Logf("gzip：明文 %d 字节 → 压缩后 %d 字节", len(plain), len(request.body))
+	})
+
+	t.Run("默认 none 逐字节不变", func(t *testing.T) {
+		collector := newOTLPTestServer(t)
+		reporter := mustEventReporter(t, service, LogChannelOptions{
+			Endpoint:           collector.url(),
+			Scope:              InstrumentationScope{Name: "scope-plain"},
+			MaxExportBatchSize: 1,
+			ScheduledDelay:     10 * time.Millisecond,
+		})
+		t.Cleanup(func() { _ = reporter.Shutdown(context.Background()) })
+
+		reporter.Emit(OTelLogRecord{EventName: "plain_event", Timestamp: 1730000000000})
+		waitFor(t, "明文通道发出请求", func() bool { return collector.hits() >= 1 })
+
+		request := collector.snapshot()[0]
+		if got := request.header.Get("Content-Encoding"); got != "" {
+			t.Fatalf("没配压缩时不该带 Content-Encoding，得到 %q", got)
+		}
+		records := otlpRecordsOf(t, []byte(request.body))
+		if len(records) != 1 || records[0]["eventName"] != "plain_event" {
+			t.Fatalf("明文通道的记录不对：%v", records)
+		}
+	})
+}
+
+// 拼错的压缩方式必须 fail-loud：静默当成"不压缩"等于把用户的显式配置改掉。
+func TestChannelRejectsUnknownCompression(t *testing.T) {
+	service, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer service.Close()
+
+	_, err = service.CreateEventReporter(LogChannelOptions{
+		Endpoint:    "http://127.0.0.1:1/v1/logs",
+		Scope:       InstrumentationScope{Name: "scope"},
+		Compression: "zstd",
+	})
+	if err == nil {
+		t.Fatal("未知的 Compression 必须报错")
+	}
+	if !strings.Contains(err.Error(), "Compression") || !strings.Contains(err.Error(), "gzip") {
+		t.Fatalf("错误必须点名参数与合法值，实际: %v", err)
+	}
+}
+
+// 压缩不改变字节上限的判据：官方 `SESSION_LOG_MAX_REQUEST_BYTES` 是**未压缩**
+// 字节，所以压得很小的超限记录仍然要被拒收（不截断、不发出）。
+func TestGzipDoesNotBypassSessionByteLimit(t *testing.T) {
+	service, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer service.Close()
+
+	collector := newOTLPTestServer(t)
+	reporter := mustSessionReporter(t, service, SessionLogChannelOptions{
+		LogChannelOptions: LogChannelOptions{
+			Endpoint:           collector.url(),
+			Scope:              InstrumentationScope{Name: "scope-session-gzip"},
+			Compression:        CompressionGzip,
+			MaxExportBatchSize: 1,
+			ScheduledDelay:     5 * time.Millisecond,
+			OnFailure:          func(string, error) {},
+		},
+		MaxRequestBytes: 512,
+	})
+	t.Cleanup(func() { _ = reporter.Shutdown(context.Background()) })
+
+	// 4000 个 x 的重复串压缩后极小，但**未压缩**远超 512。
+	reporter.Report(SessionLogRecord{
+		SessionID: "session-1",
+		Event:     map[string]any{"data": strings.Repeat("x", 4000)},
+	})
+	stats := reporter.Stats()
+	if stats.Rejected != 1 || stats.Accepted != 0 {
+		t.Fatalf("压得再小也必须按未压缩字节拒收：%+v", stats)
+	}
+	if collector.hits() != 0 {
+		t.Fatalf("被拒收的记录不该发出请求（hits=%d）", collector.hits())
+	}
+
+	// 通道仍可用：正常大小的事件照发，且仍然是 gzip 编码。
+	reporter.Report(SessionLogRecord{SessionID: "session-1", Event: map[string]any{"seq": 1}})
+	waitFor(t, "超限之后通道仍能发送", func() bool { return collector.hits() >= 1 })
+	if got := collector.snapshot()[0].header.Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("会话日志通道的 Content-Encoding = %q", got)
 	}
 }

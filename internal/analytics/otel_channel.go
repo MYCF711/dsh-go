@@ -22,6 +22,11 @@ package analytics
 //   - `src/transport.ts:52-55` headers 是显式的：`Content-Type: application/json`
 //     之后再叠消费者自己的头（消费者可覆盖），"does not inherit ambient authorization
 //     headers or TLS identity"。
+//   - `src/transport.ts:41` "Resolve collector-local headers and agents with shared SDK
+//     timeout and **compression** defaults"；`src/event-transport.ts:26,31-32`
+//     `const compressed = config.compression === 'gzip'` → 请求体 `gzipSync(data)` + `'content-encoding': 'gzip'`。
+//     默认（未配）= `none`，请求体就是明文 JSON；`LogChannelOptions.Compression` 是它的
+//     宿主形状（校验见 normalizeLogChannelOptions，编码点见 send）。
 //
 // 为什么每条通道都要自己的 http.Client/队列/资源/scope：官方 README 那句
 // "no state is shared with other channels"。共用一份 client 或队列会让"一个消费者
@@ -34,6 +39,8 @@ package analytics
 // 其它消费者。两者共用同一套编码/重试/计数/诊断。
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -61,6 +68,15 @@ const (
 	DefaultExportTimeout = 30000 * time.Millisecond
 	// DefaultSessionLogMaxRequestBytes 是会话日志单请求上限（官方 4,000,000，只准调低）。
 	DefaultSessionLogMaxRequestBytes = 4_000_000
+)
+
+// 请求体压缩方式（官方 `LogExporterOptions.compression` 的两个合法取值）。
+const (
+	// CompressionNone 是默认值：请求体是明文 OTLP JSON（官方"默认不压缩"）。
+	CompressionNone = "none"
+	// CompressionGzip 让通道 gzip 请求体并带 `content-encoding: gzip`
+	// （官方 `src/event-transport.ts:26,31-32`）。
+	CompressionGzip = "gzip"
 )
 
 // 传输层的本地常量：与 Service 既有 exporter（service.go 的 postCollector）同口径，
@@ -98,6 +114,18 @@ type LogChannelOptions struct {
 	ScheduledDelay time.Duration
 	// ExportTimeout 是单请求看门狗；0 用 DefaultExportTimeout。
 	ExportTimeout time.Duration
+	// Compression 是请求体压缩方式（官方 `LogExporterOptions.compression`，
+	// 取值 `none` | `gzip`；零值/空 = `none`）。
+	//
+	// 官方默认就是不压缩（`src/event-transport.ts:26` 只认字面量 'gzip'），所以
+	// 零值必须逐字节等于"没有这个功能之前"的请求：不设 `Content-Encoding`、
+	// 载荷就是明文 OTLP JSON。配 `gzip` 时按官方形状 `gzipSync(data)` 压请求体
+	// 并设 `content-encoding: gzip`。
+	//
+	// 与 `maxRequestBytes` 的关系（官方 `SESSION_LOG_MAX_REQUEST_BYTES = 4_000_000`
+	// 是**未压缩**字节）：字节上限始终按**压缩前**的载荷算，压缩不会让一条超大
+	// 记录偷偷过闸。
+	Compression string
 	// OnFailure 是失败诊断回调（官方 onFailure：报"记录被拒/传输失败"，绝不记录内容）。
 	// 为 nil 时通道写到 stderr 一次——丢记录必须有声音，静默成功是本仓禁止的形态。
 	OnFailure func(message string, err error)
@@ -294,6 +322,18 @@ func normalizeLogChannelOptions(kind string, opts LogChannelOptions) (LogChannel
 	if opts.maxRequestBytes < 0 {
 		return LogChannelOptions{}, fmt.Errorf("analytics %s: maxRequestBytes 不能为负", kind)
 	}
+	// 压缩方式：官方只认 `gzip`（其余按 none），但**静默**把拼错的值当成
+	// "不压缩"等于把用户的显式配置悄悄改掉——所以不认识的值 fail-loud。
+	switch strings.ToLower(strings.TrimSpace(opts.Compression)) {
+	case "", CompressionNone:
+		opts.Compression = CompressionNone
+	case CompressionGzip:
+		opts.Compression = CompressionGzip
+	default:
+		return LogChannelOptions{}, fmt.Errorf(
+			"analytics %s: Compression=%q 不支持（合法值：%q / %q）",
+			kind, opts.Compression, CompressionNone, CompressionGzip)
+	}
 	if opts.onOutbound == nil {
 		opts.onOutbound = func() {}
 	}
@@ -464,6 +504,23 @@ func (c *otlpChannel) deliver(batch []queuedLog) {
 	c.exported.Add(int64(len(records)))
 }
 
+// gzipOTLPPayload 按官方 `gzipSync(data)` 的语义压 OTLP 请求体。
+//
+// 只有配了 `Compression: gzip` 才会走到这里；默认（none）的请求逐字节不变。
+// 用标准库 compress/gzip，不引第三方（go.mod 零第三方依赖的纪律）。
+func gzipOTLPPayload(payload []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := gzip.NewWriter(&buf)
+	if _, err := writer.Write(payload); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("analytics: gzip 压缩 OTLP 请求体失败: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("analytics: gzip 收尾失败: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
 // send 编码并 POST 一条 OTLP 请求（同步、含重试）。Service 的结算路径也走它。
 func (c *otlpChannel) send(ctx context.Context, records []otlpLogRecord) error {
 	if len(records) == 0 {
@@ -477,12 +534,22 @@ func (c *otlpChannel) send(ctx context.Context, records []otlpLogRecord) error {
 		// 排批逻辑已保证单请求不超限；走到这里说明分片算错了，必须报错而不是硬发。
 		return fmt.Errorf("analytics: OTLP 请求 %d 字节超过通道上限 %d", len(payload), c.opts.maxRequestBytes)
 	}
+	// 压缩只做一次：重试重发的必须是**同一份字节**（官方 exporter 也是编码一次、
+	// 之后每次尝试复用同一份 buffer）。
+	body := payload
+	if c.opts.Compression == CompressionGzip {
+		compressed, err := gzipOTLPPayload(payload)
+		if err != nil {
+			return err
+		}
+		body = compressed
+	}
 	var lastErr error
 	for attempt := 0; attempt < otlpChannelExportAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.Endpoint, bytesReader(payload))
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opts.Endpoint, bytesReader(body))
 		if err != nil {
 			return err
 		}
@@ -490,6 +557,11 @@ func (c *otlpChannel) send(ctx context.Context, records []otlpLogRecord) error {
 		request.Header.Set("Content-Type", "application/json")
 		for name, value := range c.opts.Headers {
 			request.Header.Set(name, value)
+		}
+		// 官方 event-transport.ts:31-32 的顺序相反：`{...headers, 'content-encoding':
+		// 'gzip'}` —— 压缩头**压过**消费者同名头，否则会出现"声明 gzip 却发了明文"。
+		if c.opts.Compression == CompressionGzip {
+			request.Header.Set("Content-Encoding", "gzip")
 		}
 		c.outbound.Add(1)
 		c.opts.onOutbound()

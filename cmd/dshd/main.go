@@ -91,12 +91,20 @@ var hostHistory = &historyHolder{}
 // 为什么抽出来：`run` / `exec` 要在**合成目录**（静态 + 插件）上再建一条流水线
 // （见 hostToolRunner），而 builtinModules 里那条建在静态目录上。两边各写一份
 // Options 一定会漂——最典型的是 SpillDir 写错，于是外置出去的 artifact 模型读不到。
-func toolsOptions(home string, maxChars int) tools.Options {
+func toolsOptions(home string, maxChars, maxInlineTokens int) tools.Options {
 	return tools.Options{
 		// artifact 落在 home 下（不是系统 temp）：FS 只放行了这个目录，
 		// 放 temp 里模型读不到自己刚被外置的结果。
 		SpillDir: filepath.Join(home, "artifacts"),
 		MaxChars: maxChars,
+		// 官方 0.2.2 #79 `dsh-spill-policy` 的 `config.maxInlineTokens`
+		// （文本与图片共享的估算 token 预算）。
+		//
+		// 三值语义在 modules/tools：0 = 未配置（回落到 DSHD_MAX_INLINE_TOKENS，
+		// 再没有就是关闭）、正值 = 这个预算、负值 = 非法（装配期 fail-loud）。
+		// 这里只负责把 `--max-inline-tokens` 的值原样交下去——**不再**只靠环境变量：
+		// 环境变量在 --help 里看不见，等于一个藏起来的开关（与 --reasoning 同一条理由）。
+		MaxInlineTokens: maxInlineTokens,
 		// 官方 0.2.2 #78 `session-checkpoint-policy` 的 `tools/execute` 钩子：
 		// 顶层调用的工具体是副作用边界，执行前先让请求前缀耐久；
 		// 失败即零执行（pipeline 里 fail-closed，见 modules/tools/pipeline.go）。
@@ -113,14 +121,14 @@ func toolsOptions(home string, maxChars int) tools.Options {
 // 「模型看得见、runner 回 unknown tool」是必然结果，不是配置问题。
 // 这里用同一个构造函数（tools.NewPipeline）、同一份 Options、同一条 bus，
 // 只把目录换成合成表——审批、沙箱、超时、外置、R3 兜底一样不少。
-func hostToolRunner(root *kernel.Scope, table spi.ToolRegistry, home string, maxChars int) spi.Runner {
-	return tools.NewPipeline(table, root.Bus(), toolsOptions(home, maxChars))
+func hostToolRunner(root *kernel.Scope, table spi.ToolRegistry, home string, maxChars, maxInlineTokens int) spi.Runner {
+	return tools.NewPipeline(table, root.Bus(), toolsOptions(home, maxChars, maxInlineTokens))
 }
 
 // builtinModules 按工作区与 home 装配默认实现。
 // artifacts 目录要放行给 FS 读：工具输出被外置成 artifact 之后，
 // Hint 会告诉模型「用 read 读全文」——不放行那句 Hint 就是假的。
-func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Module {
+func builtinModules(wd, home string, maxChars, maxInlineTokens int, sub *subProvider) []kernel.Module {
 	if sub == nil {
 		sub = &subProvider{} // 没绑定：工具会明确报「还没装配好」，不会假装能派
 	}
@@ -132,7 +140,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 	}
 	return []kernel.Module{
 		// 默认实现也是插件（A3）：它们与第三方插件走同一个 Register(scope)。
-		tools.Module(toolsOptions(home, maxChars)),
+		tools.Module(toolsOptions(home, maxChars, maxInlineTokens)),
 		// 官方 base 插件 #46：受管 `DSH_*` 环境注册表。装在这里（shell 工具之前）只是
 		// 为了让模块图读起来是"先有能力再有用它的工具"——工具是**惰性** inject 的，
 		// 真实顺序由能力图决定。装配代码见 shellenv_wiring.go。
@@ -332,8 +340,8 @@ func cwdOrDot() string {
 	return wd
 }
 
-func loadMods(manifestPath, home string, maxChars int, sub *subProvider) ([]kernel.Module, error) {
-	return loadModsIn(manifestPath, home, maxChars, sub, cwdOrDot())
+func loadMods(manifestPath, home string, maxChars, maxInlineTokens int, sub *subProvider) ([]kernel.Module, error) {
+	return loadModsIn(manifestPath, home, maxChars, maxInlineTokens, sub, cwdOrDot())
 }
 
 // loadModsIn 是 loadMods 的同一份实现，工作目录由调用方给定。
@@ -342,8 +350,8 @@ func loadMods(manifestPath, home string, maxChars int, sub *subProvider) ([]kern
 // 变成**工具的根**：read/edit/glob/grep/bash 的相对路径都按它解析。不这么做就会出现
 // 「系统提示里写着 Workspace: A，工具却在 B 里干活」——那正是 ACP 那条注释里
 // 实测踩过的坑（文件不存在 → 在宿主启动目录里翻）。
-func loadModsIn(manifestPath, home string, maxChars int, sub *subProvider, workdir string) ([]kernel.Module, error) {
-	mods := builtinModules(workdir, home, maxChars, sub)
+func loadModsIn(manifestPath, home string, maxChars, maxInlineTokens int, sub *subProvider, workdir string) ([]kernel.Module, error) {
+	mods := builtinModules(workdir, home, maxChars, maxInlineTokens, sub)
 
 	// wasm 模块在 Apply **之前**装：装不起来（缺文件/魔数不对/digest 不符）
 	// 就该在启动时炸，而不是等到第一次调用——那正是 digest 校验存在的意义。
@@ -376,14 +384,14 @@ func loadModsIn(manifestPath, home string, maxChars int, sub *subProvider, workd
 // 为什么加在 Apply **之后**：插件运行时不是可配置项。放进 builtinModules 会被
 // dsh.toml 的白名单静默丢掉（Apply 对没列出的模块只打一行 Warn 就跳过）——
 // 那正是「装好了插件、模型却永远看不见」的复现路径。
-func loadModsWithPlugins(manifestPath, home string, maxChars int, sub *subProvider) ([]kernel.Module, *pluginRuntime, error) {
-	return loadModsWithPluginsIn(manifestPath, home, maxChars, sub, cwdOrDot())
+func loadModsWithPlugins(manifestPath, home string, maxChars, maxInlineTokens int, sub *subProvider) ([]kernel.Module, *pluginRuntime, error) {
+	return loadModsWithPluginsIn(manifestPath, home, maxChars, maxInlineTokens, sub, cwdOrDot())
 }
 
 // loadModsWithPluginsIn 是 loadModsWithPlugins 的同一份实现，工作目录由调用方给定
 // （run 入口传官方 `workingDirectory.defaultDirectory`，见 loadModsIn）。
-func loadModsWithPluginsIn(manifestPath, home string, maxChars int, sub *subProvider, workdir string) ([]kernel.Module, *pluginRuntime, error) {
-	mods, err := loadModsIn(manifestPath, home, maxChars, sub, workdir)
+func loadModsWithPluginsIn(manifestPath, home string, maxChars, maxInlineTokens int, sub *subProvider, workdir string) ([]kernel.Module, *pluginRuntime, error) {
+	mods, err := loadModsIn(manifestPath, home, maxChars, maxInlineTokens, sub, workdir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -469,7 +477,7 @@ func cmdModules(argv []string) error {
 	if err := fs.Parse(argv[1:]); err != nil {
 		return err
 	}
-	mods, err := loadMods(*manifest, defaultHome(), 0, nil)
+	mods, err := loadMods(*manifest, defaultHome(), 0, 0, nil)
 	if err != nil {
 		return err
 	}
@@ -524,7 +532,7 @@ func cmdTools(argv []string) error {
 	if err != nil {
 		return err
 	}
-	mods, pluginRT, err := loadModsWithPlugins(*manifest, defaultHome(), 0, nil)
+	mods, pluginRT, err := loadModsWithPlugins(*manifest, defaultHome(), 0, 0, nil)
 	if err != nil {
 		return err
 	}
@@ -651,6 +659,11 @@ func cmdRun(argv []string) (retErr error) {
 	maxSteps := fs.Int("max-steps", defaultTurnMaxSteps, "最多几步")
 	home := fs.String("home", defaultHome(), "会话根目录")
 	maxChars := fs.Int("max-chars", defaultMaxChars, "工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
+	// 官方 0.2.2 #79 `dsh-spill-policy` 的 `config.maxInlineTokens`：文本与图片**共享**
+	// 的估算 token 预算。0 = 未配置（回落到 DSHD_MAX_INLINE_TOKENS，再没有就是关闭）。
+	// 负值不在这里挡：装配期由 modules/tools 的 Options.Validate fail-loud（与官方
+	// "Invalid config fails at load" 同一形状），这样库层与宿主是同一份判据。
+	maxInlineTokens := fs.Int("max-inline-tokens", 0, "工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
 	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	resumeSession := fs.String("session", "", "续这个会话（空=新建）；cwd 可省，按 id 找")
 	// 工具表默认压掉参数说明：20 次 A/B（10 个任务 × 两种表）结果一致，输入省 22%。
@@ -778,7 +791,7 @@ func cmdRun(argv []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	mods, pluginRT, err := loadModsWithPluginsIn(*manifest, *home, *maxChars, subp, workDir)
+	mods, pluginRT, err := loadModsWithPluginsIn(*manifest, *home, *maxChars, *maxInlineTokens, subp, workDir)
 	if err != nil {
 		return err
 	}
@@ -826,7 +839,7 @@ func cmdRun(argv []string) (retErr error) {
 	if _, err := kernel.Inject(root, spi.ToolRunnerKey); err != nil {
 		return err
 	}
-	runner := hostToolRunner(root, reg, *home, *maxChars)
+	runner := hostToolRunner(root, reg, *home, *maxChars, *maxInlineTokens)
 
 	// 新会话的工作目录与工具根是同一个值（装配期就定死的 workDir，见上面）。
 	// `--home` 是会话根，不是工作目录——两者互不替代。
@@ -1455,7 +1468,7 @@ func cmdExec(argv []string) error {
 	if *toolName == "" {
 		return fmt.Errorf("缺 --tool")
 	}
-	mods, pluginRT, err := loadModsWithPlugins(*manifest, defaultHome(), 0, nil)
+	mods, pluginRT, err := loadModsWithPlugins(*manifest, defaultHome(), 0, 0, nil)
 	if err != nil {
 		return err
 	}
@@ -1472,7 +1485,7 @@ func cmdExec(argv []string) error {
 	if err != nil {
 		return err
 	}
-	runner := hostToolRunner(root, reg, defaultHome(), 0)
+	runner := hostToolRunner(root, reg, defaultHome(), 0, 0)
 	res, err := runner.Run(root.Context(), *toolName, json.RawMessage(*rawArgs))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "执行失败: %v\n", err)

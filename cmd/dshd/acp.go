@@ -956,6 +956,9 @@ func cmdACP(argv []string) error {
 		"推理强度：空=不要（默认）| xhigh | max")
 	base := fs.String("base", envOr("DSHD_LLM_BASE", defaultLLMBase), "OpenAI 兼容端点")
 	maxChars := fs.Int("max-chars", defaultMaxChars, "工具输出外置阈值（字符）")
+	// 与 run/serve 同一个旋钮（官方 0.2.2 #79 `config.maxInlineTokens`）：三个入口
+	// 各差一个开关，就会出现"同一份配置换个客户端就不生效"的差异。
+	maxInlineTokens := fs.Int("max-inline-tokens", 0, "工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
 	home := fs.String("home", defaultHome(), "会话根目录")
 	steps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步")
 	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "AGENTS.md 进系统提示的字节上限（0=不传）")
@@ -1009,7 +1012,7 @@ func cmdACP(argv []string) error {
 	if d := diagOrWarn(*home); d != nil {
 		defer d.Close()
 	}
-	mods, err := loadMods(*manifest, *home, *maxChars, nil)
+	mods, err := loadMods(*manifest, *home, *maxChars, *maxInlineTokens, nil)
 	if err != nil {
 		return err
 	}

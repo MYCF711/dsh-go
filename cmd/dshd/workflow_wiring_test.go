@@ -353,7 +353,7 @@ func (c *recordingChat) Stream(ctx context.Context, req llm.Request, onEvent fun
 // 本仓的默认装配必须一致：不写 dsh.toml 也有 workflow 工具。
 func TestWorkflowEnabledByDefault(t *testing.T) {
 	home := t.TempDir()
-	mods := builtinModules(home, home, 4096, &subProvider{})
+	mods := builtinModules(home, home, 4096, 0, &subProvider{})
 	plan, err := kernel.TopoSort(mods)
 	if err != nil {
 		t.Fatalf("默认装配排序失败：%v", err)
@@ -398,7 +398,7 @@ func TestWorkflowEnabledByDefault(t *testing.T) {
 // 反向：manifest 里 `enabled = false` 必须真的把 workflow 关掉。
 func TestWorkflowCanBeDisabled(t *testing.T) {
 	home := t.TempDir()
-	mods := builtinModules(home, home, 4096, &subProvider{})
+	mods := builtinModules(home, home, 4096, 0, &subProvider{})
 	disabled := false
 	// manifest 是白名单：只列 tools + subagent + tool-workflow 三行（其余跳过，
 	// 会打 warn，这里不关心）。tool-workflow 那行显式关掉。

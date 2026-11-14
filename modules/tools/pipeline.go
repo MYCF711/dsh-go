@@ -37,12 +37,14 @@ type Options struct {
 	MaxInlineTokens int
 	// ImageReadablePath 把一张结果图片解析成"模型可以 read 的路径"（附件/源文件路径）。
 	//
-	// 为什么必须是注入的函数值：本仓 `spi.Image` 只有 MIME + base64，没有附件身份
-	// （internal/spi/tool.go:214-218），而附件库在 cmd/dshd 侧（package main，
-	// modules 拿不到）。官方把这件事做成注入的 provider
-	// （`resolveImageAttachmentAccess`，dsh-llm/lib/types/content.js:13-19）。
+	// 为什么是注入的函数值：附件库在 cmd/dshd 侧（package main，modules 拿不到），
+	// 而官方把这件事做成注入的 provider（`resolveImageAttachmentAccess`，
+	// dsh-llm/lib/types/content.js:13-19）。**首选来源不是它**，而是
+	// `spi.Image.Path`（生产者自报的源文件路径，例如 `read_image` 刚读的那个文件）：
+	// 那个精度最高、不需要任何解析器，见 spill_policy.go 的 imageReadablePath。
 	//
-	// nil（本仓当前装配）= 拿不到路径 = 官方 best-effort：含图片且超预算的结果
+	// 这个钩子留给"结果图片来自内存、但宿主另有附件库能按内容反查路径"的部署。
+	// 两个来源都为 nil/空 = 拿不到路径 = 官方 best-effort：含图片且超预算的结果
 	// **保留原内容**并记一条 warning，绝不把读不到的路径塞进恢复文件。
 	ImageReadablePath func(spi.Image) (string, bool)
 	// ToolTimeout 是**每一次工具调用**的统一截止时间（timeout-policy）的默认值。
