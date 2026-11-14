@@ -42,6 +42,27 @@ const (
 	deepSeekUserAgent = "dsh-go/0.2.2"
 )
 
+// 官方 `dsh-web-search-deepseek` Config 里三个"设置页可编辑"字段（`src/index.ts:71-79`）
+// 的宿主接缝名。设置命名空间 `web-search-deepseek` 经 cmd/dshd 的设置叠加层变成
+// 这三个环境变量，**这里才是它们真正的消费方**：
+//
+//	web-search-deepseek.maxUses    → DSHD_SEARCH_MAX_USES
+//	web-search-deepseek.maxTokens  → DSHD_SEARCH_MAX_TOKENS
+//	web-search-deepseek.apiVersion → DSHD_SEARCH_API_VERSION
+//
+// 官方 schema 里 maxUses 是 `.step(1).min(1).default(5)`、maxTokens 是裸
+// `.number().default(4096)`、apiVersion 是 `.default('2023-06-01')`；三者空/非法/<=0
+// 一律回落官方默认（本仓既有约定：写坏配置不该把能力变成"永远拒绝"——0 次
+// web_search 或 0 输出 token 的请求只会稳定失败，那不是"关闭"）。
+const (
+	// envDeepSeekMaxUses 对应官方 `maxUses`（默认 DeepSeekDefaultMaxUses）。
+	envDeepSeekMaxUses = "DSHD_SEARCH_MAX_USES"
+	// envDeepSeekMaxTokens 对应官方 `maxTokens`（默认 DeepSeekDefaultMaxTokens）。
+	envDeepSeekMaxTokens = "DSHD_SEARCH_MAX_TOKENS"
+	// envDeepSeekAPIVersion 对应官方 `apiVersion`（默认 DeepSeekDefaultAPIVersion）。
+	envDeepSeekAPIVersion = "DSHD_SEARCH_API_VERSION"
+)
+
 // DeepSeek 是 DeepSeek 原生搜索 provider。
 type DeepSeek struct {
 	// BaseURL 是 Messages 兼容端点根（默认 DeepSeekDefaultBaseURL）。
@@ -60,6 +81,18 @@ type DeepSeek struct {
 }
 
 // NewDeepSeekFromEnv 按环境造一个 DeepSeek provider（生产与测试同一份）。
+//
+// 官方 `dsh-web-search-deepseek` 的 Config 字段 → 宿主环境变量：
+//
+//	baseURL    → DEEPSEEK_SEARCH_BASE_URL / DSHD_SEARCH_BASE_URL
+//	model      → DEEPSEEK_SEARCH_MODEL / DSHD_SEARCH_MODEL
+//	apiKey     → DEEPSEEK_API_KEY / DSHD_SEARCH_API_KEY（官方是 credential-ref，见文件头注释）
+//	apiVersion → DSHD_SEARCH_API_VERSION
+//	maxTokens  → DSHD_SEARCH_MAX_TOKENS
+//	maxUses    → DSHD_SEARCH_MAX_USES
+//
+// 后三条是 `web-search-deepseek` 设置页字段的**真实消费方**：cmd/dshd 装配时把设置
+// 文档叠在环境变量前面（settingsEnvOverlay），所以这里读到的就是用户在设置页里改的值。
 func NewDeepSeekFromEnv(getenv func(string) string) *DeepSeek {
 	if getenv == nil {
 		return &DeepSeek{}
@@ -72,13 +105,27 @@ func NewDeepSeekFromEnv(getenv func(string) string) *DeepSeek {
 	if model == "" {
 		model = DeepSeekDefaultModel
 	}
+	// 官方 maxUses 有 `.min(1)`、maxTokens 是裸 number；两者都要正整数才生效。
+	maxUses := DeepSeekDefaultMaxUses
+	if n, ok := parseBoundedInt(getenv(envDeepSeekMaxUses), 1, 0); ok {
+		maxUses = n
+	}
+	maxTokens := DeepSeekDefaultMaxTokens
+	if n, ok := parseBoundedInt(getenv(envDeepSeekMaxTokens), 1, 0); ok {
+		maxTokens = n
+	}
+	// apiVersion 是非空才生效（官方 `.default('2023-06-01')`，空串等于没设）。
+	apiVersion := strings.TrimSpace(getenv(envDeepSeekAPIVersion))
+	if apiVersion == "" {
+		apiVersion = DeepSeekDefaultAPIVersion
+	}
 	return &DeepSeek{
 		BaseURL:    base,
 		APIKey:     firstNonEmpty(getenv("DEEPSEEK_API_KEY"), getenv("DSHD_SEARCH_API_KEY")),
 		Model:      model,
-		APIVersion: DeepSeekDefaultAPIVersion,
-		MaxTokens:  DeepSeekDefaultMaxTokens,
-		MaxUses:    DeepSeekDefaultMaxUses,
+		APIVersion: apiVersion,
+		MaxTokens:  maxTokens,
+		MaxUses:    maxUses,
 	}
 }
 

@@ -155,7 +155,11 @@ func builtinModules(wd, home string, maxChars, maxInlineTokens int, sub *subProv
 		glob.Module(),
 		grep.Module(),
 		historyModule(hostHistory),
-		search.Module(),
+		// 官方 web 命名空间的三个设置（`web` 的 provider 选择、`web-deepseek-api`
+		// 的 9 个字段、`web-search-deepseek` 的端点/模型/请求参数）在这里变成
+		// provider 的配置：把"设置优先的 getenv"传进去，modules/search 一个字段
+		// 都不用改（它本来就只从同一个 getenv 接缝读，见 settings_effective.go）。
+		search.ModuleWithEnv(settingsEnvOverlay(home, os.Getenv)),
 		history.Module(),
 		wdtool.Module(),
 		wsdeps.Module(),
@@ -172,7 +176,11 @@ func builtinModules(wd, home string, maxChars, maxInlineTokens int, sub *subProv
 		webfetch.Module(),
 		websearch.Module(),
 		readimage.Module(),
-		pwsh.Module(),
+		// 官方 `pwsh-sandbox.timeoutMs` / `maxOutputBytes` 的真实落点：
+		// 只有**用户显式写过**的值才注入（没写过 = 工具自己的官方默认
+		// 120s / 64000，见 modules/tool/pwsh 的 DefaultTimeout /
+		// DefaultMaxOutputBytes）。零值 Option 一律被忽略，不会把默认值改成 0。
+		pwsh.Module(pwshBudgetOptions(home)...),
 		github.Module(),
 		repohere.Module(),
 		execlit.Module(),
@@ -1103,7 +1111,10 @@ func cmdRun(argv []string) (retErr error) {
 	// 无限任务），步数只是死循环安全阀。
 	// 官方 subagent.maxActiveSubagents：并发子代理上限（默认 8；desktop profile
 	// 覆盖为 20）。解析在建循环之前、发请求之前：写错就 fail-closed。
-	subGate, err := subagentGateFromEnv(os.Getenv)
+	//
+	// 设置文档里的 `subagent.maxActiveSubagents` 优先（用户显式写过才覆盖，
+	// 没写过继续走环境变量 / 官方默认；见 settings_effective.go 的三条判据）。
+	subGate, err := subagentGateFromSettings(*home, os.Getenv)
 	if err != nil {
 		return err
 	}
@@ -1114,10 +1125,16 @@ func cmdRun(argv []string) (retErr error) {
 		// 可续问子会话的落点。空着会让 Continuable 明确失败——所以必须给。
 		home: *home,
 		gate: subGate,
+		// 官方 subagent.maxDepth（默认 1）：设置文档写过就用它，否则 nil 走默认。
+		depthLimit: effectiveSubagentMaxDepth(*home),
 	})
 	loop := &agent.Loop{
 		Chat:   chat,
 		Steers: steerInbox,
+		// 官方 agent-loop.maxParallelToolCalls（默认 10）：设置文档写过就用它，
+		// 没写过保持 0 = 走 DSHD_MAX_PARALLEL_TOOL_CALLS / 官方默认
+		// （internal/agent/parallel.go:99-105 的三段解析）。
+		MaxParallelToolCalls: effectiveAgentLoopMaxParallel(*home),
 		// 工具写的耐久会话事件（workflow 的 4 类 `tool-workflow/*` 帧）落到本会话
 		// 的 v4 日志：serve 的 follow 会把它镜像成 journal 帧，GUI 再投影出节点。
 		// 不给它，workflow 就会"跑得起来但界面上什么都没有"。

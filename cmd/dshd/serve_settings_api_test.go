@@ -104,15 +104,27 @@ func TestSettingsDescribeOfficialWireEnvelope(t *testing.T) {
 	if len(value) != 3 || value["writable"] != true || value["hasDocument"] != false {
 		t.Fatalf("result.value 不是官方 SettingsDescribeValue：%s", payload)
 	}
-	// 十一行：model / permission / llm + 官方客户端与插件的 7 个 UI 命名空间
+	// 十九行 = 原来的十一行 + 官方 4 条设置页的 8 个命名空间（2026-11-15）。
+	//
+	// 为什么从 11 变 19（**不是放宽判据，而是官方形状变多了**）：这 8 条每一条
+	// 都是官方 UI 页面的"存在条件"——官方客户端用
+	// `ctx.configForms.whileServed([ns...])` 决定页面出不出来，宿主不发这条
+	// 命名空间，页面就永远不显示。4 页对应的命名空间是一到三条不等：
+	//
+	//	settings-agent-loop  → agent-loop
+	//	settings-shell       → bash-sandbox / pwsh-sandbox
+	//	settings-subagent    → subagent / subagent-model-selection-settings
+	//	settings-web-search  → web / web-deepseek-api / web-search-deepseek
+	//
+	// 原来的十一行：model / permission / llm + 官方客户端与插件的 7 个 UI 命名空间
 	// （locale / ui-theme / ui-chat / ui-settings / ui-conversation /
 	// session-log-deepseek / session-telemetry-otel）+ agent-preset-registry。
 	// llm 是 0.2.2-rc.2 加的（发布 `providers.<route>.retryPolicy`）；
 	// agent-preset-registry 是官方 agent-preset registry 的 selectedDefault
 	// （dsh-client-ui-agent-preset 的"设为默认"写的就是它）。
 	namespaces, ok := value["namespaces"].([]any)
-	if !ok || len(namespaces) != 11 {
-		t.Fatalf("result.value.namespaces 应是十一行：%s", payload)
+	if !ok || len(namespaces) != 19 {
+		t.Fatalf("result.value.namespaces 应是十九行（11 + 4 条设置页的 8 个命名空间）：%s", payload)
 	}
 	for _, rawNamespace := range namespaces {
 		namespace := rawNamespace.(map[string]any)
@@ -169,8 +181,10 @@ func TestSettingsDescribeOfficialWireShape(t *testing.T) {
 		t.Fatalf("hasDocument 应为 false（本宿主没有配置编辑器的本地文档）：%v", out["hasDocument"])
 	}
 	namespaces, ok := out["namespaces"].([]any)
-	if !ok || len(namespaces) != 11 {
-		t.Fatalf("namespaces 应是 model/permission/llm + 7 个客户端/插件 UI 命名空间 + agent-preset-registry 共十一行，实际：%v", out["namespaces"])
+	if !ok || len(namespaces) != 19 {
+		// 19 = 原来的 11 行 + 官方 4 条设置页的 8 个命名空间（2026-11-15，逐条见
+		// 上面那个用例的注释）。多出来的行不是重复发布，是官方页面的存在条件。
+		t.Fatalf("namespaces 应是 model/permission/llm + 7 个客户端/插件 UI 命名空间 + agent-preset-registry + 4 条设置页的 8 个命名空间共十九行，实际：%v", out["namespaces"])
 	}
 	for _, raw := range namespaces {
 		namespace, ok := raw.(map[string]any)
@@ -183,6 +197,11 @@ func TestSettingsDescribeOfficialWireShape(t *testing.T) {
 			"ui-conversation", "session-log-deepseek",
 			// 2026-11-14 补：官方 dsh-session-telemetry-otel 的开关命名空间。
 			"session-telemetry-otel",
+			// 2026-11-15 补：官方 4 条设置页的命名空间（每条都是官方
+			// `ctx.configForms.whileServed([...])` 的存在条件，缺了页面不显示）。
+			"agent-loop", "bash-sandbox", "pwsh-sandbox", "subagent",
+			"subagent-model-selection-settings",
+			"web", "web-deepseek-api", "web-search-deepseek",
 			// 2026-11-15 补：官方 agent-preset registry 的 selectedDefault。
 			"agent-preset-registry":
 		default:

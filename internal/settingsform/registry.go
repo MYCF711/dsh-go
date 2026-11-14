@@ -228,6 +228,33 @@ func HostRegistry() *Registry {
 	if _, err := registry.Register(agentPresetNamespaceSpec()); err != nil {
 		panic(fmt.Sprintf("settingsform: agent-preset 命名空间非法: %v", err))
 	}
+	// 官方 UI 的 4 个设置页各自的插件命名空间（2026-11-15 补）。
+	//
+	// 这 4 页在官方客户端里的存在条件是"宿主服务了它的命名空间"
+	// （`ctx.configForms.whileServed([...])`）：宿主不发，页面**永远不显示**。
+	// 每页对应的命名空间不一定是 1 个——官方页面绑的是执行器/provider 条目的
+	// 命名空间，一到三个不等：
+	//
+	//	settings-agent-loop    → agent-loop
+	//	settings-shell         → bash-sandbox / pwsh-sandbox
+	//	settings-subagent      → subagent / subagent-model-selection-settings
+	//	settings-web-search    → web / web-deepseek-api / web-search-deepseek
+	//
+	// 共 8 条（权威源逐条写在各自的 *_schema.go 文件头）。默认值照官方：
+	// 官方默认关闭的（subagent-model-selection-settings.enabled=false）就默认关闭，
+	// 只是**可以被打开**。
+	for _, group := range [][]NamespaceSpec{
+		buildAgentLoopNamespaceSpecs(),
+		buildShellSandboxNamespaceSpecs(),
+		buildSubagentNamespaceSpecs(),
+		buildWebNamespaceSpecs(),
+	} {
+		for _, spec := range group {
+			if _, err := registry.Register(spec); err != nil {
+				panic(fmt.Sprintf("settingsform: 设置页命名空间 %q 非法: %v", spec.NS, err))
+			}
+		}
+	}
 	return registry
 }
 

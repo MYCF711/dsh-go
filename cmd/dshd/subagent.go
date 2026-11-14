@@ -47,9 +47,27 @@ type subRunner struct {
 	// gate 是并发池（官方 subagent.maxActiveSubagents，默认 8）。
 	// nil = 不闸门（测试与旧装配的零影响路径）。
 	gate *subagentGate
+	// depthLimit 是嵌套深度上限（官方 `subagent.maxDepth`，默认 1）。
+	//
+	// nil = 用官方默认值：既有装配点（测试与旧调用方）不写这个字段，行为与
+	// 之前"硬编码 1"逐字一致；真实装配点由 cmd/dshd/main.go 从设置文档读出。
+	// 用指针而不是 0 哨兵：官方 `maxDepth` 允许 **0**（= 连主代理都不许委派），
+	// 0 是一个有意义的合法值，不能拿来当"没设置"。
+	// 语义：`depth` 是**当前**深度（主代理 0），到上限就拒绝再派。
+	depthLimit *int
 }
 
-const maxDepth = 1
+// officialDefaultMaxDepth 是官方 `subagent.maxDepth` 的默认值
+// （`dsh-subagent/src/index.ts:196` 的 `.default(1)`）：只允许一层委派。
+const officialDefaultMaxDepth = 1
+
+// maxDepthLimit 返回生效的深度上限（字段优先，否则官方默认）。
+func (s *subRunner) maxDepthLimit() int {
+	if s.depthLimit != nil && *s.depthLimit >= 0 {
+		return *s.depthLimit
+	}
+	return officialDefaultMaxDepth
+}
 
 // subCwdMu 让"临时切目录 + 跑子代理"这段临界区串行。
 var subCwdMu sync.Mutex
@@ -62,8 +80,8 @@ func (s *subRunner) RunSub(ctx context.Context, req spi.SubagentRequest) (spi.Su
 // runSub 是 RunSub 与 StartActivation 的**唯一**实现：两条入口的并发闸门、
 // 父子会话归属、审批借用必须完全一致，差别只在 options。
 func (s *subRunner) runSub(ctx context.Context, req spi.SubagentRequest, options spi.ActivationOptions) (spi.SubagentResult, error) {
-	if s.depth >= maxDepth {
-		return spi.SubagentResult{}, fmt.Errorf("子代理不能再派子代理")
+	if s.depth >= s.maxDepthLimit() {
+		return spi.SubagentResult{}, fmt.Errorf("子代理不能再派子代理（官方 subagent.maxDepth=%d）", s.maxDepthLimit())
 	}
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {

@@ -248,6 +248,20 @@ const (
 	uiKindString  = "string"
 	uiKindInteger = "integer"
 	uiKindBoolean = "boolean"
+	// uiKindNumber 是官方**裸 `z.number()`**：envelope 上只有 meta.default，
+	// 没有 step/min/max（`dsh-bash-local/src/index.ts:102-104` 的
+	// `timeoutMs: z.number().default(120_000)` 就是这种）。与 uiKindInteger 的
+	// 差别只在 envelope 形状，不在宿主接受的取值（本仓 L1 表单仍按整数毫秒/字节）。
+	uiKindNumber = "number"
+)
+
+// 官方 string 字段的 meta.role（envelope 上逐字发布的形状）。
+const (
+	// uiRoleCredentialRef 是 `z.string().role('credential-ref')`：值是**凭据引用名**
+	// （如 DEEPSEEK_API_KEY），不是凭据本身。
+	uiRoleCredentialRef = "credential-ref"
+	// uiRoleSecret 是 `z.string().role('secret')`：值从不上线，只报"有没有设"。
+	uiRoleSecret = "secret"
 )
 
 // uiField 是一个官方字段声明。**schema envelope 与 sections 字段投影都从这一张
@@ -273,6 +287,8 @@ type uiField struct {
 	patternFlags string
 	// loose 只对 uiKindEnum 生效（官方 transcriptView 的 .loose()）。
 	loose bool
+	// role 是官方 string 字段的 meta.role（credential-ref / secret）；空 = 无该键。
+	role string
 	// baseOnly 表示"Base 里有默认值，但官方 schema 没有 meta.default"：
 	// 默认值来自客户端常量（transcriptView 的 DEFAULT_TRANSCRIPT_VIEW_MODE）。
 	baseOnly bool
@@ -293,6 +309,19 @@ func uiIntegerField(name string, minimum, maximum, def int64) uiField {
 	return uiField{name: name, kind: uiKindInteger, min: &low, max: &high, def: def}
 }
 
+// uiMinOnlyIntegerField 声明官方 `z.number().step(1).min(v)` 形状：有 step、有下限、
+// **没有上限**（`dsh-web-deepseek-api/src/index.ts:101` 的 searchRequestsPerSecond
+// 与 `dsh-web-search-deepseek/src/index.ts:78` 的 maxUses 都是这种）。
+func uiMinOnlyIntegerField(name string, minimum int64, def any) uiField {
+	low := minimum
+	return uiField{name: name, kind: uiKindInteger, min: &low, def: def}
+}
+
+// uiBareNumberField 声明官方裸 `z.number().default(v)`：envelope 只有 default。
+func uiBareNumberField(name string, def any) uiField {
+	return uiField{name: name, kind: uiKindNumber, def: def}
+}
+
 func uiBooleanField(name string, def bool) uiField {
 	return uiField{name: name, kind: uiKindBoolean, def: def}
 }
@@ -310,6 +339,12 @@ func (f uiField) withRequired(required bool) uiField {
 
 func (f uiField) withLoose() uiField {
 	f.loose = true
+	return f
+}
+
+// withRole 发布官方 `z.string().role(...)` 的 meta.role。
+func (f uiField) withRole(role string) uiField {
+	f.role = role
 	return f
 }
 
@@ -340,7 +375,9 @@ func (f uiField) meta() map[string]any {
 			meta["loose"] = true
 		}
 	case uiKindString:
-		if f.def != nil {
+		// secret 的值从不上线：官方 plainSchema 对 role==='secret' 的节点删掉
+		// default 与 required（schema.ts 的 plainSchema 那三步里的第二步）。
+		if f.def != nil && f.role != uiRoleSecret {
 			meta["default"] = f.def
 		}
 		if f.pattern != "" {
@@ -361,12 +398,20 @@ func (f uiField) meta() map[string]any {
 		if f.def != nil {
 			meta["default"] = f.def
 		}
+	case uiKindNumber:
+		// 裸 z.number()：官方 envelope 上只有 default，一个约束键都没有。
+		if f.def != nil {
+			meta["default"] = f.def
+		}
 	case uiKindBoolean:
 		if f.def != nil {
 			meta["default"] = f.def
 		}
 	}
-	if f.required != nil {
+	if f.role != "" {
+		meta["role"] = f.role
+	}
+	if f.required != nil && f.role != uiRoleSecret {
 		meta["required"] = *f.required
 	}
 	return meta
@@ -389,6 +434,8 @@ func (f uiField) schemaNode(b *schemaEnvelope) int {
 	case uiKindString:
 		return b.node("string", f.meta(), nil)
 	case uiKindInteger:
+		return b.node("number", f.meta(), nil)
+	case uiKindNumber:
 		return b.node("number", f.meta(), nil)
 	case uiKindBoolean:
 		return b.node("boolean", f.meta(), nil)
@@ -425,6 +472,13 @@ func (f uiField) fieldSpec() FieldSpec {
 		}
 	case uiKindBoolean:
 		spec.Type = FieldTypeBoolean
+	case uiKindNumber:
+		// 官方裸 number 在 sections[] 里仍投影成 integer：L1 表单只画整数输入框，
+		// 而这些字段的真实语义（毫秒 / 字节 / token 数）本来就是整数。
+		spec.Type = FieldTypeInteger
+	}
+	if f.role == uiRoleSecret {
+		spec.Secret = true
 	}
 	return spec
 }
@@ -448,15 +502,32 @@ type uiNamespace struct {
 	// session-telemetry-otel.mode 的真实上传/导出后端不存在，声明"开"就是
 	// 静默成功，因此返回四字段 not_implemented（501）。返回 nil 表示通过。
 	check func(value map[string]any) error
+	// schemaOnly 是 L1 表单表达不了、只进 schema envelope 的字段（数组 / 嵌套对象）。
+	//
+	// `FieldSpec` 只有 string/integer/boolean 三种标量，`sections[].fields` 装不下
+	// `allowedModels: {provider, model}[]` 这种节点。官方 settings 的 schema 里它是
+	// 真字段，所以 envelope 必须照样发布（否则客户端 rehydrate 出来的表单少一截）；
+	// 只是 GUI 的通用表单不画它，语义校验走 check。
+	schemaOnly []schemaOnlyField
+}
+
+// schemaOnlyField 是一个只发 schema、不进 sections[] 的字段声明。
+type schemaOnlyField struct {
+	name string
+	// node 在同一个 envelope builder 上建节点（uid 因此与标量字段连续、无空洞）。
+	node func(b *schemaEnvelope) int
 }
 
 // schema 生成官方 schemastery envelope（根 object 带 meta.default={}，与官方
 // toJSON 一致）。
 func (ns uiNamespace) schema() any {
 	b := newSchemaEnvelope()
-	dict := make(map[string]any, len(ns.fields))
+	dict := make(map[string]any, len(ns.fields)+len(ns.schemaOnly))
 	for _, field := range ns.fields {
 		dict[field.name] = field.schemaNode(b)
+	}
+	for _, field := range ns.schemaOnly {
+		dict[field.name] = field.node(b)
 	}
 	root := b.node("object", map[string]any{"default": map[string]any{}}, map[string]any{"dict": dict})
 	return b.envelope(root)
@@ -482,8 +553,11 @@ func (ns uiNamespace) validate(value any) error {
 	if !ok {
 		return newInvalidTypeError([]string{ns.ns}, "object", value)
 	}
-	known := make(map[string]bool, len(ns.fields))
+	known := make(map[string]bool, len(ns.fields)+len(ns.schemaOnly))
 	for _, field := range ns.fields {
+		known[field.name] = true
+	}
+	for _, field := range ns.schemaOnly {
 		known[field.name] = true
 	}
 	for key := range object {
@@ -542,16 +616,32 @@ func (f uiField) validate(namespace string, raw any) error {
 			}
 		}
 		return nil
-	case uiKindInteger:
+	case uiKindInteger, uiKindNumber:
 		number, ok := integerValue(raw)
 		if !ok {
 			return newInvalidTypeError(path, "integer", raw)
 		}
+		if f.kind == uiKindNumber {
+			// 裸 number 没有官方的 min/max 声明（envelope 上就不许有），
+			// 这里也就只判类型；"必须为正"这类运行时判据由各命名空间的
+			// check（官方构造函数里也才是那一层）负责。
+			return nil
+		}
+		// 官方有"只有下限、没有上限"的字段（agent-loop 的 maxParallelToolCalls
+		// 是 `.min(1)`，searchRequestsPerSecond / maxUses 是 `.min(1)`），
+		// 所以两侧都要按"有没有声明"分开取，不能假定另一个端点也存在。
+		minimum, maximum := "", ""
+		if f.min != nil {
+			minimum = formatInt(*f.min)
+		}
+		if f.max != nil {
+			maximum = formatInt(*f.max)
+		}
 		if f.min != nil && number < *f.min {
-			return newOutOfRangeError(path, raw, formatInt(*f.min), formatInt(*f.max))
+			return newOutOfRangeError(path, raw, minimum, maximum)
 		}
 		if f.max != nil && number > *f.max {
-			return newOutOfRangeError(path, raw, formatInt(*f.min), formatInt(*f.max))
+			return newOutOfRangeError(path, raw, minimum, maximum)
 		}
 		return nil
 	case uiKindBoolean:
@@ -794,24 +884,36 @@ func transcriptViewAcceptableValues() []string {
 	return out
 }
 
+// MaxSafeInteger 是 JS 的 Number.MAX_SAFE_INTEGER：官方 schema 在"不设上限"处
+// 逐字用的就是它（`dsh-subagent/src/index.ts:196-197` 的 `.max(Number.MAX_SAFE_INTEGER)`）。
+const MaxSafeInteger int64 = 9007199254740991
+
+// uiNamespaceSpec 把一份声明翻成注册表能收的 NamespaceSpec。
+//
+// **schema / sections / base 同源**就靠这一处：字段投影（fieldSpecs）、envelope
+// （schema）、默认值（base）与语义校验（validate）全部从同一个 uiNamespace 生成，
+// 所以不存在"schema 说 min 1、section 说 min 10"这种漂移。
+func uiNamespaceSpec(namespace uiNamespace) NamespaceSpec {
+	return NamespaceSpec{
+		NS:      namespace.ns,
+		Title:   namespace.title,
+		Applies: "live",
+		Fields:  namespace.fieldSpecs(),
+		Schema:  namespace.schema(),
+		Base:    deepCloneMap(namespace.base),
+		Validate: func(value any) error {
+			return namespace.validate(value)
+		},
+		Normalize: namespace.normalize,
+	}
+}
+
 // buildClientUINamespaceSpecs 把声明转成注册表能收的 NamespaceSpec。
 func buildClientUINamespaceSpecs() []NamespaceSpec {
 	namespaces := clientUINamespaces()
 	specs := make([]NamespaceSpec, 0, len(namespaces))
 	for _, namespace := range namespaces {
-		namespace := namespace
-		specs = append(specs, NamespaceSpec{
-			NS:      namespace.ns,
-			Title:   namespace.title,
-			Applies: "live",
-			Fields:  namespace.fieldSpecs(),
-			Schema:  namespace.schema(),
-			Base:    deepCloneMap(namespace.base),
-			Validate: func(value any) error {
-				return namespace.validate(value)
-			},
-			Normalize: namespace.normalize,
-		})
+		specs = append(specs, uiNamespaceSpec(namespace))
 	}
 	return specs
 }
