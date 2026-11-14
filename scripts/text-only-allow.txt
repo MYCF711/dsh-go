@@ -52,7 +52,7 @@ internal/session/compact.go:Compact | 判"摘要是不是空的"只看 text 块�
 # ACP session/load 的正文 chunk：思考块在紧邻的上一个循环里已按
 # session.ReasoningBlocksBySeq 逐块 emit（顺序 思考→正文→调用，与 fork/serve 一致）。
 # 正文为空只表示"这条没有正文 chunk"，不决定消息是否消失。
-cmd/dshd/acp.go:1567 | 思考块在上一循环已按 ReasoningBlocksBySeq emit（tool/call 走 ACP 自己的调用事件）；正文空只表示没有正文 chunk，不决定消息存亡
+cmd/dshd/acp.go:1600 | 思考块在上一循环已按 ReasoningBlocksBySeq emit（tool/call 走 ACP 自己的调用事件）；正文空只表示没有正文 chunk，不决定消息存亡
 
 # history_search 的检索过滤：判据来自 eventText，而 eventText 已经把
 # text / reasoning / tool-call 三样拼起来。text 为空 = 三样都没有，确实搜不到东西。

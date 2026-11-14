@@ -214,20 +214,35 @@ func (s *subRunner) runSub(ctx context.Context, req spi.SubagentRequest, options
 			res.Structured = structured
 		}
 	}
-	// 可续问：把这一趟真实往返落成一条 durable 子会话，官方 `subagents.prompt`
-	// 才有地址可投。**放在成功之后**——委派失败不留孤儿会话（一个空会话既不能
-	// 续问也没人清理）。
+	// durable 子会话：把这一趟真实往返落成一条 durable 子会话。三个来源：
+	//
+	//   - **可续问**（`req.Continuable`）：官方 `subagents.prompt` 才有地址可投；
+	//   - **具名委派**（`req.AgentID` / 显式 `ChildSessionID`）：地址要跨进程认；
+	//   - **一次性同步 fork**（`req.Seed` 非空）：官方
+	//     `dsh-subagent-fork-in-process` 的语义是"the child works in its own session"
+	//     （README.md "What a fork delegation does"），且种子 "becomes part of the
+	//     child's own durable transcript"（`src/index.ts:72-78`）——不留会话就等于
+	//     把那份种子丢掉。判据是**种子里有东西**：空种子 = 首轮完成之前的 fork，
+	//     官方说它 "behaves like a fresh spawn"（README.md "Seed boundary"），
+	//     那就不该凭空多出一条会话。
+	//
+	// **放在成功之后**——委派失败不留孤儿会话（一个空会话既不能续问也没人清理）。
+	forkChild := len(req.Seed) > 0
 	if reuseChild != "" {
 		// 复用：这一趟往返**追加**到同一条子会话（不新建，v4 重建等于抹历史）。
 		if err := agent.AppendChildTurn(s.home, "", reuseChild, prompt, text); err != nil {
 			return spi.SubagentResult{}, fmt.Errorf("委派已完成但复用子会话没写成: %w", err)
 		}
 		res.ChildSessionID = reuseChild
-	} else if req.Continuable || agentID != "" || strings.TrimSpace(req.ChildSessionID) != "" {
+	} else if req.Continuable || forkChild || agentID != "" || strings.TrimSpace(req.ChildSessionID) != "" {
 		childID, err := s.continuation(ctx, req, prompt, text, agentID)
 		if err != nil {
-			// 响亮失败：这次委派的结果照实交回去，但"可续问"这件事没成，
-			// 绝不能回一个编出来的 child id。
+			// 响亮失败：这次委派的结果照实交回去，但"子会话"这件事没成，
+			// 绝不能回一个编出来的 child id，也不能假装 fork 的种子落了盘。
+			if forkChild && !req.Continuable {
+				return spi.SubagentResult{}, fmt.Errorf(
+					"委派已完成但 fork 种子的 durable 子会话没建成（不静默丢种子）: %w", err)
+			}
 			return spi.SubagentResult{}, fmt.Errorf("委派已完成但可续问子会话没建成: %w", err)
 		}
 		// 具名委派：把地址记进盘，下一轮（另一个进程）按同一个名字还认得到。

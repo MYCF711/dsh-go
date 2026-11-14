@@ -565,7 +565,7 @@
       "verified_at": "2026-11-13"
     },
     {
-      "site": "cmd/dshd/subagent.go:447",
+      "site": "cmd/dshd/subagent.go:462",
       "what": "两段式委派的 child 执行体（RunSub 跑在 goroutine 里，发布时就能拿到 childId）",
       "sync": "读过：goroutine 只写 activation.result/err，写完 defer close(done) 建立 happens-before；Await 只 select done/ctx.Done，读 result 一定在 done 关闭之后；childCtx 由 Await 取消或 run 取消传播；panic 被 recover 成 err（AGENT_RESULT）",
       "verified_at": "2026-11-13"

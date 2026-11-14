@@ -650,8 +650,13 @@ func truncateUTF8(value string, maxBytes int) string {
 //     追踪 + durable 消息投影 + version/digest 缓存（index.ts、state.ts），
 //     本轮只做基线装配（`Build` 每次重读，cwd 变了链跟着变，但"read 到更深目录
 //     后追加新段"没有）。
-//  2. 用户全局双根链（`$DSH_HOME/AGENTS.md` → `<agentsHome>/AGENTS.md`）：宿主仍只有
-//     `GlobalRules` 一个点（`Context.GlobalRulesPath`），官方那两条根的同组去重与
-//     "harness-home 先于 shared-root 被丢"的预算顺序没有实现。
-//  3. 链的开关接线在 `cmd/dshd`（本轮写作用域外）：`EnableInstructionChain`
-//     由调用方打开，宿主默认仍是旧的两点链，字节不变。
+//  2. 用户全局链的**帧形状**：两根现在都读（`Context.GlobalRulesPath` 是 harness-home、
+//     `Context.SharedGlobalRulesPath` 是 `$DSH_AGENTS_HOME/AGENTS.md` → `~/.agents/AGENTS.md`，
+//     同组 trim 去重、harness-home 先丢，见 `prompt.go` 的 `GlobalRules`），但它们渲染在
+//     既有的 `全局约定（path）：正文` 块里，**不是**官方那条与 project 链合并进同一个
+//     `<system-reminder>` 帧、并且每链一份独立预算的形状（README.md:74-76）。要换成官方帧，
+//     生产提示词字节会整体翻掉，而 `cmd/dshd/prompt_budget_probe_test.go` 与
+//     `internal/prompt/budget_test.go` 按字节钉着现形状——那是一次「改判据」的改动，
+//     得由 Lead 定口径后单独做。
+//  3. 链的开关接线在 `cmd/dshd`：`EnableInstructionChain` 由调用方打开，
+//     生产两个入口（run / acp）默认传 true（`DSHD_INSTRUCTION_CHAIN=0` 可关）。
