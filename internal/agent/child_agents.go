@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"dshgo/codecs/v4"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 )
@@ -186,6 +187,13 @@ func AppendChildTurn(home, cwd, childSessionID, prompt, answer string) error {
 	if err != nil {
 		return fmt.Errorf("打开子会话 %q 续写: %w", child, err)
 	}
+	// 这一趟往返是子会话里的**新一轮**：数值 turn 必须递增。
+	//
+	// 从前这里写死 `AssistantMessageEvent(1, 1, …)`，于是复用到第 N 趟时，
+	// 每一趟的 assistant/message 都标着 `turn:1`。`session.NextTurn` 的注释里
+	// 记着这条后果：界面 Turn 大纲与消息分组按数值 turn 分组，
+	// 相同的编号会把好几趟往返并成同一轮。
+	turn := nextChildTurn(path)
 	appendErr := error(nil)
 	if p := strings.TrimSpace(prompt); p != "" {
 		appendErr = lg.Append("user/message",
@@ -194,7 +202,7 @@ func AppendChildTurn(home, cwd, childSessionID, prompt, answer string) error {
 	if appendErr == nil {
 		if a := strings.TrimSpace(answer); a != "" {
 			appendErr = lg.Append("assistant/message", session.AssistantMessageEvent(
-				1, 1, []map[string]any{session.TextBlock(a)}, "stop", nil))
+				turn, 1, []map[string]any{session.TextBlock(a)}, "stop", nil))
 		}
 	}
 	closeErr := lg.Close()
@@ -206,4 +214,49 @@ func AppendChildTurn(home, cwd, childSessionID, prompt, answer string) error {
 	}
 	_ = cwd // cwd 只用于 Spawn 的落点选择；追加按已存在文件的路径走，不需要它。
 	return nil
+}
+
+// nextChildTurn 算复用型 durable 子会话里**下一趟往返**的数值 turn。
+//
+// # 为什么不能直接用 `session.NextTurn`
+//
+// 子会话日志的形状与主会话不同：`ChildSpawn`/`AppendChildTurn` 直接写
+// `user/message` + `assistant/message` 这一对，**没有 `turn/start` 帧**。
+// 而 `session.NextTurn` 的判据是"数 `turn/start`"（那份注释解释的是主会话里
+// 每轮都有帧的情形），所以在这里它恒等于 1——正好把每一趟复用都写成 `turn:1`。
+//
+// # 所以判据是什么
+//
+// "这份日志里出现过的最大数值 turn + 1"，两个来源都算：
+//   - `turn/start` 帧里的 `turn`（将来子会话若走真实轮次，这一支就在用）；
+//   - 任何事件自带的数值 `turn`（当前形状下就是 `assistant/message.turn`）。
+//
+// 两条同向单调，不会回退、不会撞号：只有消息的日志取"上一趟 +1"，
+// 有帧的日志取"已开轮数 +1"（若帧的编号更小则以消息里更大的那个为准）。
+// 读不出日志时退到 1：编号错好过写不进去。
+func nextChildTurn(path string) int {
+	back, err := v4.ReadFile(path)
+	if err != nil {
+		return 1
+	}
+	next := session.NextTurn(back)
+	maxTurn := 0
+	for _, ev := range back.Events {
+		var data struct {
+			Turn int `json:"turn"`
+		}
+		if len(ev.Data) == 0 {
+			continue
+		}
+		if json.Unmarshal(ev.Data, &data) != nil {
+			continue
+		}
+		if data.Turn > maxTurn {
+			maxTurn = data.Turn
+		}
+	}
+	if maxTurn+1 > next {
+		return maxTurn + 1
+	}
+	return next
 }

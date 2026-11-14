@@ -67,7 +67,17 @@ func autoCompact(ctx context.Context, path string, keep, maxMessages int, model,
 	}
 	_, shadowed, err := session.Compact(l, before.Events, session.Span{Start: span.Start, End: span.End},
 		[]spi.Block{{Type: "text", Text: text}},
-		session.CompactionMeta{Provider: "dshd", Model: model, TokenCount: len([]rune(text))})
+		session.CompactionMeta{
+			Provider: "dshd",
+			Model:    model,
+			// TokenCount 落盘成 `compaction/summary.shadowedTokenCount`，它的语义是
+			// **被遮蔽那段历史有多少 token**，不是"摘要正文有多长"。从前这里写的是
+			// `len([]rune(text))`——摘要字数被当成 token 数报出去，官方客户端与
+			// `ManualCompactionResult.shadowedTokenCount` 的读者拿到的都是一个
+			// 已知不是 token 的数字（`compactShadowedTokens` 的注释里记着这条）。
+			// 现在用与 `/compact` 命令**同一个**估算器算真实区间体积。
+			TokenCount: compactShadowedTokens(before, span.Start, span.End),
+		})
 	closeErr := l.Close()
 	if err != nil {
 		return out, err

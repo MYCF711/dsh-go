@@ -177,9 +177,17 @@ func claimWriter(path string) error {
 	}
 }
 
+// ErrWriterBusy 是"这份会话的写锁被占"的分类标记。
+//
+// 文案与从前的 `sessionWriterBusy` 逐字一致（callers 里有按这段文本判
+// "会话忙"的，见 cmd/dshd/serve_commands_api.go 的 compactFailureText），
+// 这里只是额外挂一个 `errors.Is` 认得出的哨兵：死锁回收要知道自己撞的是
+// "写锁被占"还是别的失败（见 stale_lock.go 的 OpenSessionAtRecoveringStale）。
+var ErrWriterBusy = errors.New("会话正被另一个进程写入")
+
 func sessionWriterBusy(lock string) error {
-	return fmt.Errorf("会话正被另一个进程写入（锁文件 %s）；"+
-		"确认没有别的 dshd 在用这份会话后删掉它再 resume", lock)
+	return fmt.Errorf("%w（锁文件 %s）；"+
+		"确认没有别的 dshd 在用这份会话后删掉它再 resume", ErrWriterBusy, lock)
 }
 
 // foreignLockOwner 判断锁文件是否由**另一个进程**留下。
