@@ -16,7 +16,9 @@ func waitW149NaturalTurn(t *testing.T, client *http.Client, base, sid string, si
 	if turnID == "" {
 		t.Fatal("session.prompt 未返回 turnId")
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	// 真进程用例等一轮模型回答。CI 是 2 核 + -race，15s 会误判——
+	// 统一用 realChainWait（与 serve_models / serve_settings 等同一预算）。
+	deadline := time.Now().Add(realChainWait)
 	for {
 		history := postPluginGlue(t, client, base, "session.history", map[string]any{"id": sid, "sinceSeq": sinceSeq, "limit": 1000}, http.StatusOK)
 		frames := history["result"].(map[string]any)["frames"].([]any)
