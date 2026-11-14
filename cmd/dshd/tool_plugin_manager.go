@@ -18,20 +18,34 @@ package main
 //	  …
 //	}))
 //
-// 八条 action 里，本仓有真实支撑的是**六条**：
+// 八条 action 里，本仓有真实支撑的是**八条**：
 //
 //	 list_plugins            → pluginManager.listPlugins 的真实实现（与 pluginInventory.list 同源）
 //	 list_bundles            → pluginManager.listBundles 的真实实现
 //	 set_plugin / set_bundle → 同一份持久化启用位（pluginManager.setPluginEnabled/setBundleEnabled）
 //	 list_version_exemptions → compatibility.json 的真实读
 //	 set_version_exemption   → compatibility.json 的真实写
+//	 install_bundle          → 本地目录包（kind=path）走真实安装事务（journal + staging + 回滚）
+//	 remove_bundle           → 已安装包的真实卸载（Manager.Uninstall 的同一事务）
 //
-// 两条**没有**真实支撑：`install_bundle` / `remove_bundle`。本仓没有 registry/pnpm/git/tarball
-// 下载源，也没有安装事务（见 `internal/transport/handlers_pluginmanager_official.go:193-195`
-// 的逐方法缺失说明）。这两条**不是**被悄悄省略，而是**照官方形状回结构化失败**：
-// 返回的 `ChangeResult` 里 `changed:false`、`error.code=unsupported-platform`，并带
-// `nextStep` 说明"为什么在这里装不了"（官方对"改不了的东西"就是给 ChangeResult 而不是抛异常，
-// 客户端据此显示"换插件"而不是"你的请求写错了"）。
+// 安装/卸载**不是**在工具层重新实现的：工具只做参数翻译与 spec 形态判定，真正的
+// 校验（manifest / hash / 未登记文件）、事务、`state.json`、`packages/<id>/<version>/`
+// 与运行时装载都在 `internal/pluginmgr` 里，经 `OfficialPluginManagerAPI` 注入
+// （生产实现 `cmd/dshd/serve_plugins_official.go:newOfficialPluginManagerAPI`）。
+// 因此"装上了但看不到"不可能出现：`pluginInventory.list` 与 `list_plugins` /
+// `list_bundles` 读的是**同一份** `Manager.Bundles()`。
+//
+// `install_bundle` 的**来源形态**是显式边界（这条是工具面的策略，不是宿主的全部能力）：
+//
+//   - 本地目录（`C:\...` / `/...` / `\\server\share` / `./x` / `../x`）→ 真装；
+//   - registry / git / tarball 等**网络形态** → 仍回官方形状结构化失败
+//     （`changed:false`、`application:failed`、`error.code=unsupported-platform`）并带
+//     `nextStep` 说清"本仓只支持本地目录包，网络来源没有下载源"。
+//
+// 边界要说明白：宿主 transport 层的 `pluginManager.installBundle`（`serve_plugins_official.go`）
+// 在显式配置 `DSHD_PLUGIN_REGISTRY` 时是有 registry/tarball 下载路径的；**工具面这次不接它**
+// （任务边界：不引入网络下载）。所以这里是"工具不支持网络来源"，而不是"宿主没有这个能力"——
+// 两句话都不是假话，只是作用域不同，不许混着说。
 //
 // 为什么这个工具在 `cmd/dshd` 而不是 `modules/tool/plugin`：
 // `modules/tool/plugin/plugin.go` 的 `plugin` 工具管的是**另一层**——`dsh.toml` 里的编译期
@@ -53,10 +67,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"dshgo/internal/kernel"
+	"dshgo/internal/pluginmgr"
 	"dshgo/internal/spi"
 	"dshgo/internal/transport"
 )
@@ -126,11 +142,12 @@ type pluginManagerTool struct{ api pluginManagerAPI }
 func (t *pluginManagerTool) Name() string { return pluginManagerToolName }
 
 func (t *pluginManagerTool) Description() string {
-	return "List plugins or bundles in the current profile, enable or disable them, " +
-		"inspect or set version exemptions. Every mutating action requires approval for this call; " +
-		"approval does not change the session permission mode. Changes affect every session in this profile. " +
-		"List first to obtain exact identifiers. Installing or removing bundles is unavailable in this host " +
-		"(no registry/git/tarball source and no install transaction) and reports a structured unsupported failure."
+	return "List plugins or bundles in the current profile, enable or disable them, inspect or set version " +
+		"exemptions, install a bundle from a local package directory, or remove an installed bundle. Every " +
+		"mutating action requires approval for this call; approval does not change the session permission mode. " +
+		"Changes affect every session in this profile. List first to obtain exact identifiers. install_bundle " +
+		"accepts a local package directory only: registry, git and tarball specs report a structured unsupported " +
+		"failure because this tool surface has no download source."
 }
 
 func (t *pluginManagerTool) Schema() json.RawMessage { return pluginManagerSchema }
@@ -169,8 +186,10 @@ func (t *pluginManagerTool) Exec(ctx context.Context, raw json.RawMessage) (spi.
 		return t.listExemptions()
 	case "set_version_exemption":
 		return t.setExemption(a)
-	case "install_bundle", "remove_bundle":
-		return t.unsupported(action)
+	case "install_bundle":
+		return t.installBundle(a)
+	case "remove_bundle":
+		return t.removeBundle(a)
 	}
 	return spi.Result{Hint: "action 只能是 " + strings.Join(pluginManagerActions, " / ")},
 		fmt.Errorf("未知 action: %q", action)
@@ -364,40 +383,116 @@ func (t *pluginManagerTool) setExemption(a pluginManagerArgs) (spi.Result, error
 	return changeResult("set_version_exemption", res), nil
 }
 
-// unsupported 是官方 `install_bundle` / `remove_bundle` 的宿主形状。
+// installBundle 实现官方 `install_bundle`：target 是安装 spec（官方原文
+// `'target package spec is required'`，`dsh-plugin-manager/src/tools.ts:149`）。
 //
-// 为什么不是错误而是 ChangeResult：官方对"应用性失败"用的就是 ChangeResult
-// （`application` + `error` + `nextStep`），客户端据此显示"这个装不了"，
-// 而不是把 tools 调用变成异常。本仓没有下载源与安装事务，所以：
+// 本仓的安装单元是 `dsh.local-plugin@1` **本地目录包**，所以这里只按 spec 形态分流，
+// 不自己实现"装"的任何一步：
 //
-//	changed=false, application='failed',
-//	error.code='unsupported-platform', error.diagnostic=<缺什么>,
-//	nextStep=<用户该怎么做>, stage='resolve', target=''
+//	kind=path → 交宿主真实安装事务（OfficialPluginManagerAPI.InstallBundle）
+//	其余形态  → 官方形状结构化失败 + 说清这是工具面的来源边界
 //
-// 这四个字段都是**真话**：不是假数据、不是静默成功。
-func (t *pluginManagerTool) unsupported(action string) (spi.Result, error) {
-	what := "安装"
-	if action == "remove_bundle" {
-		what = "卸载"
+// `enabled` 缺省时由宿主按官方语义取 true（"defaults to true for installation"），
+// 这里**不**替它补默认值：默认值只有一份，在适配层。
+func (t *pluginManagerTool) installBundle(a pluginManagerArgs) (spi.Result, error) {
+	spec, ok := pluginManagerTarget(a)
+	if !ok {
+		return spi.Result{Hint: "install_bundle 需要 target：一个本地包目录路径（绝对路径，或 ./ 开头的相对路径）"},
+			errors.New("target package spec is required")
 	}
+	if kind := pluginmgr.SourceKind(spec); kind != "path" {
+		return pluginManagerSourceRefusal("install_bundle", spec, kind), nil
+	}
+	if t.api.InstallBundle == nil {
+		return spi.Result{Hint: "宿主没有挂接安装事务（OfficialPluginManagerAPI.InstallBundle）；单轮子进程里没有插件管理面"},
+			errors.New("plugin_manager install_bundle: 未接线")
+	}
+	params := transport.OfficialInstallBundleParams{Spec: spec, Enabled: a.Enabled, Registry: a.Registry}
+	if a.ApprovedBuilds != nil {
+		params.ApprovedBuilds = *a.ApprovedBuilds
+	}
+	res, err := t.api.InstallBundle(params)
+	if err != nil {
+		return spi.Result{Hint: "安装没走完：先确认包目录可读、profile 的插件目录可写，再看事务记录是否损坏"}, err
+	}
+	// registry 对本地目录包没有任何作用（官方只在 registry 规格上问源）。
+	// 静默忽略一个用户显式给的参数是不诚实的，所以如实写成一条 warning。
+	if a.Registry != nil && strings.TrimSpace(*a.Registry) != "" {
+		res.Warnings = append(res.Warnings, "registry 只对 registry 规格有意义：这次是本地目录包，没有使用 registry "+strings.TrimSpace(*a.Registry))
+	}
+	return changeResult("install_bundle", res), nil
+}
+
+// removeBundle 实现官方 `remove_bundle`：target 是**已安装 bundle 名**（官方原文
+// `'target bundle name is required'`，`dsh-plugin-manager/src/tools.ts:156`）。
+//
+// 卸载是纯本地操作（删包目录 + 改 state.json，同一事务里回滚），所以这里不需要
+// 任何来源判定：本地装的、以前从 registry 缓存装的都能卸。真正做不到的是
+// "没装这个包"——那是官方 `not-removable` 的管理性失败，由适配层如实给出。
+func (t *pluginManagerTool) removeBundle(a pluginManagerArgs) (spi.Result, error) {
+	name, ok := pluginManagerTarget(a)
+	if !ok {
+		return spi.Result{Hint: "remove_bundle 需要 target：先用 list_bundles 拿到已安装包名"},
+			errors.New("target bundle name is required")
+	}
+	if t.api.RemoveBundle == nil {
+		return spi.Result{Hint: "宿主没有挂接卸载事务（OfficialPluginManagerAPI.RemoveBundle）"},
+			errors.New("plugin_manager remove_bundle: 未接线")
+	}
+	res, err := t.api.RemoveBundle(transport.OfficialBundleNameParams{Name: name})
+	if err != nil {
+		return spi.Result{Hint: "卸载没走完：检查 profile 的插件目录与事务记录"}, err
+	}
+	return changeResult("remove_bundle", res), nil
+}
+
+// pluginManagerTarget 取 install/remove 的 target（官方两个 action 都必填 target，
+// 且空串不是合法包名/路径）。
+func pluginManagerTarget(a pluginManagerArgs) (string, bool) {
+	if a.Target == nil {
+		return "", false
+	}
+	target := strings.TrimSpace(*a.Target)
+	return target, target != ""
+}
+
+// pluginManagerSourceRefusal 是"合法、但本仓工具面装不了的来源形态"的官方形状失败。
+//
+// 为什么不是 Go 错误：官方对应用性失败用的就是 `ChangeResult`
+// （`application=failed` + `error.code` + `nextStep`），客户端据此显示"这个装不了"，
+// 而不是把一次工具调用变成异常（`dsh-plugin-manager/src/tools.ts:57-78` 的 `withNextStep`）。
+//
+// 为什么 `stage=install`：官方 `ChangeResult.stage` 是 `install|enable|remove` 三值
+// （`dsh-plugin-manager/src/types.ts:178`），既有的 `resolve` 不是合法值，官方客户端
+// 拿到的会是一个模式外的字符串。
+//
+// 为什么用 `unsupported-platform`：沿用本仓库既有口径（工具面一致，客户端已有分支），
+// 但 `nextStep` **不**照抄官方对这个码的那句（官方意思是"换一台支持的宿主"）——这里拒绝
+// 的原因是来源形态，不是平台。这句话必须说准，否则模型会去让用户换机器。
+func pluginManagerSourceRefusal(action, spec, kind string) spi.Result {
 	res := transport.OfficialChangeResult{
 		Changed:     false,
 		Application: "failed",
-		Stage:       "resolve",
+		Stage:       "install",
+		Target:      spec,
 		Error: &transport.OfficialChangeError{
 			Code:       "unsupported-platform",
-			Diagnostic: "本仓没有 bundle 下载源（registry/pnpm/git/tarball），也没有可回滚的" + what + "事务",
+			Diagnostic: fmt.Sprintf("plugin_manager 的工具面只装本地目录包（kind=path）；这次 spec 的形态是 %s", kind),
 		},
 	}
-	body, err := json.Marshal(changeEnvelope(action, res))
+	envelope := changeEnvelope(action, res)
+	envelope["nextStep"] = "本仓只支持本地目录包：把包目录路径传给 install_bundle（绝对路径，或 ./ 开头的相对路径）。" +
+		"网络来源（registry/git/tarball）在这个工具面上没有下载源，装不了（本地 .tgz 也不解包）；" +
+		"已安装的包用 list_bundles 查、remove_bundle 卸。"
+	body, err := json.Marshal(envelope)
 	if err != nil {
-		return spi.Result{Hint: "结果序列化失败（不应发生）"}, err
+		return spi.Result{Hint: "结果序列化失败（不应发生）"}
 	}
 	return spi.Result{
-		Summary: action + " 不支持：本仓没有下载源与安装事务（结构化失败，未做任何改动）",
+		Summary: action + " 未应用：本仓只支持本地目录包，" + kind + " 形态在这个工具面上没有下载源",
 		Text:    string(body),
-		Data:    changeEnvelopeOnce(body),
-	}, nil
+		Data:    envelope,
+	}
 }
 
 // changeResult 把宿主真实的 ChangeResult 翻成工具结果：`nextStep` 由宿主给出的
@@ -456,13 +551,32 @@ func changeEnvelope(action string, res transport.OfficialChangeResult) map[strin
 	return envelope
 }
 
+// managementNextSteps 是官方 `ERROR_STEPS`（`dsh-plugin-manager/src/tools.ts:13-29`）
+// 的宿主口径：管理性失败必须告诉模型**下一步具体做什么**，不是只回一个码。
+//
+// 只列本仓真的会产生的 code（`internal/pluginmgr/official/adapter.go:mapChangeCode`
+// 的映射结果 + 适配层直接给的三个）。列一个永远不出现的码，等于给自己发假许可证。
+var managementNextSteps = map[string]string{
+	"invalid-spec":         "重试时给一个本地包目录（本仓只装本地目录包）；先确认目录里面的 plugin.json 合法、files 里每个 SHA-256 与真实文件一致。",
+	"already-installed":    "这个包已经装过：先 remove_bundle，再 install_bundle。",
+	"unknown-plugin":       "先 list_plugins / list_bundles 拿到精确 id，再用它重试。",
+	"not-removable":        "先 list_bundles；只有 removable 的已安装包才能卸载。",
+	"incompatible-version": "装一个与当前运行时兼容的版本；版本豁免需要用户明确接受崩溃与丢数据风险。",
+	"unsupported-platform": "这个包在当前宿主运行时上跑不了：改用本仓支持的 Go/WASM 包，或换一台支持的宿主。",
+	"unexpected-package":   "源装出来的包或版本与请求不一致，这次安装已回滚；把这个诊断告诉用户。",
+	"operation-error":      "把 diagnostic 告诉用户，原因解决之后再重试。",
+}
+
 // nextStepFor 是官方 `withNextStep` 的宿主口径：只有"没有应用"时才给下一步。
 func nextStepFor(action string, res transport.OfficialChangeResult) string {
 	if res.Changed {
 		return ""
 	}
 	if res.Error != nil {
-		return "这次没有应用（" + res.Error.Code + "）。改用本仓支持的插件通道（pluginManager.* / 已安装 bundle 的 set_bundle）或告诉用户这一点"
+		if step, ok := managementNextSteps[res.Error.Code]; ok {
+			return step
+		}
+		return action + " 这次没有应用（" + res.Error.Code + "）。把 diagnostic 告诉用户，按原因修好后再试"
 	}
 	switch res.RestartReason {
 	case "":
@@ -471,13 +585,6 @@ func nextStepFor(action string, res transport.OfficialChangeResult) string {
 		return "改动已写入，但需要重启宿主后生效"
 	}
 	return "这次没有应用（原因：" + res.RestartReason + "）"
-}
-
-// changeEnvelopeOnce 把已经序列化过的信封还原成 Data（避免 Data 与 Text 不一致）。
-func changeEnvelopeOnce(body []byte) map[string]any {
-	out := map[string]any{}
-	_ = json.Unmarshal(body, &out)
-	return out
 }
 
 // dshRuntimeVersion 回答官方 `getDshRuntimeVersion()`：当前运行时的版本串。
