@@ -317,7 +317,10 @@ func marshalOTLPLogs(resource []LogAttribute, scope InstrumentationScope, record
 	payload := otlpLogsRequest{ResourceLogs: []otlpResourceLogs{{
 		Resource: otlpResource{Attributes: resourceAttributes, DroppedAttributesCount: 0},
 		ScopeLogs: []otlpScopeLogs{{
-			Scope:      otlpScope{Name: scope.Name, Version: scope.Version},
+			// 两个结构体字段完全一致（Name/Version），直接用转换。
+			// 原先写成 struct literal 被 staticcheck S1016 抓出来 —— 是**真提示**：
+			// 手抄字段名会在将来某一侧加字段时静默丢掉。
+			Scope:      otlpScope(scope),
 			LogRecords: wireRecords,
 		}},
 	}}}

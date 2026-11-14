@@ -284,7 +284,12 @@ func assistantSeedParts(data json.RawMessage) (text string, reasoning string, to
 		case "tool-call":
 			toolCalls++
 		case "reasoning":
-			if t := strings.TrimSpace(b.Text); t != "" {
+			// 「算不算思考」这条判据**只许有一份**（`scripts/single-source.txt` 的
+			// `reasoning-type-discriminator`）：类型是 reasoning 且正文 TrimSpace 非空。
+			// 原先这里自己写了一遍 `b.Type == "reasoning"` + TrimSpace，被单点守卫抓出来——
+			// 两份判据必然漂（2026-11-04 事故：一份取第一条、一份全带）。
+			// 改成复用唯一的那个函数。
+			if t, isThinking := session.ReasoningText(b.Type, b.Text); isThinking {
 				thinks = append(thinks, t)
 			}
 		case "text":
@@ -327,8 +332,11 @@ func userSeedParts(data json.RawMessage) (text string, hasPayload bool) {
 		case "reference":
 			parts = append(parts, "[引用 "+b.ReferenceID+"]")
 		case "reasoning":
+			// 判据复用唯一那处（`scripts/single-source.txt` 的 reasoning-type-discriminator）。
 			// user 消息里出现思考块不合常理；出现了就按原样标记，不丢。
-			parts = append(parts, reasoningText(b.Text))
+			if t, isThinking := session.ReasoningText(b.Type, b.Text); isThinking {
+				parts = append(parts, reasoningText(t))
+			}
 		case "tool-call":
 			parts = append(parts, toolCallText(b.Name, b.Arguments))
 		}

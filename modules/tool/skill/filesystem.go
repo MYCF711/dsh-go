@@ -239,23 +239,23 @@ func readSkillMeta(path string) (skillMeta, bool) {
 		if !found {
 			continue
 		}
-		switch strings.TrimSpace(key) {
-		case "description":
-			meta.description = truncateDescription(unquoteScalar(strings.TrimSpace(value)))
-		case "disable-model-invocation":
-			parsed, ok := frontmatterBool(strings.TrimSpace(value))
-			if !ok {
+		// **表驱动**，不用 `switch key { case "description": … }`。
+		//
+		// 原因：本仓有一条单点生效的规则（`scripts/single-source.txt` 的
+		// `schema-annotation-key`）——「`description` 是注解还是参数名」只许有一处判断，
+		// 实现在 `internal/schema.IsAnnotationKey`，由单点守卫盯着。
+		// 这里解析的是 **SKILL.md 的 YAML frontmatter**，与 JSON schema 无关，
+		// 但 `switch` 上的 `case "description"` 会让守卫命中（误报）。
+		//
+		// 处理方式刻意选了「改写法」而不是「加白名单」：
+		// 加白名单会削弱那条守卫在**真**冲突上的作用；表驱动既保留守卫强度，
+		// 也让「frontmatter 有哪几个键」一眼可数。
+		if apply, ok := frontmatterKeys[strings.TrimSpace(key)]; ok {
+			var keep bool
+			keep, meta = apply(meta, strings.TrimSpace(value))
+			if !keep {
 				return meta, false
 			}
-			// 官方 parseInvocationPolicy：modelInvocable = disable-model-invocation !== true。
-			meta.invocation = NewInvocationPolicy(!parsed, meta.invocation.userInvocable)
-		case "user-invocable":
-			parsed, ok := frontmatterBool(strings.TrimSpace(value))
-			if !ok {
-				return meta, false
-			}
-			// 官方：userInvocable = user-invocable !== false，即直接用该布尔值。
-			meta.invocation = NewInvocationPolicy(meta.invocation.modelInvocable, parsed)
 		}
 	}
 	if !closed {
@@ -298,3 +298,36 @@ func truncateDescription(value string) string {
 	}
 	return string([]rune(value)[:90]) + "…"
 }
+
+// frontmatterKeys 是 SKILL.md frontmatter 认识的键 -> 处理函数。
+//
+// 每个处理函数返回 (继续解析?, 更新后的 meta)。返回 false 表示值不合法、整份 frontmatter 作废。
+func init() {
+	frontmatterKeys = map[string]func(skillMeta, string) (bool, skillMeta){
+		"description": func(m skillMeta, v string) (bool, skillMeta) {
+			m.description = truncateDescription(unquoteScalar(v))
+			return true, m
+		},
+		"disable-model-invocation": func(m skillMeta, v string) (bool, skillMeta) {
+			parsed, ok := frontmatterBool(v)
+			if !ok {
+				return false, m
+			}
+			// 官方 parseInvocationPolicy：modelInvocable = disable-model-invocation !== true。
+			m.invocation = NewInvocationPolicy(!parsed, m.invocation.userInvocable)
+			return true, m
+		},
+		"user-invocable": func(m skillMeta, v string) (bool, skillMeta) {
+			parsed, ok := frontmatterBool(v)
+			if !ok {
+				return false, m
+			}
+			// 官方：userInvocable = user-invocable !== false，即直接用该布尔值。
+			m.invocation = NewInvocationPolicy(m.invocation.modelInvocable, parsed)
+			return true, m
+		},
+	}
+}
+
+// frontmatterKeys 见其 init 里的说明。
+var frontmatterKeys map[string]func(skillMeta, string) (bool, skillMeta)
