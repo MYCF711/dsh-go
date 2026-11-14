@@ -1,11 +1,25 @@
 // Package skill 提供 skill 工具：按名字把一份 SKILL.md 全文取进上下文。
 //
-// 它只做"取文档"这一件事：不执行 skill、不缓存。
+// 它只做"取文档"这一件事：不执行 skill、不缓存正文。
 // 内容由人维护在 <dir>/<name>/SKILL.md，本工具只读。
 //
 // 模型可见形状对齐官方 @deepseek-ai/dsh-skill 的 renderSkillContent
 // （lib/index.js:57-72）：正文外面必须有一层 <skill_content> 框架，否则模型
 // 分不清「这是技能正文」还是「这是用户刚才说的话」。
+//
+// # 合并语义已改走官方注册面（#54 skill 的最后一公里）
+//
+// 之前这里是"工具自己扫目录"，非文件系统来源无法接入。现在：
+//
+//   - 文件系统这一路变成**内置 provider**（filesystem.go，官方
+//     `@deepseek-ai/dsh-skill-filesystem` 的投影），通过官方同款
+//     `Registry.RegisterProvider` 注册进来（registry.go）；
+//   - `skill` 工具的 list / search / 加载全部读**注册表合并结果**，不再绕过
+//     注册面另走一条；别的来源（远端、插件内嵌、运行时注册）都能接进来；
+//   - 模型面（本工具的 list / search / 加载）**只选 `modelInvocable=true`**，
+//     人类面（`skills.list` 目录）只选 `userInvocable=true`——四个组合都保留，
+//     两个面各看各的（官方 dsh-skill/README.md 的策略表）；
+//   - provider 失败/自报不完整的观察标记为 incomplete，与"确认没有"分开说。
 package skill
 
 import (
@@ -57,26 +71,27 @@ var schema = json.RawMessage(`{
 type Tool struct {
 	dir string
 
-	// cache 是收集结果的缓存（官方 `skill.collectCacheMaxEntries`）。
+	// registry 是官方的 provider 注册面（`ctx.skills`）。
 	// 懒初始化：`&Tool{dir: ...}` 这种零值构造照旧可用。
+	registryMu sync.Mutex
+	registry   *Registry
+
+	// cache 是**模型面**收集结果的缓存（官方 `skill.collectCacheMaxEntries`），
+	// 按 registry revision + TTL + 磁盘签名失效。
 	cacheMu sync.Mutex
 	cache   *collectCache
 }
 
-// skillEntry 是一条收集结果：名字 + 一句话说明（说明来自 SKILL.md frontmatter）。
-type skillEntry struct {
-	name string
-	desc string
-}
-
-// collectCache 是一份收集快照。
+// collectCache 是一份模型面收集快照。
 type collectCache struct {
-	mu      sync.Mutex
-	entries []skillEntry
-	at      time.Time // 快照时间（TTL 从这一刻算）
-	valid   bool
-	sig     string    // 上一次看到的磁盘签名（轮询监听用）
-	sigAt   time.Time // 上一次算签名的时间
+	mu       sync.Mutex
+	skills   []Summary // 只放 modelInvocable=true 的摘要（模型面）
+	complete bool      // provider 全部成功且未自报不完整
+	revision uint64    // 这份快照对应 registry 的哪一代
+	at       time.Time // 快照时间（TTL 从这一刻算）
+	valid    bool
+	sig      string    // 上一次看到的磁盘签名（轮询监听用）
+	sigAt    time.Time // 上一次算签名的时间
 }
 
 const (
@@ -126,6 +141,29 @@ func (t *Tool) cacheRef() *collectCache {
 	return t.cache
 }
 
+// Registry 返回本工具的 skill 注册表（官方 `ctx.skills` 的宿主实例），
+// 首次调用时把内置文件系统 provider 按官方 `registerProvider` 注册进来。
+//
+// 外部来源（远端、插件内嵌、运行时 skill）用它接入：`RegisterProvider` /
+// `Register`。**不要**绕过它自己去扫目录——那样模型面会把两个来源看成两套。
+func (t *Tool) Registry() (*Registry, error) {
+	t.registryMu.Lock()
+	defer t.registryMu.Unlock()
+	if t.registry != nil {
+		return t.registry, nil
+	}
+	registry := NewRegistry()
+	rootProvider := &filesystemProvider{roots: t.roots, warn: registry.warningf}
+	if _, err := registry.RegisterProvider(func(ProviderControl) (Provider, error) {
+		return rootProvider, nil
+	}); err != nil {
+		// 内置 provider 注册失败是编程错误；响亮返回，不静默退化成空目录表。
+		return nil, fmt.Errorf("注册内置文件系统 skill provider：%w", err)
+	}
+	t.registry = registry
+	return t.registry, nil
+}
+
 // skillsSignature 是 skill 根目录的**廉价变化指纹**：目录名 + SKILL.md 的
 // size/mtime。它只回答"变了没有"，不解析内容。
 func skillsSignature(roots []string) string {
@@ -150,44 +188,59 @@ func skillsSignature(roots []string) string {
 	return b.String()
 }
 
-// collect 返回收集结果（名字 + 说明），按 TTL 缓存；开了轮询监听就先看签名。
-func (t *Tool) collect() []skillEntry {
+// modelCatalog 返回**模型面**的合并结果（只含 modelInvocable=true），按 TTL +
+// registry revision 缓存；开了轮询监听就先看磁盘签名。
+//
+// 第二个返回值是"这次发现是否完整"：provider 失败或自报不完整时为假。
+// 调用方必须把它和"确认没有"分开说（官方 tool-skill 的 incomplete 口径）。
+func (t *Tool) modelCatalog(ctx context.Context) ([]Summary, bool, error) {
+	registry, err := t.Registry()
+	if err != nil {
+		return nil, false, err
+	}
 	roots := t.roots()
 	now := time.Now()
 	poll := skillWatchPoll()
+	revision := registry.Revision()
 	c := t.cacheRef()
 
 	c.mu.Lock()
-	if c.valid && now.Sub(c.at) < skillCacheTTL() {
+	if c.valid && c.revision == revision && now.Sub(c.at) < skillCacheTTL() {
 		changed := false
 		if poll > 0 && now.Sub(c.sigAt) >= poll {
 			sig := skillsSignature(roots)
 			c.sigAt = now
 			changed = sig != c.sig
-			if !changed {
-				out := append([]skillEntry(nil), c.entries...)
-				c.mu.Unlock()
-				return out
-			}
 		}
 		if !changed {
-			out := append([]skillEntry(nil), c.entries...)
+			out := append([]Summary(nil), c.skills...)
+			complete := c.complete
 			c.mu.Unlock()
-			return out
+			return out, complete, nil
 		}
-		// 磁盘变了：掉到下面重扫。
+		// 磁盘变了（或 registry 换代了）：掉到下面重扫。
+		c.valid = false
 	}
 	c.mu.Unlock()
 
-	names := existingSkillsAll(roots)
-	entries := make([]skillEntry, 0, len(names))
-	for _, n := range names {
-		entries = append(entries, skillEntry{name: n, desc: readDescriptionAny(roots, n)})
+	catalog, err := registry.Snapshot(ctx, LookupOptions{})
+	if err != nil {
+		return nil, false, err
+	}
+	visible := make([]Summary, 0, len(catalog.Skills))
+	for _, summary := range catalog.Skills {
+		// 模型面只看 modelInvocable（官方 tool-skill:229 `filter(isModelInvocable)`）。
+		if !summary.Invocation.ModelInvocable() {
+			continue
+		}
+		visible = append(visible, summary)
 	}
 
 	c.mu.Lock()
-	if max := skillCacheMax(); max <= 0 || len(entries) <= max {
-		c.entries = entries
+	if max := skillCacheMax(); max <= 0 || len(visible) <= max {
+		c.skills = visible
+		c.complete = catalog.Complete
+		c.revision = revision
 		c.at = now
 		c.valid = true
 		c.sig = skillsSignature(roots)
@@ -195,10 +248,10 @@ func (t *Tool) collect() []skillEntry {
 	} else {
 		// 超限：不缓存（结果照常返回，只是没有性能收益）。
 		c.valid = false
-		c.entries = nil
+		c.skills = nil
 	}
 	c.mu.Unlock()
-	return entries
+	return visible, catalog.Complete, nil
 }
 
 // cachedSkillCount 是当前缓存里的条目数（用例用；0 表示没缓存）。
@@ -209,7 +262,7 @@ func (t *Tool) cachedSkillCount() int {
 	if !c.valid {
 		return 0
 	}
-	return len(c.entries)
+	return len(c.skills)
 }
 
 func (t *Tool) Name() string { return "skill" }
@@ -244,47 +297,70 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		}, skillErr("skill 的 name 与 query 只能给一个")
 	}
 	if query != "" {
-		return t.search(query)
+		return t.search(ctx, query)
 	}
 	// 不给 name（或给 "*" / "list"）= 列清单。这是"先看看有什么"的那一步，
 	// 没有它，模型只能猜名字。
 	if name == "" || name == "*" || name == "list" {
-		return t.list()
+		return t.list(ctx)
 	}
+	return t.load(ctx, name)
+}
 
-	// 按 roots() 的顺序找：第一个有 <root>/<name>/SKILL.md 的就是它。
-	// 多个根的理由：主 home 可能是空的，而真正的 skill 目录在别处（本机就是这种情况）。
-	var dir string
-	for _, r := range t.roots() {
-		cand := filepath.Join(r, name, "SKILL.md")
-		if !underDir(r, cand) {
-			continue // 带 ../ 的 name：不许逃出任何一根
-		}
-		if info, err := os.Stat(cand); err == nil && !info.IsDir() {
-			dir = r
+// load 按名字从**合并结果**里取一条完整定义。
+//
+// 顺序与官方 dsh-tool-skill（src/index.ts:131-160）一致：
+//  1. 名字必须是 kebab-case（否则当作"没有这个 skill"，不做路径拼接）；
+//  2. 在模型面清单里找不到 → 未知 skill（Hint 给真实可选名字）；
+//  3. 摘要策略 modelInvocable=false → 不可由模型加载（官方原文
+//     `skill "<name>" is not available for model invocation`）；
+//  4. 让拥有它的 provider 载入正文（**每次现读**，不缓存正文），载入回来的
+//     定义再校验一次策略（官方同一处对 summary 与 loaded 各查一次）。
+func (t *Tool) load(ctx context.Context, name string) (spi.Result, error) {
+	registry, err := t.Registry()
+	if err != nil {
+		return spi.Result{Hint: "skill 注册表不可用；这是宿主装配错误，请报告它而不是换名字重试。"}, err
+	}
+	visible, complete, err := t.modelCatalog(ctx)
+	if err != nil {
+		return spi.Result{Hint: "skill 合并失败（某个 provider 返回了非法数据）；这是宿主装配错误。"}, err
+	}
+	var chosen *Summary
+	for i := range visible {
+		if visible[i].Name == name {
+			chosen = &visible[i]
 			break
 		}
 	}
-	if dir == "" {
-		slashDir := filepath.ToSlash(strings.Join(t.roots(), ", "))
+	if chosen == nil {
+		// 名字不合法（例如带 ../）和"确实没有"走同一条响亮失败；Hint 里给出
+		// 真实可选名字，让模型下一句能改对。
 		return spi.Result{
-			Hint: notFoundHintAll(t.roots(), name),
-		}, skillErr("没有名为「" + name + "」的 skill（找过：" + slashDir + "）")
+			Hint: notFoundHint(t.roots(), name, summariesToEntries(visible), complete),
+		}, skillErr("没有名为「" + name + "」的 skill")
+	}
+	if !chosen.Invocation.ModelInvocable() {
+		return spi.Result{
+			Hint: "该 skill 的 invocation 策略不允许模型加载（modelInvocable=false）；它只给人类面使用。",
+		}, skillErr("skill「" + name + "」不可由模型调用")
 	}
 
-	path := filepath.Join(dir, name, "SKILL.md")
-
-	body, readErr := os.ReadFile(path)
-	if readErr != nil {
-		if os.IsNotExist(readErr) {
-			return spi.Result{Hint: notFoundHintAll(t.roots(), name)}, skillErr("没有名为「" + name + "」的 skill")
-		}
+	definition, err := registry.Get(ctx, name, LookupOptions{})
+	if err != nil {
+		return spi.Result{Hint: "读 skill 正文失败；确认文件可读、provider 正常。"}, err
+	}
+	if definition == nil {
 		return spi.Result{
-			Hint: "确认该文件可读（不是目录、没有被权限挡住），或换一个 skill 名。",
-		}, skillErr("读不到 " + filepath.ToSlash(path) + "：" + readErr.Error())
+			Hint: notFoundHint(t.roots(), name, summariesToEntries(visible), complete),
+		}, skillErr("没有名为「" + name + "」的 skill")
+	}
+	if !definition.Invocation.ModelInvocable() {
+		return spi.Result{
+			Hint: "该 skill 的 invocation 策略不允许模型加载（modelInvocable=false）；它只给人类面使用。",
+		}, skillErr("skill「" + name + "」不可由模型调用")
 	}
 
-	content := skillBody(string(body))
+	content := definition.Content
 	chars := len([]rune(content))
 	truncated := false
 	if len(content) > maxBody {
@@ -297,23 +373,38 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	if truncated {
 		summary = "已加载 skill「" + name + "」（" + itoa(chars) + " 字，已截断）"
 	}
-	resourceDir := filepath.ToSlash(filepath.Join(dir, name))
+	data := map[string]any{
+		"name":     definition.Name,
+		"provider": definition.Provider,
+		"content":  content,
+	}
+	if base := definition.ResourceBase; base != nil {
+		data["resourceBase"] = resourceBaseData(base)
+	}
 	return spi.Result{
 		// 模型可见正文只有这一种形状：官方 renderSkillContent 的 <skill_content>。
-		Text:    renderSkillContent(name, providerName, resourceDir, content),
+		Text:    renderSkillContent(definition.Name, definition.Provider, definition.ResourceBase, content),
 		Summary: summary,
-		// 输出 Schema 对齐官方 skill 工具：{name, provider, resourceBase, content}。
-		Data: map[string]any{
-			"name":         name,
-			"provider":     providerName,
-			"resourceBase": map[string]any{"kind": "directory", "path": resourceDir},
-			"content":      content,
-		},
+		// 输出 Schema 对齐官方 skill 工具：{name, provider, resourceBase?, content}。
+		Data: data,
 	}, nil
 }
 
+// resourceBaseData 把资源基准折成官方输出 Schema 的形状（kind/path|url|description）。
+func resourceBaseData(base *ResourceBase) map[string]any {
+	switch base.Kind {
+	case "directory":
+		return map[string]any{"kind": "directory", "path": base.Path}
+	case "url":
+		return map[string]any{"kind": "url", "url": base.URL}
+	default:
+		return map[string]any{"kind": "opaque", "description": base.Description}
+	}
+}
+
 // renderSkillContent 是官方 @deepseek-ai/dsh-skill 的 renderSkillContent 的 Go 投影
-// （asar 只读解出，lib/index.js:57-72）。模型看到的唯一 <skill_content> 形状：
+// （asar 只读解出，lib/index.js:57-72 / src/index.ts:190-230）。模型看到的唯一
+// <skill_content> 形状：
 //
 //	<skill_content name="...">
 //	<skill_resources>
@@ -326,14 +417,17 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 //	</skill_instructions>
 //	</skill_content>
 //
+// 资源基准有四种官方形状（directory / url / opaque / 没有）：没有时官方原文是
+// `Resources for this skill are managed by provider "<provider>".`——非文件系统
+// provider 就靠这一支，别硬造一个目录。
+//
 // 名字走属性转义（skill 名可能是任意目录名）；正文原样嵌入——skill 是本地可信内容，
 // 转义会改掉它自己的 Markdown。
-func renderSkillContent(name, provider, resourceDir, body string) string {
+func renderSkillContent(name, provider string, base *ResourceBase, body string) string {
 	return strings.Join([]string{
 		`<skill_content name="` + escapeAttr(name) + `">`,
 		"<skill_resources>",
-		"Base directory for this skill: " + escapeText(resourceDir),
-		"Resolve relative paths mentioned by this skill against the base directory before using them. Load referenced resources only as needed.",
+		renderResourceHint(provider, base),
 		"</skill_resources>",
 		"",
 		"<skill_instructions>",
@@ -341,6 +435,25 @@ func renderSkillContent(name, provider, resourceDir, body string) string {
 		"</skill_instructions>",
 		"</skill_content>",
 	}, "\n")
+}
+
+// renderResourceHint 是官方 `renderResourceHint`（src/index.ts:206-230）的投影。
+func renderResourceHint(provider string, base *ResourceBase) string {
+	if base == nil {
+		return "Resources for this skill are managed by provider \"" + escapeText(provider) + "\".\n" +
+			"Load referenced resources only as needed."
+	}
+	switch base.Kind {
+	case "directory":
+		return "Base directory for this skill: " + escapeText(base.Path) + "\n" +
+			"Resolve relative paths mentioned by this skill against the base directory before using them. Load referenced resources only as needed."
+	case "url":
+		return "Base URL for this skill: " + escapeText(base.URL) + "\n" +
+			"Resolve relative URLs mentioned by this skill against the base URL before using them. Load referenced resources only as needed."
+	default:
+		return "Resources for this skill: " + escapeText(base.Description) + "\n" +
+			"Load referenced resources only as needed."
+	}
 }
 
 // escapeAttr 转义 XML 属性值（官方 escapeAttr：& " <）。
@@ -352,6 +465,14 @@ func escapeAttr(value string) string {
 func escapeText(value string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
 }
+
+// Body 取 SKILL.md 的正文（有 YAML frontmatter 就切掉，两头空白去掉）。
+//
+// 导出理由：官方 `skills.list`（cmd/dshd/serve_agent_api_skills.go）的文件系统
+// provider 也要交回"frontmatter 之后的正文"，两处若各写一份切分逻辑迟早漂移。
+// 官方出处：@deepseek-ai/dsh-skill/src/index.ts:1022 `validateDefinition` 之前的
+// `parseFrontmatter`（返回的 body 两头 trim）。
+func Body(text string) string { return skillBody(text) }
 
 // skillBody 取 SKILL.md 的正文：有 YAML frontmatter 就切掉（官方 parseFrontmatter
 // 返回的 body，两头空白去掉），没有就是整个文件。
@@ -394,18 +515,32 @@ type skillErr string
 
 func (e skillErr) Error() string { return string(e) }
 
-// list 列出本机所有 skill：名字 + 从 SKILL.md 的 frontmatter 里取的一句话说明。
+// skillEntry 是一条收集结果：名字 + 一句话说明（说明来自 SKILL.md frontmatter）。
+type skillEntry struct {
+	name string
+	desc string
+}
+
+// list 列出**模型面**可见的 skill：名字 + 一句话说明。
 //
 // 说明取不到就不编：只给名字。**空描述比假描述好**——假描述会让模型挑错 skill。
-func (t *Tool) list() (spi.Result, error) {
-	entries := t.collect()
-	names := make([]string, 0, len(entries))
-	descOf := make(map[string]string, len(entries))
-	for _, e := range entries {
-		names = append(names, e.name)
-		descOf[e.name] = e.desc
+//
+// 与"确认没有"分开：incomplete（有 provider 失败）时，即使一条都列不出来也不能
+// 说"这台机器上没装任何 skill"——那是假话（官方 tool-skill 的
+// `incompleteCatalogNotice` 同一口径）。
+func (t *Tool) list(ctx context.Context) (spi.Result, error) {
+	visible, complete, err := t.modelCatalog(ctx)
+	if err != nil {
+		return spi.Result{Hint: "skill 合并失败（某个 provider 返回了非法数据）；这是宿主装配错误。"}, err
 	}
-	if len(names) == 0 {
+	entries := summariesToEntries(visible)
+	if len(entries) == 0 {
+		if !complete {
+			return spi.Result{
+				Hint: "这次 skill 发现是**不完整**的（有来源没查完），不能据此认定没装 skill。" +
+					"找过：" + filepath.ToSlash(strings.Join(t.roots(), ", ")) + "。稍后重试，或检查 provider 日志。",
+			}, skillErr("skill 发现不完整，没有可确认的 skill")
+		}
 		return spi.Result{
 			Hint: "这台机器上没装任何 skill（找过：" + filepath.ToSlash(strings.Join(t.roots(), ", ")) +
 				"）。先建 <根>/<名字>/SKILL.md，或用 DSHD_SKILLS_EXTRA 指一个已有的目录。",
@@ -414,29 +549,43 @@ func (t *Tool) list() (spi.Result, error) {
 
 	var b strings.Builder
 	b.WriteString("本机可用 skill（用 {\"name\":\"<名字>\"} 取全文）：\n")
-	for _, n := range names {
-		desc := descOf[n]
-		if desc == "" {
-			b.WriteString("- " + n + "\n")
+	for _, e := range entries {
+		if e.desc == "" {
+			b.WriteString("- " + e.name + "\n")
 			continue
 		}
-		b.WriteString("- " + n + " — " + desc + "\n")
+		b.WriteString("- " + e.name + " — " + e.desc + "\n")
+	}
+	if !complete {
+		b.WriteString("\n（注意：这次发现不完整——有来源没查完，清单可能缺项；" +
+			"同名 skill 也可能落到了次优先的来源。下次请求会重试。）")
 	}
 
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.name)
+	}
 	return spi.Result{
 		Summary: "本机有 " + itoa(len(names)) + " 个 skill",
 		Text:    strings.TrimRight(b.String(), "\n"),
-		Data:    map[string]any{"count": len(names), "names": names},
+		Data:    map[string]any{"count": len(names), "names": names, "incomplete": !complete},
 	}, nil
 }
 
 // search 在名字、说明与正文里检索：模型不用先知道准确名字，也能找到该用哪份 skill。
 //
-// 排序：名字命中 → 说明命中 → 正文命中；同一档按名字排，同名只算一次
-// （先出现的根优先，与取正文的查找顺序一致）。
-func (t *Tool) search(query string) (spi.Result, error) {
+// 排序：名字命中 → 说明命中 → 正文命中；同一档按名字排。只搜**模型面**可见
+// （modelInvocable=true）的 skill：正文通过注册表按名载入，不再自己拼路径读盘。
+func (t *Tool) search(ctx context.Context, query string) (spi.Result, error) {
+	registry, err := t.Registry()
+	if err != nil {
+		return spi.Result{Hint: "skill 注册表不可用；这是宿主装配错误。"}, err
+	}
+	visible, complete, err := t.modelCatalog(ctx)
+	if err != nil {
+		return spi.Result{Hint: "skill 合并失败（某个 provider 返回了非法数据）；这是宿主装配错误。"}, err
+	}
 	needle := strings.ToLower(query)
-	roots := t.roots()
 	type match struct {
 		name        string
 		description string
@@ -445,41 +594,33 @@ func (t *Tool) search(query string) (spi.Result, error) {
 		rank        int
 	}
 	var matches []match
-	seen := map[string]bool{}
-	for _, root := range roots {
-		for _, name := range existingSkills(root) {
-			if seen[name] {
+	for _, summary := range visible {
+		rank := 0
+		excerpt := ""
+		switch {
+		case strings.Contains(strings.ToLower(summary.Name), needle):
+		case summary.Description != "" && strings.Contains(strings.ToLower(summary.Description), needle):
+			rank = 1
+		default:
+			// 正文命中要读正文：走 provider 的 get（每次现读，不缓存正文）。
+			definition, err := registry.Get(ctx, summary.Name, LookupOptions{})
+			if err != nil || definition == nil {
 				continue
 			}
-			path := filepath.Join(root, name, "SKILL.md")
-			raw, err := os.ReadFile(path)
-			if err != nil {
+			excerpt = matchExcerpt(definition.Content, needle)
+			if excerpt == "" {
 				continue
 			}
-			description := readDescription(path)
-			rank := 0
-			excerpt := ""
-			switch {
-			case strings.Contains(strings.ToLower(name), needle):
-			case description != "" && strings.Contains(strings.ToLower(description), needle):
-				rank = 1
-			default:
-				excerpt = matchExcerpt(skillBody(string(raw)), needle)
-				if excerpt == "" {
-					continue
-				}
-				rank = 2
-			}
-			seen[name] = true
-			matches = append(matches, match{
-				name: name, description: description,
-				path: filepath.ToSlash(path), excerpt: excerpt, rank: rank,
-			})
+			rank = 2
 		}
+		matches = append(matches, match{
+			name: summary.Name, description: summary.Description,
+			path: summary.Path, excerpt: excerpt, rank: rank,
+		})
 	}
 	if len(matches) == 0 {
 		return spi.Result{
-			Hint: "没有匹配「" + query + "」的 skill。" + availableHint(roots),
+			Hint: "没有匹配「" + query + "」的 skill。" + availableHint(t.roots(), summariesToEntries(visible), complete),
 		}, skillErr("没有匹配「" + query + "」的 skill")
 	}
 	sort.SliceStable(matches, func(i, j int) bool {
@@ -501,22 +642,45 @@ func (t *Tool) search(query string) (spi.Result, error) {
 		if m.excerpt != "" {
 			b.WriteString("  正文：" + m.excerpt + "\n")
 		}
-		rows = append(rows, map[string]any{
-			"name": m.name, "description": m.description, "path": m.path, "excerpt": m.excerpt,
-		})
+		row := map[string]any{
+			"name": m.name, "description": m.description, "excerpt": m.excerpt,
+		}
+		if m.path != "" {
+			row["path"] = m.path
+		}
+		rows = append(rows, row)
+	}
+	if !complete {
+		b.WriteString("\n（注意：这次发现不完整——有来源没查完，命中可能缺项。）")
 	}
 	return spi.Result{
 		Summary: "检索到 " + itoa(len(matches)) + " 个 skill",
 		Text:    strings.TrimRight(b.String(), "\n"),
-		Data:    map[string]any{"query": query, "count": len(matches), "matches": rows},
+		Data:    map[string]any{"query": query, "count": len(matches), "matches": rows, "incomplete": !complete},
 	}, nil
 }
 
+// summariesToEntries 把摘要折成 list/search 的显示条目。
+func summariesToEntries(summaries []Summary) []skillEntry {
+	out := make([]skillEntry, 0, len(summaries))
+	for _, summary := range summaries {
+		out = append(out, skillEntry{name: summary.Name, desc: summary.Description})
+	}
+	return out
+}
+
 // availableHint 把真实存在的名字给模型（一个都没有就说明目录是空的）。
-func availableHint(roots []string) string {
-	names := existingSkillsAll(roots)
-	if len(names) == 0 {
+func availableHint(roots []string, entries []skillEntry, complete bool) string {
+	if len(entries) == 0 {
+		if !complete {
+			return "这次发现不完整，不能据此认定没有 skill（找过：" +
+				filepath.ToSlash(strings.Join(roots, ", ")) + "）。"
+		}
 		return "一个都没装（找过：" + filepath.ToSlash(strings.Join(roots, ", ")) + "）。"
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.name)
 	}
 	return "现有：" + strings.Join(names, "、")
 }
@@ -569,77 +733,25 @@ func (t *Tool) roots() []string {
 	return out
 }
 
-// existingSkillsAll 合并多个根里的 skill 名（同名只算一次，先出现的根优先）。
-func existingSkillsAll(roots []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, r := range roots {
-		for _, n := range existingSkills(r) {
-			if seen[n] {
-				continue
-			}
-			seen[n] = true
-			out = append(out, n)
+// notFoundHint 把"真实存在的名字"给模型，并说清"不完整"与"确认没有"的区别。
+func notFoundHint(roots []string, name string, entries []skillEntry, complete bool) string {
+	if len(entries) == 0 {
+		if !complete {
+			return "没有名为「" + name + "」的 skill，但这次发现是不完整的（有来源没查完），" +
+				"不能据此认定它不存在。找过：" + filepath.ToSlash(strings.Join(roots, ", ")) + "。"
 		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// readDescriptionAny 按 roots 顺序找第一个有这个 skill 的根，读它的 description。
-func readDescriptionAny(roots []string, name string) string {
-	for _, r := range roots {
-		p := filepath.Join(r, name, "SKILL.md")
-		if !underDir(r, p) {
-			continue
-		}
-		if _, err := os.Stat(p); err == nil {
-			return readDescription(p)
-		}
-	}
-	return ""
-}
-
-// notFoundHintAll 把"真实存在的名字"跨根汇总给模型。
-func notFoundHintAll(roots []string, name string) string {
-	names := existingSkillsAll(roots)
-	if len(names) == 0 {
 		return "没有名为「" + name + "」的 skill，而且一个都没装（找过：" +
 			filepath.ToSlash(strings.Join(roots, ", ")) + "）。"
 	}
-	return "没有名为「" + name + "」的 skill。现有：" + strings.Join(names, "、")
-}
-
-// readDescription 从 SKILL.md 顶部的 YAML frontmatter 里取 description。
-//
-// 只认最常见的形状：文件以 `---` 开头，之后的若干行 `key: value`，遇到第二个 `---` 结束。
-// 取不到就返回空串——**不猜、不拼**。
-func readDescription(path string) string {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return ""
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.name)
 	}
-	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	lines := strings.SplitN(text, "\n", 40) // 只看前 40 行：frontmatter 不会更长
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return ""
+	hint := "没有名为「" + name + "」的 skill。现有：" + strings.Join(names, "、")
+	if !complete {
+		hint += "（这次发现不完整，清单可能缺项。）"
 	}
-	for _, ln := range lines[1:] {
-		t := strings.TrimSpace(ln)
-		if t == "---" {
-			break
-		}
-		if !strings.HasPrefix(t, "description:") {
-			continue
-		}
-		v := strings.TrimSpace(strings.TrimPrefix(t, "description:"))
-		v = strings.Trim(v, `"'`)
-		if len([]rune(v)) > 90 {
-			v = string([]rune(v)[:90]) + "…"
-		}
-		return v
-	}
-	return ""
+	return hint
 }
 
 // underDir 判断 p 是否落在 base 之内（跨盘符一律判否）。
@@ -657,35 +769,6 @@ func underDir(base, p string) bool {
 		return false // Windows 跨盘符会在这里报错
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// notFoundHint 列出目录里真实存在的 skill 名，让模型下一句能改对参数。
-func notFoundHint(dir, name string) string {
-	names := existingSkills(dir)
-	if len(names) == 0 {
-		return "没有名为「" + name + "」的 skill。目录是空的（" + filepath.ToSlash(dir) + "）。"
-	}
-	return "没有名为「" + name + "」的 skill。现有：" + strings.Join(names, "、")
-}
-
-// existingSkills 返回 dir 下含 SKILL.md 的子目录名，已排序。
-func existingSkills(dir string) []string {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(dir, e.Name(), "SKILL.md")); err != nil {
-			continue
-		}
-		names = append(names, e.Name())
-	}
-	sort.Strings(names)
-	return names
 }
 
 // itoa 打印十进制整数。不引 strconv：这个包里只需要这一处格式化。
@@ -782,6 +865,12 @@ func copyTree(from, to string) error {
 		return os.WriteFile(target, data, 0o644)
 	})
 }
+
+// New 构造一个独立的工具实例（dir 是主 skill 根）。
+//
+// 宿主装配走 `Module`；非 kernel 场景（用例、命令行探针）用它直接拿实例，
+// 再接 `Registry()` 注册额外的 provider。
+func New(dir string) *Tool { return &Tool{dir: dir} }
 
 // Module 把工具注册进 tools 服务。
 func Module(dir string) kernel.Module {

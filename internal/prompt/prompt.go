@@ -41,6 +41,31 @@ type Context struct {
 	// 的默认串塞进来是另一种产品形状，不是能力补齐。要官方那句话，显式设
 	// `DSH_SYSTEM_PROMPT='You are a helpful software engineer assistant.'` 即可。
 	PersonaPrefix string
+	// EnableInstructionChain 打开官方 `@deepseek-ai/dsh-agent-instructions` 的
+	// **project root → session cwd** 指令链（实现与官方引文见 instructions.go）。
+	//
+	// 零值 = 关闭：`Default` 继续走旧的单点 `WorkspaceRules`，宿主既有提示形状
+	// 逐字节不变。为什么默认关闭而不是默认开：官方链把项目段从
+	// 「一个 AGENTS.md」换成「一条带 `<system-reminder>` 框架的链」，默认翻会
+	// 改掉所有既有字节与既有测试断言；官方自己也是"挂载插件才生效"
+	// （README.md:30 "Mount this plugin when agents should work from the
+	// workspace's own instruction files"）。
+	EnableInstructionChain bool
+	// ProjectRootMarkers 是官方 `projectRootMarkers`（src/config.ts:11，默认 `['.git']`）：
+	// 用这些目录名从 cwd 向上认项目根；找不到就用 cwd 自己（不猜祖先）。
+	ProjectRootMarkers []string
+	// InstructionFileCandidates 是官方 `instructionFileCandidates`
+	// （src/config.ts:12，默认 `['AGENTS.md', 'CLAUDE.md']`）：每个目录先加载的 base 候选。
+	InstructionFileCandidates []string
+	// LocalInstructionFileCandidates 是官方 `localInstructionFileCandidates`
+	// （src/config.ts:13，默认 `['AGENTS.local.md', 'CLAUDE.local.md']`）：base 之后加载的
+	// local 叠加；与同目录 base 候选**同组**去重（官方 src/config.ts:34-37
+	// "under the same per-directory trimmed-content dedup"）。
+	LocalInstructionFileCandidates []string
+	// MaxSourceBytes 是官方 `maxSourceBytes`（src/config.ts:14，默认 1048576）：
+	// **单个源文件**的上限，超过就整文件丢弃（README 表格 "larger files are ignored"），
+	// 不是截断。0 = 用默认值；负值 = 关闭整条链（与 MaxWorkspaceBytes 的哨兵约定一致）。
+	MaxSourceBytes int
 }
 
 // Provider 是提示词的一段。返回空串即表示这一段这轮不出现。
@@ -215,6 +240,16 @@ func rulesFromFile(title, path string, limit int) string {
 // ---------- 便捷入口 ----------
 
 // Default 是默认的装配组合。
+//
+// `EnableInstructionChain` 打开时，项目段换成官方 project 指令链（ProjectInstructions）：
+// 官方的一条消息里用户全局链在前、项目链在后（README.md:34），所以链排在 GlobalRules 之后。
+// `ExtraRulesPath` 是宿主的**显式单手册**入口（官方没有这个字段）：一旦给了它就按既有语义
+// 只注入那一本，自动发现链让位——否则两本手册会同时进提示词，与既有语义（extra_test.go
+// "两本手册不能同时进提示词"）冲突。
 func Default(c Context) string {
-	return Assemble(c, Persona{}, Runtime{}, ToolGuide{}, GlobalRules{}, WorkspaceRules{})
+	var workspace Provider = WorkspaceRules{}
+	if c.EnableInstructionChain && strings.TrimSpace(c.ExtraRulesPath) == "" {
+		workspace = ProjectInstructions{}
+	}
+	return Assemble(c, Persona{}, Runtime{}, ToolGuide{}, GlobalRules{}, workspace)
 }

@@ -29,10 +29,28 @@ var schema = json.RawMessage(`{
   "additionalProperties": false
 }`)
 
-// Tool 实现 spi.Tool。svc 负责真正去跑子轮，inherit 负责把父会话片段取出来。
+// Inherit 是宿主注入的"取一次 fork 种子"的钩子。
+//
+// 为什么返回一个结构体而不是两个闭包：官方 `dsh-subagent-fork-in-process/src/index.ts:72-78`
+// 的种子是**创建时取一次**的快照；文本出口（子代理这一趟的初始历史）与 durable
+// 出口（子会话日志里的真实事件）必须来自**同一次**取数，否则父会话在两读之间又写了
+// 一轮，就会出现"子代理看到 N 轮、子会话日志里 N+1 轮"。
+//
+// 工具层**不认识会话**（spi 的分层约束），所以这里只拿到已算好的两样东西。
+type Seed struct {
+	// Text 是渲染给子代理第一次模型调用的那段文本（空 = 没带上历史）。
+	Text string
+	// Events 是落盘用的 durable 事件（父会话原样 v4 事件字节，空 = 没有）。
+	Events []json.RawMessage
+}
+
+// Empty 报告这次 fork 有没有带上历史（= 首轮完成之前 fork，等同 spawn）。
+func (s Seed) Empty() bool { return strings.TrimSpace(s.Text) == "" && len(s.Events) == 0 }
+
+// Tool 实现 spi.Tool。svc 负责真正去跑子轮，inherit 负责把父会话种子取出来。
 type Tool struct {
 	svc     spi.SubagentRunner
-	inherit func(ctx context.Context) string
+	inherit func(ctx context.Context) Seed
 }
 
 func (t *Tool) Name() string            { return "subagent_fork" }
@@ -65,8 +83,12 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	}
 
 	req := spi.SubagentRequest{Description: desc, Prompt: prompt, Cwd: a.Cwd}
+	// 种子**只取一次**（官方 `src/index.ts:72-78`）：文本出口（子代理这一趟的初始历史）
+	// 与 durable 出口（子会话日志里的真实事件）来自同一次快照。
 	if t.inherit != nil {
-		req.Inherit = t.inherit(ctx)
+		seed := t.inherit(ctx)
+		req.Inherit = seed.Text
+		req.Seed = seed.Events
 	}
 
 	res, err := t.svc.RunSub(ctx, req)
@@ -118,8 +140,12 @@ type data struct {
 	BorrowedApprovals bool   `json:"borrowed_approvals"`
 }
 
-// Module 返回装配用的模块描述。inherit 由接线处提供（读父会话最近若干条并拼成文本）。
-func Module(inherit func(ctx context.Context) string) kernel.Module {
+// Module 返回装配用的模块描述。
+//
+// inherit 由接线处提供（`cmd/dshd/main.go:187` → `cmd/dshd/subagent_inherit.go` 的
+// `seedForCtx`）：它读一次父会话，同时算好文本出口与 durable 出口。
+// 工具层**不认识会话**——这条结构约束不能为了一个工具就破掉。
+func Module(inherit func(ctx context.Context) Seed) kernel.Module {
 	return kernel.Module{
 		ID:       "tool-subagentfork",
 		Backend:  kernel.BackendStatic,

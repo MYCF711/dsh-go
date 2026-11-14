@@ -192,16 +192,16 @@ official covered by const: 155 of 193
 
 | # | plugin id | 状态 | 证据（file:line，HEAD 快照） | 差什么 / 说明 |
 |---:|---|---|---|---|
-| 1 | `tool-plugin-manager` | PARTIAL | `modules/tool/plugin/plugin.go:65`、`cmd/dshd/main.go:125` | 工具面只有 list/enable/disable，改的是 `dsh.toml` 里的 `[[module]]` 且**下次启动生效**；官方工具的 install/uninstall/update/restore 在宿主只存在于 `plugin.*` HTTP/CLI 面（`cmd/dshd/serve_plugins.go:43` 的 8 方法表），工具面没有对应动作。 |
+| 1 | `tool-plugin-manager` | IMPLEMENTED | `cmd/dshd/tool_plugin_manager.go`；装配 `cmd/dshd/main.go:401` | `plugin_manager` 工具按官方 enum 逐字实现 8 个 action（`dsh-plugin-manager/src/tools.ts:88-164`）：6 条走真实管理器（分页信封 `{entries,total,nextOffset}`、`offset≥0`/`limit 1..100`、豁免真读写 compatibility.json），`install_bundle`/`remove_bundle` 因无下载源与安装事务回**官方形状结构化失败**（`changed=false` + `error.code=unsupported-platform` + `nextStep`）。原 `plugin` 工具（`dsh.toml` 白名单层）保留不动，两层分工写在文件头。测试 `cmd/dshd/tool_plugin_manager_test.go`（8 条，含真装 wasm 包后 `set_bundle` 并重开管理器验落盘）。 |
 | 2 | `plugin-manager` | PARTIAL | `internal/pluginmgr/manager.go:134`、`cmd/dshd/serve_plugins.go:43` | 有本地 `dsh.local-plugin@1` 包的 install/update/restore/uninstall/reconcile，带事务、`.bak`、回滚与 reconcile 恢复；但**没有运行时插件加载器**——包入口永不装载/执行（`internal/transport/handlers_pluginmanager_official.go:629` 把这条写进每条 applied 结果的 warnings），也不是官方 npm 生态。 |
-| 3 | `timer` | DEFERRED | `internal/transport/heartbeat.go:40` | 没有面向模块、随 `*Scope` 释放的 timer 服务（官方 `cordis-plugin-timer` 的 ctx.setTimeout/setInterval 形状）；宿主只有散落的内部 ad-hoc `time.Ticker`（heartbeat、parentwatch），`grep -rE "cordis\ |
-| 4 | `hmr` | DO_NOT_IMPLEMENT | `PLAN.md:643`、`modules/tool/plugin/plugin.go:13` | PLAN 硬规则原文："长期仍不做多 provider、`!!js`、cordis 式热重载和宿主内 JS 桥"；plugin 工具注释亦自述"本仓没有热重载"。代码面 `grep -rE "fsnotify\ |
+| 3 | `timer` | IMPLEMENTED | `internal/timer/module.go`；装配 `cmd/dshd/main.go:142` | 补齐官方 `@cordisjs/plugin-timer` 的**挂载面**：`timer.Key` + `Module()`（`kernel.Provide` + `s.Effect(Release)`，随作用域释放并**等正在跑的回调退出**），`Scope.Wait` 是官方 `ctx.timeout(delay)` 的等待形状（取消后 Done 不关闭）。补之前 `internal/timer` 零生产 importer。测试 `internal/timer/module_test.go`（4 条，走 `kernel.Assemble` 真实装配 + 注入）。 |
+| 4 | `hmr` | PARTIAL | `cmd/dshd/serve_config_hmr.go`；装配 `cmd/dshd/serve.go:556` | 官方两半：**profile 配置热重载（默认开）已补齐**——`ConfigHMR` 只读、按 revision 变化重读并广播、消费者 panic 隔离、构造期拒绝 `profiles/*/cordis.patch.yml`，`DSHD_PROFILE_HMR=0` 可关。另一半（module roots 热替换，官方 opt-in `root: []`）**按 PLAN 硬规则不做**（"cordis 式热重载"），插件安装根重装另由 `internal/pluginmgr/hmr.go` 守（默认关）。测试 `cmd/dshd/serve_config_hmr_test.go`（7 条）。 |
 | 5 | `llm` | IMPLEMENTED | `internal/llm/client.go:71`、`internal/llm/client_test.go` | 真实 SSE 流式客户端：`reasoning_content`/`reasoning` 与 tool_calls 增量拼接、usage 汇总、多行 data 的 SSE 解析、超时与取消；配套 `client_test.go`、`compat_test.go`、`ua_test.go`。 |
-| 6 | `deepseek-llm-api-extensions` | PARTIAL | `internal/llm/compat.go:58`、`internal/llm/client.go:286` | 只做 3 个可选字段的请求形状协商（max_tokens↔max_completion_tokens、stream_options.include_usage、reasoning_effort）+ `reasoning_content` 解析；没有 DeepSeek 侧扩展面（如 prompt cache 命中/未命中计量），`Usage` 只有 prompt/completion/total 三个整数。 |
+| 6 | `deepseek-llm-api-extensions` | PARTIAL | `cmd/dshd/serve_llm_extensions.go`；`internal/llm/provider.go:235` | 扩展注册表已有**真实生产注册者**：`dsh_plugin_packages` 对 `deepseek-completions` + `deepseek-account` 各注册，每次 prepare 现读真实 Loader/state 投影（去重键 `name + NUL + version`、字节序排序、name-only 优先），字段真的进请求体。仍 PARTIAL：官方另一个非空所有者 `dsh_session_log`（#8）本仓 MISSING；`sessionId`→preset 树并集不可达（`llm.Request` 无 sessionId，官方对该部署说 report the host tree only）。测试 `cmd/dshd/serve_llm_extensions_test.go`（6 子测，抓原始请求字节）。 |
 | 7 | `session` | IMPLEMENTED | `internal/session/log.go:71`、`internal/session/surface.go:49` | v4 append-only 会话日志（Append/Seq/Close）+ surface 投影 + fork/rewind/compact/metadata/checkpoint；`log_test.go`、`surface_test.go`、`fork_test.go` 等齐备。 |
 | 8 | `session-log-deepseek` | DEFERRED | grep `-rE "sessionLog\ | report_event\ |
 | 9 | `typert` | PARTIAL | `internal/officialwire/descriptor.go:14`、`internal/officialwire/server.go:126` | 有运行时方法注册表 `Server.Handle(endpoint, Binding)` 与 args 校验入口；但 `Descriptor` 只有 `Required`/`Optional` **字段集**，没有官方的完整类型/默认值 schema（文件自述"U5 未取证"），类型校验散落在各 handler 里。 |
-| 10 | `typert-loader` | DEFERRED | grep `-rE "typert-loader\ | typertLoader\ |
+| 10 | `typert-loader` | IMPLEMENTED | `internal/transport/typert_loader.go`；`cmd/dshd/serve_typert_loader.go` | 加载面补齐：从真实已安装包集合发现 `<包目录>/typert.json`（无描述静默跳过并记账）、支持显式清单 `DSHD_TYPERT_PACKAGES=name=path`（给错 fail-loud 点名包）、`Registry.RegisterPackage` 整批回滚注入、**按包撤销**（`WithdrawPackage`/`WithdrawPackagesExcept`，官方 "withdrawn when the entry unmounts"）。测试 `cmd/dshd/serve_typert_loader_test.go`（5 条，含发现后 `ValidateParams` 立刻生效、卸载后重扫真撤）。 |
 | 11 | `typert-gateway` | IMPLEMENTED | `internal/officialwire/server.go:174`、`internal/officialwire/mux.go:85` | 完整 gateway：unary `{"type":"client-request"…}` 信封、`/api/remote.mux` 七帧、`$events`（ready/emit/waterfall/cancel + result 三态 outcome）、`gateway/*` 错误码、descriptor 校验、上行 256 KiB 背压与 2s×2 心跳；生产挂载在 `cmd/dshd/serve.go:390`，`DSHD_OFFICIAL_WIRE=1` 才启用（默认关，关时字节不变）。 |
 | 12 | `remote-access` | PARTIAL | `cmd/dshd/serve_official_wire.go:155`、`internal/officialwire/auth.go:142` | token→authority 绑定的 v2 HMAC cookie、Host/Origin/sec-fetch-site 三档围栏、一次性 token、peer 的 interactions(none\ |
 | 13 | `session-title` | IMPLEMENTED | `internal/session/fork.go:150`、`cmd/dshd/serve_title_auto.go:153` | title 事件落 v4 + 官方 `normalizeSessionTitle`（清 OSC/CSI/ESC、C0/C1、方向与不可见字符、空白折叠、按 UTF-8 字节截断不拆码点）+ 用户显式标题优先（写前在会话锁内重读，用户标题在场即放弃）。 |
@@ -214,7 +214,7 @@ official covered by const: 155 of 193
 | 20 | `llm-retry` | IMPLEMENTED | `internal/llm/retry.go:16`、`internal/llm/retry_test.go` | 文件头显式声明"这一层是 0.2.2 `llm-retry`（官方编号 20）的宿主实现"：429/5xx/连接层瞬时错误指数退避（base 500ms、单次上限 8s、总预算 20s、50% 抖动、Retry-After 有天花板），401/403/404/400/422 一次都不重试；重放点在**单次 HTTP 请求**而非 step 边界，流已开始吐字后不重放。 |
 | 21 | `config-editor` | PARTIAL | `internal/transport/handlers_config.go:60`、`internal/transport/handlers_config.go:23` | 只有扁平 `key → string` 的 config.get/config.set（协议层明确不做嵌套、不做类型推断、不做合并策略）；没有官方的 profile patch 树（cordis.patch.yml 那种按 id 整块替换）、字段级 schema 校验与热应用。 |
 | 22 | `settings` | PARTIAL | `internal/settingsform/settingsform.go:283`、`internal/settingsform/settingsform.go:254` | settings.describe/mutate + settings.form.describe/get/set/reset 的 revision 栅栏、乐观并发 409、reset 与写失败回滚都在；但 namespace 是**写死的两个**（model、permission，见 `settingsform.go:212` 的 `New`），没有官方那种由插件声明 namespace/字段 schema 的注册面。 |
-| 23 | `authorization` | DEFERRED | grep `-rE "AuthorizationFlow\ | authorizationFlow\ |
+| 23 | `authorization` | IMPLEMENTED | `internal/authorization/registry.go`；`internal/transport/handlers_authorization_rc2.go`；`cmd/dshd/serve_authorization_flows.go` | 通用 flow 注册表：`registerFlow`/`begin`/`cancel`/`list`/`describe` + 官方四个错误码（NO_FLOW/ALREADY_IN_FLIGHT/NOT_COMMITTED/UNKNOWN_METHOD）+ **commit 必须被观察到**（没 Commit 不报 authorized）+ 人拒绝=cancelled（不是错误）+ notice/prompt 只到发起方。wire 面 5 条方法（`authorization.begin` 用 NDJSON 推 notice/prompt/outcome，`authorization.answer` 回填；官方无 RPC，因为其 surface 在进程内）。生产流：真实自托管 OIDC device-code 登录包成 `account/oidc`。测试 registry 9 条 + wire 8 条 + cmd 端到端 6 条（真 OIDC 端点、notice 带端点返回的 user_code、answer=done 后真换 token 且凭据落盘、取消时 token 端点零调用）。 |
 | 24 | `deepseek-account` | PARTIAL | `cmd/dshd/serve_account_api.go:107`、`internal/transport/handlers_account_official.go:508` | 10 个 account 组方法只绑了 4 个真实现（getUnnotifiedBonuses / ackBonusNotified / signOut / discoverModels），其余 6 个（getProfile、getBalance、startSignIn、cancelSignIn、productAnalytics.report、actionCards.act）回官方形状的四字段 501——没有官方账号服务、浏览器登录与 code 交换。 |
 | 25 | `credentials` | IMPLEMENTED | `internal/llm/model_catalog.go:499`、`internal/llm/model_catalog.go:523` | 独立凭据存储：describe 只回 configured/source/writable（**从不回值**、ref 非法整批拒），set/unset 带 revision 栅栏 + 临时文件 rename 原子提交，未被任何 catalog 模型引用的 standalone ref 也能存；解析优先级 stored > `apiKeyEnv` 同名环境变量（`model_catalog.go:684`）。 |
 | 26 | `llm-pi-ai` | DO_NOT_IMPLEMENT | `PLAN.md:643`、`internal/llm/model_catalog.go:1030` | PLAN 硬规则："长期仍不做多 provider"；宿主只承认 `openai-completions` 一条协议（`api:"anthropic-messages"` 直接判 invalid_field，`internal/llm/model_catalog_test.go:156` 就是那条负例），没有 pi-ai 的多协议适配器注册表。 |
@@ -233,7 +233,7 @@ official covered by const: 155 of 193
 | 34 | `storage-json` | PARTIAL | `cmd/dshd/serve_agent_api.go:168`、`internal/schedule/mutations.go:249` | 只有逐功能的 JSON 文档原子写（goal/feedback/preset/sandbox 共用 `agentWriteDoc`，schedule 另带 version 戳），没有具名 JSON backend，也没有官方"整单元/逐记录"两种布局。 |
 | 35 | `storage-domain` | DEFERRED | grep `-rniE "storagedomain\ | storage-domain\ |
 | 36 | `session-projection-cache` | DEFERRED | grep `-rni "cache" internal/session` = 0 | 无持久投影 checkpoint 缓存；`session.history` 仍冷读整份 v4 日志重算 surface。 |
-| 37 | `otel` | DEFERRED | grep `-rniE "otel\ | otlp\ |
+| 37 | `otel` | PARTIAL | `internal/analytics/otlp.go`；`internal/analytics/otel_channel.go` | 真 OTLP/HTTP **JSON** 编码（`resourceLogs/scopeLogs/logRecords`、纳秒时间戳为字符串、`eventName` 一等字段，零依赖）+ **每消费者独立通道**（自己的 client/resource/scope/队列/退避；`createEventReporter` 按 count 批、`createSessionLogReporter` 一条事件一条 `session-log` 记录、4,000,000 未压缩字节上限、shutdown 取消在飞请求与重试等待）。仍 PARTIAL：gzip 压缩未做（默认与官方一致不压缩）；会话日志通道暂无生产消费者（属 #38，本仓 MISSING）。测试 `otlp_test.go` 4 条 + `otel_channel_test.go` 11 条（含两通道互不干扰、溢出可观测、503 重试）。 |
 | 38 | `session-telemetry-otel` | DEFERRED | grep `-rniE "telemetry\ | sessionTelemetry"` = 0 |
 | 39 | `subprocess` | IMPLEMENTED | `internal/spi/exec.go:17`、`modules/exec/bash/session.go:75` | 真实 OS 进程 provider：`spi.Exec` 接缝 + 常驻 bash 会话 + 真实终端（`modules/exec/bash/terminal.go:34` OpenTerminal）+ Windows Job Object/Unix 进程组归属；`grep subprocess`=0 只是没沿用官方标识符。 |
 | 40 | `sandbox` | DEFERRED | `internal/sandbox/policy.go:3`（包注释："本包不是 OS 沙盒"）、grep `-rniE "chroot\ | appcontainer\ |
@@ -249,8 +249,8 @@ official covered by const: 155 of 193
 | 50 | `fs-observation-policy` | IMPLEMENTED | `modules/fs/local/local.go:280`、`modules/fs/local/local.go:272` | 读后写 + 防陈旧覆盖（未读即改、读后被改都拒）；用 mtime+size 而非内容 hash（已登记差异）。 |
 | 51 | `tool-fs` | IMPLEMENTED | `modules/tool/read/read.go:38`、`modules/tool/write/write.go:31` | read / read_image / write / edit 四件齐全（`modules/tool/edit/edit.go:34`）。 |
 | 52 | `tool-fs-search` | IMPLEMENTED | `modules/tool/glob/glob.go:42`、`modules/tool/grep/grep.go:52` | glob / grep 两件齐全，均带包内测试。 |
-| 53 | `agent-instructions` | PARTIAL | `internal/prompt/prompt.go:140` | 只认 `AGENTS.md`（全局 + 工作区两级），无 `CLAUDE.md`（grep = 0），预算默认 8000B ≠ 官方 65536B，也没有项目根/`.local` 链。 |
-| 54 | `skill` | PARTIAL | `modules/tool/skill/skill.go:43` | 无 skill provider 注册表 SPI（grep `skillprovider\ |
+| 53 | `agent-instructions` | PARTIAL | `internal/prompt/instructions.go`；装配 `cmd/dshd/acp.go:1247` | 官方 project root→cwd broad→specific 链**已补齐并默认开**（`DSHD_INSTRUCTION_CHAIN=0` 关）：`.git` 定根、`AGENTS.md`/`CLAUDE.md` + `*.local.md` 候选、组内 trim 去重（跨组不去重）、超 `maxSourceBytes` 整文件丢、三级预算退化（丢宽的→截断最具体的→compact intro→只有通知）、`</system-reminder>` 转义、cwd 变更重载。仍 PARTIAL：fs 操作后的嵌套发现与 change/removal 通知（官方 durable 投影）未做；用户全局双根链只实现一个点。测试 `internal/prompt/instructions_chain_test.go` 14 条。 |
+| 54 | `skill` | IMPLEMENTED | `modules/tool/skill/registry.go`；`modules/tool/skill/filesystem.go`；`cmd/dshd/serve_agent_api_skills.go:305` | provider 注册面补齐：`registerProvider`/`register`（`runtime` 保留名、同层重名报错、first-wins + 警告、返回按注册作用域生效的 `Invalidate`）、`{modelInvocable,userInvocable}` 四组合、合并键 rank→providerOrder→localOrder、载入后校验名字不一致即失效缓存、provider 失败记日志+跳过+标 incomplete。`skill` 工具与 `skills.list` 都读注册表合并结果；自带文件系统 provider。仍只实现全局层（无 preset 分层）。测试 `registry_test.go` 8 条 + `cmd/dshd/serve_agent_api_skills_registry_test.go` 5 条。 |
 | 55 | `skill-filesystem` | IMPLEMENTED | `modules/tool/skill/skill.go:166`、`cmd/dshd/serve_agent_api.go:1167` | 多根（`<home>/skills` + `DSHD_SKILLS_EXTRA` 分号分隔，先到先得）+ frontmatter 解析（description / when_to_use）。 |
 | 56 | `tool-skill` | IMPLEMENTED | `modules/tool/skill/skill.go:43` | 不给 name = 列清单（名字 + 一句话说明），给 name = 取 SKILL.md 全文（32KB 截断且显式标注）。 |
 | 57 | `commands` | IMPLEMENTED | `internal/transport/handlers_commands_official.go:111`、`cmd/dshd/serve_commands_api.go:58` | 真注册表：Register/List/Find/Execute + 生命周期写 v4（`command/run`、`command/done`）+ 附件准入；`commands.list/execute` 走它。 |
@@ -269,16 +269,16 @@ official covered by const: 155 of 193
 | 65 | `command-compact` | PARTIAL | `cmd/dshd/serve_commands_api.go:16` | 压缩引擎与 `session.compact` RPC 都已真实存在（`internal/compact/compact.go:66`、`internal/transport/handlers_extra.go:230`），但官方 `/compact` **没有进宿主命令注册表**——只注册了 goal/feedback/help，`commands.list` 列不出、`commands.execute` 执行不了。 |
 | 66 | `subagent` | PARTIAL | `cmd/dshd/subagent.go:48` | 子代理运行器真实存在（`RunSub`），但语义是**同步阻塞**：无官方"立刻返回 id、完成后再回传"的异步形态；另 `maxDepth=1`（`cmd/dshd/subagent.go:43`）使子代理不能再派子代理。 |
 | 67 | `subagent-spawn-in-process` | IMPLEMENTED | `cmd/dshd/subagent.go:92`；测试 `modules/tool/subagent/subagent_test.go:1` | 同进程装配 `agent.Loop` 跑子轮，工具表用 `noSubagent` 结构性挡递归（`cmd/dshd/subagent.go:191`）。 |
-| 68 | `subagent-fork-in-process` | PARTIAL | `cmd/dshd/subagent_inherit.go:19`；`cmd/dshd/subagent_inherit.go:60` | 不是真 fork：只把父会话最近的 surface 转成**纯文本**（`inheritKeep=20` 条）拼进 prompt，子会话不复制父会话历史、不可续问。 |
+| 68 | `subagent-fork-in-process` | IMPLEMENTED | `cmd/dshd/subagent_seed.go`；`internal/agent/child_session.go:120/399` | 真 fork：`completedTurnPrefix` 取到最后一条 `turn/end` 并含它（官方 `src/index.ts:46-53`），`buildForkSeed` 按事件前缀切出**已完成轮次**并原样保留 text/reasoning/tool-call 块，`ChildSpawn` 把种子**逐条真实写入子会话 v4 日志**。in-flight 轮排除、**一次性快照**（父后续轮次不再进入）、首轮前为空等同 spawn。测试 `cmd/dshd/subagent_seed_fork_test.go` 5 条 + `internal/agent/child_session_test.go` 2 条（子会话含 reasoning/tool-call 块、无 in-flight 字节、父跑第 4 轮后子会话文件字节不变）。 |
 | 69 | `tool-subagent-control` | PARTIAL | `modules/tool/team/team.go:26`；`modules/tool/team/spawn.go:211` | 有 `send_message`/`wait_agent`/`list_agents`/`interrupt_agent` 四个工具，但都基于**文件信箱 + 名单标记**；同步委派没有运行句柄，无法对在跑的子代理做 list/cancel/wait。 |
 | 70 | `tool-subagent` | IMPLEMENTED | `modules/tool/subagent/subagent.go:34`；`modules/tool/subagent/subagent.go:61` | 工具名 `subagent`、schema 带 `continuable` 透传；测试 `modules/tool/subagent/subagent_test.go`。形态差异同 #66。 |
-| 71 | `tool-subagent-fork` | IMPLEMENTED | `modules/tool/subagentfork/subagentfork.go:38`；`modules/tool/subagentfork/subagentfork.go:51` | 工具名 `subagent_fork`、继承文本由宿主注入、`inheritNote` 如实报告"这次带了多少历史"。**无独立测试文件**（`modules/tool/subagentfork/` 下无 `*_test.go`）。 |
+| 71 | `tool-subagent-fork` | IMPLEMENTED | `modules/tool/subagentfork/subagentfork.go:40/91/148`；`cmd/dshd/main.go:187` | 与 #68 同一实现的两个出口：工具层一次取数拿到 `Seed{Text,Events}`，结构化事件经 `internal/spi/subagent.go:40` 的 `SubagentRequest.Seed` 传到 `ChildSpawn`；`spawn` 路径形状逐字节不变（`Seed` 恒 nil，golden 已含该字段）。**已有独立测试**（原“无独立测试文件”已消除）：`cmd/dshd/subagent_seed_fork_test.go` + `modules/tool/subagent/subagent_test.go`。 |
 | 72 | `ptc-runtime` | DO_NOT_IMPLEMENT | `AGENTS.md:39`；`modules/tool/workflow/workflow.go:9` | R6 原文「不嵌 JS 运行时、不 fork/vendor dsc、不用 mvdan 执行命令」；`grep -rniw ptc internal cmd modules codecs` 生产代码仅 1 条注释（`cmd/dshd-bridge/main.go:269`），`run_code` = 0。 |
 | 73 | `workflow-ptc` | PARTIAL | `modules/tool/workflow/workflow.go:40`；`modules/tool/workflow/workflow.go:9` | 脚本是宿主自定义的 **JSON 步骤表**，不是 PTC 运行时；无官方 `agent()` 钩子、无并发扇出（`foreach` 串行）。R6 决定了 JS 形态不会来。 |
 | 74 | `tool-workflow` | IMPLEMENTED | `modules/tool/workflow/workflow.go:45`；`modules/tool/workflow/workflow.go:87` | 工具名 `workflow`、参数名 `script`/`meta` 与官方对齐，子调用走受管 `spi.SubDispatch`（`internal/spi/ctx.go:62`）；测试 `modules/tool/workflow/workflow_test.go`。脚本语言不同见 #73。 |
 | 75 | `timeout-policy` | IMPLEMENTED | `modules/tools/pipeline.go:366`；`modules/tools/pipeline.go:90` | 统一 per-call deadline 已在流水线层落地：`executeWithDeadline` 用 goroutine + 缓冲 channel，超时返回结构化 `*ToolTimeoutError`（`:327`），`DSHD_TOOL_TIMEOUT_SECS` 可配、负值关闭；测试 `modules/tools/pipeline_test.go`。 |
 | 76 | `spill-local` | IMPLEMENTED | `modules/tools/pipeline.go:512`；`cmd/dshd/main.go:98` | 超阈值结果外置成 artifact + 指针，`SpillDir` 落 `<home>/artifacts`（FS 已放行，Hint 可读）；测试 `cmd/dshd/spill_roundtrip_test.go`、`modules/tools/pipeline_test.go`。 |
-| 77 | `spill-policy` | PARTIAL | `modules/tools/pipeline.go:121`；`modules/tools/pipeline.go:515` | 只有**单一字符阈值**（默认 4000，`--max-chars` 可调）；无 token 预算、无图文共享预算，`spill` 只动 `Text`/`Data`，图片不参与外置。 |
+| 77 | `spill-policy` | PARTIAL | `modules/tools/spill_policy.go`；`modules/tools/pipeline.go:624` | 官方共享 token 预算补齐：文本 + 每张图（**整留整去**）+ notice 共用 `maxInlineTokens`；头尾各拿剩余一半；notice 报 omitted 字节数**与 omitted 图片数**；恢复文件保留全文 + 每张图可读路径、不复制附件字节；`EstimateImageTokens` 按官方算法逐行移植（16 组 node 跑出的 golden）。仍 PARTIAL：生产装配目前靠 `DSHD_MAX_INLINE_TOKENS` 打开（未加 flag）；含图片且超预算时因无图片可读路径提供者而保留原内容 + warning（官方 best-effort 语义）。测试 `modules/tools/spill_policy_test.go` 15 条。 |
 | 78 | `session-checkpoint-policy` | IMPLEMENTED | `internal/session/checkpoint.go:175`；`cmd/dshd/serve_checkpoint.go:34` | 模型请求发出前把前缀落成耐久快照，失败 fail-closed；四个 prompt 入口全包，另有 `tools/execute` 钩子（`modules/tools/pipeline.go:54` `BeforeDispatch`）；测试 `cmd/dshd/serve_checkpoint_test.go`、`modules/tools/checkpoint_dispatch_test.go`。 |
 | 79 | `tool-result-pruner` | IMPLEMENTED | `internal/prune/prune.go:73`；`internal/session/project.go:33` | 投影到模型上下文前按字节/行双预算留头留尾；生产调用方是 `ProjectResult`；测试 `internal/prune/prune_test.go`。只裁 `Text`，不裁 `Data`/`View`。 |
 | 80 | `image-offload` | IMPLEMENTED | `internal/session/image_offload.go:359`；`cmd/dshd/serve_offload_retry.go:148` | 官方 `image/offload` 决策事件 + 预算/占位文案逐行移植；4xx 失败体识别 `IMAGE_OFFLOAD_REQUIRED` 后降级重试（一次 turn 只降一次）；测试 `internal/session/image_offload_test.go`、`cmd/dshd/serve_offload_retry_test.go`。 |
@@ -629,7 +629,7 @@ terminal.input/open/output, workspace.init/list
 
 - 旧：#66/#67/#70/#71 DONE，#68/#69 PARTIAL
 - 当前：**PARTIAL**（#66 同步语义是硬伤）
-- 证据：`cmd/dshd/subagent.go:3` 自述"上游是**异步**的——立刻返回一个 id"；本仓 `:48 RunSub` 同步返回。`:222 subProvider`/`:232 subagentModule` 装配。fork 侧：`cmd/dshd/subagent_inherit.go:19 inheritKeep = 20`、`:60 inheritTranscript`（只把最近 20 条 surface 转文本、`:87 inheritLine`）——**不是真 fork、不可续**。控制面：`modules/tool/team/spawn.go:30 spawn_teammate`、`:211 interrupt_agent`；官方 `subagents.prompt`/`subagents.interruptByParent` 已真实现（`cmd/dshd/serve_subagents_api.go:55 newHostChildRegistry`、`:143 adoptChild`）
+- 证据：`cmd/dshd/subagent.go:3` 自述"上游是**异步**的——立刻返回一个 id"；本仓 `:48 RunSub` 同步返回。`:222 subProvider`/`:232 subagentModule` 装配。fork 侧（**2026-11-14 已收口，见 §HOST-PARTIAL19**：改为官方 `completedTurnPrefix` 结构化逐轮种子 + in-flight 排除 + 一次性快照，`cmd/dshd/subagent_seed.go:110`；下面这句是收口前的现场记录）：`cmd/dshd/subagent_inherit.go:19 inheritKeep = 20`、`:60 inheritTranscript`（当时只把最近 20 条 surface 转文本）——收口前**不是真 fork**。控制面：`modules/tool/team/spawn.go:30 spawn_teammate`、`:211 interrupt_agent`；官方 `subagents.prompt`/`subagents.interruptByParent` 已真实现（`cmd/dshd/serve_subagents_api.go:55 newHostChildRegistry`、`:143 adoptChild`）
 - 测试：`cmd/dshd -run 'Subagent'` 绿；`modules/tool/subagent`、`modules/tool/subagentfork` 包内测试
 - 还差：异步句柄（立刻返回 id + 完成回传）、真 fork（可续的会话分支而非文本裁剪）
 
@@ -1008,3 +1008,23 @@ t143 之后一批真实缺陷已修（t153/t155/t156/t164/t166/t167/t168），**
 
 **边界继续保留（不得读成"全面等同官方/已发布"）**：Cordis 双轨与非官方 wire、ESM/live-binding 不等价、8 MiB 背压未压测；
 officeToPdf **未装 LibreOffice 实测**；directoryPicker 原生目录框**人工交互项**；版本**未发布、未过用户验收**。
+
+-----
+
+## §HOST-PARTIAL19 · base 插件面 19 条 PARTIAL 的逐条收口（2026-11-14）
+
+工作树 `feat/host-partial19`（**未 commit / 未 push**）。逐条结论与证据：`tmp/GO8-RC2/_p19/HOST-partial19.md`；
+"不做/后置/拍板"各条的官方形状说明：`docs/base-plugins-partial19-official-shape.md`。
+
+| 分档 | 条数 | 明细 |
+|---|---:|---|
+| 已补（本表对应行已改 `IMPLEMENTED`/`PARTIAL` + 新证据） | 12 | #1 #3 #4 #6 #10 #23 #37 #53 #54 #68 #71 #77（审计表编号 #70/#73/#79 = 本表 #68/#71/#77） |
+| R6 不做 | 1 | `workflow-ptc`（插件的唯一内容是 JS 运行时；六类钩子已由宿主原生引擎实现） |
+| 要用户拍板 | 4 | `llm-pi-ai`（四协议产品取舍）、`session-query-sqlite`（FTS5 vs 零依赖）、`sandbox` / `pwsh-sandbox`（要不要 Windows ACL partial 隔离） |
+| 不该补 | 1 | `bash-sandbox`（官方自己在 win32 上 `disabled:true`，同批 `tool-bash` 也 disabled——本仓在同一平台上的形状与官方一致，且本仓仍跑三档策略闸门） |
+| 不适用 | 1 | `agent`（rc.1 遗留判定；PR #24 已在 `cmd/dshd/serve.go:493` 传 `Emit`，`cmd/dshd/agent_events_wiring_test.go` 钉住） |
+
+计数自检：12 + 1 + 4 + 1 + 1 = 19。
+
+其中仍然 `PARTIAL` 的 5 条，#4/#6/#37/#53/#77 的残余缺口逐条写在上面各行与配套报告 §5，
+不当作已实现：**没有**用"删测试/放宽断言/盲改 golden/假数据/静默成功"换绿。

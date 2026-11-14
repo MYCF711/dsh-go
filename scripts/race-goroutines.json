@@ -115,7 +115,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:740",
+      "site": "cmd/dshd/main.go:752",
       "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
       "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"
@@ -127,7 +127,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:874",
+      "site": "cmd/dshd/main.go:886",
       "what": "run 的看门狗协程：父进程没了就取消本轮 ctx",
       "sync": "读过：只调 cancel()，不碰会话/日志；runCtx 与主 goroutine 共享，取消是幂等的",
       "verified_at": "2026-11-04"
@@ -139,19 +139,19 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "internal/account/account.go:895",
+      "site": "internal/account/account.go:903",
       "what": "Watch 的订阅清理观察者",
       "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.subs, ch)+close(ch)；订阅表 s.subs 的每次读写都在 s.mu 下（Watch 入口 869-875、notifyLocked 同锁），每条 ch 只有一个 watcher，close 只可能一次",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/account/account.go:923",
+      "site": "internal/account/account.go:931",
       "what": "WatchUpdates 的推送循环（rc.2 官方 AccountUpdate 流）",
       "sync": "读过：ch 由这条独占并 defer close(ch)；sub.pending 与 s.updates 表的读写全在 s.mu 下（登记 896-899、取帧 915-918、退出 909-911/925-927）；唤醒走 sub.wake（容量 1，只装『有新帧』信号），合并口径见 observeUpdates",
       "verified_at": "2026-11-12"
     },
     {
-      "site": "internal/account/account.go:972",
+      "site": "internal/account/account.go:980",
       "what": "WatchExpiry 的订阅清理观察者",
       "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.expiry, ch)+close(ch)；发布侧 expireLocked 的 for ch := range s.expiry 是非阻塞 send、同样在 s.mu 下（同一把锁 ⇒ 不会 send on closed）；首帧在起 goroutine 之前就发完了",
       "verified_at": "2026-11-12"
@@ -169,10 +169,16 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/analytics/service.go:227",
+      "site": "internal/analytics/service.go:234",
       "what": "策略变化的 watcher：250ms ticker 推 Enabled 变化",
       "sync": "读过：watcher 表 s.watchers 全在 s.mu 下（登记在入口、退订在 ctx.Done/stop 分支，delete 前先判存在再 close，保证只 close 一次）",
       "verified_at": "2026-11-09"
+    },
+    {
+      "site": "internal/analytics/otel_channel.go:246",
+      "what": "每个 OTLP 通道自己的发送 goroutine（队列排批 + 串行发送 + shutdown drain）",
+      "sync": "读过：队列/首个入队时间/stopped 全在 c.mu 下，且只有本 goroutine 出队（planLocked 内出队）；入队方只 append 后 signal 缓冲 1 的 wake；done 只由本 goroutine 关闭；取消统一走 abortCtx（shutdown/stopPending 调 abortCancel），在飞请求与重试等待都从它派生；计数器全 atomic",
+      "verified_at": "2026-11-14"
     },
     {
       "site": "internal/cordis/extern/client.go:141",
@@ -319,25 +325,25 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:881",
+      "site": "cmd/dshd/main.go:893",
       "what": "父进程看门狗：父没了就取消本轮 ctx",
       "sync": "读过：只调 stopOnParentGone()（cancel 幂等），不碰会话/日志",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:874",
+      "site": "cmd/dshd/main.go:886",
       "what": "serveJobsOut：后台任务通道",
       "sync": "读过：写 stdout 的 @@JOBS@@ 行，写侧有自己的一把锁；读的是 jobs 服务的快照",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:881",
+      "site": "cmd/dshd/main.go:893",
       "what": "serveSteerIPC：steer IPC 接收循环",
       "sync": "读过：收到的请求投进 steerInbox（自己加锁的队列）；runCtx 取消即退",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve.go:269",
+      "site": "cmd/dshd/serve.go:278",
       "what": "插件热重载循环",
       "sync": "读过：hmrCtx 取消即退；pluginRT.HMR() 内部自己串行化，不直写共享表",
       "verified_at": "2026-11-09"
@@ -481,7 +487,7 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "modules/tools/pipeline.go:391",
+      "site": "modules/tools/pipeline.go:478",
       "what": "单次工具执行（带 panic 兜底与超时）",
       "sync": "读过：结果只经 buffered(1) 的 done channel 回传（超时后仍能写完退出，不泄漏）；工具本身按 SPI 契约无共享状态",
       "verified_at": "2026-11-09"
@@ -559,7 +565,7 @@
       "verified_at": "2026-11-13"
     },
     {
-      "site": "cmd/dshd/subagent.go:434",
+      "site": "cmd/dshd/subagent.go:447",
       "what": "两段式委派的 child 执行体（RunSub 跑在 goroutine 里，发布时就能拿到 childId）",
       "sync": "读过：goroutine 只写 activation.result/err，写完 defer close(done) 建立 happens-before；Await 只 select done/ctx.Done，读 result 一定在 done 关闭之后；childCtx 由 Await 取消或 run 取消传播；panic 被 recover 成 err（AGENT_RESULT）",
       "verified_at": "2026-11-13"
@@ -574,6 +580,12 @@
       "site": "internal/updater/status.go:480",
       "what": "更新检查的单飞 worker（一次出网查 GitHub releases，结果写回缓存并推给订阅者）",
       "sync": "读过：起之前调用方持锁并已置 s.inflight=flight，所以同一时刻只有一个 worker。worker 出网前**不持锁**；回来后持锁写 s.cache / 置 s.inflight=nil / 推订阅帧，然后**出锁**才 close(flight.done)。等它的人只 select done/ctx.Done，醒来必在 done 关闭之后（close 建立 happens-before），再持锁读缓存——读到的要么是它写的结论，要么是之后别人起的新一轮（那时如实回 checking）。订阅通道是带缓冲的，投递在锁内非阻塞，不碰任何外部代码。",
+      "verified_at": "2026-11-14"
+    },
+    {
+      "site": "cmd/dshd/serve.go:570",
+      "what": "profile 配置热重载循环（ConfigHMR.Run）",
+      "sync": "读过：hmrCtx 取消即退；store.Reload() 与 store.Revision() 各自在 config.Store 的 mu 下；本组件自己的状态（checks/reloads/lastRev/onChange/lastErr）全在 ConfigHMR.mu 下；Tick 由 tickMu 串行化；消费者在锁外被调用，单个消费者 panic 被 recover 且只记 Err。不写任何文件。",
       "verified_at": "2026-11-14"
     }
   ]

@@ -54,6 +54,26 @@
 // 同名去重按官方 precedence：rank 小的根先赢，同一 rank 按配置顺序（provider
 // 注册顺序）先赢；最终列表按 name 码位序升序（官方 `compareSkillNames`）。
 //
+// # 合并走官方 provider 注册面（#54 skill 的最后一公里）
+//
+// 本文件不再"自己扫根 + 自己按名去重"另走一条：文件系统来源被包成官方
+// `SkillProvider`（`dsh-skill/src/index.ts:245-278` 的 list/get 契约），通过
+// 宿主侧的 `skill.Registry.RegisterProvider`（同文件 :430-472）注册进来，
+// 目录由 `Registry.Snapshot`（:512-529）合并产出：
+//
+//   - 同层按 (rank, provider 注册顺序, provider 内顺序) 去重，first-wins
+//     （官方 compareIndexedCandidates，:945-951 + collectLayer :574-596）；
+//   - 最终按 name 码位序升序（官方 compareSkillSummary，:936-938）；
+//   - 某个 provider 失败 → 记日志 + 跳过，**不丢其它 provider 的结果**，
+//     观察标为 incomplete（官方 README："logged and skipped, and the
+//     observation is reported incomplete so consumers can distinguish failed
+//     discovery from confirmed absence"）；
+//   - 人类面只取 `userInvocable=true`（官方 `.filter(isUserInvocable)`）。
+//
+// 生产装配目前只挂**文件系统**这一个 provider（本宿主没有运行时 skill 插件
+// 加载器）；`agentSkillCatalogWith` 是给"把非文件系统来源接进人类面"留的接缝
+// ——默认路径不传，测试用它证明接得上（不是空壳）。
+//
 // # `modelInvocable` 取的是**两件事的与**
 //
 // 官方只读 skill 级策略（`invocation.modelInvocable`，frontmatter
@@ -65,6 +85,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -76,6 +97,7 @@ import (
 	"strings"
 
 	"dshgo/internal/transport"
+	"dshgo/modules/tool/skill"
 )
 
 // 官方 skill 来源名（`@deepseek-ai/dsh-skill` 的 `SkillSource`）。
@@ -171,6 +193,10 @@ type agentSkillScanStats struct {
 	BytesRead int
 	// Skipped 是"看着像 skill 但 frontmatter 不合官方形状"被忽略的条数。
 	Skipped int
+	// Incomplete 报"这次发现不完整"（有 provider 失败或自报不完整）。
+	// 官方口径：incomplete 与"确认没有"必须分开（dsh-skill/README.md
+	// "Observable success and failures"），不许把失败伪装成空目录。
+	Incomplete bool
 }
 
 // ---------------------------------------------------------------------------
@@ -258,34 +284,188 @@ func (a *agentOfficialAPI) agentSkillModelSurface(presetID string) bool {
 	return true
 }
 
-// agentSkillCatalog 按官方语义扫出"用户可调用"的 skill 清单。
+// agentSkillCatalog 按官方语义产出"人类面可调用"的 skill 清单。
 //
 // modelSurface 是"模型面可见性"（见 agentSkillModelSurface）；它为假时所有
 // 条目的 `modelInvocable` 都是 false。
+//
+// 合并走 `skill.Registry`（官方 `ctx.skills` 的投影）：文件系统只是一个
+// provider，和别的来源一起由注册表按 (rank, 注册顺序, provider 内顺序) 去重、
+// 按 name 排序。人类面在这里做**唯一一次** `userInvocable` 过滤（官方
+// skill-catalog.ts:78 `.filter(isUserInvocable)`）。
 func (a *agentOfficialAPI) agentSkillCatalog(cwd string, modelSurface bool) ([]transport.OfficialSkill, agentSkillScanStats, error) {
-	candidates, stats, err := scanAgentSkillRoots(a.agentSkillRoots(cwd))
+	return a.agentSkillCatalogWith(context.Background(), cwd, modelSurface)
+}
+
+// agentSkillCatalogWith 是同一条路径的**可追加 provider** 版本。
+//
+// 为什么留这个接缝：人类面的目录必须和模型面看同一个注册表语义，否则"某个
+// 来源只在模型面出现"就是两套真相。生产装配（skillsList）不传额外 provider；
+// 用例用它证明非文件系统来源真的能接进人类面（不是空壳）。
+func (a *agentOfficialAPI) agentSkillCatalogWith(ctx context.Context, cwd string, modelSurface bool, extra ...skill.Provider) ([]transport.OfficialSkill, agentSkillScanStats, error) {
+	var stats agentSkillScanStats
+	registry := skill.NewRegistry()
+	rootProvider := &agentSkillRootProvider{
+		roots: a.agentSkillRoots(cwd),
+		stats: &stats,
+		warn: func(msg string) {
+			// 官方 filesystem provider 对失败的根是"日志 + 跳过 + 标不完整"
+			// （dsh-skill-filesystem/src/index.ts:201-205），不是让整份目录 500。
+			fmt.Fprintf(os.Stderr, "skill: %s\n", msg)
+		},
+	}
+	if _, err := registry.RegisterProvider(func(skill.ProviderControl) (skill.Provider, error) {
+		return rootProvider, nil
+	}); err != nil {
+		return nil, stats, transport.OfficialAgentError("gateway/internal", nil,
+			"skill listing failed: %v", err)
+	}
+	for _, provider := range extra {
+		if provider == nil {
+			continue
+		}
+		if _, err := registry.RegisterProvider(func(skill.ProviderControl) (skill.Provider, error) {
+			return provider, nil
+		}); err != nil {
+			return nil, stats, transport.OfficialAgentError("gateway/internal", nil,
+				"skill listing failed: %v", err)
+		}
+	}
+	catalog, err := registry.Snapshot(ctx, skill.LookupOptions{Cwd: cwd})
 	if err != nil {
 		// 官方 `list()` 自己抛错时的原文：`skill listing failed: …`。
 		return nil, stats, transport.OfficialAgentError("gateway/internal", nil,
 			"skill listing failed: %v", err)
 	}
+	stats.Incomplete = !catalog.Complete
 	// 官方 `[]` 不是 `null`：一条都没有时也必须是空数组。
-	skills := make([]transport.OfficialSkill, 0, len(candidates))
-	for _, candidate := range candidates {
-		// 官方 `.filter(isUserInvocable)`：用户面只看 `user-invocable`。
-		if !candidate.UserInvocable {
+	skills := make([]transport.OfficialSkill, 0, len(catalog.Skills))
+	for _, summary := range catalog.Skills {
+		// 官方 `.filter(isUserInvocable)`：人类面只看 `user-invocable`。
+		if !summary.Invocation.UserInvocable() {
 			continue
 		}
 		skills = append(skills, transport.OfficialSkill{
-			Path:           candidate.Path,
-			Name:           candidate.Name,
-			Description:    candidate.Description,
-			WhenToUse:      candidate.WhenToUse,
-			ModelInvocable: candidate.ModelInvocable && modelSurface,
+			Path:           summary.Path,
+			Name:           summary.Name,
+			Description:    summary.Description,
+			WhenToUse:      summary.WhenToUse,
+			ModelInvocable: summary.Invocation.ModelInvocable() && modelSurface,
 		})
 	}
 	return skills, stats, nil
 }
+
+// agentSkillRootProvider 是"本宿主真正挂载的那几个根"的官方 `SkillProvider` 实现
+// （`dsh-skill/src/index.ts:245-278`：list 给候选、get 给完整定义）。
+//
+// 每个根一条候选的 rank/source 取自 `agentSkillRoot`（官方 rank 表 100/200/300/400），
+// 同层去重交给注册表；这里不再自己按名去重（那是两套真相）。
+type agentSkillRootProvider struct {
+	roots []agentSkillRoot
+	stats *agentSkillScanStats
+	warn  func(msg string)
+}
+
+func (p *agentSkillRootProvider) Name() string { return "filesystem" }
+
+// List 逐根扫描。单个根失败 = 记日志 + 跳过 + 本次发现不完整
+// （官方 dsh-skill-filesystem/src/index.ts:185-208 的同一条语义）；
+// 其它根的结果照样返回。
+func (p *agentSkillRootProvider) List(ctx context.Context, _ skill.LookupOptions) (skill.Observation, error) {
+	observation := skill.Observation{Complete: true}
+	for _, root := range p.roots {
+		if err := ctx.Err(); err != nil {
+			return skill.Observation{}, err
+		}
+		p.stats.Roots++
+		candidates, rootStats, err := scanAgentSkillRoot(root)
+		p.stats.Files += rootStats.Files
+		p.stats.BytesRead += rootStats.BytesRead
+		p.stats.Skipped += rootStats.Skipped
+		if err != nil {
+			observation.Complete = false
+			if p.warn != nil {
+				p.warn(fmt.Sprintf("根 %s（source=%s）本次跳过：%v；其它根仍然可用，观察标为 incomplete",
+					filepath.ToSlash(root.Path), root.Source, err))
+			}
+			continue
+		}
+		for _, candidate := range candidates {
+			observation.Candidates = append(observation.Candidates, skill.Candidate{
+				Summary: skill.Summary{
+					Path:        candidate.Path,
+					Name:        candidate.Name,
+					Description: candidate.Description,
+					WhenToUse:   candidate.WhenToUse,
+					// 官方 parseInvocationPolicy：两个面各自一个布尔（四个组合都保留）。
+					Invocation: skill.NewInvocationPolicy(candidate.ModelInvocable, candidate.UserInvocable),
+					Source:     root.Source,
+					Provider:   "filesystem",
+					ResourceBase: &skill.ResourceBase{
+						Kind: "directory", Path: filepath.ToSlash(filepath.Dir(candidate.Path)),
+					},
+				},
+				Rank:    root.Rank,
+				Locator: candidate.Path,
+			})
+		}
+	}
+	return observation, nil
+}
+
+// Get 载入完整定义：重新读**当前文件**（官方 filesystem provider 同一口径：
+// 正文从不缓存，改了立刻生效），frontmatter 仍按官方 parseSkillFile 的严格形状。
+//
+// 文件消失 = (nil,nil)（官方 undefined，不是错误）。
+func (p *agentSkillRootProvider) Get(ctx context.Context, candidate skill.Candidate, _ skill.LookupOptions) (*skill.Definition, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	path, ok := candidate.Locator.(string)
+	if !ok {
+		return nil, fmt.Errorf("filesystem provider 收到了别的 provider 的候选 %q", candidate.Name)
+	}
+	data, _, err := readAgentSkillFrontmatter(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		// 形状非法 = 官方 parseSkillFile 返回 undefined：按"不可再载入"处理。
+		if errors.Is(err, errAgentSkillNoFrontmatter) || errors.Is(err, errAgentSkillBadFrontmatter) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读 %s 的 frontmatter: %w", filepath.ToSlash(path), err)
+	}
+	parsed, ok := agentSkillCandidateFromFrontmatter(data, path)
+	if !ok {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读 %s: %w", filepath.ToSlash(path), err)
+	}
+	return &skill.Definition{
+		Summary: skill.Summary{
+			Path:        parsed.Path,
+			Name:        parsed.Name,
+			Description: parsed.Description,
+			WhenToUse:   parsed.WhenToUse,
+			Invocation:  skill.NewInvocationPolicy(parsed.ModelInvocable, parsed.UserInvocable),
+			Source:      candidate.Source,
+			Provider:    "filesystem",
+			ResourceBase: &skill.ResourceBase{
+				Kind: "directory", Path: filepath.ToSlash(filepath.Dir(parsed.Path)),
+			},
+		},
+		Content: skill.Body(string(raw)),
+	}, nil
+}
+
+var _ skill.Provider = (*agentSkillRootProvider)(nil)
 
 // ---------------------------------------------------------------------------
 // 根

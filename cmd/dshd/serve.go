@@ -256,6 +256,15 @@ func cmdServe(args []string) error {
 	}
 	defer func() { _ = pluginRT.Close(context.Background()) }()
 
+	// 官方 #6 `deepseek-llm-api-extensions` + #17 `plugin-package-inventory-deepseek`
+	// 的生产注册点（装配期一次）：本进程之后发出的每条 DeepSeek 官方协议模型请求
+	// 都带 `dsh_plugin_packages`（活跃包库存，每次请求现读 manager+loader 投影）。
+	// 见 serve_llm_extensions.go。注册失败只让这一个字段缺席，不拦 HTTP 服务：
+	// 但必须说出来，否则"注册了却发不出去"又会变成一次静默成功。
+	if err := registerPluginPackagesExtension(pluginRT); err != nil {
+		fmt.Fprintf(os.Stderr, "DeepSeek 请求扩展注册失败（%v）；dsh_plugin_packages 不会出现在模型请求里\n", err)
+	}
+
 	// 插件热重载（HS-14）：**默认关闭**。pluginHMRConfig 的零值就是 disabled，
 	// 只有显式 `DSHD_PLUGIN_HMR=1` 才走这个分支；关闭时连 Run 都不调用
 	// （Run 对关闭状态直接回 ErrHMROff，那是调用方的 bug 而不是"空转成功"）。
@@ -531,9 +540,34 @@ func cmdServe(args []string) error {
 	}
 
 	// 配置树（HS-14）：`config.patch.*` 的唯一真值。启动即打开，损坏 fail-loud。
-	configTree, err := config.OpenStore(filepath.Join(*home, "state", "config-tree.json"))
+	configPath := filepath.Join(*home, "state", "config-tree.json")
+	configTree, err := config.OpenStore(configPath)
 	if err != nil {
 		return fmt.Errorf("配置树打开失败: %w", err)
+	}
+	// 官方 #4 `hmr` 的**前半**（profile 配置热重载，官方默认开）。
+	//
+	// 在这之前 `Store.Reload()` 没有任何调用者：改了配置树文件，进程内看到的
+	// 还是旧树，必须重启。这里接上一个独立的轮询组件（`serve_config_hmr.go`），
+	// 只读、只 Reload、只广播 revision 变化，**不重装任何插件**。
+	//
+	// 关闭方式：`DSHD_PROFILE_HMR=0`（见 configHMRConfigFromEnv 的注释）；
+	// 它拒绝监听 `profiles/*/cordis.patch.yml`（铁律 3 的那个文件）。
+	configHMR, err := NewConfigHMR(configTree, configHMRConfigFromEnv(configPath))
+	if err != nil {
+		return fmt.Errorf("配置热重载装配失败: %w", err)
+	}
+	if configHMR.Enabled() {
+		hmrCtx, hmrCancel := context.WithCancel(context.Background())
+		defer hmrCancel()
+		// 消费者：把新的 revision 写进日志，并把"谁需要知道"留给以后接——
+		// 现在没有任何内存投影依赖配置树（读的都是 Store.Tree() 的实时快照），
+		// 所以这里只观测，不假装重建了什么。
+		offChange := configHMR.OnChange(func(c ConfigHMRChange) {
+			fmt.Fprintf(os.Stderr, "profile 配置已热重载：revision %d → %d\n", c.From, c.To)
+		})
+		defer offChange()
+		go func() { _ = configHMR.Run(hmrCtx) }()
 	}
 	configDescriptors := transport.NewRegistry()
 	if err := configDescriptors.RegisterAll(transport.ConfigPatchDescriptors()); err != nil {
@@ -952,9 +986,28 @@ func cmdServe(args []string) error {
 	// 官方 0.2.2-rc.2 `web.listProviders`：清单来自 web 接缝的**真实注册表**
 	// （谁注册了、谁现在可用、配置钉的是哪个），不是写死的一份。
 	srv.AttachOfficialWebProviderAPI(providerapi.ProviderAPI(os.Getenv))
-	accountAPI := newAccountOfficialAPI(accountOfficialDeps{home: *home, catalog: modelCatalog})
+	accountDeps := accountOfficialDeps{home: *home, catalog: modelCatalog}
+	accountAPI := newAccountOfficialAPI(accountDeps)
 	accountAPI.ActionCardAct = actionCardAct(*home)
 	srv.AttachOfficialAccountAPI(accountAPI)
+	// 官方 base 插件 #23 `authorization`：把真实登录流注册进通用 flow 注册表。
+	//
+	// 补这一段之前，非 account 的凭据流**无处注册**、UI 也列不出"现在能授权
+	// 什么"。provider 建立失败时注册表仍然存在但没有 flow（`begin` 回 NO_FLOW，
+	// 不静默成功）——这是配置错误下的正确形状，而不是假装能登录。
+	if authProvider, providerErr := accountProviderFromDeps(accountDeps); providerErr == nil {
+		authz, err := newAuthorizationRegistry(authProvider)
+		if err != nil {
+			return fmt.Errorf("authorization flow 注册失败: %w", err)
+		}
+		srv.AttachAuthorizationRegistry(authz)
+	} else {
+		authz, err := newAuthorizationRegistry(nil)
+		if err != nil {
+			return err
+		}
+		srv.AttachAuthorizationRegistry(authz)
+	}
 	// Office 面（rc.2 新权威面 officeKit.* + 兼容保留的 officeToPdf.*）共用**同一个**
 	// provider：同一引擎、同一准入队列、同一 generation、同一产物仓。
 	// provider 没有引擎也照样建（官方语义「It now registers without Kit」），

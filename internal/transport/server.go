@@ -517,6 +517,13 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.ServeOfficialWebProviderAPI(w, r)
 		return
 	}
+	// 宿主新增方法组：官方 base 插件 #23 `authorization` 的 flow 注册表。
+	// 官方没有 RPC 面（surface 在进程内），本仓 surface 在进程外，所以补这组；
+	// 未接线时结构化 501（不返回空清单假成功）。
+	if IsAuthorizationMethod(name) {
+		s.ServeOfficialAuthorizationAPI(w, r)
+		return
+	}
 	// PARITY-W1-STREAMS：两条 no-param 流不属于既有方法族，必须在
 	// workspace 族前缀之前直通到流面。
 	if Method(name) == MethodWorkspaceFollow || Method(name) == MethodRemoteAccessFollow {

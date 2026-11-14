@@ -108,7 +108,24 @@ type ChildSpawnOptions struct {
 	// Answer 是子代理交回的正文（写成第一条 assistant 消息）。
 	// 空 = 只留提问：委派失败时**不编**一个空回答。
 	Answer string
+	// Seed 是 fork 种子的 durable 事件（父会话已完成轮次的真实事件，**原样**）。
+	//
+	// 官方 `dsh-subagent-fork-in-process/src/index.ts:72-78`：fork 的种子在创建时
+	// 取一次，然后"becomes part of the child's own durable transcript"——
+	// 所以它必须**落进子会话自己的日志**，之后父会话再怎么长也进不来。
+	//
+	// 空 = 不是 fork 委派（或首轮完成之前 fork），子会话日志与改动前逐字节一致。
+	// 写法见 `appendSeedEvents`：事件按原顺序搬、data 原样、只补一个来源标记，
+	// 不重排、不合并、不重新编造字段。
+	Seed []SeedEvent
 }
+
+// SeedEvent 是一条要从父会话搬进子会话的事件。
+//
+// 为什么暴露 `v4.Event` 而不是让 agent 层自己投影：种子的语义是"**父会话的那条事件**"，
+// 投影（怎么拼成模型看的一段文本）已经由 `cmd/dshd/subagent_seed.go` 做完，
+// 这里只管把它落成子会话里的一条真实事件——两层各自的职责不混。
+type SeedEvent = v4.Event
 
 // AgentChildSessionIDSeparator 是官方 `${id}-session-${uuid}` 里的中缀。
 const AgentChildSessionIDSeparator = "-session-"
@@ -337,6 +354,14 @@ func (s ChildSpawn) Spawn(opts ChildSpawnOptions) (ChildRecord, error) {
 			session.SubagentCatalogV3(child, rec.SpawnedAt, session.CatalogModeContinuable,
 				catalogLabel, catalogName))
 	}
+	// fork 种子：父会话已完成轮次的真实事件，原样搬进来。
+	//
+	// **顺序有讲究**：种子写在父子帧与 catalog 事实**之后**、这次委派的 user 之前。
+	// 子会话的历史本来就是"先有来历（帧），再有继承来的过去（种子），最后是我这一趟"；
+	// 反过来会把子代理自己的任务排到历史中间，续问时读起来像是"它在替别人说话"。
+	if appendErr == nil && len(opts.Seed) > 0 {
+		appendErr = appendSeedEvents(lg, opts.Seed)
+	}
 	if appendErr == nil {
 		if p := strings.TrimSpace(opts.Prompt); p != "" {
 			appendErr = lg.Append("user/message",
@@ -359,8 +384,86 @@ func (s ChildSpawn) Spawn(opts ChildSpawnOptions) (ChildRecord, error) {
 	return rec, nil
 }
 
-// FindChild 从 durable 日志里认出这个 child 属于谁。
+// appendSeedEvents 把 fork 种子逐条写进子会话日志。
 //
+// 三条规矩（每一条都对应"种子会骗人"的一种方式）：
+//  1. **只搬对话事件**：`user/message` / `assistant/message` / `tool/result`。
+//     别的类型（`turn/start`、`request/*`、压缩事件…）不进来：它们的 seq 指向父日志，
+//     搬到新文件里就是指向一条不相关的事件（与 `internal/session/fork.go` 不搬
+//     `headerSeq` 同一个理由）。子会话不伪造轮次边界，它只是"生来就带着这段历史"。
+//  2. **data 原样、只补来源标记**：`finish` 原因、`isError`、`meta.cwd`、
+//     `tool_call_id` 都是被 fork 之后依然为真的事实，重写它们等于把结论改掉。
+//  3. **user 消息加 `source.kind = fork-seed`**：区分"继承来的历史"与"派我的这一趟"。
+//     只补 user 一种（它是轮次的开头，也是将来最可能被误当成"用户刚说的话"的那一类）；
+//     assistant/tool 不碰，一个字节都不改。
+func appendSeedEvents(lg *session.Log, seed []SeedEvent) error {
+	for _, ev := range seed {
+		if err := appendSeedEvent(lg, ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// appendSeedEvent 搬一条种子事件。
+//
+// **只接受三种事件**（`seedEventTypes`），别的一律响亮失败：调用方（`cmd/dshd` 的
+// `buildForkSeed`）已经按同一份判据筛过一遍，这里再拦是防止某个新入口把
+// `turn/start` / `request/*` 之类的父日志帧误塞进来——那些进了子会话只会是一条
+// 指向"别的日志的 seq"的孤儿记录，读路径看不出来，写路径也不报错。
+func appendSeedEvent(lg *session.Log, ev SeedEvent) error {
+	if strings.TrimSpace(ev.Type) == "" {
+		return fmt.Errorf("fork 种子事件缺少 type：写进子会话也没有任何投影认得它")
+	}
+	if !seedEventTypes[ev.Type] {
+		return fmt.Errorf("fork 种子不接受 %q 事件（只搬 user/message、assistant/message、tool/result）", ev.Type)
+	}
+	if len(ev.Data) == 0 {
+		return fmt.Errorf("fork 种子事件 %q 没有 data", ev.Type)
+	}
+	switch ev.Type {
+	case "user/message":
+		return lg.Append(ev.Type, seedUserData(ev.Data))
+	default:
+		// assistant/message 与 tool/result：data 原样（finish/isError/cwd 都是
+		// fork 之后依然为真的事实，重写它们等于改结论）。
+		return lg.Append(ev.Type, json.RawMessage(ev.Data))
+	}
+}
+
+// seedEventTypes 是种子允许搬的事件类型（与 `cmd/dshd/subagent_seed.go` 的
+// `buildForkSeed` 同一份判据：只搬对话事件）。
+var seedEventTypes = map[string]bool{
+	"user/message":      true,
+	"assistant/message": true,
+	"tool/result":       true,
+}
+
+// seedUserData 给一条继承来的 user 消息补上来历。
+//
+// 只动 `source.kind`：正文、块顺序、附件/引用身份全部原样（那些是真实用户输入的证据）。
+// 解不开就原样搬——一条读不懂的 user 消息也比"悄悄消失"强。
+func seedUserData(data json.RawMessage) any {
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return data
+	}
+	source, _ := payload["source"].(map[string]any)
+	if source == nil {
+		source = map[string]any{}
+	}
+	source["kind"] = SeedSourceKind
+	payload["source"] = source
+	return payload
+}
+
+// SeedSourceKind 是"这条消息来自 fork 种子"的 `source.kind`。
+//
+// 与 `cmd/dshd/subagent_seed.go` 的常量同值：那边造种子、这边落盘，
+// 两处必须写同一个词，否则读日志的人要认两种标记。
+const SeedSourceKind = "fork-seed"
+
+// FindChild 从 durable 日志里认出这个 child 属于谁。
 // 返回 (record, true, nil) 表示盘上确有一条父子帧；false 表示这个子会话不存在
 // **或**它的日志里没有父子帧（对 `subagents.prompt` 而言两者都该是
 // no_such_session：没有归属就没有授权）。

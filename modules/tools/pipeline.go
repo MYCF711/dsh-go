@@ -23,6 +23,28 @@ import (
 type Options struct {
 	SpillDir string // 外置目录；空 = <temp>/dshd-spill
 	MaxChars int    // 超过就外置；<=0 = 4000
+	// MaxInlineTokens 是"这次结果**内联**多少"的估算 token 预算（官方 0.2.2 base #79
+	// `@deepseek-ai/dsh-spill-policy` 的 `config.maxInlineTokens`）。
+	//
+	// 三值约定（与 ToolTimeout 同一套）：0 = 未配置（官方语义就是"省略
+	// maxInlineTokens 关闭保留策略"，此时回落到环境变量 DSHD_MAX_INLINE_TOKENS，
+	// 再没有就是关闭）；正值 = 这个估算预算；负值 = **非法**，装配期就炸
+	// （官方 index.ts:52-54：负值/非整数必须在插件加载期失败，不能拖到每次调用）。
+	//
+	// 与 MaxChars 的关系：MaxChars 是**兼容下限**（按字符），MaxInlineTokens 是
+	// 按估算 token 的预算（文本与图片共享）。两者都配时**先触发者生效**：
+	// token 臂先把正文换掉，字符臂就不再对同一段正文二次裁剪（见 spill）。
+	MaxInlineTokens int
+	// ImageReadablePath 把一张结果图片解析成"模型可以 read 的路径"（附件/源文件路径）。
+	//
+	// 为什么必须是注入的函数值：本仓 `spi.Image` 只有 MIME + base64，没有附件身份
+	// （internal/spi/tool.go:214-218），而附件库在 cmd/dshd 侧（package main，
+	// modules 拿不到）。官方把这件事做成注入的 provider
+	// （`resolveImageAttachmentAccess`，dsh-llm/lib/types/content.js:13-19）。
+	//
+	// nil（本仓当前装配）= 拿不到路径 = 官方 best-effort：含图片且超预算的结果
+	// **保留原内容**并记一条 warning，绝不把读不到的路径塞进恢复文件。
+	ImageReadablePath func(spi.Image) (string, bool)
 	// ToolTimeout 是**每一次工具调用**的统一截止时间（timeout-policy）的默认值。
 	//
 	// 三值约定（本仓统一）：0 = 未配置，按 DSHD_TOOL_TIMEOUT_SECS → 内置默认；
@@ -130,6 +152,62 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
+// maxInlineTokensEnv 让装配/运维不改代码就能打开 token 保留策略（官方 0.2.2 base #79）。
+//
+// 与 toolTimeoutEnv 同一条三值约定：空 = 未配置（策略关闭，这是官方语义：
+// "Omitting maxInlineTokens disables retention"）；正整数 = 预算；
+// 非法/负值 = 装配期失败（不是"静默按关闭处理"——把笔误变成"策略永远不生效"
+// 是最坏的失败方式，官方 index.ts:52-54 也是 fail plugin load）。
+const maxInlineTokensEnv = "DSHD_MAX_INLINE_TOKENS"
+
+// maxInlineTokensFromEnv 解析上面那个环境变量。
+func maxInlineTokensFromEnv(getenv func(string) string) (int, error) {
+	raw := strings.TrimSpace(getenv(maxInlineTokensEnv))
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q 不是整数: %w", maxInlineTokensEnv, raw, err)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("%s=%q 非法：maxInlineTokens 不能是负数（0 = 关闭保留策略）",
+			maxInlineTokensEnv, raw)
+	}
+	return n, nil
+}
+
+// Validate 是 Options 的**装配期**校验（纯函数，可单测）。
+//
+// 官方把配置错误挡在加载期而不是每次调用：`if (!Number.isSafeInteger(cap) || cap < 0)
+// throw` （dsh-spill-policy/src/index.ts:52-54）。理由同样适用本仓——一个 -1 若是
+// 拖到调用期才炸，表现为"每次工具调用都失败"，没人会想到是装配参数写错了。
+func (o Options) Validate() error {
+	if o.MaxInlineTokens < 0 {
+		return fmt.Errorf("MaxInlineTokens 不能是负数（得到 %d）：0 = 关闭保留策略，正值 = 估算 token 预算",
+			o.MaxInlineTokens)
+	}
+	return nil
+}
+
+// resolveOptions 是**装配期唯一入口**：补默认值 + 解析环境 + 校验，一次做完。
+//
+// 配置错误在这里返回 error（装配期 fail-loud），绝不留到每次调用才炸。
+func resolveOptions(opts Options) (Options, error) {
+	if opts.MaxInlineTokens == 0 {
+		n, err := maxInlineTokensFromEnv(os.Getenv)
+		if err != nil {
+			return Options{}, err
+		}
+		opts.MaxInlineTokens = n
+	}
+	opts = opts.withDefaults()
+	if err := opts.Validate(); err != nil {
+		return Options{}, err
+	}
+	return opts, nil
+}
+
 // Pipeline 实现 spi.Runner：三条硬约束都在这里，工具作者一行都不用写。
 //
 //	pre-execute（审批/沙箱，可 veto）→ execute → post-execute（外置/裁剪/提醒）→ result（广播）
@@ -150,12 +228,21 @@ type Pipeline struct {
 	repeat *repeatGuard
 }
 
-// NewPipeline 造一条流水线。opts 会被补默认值。
+// NewPipeline 造一条流水线。opts 会补默认值并校验（装配期）。
+//
+// 非法配置这里**直接 fail-loud**：构造器没有 error 返回口（调用点全是装配期），
+// 按本仓"装配期声明非法就炸"的惯例处理（同类：internal/session/projection.go:421、
+// internal/storage/domain_spec.go:217）。宁可起不来，也不要带着一个坏预算跑到
+// 每一次工具调用上都失败。想拿到 error 而不是 panic 的装配点，用 resolveOptions。
 func NewPipeline(reg spi.ToolRegistry, bus *kernel.Bus, opts Options) *Pipeline {
+	resolved, err := resolveOptions(opts)
+	if err != nil {
+		panic("tools.NewPipeline: " + err.Error())
+	}
 	return &Pipeline{
 		reg:    reg,
 		bus:    bus,
-		opts:   opts.withDefaults(),
+		opts:   resolved,
 		log:    slog.Default(),
 		repeat: newRepeatGuard(),
 	}
@@ -522,15 +609,27 @@ func enforceSerialization(res *spi.Result) error {
 // **Text 也必须一起截**。只换 Data 的话，ProjectResult 会优先用 Text，
 // 模型照样看到全文——那样 spill 等于没做（实测 9000 字符的输出，
 // 阈值 4000，模型仍然看到 9361 字符）。
+//
+// 两臂的次序（官方 0.2.2 base #79 `@deepseek-ai/dsh-spill-policy`）：
+//
+//  0. **token 预算臂**（只有显式配了 MaxInlineTokens 才启用）：文本与图片共享同一个
+//     估算 token 预算，超了就换头/尾 + notice，并在恢复文件里记图片可读路径。
+//     实现在 spill_policy.go 的 retainInline。
+//  1. **字符臂**（MaxChars，兼容下限）：token 臂没配、或者没触发时照旧生效。
+//
+// 两条都配时"先触发者生效"：token 臂成功换掉正文之后，字符臂不再对**同一段正文**
+// 二次裁剪（否则会把刚写好的 notice 再切一刀）。token 臂没触发（预算内 / 拿不到
+// 图片可读路径 / 写盘失败）时，字符臂仍然是那道兜底，行为与引入 token 臂之前一致。
 func (p *Pipeline) spill(res *spi.Result, toolName string) {
-	// 先把 Text 截掉：无论走不走 Data 外置，模型看到的那段文本都要有界。
-	textSpilled := false
-	if len(res.Text) > p.opts.MaxChars {
-		textSpilled = true
-	}
+	bodyRetained := p.opts.MaxInlineTokens > 0 && p.retainInline(res, toolName)
 
-	if res.Data == nil {
+	// 先把 Text 截掉：无论走不走 Data 外置，模型看到的那段文本都要有界。
+	textSpilled := !bodyRetained && len(res.Text) > p.opts.MaxChars
+
+	if bodyRetained || res.Data == nil {
 		// 没有结构化 Data 也不能放过：Text 本身超了就直接截。
+		// （token 臂已经接管正文时同样到此为止：正文里的 Data 内容是它渲染并保留的，
+		// 再走一次 Data 外置会把同一份载荷说两遍、并且多出一条不在预算里的截断说明。）
 		if textSpilled {
 			p.spillText(res, textSpilled, "")
 		}
@@ -690,7 +789,18 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
+// writeSpill 把一份结构化 Data 的 JSON 落到 SpillDir（后缀 .json）。
 func (p *Pipeline) writeSpill(raw []byte) (string, error) {
+	return p.writeSpillFile(raw, "spill-%04d-*.json")
+}
+
+// writeSpillFile 是外置的唯一落盘点：同一个 SpillDir、同一个序号池、同一个
+// 创建失败语义（失败就返回 error，由调用方保留内联）。
+//
+// pattern 里的 %04d 是本次的序号（诊断时能把"哪一次调用外置的"对上日志）。
+// token 预算臂的恢复文件用 .txt：里面是模型可见正文（图片只写可读路径），
+// 模型 read 它的时候按纯文本读，不需要 JSON 那一层转义。
+func (p *Pipeline) writeSpillFile(raw []byte, pattern string) (string, error) {
 	if err := os.MkdirAll(p.opts.SpillDir, 0o755); err != nil {
 		return "", err
 	}
@@ -699,7 +809,7 @@ func (p *Pipeline) writeSpill(raw []byte) (string, error) {
 	seq := p.seq
 	p.mu.Unlock()
 
-	f, err := os.CreateTemp(p.opts.SpillDir, fmt.Sprintf("spill-%04d-*.json", seq))
+	f, err := os.CreateTemp(p.opts.SpillDir, fmt.Sprintf(pattern, seq))
 	if err != nil {
 		return "", err
 	}

@@ -85,8 +85,16 @@ type Attempt struct {
 	ID           string `json:"id"`
 	Phase        string `json:"phase"`
 	AuthorizeURL string `json:"authorizeUrl,omitempty"`
-	ExpiresAt    int64  `json:"expiresAt,omitempty"`
-	ErrorCode    string `json:"errorCode,omitempty"`
+	// UserCode 是 RFC 8628 device authorization 里**人要在浏览器里输入的那串码**。
+	//
+	// 为什么放进 attempt：官方 `AccountView.attempt` 是 `additionalProperties: true`
+	// （`docs/evidence` 的 rc.2 契约里逐字如此），所以这是**加性字段**，不改官方
+	// 形状；而 UI 与 authorization flow 都需要它在**不读内部状态**的前提下显示
+	// "去哪个页面、输什么码"。以前它只活在 `Config.Doc.DeviceCode` 旁边没被保存，
+	// 于是"人能看见这个码"这件事无从实现。
+	UserCode  string `json:"userCode,omitempty"`
+	ExpiresAt int64  `json:"expiresAt,omitempty"`
+	ErrorCode string `json:"errorCode,omitempty"`
 }
 
 type Profile struct {

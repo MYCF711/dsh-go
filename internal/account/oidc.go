@@ -43,6 +43,7 @@ func (s *Service) startOIDC(ctx context.Context, opts StartOptions) (State, erro
 	s.doc.Issuer = issuer
 	s.doc.Attempt = &Attempt{
 		ID: id, Phase: PhaseWaitingBrowser, AuthorizeURL: dev.VerificationURI,
+		UserCode:  dev.UserCode,
 		ExpiresAt: time.Now().Add(time.Duration(dev.ExpiresIn) * time.Second).UnixMilli(),
 	}
 	s.doc.Status = StatusSignedOut
