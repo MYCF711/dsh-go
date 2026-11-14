@@ -150,6 +150,24 @@ else
     bad "找不到 scripts/single-source.py —— 同一条规则写第二份的病没有门禁"
   fi
 
+  # PLAN §15：缺口登记表口径。scripts/gap-register-counts.py。
+  #
+  # 为什么要有它：`docs/host-stable-gap-register.md` 是全仓唯一的缺口底账，
+  # 而它长期写着 rc.1 的 193/97。数字是人手填的，改完代码没人回头改，
+  # 于是越错越久——2026-11-14 盘点查出 **149 条陈旧登记**。
+  # GUI 仓那份曾一模一样（分母写死 55 而官方 66，`--check` 却报 PASS），
+  # 修法是让它对官方清单逐 id 断言。这里做同一件事。
+  if [ -f scripts/gap-register-counts.py ]; then
+    if gr_out="$(python scripts/gap-register-counts.py --check 2>&1)"; then
+      pass "$(printf '%s' "$gr_out" | grep '^PASS' | sed 's/^PASS  *//')"
+    else
+      bad "缺口登记表口径: $(printf '%s' "$gr_out" | grep -E '^      - ' | head -2 | tr '
+' ' ')"
+    fi
+  else
+    bad "找不到 scripts/gap-register-counts.py —— 缺口底账的口径没人守了"
+  fi
+
   # 变异清单自洽：每条的 old 片段必须**恰好出现一次**，
   # 否则那条变异永远是 BAD，等于验收清单里混着一条废条目。
   if [ -f scripts/mutate.py ] && [ -f scripts/mutations.json ]; then
