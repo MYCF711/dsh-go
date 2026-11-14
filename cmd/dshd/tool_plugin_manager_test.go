@@ -6,20 +6,24 @@ package main
 //   - `list_plugins` 的分页信封里的行，与本进程 `pluginRuntime` 的真实装载集合一致；
 //   - `set_plugin` 真的改了 state.json 里的启用位（重开管理器仍然读得到）；
 //   - `set_version_exemption` 真的写进了 compatibility.json；
-//   - `install_bundle` / `remove_bundle` 回的是**官方形状的结构化失败**
-//     （ChangeResult + error.code + nextStep），不是假成功也不是 HTTP 层异常。
+//   - `install_bundle` 收**本地目录包**时走真实安装事务，装完 `pluginInventory.list`
+//     （设置页「内置插件」的数据源）看得到；`remove_bundle` 卸完它消失；
+//   - 网络来源（registry/git/tarball）与装不了的包回**官方形状的结构化失败**
+//     （ChangeResult + error.code + nextStep），不是假成功也不是异常。
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"crypto/sha256"
-	"encoding/hex"
 
 	"dshgo/internal/pluginmgr"
 	"dshgo/internal/transport"
@@ -230,32 +234,453 @@ func TestPluginManagerSetPluginPersists(t *testing.T) {
 	}
 }
 
-// 安装/卸载：官方形状的**结构化失败**，不是假成功、也不是异常。
-func TestPluginManagerInstallAndRemoveAreStructuredUnsupported(t *testing.T) {
-	tl, _ := newPluginManagerFixture(t)
+// 网络来源（registry / git / tarball）在**工具面**上仍然装不了：官方形状失败 + nextStep。
+//
+// 这条边界是显式的产品决策（工具面不引入网络下载），所以必须钉死"说清为什么"：
+// 只回一个 unsupported-platform 而不说"本仓只支持本地目录包"，模型会去改参数重试。
+func TestPluginManagerInstallRejectsNetworkSources(t *testing.T) {
+	tl, home := newPluginManagerFixture(t)
 
-	for _, action := range []string{"install_bundle", "remove_bundle"} {
-		out, err := execPluginManager(t, tl, `{"action":"`+action+`","target":"@deepseek-ai/dsh-skill@0.2.2"}`)
+	specs := []string{
+		"@deepseek-ai/dsh-skill@0.2.2",       // 作用域包名 = registry 规格
+		"acme-bundle",                        // 裸包名 = registry 规格
+		"https://example.com/acme-1.0.0.tgz", // tarball URL
+		"git+https://example.com/acme.git",   // git 规格
+	}
+	for _, spec := range specs {
+		out, err := execPluginManager(t, tl, fmt.Sprintf(`{"action":"install_bundle","target":%q}`, spec))
 		if err != nil {
-			t.Fatalf("%s 不该抛错（官方用 ChangeResult 表达应用性失败）：%v", action, err)
+			t.Fatalf("%s 不该抛错（官方用 ChangeResult 表达应用性失败）：%v", spec, err)
 		}
 		if changed, _ := out["changed"].(bool); changed {
-			t.Fatalf("%s 报 changed=true —— 这是假成功", action)
+			t.Fatalf("%s 报 changed=true —— 这是假成功", spec)
 		}
 		if app, _ := out["application"].(string); app != "failed" {
-			t.Fatalf("%s 的 application 应当是 failed，实际 %v", action, out["application"])
+			t.Fatalf("%s 的 application 应当是 failed，实际 %v", spec, out["application"])
+		}
+		// 官方 ChangeResult.stage 只有 install|enable|remove 三值。
+		if stage, _ := out["stage"].(string); stage != "install" {
+			t.Fatalf("%s 的 stage 必须是官方的 install（不是 resolve），实际 %v", spec, out["stage"])
+		}
+		if target, _ := out["target"].(string); target != spec {
+			t.Fatalf("%s 的 target 必须回显这次 spec，实际 %v", spec, out["target"])
 		}
 		e, ok := out["error"].(map[string]any)
 		if !ok {
-			t.Fatalf("%s 必须带 error 对象：%v", action, out)
+			t.Fatalf("%s 必须带 error 对象：%v", spec, out)
 		}
 		if code, _ := e["code"].(string); code != "unsupported-platform" {
-			t.Fatalf("%s 的 error.code 应当是 unsupported-platform，实际 %v", action, code)
+			t.Fatalf("%s 的 error.code 应当是 unsupported-platform，实际 %v", spec, code)
 		}
-		if _, ok := out["nextStep"].(string); !ok {
-			t.Fatalf("%s 没给 nextStep（官方 withNextStep：没应用的变更要说清下一步）：%v", action, out)
+		if diagnostic, _ := e["diagnostic"].(string); !strings.Contains(diagnostic, "本地目录包") {
+			t.Fatalf("%s 的 diagnostic 必须说清只支持本地目录包：%v", spec, e["diagnostic"])
+		}
+		step, ok := out["nextStep"].(string)
+		if !ok {
+			t.Fatalf("%s 没给 nextStep（官方 withNextStep：没应用的变更要说清下一步）：%v", spec, out)
+		}
+		if !strings.Contains(step, "本地目录包") || !strings.Contains(step, "没有下载源") {
+			t.Fatalf("%s 的 nextStep 必须说清「只支持本地目录包」与「网络来源没有下载源」，实际 %q", spec, step)
 		}
 	}
+
+	// 被拒的来源一次都不许碰磁盘：没有已装包，也没有包目录。
+	out, err := execPluginManager(t, tl, `{"action":"list_bundles"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total, _ := out["total"].(float64); total != 0 {
+		t.Fatalf("被拒绝的网络来源不该留下已装包：%v", out)
+	}
+	if entries, err := os.ReadDir(filepath.Join(home, "plugins", "packages")); err == nil && len(entries) != 0 {
+		t.Fatalf("被拒绝的网络来源不该建包目录：%v", entries)
+	}
+}
+
+// 端到端：工具装一个**真目录包** -> `pluginInventory.list` 的 entries 里有它
+// -> 卸载后消失。
+//
+// 为什么必须走 `pluginInventory.list` 而不是只看工具自己的 list_bundles：
+// 设置页「内置插件」的数据源就是它（宿主装配见
+// `cmd/dshd/serve_plugins_official.go:newOfficialPluginManagerAPI` 的 PluginInventoryList）。
+// "工具回 changed=true 但设置页永远空着"正是这次要消灭的缺口，所以判据落在出口上。
+func TestPluginManagerInstallAndRemoveLocalDirectoryEndToEnd(t *testing.T) {
+	home := t.TempDir()
+	rt, err := openPluginRuntime(home)
+	if err != nil {
+		t.Fatalf("打开插件运行时失败：%v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
+	tl := &pluginManagerTool{api: pluginManagerAPI{newOfficialPluginManagerAPI(rt)}}
+	srv := newOfficialPluginManagerTestServer(t, rt)
+
+	// 真目录包：manifest + 真 wasm payload（与装载器测试同一份客人产物）。
+	pkg := writePluginTransportPackage(t, filepath.Join(t.TempDir(), "acme"), "1.0.0")
+
+	// 0) 装之前设置页的数据源是空的——后面看到的是这次装出来的，不是巧合。
+	if entries := pluginInventoryEntries(t, srv); len(entries) != 0 {
+		t.Fatalf("装之前 pluginInventory.list 应为空：%v", entries)
+	}
+
+	// 1) 安装：真事务（staging 复制 + 校验 + state.json 提交）。
+	out, err := execPluginManager(t, tl, fmt.Sprintf(`{"action":"install_bundle","target":%q}`, pkg))
+	if err != nil {
+		t.Fatalf("本地目录包安装失败：%v", err)
+	}
+	if changed, _ := out["changed"].(bool); !changed {
+		t.Fatalf("安装没报 changed=true：%v", out)
+	}
+	if app, _ := out["application"].(string); app != "applied" {
+		t.Fatalf("安装的 application 应当是 applied：%v", out)
+	}
+	if out["bundle"] != fixturePluginID || out["version"] != "1.0.0" {
+		t.Fatalf("结果必须点名装上的包与版本（官方 bundle/version）：%v", out)
+	}
+	if _, has := out["nextStep"]; has {
+		t.Fatalf("已应用的变更不该带 nextStep（官方 withNextStep）：%v", out)
+	}
+
+	// 磁盘真相：state.json 记了它、包目录真的落地（不是只回了个 changed=true）。
+	stateRaw, err := os.ReadFile(filepath.Join(home, "plugins", "state.json"))
+	if err != nil {
+		t.Fatalf("安装必须真写 state.json：%v", err)
+	}
+	var state struct {
+		Plugins map[string]struct {
+			Version  string `json:"version"`
+			Enabled  bool   `json:"enabled"`
+			Versions map[string]struct {
+				Source string `json:"source"`
+			} `json:"versions"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(stateRaw, &state); err != nil {
+		t.Fatalf("state.json 不是合法 JSON：%v（%s）", err, stateRaw)
+	}
+	record, ok := state.Plugins[fixturePluginID]
+	if !ok {
+		t.Fatalf("state.json 里没有 %s：%s", fixturePluginID, stateRaw)
+	}
+	if record.Version != "1.0.0" || !record.Enabled {
+		t.Fatalf("state.json 记的版本/启用位不对：%+v", record)
+	}
+	if source := record.Versions["1.0.0"].Source; source != pkg {
+		t.Fatalf("state.json 记的来源应为真实绝对目录 %q，实际 %q", pkg, source)
+	}
+	if _, err := os.Stat(filepath.Join(home, "plugins", "packages", fixturePluginID, "1.0.0", "plugin.json")); err != nil {
+		t.Fatalf("安装后的包目录不存在：%v", err)
+	}
+
+	// 2) 设置页的数据源看得到它（entryId/enabled/fiberPhase 都是真实值）。
+	entries := pluginInventoryEntries(t, srv)
+	if len(entries) != 1 {
+		t.Fatalf("pluginInventory.list 应看到刚装的 1 个包，实际 %d 行：%v", len(entries), entries)
+	}
+	entry := entries[0]
+	if entry["entryId"] != fixturePluginID {
+		t.Fatalf("entryId 不对：%v", entry)
+	}
+	if entry["moduleName"] != "plugin.wasm" {
+		t.Fatalf("moduleName 必须是真实 entry：%v", entry)
+	}
+	if entry["enabled"] != true {
+		t.Fatalf("安装默认启用（官方 defaults to true），enabled 应为 true：%v", entry)
+	}
+	if entry["fiberPhase"] != "active" {
+		t.Fatalf("启用安装必须真的装载到当前进程（fiberPhase=active）：%v", entry)
+	}
+
+	// 3) 卸载：真事务（包目录进事务区 + state.json 摘记录）。
+	out, err = execPluginManager(t, tl, fmt.Sprintf(`{"action":"remove_bundle","target":%q}`, fixturePluginID))
+	if err != nil {
+		t.Fatalf("卸载失败：%v", err)
+	}
+	if changed, _ := out["changed"].(bool); !changed {
+		t.Fatalf("卸载没报 changed=true：%v", out)
+	}
+	if app, _ := out["application"].(string); app != "applied" {
+		t.Fatalf("卸载的 application 应当是 applied：%v", out)
+	}
+	if stage, _ := out["stage"].(string); stage != "remove" {
+		t.Fatalf("卸载的 stage 必须是 remove：%v", out)
+	}
+
+	// 4) 设置页里消失，磁盘上也回收了。
+	if entries := pluginInventoryEntries(t, srv); len(entries) != 0 {
+		t.Fatalf("卸载之后 pluginInventory.list 必须为空，实际：%v", entries)
+	}
+	after, err := os.ReadFile(filepath.Join(home, "plugins", "state.json"))
+	if err != nil {
+		t.Fatalf("卸载后 state.json 必须仍可读：%v", err)
+	}
+	if strings.Contains(string(after), fixturePluginID) {
+		t.Fatalf("卸载后 state.json 仍记着 %s：%s", fixturePluginID, after)
+	}
+	if _, err := os.Stat(filepath.Join(home, "plugins", "packages", fixturePluginID)); !os.IsNotExist(err) {
+		t.Fatalf("卸载后包目录应被回收，实际 err=%v", err)
+	}
+}
+
+// 装不了的包：**官方形状的结构化失败**并说清原因，且状态一步不动。
+//
+// 四类失败各有各的真相，不许合并成一句"安装失败"：
+//   - 路径不存在   → invalid-spec（读不到包目录）
+//   - hash 不符    → invalid-spec（文件 SHA-256 与 manifest 登记值不一致）
+//   - manifest 坏  → invalid-spec（不是合法 JSON / schema 不对）
+//   - Cordis/JS 包 → unsupported-platform（本仓不嵌 JS 运行时，AGENTS R6）
+func TestPluginManagerInstallFailuresStayStructured(t *testing.T) {
+	home := t.TempDir()
+	rt, err := openPluginRuntime(home)
+	if err != nil {
+		t.Fatalf("打开插件运行时失败：%v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
+	tl := &pluginManagerTool{api: pluginManagerAPI{newOfficialPluginManagerAPI(rt)}}
+	srv := newOfficialPluginManagerTestServer(t, rt)
+
+	cases := []struct {
+		name       string
+		build      func(t *testing.T) string
+		wantCode   string
+		wantInDiag string
+	}{
+		{
+			name:       "路径不存在",
+			build:      func(t *testing.T) string { return filepath.Join(t.TempDir(), "no-such-package") },
+			wantCode:   "invalid-spec",
+			wantInDiag: "读取包目录",
+		},
+		{
+			name:       "hash 不符",
+			build:      corruptHashPackage,
+			wantCode:   "invalid-spec",
+			wantInDiag: "SHA-256 不符",
+		},
+		{
+			name:       "manifest 坏 JSON",
+			build:      brokenManifestPackage,
+			wantCode:   "invalid-spec",
+			wantInDiag: "坏 manifest",
+		},
+		{
+			name:       "Cordis/JS 形态",
+			build:      cordisStylePackage,
+			wantCode:   "unsupported-platform",
+			wantInDiag: "Cordis",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec := c.build(t)
+			out, err := execPluginManager(t, tl, fmt.Sprintf(`{"action":"install_bundle","target":%q}`, spec))
+			if err != nil {
+				t.Fatalf("装不了的包不该把工具调用变成异常（官方用 ChangeResult）：%v", err)
+			}
+			if changed, _ := out["changed"].(bool); changed {
+				t.Fatalf("%s 报 changed=true —— 这是假成功：%v", c.name, out)
+			}
+			if app, _ := out["application"].(string); app != "failed" {
+				t.Fatalf("%s 的 application 应当是 failed：%v", c.name, out)
+			}
+			e, ok := out["error"].(map[string]any)
+			if !ok {
+				t.Fatalf("%s 必须带 error 对象：%v", c.name, out)
+			}
+			if code, _ := e["code"].(string); code != c.wantCode {
+				t.Fatalf("%s 的 error.code 应当是 %s，实际 %v", c.name, c.wantCode, code)
+			}
+			diagnostic, _ := e["diagnostic"].(string)
+			if !strings.Contains(diagnostic, c.wantInDiag) {
+				t.Fatalf("%s 的 diagnostic 必须点名原因（要含 %q），实际 %q", c.name, c.wantInDiag, diagnostic)
+			}
+			if step, ok := out["nextStep"].(string); !ok || strings.TrimSpace(step) == "" {
+				t.Fatalf("%s 没给 nextStep（官方 withNextStep）：%v", c.name, out)
+			}
+			// 失败必须一步不动：没有已装包，设置页也没有条目。
+			list, err := execPluginManager(t, tl, `{"action":"list_bundles"}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if total, _ := list["total"].(float64); total != 0 {
+				t.Fatalf("%s 之后不该有已装包：%v", c.name, list)
+			}
+			if entries := pluginInventoryEntries(t, srv); len(entries) != 0 {
+				t.Fatalf("%s 之后 pluginInventory.list 必须为空：%v", c.name, entries)
+			}
+		})
+	}
+}
+
+// 卸载不存在的包：官方码是 not-removable（管理性失败），不是 unsupported-platform。
+func TestPluginManagerRemoveMissingBundleIsNotRemovable(t *testing.T) {
+	tl, _ := newPluginManagerFixture(t)
+	out, err := execPluginManager(t, tl, `{"action":"remove_bundle","target":"acme.absent"}`)
+	if err != nil {
+		t.Fatalf("没装的包卸载失败必须是 ChangeResult，不是异常：%v", err)
+	}
+	if changed, _ := out["changed"].(bool); changed {
+		t.Fatalf("没装的包卸载报 changed=true —— 这是假成功：%v", out)
+	}
+	e, ok := out["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("必须带 error 对象：%v", out)
+	}
+	if code, _ := e["code"].(string); code != "not-removable" {
+		t.Fatalf("官方码是 not-removable，实际 %v", code)
+	}
+	if step, ok := out["nextStep"].(string); !ok || !strings.Contains(step, "list_bundles") {
+		t.Fatalf("not-removable 的 nextStep 必须指向 list_bundles：%v", out)
+	}
+}
+
+// target 必填：官方两句原文（tools.ts:151/157），缺了不许静默成功。
+func TestPluginManagerInstallTargetRequired(t *testing.T) {
+	tl, _ := newPluginManagerFixture(t)
+	for _, c := range []struct{ raw, want string }{
+		{`{"action":"install_bundle"}`, "target package spec is required"},
+		{`{"action":"install_bundle","target":"   "}`, "target package spec is required"},
+		{`{"action":"remove_bundle"}`, "target bundle name is required"},
+		{`{"action":"remove_bundle","target":""}`, "target bundle name is required"},
+	} {
+		res, err := tl.Exec(context.Background(), json.RawMessage(c.raw))
+		if err == nil {
+			t.Fatalf("%s 缺 target 必须拒绝", c.raw)
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s 的错误文案必须是官方原文 %q，实际 %q", c.raw, c.want, err.Error())
+		}
+		if res.Hint == "" {
+			t.Fatalf("%s 的错误必须带 Hint（R3）：%v", c.raw, res)
+		}
+	}
+}
+
+// 宿主没挂接安装/卸载事务时点名缺什么（不是静默成功、也不是 unsupported-platform）。
+func TestPluginManagerInstallUnwiredIsLoud(t *testing.T) {
+	// 只挂读方法：Exec 的"整个插件面都没接"预检会放行，从而走到安装/卸载的 nil 分支。
+	tl := &pluginManagerTool{api: pluginManagerAPI{transport.OfficialPluginManagerAPI{
+		ListPlugins: func() ([]transport.OfficialPluginEntry, error) { return nil, nil },
+	}}}
+	pkg := writePluginTransportPackage(t, filepath.Join(t.TempDir(), "pkg"), "1.0.0")
+
+	res, err := tl.Exec(context.Background(), json.RawMessage(fmt.Sprintf(`{"action":"install_bundle","target":%q}`, pkg)))
+	if err == nil || !strings.Contains(err.Error(), "未接线") {
+		t.Fatalf("没有 InstallBundle 时必须点名未接线，实际 err=%v", err)
+	}
+	if res.Hint == "" {
+		t.Fatal("必须带 Hint（R3）")
+	}
+	res, err = tl.Exec(context.Background(), json.RawMessage(`{"action":"remove_bundle","target":"acme.audit"}`))
+	if err == nil || !strings.Contains(err.Error(), "未接线") {
+		t.Fatalf("没有 RemoveBundle 时必须点名未接线，实际 err=%v", err)
+	}
+	if res.Hint == "" {
+		t.Fatal("必须带 Hint（R3）")
+	}
+}
+
+// 本地目录包收到 registry 参数：不静默忽略，如实说它没起作用。
+func TestPluginManagerInstallWarnsRegistryUnusedForLocalPath(t *testing.T) {
+	home := t.TempDir()
+	rt, err := openPluginRuntime(home)
+	if err != nil {
+		t.Fatalf("打开插件运行时失败：%v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close(context.Background()) })
+	tl := &pluginManagerTool{api: pluginManagerAPI{newOfficialPluginManagerAPI(rt)}}
+
+	pkg := writePluginTransportPackage(t, filepath.Join(t.TempDir(), "acme"), "1.0.0")
+	out, err := execPluginManager(t, tl, fmt.Sprintf(
+		`{"action":"install_bundle","target":%q,"registry":"https://registry.example"}`, pkg))
+	if err != nil {
+		t.Fatalf("本地目录包安装失败：%v", err)
+	}
+	if changed, _ := out["changed"].(bool); !changed {
+		t.Fatalf("安装没报 changed=true：%v", out)
+	}
+	warnings, _ := out["warnings"].([]any)
+	found := false
+	for _, warning := range warnings {
+		if text, _ := warning.(string); strings.Contains(text, "没有使用 registry") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("本地目录包收到 registry 参数时必须如实警告它没被使用：%v", out["warnings"])
+	}
+}
+
+// corruptHashPackage 造一个"manifest 合法但 payload 被改过"的包。
+func corruptHashPackage(t *testing.T) string {
+	t.Helper()
+	dir := writePluginTransportPackage(t, filepath.Join(t.TempDir(), "bad-hash"), "1.0.0")
+	payload, err := os.ReadFile(filepath.Join(dir, "plugin.wasm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 末尾加一个字节：文件内容变了，manifest 里登记的 SHA-256 自然不符。
+	if err := os.WriteFile(filepath.Join(dir, "plugin.wasm"), append(payload, 0x00), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// brokenManifestPackage 造一个 plugin.json 不是合法 JSON 的包目录。
+func brokenManifestPackage(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "bad-manifest")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plugin.json"), []byte(`{"schema":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// cordisStylePackage 造一个"另一套生态"的插件目录（package.json + JS 入口，没有 plugin.json）。
+func cordisStylePackage(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "cordis-plugin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"),
+		[]byte(`{"name":"acme-cordis","version":"1.0.0","main":"index.js"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.js"), []byte("module.exports = {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// pluginInventoryEntries 从**真实 transport 出口**读 `pluginInventory.list` 的 entries。
+//
+// 这是设置页「内置插件」看到的那一份数据：走 server 的 handler、而不是工具的
+// list_bundles，才能证明"装进去的包在界面数据源里真的出现/消失"。
+func pluginInventoryEntries(t *testing.T, srv *transport.Server) []map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/pluginInventory.list", bytes.NewReader([]byte("{}")))
+	rec := httptest.NewRecorder()
+	srv.ServeOfficialPluginInventoryAPI(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pluginInventory.list 状态码 %d（body=%s）", rec.Code, rec.Body.String())
+	}
+	var envelope struct {
+		Result struct {
+			ManagementAvailable *bool            `json:"managementAvailable"`
+			Entries             []map[string]any `json:"entries"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("pluginInventory.list 响应不是 JSON：%s", rec.Body.String())
+	}
+	// 本仓有持久化 profile 管理，managementAvailable 必须显式为 true（不是缺省）。
+	if envelope.Result.ManagementAvailable == nil || !*envelope.Result.ManagementAvailable {
+		t.Fatalf("managementAvailable 必须是 true：%s", rec.Body.String())
+	}
+	return envelope.Result.Entries
 }
 
 // 版本豁免：真实写 compatibility.json，且授权必须显式 acceptRisk。
