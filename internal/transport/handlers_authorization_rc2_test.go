@@ -310,7 +310,10 @@ func TestAuthorizationBeginDisconnectCancels(t *testing.T) {
 			return session.Commit()
 		},
 	})
-	events, cancel := beginStream(t, ts, "acme/disconnect")
+	// 这条用例只关心**撤销**有没有生效，不看事件流；第一个返回值直接丢弃。
+	// （原先写成 events 再在 t.Fatal 之后 `_ = events`，那段代码不可达，
+	//  staticcheck SA4006 抓出来「赋值后从未使用」——是**真提示**。）
+	_, cancel := beginStream(t, ts, "acme/disconnect")
 	<-started
 	cancel() // 客户端断开
 	// 等 server 侧的 begin 结算。
@@ -322,7 +325,6 @@ func TestAuthorizationBeginDisconnectCancels(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("连接断开之后 attempt 仍然在飞（撤销没有生效）")
-	_ = events
 }
 
 // 未接线：结构化 501 + 点名接什么。
