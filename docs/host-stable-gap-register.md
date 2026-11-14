@@ -1,6 +1,22 @@
 # 宿主稳定版真实缺口登记（HS-00 · HOST-BASELINE-RECHECK）
 
-> **一句话结论（T18 终审）**：官方方法总数 **193**（旧快照 153 漏 40）。**当前计数（HOST-FINAL-193-DOCS 终审后，已逐行与官方 asar 清单核对）：IMPLEMENTED 193 / PARTIAL 0 / OFFICIAL_UNSUPPORTED 0 / DEFERRED 0 / DO_NOT_IMPLEMENT 0 = 193，UNVERIFIED 0**。T18 终审原话（历史）：IMPLEMENTED 103 + PARTIAL 6 = 109 有真实实现；OFFICIAL_UNSUPPORTED 64 + DEFERRED 8 + DO_NOT_IMPLEMENT 12 = 84 未实现/后置。**T67 已把其中 7 个 PARTIAL 复核为 IMPLEMENTED（见文末 §T67）；103+6+64+8+12 = 193 自洽**。97 插件：**IMPLEMENTED 51 / PARTIAL 28 / OFFICIAL_UNSUPPORTED 1 / DEFERRED 13 / DO_NOT_IMPLEMENT 4**。因此旧 `82/153`、`93/100`（74+19）、`L2 未开始`、`P1 全 MISSING` 全部作废；逐条证据以 §2.3–2.5、§3.3 与 `tmp/GO2-TEAM/T18/parity-summary.json` 为准。
+> **一句话结论（2026-11-14 全量盘点后重写）**：官方基线 **`0.2.2-rc.2`**。
+>
+> | 面 | 总数 | 状态 | 来源 |
+> |---|---|---|---|
+> | **宿主方法** | **223** | **220** IMPLEMENTED / **3** STRUCTURED_UNIMPLEMENTED / **0** MISSING | `docs/evidence/official-desktop-api-methods-0.2.2-rc.2.txt`；逐条核对见 `tmp/GO8-RC2/reports/FULL-gap-audit-2026-11-14.md` |
+> | **base 插件** | **99** | **75** IMPLEMENTED / **17** PARTIAL / **7** MISSING | 同表 §3；本行随 PR #25/#26/#28 更新 |
+> | **UI 插件** | **66** | **30** / **19** / **17** | GUI 仓 `docs/official-parity.md`（分母**动态读**官方清单，`parity-count.py --check` 守着） |
+>
+> **`方法面 MISSING = 0` 有机器反证**：223 个方法**全部**被某条分派分支认领，
+> 无一落到 `internal/transport/server.go` 的通用 `errorBody("not implemented")`。
+>
+> **这份文件长期写着「193 方法 / 97 插件」——那是 rc.1 口径，已经错了很久。**
+> 2026-11-14 的全量盘点查出 **149 条陈旧登记**（方法面 88 + base 插件 40 + UI 21），
+> 其中 **6 条是反向降级**（记成"已做"其实没做）。逐条见 `FULL-gap-audit` 报告 §4。
+>
+> **维护规矩**：这三行是**数出来的**，不是手填的。改完代码要同步计数，
+> 否则下一个人会照过时口径做事——这正是上面那 149 条怎么来的。
 
 - `task_id`：HS-00 · HOST-BASELINE-RECHECK
 - `owner` / `model`：`qa` / `group/deepseek-v4.1-flash-1017`
