@@ -220,6 +220,11 @@ type Options struct {
 	SideQuery    func(ctx context.Context, sessionID, requestID, prompt string, onText func(string) error) (string, error)
 	SideCancel   func(sessionID, requestID string) error
 	SideClose    func(sessionID string) error
+	// Changes 是官方 deliverables 三条变更路由（`/api/changes.summary|diff|open`）
+	// 的宿主实现。它们是**按路径**接住的文档相对路由，不走 /api/<method> 分派，
+	// 所以既不改 canonical 方法表，也不与任何 typert 方法重名。
+	// 全部 nil 时三条路由回 501 并说清"没有 workspace/changes 记录源"。
+	Changes ChangesAPI
 }
 
 // Server 是界面线的宿主入口。
@@ -347,6 +352,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleDebugStats(w, r)
 	case r.URL.Path == "/ws":
 		s.handleWS(w, r)
+	case r.URL.Path == ChangesSummaryRoute || r.URL.Path == ChangesDiffRoute || r.URL.Path == ChangesOpenRoute:
+		// 官方 deliverables 的三条变更路由是浏览器直接 fetch 的 GET/POST 文档
+		// 相对路由，不是 POST /api/<method>；必须在这里接住，否则会被下面的
+		// 前缀分支当"未知方法"吞掉。
+		s.serveChangesRoute(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/"):
 		s.handleAPI(w, r)
 	default:

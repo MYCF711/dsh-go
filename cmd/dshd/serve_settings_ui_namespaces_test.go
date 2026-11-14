@@ -136,12 +136,12 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 
 	result := settingsL1Describe(t, handler)
 	namespaces, ok := result["namespaces"].([]any)
-	if !ok || len(namespaces) != 10 {
-		t.Fatalf("settings.describe 必须报 10 个命名空间（model/permission/llm + 7 个客户端/插件 UI）：%v", result["namespaces"])
+	if !ok || len(namespaces) != 11 {
+		t.Fatalf("settings.describe 必须报 11 个命名空间（model/permission/llm + 7 个客户端/插件 UI + agent-preset-registry）：%v", result["namespaces"])
 	}
 	sections, ok := result["sections"].([]any)
-	if !ok || len(sections) != 10 {
-		t.Fatalf("settings.describe 必须报 10 个 section：%v", result["sections"])
+	if !ok || len(sections) != 11 {
+		t.Fatalf("settings.describe 必须报 11 个 section：%v", result["sections"])
 	}
 
 	defaults := []struct {
@@ -181,6 +181,9 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 			"shutdownTimeoutMillis": float64(3000),
 			"maxRequestBytes":       float64(4000000),
 		}},
+		// 本仓 2026-11-15 新增：官方 agent-preset registry 的"后续会话默认 preset"
+		// （官方 dsh-agent-preset-registry/src/index.ts:52-59）。
+		{"agent-preset-registry", map[string]any{"selectedDefault": "default"}},
 	}
 	for _, entry := range defaults {
 		namespace := settingsL1Namespace(t, result, entry.ns)

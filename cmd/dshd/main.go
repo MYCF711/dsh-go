@@ -22,7 +22,6 @@ import (
 	"dshgo/internal/compact"
 	"dshgo/internal/kernel"
 	"dshgo/internal/llm"
-	"dshgo/internal/modes"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 	timermod "dshgo/internal/timer"
@@ -867,7 +866,7 @@ func cmdRun(argv []string) (retErr error) {
 	var logw *session.Log
 	if sessID == "" {
 		sessID = "session-" + session.NewID()
-		logw, err = session.CreateSession(*home, cwd, sessID, modes.DefaultID)
+		logw, err = session.CreateSession(*home, cwd, sessID, selectedAgentPresetDefault(*home))
 	} else {
 		var path string
 		path, err = session.ResolvePath(*home, cwd, sessID)
@@ -941,7 +940,7 @@ func cmdRun(argv []string) (retErr error) {
 		}
 		sys += "\n\n" + dir
 	}
-	logSessionStart(*home, sessID, logw.Path, cwd, modes.DefaultID)
+	logSessionStart(*home, sessID, logw.Path, cwd, selectedAgentPresetDefault(*home))
 	// 把"当前会话"指给 history_search——`run` 以前没这一步，模型回查只会得到
 	// "没有活动会话"。ACP 那边早就指了，这里补上。
 	attachHistory(logw)
@@ -977,6 +976,11 @@ func cmdRun(argv []string) (retErr error) {
 	if err := logw.Append("turn/start", session.TurnStartData(turn)); err != nil {
 		return err
 	}
+	// 这一轮的变更记录器：`turn/start` 之后**立刻**拍"开始"快照（工具一改文件就晚了），
+	// 收工时在 `turn/end` 之后补 `workspace/changes` 事件与记录。defer 注册在这里 →
+	// 后进先出：先 tc.Exit 写 turn/end，再 finish 写变更，最后才 logw.Close。
+	changesTurn := startWorkspaceChangesTurn(*home, logw, cwd, turn)
+	defer changesTurn.finish()
 	// v4 `request/context`：这一轮请求用的模型（`session.load.model`、`context.usage`
 	// 都只读这条事件，而宿主以前从不写它——我们自己的会话在界面上"没有模型"）。
 	//

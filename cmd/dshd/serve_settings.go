@@ -58,6 +58,18 @@ func newServeSettingsStore(baseModel, basePolicy string, models *modelOverrideSt
 	return store
 }
 
+// homeDir 返回这份 store 所属的 home（namespace 文档落点的上两级）。
+//
+// 为什么不在构造时存一份：`serveSettingsStore` 的既有构造签名被四处调用点
+// （含测试）钉住，而 home 只有一个真实来源——`settings.Store` 自己的路径。
+// 从这里推出来，两个 store 永远指的是同一个 home。
+func (s *serveSettingsStore) homeDir() string {
+	if s == nil || s.namespaces == nil {
+		return ""
+	}
+	return filepath.Dir(filepath.Dir(s.namespaces.Path()))
+}
+
 func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, error) {
 	switch namespace {
 	case settingsform.NamespaceModel:
@@ -87,7 +99,10 @@ func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, erro
 		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek,
 		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的命名空间（本仓无 OTel 后端，
 		// mode=FEEDBACK_ONLY 由 settingsform 的语义校验回 501）。
-		settingsform.NamespaceSessionTelemetryOTel:
+		settingsform.NamespaceSessionTelemetryOTel,
+		// 2026-11-15 补：官方 agent-preset registry 的 selectedDefault（后续会话的
+		// 默认 preset；官方 UI 的"设为默认"写的就是这个命名空间）。
+		settingsform.NamespaceAgentPreset:
 		if s.namespaces == nil {
 			return settingsform.Document{}, settingsStoreNotWiredError(namespace)
 		}
@@ -146,9 +161,17 @@ func (s *serveSettingsStore) Write(namespace string, user map[string]any, expect
 		// 2026-11-13 补：官方另两个 general slot 的命名空间。
 		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek,
 		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的命名空间（见上面 Read 的说明）。
-		settingsform.NamespaceSessionTelemetryOTel:
+		settingsform.NamespaceSessionTelemetryOTel,
+		// 2026-11-15 补：agent-preset registry（写路径另做"id 真实存在"校验，
+		// 见 agent_preset_default.go；不写进去一个装不起来的默认值）。
+		settingsform.NamespaceAgentPreset:
 		if s.namespaces == nil {
 			return 0, settingsStoreNotWiredError(namespace)
+		}
+		if namespace == settingsform.NamespaceAgentPreset {
+			if err := validateAgentPresetSelection(s.homeDir(), user); err != nil {
+				return 0, err
+			}
 		}
 		revision, err := s.namespaces.Write(namespace, user, expected)
 		if err != nil {

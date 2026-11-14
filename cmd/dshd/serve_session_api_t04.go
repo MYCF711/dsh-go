@@ -18,7 +18,6 @@ import (
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/llm"
-	"dshgo/internal/modes"
 	"dshgo/internal/settingsform"
 	"dshgo/internal/transport"
 )
@@ -289,7 +288,7 @@ func (h *officialSessionHost) AgentPreset(sessionID string) (*string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", transport.ErrStatePersistence, err)
 	}
-	preset := modes.DefaultID
+	preset := selectedAgentPresetDefault(h.home)
 	if found {
 		if doc.Version != 1 || doc.Sessions == nil {
 			return nil, fmt.Errorf("%w: state/session-preset.json version/sessions 非法",
