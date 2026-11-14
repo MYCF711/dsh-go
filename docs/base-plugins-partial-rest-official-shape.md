@@ -18,9 +18,9 @@
 | # | 插件 | 本轮之后 | 剩下的缺口是"实现"还是"决定" |
 |---:|---|---|---|
 | 6 | `deepseek-llm-api-extensions` | **仍 PARTIAL** | 一半被 `#8` 的决定锁死（`dsh_session_log` 没有所有者），一半是"不可达分支"（无 sessionId / 无 agentPresets 服务） |
-| 53 | `agent-instructions` | **仍 PARTIAL** | 真实现缺口（fs 操作后的嵌套发现 + change/removal 批次；用户全局双根链的第二根） |
+| 53 | `agent-instructions` | **仍 PARTIAL**（第二根已补，见 §7） | 真实现缺口（fs 操作后的嵌套发现 + change/removal 批次；官方 reminder 帧形状） |
 | 54 | `skill` | **仍 PARTIAL** | 真实现缺口（host + per-scope 分层）；而"incomplete 持久化"官方自述是**开放问题**，不是缺口 |
-| 70 / 73 | `subagent-fork-in-process` / `tool-subagent-fork` | **仍 PARTIAL** | 产品决定（每次 fork 是否都落 durable 子会话） |
+| 70 / 73 | `subagent-fork-in-process` / `tool-subagent-fork` | **IMPLEMENTED**（§7 补齐） | 一次性同步 fork 也建 durable 子会话；空种子仍等同 spawn |
 | 37 | `otel` | **IMPLEMENTED**（本轮补齐 gzip） | 只剩 `#38` 的消费者，而 `#38` 已判结构化不做（另一个插件） |
 | 79 | `spill-policy` | **IMPLEMENTED**（本轮补齐 flag + 图片可读路径） | 只剩"内存渲染图没有路径"这一条 best-effort（官方同语义，已写进代码注释） |
 
@@ -109,7 +109,7 @@ durable 观察状态（哪些文件在本会话里已经被渲染过、哪些这
 改错会让历史投影与 resume 兼容性一起漂。它需要单独一单（含事件类型登记、
 投影、resume reconcile、以及"预算内被略过的更新下次仍有资格"的语义）。
 
-### 2.2 用户全局双根链（第二根）
+### 2.2 用户全局双根链（第二根）——**已在 §7 补齐**
 
 官方逐条：
 
@@ -192,7 +192,7 @@ observation"；`:140` 只承诺告警与隐藏，不承诺可查询被遮蔽项�
 `src/index.ts:46-53`；最后一条 `turn/end` 且含它）、in-flight 轮不含、一次性快照、
 结构化逐块保真（text/reasoning/tool-call 原样进子会话 v4 日志）。
 
-### 4.2 缺的那一半：同步且 `Continuable=false` 时不留 durable 子会话
+### 4.2 缺的那一半：同步且 `Continuable=false` 时不留 durable 子会话——**已在 §7 补齐**
 
 官方 `subagent-fork-in-process` 的前提是"fork 出来的子代理是**可续问的进程内会话**"，
 所以它总有一份子会话可供后续读取。本仓 `subagent_fork` 的同步委派在
@@ -237,3 +237,93 @@ grep -n "consumers should own that state" "$O/dsh-skill/README.md"
 # #70/#73：官方 completedTurnPrefix
 grep -n "completedTurnPrefix" "$O/dsh-subagent-fork-in-process/src/index.ts"
 ```
+
+---
+
+## 7. `feat/host-partial5` 之后的现状（2026-11-14，本单补齐 2 条 + 补齐 1 条的半条）
+
+上一单之后只剩 5 条"还能补"，本单逐条核实的结果如下。**状态以逐项表
+`docs/evidence/base-plugins-per-item-0.2.2-rc.2.json` 为准**（99 条：86 IMPLEMENTED /
+9 PARTIAL / 4 MISSING），本文件只解释"为什么"。
+
+| 插件 | 本单结论 | 依据 |
+|---|---|---|
+| `#70 subagent-fork-in-process` | **IMPLEMENTED** | §7.1 |
+| `#73 tool-subagent-fork` | **IMPLEMENTED**（与 #70 同一处改动） | §7.1 |
+| `#53 agent-instructions` | **仍 PARTIAL**（用户全局第二根已补；剩两条真缺口） | §7.2 |
+| `#54 skill` | **仍 PARTIAL**（无 preset 级 provider = 没有第二个 layer 可分层） | §7.3 |
+| `#6 deepseek-llm-api-extensions` | **仍 PARTIAL**（被 `#8` 锁住，不可单方面补） | §7.4 |
+
+### 7.1 `#70`/`#73`：一次性同步 fork 也留 durable 子会话
+
+缺口原文（§4.2）：同步委派在 `Continuable=false` 时不留子会话，fork 的种子只在
+"可续问/具名委派"时才有落点。
+
+官方形状（`dsh-subagent-fork-in-process/README.md` "What a fork delegation does"）：
+"One tool call creates a background child … **The child works in its own session**"；
+`src/index.ts:72-78`：种子创建时取一次，之后 "becomes part of the child's own durable
+transcript"；"Seed boundary"：首轮完成前种子为空，"behaves like a fresh spawn"。
+
+补齐方式（不是新造机制，是把已有的落盘路径接上）：`cmd/dshd/subagent.go` 的 `runSub`
+里，落 durable 子会话的判据从 `Continuable || AgentID != "" || ChildSessionID != ""`
+扩到 **`|| len(req.Seed) > 0`**——`Seed` 非空就是"这次 fork 真的继承了父会话的已完成
+轮次"，那批事件必须有子会话可落（`agent.ChildSpawn.Spawn` 本来就会把 seed + 这一趟
+问答写成子会话自己的 v4 日志）。两个边界照官方语义保留：
+
+- **空种子不留会话**（首轮完成前的 fork = fresh spawn），既有行为逐字节不变；
+- **种子落不了盘时响亮失败**（错误文案点明丢的是 fork 种子），不静默成功。
+
+证据：`cmd/dshd/subagent_fork_durable_test.go`（真 v4、真 `subRunner`、真 `ChildSpawn`：
+父子帧归属、种子逐条同序、种子不含 `turn/*` 边界、这一趟问答在种子之后；空种子零新增；
+无 home 时响亮失败）。
+
+### 7.2 `#53 agent-instructions`：第二根补齐，仍缺两条
+
+**已补**（§2.2 原文列出的三件——第二根、同组 trim 去重、省略顺序——全部补上）：`prompt.Context` 增加 `SharedGlobalRulesPath`
+（`$DSH_AGENTS_HOME/AGENTS.md` → `~/.agents/AGENTS.md`），`GlobalRules.Build` 按官方
+候选组语义渲染两根：同组 trim 内容相同则 shared-root 塌在 harness-home 后面
+（README.md:224）、两根合起来超预算时 **harness-home 先整份被丢**再截断留下的那根
+（README.md:74）。接线在 `cmd/dshd/acp.go` 的 `buildSystemPromptWithHome`
+（`resolveSharedGlobalRulesPath`）；没有 harness home 的装配不解析第二根，保证测试
+提示词不随跑它的机器漂移。证据：`internal/prompt/global_chain_test.go`、
+`cmd/dshd/global_chain_wiring_test.go`。
+
+**仍缺**（所以维持 PARTIAL）：
+
+1. **fs 操作后的嵌套发现 / change·removal 批次**（§2.1 原文）：要新增一条 durable
+   `user/message` 事件类型 + 跨轮观察状态 + 投影与 resume reconcile，不是接线。上一单
+   的判断仍然成立：改错会让历史投影与 resume 兼容性一起漂，必须单独一单。
+2. **用户全局链的官方帧形状**：官方把两根与 project 链合并进**同一条**
+   `<system-reminder>` 帧、且每链一份独立预算（README.md:74-76）。本仓两根渲染在既有
+   `全局约定（path）：正文` 块里——换成官方帧会让生产提示词字节整体翻掉，而
+   `cmd/dshd/prompt_budget_probe_test.go:64/83` 与 `internal/prompt/budget_test.go`
+   按字节钉着现形状。按"不许删测试/放宽断言"的纪律，这属"要改判据"，
+   得由 Lead 定口径后单独做（本单**没有**为了变绿去改那些探针）。
+
+### 7.3 `#54 skill`：仍然 PARTIAL，理由是"没有第二个 layer"
+
+官方 `dsh-skill/README.md:84` 的分层是"registration 落进**调用上下文 scope** 的层"：
+"host rows and repository plugins land in the global layer, **a plugin mounted by an
+agent preset's standing composition lands in that preset's layer**"。
+
+本仓没有这个生产者：`internal/modes` 的 preset 只是模式（工具白名单轴），不承载模块
+组合；`serve_agent_api_skills.go` 的生产装配只挂一个 filesystem provider
+（`skill.Registry` 的全局层）。在没有"per-scope provider"的情况下把分层 API 建出来，
+是一个**没有任何生产者**的空层——那违反"不许空壳"。重新评估条件不变：出现
+"preset 自带 provider"的装配形状时，按官方 `ScopedLayers`（`src/index.ts:420-440`）补。
+"incomplete 持久化"仍是官方 README:148 自述的**开放问题**（"consumers should own that
+state"），本仓落在 consumer 侧，不是缺口。
+
+### 7.4 `#6 deepseek-llm-api-extensions`：被 `#8` 锁住，不可单方面补
+
+残余缺口 A（§1.2）：`dsh_session_log` 这个顶层字段的**唯一合法所有者**是插件
+`#8 session-log-deepseek`（官方 `dsh-session-log-deepseek/src/index.ts:44` 的
+`ctx.deepseekLlmApiExtensions.register('dsh_session_log', …)`）。本仓 `#8` 已判
+**结构化不做**（settings 命名空间 `session-log-deepseek.enabled=true` 回 501
+`not_implemented`，理由是没有本仓自己的 DeepSeek Messages sink）。所以这一半**不是
+`#6` 自己能补的**：替它造一个注册者就是给一个不存在的 sink 编 payload（假数据），
+本单**不做**。重新评估条件仍写在 `#8` 那侧：出现"本仓自己的 DeepSeek Messages 路由"
+（而不是 OpenAI 兼容 wire）时，`#6` 这一半才跟着可做。
+
+残余缺口 B（§1.3）是不可达分支，官方自己也承认这种部署合法（"deployments without the
+service report the host tree only"），维持原判。

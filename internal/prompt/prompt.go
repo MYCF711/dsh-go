@@ -27,7 +27,20 @@ type Context struct {
 	// 写代码的执行者读 docs/WORKER.md。两者内容差一个量级。
 	ExtraRulesPath string
 	// GlobalRulesPath 是全局 AGENTS.md 的路径（绝对路径或相对 Cwd）；空 = 不注入全局规则。
+	//
+	// 它是官方用户全局链的**第一根**（`$DSH_HOME/AGENTS.md`）：harness home 的进程策略文件。
 	GlobalRulesPath string
+	// SharedGlobalRulesPath 是用户全局链的**第二根**（`$DSH_AGENTS_HOME/AGENTS.md`，
+	// 未设环境变量时 `~/.agents/AGENTS.md`）；空 = 这条链只有一根。
+	//
+	// 官方 `@deepseek-ai/dsh-agent-instructions/README.md:34`："The first request includes
+	// one durable baseline message with the user-global chain — `$DSH_HOME/AGENTS.md`,
+	// then `<agentsHome>/AGENTS.md`"；`:40` 明确两个根各自怎么解析
+	// （"The shared agents root resolves the same way, from `$DSH_AGENTS_HOME` or
+	// `~/.agents`"）。两根**同属一个候选组**（`:224` "The two user-global roots share
+	// one group, so the shared-root file collapses behind a matching harness-home file"），
+	// 超预算时 harness-home **先于** shared-root 被丢（`:74`）。
+	SharedGlobalRulesPath string
 	// MaxGlobalBytes 与 MaxWorkspaceBytes 是两条规则链各自的正文字节上限，互不争用。
 	MaxGlobalBytes    int
 	MaxWorkspaceBytes int
@@ -178,20 +191,120 @@ func (ToolGuide) Build(c Context) string {
 	return b.String()
 }
 
-// GlobalRules 把全局 AGENTS.md 带进来；它与工作区规则各有独立预算。
+// GlobalRules 把用户的全局 AGENTS.md 带进来；它与工作区规则各有独立预算。
+//
+// 用户全局链有**两个根**（官方 README.md:34/40）：harness home 的
+// `$DSH_HOME/AGENTS.md`，然后 shared agents root 的 `$DSH_AGENTS_HOME/AGENTS.md`
+// （未设环境变量时 `~/.agents/AGENTS.md`）。两个根**同属一个候选组**：
+//
+//   - 内容 trim 之后相同的后者塌在前者后面，只渲染一份（官方 README.md:224
+//     "The two user-global roots share one group, so the shared-root file collapses
+//     behind a matching harness-home file"）；
+//   - 两根合起来超预算时，harness-home **先**被整份丢掉，再截断留下的那一根
+//     （官方 README.md:74 "User-global files are therefore omitted or truncated only
+//     when they exceed their own budget, with the harness-home file omitted before
+//     the shared-root file"）。
+//
+// 只有一根时逐字节等同改动前（`rulesFromFile` 的同一个块形状）：shared root 缺席
+// （绝大多数机器上 `~/.agents/AGENTS.md` 不存在）不产生任何字节差异。
 type GlobalRules struct{}
 
 func (GlobalRules) Name() string { return "global" }
 
+// globalRulesCandidates 把两根归一成绝对路径候选，顺序 = 官方"先 harness-home、
+// 后 shared-root"。空路径不占位（缺席的根不参与去重与预算）。
+func globalRulesCandidates(c Context) []string {
+	out := make([]string, 0, 2)
+	for _, p := range []string{c.GlobalRulesPath, c.SharedGlobalRulesPath} {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) && c.Cwd != "" {
+			p = filepath.Join(c.Cwd, p)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// globalRuleFile 是一条**读到内容**的用户全局候选。
+//
+// text 保留原始字节（含前后空白）：截断预算按官方口径算的是**源文件字节**
+// （`rulesFromFile` 的 `len(text) > limit`），trim 只发生在渲染那一步。
+type globalRuleFile struct {
+	path string
+	text string
+}
+
 func (GlobalRules) Build(c Context) string {
-	if c.GlobalRulesPath == "" {
+	candidates := globalRulesCandidates(c)
+	if len(candidates) == 0 {
 		return ""
 	}
-	p := c.GlobalRulesPath
-	if !filepath.IsAbs(p) && c.Cwd != "" {
-		p = filepath.Join(c.Cwd, p)
+	return userGlobalRulesSection(candidates, c.MaxGlobalBytes)
+}
+
+// userGlobalRulesSection 读候选、按官方候选组语义去重，再按预算渲染。
+//
+// 读失败/空文件只跳过它自己（与 `rulesFromFile` 一致）：一根读不了不该连坐另一根，
+// 也不该把"读不了"伪装成"没有全局约定"之外的任何东西。
+func userGlobalRulesSection(candidates []string, limit int) string {
+	if limit < 0 {
+		return ""
 	}
-	return rulesFromFile("全局约定", p, c.MaxGlobalBytes)
+	seen := make(map[string]bool, len(candidates))
+	files := make([]globalRuleFile, 0, len(candidates))
+	for _, p := range candidates {
+		b, err := os.ReadFile(p)
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		text := string(b)
+		// 同一个候选组：trim 之后内容相同 = 重复，后来者塌在前者后面
+		// （官方 README.md:224 "Deduplication is content-based within one candidate group"）。
+		key := strings.TrimSpace(text)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		files = append(files, globalRuleFile{path: p, text: text})
+	}
+	if len(files) == 0 {
+		return ""
+	}
+	if limit == 0 {
+		// 0 = 未设置（调用方没走 Assemble 的默认预算填充）：不设上限。
+		return joinUserGlobalBlocks(files, 0)
+	}
+	// 预算按**源文件正文字节**算（与 `rulesFromFile` 的 `len(text) > limit` 同一口径，
+	// 段标题与截断说明不占预算）：两根合得下就都渲染，合不下才按官方顺序丢。
+	total := 0
+	for _, f := range files {
+		total += len(f.text)
+	}
+	if total <= limit {
+		return joinUserGlobalBlocks(files, 0)
+	}
+	// 超预算：官方先把整份更宽的丢掉——用户全局链里 harness-home 先于 shared-root。
+	if len(files) > 1 {
+		return joinUserGlobalBlocks(files[len(files)-1:], limit)
+	}
+	return joinUserGlobalBlocks(files, limit)
+}
+
+// joinUserGlobalBlocks 把候选渲染成 `全局约定（path）：\n正文` 块，块间一个空行；
+// limit>0 时对**最后一块**的正文按字节截断（与 `rulesFromFile` 同一形状与同一说明）。
+func joinUserGlobalBlocks(files []globalRuleFile, limit int) string {
+	blocks := make([]string, 0, len(files))
+	for i, f := range files {
+		text := f.text
+		if limit > 0 && i == len(files)-1 && len(text) > limit {
+			text = text[:limit] + truncationNotice
+		}
+		blocks = append(blocks,
+			"全局约定（"+filepath.ToSlash(f.path)+"）：\n"+strings.TrimSpace(text))
+	}
+	return strings.Join(blocks, "\n\n")
 }
 
 // WorkspaceRules 把工作区里的 AGENTS.md 带进来（有界、可缺省）。
@@ -220,6 +333,9 @@ func (WorkspaceRules) Build(c Context) string {
 	return ""
 }
 
+// truncationNotice 是任何一个被预算截断的正文尾部说明（全局链与工作区链同一句）。
+const truncationNotice = "\n\n（以上内容已截断：原文件更大，需要细节请用 read 工具）"
+
 // rulesFromFile 的 limit 只限制文件正文，不包含段标题和截断说明。
 // limit 为负 = 这条指令链关闭（`--workspace-bytes=0` 的「不传」语义）。
 func rulesFromFile(title, path string, limit int) string {
@@ -232,7 +348,7 @@ func rulesFromFile(title, path string, limit int) string {
 	}
 	text := string(b)
 	if limit > 0 && len(text) > limit {
-		text = text[:limit] + "\n\n（以上内容已截断：原文件更大，需要细节请用 read 工具）"
+		text = text[:limit] + truncationNotice
 	}
 	return title + "（" + filepath.ToSlash(path) + "）：\n" + strings.TrimSpace(text)
 }

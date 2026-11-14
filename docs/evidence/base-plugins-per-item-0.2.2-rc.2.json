@@ -11,8 +11,8 @@
   },
   "counts": {
     "total": 99,
-    "IMPLEMENTED": 84,
-    "PARTIAL": 11,
+    "IMPLEMENTED": 86,
+    "PARTIAL": 9,
     "MISSING": 4
   },
   "stale_register": {
@@ -608,8 +608,8 @@
       "id": "agent-instructions",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`internal/prompt/prompt.go:159` `GlobalRules`、`:173` `WorkspaceRules`、`:62-63` 每条链 65,536 字节",
-      "note": "仍 PARTIAL：fs 后嵌套发现 + 用户全局双根链（partial-rest §2）"
+      "evidence": "`internal/prompt/prompt.go:29-43` `Context.GlobalRulesPath` / `SharedGlobalRulesPath`（用户全局**双根**链）、`:239` `GlobalRules.Build` / `:251` `userGlobalRulesSection`（同组去重 + 预算顺序）、`:297` `joinUserGlobalBlocks`；`cmd/dshd/acp.go:1243-1252` `buildSystemPromptWithHome` 的接线、`:1287` `resolveSharedGlobalRulesPath`（`$DSH_AGENTS_HOME` → `~/.agents`）；project 链 `internal/prompt/instructions.go:140`；证据 `internal/prompt/global_chain_test.go`、`cmd/dshd/global_chain_wiring_test.go`",
+      "note": "仍 PARTIAL：用户全局**第二根**已补齐（同组 trim 去重、harness-home 先丢；`docs/base-plugins-partial-rest-official-shape.md` §7），剩下两条真缺口没做——① fs 操作后的嵌套发现 / change·removal 批次（要新增 durable 会话事件 + 跨轮观察状态 + resume reconcile，单独一单）；② 用户全局链的**官方帧形状**（与 project 链合并进同一个 `<system-reminder>` 帧、每链独立预算）——那会整体翻掉生产提示词字节，既有探针按字节钉着现形状，属\"要改判据\"，需 Lead 定口径"
     },
     {
       "id": "skill",
@@ -762,10 +762,17 @@
     },
     {
       "id": "subagent-fork-in-process",
-      "status": "PARTIAL",
+      "status": "IMPLEMENTED",
       "audit_status": "PARTIAL",
-      "evidence": "`cmd/dshd/subagent_inherit.go:60` `inheritTranscript`、`:87` `inheritLine`、`:26` `inheritFromCtx`",
-      "note": "仍 PARTIAL：一次性同步 fork 不留 durable 子会话（partial-rest §4）"
+      "evidence": "`cmd/dshd/subagent_inherit.go:60` `inheritTranscript`、`:87` `inheritLine`、`:26` `inheritFromCtx`；`cmd/dshd/subagent.go:230` `forkChild := len(req.Seed) > 0`（`runSub` 的 durable 子会话分支，:217-252）（一次性同步 fork 也走 `continuation` → `agent.ChildSpawn.Spawn`）；`internal/agent/child_session.go:265` `Spawn`；证据 `cmd/dshd/subagent_fork_durable_test.go`",
+      "note": "已补齐（post-audit）：一次性同步 fork（`Continuable=false`、`Seed` 非空）也留 durable 子会话——子会话日志 = 父子帧 + 父会话已完成轮次的结构化种子 + 这一趟的提问与回答；种子落不了盘时**响亮失败**（不静默丢）。空种子（首轮完成前的 fork）仍按官方\"behaves like a fresh spawn\" 不留会话。见 `docs/base-plugins-partial-rest-official-shape.md` §7",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ]
     },
     {
       "id": "tool-subagent-control",
@@ -788,10 +795,17 @@
     },
     {
       "id": "tool-subagent-fork",
-      "status": "PARTIAL",
+      "status": "IMPLEMENTED",
       "audit_status": "PARTIAL",
-      "evidence": "`modules/tool/subagentfork/subagentfork.go:38`",
-      "note": "同 #70（同一实现）"
+      "evidence": "`modules/tool/subagentfork/subagentfork.go:38` `Seed` 一次取数（文本 + 结构化两个出口）；落盘由同一实现承担：`cmd/dshd/subagent.go:230` `forkChild` 分支（`runSub`，:217-252）（与 #70 是**同一处**改动）；证据 `cmd/dshd/subagent_fork_durable_test.go`",
+      "note": "已补齐（post-audit）：同 #70，同一实现（`cmd/dshd/subagent.go` 的 `forkChild` 判据）；工具面只负责把种子一次取好，durable 出口由宿主建子会话承担。见 `docs/base-plugins-partial-rest-official-shape.md` §7",
+      "changes": [
+        {
+          "from": "PARTIAL",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
+        }
+      ]
     },
     {
       "id": "ptc-runtime",

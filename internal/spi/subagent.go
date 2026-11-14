@@ -35,6 +35,11 @@ type SubagentRequest struct {
 	// 取一次（one-time snapshot），之后成为子会话自己的 durable transcript。
 	// 空 = 不是 fork（或首轮完成之前 fork）：一个字节都不多写，行为与改动前完全一致。
 	//
+	// **非空即要求宿主为这一趟留下 durable 子会话**（不必同时设 `Continuable`）：
+	// 官方 README "What a fork delegation does" 的原文是 "The child works in its own
+	// session"，种子要落进子会话自己的日志才算 durable transcript——没有子会话，这批
+	// 事件就等于被丢掉。所以 `Seed` 非空而宿主落不了盘时必须**响亮失败**，不许当成功。
+	//
 	// 类型用 json.RawMessage 而不是 v4.Event：spi 不认识 codecs（R1/R2 的分层），
 	// 这里只约定"每条是一份 v4 事件的 JSON 字节"，宿主按自己的 `v4.Event` 解码。
 	Seed []json.RawMessage

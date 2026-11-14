@@ -5,7 +5,7 @@
 > | 面 | 总数 | 状态 | 来源 |
 > |---|---|---|---|
 > | **宿主方法** | **223** | **220** IMPLEMENTED / **3** STRUCTURED_UNIMPLEMENTED / **0** MISSING | `docs/evidence/official-desktop-api-methods-0.2.2-rc.2.txt`；逐条核对见 `tmp/GO8-RC2/reports/FULL-gap-audit-2026-11-14.md` |
-> | **base 插件** | **99** | **84** IMPLEMENTED / **11** PARTIAL / **4** MISSING | 同表 §3；逐项表 `docs/evidence/base-plugins-per-item-0.2.2-rc.2.json`（99 条 id + 状态 + 落点）；本行随 PR #24–#28 更新 |
+> | **base 插件** | **99** | **86** IMPLEMENTED / **9** PARTIAL / **4** MISSING | 同表 §3；逐项表 `docs/evidence/base-plugins-per-item-0.2.2-rc.2.json`（99 条 id + 状态 + 落点）；本行随 PR #24–#30 与工作树 `feat/host-partial5`（未推送）更新 |
 > | **UI 插件** | **66** | **30** / **19** / **17** | GUI 仓 `docs/official-parity.md`（分母**动态读**官方清单，`parity-count.py --check` 守着） |
 >
 > **`方法面 MISSING = 0` 有机器反证**：223 个方法**全部**被某条分派分支认领，
@@ -1056,3 +1056,24 @@ officeToPdf **未装 LibreOffice 实测**；directoryPicker 原生目录框**人
 
 其中仍然 `PARTIAL` 的 5 条，#4/#6/#37/#53/#77 的残余缺口逐条写在上面各行与配套报告 §5，
 不当作已实现：**没有**用"删测试/放宽断言/盲改 golden/假数据/静默成功"换绿。
+
+-----
+
+## §HOST-PARTIAL5 · base 插件面最后 5 条"还能补"的逐条核实（2026-11-14）
+
+工作树 `feat/host-partial5`（**未 commit / 未 push**）。逐条官方形状与"停在哪一站"：
+`docs/base-plugins-partial-rest-official-shape.md` §7；逐项状态以
+`docs/evidence/base-plugins-per-item-0.2.2-rc.2.json` 为准（99 条：**86 IMPLEMENTED /
+9 PARTIAL / 4 MISSING**）。
+
+| 插件 | 本单结论 | 依据 |
+|---|---|---|
+| `#70 subagent-fork-in-process` | **补齐 → IMPLEMENTED** | 一次性同步 fork（`Seed` 非空）也建 durable 子会话；空种子仍等同 spawn；落不了盘响亮失败 |
+| `#73 tool-subagent-fork` | **补齐 → IMPLEMENTED** | 与 #70 **同一处实现**（`cmd/dshd/subagent.go` 的 `forkChild` 判据） |
+| `#53 agent-instructions` | **仍 PARTIAL**（用户全局**第二根**已补） | 剩：fs 后嵌套发现 / change·removal 批次（需新 durable 事件 + 跨轮状态 + resume reconcile）；用户全局链的官方 reminder 帧形状（会翻生产字节，属改判据，需 Lead 定） |
+| `#54 skill` | **仍 PARTIAL** | 宿主没有 preset 级 skill provider = 没有第二个 layer 可分层；建一个没有生产者的层就是空壳。重新评估条件写在形状文档 §7.3 |
+| `#6 deepseek-llm-api-extensions` | **仍 PARTIAL，且被 `#8` 锁住** | `dsh_session_log` 的唯一合法所有者是 `#8 session-log-deepseek`，而 `#8` 已判结构化不做（501）——替它造注册者就是假数据，本单不做 |
+
+计数自检：补齐 2 条（#70/#73），半补齐 1 条（#53 的第二根），维持 PARTIAL 3 条（#53/#54/#6）。
+门禁：`python scripts/gap-register-counts.py --check` PASS（逐项表与结论行逐数相等，
+`changes` 只追加、`audit-4.1`/`audit-4.2` 历史一条未丢）。

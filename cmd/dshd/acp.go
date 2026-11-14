@@ -1240,8 +1240,16 @@ func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes i
 // 显式 `--agents`（`ExtraRulesPath`）给出时链让位：那是宿主独有的"单手册"入口。
 func buildSystemPromptWithHome(reg spi.ToolRegistry, model, cwd, home string, workspaceBytes int) (string, error) {
 	globalRulesPath := ""
+	sharedGlobalRulesPath := ""
 	if home != "" {
 		globalRulesPath = filepath.Join(home, "AGENTS.md")
+		// 用户全局链的第二根（`$DSH_AGENTS_HOME/AGENTS.md` → `~/.agents/AGENTS.md`）。
+		//
+		// **只在有 harness home 时才解析**：没有 home 的装配（测试夹具与
+		// `buildSystemPrompt` 这个"没有显式 home"的入口）不存在"用户全局链"这个
+		// 概念，去读进程的 `~/.agents/AGENTS.md` 等于让宿主的提示词随跑测试那台
+		// 机器的家目录漂移。生产两个入口（run / acp）都带 home，所以能力不受影响。
+		sharedGlobalRulesPath = resolveSharedGlobalRulesPath()
 	}
 	tools, err := orderedPromptTools(reg.Tools())
 	if err != nil {
@@ -1254,12 +1262,37 @@ func buildSystemPromptWithHome(reg spi.ToolRegistry, model, cwd, home string, wo
 		Date:                   time.Now().Format("2006-01-02"),
 		Tools:                  tools,
 		GlobalRulesPath:        globalRulesPath,
+		SharedGlobalRulesPath:  sharedGlobalRulesPath,
 		MaxGlobalBytes:         workspaceBytes,
 		MaxWorkspaceBytes:      workspaceBytes,
 		ExtraRulesPath:         *rulesPath,
 		PersonaPrefix:          strings.TrimSpace(os.Getenv(personaPrefixEnv)),
 		EnableInstructionChain: instructionChainEnabled(),
 	}), nil
+}
+
+// sharedAgentsHomeEnv 是用户全局链**第二根**的根目录环境变量。
+//
+// 官方 `@deepseek-ai/dsh-agent-instructions/README.md:40`："The harness home holding
+// the user-global `AGENTS.md` is process policy rather than row configuration: the
+// plugin resolves `$DSH_HOME`, or `~/.dsh` ... The shared agents root resolves the
+// same way, from `$DSH_AGENTS_HOME` or `~/.agents`."
+const sharedAgentsHomeEnv = "DSH_AGENTS_HOME"
+
+// resolveSharedGlobalRulesPath 回答"shared agents root 的 AGENTS.md 在哪"。
+//
+// 解析顺序与官方同形（`$DSH_AGENTS_HOME` → `~/.agents`）；两个都拿不到就返回空
+// （= 这条链只有 harness-home 一根，与改动前逐字节一致）。**不猜**其它目录：
+// 猜出来的第二根会把某个碰巧存在的文件悄悄提升成"用户全局约定"。
+func resolveSharedGlobalRulesPath() string {
+	if root := strings.TrimSpace(os.Getenv(sharedAgentsHomeEnv)); root != "" {
+		return filepath.Join(root, "AGENTS.md")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".agents", "AGENTS.md")
 }
 
 // instructionChainEnabledEnv 是 #53 指令链的开关环境变量。
