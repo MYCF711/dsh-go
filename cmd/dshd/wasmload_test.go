@@ -47,7 +47,7 @@ backend = "wasm"
 path    = "`+filepath.ToSlash(fixture)+`"
 digest  = "`+digest+`"
 `)
-	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	mods, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("合法的 wasm 模块必须能装配，实际报错：%v", err)
 	}
@@ -132,7 +132,7 @@ backend = "wasm"
 path    = "`+filepath.ToSlash(fixture)+`"
 digest  = "`+wrong+`"
 `)
-	if _, err := loadMods(mp, t.TempDir(), 0, nil); err == nil {
+	if _, err := loadMods(mp, t.TempDir(), 0, 0, nil); err == nil {
 		t.Fatal("digest 不匹配必须让装配失败，不能装作没看见")
 	} else {
 		msg := err.Error()
@@ -165,7 +165,7 @@ id      = "wasm-gone"
 backend = "wasm"
 path    = "`+filepath.ToSlash(missing)+`"
 `)
-	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err == nil {
 		t.Fatal("路径不存在必须让装配失败")
 	}
@@ -194,7 +194,7 @@ id      = "wasm-fake"
 backend = "wasm"
 path    = "`+filepath.ToSlash(fake)+`"
 `)
-	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err == nil {
 		t.Fatal("非 wasm 文件必须让装配失败")
 	}
@@ -224,7 +224,7 @@ backend  = "wasm"
 path     = "`+filepath.ToSlash(fixture)+`"
 provides = ["compaction"]
 `)
-	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err == nil {
 		t.Fatal(`wasm 只认 provides = ["tool"]，写 compaction 必须报错`)
 	}
@@ -265,7 +265,7 @@ tool_description = "把 text 原样回显（wasm 夹具工具）"
 tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}'''
 timeout_ms       = 2000
 `)
-	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	mods, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("带工具声明的 wasm 模块必须能装配，实际：%v", err)
 	}
@@ -439,7 +439,7 @@ backend = "wasm"
 path    = "`+filepath.ToSlash(missing)+`"
 enabled = false
 `)
-	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	mods, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("禁用的 wasm 模块不该被装载：%v", err)
 	}
@@ -515,7 +515,7 @@ provides = ["tool"]
 		t.Run(c.name, func(t *testing.T) {
 			resetWasm(t)
 			mp := writeManifest(t, head+c.body)
-			_, err := loadMods(mp, t.TempDir(), 0, nil)
+			_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 			if err == nil {
 				t.Fatalf("%s 必须让装配失败", c.name)
 			}
@@ -586,7 +586,7 @@ func TestWasmTwoToolModulesCoexist(t *testing.T) {
 	resetWasm(t)
 	mp := writeManifest(t, twoToolManifest(t, "tool:echo", "tool:hello", "echo", "hello"))
 
-	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	mods, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("两个 wasm 工具模块必须能同时装配，实际报错：%v", err)
 	}
@@ -676,7 +676,7 @@ func TestWasmTwoToolsWithPlainToolKeyFails(t *testing.T) {
 	resetWasm(t)
 	mp := writeManifest(t, twoToolManifest(t, "tool", "tool", "echo", "hello"))
 
-	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err == nil {
 		t.Fatal(`两个 wasm 工具模块都写 provides = ["tool"] 必须报错（kernel 只允许一个提供者）`)
 	}
@@ -700,7 +700,7 @@ func TestWasmToolCapKeyMustMatchToolName(t *testing.T) {
 	resetWasm(t)
 	mp := writeManifest(t, twoToolManifest(t, "tool:eho", "tool:hello", "echo", "hello"))
 
-	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err == nil {
 		t.Fatal("能力键与 tool_name 不一致必须报错")
 	}
@@ -799,7 +799,7 @@ func TestWasmModuleServesTwoTools(t *testing.T) {
 		toolItem("echo", "把 text 原样回显（wasm 夹具 · 一号）", "timeout_ms = 2000\n")+
 		toolItem("upper", "把 text 里的字母转成大写（wasm 夹具 · 二号）", "timeout_ms = 5000\n"))
 
-	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	mods, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("一个模块挂两个工具必须能装配，实际：%v", err)
 	}
@@ -894,7 +894,7 @@ func TestWasmTwoToolsRouteByToolField(t *testing.T) {
 		toolItem("echo", "原样回显", "")+
 		toolItem("upper", "转大写", ""))
 
-	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	mods, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("装配失败：%v", err)
 	}
@@ -958,7 +958,7 @@ tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}},"
 tool_caps        = ["writes"]
 timeout_ms       = 2000
 `)
-	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	mods, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("旧的单工具写法必须继续有效，实际报错：%v", err)
 	}
@@ -1023,7 +1023,7 @@ tool_description = "也写在模块上（这就是混写）"
 tool_schema      = '''{"type":"object"}'''
 `)+toolItem("echo", "原样回显", "")+toolItem("upper", "转大写", ""))
 
-	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err == nil {
 		t.Fatal("单工具字段与 [[module.tool]] 混写必须报错，不许猜优先级")
 	}
@@ -1086,7 +1086,7 @@ func TestWasmToolCapKeysMustMatchDeclaredTools(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			resetWasm(t)
 			mp := writeManifest(t, multiToolHead(t, c.provides)+items)
-			_, err := loadMods(mp, t.TempDir(), 0, nil)
+			_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 			if err == nil {
 				t.Fatalf("%s 必须让装配失败", c.name)
 			}
@@ -1144,7 +1144,7 @@ func TestWasmMultiToolDeclValidation(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			resetWasm(t)
 			mp := writeManifest(t, multiToolHead(t, `"tool:echo"`)+c.items)
-			_, err := loadMods(mp, t.TempDir(), 0, nil)
+			_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 			if err == nil {
 				t.Fatalf("%s 必须让装配失败", c.name)
 			}
@@ -1170,7 +1170,7 @@ func TestWasmSingleItemArrayWithBareToolKey(t *testing.T) {
 	resetWasm(t)
 	mp := writeManifest(t, multiToolHead(t, `"tool"`)+toolItem("echo", "数组写法但只有一个工具", ""))
 
-	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	mods, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf(`[[module.tool]] 只有一项时 provides = ["tool"] 应当成立，实际报错：%v`, err)
 	}
@@ -1226,7 +1226,7 @@ tool_name        = "echo"
 tool_description = "第二个模块也想要 echo"
 tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}}}'''
 `)
-	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err == nil {
 		t.Fatal("两个模块声明同一个工具名必须让装配失败：工具表里只容得下一个 echo")
 	}
@@ -1315,7 +1315,7 @@ provides = ["tool"]
 		t.Run(c.name, func(t *testing.T) {
 			resetWasm(t)
 			mp := writeManifest(t, head+c.body)
-			_, err := loadMods(mp, t.TempDir(), 0, nil)
+			_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 			if err == nil {
 				t.Fatalf("%s：同名工具必须让装配失败", c.name)
 			}
@@ -1345,7 +1345,7 @@ func TestWasmDuplicateToolNameInsideModuleFails(t *testing.T) {
 	mp := writeManifest(t, multiToolHead(t, `"tool:echo"`)+
 		toolItem("echo", "一号", "")+toolItem("echo", "二号", ""))
 
-	_, err := loadMods(mp, t.TempDir(), 0, nil)
+	_, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err == nil {
 		t.Fatal("同一个模块里两个工具同名必须让装配失败（工具表按名字存，第二行存不进去）")
 	}
@@ -1398,7 +1398,7 @@ path     = "`+fixture+`"
 provides = ["tool:upper"]
 `+toolItem("upper", "新写法的 upper", ""))
 
-	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	mods, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("两个模块的工具名不同就该照常装配，实际报错：%v", err)
 	}
@@ -1479,7 +1479,7 @@ func assembleForTest(t *testing.T, mods []kernel.Module) spi.ToolRegistry {
 // toolTableBytes 走完整链路（manifest → 装载 → 装配 → 工具表 JSON），返回字节。
 func toolTableBytes(t *testing.T, manifest string) []byte {
 	t.Helper()
-	mods, err := loadMods(manifest, t.TempDir(), 0, nil)
+	mods, err := loadMods(manifest, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("装配失败：%v", err)
 	}
@@ -1515,7 +1515,7 @@ tool_name        = "`+name+`"
 tool_description = "wasm 夹具工具"
 tool_schema      = '''{"type":"object","properties":{"text":{"type":"string"}}}'''
 `+extra)
-	mods, err := loadMods(mp, t.TempDir(), 0, nil)
+	mods, err := loadMods(mp, t.TempDir(), 0, 0, nil)
 	if err != nil {
 		t.Fatalf("装配失败：%v", err)
 	}

@@ -36,7 +36,7 @@ func goalTruthCreateViaModelTool(t *testing.T, home, sessionID, objective string
 	defer k.Root().Dispose()
 	// 与 main.go 的接线逐字一致：整张 builtinModules 表，goal 模块拿
 	// `<home>/state/goals`（`builtinModules` 里的那一行）。
-	if _, err := kernel.Assemble(k.Root(), builtinModules(".", home, 0, nil)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(".", home, 0, 0, nil)); err != nil {
 		t.Fatalf("装配 builtinModules: %v", err)
 	}
 	reg, err := kernel.Inject(k.Root(), spi.ToolsKey)

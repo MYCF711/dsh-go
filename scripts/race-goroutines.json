@@ -115,19 +115,19 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:752",
+      "site": "cmd/dshd/main.go:765",
       "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
       "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/acp.go:1184",
+      "site": "cmd/dshd/acp.go:1187",
       "what": "父进程看门狗收尾：watch.Done() 之后关服务",
       "sync": "读过：只做 close/取消，不写会话文件；与主流程之间靠 context 取消 + 单向 channel",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:886",
+      "site": "cmd/dshd/main.go:899",
       "what": "run 的看门狗协程：父进程没了就取消本轮 ctx",
       "sync": "读过：只调 cancel()，不碰会话/日志；runCtx 与主 goroutine 共享，取消是幂等的",
       "verified_at": "2026-11-04"
@@ -175,7 +175,7 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/analytics/otel_channel.go:246",
+      "site": "internal/analytics/otel_channel.go:274",
       "what": "每个 OTLP 通道自己的发送 goroutine（队列排批 + 串行发送 + shutdown drain）",
       "sync": "读过：队列/首个入队时间/stopped 全在 c.mu 下，且只有本 goroutine 出队（planLocked 内出队）；入队方只 append 后 signal 缓冲 1 的 wake；done 只由本 goroutine 关闭；取消统一走 abortCtx（shutdown/stopPending 调 abortCancel），在飞请求与重试等待都从它派生；计数器全 atomic",
       "verified_at": "2026-11-14"
@@ -301,7 +301,7 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/acp.go:1184",
+      "site": "cmd/dshd/acp.go:1187",
       "what": "父进程看门狗：watch.Done() 就取消本轮并关 stdin",
       "sync": "读过：只调 cancel() 与 os.Stdin.Close()，两个都幂等；不写共享状态",
       "verified_at": "2026-11-09"
@@ -325,19 +325,19 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:893",
+      "site": "cmd/dshd/main.go:906",
       "what": "父进程看门狗：父没了就取消本轮 ctx",
       "sync": "读过：只调 stopOnParentGone()（cancel 幂等），不碰会话/日志",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:886",
+      "site": "cmd/dshd/main.go:899",
       "what": "serveJobsOut：后台任务通道",
       "sync": "读过：写 stdout 的 @@JOBS@@ 行，写侧有自己的一把锁；读的是 jobs 服务的快照",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:893",
+      "site": "cmd/dshd/main.go:906",
       "what": "serveSteerIPC：steer IPC 接收循环",
       "sync": "读过：收到的请求投进 steerInbox（自己加锁的队列）；runCtx 取消即退",
       "verified_at": "2026-11-09"
@@ -487,7 +487,7 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "modules/tools/pipeline.go:478",
+      "site": "modules/tools/pipeline.go:480",
       "what": "单次工具执行（带 panic 兜底与超时）",
       "sync": "读过：结果只经 buffered(1) 的 done channel 回传（超时后仍能写完退出，不泄漏）；工具本身按 SPI 契约无共享状态",
       "verified_at": "2026-11-09"

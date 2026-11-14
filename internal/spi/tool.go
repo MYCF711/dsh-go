@@ -204,6 +204,23 @@ func (r Result) WithErrorInfo(name, code string) Result {
 type Image struct {
 	MIME       string
 	DataBase64 string
+	// Path 是**生产者已知的**可读路径（官方 `resolveImageAttachmentAccess` 的
+	// 宿主等价物里"附件身份"那一半，见 dsh-llm/lib/types/content.js:13-19）。
+	//
+	// 为什么要有它：`spi.Image` 原来只有 MIME + base64，图片一旦离开工具就
+	// **没有身份**了。于是 spill-policy 的 token 预算臂（官方 #79）在"结果含图片
+	// 且超预算"时拿不到恢复文件里要写的路径，只能整份保留原文——预算形同虚设。
+	// `read_image` 这类工具**本来就知道**自己读的是哪个文件，这个字段就是把那份
+	// 知识带出工具边界的唯一通道。
+	//
+	// 约定：
+	//   - 空 = 生产者不知道（内存里渲染出来的图，例如 office 渲染出的 PNG）；
+	//   - 非空 = 生产者**保证**它指向一个常规文件。消费方（spill-policy）仍会
+	//     stat 复核一次：官方原话是 "The policy never substitutes an unreadable
+	//     path for an image"，声明错了就退回"保留原内容 + warning"。
+	//   - 不参与序列化（`Result.Images` 本来就是 json:"-"）：这条知识只在
+	//     进程内的一次工具结果里有效，落盘的是正文与 artifact。
+	Path string
 }
 
 // Artifact 是一份被外置的大结果。

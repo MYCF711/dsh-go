@@ -435,6 +435,96 @@ func TestSpillPolicyKeepsContentWhenImagePathUnavailable(t *testing.T) {
 	}
 }
 
+// 生产者自报的可读路径（`spi.Image.Path`）：不需要任何注入解析器就能按预算保留。
+//
+// 这是"能力已在、只差接线"的那一段——`read_image` 本来就知道自己读的是哪个文件，
+// 但 `spi.Image` 以前只带 MIME + base64，这条知识在工具边界上被丢掉了，于是
+// "结果含图片且超预算"永远只能整份保留原文（token 预算臂等于没接上）。
+func TestSpillPolicyUsesProducerDeclaredImagePath(t *testing.T) {
+	imageDir := t.TempDir()
+	images, _ := spillTestImages(t, imageDir, 2)
+	// 模拟 read_image：把 Path 填成它刚读过的那个真实文件。
+	for index := range images {
+		images[index].Path = filepath.Join(imageDir, "shot-"+strconv.Itoa(index)+".png")
+	}
+	body := strings.Repeat("abcdefgh", 500) // 4000 字符 ≈ 1000 估算 token
+	tl := &stubTool{name: "shots", res: spi.Result{Text: body, Images: images}}
+	dir := t.TempDir()
+	// 注入的解析器**故意给另一份**路径：生产者声明优先，解析器这一路不该被用。
+	decoy := filepath.Join(imageDir, "decoy.png")
+	if err := os.WriteFile(decoy, []byte("x"), 0o600); err != nil {
+		t.Fatalf("写诱饵文件失败: %v", err)
+	}
+	p, k := newPipe(t, Options{
+		SpillDir: dir, MaxChars: 1 << 20, MaxInlineTokens: 580,
+		ImageReadablePath: func(spi.Image) (string, bool) { return decoy, true },
+	}, tl)
+	defer k.Root().Dispose()
+
+	res, err := p.Run(context.Background(), "shots", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Text == body {
+		t.Fatal("只要每张图都有生产者声明的可读路径，超预算就必须真的按预算保留")
+	}
+	if got := spillTestOmittedImages(t, res.Text); got != 1 {
+		t.Fatalf("预算只够一张图时应报 'Omitted 1 images.'，实际 %d：%q", got, res.Text)
+	}
+	if len(res.Artifacts) != 1 {
+		t.Fatalf("应登记 1 个恢复文件，得到 %d", len(res.Artifacts))
+	}
+	recovered, err := os.ReadFile(res.Artifacts[0].Path)
+	if err != nil {
+		t.Fatalf("恢复文件读不到: %v", err)
+	}
+	fileText := string(recovered)
+	if !strings.Contains(fileText, body) {
+		t.Fatal("恢复文件里必须是完整正文")
+	}
+	for index := range images {
+		want := filepath.Join(imageDir, "shot-"+strconv.Itoa(index)+".png")
+		if !strings.Contains(fileText, `[Image: `+spillJSONString(want)+`; image/png; `) {
+			t.Fatalf("恢复文件里第 %d 张图要写生产者声明的路径 %q: %q", index+1, want, fileText)
+		}
+	}
+	if strings.Contains(fileText, decoy) {
+		t.Fatalf("生产者声明了路径时不该再用注入解析器给的那份 %q: %q", decoy, fileText)
+	}
+	t.Logf("生产者路径优先：内联 %d 张、恢复文件 %d 字节", len(res.Images), len(recovered))
+}
+
+// 生产者声明错了（文件不在/被删）→ 与"没有解析器"同一条 best-effort 兜底：
+// 保留原内容 + warning，绝不把一条死链写进恢复文件。
+func TestSpillPolicyFallsBackWhenProducerPathUnreadable(t *testing.T) {
+	imageDir := t.TempDir()
+	images, _ := spillTestImages(t, imageDir, 1)
+	images[0].Path = filepath.Join(imageDir, "gone.png") // 声明了，但文件不在
+	body := strings.Repeat("abcdefgh", 500)
+	tl := &stubTool{name: "shots", res: spi.Result{Text: body, Images: images}}
+	dir := t.TempDir()
+	logs := spillTestCaptureLog(t)
+	p, k := newPipe(t, Options{SpillDir: dir, MaxChars: 1 << 20, MaxInlineTokens: 200}, tl)
+	defer k.Root().Dispose()
+
+	res, err := p.Run(context.Background(), "shots", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Text != body {
+		t.Fatalf("生产者声明的路径 stat 不到时必须保留原正文: %q", res.Text)
+	}
+	if len(res.Images) != 1 || res.Images[0].DataBase64 != images[0].DataBase64 {
+		t.Fatal("这条路不许动图片")
+	}
+	if files := spillTestSpillFiles(t, dir); len(files) != 0 {
+		t.Fatalf("这条路不该落盘，实际 %v", files)
+	}
+	if !strings.Contains(logs(), "没有可读路径") {
+		t.Fatalf("要有一条说明原因的 warning，实际: %s", logs())
+	}
+}
+
 // notice 自己都放不进预算 → 原内容保留（官方 index.ts:112-114）。
 func TestSpillPolicyKeepsOriginalWhenNoticeExceedsBudget(t *testing.T) {
 	dir := t.TempDir()

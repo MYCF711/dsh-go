@@ -49,7 +49,7 @@ func ckptDispatchRunner(t *testing.T, wd, home string) spi.Runner {
 	k := kernel.New("ckpt-dispatch")
 	root := k.Root()
 	t.Cleanup(root.Dispose)
-	if _, err := kernel.Assemble(root, builtinModules(wd, home, 0, nil)); err != nil {
+	if _, err := kernel.Assemble(root, builtinModules(wd, home, 0, 0, nil)); err != nil {
 		t.Fatalf("装配 builtinModules: %v", err)
 	}
 	runner, err := kernel.Inject(root, spi.ToolRunnerKey)
