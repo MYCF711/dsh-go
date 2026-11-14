@@ -24,7 +24,7 @@ const productName = "DSH TUI GO"
 // import；build.sh 从宿主源码读出同一个号，同时注入两边）。直接 `go build` 时用
 // 这里的默认值，所以它必须跟着宿主版本走。
 var (
-	version   = "0.2.2-go.3"
+	version   = "0.2.2-go.4"
 	commit    = "dev"
 	buildTime = ""
 )
