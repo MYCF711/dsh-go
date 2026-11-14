@@ -18,3 +18,4 @@ R1
 凭据泄露
 工具表体积
 TUI 长场景（opt-in：DSHGO_TUI_E2E=1）
+scripts/gap-register-counts.py
