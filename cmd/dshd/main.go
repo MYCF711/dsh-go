@@ -956,10 +956,25 @@ func cmdRun(argv []string) (retErr error) {
 	// 把"一次调用的 call+result"成对写完。
 	kernel.OnTyped[*spi.Call](root.Bus(), root, spi.EventToolResult, newNestedV4(logw).record)
 
-	if err := logw.Append("system/message", session.SystemMessageData(1, 1, sys)); err != nil {
+	// 这一轮的**会话级**轮次编号。数值 `turn` 是既有身份
+	// （`docs/transport-contract.md`「消息身份」与 `turn/done.turnId`、
+	// `tool/call.callId` 并列），真值只能来自 append-only 的 v4 日志：
+	// serve 的每一轮都是一个新进程（`dshd run --session <id>`），任何进程内计数器
+	// 都会让第二次 prompt 又写 `turn:1`，第二轮起所有轮次在界面上混成一轮。
+	//
+	// `back` 是上面为历史/装载集**已经读出来**的那份日志（不重复读盘）：
+	// 它只含本轮之前的 turn/start，正好就是"已经开过几轮"。
+	turn := session.NextTurn(back)
+	if backErr != nil {
+		// 读不出来就没法知道已经开过几轮：退回 1 而不是猜一个更大的号。
+		// 但绝不静默——轮次号重复是消费者能看见的错，得留下痕迹。
+		fmt.Fprintf(os.Stderr, "turn：会话日志读不出来（%v），本轮轮次编号退回 %d\n", backErr, turn)
+	}
+
+	if err := logw.Append("system/message", session.SystemMessageData(turn, 1, sys)); err != nil {
 		return err
 	}
-	if err := logw.Append("turn/start", session.TurnStartData(1)); err != nil {
+	if err := logw.Append("turn/start", session.TurnStartData(turn)); err != nil {
 		return err
 	}
 	// v4 `request/context`：这一轮请求用的模型（`session.load.model`、`context.usage`
@@ -984,7 +999,7 @@ func cmdRun(argv []string) (retErr error) {
 	//
 	// 注册在这个位置是有意的：defer 是后进先出，所以它比上面那个
 	// `defer logw.Close()` 先跑——补写结局时文件还开着。
-	tc := newTurnCloser(logw, 1)
+	tc := newTurnCloser(logw, turn)
 	defer func() {
 		if r := recover(); r != nil {
 			// panic 也是"这一轮没跑完"的一种。先补结局，再把 panic 原样抛回去：
@@ -1257,7 +1272,10 @@ func cmdRun(argv []string) (retErr error) {
 		runMessage = llm.Message{Role: "user", Parts: runParts}
 	}
 	hist := append(append([]llm.Message(nil), baseHist...), runMessage)
-	hist, err = loop.Run(runCtx, 1, hist)
+	// turn 传的是**会话级**编号（见上面 `session.NextTurn(back)`）：这一步里
+	// 所有 v4 事件（step/*、tool/call、tool/result、assistant/message）都带它，
+	// 写死 1 会让第二轮起的工具事件全落到第一轮名下。
+	hist, err = loop.Run(runCtx, turn, hist)
 	if err != nil {
 		return err
 	}
