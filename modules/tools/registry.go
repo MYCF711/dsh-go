@@ -96,11 +96,18 @@ func Module(opts Options) kernel.Module {
 		Backend:  kernel.BackendStatic,
 		Provides: []string{"tools", "toolrunner"},
 		Register: func(s *kernel.Scope) error {
+			// 装配期校验放在这里而不是等到第一次工具调用：Options 写错
+			// （例如负的 MaxInlineTokens）必须在启动时就说话，
+			// 否则表现成"每次工具调用都失败"，没人会想到是配置错了。
+			resolved, err := resolveOptions(opts)
+			if err != nil {
+				return fmt.Errorf("tools 模块装配失败: %w", err)
+			}
 			reg := New()
 			if err := kernel.Provide(s, Key, spi.ToolRegistry(reg)); err != nil {
 				return err
 			}
-			return kernel.Provide(s, RunKey, spi.Runner(NewPipeline(reg, s.Bus(), opts)))
+			return kernel.Provide(s, RunKey, spi.Runner(NewPipeline(reg, s.Bus(), resolved)))
 		},
 	}
 }

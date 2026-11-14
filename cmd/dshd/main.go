@@ -25,6 +25,7 @@ import (
 	"dshgo/internal/modes"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
+	timermod "dshgo/internal/timer"
 	"dshgo/modules/exec/bash"
 	"dshgo/modules/fs/local"
 	"dshgo/modules/search"
@@ -136,6 +137,9 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		// 为了让模块图读起来是"先有能力再有用它的工具"——工具是**惰性** inject 的，
 		// 真实顺序由能力图决定。装配代码见 shellenv_wiring.go。
 		shellEnvModule(home),
+		// 官方 base 插件 #3：随 scope 释放的定时器。补这一层之前 `internal/timer`
+		// 零生产 importer（能力有实现、没有挂载点），消费者拿不到 ctx.timeout/interval。
+		timermod.Module(),
 		bash.Module(wd, bash.Options{}),
 		local.Module(wd, local.WithExtraReadRoot(filepath.Join(home, "artifacts"))),
 		read.Module(),
@@ -180,7 +184,7 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		terminalpanel.ModuleFromEnv(os.Getenv),
 		subagentModule(sub),
 		subagenttool.Module(),
-		subagentfork.Module(inheritFromCtx(home)),
+		subagentfork.Module(seedForCtx(home)),
 		skill.Module(filepath.Join(home, "skills")),
 		hindsight.Module(home),
 		// Office 三工具（office_convert / office_recalculate / office_render）。
@@ -387,7 +391,15 @@ func loadModsWithPluginsIn(manifestPath, home string, maxChars int, sub *subProv
 	if err != nil {
 		return nil, nil, err
 	}
-	return append(mods, pluginmod.Runtime(rt.Manager())), rt, nil
+	// 官方 #1 `tool-plugin-manager`：运行时插件面的管理工具（list/set/豁免/安装卸载）。
+	//
+	// 与上面 `pluginmod.Module(...)` 的 `plugin` 工具是**两层**：那个管 dsh.toml 的
+	// 编译期 [[module]] 白名单，这个管 state.json + 运行时装载器（见
+	// cmd/dshd/tool_plugin_manager.go 的文件头）。同样加在 Apply 之后、同样不进
+	// builtinModules：插件管理工具本身不能因为白名单里没写就消失。
+	api := newOfficialPluginManagerAPI(rt)
+	mods = append(mods, pluginmod.Runtime(rt.Manager()), pluginManagerModule(pluginManagerAPI{api}))
+	return mods, rt, nil
 }
 
 // syncPlugins 让运行时与 state.json 对齐（启动路径：enabled 的包必须真在跑）。

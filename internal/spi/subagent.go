@@ -24,6 +24,20 @@ type SubagentRequest struct {
 	InheritSession string
 	// Inherit 是已读好的父会话片段（由宿主填入）。有它就不必再给 InheritSession。
 	Inherit string
+	// Seed 是 fork 种子的 **durable 事件**（父会话已完成轮次的真实 user/assistant/tool 事件，
+	// 由宿主从 v4 日志切出、原样带过来）。
+	//
+	// 为什么与 Inherit 并存而不是替换它：两样东西服务两个出口。
+	//   - `Inherit` 是**字符串**，喂给子代理这一趟的第一次模型调用（子代理自己得看见）；
+	//   - `Seed` 是**结构化事件**，落进子会话自己的 v4 日志（续问/重读/导出时结构不丢）。
+	//
+	// 官方 `dsh-subagent-fork-in-process/src/index.ts:72-78`：fork 的种子在创建时
+	// 取一次（one-time snapshot），之后成为子会话自己的 durable transcript。
+	// 空 = 不是 fork（或首轮完成之前 fork）：一个字节都不多写，行为与改动前完全一致。
+	//
+	// 类型用 json.RawMessage 而不是 v4.Event：spi 不认识 codecs（R1/R2 的分层），
+	// 这里只约定"每条是一份 v4 事件的 JSON 字节"，宿主按自己的 `v4.Event` 解码。
+	Seed []json.RawMessage
 
 	// Continuable 为真表示这次委派要留下一条**可续问**的子会话。
 	//

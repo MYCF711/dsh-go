@@ -263,6 +263,12 @@ func (s *subRunner) continuation(ctx context.Context, req spi.SubagentRequest, p
 	if err != nil {
 		cwd = ""
 	}
+	// fork 种子：宿主侧唯一一次解码（spi 只约定"每条是一份 v4 事件的 JSON"）。
+	// 解不开就响亮失败——子会话少一段父会话真实说过的话，比"这次委派没成"更难查。
+	seedEvents, err := seedEventsFromWire(req.Seed)
+	if err != nil {
+		return "", fmt.Errorf("fork 种子解不开: %w", err)
+	}
 	rec, err := (agent.ChildSpawn{
 		Home:            home,
 		ParentSessionID: parentID,
@@ -274,6 +280,13 @@ func (s *subRunner) continuation(ctx context.Context, req spi.SubagentRequest, p
 		AgentID: agentID,
 		Prompt:  prompt,
 		Answer:  answer,
+		// fork 种子：父会话**已完成轮次**的真实事件，逐条落进子会话日志。
+		//
+		// 官方 `dsh-subagent-fork-in-process/src/index.ts:72-78`：种子在创建时取一次，
+		// 之后成为子会话自己的 durable transcript（父会话再长也不会进来）。
+		// 取种子与"投影成子代理第一段文本"是同一份事实的两个出口：前者落盘保结构，
+		// 后者走现有 `Inherit` 通道喂给这一趟的模型调用（见 `inheritFromCtx`）。
+		Seed: seedEvents,
 	})
 	if err != nil {
 		return "", err

@@ -1225,6 +1225,16 @@ func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes i
 // （@deepseek-ai/dsh-sdk-minimal/cordis.patch.yml:118）：设了就排在提示词**第一段**，
 // 没设/全空白 = 宿主既有形状逐字节不变。两个入口（run / acp）都经过这里，
 // 所以不存在"某个入口偷偷不读"。
+//
+// 官方 #53 `agent-instructions` 默认开（`dsh-base` 带着它、每链 65,536 字节，
+// 见 `@deepseek-ai/dsh-agent-instructions/README.md:30`）：所以这里**默认打开**
+// project root→cwd 指令链（`prompt.Context.EnableInstructionChain`）。关闭方式
+// `DSHD_INSTRUCTION_CHAIN=0`（显式关，不是"没设就不开"）。
+//
+// 为什么默认开而不是默认关：能力下限规则要求"官方默认有的，我们不能默认没有"。
+// 官方在 base 组合里就是开着的；本仓以前只有"一个全局文件 + 一个 cwd AGENTS.md"
+// 两点链，等于默认少了整条 project 链（monorepo 里 `pkg/AGENTS.md` 根本看不到）。
+// 显式 `--agents`（`ExtraRulesPath`）给出时链让位：那是宿主独有的"单手册"入口。
 func buildSystemPromptWithHome(reg spi.ToolRegistry, model, cwd, home string, workspaceBytes int) (string, error) {
 	globalRulesPath := ""
 	if home != "" {
@@ -1235,17 +1245,33 @@ func buildSystemPromptWithHome(reg spi.ToolRegistry, model, cwd, home string, wo
 		return "", err
 	}
 	return prompt.Default(prompt.Context{
-		Model:             model,
-		Cwd:               cwd,
-		Platform:          runtime.GOOS + "/" + runtime.GOARCH,
-		Date:              time.Now().Format("2006-01-02"),
-		Tools:             tools,
-		GlobalRulesPath:   globalRulesPath,
-		MaxGlobalBytes:    workspaceBytes,
-		MaxWorkspaceBytes: workspaceBytes,
-		ExtraRulesPath:    *rulesPath,
-		PersonaPrefix:     strings.TrimSpace(os.Getenv(personaPrefixEnv)),
+		Model:                  model,
+		Cwd:                    cwd,
+		Platform:               runtime.GOOS + "/" + runtime.GOARCH,
+		Date:                   time.Now().Format("2006-01-02"),
+		Tools:                  tools,
+		GlobalRulesPath:        globalRulesPath,
+		MaxGlobalBytes:         workspaceBytes,
+		MaxWorkspaceBytes:      workspaceBytes,
+		ExtraRulesPath:         *rulesPath,
+		PersonaPrefix:          strings.TrimSpace(os.Getenv(personaPrefixEnv)),
+		EnableInstructionChain: instructionChainEnabled(),
 	}), nil
+}
+
+// instructionChainEnabledEnv 是 #53 指令链的开关环境变量。
+//
+// 三值约定与本仓其它开关一致：未设/空前缀 = 默认（**开**，官方默认）；
+// `0/false/off/no` = 关（回到旧的两点链）。
+const instructionChainEnabledEnv = "DSHD_INSTRUCTION_CHAIN"
+
+// instructionChainEnabled 回答"这次装配要不要走官方 project 指令链"。
+func instructionChainEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(instructionChainEnabledEnv))) {
+	case "0", "false", "off", "no":
+		return false
+	}
+	return true
 }
 
 // personaPrefixEnv 是官方 `systemPrompt.personaPrefix` 的环境变量名。

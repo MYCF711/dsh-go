@@ -213,3 +213,100 @@ func TestChildSpawnAllocatesIdentity(t *testing.T) {
 		t.Fatalf("期望只有 1 条消息（提问），实得 %d", got)
 	}
 }
+
+// TestChildSpawnWritesStructuredSeed 钉住 fork 种子在子会话里的落盘形状。
+//
+// 官方 `dsh-subagent-fork-in-process/src/index.ts:72-78`：fork 的种子在创建时取一次，
+// 之后成为**子会话自己的 durable transcript**。所以这里证明的不是"写了点文字"，
+// 而是三件结构性的事：
+//  1. 种子事件按原顺序排、data 原样（assistant 的 tool-call/reasoning 块、tool/result 的
+//     isError 与 cwd 都还在）；
+//  2. user 种子消息带 `source.kind = fork-seed`（区分"继承来的历史"与"派它的这一趟"）；
+//  3. 顺序是 父子帧 → catalog/种子 → 这一趟的 prompt/answer。
+func TestChildSpawnWritesStructuredSeed(t *testing.T) {
+	home := newChildFixture(t)
+	seed := []SeedEvent{
+		{
+			Type: "user/message", Seq: 1, Time: 1,
+			Data: json.RawMessage(`{"content":[{"type":"text","text":"父会话第 1 句"}],"source":{"kind":"user"},"role":"user"}`),
+		},
+		{
+			Type: "assistant/message", Seq: 2, Time: 2,
+			Data: json.RawMessage(`{"turn":1,"step":1,"message":{"role":"assistant","content":[` +
+				`{"type":"reasoning","text":"想过"},{"type":"tool-call","id":"c1","name":"read","arguments":"{}"}]},` +
+				`"stream":[{"type":"finish","reason":{"kind":"tool-calls"}}],"surfaceOp":"append"}`),
+		},
+		{
+			Type: "tool/result", Seq: 3, Time: 3,
+			Data: json.RawMessage(`{"turn":1,"step":1,"message":{"role":"tool","toolCallId":"c1",` +
+				`"content":[{"type":"text","text":"结果正文"}],"isError":true,"id":"r1"},` +
+				`"meta":{"cwd":"/tmp/x"},"surfaceOp":"append"}`),
+		},
+	}
+	rec, err := (ChildSpawn{Home: home, ParentSessionID: "parent-seed", Cwd: home}).Spawn(ChildSpawnOptions{
+		ChildSessionID: "child-seed",
+		Prompt:         "这一趟的任务",
+		Answer:         "这一趟的回答",
+		Seed:           seed,
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if rec.ChildSessionID != "child-seed" {
+		t.Fatalf("id 不对: %+v", rec)
+	}
+	back := readSession(t, home, "child-seed")
+
+	var types []string
+	for _, ev := range back.Events {
+		types = append(types, ev.Type)
+	}
+	want := []string{
+		EventChildSpawn,
+		"user/message", "assistant/message", "tool/result",
+		"user/message", "assistant/message",
+	}
+	if strings.Join(types, ",") != strings.Join(want, ",") {
+		t.Fatalf("子会话事件序列 = %v，要 %v（帧 → 种子 → 这一趟）", types, want)
+	}
+
+	// 1) data 原样：块身份、isError、cwd 全在。
+	body := string(back.Events[2].Data)
+	if !strings.Contains(body, `"reasoning"`) || !strings.Contains(body, `"tool-call"`) {
+		t.Fatalf("assistant 种子的块身份丢了: %s", body)
+	}
+	if !strings.Contains(body, `"kind":"tool-calls"`) {
+		t.Fatalf("assistant 种子的 finish 原因被改写了: %s", body)
+	}
+	tool := string(back.Events[3].Data)
+	if !strings.Contains(tool, `"isError":true`) || !strings.Contains(tool, `"cwd":"/tmp/x"`) {
+		t.Fatalf("tool/result 种子的事实被改写了: %s", tool)
+	}
+
+	// 2) 种子的 user 消息带来源标记；这一趟的 prompt **不带**（它不是继承来的）。
+	if !strings.Contains(string(back.Events[1].Data), `"kind":"fork-seed"`) {
+		t.Fatalf("种子 user 消息没有 fork-seed 标记: %s", back.Events[1].Data)
+	}
+	if strings.Contains(string(back.Events[4].Data), `"kind":"fork-seed"`) {
+		t.Fatalf("这一趟的 prompt 被标成了继承历史: %s", back.Events[4].Data)
+	}
+}
+
+// TestChildSpawnRejectsSeedEventWithoutType 钉住"坏种子响亮失败"。
+//
+// 缺 type 的事件搬进子会话后没有任何投影认得它（Surface 只认 5 类）：
+// 写进去等于留一条永远读不回来的记录，比"这次委派没成"更难查。
+func TestChildSpawnRejectsSeedEventWithoutType(t *testing.T) {
+	home := newChildFixture(t)
+	_, err := (ChildSpawn{Home: home, ParentSessionID: "p", Cwd: home}).Spawn(ChildSpawnOptions{
+		ChildSessionID: "child-bad-seed",
+		Prompt:         "x",
+		Seed:           []SeedEvent{{Data: json.RawMessage(`{"content":[]}`)}},
+	})
+	if err == nil {
+		t.Fatal("缺 type 的种子事件必须让 spawn 失败")
+	}
+	if !strings.Contains(err.Error(), "type") {
+		t.Fatalf("错误里要说清缺的是什么: %v", err)
+	}
+}
