@@ -571,10 +571,10 @@
       "verified_at": "2026-11-13"
     },
     {
-      "site": "internal/updater/channel.go:294",
-      "what": "把壳更新渠道的状态变更通知给订阅者（其中一个是 desktopUpdate.channel.subscribe 的 NDJSON 流）",
-      "sync": "读过：在锁内先 snapshotLocked() 复制状态、append 复制订阅者切片，再出锁起 goroutine 逐个回调；回调只拿到**值拷贝**，不碰 Service 的任何字段。listen 切片的增删都在锁内，所以并发订阅/取消不会与这次遍历竞争。",
-      "verified_at": "2026-11-13"
+      "site": "internal/updater/channel.go:356",
+      "what": "串行投递协程：按入队顺序把壳更新渠道的状态变更通知给订阅者（其中一个是 desktopUpdate.channel.subscribe 的 NDJSON 流）；队列排空后自己退出，不是常驻循环",
+      "sync": "读过：入队与出队都在 s.notifyMu 下，且同一时刻最多一条投递协程（dispatching 标志在同一把锁下置/复位，'看到队列空'+'置 dispatching=false' 是同一个原子动作，所以不会漏排空、也不会两条并行投递）。入队顺序由调用方的 s.mu 串行化（notifyLocked 持 mu 调用），故投递顺序 == 发出顺序。每条通知自带 snapshotLocked() 的值拷贝与 listeners 切片拷贝，回调只拿到值、不碰 Service 任何字段，且在 s.mu/s.notifyMu 之外执行。锁序固定 mu -> notifyMu，投递协程绝不拿 mu。队列无界、刻意不丢（丢一条就退回'界面永久转圈'的乱序 bug）。",
+      "verified_at": "2026-11-15"
     },
     {
       "site": "internal/updater/status.go:480",
