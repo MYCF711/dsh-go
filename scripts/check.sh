@@ -72,7 +72,12 @@ else
     # （哪一行断言、什么错误），于是每一轮都要靠本地复现去猜。
     # 所以：先按 `--- FAIL` 打出每条的完整上下文（含失败消息），再打 tail 25 供收尾。
     # **不是**放宽判定——判定仍然只看 race_rc，这里只是把已经发生的事实打全。
-    printf '%s\n' "$race_out" | grep -B 1 -A 12 -E '^[[:space:]]*--- FAIL' | head -400
+    #
+    # 12 行不够（2026-11-14 实证）：真进程用例在失败前会打十几条证据 t.Log
+    # （TestModelCatalog… 6 ACCEPT + 6 REJECT，TestSettingsForm… 12 条 GOLDEN_*），
+    # 真正的那条失败消息是 Go 最后 append 的——正好被 -A 12 切掉，CI 上就表现为
+    # "--- FAIL 后没有断言行"。窗口必须大于证据行数。
+    printf '%s\n' "$race_out" | grep -B 1 -A 60 -E '^[[:space:]]*--- FAIL' | head -800
     printf '%s\n' "$race_out" | grep -E '^(WARNING: DATA RACE|panic:)' | head -20
     printf '%s\n' "$race_out" | tail -25
     # 环境面：CI 上这批失败是"很多包同时快速失败"的形状，先看磁盘/临时目录/进程数有没有被打满
