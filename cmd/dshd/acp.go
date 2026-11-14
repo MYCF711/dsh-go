@@ -347,9 +347,15 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		if err != nil {
 			return "", nil, err
 		}
+		// 走到这条分支说明这个会话在本进程里还没登记过（客户端没先 resume）。
+		// 文件里可能已经有轮次，所以编号必须从日志恢复，不能从 1 起：
+		// 判据与 Resume / cmdRun 是同一份（session.NextTurnAt）。
+		// 读盘放在锁外：长会话的日志可能几十 MB，不该占着 runner 的互斥锁。
+		firstUsed := session.NextTurnAt(l.Path) - 1
 		r.mu.Lock()
 		if r.logs[sessionID] == nil {
 			r.logs[sessionID] = l
+			r.turns[sessionID] = firstUsed
 		}
 		logw = r.logs[sessionID]
 	}
@@ -867,6 +873,12 @@ func (r *acpRunner) Resume(ctx context.Context, sessionID, cwd string) error {
 	}
 	r.logs[sessionID] = logw
 	r.hist[sessionID] = hist
+	// 轮次编号是**会话级**身份，不是进程级：resume 之后接着发 prompt 必须从
+	// 日志里已经开过的轮数续上，否则宿主重启/重连一次就又从 turn:1 开始，
+	// 同一个会话里出现第二个 turn:1（消费者会把两轮当成一轮）。
+	// `turns` 记的是"已经用掉的轮次"，所以种成 下一个-1：下面 Prompt 里的 ++
+	// 才正好等于 session.NextTurn(back)。
+	r.turns[sessionID] = session.NextTurn(back) - 1
 	r.mu.Unlock()
 	attachHistory(logw) // resume 之后也要能回查
 
@@ -918,7 +930,9 @@ func (r *acpRunner) Fork(ctx context.Context, sessionID, cwd string) (string, er
 	r.mu.Lock()
 	r.logs[newID] = writer
 	r.hist[newID] = session.History(back)
-	r.turns[newID] = 0
+	// fork 出来的日志已经带走了父会话的节点（system/developer 消息上还留着源轮次），
+	// 所以新轮次同样从**这份日志**续：判据与其他入口同源（session.NextTurn）。
+	r.turns[newID] = session.NextTurn(back) - 1
 	r.sessionModes[newID] = parentMode.ID
 	r.mu.Unlock()
 	// fork 出来的会话继承父会话**当前**档位；registerSandbox 会拒绝任何放大。

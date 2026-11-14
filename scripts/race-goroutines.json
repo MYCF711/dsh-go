@@ -121,7 +121,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/acp.go:1187",
+      "site": "cmd/dshd/acp.go:1201",
       "what": "父进程看门狗收尾：watch.Done() 之后关服务",
       "sync": "读过：只做 close/取消，不写会话文件；与主流程之间靠 context 取消 + 单向 channel",
       "verified_at": "2026-11-04"
@@ -301,7 +301,7 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/acp.go:1187",
+      "site": "cmd/dshd/acp.go:1201",
       "what": "父进程看门狗：watch.Done() 就取消本轮并关 stdin",
       "sync": "读过：只调 cancel() 与 os.Stdin.Close()，两个都幂等；不写共享状态",
       "verified_at": "2026-11-09"

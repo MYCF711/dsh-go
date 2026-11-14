@@ -465,22 +465,16 @@ func (r *modelRunner) persistModelEvents(sessionID string, events []modelTurnEve
 	return tc.End(finish)
 }
 
-// nextTurnNumber 数一下这份日志里已经开过几个 turn，下一个就是它 +1。
+// nextTurnNumber 是"下一轮的**会话级** turn 编号"，判据只有一份：
+// `session.NextTurnAt`（数 v4 日志里已经开过几轮，下一个就是它 +1）。
 //
 // 为什么不用"进程内计数器"：serve 每轮可能换一个子进程，进程内计数从 1 开始，
 // 第二次就又写 turn:1——同一个会话里出现两个 turn:1，消费者会把两轮当成一轮。
 // 也不能问正在写的那个 Log（它不暴露已写事件），所以先纯读一遍文件。
 // 读失败就退到 1：轮次号错总比"写不进去"好，而写不进去调用方会拿到 error。
+//
+// 手里已经有 `*v4.Log` 的调用方（`cmdRun` 本来就为历史读了一份）请直接用
+// `session.NextTurn(back)`，不要为了编号再读一次几十 MB 的文件。
 func nextTurnNumber(path string) int {
-	log, err := v4.ReadFile(path)
-	if err != nil || log == nil {
-		return 1
-	}
-	n := 0
-	for _, ev := range log.Events {
-		if ev.Type == "turn/start" {
-			n++
-		}
-	}
-	return n + 1
+	return session.NextTurnAt(path)
 }
