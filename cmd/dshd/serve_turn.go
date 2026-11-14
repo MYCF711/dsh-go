@@ -391,7 +391,7 @@ func (r *modelRunner) persistModelEvents(sessionID string, events []modelTurnEve
 	if err != nil {
 		return fmt.Errorf("存不下来（找不到会话文件）: %w", err)
 	}
-	logw, err := session.OpenSessionAt(path)
+	logw, err := session.OpenSessionAtRecoveringStale(path)
 	if err != nil {
 		return fmt.Errorf("存不下来（打不开写入）: %w", err)
 	}
