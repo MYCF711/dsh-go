@@ -40,6 +40,18 @@ func callCordis(t *testing.T, s *cordisService, method string, params map[string
 	return s.HandleOfficialCordis(context.Background(), method, raw)
 }
 
+// findRow 在官方形状的 inventory 里按 pluginId 找一行。
+func findRow(t *testing.T, rows []cordisInventoryRow, id string) cordisInventoryRow {
+	t.Helper()
+	for _, row := range rows {
+		if row.PluginID == id {
+			return row
+		}
+	}
+	t.Fatalf("inventory 里没有 %q：%+v", id, rows)
+	return cordisInventoryRow{}
+}
+
 // cordisKeys 返回一个结果对象的**全部** JSON 键（排序）。
 //
 // 用它断言"形状与官方逐字一致"：多一个字段、少一个字段都会红——这正是这一轮
@@ -80,6 +92,440 @@ func mustValue[T any](t *testing.T, where string, v any) T {
 	}
 	return got
 }
+
+// ── 全链条：inventory / runHostHalf / getClientCode / invoke / settle ────
+//
+// 这条用例来自 #49 的端到端冒烟，形状按合并后的官方契约对齐（runHostHalf 回
+// 官方 ok/startedHere、getClientCode 回五个字段、invoke 的失败是 200 里的
+// 判别联合、settle 以 pluginId+resolution 为参）：断言强度不变，只是钉的是
+// 官方字段名。
+
+func TestCordisInventoryClientCodeInvoke(t *testing.T) {
+	home := t.TempDir()
+	s := newCordisService(home)
+	if err := s.RegisterGo("go-a", "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	makeJSPlugin(t, home, "js-a")
+	if _, err := callCordis(t, s, "dynamicCordisRunner.inventory", nil); err != nil {
+		t.Fatal(err)
+	}
+	inv, _ := callCordis(t, s, "dynamicCordisRunner.inventory", nil)
+	rows := inv.([]cordisInventoryRow)
+	// go-a（注册在册）+ js-a（盘上真实目录）都该列出来，未激活也要看得见。
+	if len(rows) != 2 {
+		t.Fatalf("inventory=%+v", rows)
+	}
+	host, err := callCordis(t, s, "dynamicCordisRunner.runHostHalf", map[string]any{"pluginId": "js-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runHost := mustValue[cordisRunHostOK](t, "runHostHalf", host)
+	// 外部 node 真被拉起：进程号与真实导出的方法表都要在（官方 5 个方法的回执里
+	// 没有这两个字段，所以直接读内部快照——断言强度与 #49 相同）。
+	snap, ok := s.entrySnapshot("js-a")
+	if !ok || snap.PID == 0 || len(snap.Methods) != 2 {
+		t.Fatalf("host=%+v snapshot=%+v", runHost, snap)
+	}
+	code, err := callCordis(t, s, "dynamicCordisRunner.getClientCode", map[string]any{"pluginId": "js-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mustValue[cordisClientCode](t, "getClientCode", code).Code, "js-a") {
+		t.Fatalf("client code=%v", code)
+	}
+	res, err := callCordis(t, s, "dynamicCordisRunner.invoke", map[string]any{
+		"pluginId": "js-a", "requestId": "req-1", "method": "echo", "args": map[string]any{"text": "hi", "n": 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil {
+		t.Fatal("invoke 结果为空")
+	}
+	failed, err := callCordis(t, s, "dynamicCordisRunner.invoke", map[string]any{
+		"pluginId": "js-a", "requestId": "req-fail", "method": "fail", "args": nil,
+	})
+	if err != nil {
+		t.Fatalf("官方 invoke 的失败是 200 里的值，不该是 HTTP 错误：%v", err)
+	}
+	// 插件抛错必须失败（且是官方判别联合的 handler-error 分支）。
+	if f := mustValue[cordisInvokeFailure](t, "invoke(fail)", failed); f.OK || f.Code != "handler-error" {
+		t.Fatalf("插件抛错必须失败：%+v", f)
+	}
+	settled, err := callCordis(t, s, "dynamicCordisRunner.settleUserRun", map[string]any{
+		"pluginId": "js-a",
+		"resolution": map[string]any{"ok": true, "pluginRunId": runHost.PluginRunID,
+			"waitingFor": []string{"ui"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok := mustValue[cordisSettleOK](t, "settleUserRun", settled); !ok.OK ||
+		ok.PluginRunID != runHost.PluginRunID || ok.Status != "running" {
+		t.Fatalf("settle=%+v", settled)
+	}
+	// 本宿主没有 model 侧待审批请求表：任何 requestId 都是官方的 unknown 分支，
+	// 不许 accepted（也绝不假装结算掉了一个请求）。
+	unknown, err := callCordis(t, s, "dynamicCordisRunner.resolveRequestRun", map[string]any{"requestId": "unknown"})
+	if err != nil {
+		t.Fatalf("官方 resolveRequestRun 的 unknown 分支是值不是 HTTP 错误：%v", err)
+	}
+	if got := mustValue[cordisResolveReceipt](t, "resolveRequestRun", unknown); got.Accepted {
+		t.Fatal("未知 requestId 不许 accepted")
+	}
+	inspect, err := callCordis(t, s, "dynamicCordisRunner.resolveInspectQuery", map[string]any{"pluginId": "js-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspect == nil {
+		t.Fatal("inspect 为空")
+	}
+	mf, err := callCordis(t, s, "dynamicCordisRunner.syncInspectManifest", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mf.(map[string]any)["hash"].(string)) != 64 {
+		t.Fatalf("manifest=%v", mf)
+	}
+	if _, err := callCordis(t, s, "dynamicCordisRunner.reportClientGuardFailure", map[string]any{"pluginId": "js-a", "failure": "guard"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callCordis(t, s, "dynamicCordisRunner.reportRenderFailure", map[string]any{"pluginId": "js-a", "failure": "render"}); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := callCordis(t, s, "dynamicCordisRunner.stopFromPanel", map[string]any{"pluginId": "js-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stopped.(cordisStopOK).OK {
+		t.Fatalf("stop=%+v", stopped)
+	}
+	undef, err := callCordis(t, s, "dynamicCordisRunner.undefineFromPanel", map[string]any{"pluginId": "js-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt := undef.(cordisUndefineOK); !receipt.OK || receipt.WasRunning {
+		t.Fatalf("undefine 回执不是官方的 {ok:true,wasRunning:false}：%+v", receipt)
+	}
+}
+
+// ── 官方形状：逐字段 ────────────────────────────────────────────────────
+//
+// 官方 inventory schema 在 `dsh-cordis-host-runner/lib/typert.host.js:33-63`。
+// 这组用例钉的是"每个字段都是真值或如实缺席"，不是"字段存在"。
+
+func TestCordisInventoryOfficialShape(t *testing.T) {
+	home := t.TempDir()
+	s := newCordisService(home)
+	makeJSPlugin(t, home, "js-shape")
+
+	inv, err := callCordis(t, s, "dynamicCordisRunner.inventory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := findRow(t, inv.([]cordisInventoryRow), "js-shape")
+	// 从未激活：有包元数据（盘上读的），但没有 run，也没有归属会话。
+	if row.AgentID != "" {
+		t.Fatalf("没人激活过却给出了归属会话：%q", row.AgentID)
+	}
+	if len(row.Packages) != 1 {
+		t.Fatalf("packages=%+v", row.Packages)
+	}
+	pkg := row.Packages[0]
+	if pkg.Name != "js-shape" || pkg.PackageID == "" || !pkg.HasHostHalf || !pkg.HasClientHalf {
+		t.Fatalf("包元数据不是盘上的真值：%+v", pkg)
+	}
+	if pkg.Purpose != "" {
+		t.Fatalf("purpose 在盘上没有来源，必须留空：%q", pkg.Purpose)
+	}
+	if row.CurrentPackageID != "" || row.ActiveRun != nil || row.LatestRun != nil || row.NextPackageID != "" {
+		t.Fatalf("未激活不该有 run 字段：%+v", row)
+	}
+
+	// 激活（带归属会话）之后：latestRun / activeRun 立刻点得起来；包里有 Client 半，
+	// 所以这次运行停在 client-pending，currentPackageId 要等页面结算才推进。
+	if _, err := callCordis(t, s, "dynamicCordisRunner.runHostHalf",
+		map[string]any{"pluginId": "js-shape", "sessionId": "sess-1"}); err != nil {
+		t.Fatal(err)
+	}
+	inv, err = callCordis(t, s, "dynamicCordisRunner.inventory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row = findRow(t, inv.([]cordisInventoryRow), "js-shape")
+	if row.AgentID != "sess-1" {
+		t.Fatalf("agentId 应来自真实激活参数：%q", row.AgentID)
+	}
+	if row.CurrentPackageID != "" {
+		t.Fatalf("Client 半还没结算就推进了 currentPackageId：%q", row.CurrentPackageID)
+	}
+	if row.ActiveRun == nil || row.ActiveRun.PackageID != pkg.PackageID || row.ActiveRun.PluginRunID == "" {
+		t.Fatalf("activeRun=%+v", row.ActiveRun)
+	}
+	run := row.LatestRun
+	if run == nil {
+		t.Fatal("latestRun 缺失")
+	}
+	if run.PluginRunID != row.ActiveRun.PluginRunID || run.PackageID != pkg.PackageID ||
+		run.Mode != "run" || run.Status != "waiting" {
+		t.Fatalf("latestRun=%+v", run)
+	}
+	if run.Host.Status != "running" || run.Client.Status != "pending" {
+		t.Fatalf("两半状态不是真值：host=%+v client=%+v", run.Host, run.Client)
+	}
+	if run.Host.WaitingFor == nil || run.Client.WaitingFor == nil {
+		t.Fatalf("waitingFor 必须是数组（不能是 null）：%+v", run)
+	}
+
+	// 页面结算成功之后：这次运行才是 running，currentPackageId 才推进到该包。
+	if _, err := callCordis(t, s, "dynamicCordisRunner.settleUserRun", map[string]any{
+		"pluginId":   "js-shape",
+		"resolution": map[string]any{"ok": true, "pluginRunId": run.PluginRunID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inv, err = callCordis(t, s, "dynamicCordisRunner.inventory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row = findRow(t, inv.([]cordisInventoryRow), "js-shape")
+	if row.CurrentPackageID != pkg.PackageID {
+		t.Fatalf("currentPackageId=%q，包身份=%q", row.CurrentPackageID, pkg.PackageID)
+	}
+	if row.ActiveRun == nil || row.ActiveRun.PackageID != pkg.PackageID || row.ActiveRun.PluginRunID == "" {
+		t.Fatalf("结算后 activeRun=%+v", row.ActiveRun)
+	}
+	run = row.LatestRun
+	if run == nil || run.PluginRunID != row.ActiveRun.PluginRunID || run.PackageID != pkg.PackageID ||
+		run.Mode != "run" || run.Status != "running" {
+		t.Fatalf("结算后 latestRun=%+v", run)
+	}
+	if run.Host.Status != "running" || run.Client.Status != "pending" {
+		t.Fatalf("结算后两半状态不是真值：host=%+v client=%+v", run.Host, run.Client)
+	}
+
+	// 没有 Client 半的插件：client.status 必须是 absent，不能装成 pending。
+	onlyHost := filepath.Join(home, "cordis-plugins", "js-hostonly")
+	if err := os.MkdirAll(onlyHost, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(onlyHost, "package.json"),
+		[]byte(`{"name":"js-hostonly","version":"1.0.0","main":"host.cjs"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(onlyHost, "host.cjs"), []byte("module.exports = {};"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callCordis(t, s, "dynamicCordisRunner.runHostHalf",
+		map[string]any{"pluginId": "js-hostonly", "sessionId": "sess-1"}); err != nil {
+		t.Fatal(err)
+	}
+	inv, err = callCordis(t, s, "dynamicCordisRunner.inventory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	only := findRow(t, inv.([]cordisInventoryRow), "js-hostonly")
+	if only.Packages[0].HasClientHalf {
+		t.Fatal("没有 client/client.js 却报了 HasClientHalf")
+	}
+	if only.LatestRun == nil || only.LatestRun.Client.Status != "absent" {
+		t.Fatalf("client 半应为 absent：%+v", only.LatestRun)
+	}
+	// 没有 Client 半 = 官方原地 commit：currentPackageId 立刻就是这个包。
+	if only.CurrentPackageID != only.Packages[0].PackageID {
+		t.Fatalf("无 Client 半却没 commit：current=%q pkg=%q", only.CurrentPackageID, only.Packages[0].PackageID)
+	}
+}
+
+// ── stop / undefine 的官方回执 ──────────────────────────────────────────
+//
+// 官方 `DynamicCordisStopResponse` / `DynamicCordisUndefineReceipt`
+// （`dsh-cordis-host-runner/src/types.ts:299-322`）：失败也是 **200 里的值**，
+// 带 reason，而不是 HTTP 四字段错误——官方面板按 reason 分支。
+
+func TestCordisPanelReceiptsAreOfficial(t *testing.T) {
+	home := t.TempDir()
+	s := newCordisService(home)
+	makeJSPlugin(t, home, "js-panel")
+
+	// 插件不存在：plugin-missing，且是值不是错误。
+	got, err := callCordis(t, s, "dynamicCordisRunner.stopFromPanel", map[string]any{"pluginId": "nope"})
+	if err != nil {
+		t.Fatalf("plugin-missing 不该是 HTTP 错误：%v", err)
+	}
+	if r := got.(cordisRefusal); r.OK || r.Reason != "plugin-missing" || r.Message == "" {
+		t.Fatalf("stop 缺失插件回执=%+v", r)
+	}
+	got, err = callCordis(t, s, "dynamicCordisRunner.undefineFromPanel", map[string]any{"pluginId": "nope"})
+	if err != nil {
+		t.Fatalf("undefine plugin-missing 不该是 HTTP 错误：%v", err)
+	}
+	if r := got.(cordisRefusal); r.OK || r.Reason != "plugin-missing" {
+		t.Fatalf("undefine 缺失插件回执=%+v", r)
+	}
+
+	// 插件在但没跑：not-running。
+	got, err = callCordis(t, s, "dynamicCordisRunner.stopFromPanel", map[string]any{"pluginId": "js-panel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := got.(cordisRefusal); r.OK || r.Reason != "not-running" {
+		t.Fatalf("未运行时的 stop 回执=%+v", r)
+	}
+
+	// 真跑起来 → stop 成功只回 {ok:true}。
+	if _, err := callCordis(t, s, "dynamicCordisRunner.runHostHalf",
+		map[string]any{"pluginId": "js-panel", "sessionId": "sess-2"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = callCordis(t, s, "dynamicCordisRunner.stopFromPanel",
+		map[string]any{"pluginId": "js-panel", "sessionId": "sess-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.(cordisStopOK).OK {
+		t.Fatalf("stop 回执=%+v", got)
+	}
+	raw, _ := json.Marshal(got)
+	if string(raw) != `{"ok":true}` {
+		t.Fatalf("stop 成功回执必须恰好是 {ok:true}：%s", raw)
+	}
+
+	// 停下之后 inventory 要如实变成 stopped（不是 running、也不是消失）。
+	inv, err := callCordis(t, s, "dynamicCordisRunner.inventory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := findRow(t, inv.([]cordisInventoryRow), "js-panel")
+	if row.ActiveRun != nil || row.CurrentPackageID != "" {
+		t.Fatalf("停下后仍有 activeRun/currentPackageId：%+v", row)
+	}
+	if row.LatestRun == nil || row.LatestRun.Status != "stopped" || row.LatestRun.Host.Status != "stopped" {
+		t.Fatalf("停下后 latestRun 不是 stopped：%+v", row.LatestRun)
+	}
+
+	// 再跑一次再移除：wasRunning 必须为真（官方用它决定要不要注入用户消息）。
+	if _, err := callCordis(t, s, "dynamicCordisRunner.runHostHalf",
+		map[string]any{"pluginId": "js-panel", "sessionId": "sess-2"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = callCordis(t, s, "dynamicCordisRunner.undefineFromPanel",
+		map[string]any{"pluginId": "js-panel", "sessionId": "sess-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt := got.(cordisUndefineOK); !receipt.OK || !receipt.WasRunning {
+		t.Fatalf("undefine 回执=%+v", receipt)
+	}
+	inv, err = callCordis(t, s, "dynamicCordisRunner.inventory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range inv.([]cordisInventoryRow) {
+		if row.PluginID == "js-panel" {
+			t.Fatalf("移除后还在 inventory 里：%+v", row)
+		}
+	}
+	// "移除"必须是真的：目录没了，inventory 才不会再把它读回来。
+	if _, err := os.Stat(filepath.Join(home, "cordis-plugins", "js-panel")); !os.IsNotExist(err) {
+		t.Fatalf("undefine 之后插件目录仍在（err=%v）", err)
+	}
+}
+
+// ── 两条事件的真实发射路径 ──────────────────────────────────────────────
+//
+// 官方这 4 条是 **forwarded Host cordis 事件**（`dsh-api-remotes/src/remote-events.ts`
+// 的 `mode: 'emit'`，走 WS，不是 HTTP 流）。本宿主能真发的只有 2 条：
+// `cordis/dynamic-package`（激活成功）与 `cordis/dynamic-retract`（stop/undefine）。
+// 落点与 agent 生命周期帧同一处：该**归属会话**的 Transport journal + `/ws`。
+// 没有归属会话就**不发帧**——那会是一条没有接收方、也没有对应激活的假帧。
+
+func TestCordisEventsFireOnlyOnRealActivations(t *testing.T) {
+	home := t.TempDir()
+	s := newCordisService(home)
+	journals := transport.NewJournals(nil)
+	var frames []transport.ServerFrame
+	var topics []string
+	s.withEvents(journals, func(topic string, frame transport.ServerFrame) {
+		topics = append(topics, topic)
+		frames = append(frames, frame)
+	})
+	makeJSPlugin(t, home, "js-ev")
+	makeJSPlugin(t, home, "js-ev2")
+
+	// 没带归属会话：不发帧。
+	if _, err := callCordis(t, s, "dynamicCordisRunner.runHostHalf",
+		map[string]any{"pluginId": "js-ev"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 0 {
+		t.Fatalf("没有归属会话却发了帧：%+v", frames)
+	}
+
+	// 带归属会话激活：一条 dynamic-package，落在 session:sess-3 上。
+	if _, err := callCordis(t, s, "dynamicCordisRunner.runHostHalf",
+		map[string]any{"pluginId": "js-ev2", "sessionId": "sess-3"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 || frames[0].Type != "cordis/dynamic-package" {
+		t.Fatalf("激活事件不对：%+v", frames)
+	}
+	if topics[0] != "session:sess-3" {
+		t.Fatalf("事件 topic=%q，应落在归属会话", topics[0])
+	}
+	var payload struct {
+		PluginID    string `json:"pluginId"`
+		PackageID   string `json:"packageId"`
+		PluginRunID string `json:"pluginRunId"`
+		Name        string `json:"name"`
+	}
+	if err := json.Unmarshal(frames[0].Data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	inv, err := callCordis(t, s, "dynamicCordisRunner.inventory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := findRow(t, inv.([]cordisInventoryRow), "js-ev2")
+	if payload.PluginID != "js-ev2" || payload.PackageID != row.Packages[0].PackageID ||
+		payload.PluginRunID != row.ActiveRun.PluginRunID || payload.Name != "js-ev2" {
+		t.Fatalf("dynamic-package 负载与 inventory 不一致：%+v vs %+v", payload, row)
+	}
+	if frames[0].Seq <= 0 || frames[0].Time <= 0 {
+		t.Fatalf("帧没有真实 seq/time：%+v", frames[0])
+	}
+
+	// stop：一条 dynamic-retract（归属会话在激活时已记下，stop 不必再带）。
+	if _, err := callCordis(t, s, "dynamicCordisRunner.stopFromPanel",
+		map[string]any{"pluginId": "js-ev2"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 2 || frames[1].Type != "cordis/dynamic-retract" {
+		t.Fatalf("撤下事件不对：%+v", frames)
+	}
+	var retracted struct {
+		PluginID    string `json:"pluginId"`
+		PackageID   string `json:"packageId"`
+		PluginRunID string `json:"pluginRunId"`
+	}
+	if err := json.Unmarshal(frames[1].Data, &retracted); err != nil {
+		t.Fatal(err)
+	}
+	if retracted.PluginID != payload.PluginID || retracted.PackageID != payload.PackageID ||
+		retracted.PluginRunID != payload.PluginRunID {
+		t.Fatalf("dynamic-retract 负载=%+v，激活时是=%+v", retracted, payload)
+	}
+
+	// 帧真的进了 journal（= session.history 与 /ws 读的那一份）。
+	recorded, _, _ := journals.Get("sess-3").Since(transport.SinceNothing, 0)
+	if len(recorded) != 2 || recorded[0].Type != "cordis/dynamic-package" ||
+		recorded[1].Type != "cordis/dynamic-retract" {
+		t.Fatalf("journal 里的 cordis 帧=%+v", recorded)
+	}
+}
+
+// ── runHostHalf 的官方形状（5 方法形状对齐） ─────────────────────────────
 
 func TestCordisRunHostHalfOfficialShape(t *testing.T) {
 	home := t.TempDir()
@@ -421,10 +867,22 @@ func TestCordisHTTPInventory(t *testing.T) {
 	if err := json.Unmarshal(hostRec.Body.Bytes(), &env); err != nil || env.Result.PluginRunID == "" {
 		t.Fatalf("HTTP runHostHalf 结果解不开：%v %s", err, hostRec.Body.String())
 	}
+	// 没有归属会话的面板调用也照样能激活（wire 上带的是插件身份）。
+	if rec := post("dynamicCordisRunner.runHostHalf", `{"pluginId":"js-http"}`); rec.Code != 200 ||
+		!strings.Contains(rec.Body.String(), "js-http") {
+		t.Fatalf("HTTP runHostHalf(panel)=%d %s", rec.Code, rec.Body.String())
+	}
 	invokeBody := `{"pluginId":"js-http","pluginRunId":"` + env.Result.PluginRunID + `","method":"echo","args":{"text":"wire"}}`
 	if rec := post("dynamicCordisRunner.invoke", invokeBody); rec.Code != 200 ||
 		!strings.Contains(rec.Body.String(), `"ok":true`) || !strings.Contains(rec.Body.String(), "wire") {
 		t.Fatalf("HTTP invoke=%d %s", rec.Code, rec.Body.String())
+	}
+	// 插件抛错是官方 invoke 的失败分支：200 里的判别联合（code=handler-error），
+	// 不是 HTTP 四字段错误——官方 UI 按 code 分支。
+	if rec := post("dynamicCordisRunner.invoke",
+		`{"pluginId":"js-http","pluginRunId":"`+env.Result.PluginRunID+`","method":"fail","args":{}}`); rec.Code != 200 ||
+		!strings.Contains(rec.Body.String(), `"code":"handler-error"`) {
+		t.Fatalf("HTTP invoke(fail)=%d %s", rec.Code, rec.Body.String())
 	}
 	// 官方这两个 report 的结果是字面量 null：wire 上是 {"result":null}，
 	// 不能变成"空载荷 500"，也不能塞一个自制回执。
