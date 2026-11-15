@@ -271,7 +271,10 @@ type Message struct {
 	// V4Seq 是持久 v4 事件信封的 Event.Seq（MSGID-IDENTITY，只加不改）。
 	// 指针非 nil 的 0 是合法身份；nil 只用于非 v4/未知来源。它不是 Transport journal seq。
 	V4Seq *int64 `json:"v4Seq,omitempty"`
-	// MessageID 只透传 v4 data 已有的持久消息 id；当前 assistant 没有时省略，不生成。
+	// MessageID 只透传 v4 data 已有的持久消息 id（ID-PERSIST：user 在顶层 `id`，
+	// assistant 在 `message.id`，均为写事件时落盘的那个值）。**读路径不生成**：
+	// ID-PERSIST 之前写下的旧 v4 记录没有该字段，能为它们现算的只有"按位置算"，
+	// 那等于每次读换一个身份。空串 ⇒ 旧记录，客户端按 `v4Seq` 兜底。
 	MessageID string `json:"messageId,omitempty"`
 	// Content 是有序内容块（ATTACHMENTS-REFERENCES，只加不改）。Text 仍是旧客户端
 	// 使用的纯文本投影；附件/引用只在这里出现，绝不把文件名拼进 Text 冒充。

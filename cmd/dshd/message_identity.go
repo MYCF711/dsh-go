@@ -10,8 +10,11 @@ import (
 // 那会让多条 load 消息共享同一个指针，后一条把前一条的身份覆盖掉。
 func v4SeqPtr(seq int64) *int64 { return &seq }
 
-// persistentMessageID 只读 v4 data 已经持久化的消息 id。当前 user 在顶层 id，
-// assistant 构造器没有 id；没有就返回空串，绝不按时间、正文或 Transport seq 生成。
+// persistentMessageID 只读 v4 data 已经持久化的消息 id。user 在顶层 `id`，
+// assistant 在 `message.id`（ID-PERSIST：写时分配、随事件落盘，见
+// internal/session/log.go 的 AssistantMessageEvent）；**本函数只读，不写盘**。
+// 没有就返回空串——旧 v4 记录里没有这个字段，读路径不许为它现算一个，
+// 绝不按时间、正文、v4/Transport seq 生成。
 func persistentMessageID(ev v4.Event) string {
 	if ev.Type != "user/message" && ev.Type != "assistant/message" {
 		return ""

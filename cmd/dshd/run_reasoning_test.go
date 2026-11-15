@@ -155,6 +155,10 @@ func TestRunPersistsReasoningBlocks(t *testing.T) {
 // 基线是没有思考、没有调用、没有 usage 的一轮（`runPlainText`）：它正是最常见的
 // 那种回答，落盘长什么样必须与**改前**逐字节一样。期望值是改前代码跑出来的
 // 字面量，所以这条用例在 HEAD 隔离副本上就绿，改完仍绿——两边都绿才叫"没动它"。
+//
+// ID-PERSIST（2026-11-15）：同上一条，`message.id` 是显式审查过的形状增量
+// （官方 `dsh-llm/src/message.ts:139-141`）。归一化掉身份位之后**其余字节逐字节相同**，
+// 身份本身由 `normalizeAssistantMessageID` 单独钉住（存在 + uuidv4）。
 func TestRunNoReasoningPayloadBytesUnchanged(t *testing.T) {
 	home, cwd := d1Workspace(t, "run-plain")
 	base := runSSE(t, runPlainText, runPlainText)
@@ -166,11 +170,11 @@ func TestRunNoReasoningPayloadBytesUnchanged(t *testing.T) {
 	if raw == nil {
 		t.Fatal("没有思考的一轮也必须有 assistant/message")
 	}
-	const want = `{"message":{"content":[{"text":"好","type":"text"}],"role":"assistant"},` +
+	const want = `{"message":{"content":[{"text":"好","type":"text"}],"id":"<message-id>","role":"assistant"},` +
 		`"step":1,"stream":[{"reason":{"kind":"completed"},"type":"finish"}],` +
 		`"surfaceOp":"append","turn":1}`
-	if string(raw) != want {
-		t.Fatalf("没有思考的一轮，落盘字节变了。\n实际: %s\n期望: %s", raw, want)
+	if got := string(normalizeAssistantMessageID(t, raw)); got != want {
+		t.Fatalf("没有思考的一轮，落盘字节变了。\n实际: %s\n期望: %s", got, want)
 	}
 }
 

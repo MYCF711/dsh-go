@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 	"testing"
 
 	"dshgo/codecs/v4"
@@ -16,12 +17,14 @@ func TestLoadCarriesPersistentV4MessageIdentityAcrossReopen(t *testing.T) {
 	home, cwd := t.TempDir(), t.TempDir()
 	const sid = "message-identity-load"
 	user1 := session.UserMessage([]spi.Block{{Type: "text", Text: "同文用户"}})
+	asst1 := session.AssistantMessageEvent(1, 1,
+		[]map[string]any{session.TextBlock("同文助手")}, "stop", nil)
+	asst1ID := assistantPersistedID(t, asst1)
 	path := seedTurnSession(t, home, cwd, sid, func(lg *session.Log) error {
 		if err := lg.Append("user/message", user1); err != nil {
 			return err
 		}
-		return lg.Append("assistant/message", session.AssistantMessageEvent(1, 1,
-			[]map[string]any{session.TextBlock("同文助手")}, "stop", nil))
+		return lg.Append("assistant/message", asst1)
 	})
 
 	readWire := func() []map[string]json.RawMessage {
@@ -60,11 +63,13 @@ func TestLoadCarriesPersistentV4MessageIdentityAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	user2 := session.UserMessage([]spi.Block{{Type: "text", Text: "同文用户"}})
+	asst2 := session.AssistantMessageEvent(2, 1,
+		[]map[string]any{session.TextBlock("同文助手")}, "stop", nil)
+	asst2ID := assistantPersistedID(t, asst2)
 	if err := logw.Append("user/message", user2); err != nil {
 		t.Fatal(err)
 	}
-	if err := logw.Append("assistant/message", session.AssistantMessageEvent(2, 1,
-		[]map[string]any{session.TextBlock("同文助手")}, "stop", nil)); err != nil {
+	if err := logw.Append("assistant/message", asst2); err != nil {
 		t.Fatal(err)
 	}
 	if err := logw.Close(); err != nil {
@@ -88,7 +93,7 @@ func TestLoadCarriesPersistentV4MessageIdentityAcrossReopen(t *testing.T) {
 	if len(beforeWire) != 2 || len(afterWire) != 4 {
 		t.Fatalf("同文消息必须全部保留：before=%d after=%d wire=%+v", len(beforeWire), len(afterWire), afterWire)
 	}
-	wantUsers := []string{user1["id"].(string), user2["id"].(string)}
+	wantIDs := []string{user1["id"].(string), asst1ID, user2["id"].(string), asst2ID}
 	for i, wire := range afterWire {
 		var identity struct {
 			V4Seq     *int64 `json:"v4Seq"`
@@ -101,12 +106,10 @@ func TestLoadCarriesPersistentV4MessageIdentityAcrossReopen(t *testing.T) {
 			t.Fatalf("load 第 %d 条 v4Seq=%d，期望持久 Event.Seq=%d", i, *identity.V4Seq, i)
 		}
 		_ = json.Unmarshal(wire["messageId"], &identity.MessageID)
-		if i%2 == 0 {
-			if identity.MessageID != wantUsers[i/2] {
-				t.Fatalf("user messageId=%q，应透传持久 id=%q", identity.MessageID, wantUsers[i/2])
-			}
-		} else if _, invented := wire["messageId"]; invented {
-			t.Fatalf("assistant 没有持久 message id，不得编造：%s", wire["messageId"])
+		// user 与 assistant 都必须透传**落盘的那个** message id：assistant 的身份是
+		// 写时生成的（ID-PERSIST），不是这里按位置现算的。
+		if identity.MessageID != wantIDs[i] {
+			t.Fatalf("load 第 %d 条 messageId=%q，应透传持久 id=%q", i, identity.MessageID, wantIDs[i])
 		}
 	}
 	for i := 0; i < 2; i++ {
@@ -118,7 +121,7 @@ func TestLoadCarriesPersistentV4MessageIdentityAcrossReopen(t *testing.T) {
 	}
 }
 
-func TestFollowProjectsSameV4IdentityAsLoadWithoutInventingAssistantID(t *testing.T) {
+func TestFollowProjectsSameV4IdentityAsLoad(t *testing.T) {
 	frames, path := runFakeChildTurn(t, "message-identity-follow", 0, true)
 	back, err := v4.ReadFile(path)
 	if err != nil {
@@ -165,8 +168,21 @@ func TestFollowProjectsSameV4IdentityAsLoadWithoutInventingAssistantID(t *testin
 				t.Fatalf("user messageId=%q 未透传持久 id=%q err=%v", identity.MessageID, source.ID, err)
 			}
 		case "assistant/message":
-			if identity.MessageID != "" {
-				t.Fatalf("assistant 没有持久 message id，不得生成 %q", identity.MessageID)
+			// ID-PERSIST：assistant 也有落盘的持久 id，WS 帧必须透传同一个，
+			// 不许留空、不许拿 v4Seq/Transport seq 顶替。
+			var source struct {
+				Message struct {
+					ID string `json:"id"`
+				} `json:"message"`
+			}
+			if err := json.Unmarshal(ev.Data, &source); err != nil || source.Message.ID == "" {
+				t.Fatalf("assistant 事件缺持久 message.id：%s err=%v", ev.Data, err)
+			}
+			if identity.MessageID != source.Message.ID {
+				t.Fatalf("assistant messageId=%q 未透传持久 id=%q", identity.MessageID, source.Message.ID)
+			}
+			if identity.MessageID == "v4:"+strconv.FormatInt(*identity.V4Seq, 10) {
+				t.Fatalf("assistant messageId 退化成位置 %q", identity.MessageID)
 			}
 		}
 	}

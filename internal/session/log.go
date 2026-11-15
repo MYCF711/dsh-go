@@ -212,12 +212,21 @@ func ToolResultEvent(turn, step int, callID string, blocks []spi.Block, isError 
 // AssistantMessageEvent 构造 assistant/message 的 data。
 //
 // 已知差异：`stream` 里的 replayState 等回放细节暂写空，等流式记录层落地再补。
+//
+// 消息身份（ID-PERSIST）：`message.id` 在**这里**分配一次并随事件落盘。
+//
+// 为什么必须写在这里而不是读的时候算：v4 是 append-only，读路径不许写盘，
+// 于是"读时生成"只能每次现算一个值——同一条消息换一次读就换一个身份，
+// 界面挂在它上面的点赞/评论立刻对不上。官方也是建消息时分配一次的
+// （`@deepseek-ai/dsh-llm` 的 `src/message.ts:139-141` `MessageBase.id`，
+// `src/message.ts:226` `createMessage` 用 `randomUUID()` 赋值），
+// 所以这里给一个等价的持久 uuid，写进去就永不变。
 func AssistantMessageEvent(turn, step int, blocks []map[string]any, finish string, usage map[string]any) map[string]any {
 	reason := map[string]any{"kind": finishReasonKind(finish)}
 	data := map[string]any{
 		"turn":    turn,
 		"step":    step,
-		"message": map[string]any{"role": "assistant", "content": blocks},
+		"message": map[string]any{"role": "assistant", "content": blocks, "id": NewID()},
 		"stream": []map[string]any{{
 			"type":   "finish",
 			"reason": reason,
@@ -271,6 +280,11 @@ func TurnEndKind(finish string) string {
 }
 
 // SystemMessageData 构造 system/message 的 data（角色=system，首条受保护）。
+//
+// `message.id` 同 AssistantMessageEvent：写时分配、随事件落盘。官方 v4 明确要求
+// 非空 system message id（`@deepseek-ai/dsh-session-format-v3-to-v4` 的
+// `src/system-message.ts:43`：`string(message['id'], 'system message id', true)`），
+// 缺了它官方校验器会认为这条 v4 记录不合法。
 func SystemMessageData(turn, step int, text string) map[string]any {
 	return map[string]any{
 		"turn": turn,
@@ -278,6 +292,7 @@ func SystemMessageData(turn, step int, text string) map[string]any {
 		"message": map[string]any{
 			"role":    "system",
 			"content": []map[string]any{TextBlock(text)},
+			"id":      NewID(),
 		},
 		"surfaceOp": "append",
 	}

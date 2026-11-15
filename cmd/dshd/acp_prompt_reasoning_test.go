@@ -284,6 +284,11 @@ func TestACPPromptPersistsReasoningBlocks(t *testing.T) {
 // 两次跑不可能相等；也不是"解出来的结构"，那会把键序/空数组/多余字段一起放过）。
 // 基线是没有思考、没有调用、带 usage 的一轮：这正是最常见的那种回答，它落盘长什么样
 // 必须与改动前**逐字节**一样。
+//
+// ID-PERSIST（2026-11-15）：`message.id` 是显式审查过的形状增量（官方 v4 的消息对象
+// 本来就带 `MessageBase.id`，`dsh-llm/src/message.ts:139-141`），不属于"误伤"。
+// 所以先把身份位归一化成固定占位符再逐字节比：**其余每一个字节仍要与改前相同**，
+// 而身份本身由 `normalizeAssistantMessageID` 单独钉住（必须存在、必须是 uuidv4）。
 func TestACPPromptNoReasoningPayloadBytesUnchanged(t *testing.T) {
 	r, _, _ := newPromptHarness(t, ssePlainText(t, "好"), modes.DefaultID, nil)
 	cwd := t.TempDir()
@@ -298,11 +303,11 @@ func TestACPPromptNoReasoningPayloadBytesUnchanged(t *testing.T) {
 	if got := streamedReasoning(evs); got != "" {
 		t.Fatalf("假网关吐了思考（%q），这条用例就不再是「没有思考的一轮」，基线等于没设", got)
 	}
-	const want = `{"message":{"content":[{"text":"好","type":"text"}],"role":"assistant"},` +
+	const want = `{"message":{"content":[{"text":"好","type":"text"}],"id":"<message-id>","role":"assistant"},` +
 		`"step":1,"stream":[{"reason":{"kind":"completed"},"type":"finish"}],` +
 		`"surfaceOp":"append","turn":1,` +
 		`"usage":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}`
-	if string(raw) != want {
-		t.Fatalf("没有思考的一轮，落盘字节变了。\n实际: %s\n期望: %s", raw, want)
+	if got := string(normalizeAssistantMessageID(t, raw)); got != want {
+		t.Fatalf("没有思考的一轮，落盘字节变了。\n实际: %s\n期望: %s", got, want)
 	}
 }
