@@ -343,7 +343,11 @@ func loadModsIn(manifestPath, home string, maxChars int, sub *subProvider, workd
 		closeLoadedWasm(context.Background())
 		return nil, err
 	}
-	return applied, nil
+	// 凭据模块与 plugin-runtime 同一条理由追加在 Apply **之后**：它不是可配置
+	// 能力，而是宿主基础设施。放进 builtinModules 会被 dsh.toml 白名单静默丢掉
+	// （Apply 对没列出的模块只打一行 Warn），症状就是「界面上存了 API Key，
+	// 搜索却还是不生效」——正是这条接缝要修的那个用户可见缺口。
+	return append(applied, credentialsModule(home)), nil
 }
 
 // loadModsWithPlugins = loadMods + 插件运行时模块（`plugin-runtime`）。

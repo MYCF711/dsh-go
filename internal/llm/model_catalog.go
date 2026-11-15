@@ -542,6 +542,30 @@ func (s *ModelCatalogStore) DescribeCredentials(refs []string, env func(string) 
 	return views, nil
 }
 
+// StoredCredential 返回 ref 在独立凭据存储里的**当前值**（不回落环境变量）。
+//
+// 它只为一件事存在：把官方"可写凭据存储是主来源"这条语义暴露成一条只读取值
+// 路径，让宿主能把它注册成 `spi.CredentialResolver` 交给模块（模块问的就是
+// "库里有没有这个 ref"）。环境变量的回落**故意不在这里**：一个凭据常有多个
+// 别名 ref，回落放在调用方才能保证"任意一个别名在库里"赢过"任意一个环境变量"。
+//
+// 值与 `credentialStatusLocked` 用同一张表、同一套 trim 规则；loadErr（目录
+// 损坏）按"没有这个值"回答 —— 调用方只能退化成"只读环境"，而目录损坏本身
+// 已经在 catalog API 上 fail-loud，不靠这里兜。返回值只交给需要它的调用方，
+// **绝不进日志/错误串**。
+func (s *ModelCatalogStore) StoredCredential(ref string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loadErr != nil {
+		return "", false
+	}
+	value := strings.TrimSpace(s.doc.Credentials[ref])
+	if value == "" {
+		return "", false
+	}
+	return value, true
+}
+
 // SetCredential 独立写入一个凭据引用：ref **不需要**被任何 catalog 模型引用。
 // 值与 `models.catalog.upsert` 的顶层 credential 写的是同一张表（同一个文件、
 // 同一把锁、同一个 revision），因此两条路径不会出现两份真值。

@@ -236,3 +236,62 @@ func TestNewWebProvidersFromEnv(t *testing.T) {
 		t.Fatalf("钉死的 provider 没生效: %v %v", err, selected)
 	}
 }
+
+// fakeCredentials 是固定的 ref→值映射（模拟宿主独立凭据存储）。
+type fakeCredentials map[string]string
+
+func (f fakeCredentials) ResolveCredential(ref string) (string, bool) {
+	value, ok := f[ref]
+	return value, ok
+}
+
+// 凭据来源优先级：**凭据库 > 环境**（官方 credentials provider：可写文件是主来源）。
+//
+// 关键是别名要**分两轮**问：先把库问一遍，再问环境。逐个别名地做「库→env」
+// 会让「库里的别名」输给「环境里的主名」，正好把官方优先级反过来 ——
+// 下面的 "库里的别名赢环境里的主名" 就是钉这一点的。
+func TestDeepSeekResolvedAPIKeyPrecedence(t *testing.T) {
+	cases := []struct {
+		name   string
+		stored map[string]string
+		env    map[string]string
+		want   string // "" = 解析不到（provider 不可用）
+	}{
+		{"只有库", map[string]string{"DEEPSEEK_API_KEY": "k-store-main"}, nil, "k-store-main"},
+		{"库+环境：库赢", map[string]string{"DEEPSEEK_API_KEY": "k-store-main"}, map[string]string{"DEEPSEEK_API_KEY": "k-env-main"}, "k-store-main"},
+		{"库里的别名赢环境里的主名", map[string]string{"DSHD_SEARCH_API_KEY": "k-store-alias"}, map[string]string{"DEEPSEEK_API_KEY": "k-env-main"}, "k-store-alias"},
+		{"只有环境（别名）", nil, map[string]string{"DSHD_SEARCH_API_KEY": "k-env-alias"}, "k-env-alias"},
+		{"环境里主名优先于别名", nil, map[string]string{"DEEPSEEK_API_KEY": "k-env-main", "DSHD_SEARCH_API_KEY": "k-env-alias"}, "k-env-main"},
+		{"都没有", nil, nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(name string) string { return tc.env[name] }
+			provider := newDeepSeek(getenv, fakeCredentials(tc.stored))
+			if got := provider.resolvedAPIKey(); got != tc.want {
+				// 失败信息只说"哪一档不对"，不打印凭据值。
+				t.Fatalf("解析出的 key 不是预期那一档（want 空=%v got 空=%v）", tc.want == "", got == "")
+			}
+			if tc.want == "" && provider.Available() {
+				t.Fatal("解析不到 key 时 provider 不能算可用")
+			}
+		})
+	}
+}
+
+// 显式注入的 APIKey（宿主直构 / 测试）永远最优先：调用方已经决定了这个值。
+func TestDeepSeekExplicitAPIKeyWins(t *testing.T) {
+	provider := newDeepSeek(
+		func(name string) string {
+			if name == "DEEPSEEK_API_KEY" {
+				return "k-env-main"
+			}
+			return ""
+		},
+		fakeCredentials{"DEEPSEEK_API_KEY": "k-store-main"},
+	)
+	provider.APIKey = "k-explicit"
+	if got := provider.resolvedAPIKey(); got != "k-explicit" {
+		t.Fatal("显式注入的 APIKey 必须最优先")
+	}
+}

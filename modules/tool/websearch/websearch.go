@@ -161,7 +161,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		queries = append(queries, query)
 	}
 	if t.Web == nil {
-		return spi.Result{Hint: "宿主没有装搜索后端；要么配 DSHD_SEARCH_URL / DEEPSEEK_API_KEY，要么改用 web_fetch 直接取某个网址"},
+		return spi.Result{Hint: "宿主没有装搜索后端；要么在设置里存 DEEPSEEK_API_KEY / 配 DSHD_SEARCH_URL，要么改用 web_fetch 直接取某个网址"},
 			fmt.Errorf("没有搜索服务")
 	}
 
@@ -391,15 +391,15 @@ func capSummary(s string, maxChars int) string {
 func searchHint(err error) string {
 	switch spi.WebErrorCode(err) {
 	case spi.WebProviderCredentialMissing:
-		return "DeepSeek 搜索没有 API key：设 DEEPSEEK_API_KEY（或 DSHD_SEARCH_API_KEY），或者改用 web_fetch 直接取具体网址"
+		return "DeepSeek 搜索没有 API key：在设置里存一个 DEEPSEEK_API_KEY（或设环境变量 DEEPSEEK_API_KEY / DSHD_SEARCH_API_KEY），或者改用 web_fetch 直接取具体网址"
 	case spi.WebProviderConfiguredMissing:
 		return "配置的搜索 provider 没有注册：检查 DSHD_WEB_SEARCH_PROVIDER 的取值（searxng / deepseek-official）"
 	case spi.WebProviderConfiguredUnavailable:
-		return "配置的搜索 provider 当前不可用：DeepSeek 搜索需要 DEEPSEEK_API_KEY（或 DSHD_SEARCH_API_KEY），SearxNG 需要 DSHD_SEARCH_URL；修好凭据/端点，或用 DSHD_WEB_SEARCH_PROVIDER 换一个 provider"
+		return "配置的搜索 provider 当前不可用：DeepSeek 搜索要在设置里存 DEEPSEEK_API_KEY（或环境变量 DEEPSEEK_API_KEY / DSHD_SEARCH_API_KEY），SearxNG 需要 DSHD_SEARCH_URL；修好凭据/端点，或用 DSHD_WEB_SEARCH_PROVIDER 换一个 provider"
 	case spi.WebProviderAmbiguous:
 		return "有多个可用的搜索 provider：用 DSHD_WEB_SEARCH_PROVIDER 钉死一个（searxng / deepseek-official）"
 	case spi.WebProviderUnavailable:
-		return "这个宿主没配搜索后端：设 DSHD_SEARCH_URL（SearxNG 风格端点）或 DEEPSEEK_API_KEY（DeepSeek 原生搜索），或者改用 web_fetch 直接取具体网址"
+		return "这个宿主没配搜索后端：在设置里存 DEEPSEEK_API_KEY（DeepSeek 原生搜索）、或设 DSHD_SEARCH_URL（SearxNG 风格端点），或者改用 web_fetch 直接取具体网址"
 	case spi.WebProviderError:
 		return "搜索后端出错：先用 web_fetch 直接取一个你信得过的网址，别在这里反复重试"
 	case spi.WebSearchTimeout:
