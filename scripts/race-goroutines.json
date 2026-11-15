@@ -115,7 +115,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:764",
+      "site": "cmd/dshd/main.go:772",
       "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
       "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"
@@ -127,7 +127,7 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:903",
+      "site": "cmd/dshd/main.go:911",
       "what": "run 的看门狗协程：父进程没了就取消本轮 ctx",
       "sync": "读过：只调 cancel()，不碰会话/日志；runCtx 与主 goroutine 共享，取消是幂等的",
       "verified_at": "2026-11-04"
@@ -325,19 +325,19 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:910",
+      "site": "cmd/dshd/main.go:918",
       "what": "父进程看门狗：父没了就取消本轮 ctx",
       "sync": "读过：只调 stopOnParentGone()（cancel 幂等），不碰会话/日志",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:903",
+      "site": "cmd/dshd/main.go:911",
       "what": "serveJobsOut：后台任务通道",
       "sync": "读过：写 stdout 的 @@JOBS@@ 行，写侧有自己的一把锁；读的是 jobs 服务的快照",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:910",
+      "site": "cmd/dshd/main.go:918",
       "what": "serveSteerIPC：steer IPC 接收循环",
       "sync": "读过：收到的请求投进 steerInbox（自己加锁的队列）；runCtx 取消即退",
       "verified_at": "2026-11-09"
@@ -565,7 +565,7 @@
       "verified_at": "2026-11-13"
     },
     {
-      "site": "cmd/dshd/subagent.go:462",
+      "site": "cmd/dshd/subagent.go:480",
       "what": "两段式委派的 child 执行体（RunSub 跑在 goroutine 里，发布时就能拿到 childId）",
       "sync": "读过：goroutine 只写 activation.result/err，写完 defer close(done) 建立 happens-before；Await 只 select done/ctx.Done，读 result 一定在 done 关闭之后；childCtx 由 Await 取消或 run 取消传播；panic 被 recover 成 err（AGENT_RESULT）",
       "verified_at": "2026-11-13"
