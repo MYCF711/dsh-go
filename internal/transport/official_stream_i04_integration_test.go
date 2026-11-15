@@ -159,9 +159,9 @@ func TestI04ProjectionsBaselineIsSharedAcrossThreeFaces(t *testing.T) {
 	controlKeys := sortedKeys(controlBlock.Values)
 
 	want := []string{
-		"agentPreset", "contextPressure", "modelSelection", "permissions", "sessionListMetadata",
-		"sessionStats", "subagent", "subagentCatalog", "subagentTiming", "title", "todos", "tokenUsage",
-		"workingDirectory",
+		"agentPreset", "contextPressure", "modelSelection", "permissions", "plan",
+		"sessionListMetadata", "sessionStats", "subagent", "subagentCatalog",
+		"subagentTiming", "title", "todos", "tokenUsage", "workingDirectory",
 	}
 	if !sameKeys(httpKeys, want) {
 		t.Fatalf("HTTP values 键 = %v，want %v", httpKeys, want)

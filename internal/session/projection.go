@@ -362,12 +362,18 @@ var cwdSchema = storage.Nullable(storage.SchemaFunc(func(value any) error {
 	return nil
 }))
 
-// DefaultProjectionRegistry 返回宿主真实注册的六台投影单元。
+// DefaultProjectionRegistry 返回宿主真实注册的七台投影单元。
 //
-// 为什么只有六个：其余官方键（modelSelection / todos / inbox / actionCards /
+// 为什么只有七个：其余官方键（modelSelection / todos / inbox / actionCards /
 // agentPreset / subagent / imageLimits / subagentCatalog / subagentTiming）
 // 在本宿主要么没有事件来源、要么事件字段不足（例如 `model/selection` 没有
 // 官方 `ModelSelection.provider`），注册一个推不出真值的单元就是伪造。
+//
+// `plan` 之所以在册而别的官方键不在：它有真实事件来源——`plan/mode` 是 v4 词汇
+// 表成员（读官方会话日志时要认），而宿主自己的两个计划模式工具
+// （`enter_plan_mode` / `exit_plan_mode`）的 `tool/call` + `tool/result` 配对
+// 就是"这次切换要落到哪个状态、有没有落地、有没有失败"的完整证据，见
+// plan_projection.go。
 func DefaultProjectionRegistry() *ProjectionRegistry {
 	registry, err := NewProjectionRegistry(
 		ProjectionUnit{
@@ -415,6 +421,11 @@ func DefaultProjectionRegistry() *ProjectionRegistry {
 		// `usage`（宿主写侧见 cmd/dshd/assistant_usage.go）与 `llm/retry-started`，
 		// 见 token_usage.go。界面用量弹窗只认这个键。
 		TokenUsageUnit(),
+		// 官方 `plan`（stateVersion 4，`@deepseek-ai/dsh-plan-mode`）：
+		// 计划模式的 `{active, pending}`。事件来源是 `plan/mode`（官方写侧）与
+		// 宿主两个计划模式工具的 `tool/call` / `tool/result` 配对，见
+		// plan_projection.go。客户端的输入框 `runMode` 与计划模式控件只认这个键。
+		PlanUnit(),
 	)
 	if err != nil {
 		// 这些单元是写死的常量；走到这里说明代码坏了，启动即失败。

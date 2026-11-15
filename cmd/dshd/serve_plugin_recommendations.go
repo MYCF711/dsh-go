@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"dshgo/internal/actioncards"
 	"dshgo/internal/market"
@@ -21,6 +22,13 @@ import (
 )
 
 func newPluginRecommendationsAPI(home string, manager *pluginmgr.Manager) (transport.OfficialPluginRecommendationsAPI, error) {
+	// 官方 `create_personalized_page` kind 与 propose_action/actionCards.act 共享同一个
+	// actioncards.Service（按 home 复用），所以在这里一并注册（见
+	// serve_creation_recommendations.go）。注册失败只影响那张卡：打印真实原因，
+	// 不让 recommendations.describe 跟着一起 501。
+	if creationErr := attachCreationRecommendations(home, manager); creationErr != nil {
+		fmt.Fprintf(os.Stderr, "creation-recommendations: %v\n", creationErr)
+	}
 	service, err := recommendations.New(home, manager, market.Open(home), actioncards.Open(home))
 	if err != nil {
 		return transport.OfficialPluginRecommendationsAPI{}, err

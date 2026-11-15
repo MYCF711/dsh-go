@@ -76,6 +76,22 @@ type Kind struct {
 	Details    func(json.RawMessage) error
 	Verbs      map[string]VerbPolicy
 	OpenPhases []string
+	// DelegateVerbs 声明"**不看 phase**、永远交给 kind 自己判断"的动词。
+	//
+	// 为什么需要：官方 kind 的 `act()` 本身就是按 phase 分派的
+	// （creation-recommendations/src/index.ts 的 `decide()` 里逐 phase 判断），
+	// 宿主的 `OpenPhases` 只是"默认闸门"的简化。官方 `create_personalized_page`
+	// 的四个动词全部依赖这个形状：
+	//
+	//	undo    在 installed / kept 卡上才真实卸载（这两个 phase 不在 openPhases）
+	//	restore 在 **removed** 卡上重装（removed 还是宿主的共享终态）
+	//	cancel  在没有后台任务时回已记录的 decision
+	//	create  在 cancelled/failed/interrupted/unconfirmed 上重试，其它 phase 回 settled
+	//
+	// 声明了 DelegateVerbs 的动词不再受 `OpenPhases`/共享终态闸门限制，由 kind
+	// 返回 settled/refused 自己解释；不声明时保持既有语义（phase 不允许就直接
+	// 回 `settled{decision: existing}`，不问 kind）。
+	DelegateVerbs map[string]bool
 	// Reconcile 在 unconfirmed 卡每次动作（含 dismiss）前重读真实状态；
 	// 返回非 nil decision 时直接落盘并 settled，不再执行原动作。
 	Reconcile func(Proposal, Decision) (*Decision, error)
@@ -288,10 +304,18 @@ func (s *Service) Act(ctx context.Context, sessionID, callID, verb string, paylo
 	if _, allowed := kind.Verbs[verb]; !allowed {
 		return Result{Status: StatusRefused, Reason: "unavailable"}, nil
 	}
-	if hasDecision && (finalPhases[existing.Phase] || !openPhase(kind, existing.Phase)) {
-		return Result{Status: StatusSettled, Decision: &existing}, nil
+	if hasDecision && !kind.DelegateVerbs[verb] {
+		// 默认闸门：共享终态（dismissed/removed/replaced）与不在 openPhases 里的
+		// phase 都不再问 kind，直接回已记录的 decision。声明 DelegateVerbs 的
+		// 动词由 kind 自己按 phase 判断（官方 kind 的 act 就是这个形状）。
+		if finalPhases[existing.Phase] || !openPhase(kind, existing.Phase) {
+			return Result{Status: StatusSettled, Decision: &existing}, nil
+		}
 	}
-	result, err := kind.Act(ctx, proposal, verb, payload)
+	actCtx := WithActContext(ctx, ActContext{
+		SessionID: sessionID, Proposal: proposal, Decision: existing, HasDecision: hasDecision,
+	})
+	result, err := kind.Act(actCtx, proposal, verb, payload)
 	if err != nil {
 		return Result{}, err
 	}

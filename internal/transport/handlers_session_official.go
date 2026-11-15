@@ -991,6 +991,12 @@ func (s *Server) officialProjectionValues(host OfficialSessionHost, sessionID st
 	// 见 token_usage_view.go）。用量弹窗（`UsagePill`）与统计面板合计行只认这个
 	// 键，缺了它界面就只能把用量画成「未知」。
 	values["tokenUsage"] = officialTokenUsageView(events)
+	// 官方 `plan`：计划模式的 `{active, pending}`（两个字段都必填，见
+	// plan_view.go）。客户端输入框的 `runMode` 与计划模式控件只认这个键：
+	// 缺了它，进了计划模式的会话在界面上仍然显示成默认模式。
+	// 键**总是**出现——官方把「键缺席」定义为「部署里没装 plan-mode 能力」，
+	// 而宿主总是装了（`modules/tool/plan`）。
+	values["plan"] = officialPlanView(events)
 
 	if ph, ok := host.(OfficialProjectionHost); ok {
 		lastUsed, next, err := ph.ModelSelection(sessionID)

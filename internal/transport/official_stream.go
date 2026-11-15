@@ -70,6 +70,7 @@ import (
 	"io"
 	"time"
 
+	"dshgo/codecs/v4"
 	"dshgo/internal/session"
 )
 
@@ -859,6 +860,13 @@ type officialProjectionFold struct {
 	teamMode    map[string]any
 	hasTeamMode bool
 
+	// plan 是官方 `plan` 投影的**增量**折叠（与 HTTP `officialProjectionValues`
+	// 的 `session.ProjectPlan` 是同一台折叠：同一个 ProjectionUnit 的 apply/view）。
+	// 这里的 `planView` 是最近一次发出的 wire 值，`Values()` 用它做基线，
+	// `Apply()` 用它判"这次真的变了没有"。
+	plan     *session.PlanFolder
+	planView session.PlanProjection
+
 	// foldErr 记"这条已提交事件我们读不懂"的第一次错误（rc.2 起未知类型不得静默吞掉）。
 	// Apply 没有 error 返回值（调用方要 per-event 的改动集），所以错误记在这里，
 	// 由流帧机在 apply 之后**显式**转成 fault——不吞。
@@ -872,13 +880,26 @@ func newOfficialProjectionFold() *officialProjectionFold {
 // newOfficialProjectionFoldFor 带会话身份构造折叠器：`subagent` / `subagentTiming`
 // 只对**本会话自己**的 `subagent/spawn` 成立，没身份就折不出这两个键。
 func newOfficialProjectionFoldFor(sessionID string) *officialProjectionFold {
-	return &officialProjectionFold{blank: true, lastPromptAt: -1, sessionID: sessionID}
+	return &officialProjectionFold{
+		blank: true, lastPromptAt: -1, sessionID: sessionID,
+		plan: session.NewPlanFolder(),
+	}
 }
 
 // Apply 折叠一个事件，返回它改动的键（按官方语义：没改任何键就是空数组）。
 func (f *officialProjectionFold) Apply(ev DurableEvent) []officialProjectionChange {
 	f.events = append(f.events, ev)
 	changes := make([]officialProjectionChange, 0, 2)
+	// 官方 `plan`：**先折**，因为下面 switch 里有的分支会提前 return（那些事件
+	// 与 plan 无关，但提前 return 会漏掉折叠，顺序写反就会丢状态）。
+	// 只在 wire 值真的变了时报帧——`{false,false}` 是初始值，所以第一次折叠
+	// 一定报一次，此后只有真正切换才报，客户端不会收到一串没变化的帧。
+	if f.plan != nil {
+		if view, changed := f.plan.Apply(v4.Event{Type: ev.Type, Seq: ev.Seq, Time: ev.Time, Data: ev.Data}); changed {
+			f.planView = view
+			changes = append(changes, officialProjectionChange{Key: session.ProjectionKeyPlan, Val: view})
+		}
+	}
 	switch ev.Type {
 	case "turn/start":
 		if f.blank {
@@ -1030,6 +1051,11 @@ func (f *officialProjectionFold) Values(asOfSeq int64, extras officialProjection
 	if f.hasTeamMode {
 		values["teamMode"] = f.teamMode
 	}
+	// 官方 `plan`：与 HTTP `officialProjectionValues` 同键同源，而且**总是出现**
+	// （官方把"键缺席"定义为"部署里没装 plan-mode"，宿主总是装了）。
+	// 基线帧与增量帧因此说的是同一件事：`observeProjections` 的基线里有 plan，
+	// 之后的切换由 `Apply` 发变化帧。
+	values["plan"] = f.planView
 	return OfficialProjections{AsOfSeq: asOfSeq, Values: values}
 }
 
