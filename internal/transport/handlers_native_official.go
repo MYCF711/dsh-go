@@ -152,6 +152,17 @@ func (s *Server) ServeOfficialNativeAPI(w http.ResponseWriter, r *http.Request, 
 			writeOfficialError(w, err)
 			return
 		}
+		// 官方 `directoryPicker` 是**互斥组合**：`pick` 属于 native 那一套，
+		// 组合若是 browse 就必须在这里拒绝（官方
+		// dsh-api-workspace-controller/src/directory-picker.ts:54-62 + :105-119
+		// 的 requireCapability('native','pick')），而不是悄悄弹一个原生框。
+		// 未声明组合的 Server（装配阶段还没挂 seam）保持原行为：pick 由原生
+		// 能力直供——生产装配（cmd/dshd）**总是**先声明再服务，所以线上不存在
+		// 这条分支；它只为"只测原生 5 方法"的 transport 单测保留。
+		if kind, declared := s.officialDirectoryPickerKind(); declared && kind != DirectoryPickerKindNative {
+			writeOfficialError(w, directoryPickerUnavailable("pick", DirectoryPickerKindNative, kind))
+			return
+		}
 		if api.PickDirectory == nil {
 			writeOfficialNativeError(w, nativeNotWired(name, "PickDirectory"))
 			return

@@ -39,7 +39,7 @@ type officialWorkspaceHarness struct {
 	home   string
 	host   *officialWorkspaceHost
 	api    transport.OfficialWorkspaceAPI
-	picker transport.OfficialDirectoryPickerAPI
+	picker transport.OfficialDirectoryPickerSeam
 }
 
 func newOfficialWorkspaceHarness(t *testing.T) *officialWorkspaceHarness {
@@ -55,7 +55,7 @@ func newOfficialWorkspaceHarnessAt(t *testing.T, home string) *officialWorkspace
 	if host == nil {
 		t.Fatal("newOfficialWorkspaceHost 返回 nil")
 	}
-	return &officialWorkspaceHarness{home: home, host: host, api: host.workspaceAPI(), picker: host.directoryPickerAPI()}
+	return &officialWorkspaceHarness{home: home, host: host, api: host.workspaceAPI(), picker: host.directoryPickerBrowseSeam()}
 }
 
 // call 打一次方法，返回 HTTP 状态与信封。
@@ -701,7 +701,7 @@ func TestOfficialDirectoryPickerRealListAndCreate(t *testing.T) {
 
 	host := newOfficialWorkspaceHost(t.TempDir(), nil, nil)
 	host.pickerHome = absHome // 生产上默认是 os.UserHomeDir()
-	picker := host.directoryPickerAPI()
+	picker := host.directoryPickerBrowseSeam()
 
 	call := func(t *testing.T, method string, body any) (int, map[string]any) {
 		t.Helper()
@@ -1158,7 +1158,7 @@ func newOfficialWorkspaceEventFixture(t *testing.T) *officialWorkspaceEventFixtu
 // harness 给 fixture 套上"走 transport 分派"的调用口（与 officialWorkspaceHarness 同一条路径）。
 func (f *officialWorkspaceEventFixture) harness() *officialWorkspaceHarness {
 	return &officialWorkspaceHarness{
-		home: f.home, host: f.host, api: f.host.workspaceAPI(), picker: f.host.directoryPickerAPI(),
+		home: f.home, host: f.host, api: f.host.workspaceAPI(), picker: f.host.directoryPickerBrowseSeam(),
 	}
 }
 

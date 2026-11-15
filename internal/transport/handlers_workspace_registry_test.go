@@ -77,7 +77,7 @@ func callWorkspaceMethod(t *testing.T, name string, body string, api OfficialWor
 	req := httptest.NewRequest(http.MethodPost, "/api/"+name, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	ServeOfficialWorkspace(rec, req, name, api, OfficialDirectoryPickerAPI{})
+	ServeOfficialWorkspace(rec, req, name, api, OfficialDirectoryPickerSeam{})
 	var payload map[string]any
 	if rec.Body.Len() > 0 {
 		_ = json.Unmarshal(rec.Body.Bytes(), &payload)

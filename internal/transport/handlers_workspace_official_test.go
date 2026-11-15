@@ -25,16 +25,22 @@ import (
 )
 
 // officialWorkspaceTestServer 造一个挂了官方 workspace 实现的 Server。
-func officialWorkspaceTestServer(t *testing.T, api OfficialWorkspaceAPI, picker OfficialDirectoryPickerAPI) *Server {
+func officialWorkspaceTestServer(t *testing.T, api OfficialWorkspaceAPI, picker OfficialDirectoryPickerSeam) *Server {
 	t.Helper()
 	srv, err := NewServer(Options{})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
 	srv.AttachOfficialWorkspaceAPI(api)
-	srv.AttachOfficialDirectoryPickerAPI(picker)
+	// 零值 = 这个用例不要 directoryPicker 组合（不是"挂一个空组合"）：seam 的
+	// 声明只有 native/browse 两个合法值，空组合本身就是装配错误。
+	if picker.Kind != "" {
+		if err := srv.AttachOfficialDirectoryPickerSeam(picker); err != nil {
+			t.Fatalf("挂 directoryPicker seam: %v", err)
+		}
+		t.Cleanup(srv.DetachOfficialDirectoryPickerSeam)
+	}
 	t.Cleanup(srv.DetachOfficialWorkspaceAPI)
-	t.Cleanup(srv.DetachOfficialDirectoryPickerAPI)
 	return srv
 }
 
@@ -198,7 +204,7 @@ func TestOfficialWorkspaceCreateIsIdempotentShape(t *testing.T) {
 			}, nil
 		},
 	}
-	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerSeam{})
 
 	// 嵌套 request 写法（官方 wire 是对象参数）。
 	code, out := callOfficialWorkspace(t, srv, "workspace.create", map[string]any{"request": map[string]any{"path": "/tmp/ws-a"}})
@@ -307,7 +313,7 @@ func TestOfficialWorkspaceMutationsForwardToHost(t *testing.T) {
 			return []string{}, nil
 		},
 	}
-	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerSeam{})
 
 	code, out := callOfficialWorkspace(t, srv, "workspace.rename", map[string]any{"workspaceId": "ws-a", "title": "新名字"})
 	if code != http.StatusOK {
@@ -433,7 +439,7 @@ func TestOfficialWorkspaceArchiveActiveRequiresStopActivity(t *testing.T) {
 			return []string{sessionID, "s-old"}, nil
 		},
 	}
-	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerSeam{})
 
 	code, out := callOfficialWorkspace(t, srv, "workspace.archiveSession", map[string]any{"sessionId": "s1"})
 	assertFourFieldError(t, code, out, http.StatusConflict, "revision_conflict")
@@ -481,7 +487,7 @@ func TestOfficialWorkspaceErrorsAreFourField(t *testing.T) {
 				return OfficialWorkspaceError(tc.fault, "宿主拒绝：%s", tc.fault)
 			},
 		}
-		srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerAPI{})
+		srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerSeam{})
 		code, out := callOfficialWorkspace(t, srv, "workspace.delete", map[string]any{"workspaceId": "ws-a"})
 		assertFourFieldError(t, code, out, tc.wantStatus, tc.wantCode)
 		if msg := officialWorkspaceErrorMessage(t, out); !strings.Contains(msg, tc.fault) {
@@ -489,7 +495,7 @@ func TestOfficialWorkspaceErrorsAreFourField(t *testing.T) {
 		}
 		// 兜底：认不出的错误必须是 500 internal，绝不能被渲染成成功。
 		api.Delete = func(string) error { return errors.New("磁盘只读") }
-		srv = officialWorkspaceTestServer(t, api, OfficialDirectoryPickerAPI{})
+		srv = officialWorkspaceTestServer(t, api, OfficialDirectoryPickerSeam{})
 		code, out = callOfficialWorkspace(t, srv, "workspace.delete", map[string]any{"workspaceId": "ws-a"})
 		assertFourFieldError(t, code, out, http.StatusInternalServerError, "internal")
 	}
@@ -539,7 +545,7 @@ func TestOfficialWorkspaceFilesZodShapes(t *testing.T) {
 			return OfficialWorkspaceFileStat{AbsolutePath: "/tmp/a/a.txt", Version: "v-2", Bytes: &size}, nil
 		},
 	}
-	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerSeam{})
 
 	// scope 的官方 wire 名是 workspaceFileScopeId（typert lookup，wire 保留）。
 	code, out := callOfficialWorkspace(t, srv, "workspaceFiles.list", map[string]any{
@@ -663,7 +669,7 @@ func TestOfficialWorkspaceFilesBytesAndChangesAreHonest(t *testing.T) {
 			}, nil
 		},
 	}
-	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerSeam{})
 
 	code, out := callOfficialWorkspace(t, srv, "workspaceFiles.readBytes", map[string]any{
 		"workspaceFileScopeId": "s1", "path": "a.bin",
@@ -720,7 +726,8 @@ func TestOfficialDirectoryPickerListAndCreate(t *testing.T) {
 	workDir := filepath.Join(homeDir, "work")
 	var listPath string
 	var gotParent, gotName string
-	picker := OfficialDirectoryPickerAPI{
+	picker := OfficialDirectoryPickerSeam{
+		Kind: DirectoryPickerKindBrowse,
 		List: func(path string) (OfficialDirectoryListing, error) {
 			listPath = path
 			return OfficialDirectoryListing{
@@ -859,8 +866,8 @@ func TestOfficialWorkspaceTwoServersDoNotMix(t *testing.T) {
 			},
 		}
 	}
-	a := officialWorkspaceTestServer(t, mk("ws-a"), OfficialDirectoryPickerAPI{})
-	b := officialWorkspaceTestServer(t, mk("ws-b"), OfficialDirectoryPickerAPI{})
+	a := officialWorkspaceTestServer(t, mk("ws-a"), OfficialDirectoryPickerSeam{})
+	b := officialWorkspaceTestServer(t, mk("ws-b"), OfficialDirectoryPickerSeam{})
 
 	for _, tc := range []struct {
 		srv  *Server
@@ -917,7 +924,7 @@ func TestOfficialWorkspaceDirectoryTargetStatAndChanges(t *testing.T) {
 		}
 		return OfficialWorkspaceFileStat{AbsolutePath: dirAbs, Version: version, IsDirectory: true}, nil
 	}
-	srv := officialWorkspaceTestServer(t, OfficialWorkspaceAPI{FilesStat: dirStat}, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, OfficialWorkspaceAPI{FilesStat: dirStat}, OfficialDirectoryPickerSeam{})
 
 	// 1) unary stat：官方只认普通文件，目录必须 400 且点名 not-a-file。
 	code, out := callOfficialWorkspace(t, srv, "workspaceFiles.stat", map[string]any{

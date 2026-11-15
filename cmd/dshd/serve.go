@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -188,6 +189,12 @@ func cmdServe(args []string) error {
 	serveReasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
 		"推理强度：空=不要（默认）| xhigh | max")
 	addr := fs.String("addr", "", "监听地址（默认 127.0.0.1:0，端口由 OS 分配）")
+	// directoryPicker 是**互斥组合**（官方一个 Context 只能挂一套：native 的 pick
+	// 或 browse 的 list/createDirectory）。空 = 自动，按官方 resolve 的兜底取 browse
+	// ——理由见 serve_directory_picker_seam.go 的文件头（本宿主无法自证有交互桌面）。
+	serveDirectoryPicker := fs.String("directory-picker", envOr("DSH_DIRECTORY_PICKER", ""),
+		"directoryPicker 组合：native（OS 原生目录框）| browse（应用内浏览）| 空=自动（browse）；"+
+			"客户端用 directoryPicker.list 问出来（200=browse，否则看 details.capability）")
 	// 父进程看门狗（--parent-watch / --parent-watch-interval / --parent-pid）：
 	// 三个入口共用同一组开关，见 parentwatch.go。
 	pw := addParentWatchFlags(fs)
@@ -956,6 +963,24 @@ func cmdServe(args []string) error {
 		Credentials: transport.NewCatalogCredentialStore(modelCatalog),
 	})
 	wsHost := attachOfficialWorkspace(srv, *home, src, prompts)
+	// directoryPicker 互斥组合：启动时**声明**一次，之后两个 browse 动词与 pick
+	// 都按这份声明门控（同时挂两套会被 transport 拒掉，这里当启动失败处理）。
+	pickerFacts := directoryPickerFactsFromEnv(*addr, runtime.GOOS, os.Getenv)
+	pickerKind, pickerErr := resolveDirectoryPickerKind(*serveDirectoryPicker)
+	if pickerErr != nil {
+		return pickerErr
+	}
+	if pickerKind == transport.DirectoryPickerKindNative {
+		// 声明是操作员的判断，本宿主不推翻；但与事实冲突时必须说出来，否则
+		// "原生框弹不出来"会变成一次静默失败（pick 会 fail-loud 回 500）。
+		if blocker := nativeBlocker(pickerFacts); blocker != "" {
+			fmt.Fprintf(os.Stderr,
+				"directoryPicker: 已声明 native，但%s；pick 会 fail-loud（要浏览面就 --directory-picker=browse）\n", blocker)
+		}
+	}
+	if err := attachOfficialDirectoryPickerSeam(srv, wsHost, pickerKind); err != nil {
+		return err
+	}
 	attachOfficialWorkspaceFollow(srv, wsHost)
 	worktreeSvc := attachOfficialWorktree(srv, src)
 	prompts.worktree = worktreeSvc

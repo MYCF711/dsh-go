@@ -226,10 +226,16 @@ var ErrOfficialConflict = errors.New("官方 agent API 状态冲突")
 
 // officialError 是本文内部携带"HTTP 状态 + 稳定码"的错误类型。
 // 它只在本包内使用；对外仍然收敛到 errorObject 那一个四字段构造点。
+//
+// details 对应官方 `RemoteError(code, message, details)` 的第三个参数：四字段
+// 信封是**冻结**的（恰好四个键），所以它平铺在信封顶层 `details` 那一格——与
+// `OfficialAgentFault.Details`、`stale_epoch` 的 `details.reason` 同一条先例
+// （见 server.go errorBodyFor 的注释）。
 type officialError struct {
-	status int
-	code   string
-	msg    string
+	status  int
+	code    string
+	msg     string
+	details map[string]any
 }
 
 func (e *officialError) Error() string { return e.msg }
@@ -361,7 +367,11 @@ func officialAgentFaultStatus(code string) (status int, fourcode string) {
 func writeOfficialError(w http.ResponseWriter, err error) {
 	var typed *officialError
 	if errors.As(err, &typed) {
-		writeJSON(w, typed.status, errorBodyFor(typed.code, typed.msg))
+		var extra map[string]any
+		if len(typed.details) > 0 {
+			extra = map[string]any{"details": typed.details}
+		}
+		writeJSON(w, typed.status, errorBodyFor(typed.code, typed.msg, extra))
 		return
 	}
 	var fault *OfficialAgentFault

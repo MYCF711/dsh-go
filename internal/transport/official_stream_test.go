@@ -536,7 +536,7 @@ func (f *fakeWatchFiles) set(version string, absent bool) {
 func TestOfficialStreamWorkspaceFileChanges(t *testing.T) {
 	files := &fakeWatchFiles{version: "v1"}
 	srv := officialWorkspaceTestServer(t, OfficialWorkspaceAPI{FilesStat: files.stat},
-		OfficialDirectoryPickerAPI{})
+		OfficialDirectoryPickerSeam{})
 
 	rec, _ := runStream(t, func(w http.ResponseWriter, r *http.Request) {
 		srv.serveOfficialWorkspaceAPI(w, r, "workspaceFiles.changes")
@@ -584,7 +584,7 @@ func TestOfficialStreamWorkspaceDirectoryIsSupportedByHostStat(t *testing.T) {
 		defer mu.Unlock()
 		return OfficialWorkspaceFileStat{AbsolutePath: "/work/dir", Version: version, IsDirectory: true}, nil
 	}
-	srv := officialWorkspaceTestServer(t, OfficialWorkspaceAPI{FilesStat: dirStat}, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, OfficialWorkspaceAPI{FilesStat: dirStat}, OfficialDirectoryPickerSeam{})
 
 	rec, _ := runStream(t, func(w http.ResponseWriter, r *http.Request) {
 		srv.serveOfficialWorkspaceAPI(w, r, "workspaceFiles.changes")
@@ -613,7 +613,7 @@ func TestOfficialStreamWorkspaceNonWatchableTargetIsBadRequest(t *testing.T) {
 			return OfficialWorkspaceFileStat{}, OfficialWorkspaceError("workspace-file/not-regular-file",
 				"是符号链接，不是普通文件")
 		},
-	}, OfficialDirectoryPickerAPI{})
+	}, OfficialDirectoryPickerSeam{})
 
 	rec, _ := runStream(t, func(w http.ResponseWriter, r *http.Request) {
 		srv.serveOfficialWorkspaceAPI(w, r, "workspaceFiles.changes")
