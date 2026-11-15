@@ -97,8 +97,15 @@ type Service struct {
 	packaged Channel
 	// state 是缓存真值；State() 只读它，不读盘。
 	state State
-	// listeners 是订阅者。
-	listeners []func(State)
+	// listeners 是订阅者，**按注册顺序**保存（投递顺序因此确定）。
+	//
+	// 每一项带一个自增 id：退订必须按 id 删，**不能按下标**。下标是
+	// "注册那一刻"的快照，而别人的退订会让后面的下标整体前移：
+	// A(0) B(1) --退订 A--> [B] --订阅 C--> [B, C]，此时退订 B 用的还是
+	// 1 ⇒ 删掉的是 C。现象是"退订了的人还在收通知、没退订的人反而收不到"。
+	listeners []subscriber
+	// nextSubscriberID 是下一个订阅者的 id（持 mu 递增，不复用）。
+	nextSubscriberID uint64
 	// loaded 表示已经读过一次盘。
 	loaded bool
 
@@ -162,21 +169,28 @@ func (s *Service) State() State {
 }
 
 // Subscribe 注册一个变更监听，返回取消函数（官方 `subscribe` 的等价物）。
+//
+// 取消函数按**订阅 id** 删，且幂等：调多次、乱序调、并发调都只影响自己。
 func (s *Service) Subscribe(fn func(State)) func() {
 	if fn == nil {
 		return func() {}
 	}
 	s.mu.Lock()
-	s.listeners = append(s.listeners, fn)
-	index := len(s.listeners) - 1
+	id := s.nextSubscriberID
+	s.nextSubscriberID++
+	s.listeners = append(s.listeners, subscriber{id: id, fn: fn})
 	s.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			if index < len(s.listeners) {
-				s.listeners = append(s.listeners[:index], s.listeners[index+1:]...)
+			for i := range s.listeners {
+				if s.listeners[i].id != id {
+					continue
+				}
+				s.listeners = append(s.listeners[:i], s.listeners[i+1:]...)
+				return
 			}
 		})
 	}
@@ -296,6 +310,12 @@ func (s *Service) snapshotLocked() State {
 	return state
 }
 
+// subscriber 是一个订阅者：id 是订阅身份（退订只按它删），fn 是回调。
+type subscriber struct {
+	id uint64
+	fn func(State)
+}
+
 // notification 是一条待投递的通知：**发出时**的状态值拷贝 + **发出时**的订阅者快照。
 //
 // 两者都在入队时定死，所以投递名单不受之后 Subscribe/退订的影响（快照语义）。
@@ -342,7 +362,10 @@ func (s *Service) notifyLocked() {
 		return
 	}
 	state := s.snapshotLocked()
-	listeners := append([]func(State){}, s.listeners...)
+	listeners := make([]func(State), 0, len(s.listeners))
+	for _, sub := range s.listeners {
+		listeners = append(listeners, sub.fn)
+	}
 
 	s.notifyMu.Lock()
 	s.queue = append(s.queue, notification{state: state, listeners: listeners})

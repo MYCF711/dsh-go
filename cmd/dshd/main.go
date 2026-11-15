@@ -879,7 +879,12 @@ func cmdRun(argv []string) (retErr error) {
 		var path string
 		path, err = session.ResolvePath(*home, cwd, sessID)
 		if err == nil {
-			logw, err = session.OpenSessionAt(path)
+			// 走**能回收死锁**的版本：宿主被强杀时上一轮的 `.lock` 不会被
+			// 任何人 release（defer 一行都跑不到），留到下一次续写就把这一轮
+			// 直接顶成"会话正被另一个进程写入"——而那个进程根本已经不存在了。
+			// 只回收"锁内容是本包写的形状 + 那个 pid 确实已经退出"的锁，
+			// 活进程的锁与认不出的锁一律照原样拒绝（见 internal/session/stale_lock.go）。
+			logw, err = session.OpenSessionAtRecoveringStale(path)
 		}
 	}
 	if err != nil {

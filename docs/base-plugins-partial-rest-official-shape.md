@@ -327,3 +327,73 @@ state"），本仓落在 consumer 侧，不是缺口。
 
 残余缺口 B（§1.3）是不可达分支，官方自己也承认这种部署合法（"deployments without the
 service report the host tree only"），维持原判。
+
+---
+
+## 8. 2026-11-15 复核（残余缺口 + 已知缺陷单 `feat/host-residual`）
+
+**本单没有改任何插件状态**：口径仍是 99 = **86 IMPLEMENTED / 9 PARTIAL / 4 MISSING**，
+方法面仍是 223 = **220 / 3 / 0**。下面只是把"还能不能补"的三处判断写到能核对。
+
+### 8.1 `#54 skill`：判定为**依赖锁定**（不是"再努一把就能补"）
+
+**问：官方到底有没有第二级（per-scope）层？有，而且是独立机制，不是可选优化。**
+逐行取证（官方 rc.2 解包树 `.../@deepseek-ai/dsh-skill/src/index.ts`）：
+
+- `:345-353` 类注释："Layered registry … **host+per-scope shape** … host rows and
+  repository plugins land in the global layer, while **a plugin mounted by an agent
+  preset's standing composition lands in that preset's layer**. A read merges the
+  global layer with the viewing scope's chain — **the nearest layer's entry wins**"
+- `:362` `private readonly layers = new ScopedLayers<SkillLayer>(scope => new SkillLayer(scope), …)`
+  —— 层不是"多一层去重表"，是 `@deepseek-ai/dsh-scope` 的 scope 链（`:16` import
+  `ScopedLayers, scopeChainOf, scopeOf`），`list/get` 都带 `scope`（`:117`）。
+- `:381-386` 注册落层：scoped context 落该 scope 的层、无 scope 落 global、
+  **同层**重名才抛错。
+
+**本宿主缺的不是 `skill` 的实现，是"preset 承载组合"这个上游生产者**：
+
+- `internal/modes/modes.go:16-30`：preset（本仓叫 mode）的全部字段是
+  `ID / Name / Description / Builtin / Tools`（工具白名单）`/ Approval / Sandbox`——
+  **没有模块/插件/provider 组合轴**，所以"preset 常驻编排里挂的 provider"在本仓
+  无处产生；
+- `cmd/dshd/serve_agent_api_skills.go:88-93`：生产装配只挂**一个** filesystem
+  provider（`skill.Registry` 的全局层），`Registry.RegisterProvider` 真调用者是
+  它自己（`:317/:327`）与内置文件系统（`modules/tool/skill/skill.go:157`）——
+  都在全局层。
+
+**结论（依赖锁定）**：把 `ScopedLayers` 等价物建出来，本仓不会有任何注册者，
+层恒为空——那正是"建层就是空壳"，本单**不做**。解锁条件（可验收）：`internal/modes`
+的 preset 开始承载 provider/模块组合（即出现"某个 preset 自带 skill provider"的装配
+形状）；届时按官方 `scopeChainOf` 语义补，并让 `skills.list` 与 `skill` 工具同时按
+scope 读。`incomplete` 持久化仍是官方 README:148 自述的开放问题，**不是**本仓缺口。
+
+### 8.2 `#53 agent-instructions`：两条剩余缺口的"卡在哪"不变（维持 PARTIAL）
+
+复核 §7.2 之后没有新证据推翻原判：
+
+1. **fs 操作后的嵌套发现 / change·removal 批次**——需要新增一条 durable
+   `user/message`（官方 README:34/:168/:208 "one retained sourced `user/message`"）
+   + 跨轮观察状态 + 投影与 resume reconcile；本仓 `Build` 每次重读能覆盖"文件改了"，
+   但覆盖不了"这一趟 read 到了更深的目录"与"候选文件消失要发 removal notice"。
+   这不是接线，是新增事件形状，必须单独一单（改错会让历史投影与 resume 兼容性一起漂）。
+2. **用户全局链的官方帧形状**——官方把两根与 project 链合并进**同一条**
+   `<system-reminder>` 帧、每链独立预算（README.md:74-76）；本仓两根渲染在既有的
+   `全局约定（path）：正文` 块里。换帧会整体翻掉生产提示词字节，而
+   `cmd/dshd/prompt_budget_probe_test.go` 与 `internal/prompt/budget_test.go` 按字节
+   钉着现形状 ⇒ 属"改判据"，需 Lead 定口径后单独做（本单**没有**为了变绿去动那些探针）。
+   能力侧（两根、同组 trim 去重、harness-home 先丢、每链预算）已齐，缺的只是帧形状。
+
+### 8.3 方法面那 3 条 `STRUCTURED_UNIMPLEMENTED`：**保持现状**，且这是正确形态
+
+`account.getNotifications` / `account.getNotificationContent` /
+`account.reportNotificationEvent`（`internal/transport/handlers_account_official.go:602/604/606`）
+在默认 `provider=Local`（`cmd/dshd/serve_account_provider.go:24`）下回**四字段 501**，
+message 里点名缺什么与切换方式（`internal/account/notifications.go:146-156` 的
+`noNotificationBackend`：官方通知只来自 harnessOrigin 的
+`/api/v0/users/notifications/{list,content,events}`，即 DeepSeek Platform）。
+
+**为什么不补**：本地没有通知后端，唯一的"实现"办法是**在本地伪造一条通知流**——
+那是假数据；而这条路径在 `DSHD_ACCOUNT_PROVIDER=official` 下是**真实现**
+（`cmd/dshd/serve_account_api.go:134-180`，真打云端）。所以它不是 MISSING、也不是待补，
+是"默认部署没有这个后端 + 说清怎么切"。要把它变成 IMPLEMENTED，前提是出现"本仓自己
+的账号/通知服务"，属产品取舍，不在本单。
