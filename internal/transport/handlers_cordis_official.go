@@ -23,6 +23,19 @@ type OfficialCordisAPI interface {
 	HandleOfficialCordis(ctx context.Context, method string, params json.RawMessage) (any, error)
 }
 
+// OfficialCordisNullResult 是"官方结果就是字面量 null"的哨兵。
+//
+// `reportClientGuardFailure` / `reportRenderFailure` 的官方 zod 结果都是
+// `z.literal(null)`（`dsh-cordis-host-runner/lib/typert.host.js:94` / `:109`）：
+// 它们真正的交付是副作用，回执没有载荷。而 `writeJSON` 会把 nil 载荷判成
+// "静默成功"并转 500（`server.go` 的"成功响应不许是空值"），所以这里必须显式
+// 走 `writeOfficialNullResult`——与 `directoryPicker.pick` 的取消、
+// `pluginRegistryProbe.fastest` 的"没有更快的 registry"同一出口。
+type OfficialCordisNullResult struct{}
+
+// NullCordisResult 供 OfficialCordisAPI 实现在"官方回执是 null"的方法上返回。
+func NullCordisResult() OfficialCordisNullResult { return OfficialCordisNullResult{} }
+
 // CordisAPIError 让实现把结构化错误（无 node / 未知 requestId / 取消）带到 wire。
 type CordisAPIError struct {
 	Status  int    `json:"status"`
@@ -116,6 +129,11 @@ func (s *Server) ServeOfficialCordisAPI(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		writeOfficialError(w, officialBadRequest("%v", err))
+		return
+	}
+	// 官方结果类型本身是 `null` 的那几个方法（见 OfficialCordisNullResult）。
+	if _, isNull := result.(OfficialCordisNullResult); isNull {
+		writeOfficialNullResult(w)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

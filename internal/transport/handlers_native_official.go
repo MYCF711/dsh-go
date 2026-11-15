@@ -281,8 +281,11 @@ func (s *Server) ServeOfficialNativeAPI(w http.ResponseWriter, r *http.Request, 
 //
 // 这是 writeJSON "成功不许是空载荷" 规则的例外，且只对"官方结果类型本身就是
 // `T|null`"的方法成立：`directoryPicker.pick`（null = 用户取消）与
-// `pluginRegistryProbe.fastest`（null = 没有更快的 registry）。两者的 null 都是
-// **值**，不是"没有载荷"；别的成功结果不许走这里。
+// `pluginRegistryProbe.fastest`（null = 没有更快的 registry），以及
+// `dynamicCordisRunner.reportClientGuardFailure` / `reportRenderFailure`
+// （官方结果是 `z.literal(null)`，载荷全在副作用里，见 handlers_cordis_official.go
+// 的 `OfficialCordisNullResult`）。这些 null 都是**值**，不是"没有载荷"；
+// 别的成功结果不许走这里。
 func writeOfficialNullResult(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

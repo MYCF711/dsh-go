@@ -36,3 +36,27 @@ func TestCordisAPIErrorUsesUnifiedErrorBody(t *testing.T) {
 		t.Fatalf("错误体不是统一四字段/丢 hint：%s", w.Body.String())
 	}
 }
+
+type cordisNullAPI struct{}
+
+func (cordisNullAPI) HandleOfficialCordis(context.Context, string, json.RawMessage) (any, error) {
+	return NullCordisResult(), nil
+}
+
+// 官方结果就是 `z.literal(null)` 的那两个 report 方法：出口必须是
+// `{"result":null}`（null 是**值**），不能变成"空载荷 500"，也不能塞自制回执。
+func TestCordisNullReceiptIsLiteralNull(t *testing.T) {
+	s := &Server{}
+	s.AttachOfficialCordisAPI(cordisNullAPI{})
+	for _, m := range []string{
+		"dynamicCordisRunner.reportClientGuardFailure",
+		"dynamicCordisRunner.reportRenderFailure",
+	} {
+		req := httptest.NewRequest("POST", "/api/"+m, strings.NewReader(`{"agentId":"s","pluginId":"p","pluginRunId":"r","failure":{}}`))
+		w := httptest.NewRecorder()
+		s.ServeOfficialCordisAPI(w, req)
+		if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != `{"result":null}` {
+			t.Fatalf("%s: status=%d body=%s", m, w.Code, w.Body.String())
+		}
+	}
+}
