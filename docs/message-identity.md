@@ -411,3 +411,20 @@ MSGID_RESTART_SUMMARY OK=76 FAIL=0
 | 全仓与 race | 双仓全量 test/vet/build exit 0；五个相关包 race exit 0 |
 
 未验证范围：可见 GUI 未启动（任务要求）；缺身份的普通旧 journal 仍不承诺跨 load/WS 精确去重；调试 modelRunner 的 persist 前简化帧不冒充 v4-backed 身份。本任务不外推完整工作日或其他插件能力。
+
+## 11. 后续（2026-11-15）：assistant 补上持久 message id（ID-PERSIST）
+
+上文 §2 表格里"当前 assistant 构造器没有持久 message id，所以省略"这条**已被修复**，
+历史证据（§4–§10 的实跑日志）保留原样不重写。
+
+- 缺陷登记：`docs/handoff-2026-11-15.md` §5 第 7 条——GUI 的反馈消息身份只能拿 `v4:<seq>` 适配。
+- 修复位置（**写路径**，不碰读路径）：`internal/session/log.go` 的 `AssistantMessageEvent`
+  现在写入 `message.id`，`SystemMessageData` 同样写入 `message.id`；两者都在写事件时
+  用 `NewID()` 分配**一次**，落进 v4 字节后永不变。
+- 官方形状：`@deepseek-ai/dsh-llm` 的 `src/message.ts:139-141`（`MessageBase.id`）
+  与 `src/message.ts:226`（`createMessage` 用 `randomUUID()`）；`system/message` 的 id
+  是官方 v4 必填（`dsh-session-format-v3-to-v4/src/system-message.ts:43`）。
+- 读路径不变：`cmd/dshd/message_identity.go` 的 `persistentMessageID` 照旧只解 JSON 取字段；
+  **ID-PERSIST 之前**写下的 v4 记录仍然没有 id，append-only ⇒ 永不补造，继续走 `v4:<seq>` scoped fallback。
+- 断言：`cmd/dshd/message_id_persist_test.go`（写时落盘 / 同文不同身份 / 压缩后不变 /
+  旧记录仍能读且不补造）、`internal/session/message_id_test.go`（各角色构造器都给持久 id + JSON 往返）。
