@@ -21,6 +21,8 @@ import (
 	"context"
 	"strconv"
 	"strings"
+
+	"dshgo/internal/spi"
 )
 
 const (
@@ -247,6 +249,12 @@ type DeepSeekWebAPIOptions struct {
 	// OfficialBaseURL 覆盖"官方 DeepSeek API 路由"的 base（测试与自建端点用）；
 	// 空 = DeepSeekWebAPIBaseURL。
 	OfficialBaseURL string
+	// Credentials 是宿主独立凭据存储的取回入口（nil = 不问库，只读环境）。
+	//
+	// 为什么 API key 要经这条接缝：官方 credentials provider 的"可写文件"是主来源，
+	// 环境变量只是 fallback；用户在设置页存下的 key 落在那个文件里，
+	// 模块不接这条就永远只认环境（= 「界面存了 key，搜索还是不生效」）。
+	Credentials spi.CredentialResolver
 }
 
 // getenv 是 nil 安全的读取器。

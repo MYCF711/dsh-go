@@ -642,6 +642,41 @@ func TestModelCatalogDescribeCredentialsPrecedence(t *testing.T) {
 	}
 }
 
+// StoredCredential 是给 spi.CredentialResolver 用的**只读库**取值入口：
+// 它只答"库里有没有"，**不回落环境变量** —— 环境回落必须由调用方做，
+// 否则同一个凭据的多个别名 ref 会把官方的「文件优先于环境」反过来。
+func TestModelCatalogStoredCredentialNeverFallsBackToEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("STORED_ONLY_REF", "env-value-should-not-leak-through")
+	store := OpenModelCatalog(home)
+
+	// 库里没有 → ("" , false)，即使环境里有值。这条是接缝语义的核心。
+	if value, ok := store.StoredCredential("STORED_ONLY_REF"); ok || value != "" {
+		t.Fatalf("库里没有时不许回落环境变量")
+	}
+
+	if _, err := store.SetCredential("STORED_ONLY_REF", "stored-value-sc-01", catalogRevision(0)); err != nil {
+		t.Fatalf("SetCredential: %v", err)
+	}
+	value, ok := store.StoredCredential("STORED_ONLY_REF")
+	if !ok || value != "stored-value-sc-01" {
+		t.Fatalf("存入之后必须能取回库里的值（ok=%v）", ok)
+	}
+
+	// 换一个 store 实例（= 另一个进程/另一轮）重新读盘：值必须还在。
+	// 凭据模块每次解析都新开一次 store，靠的就是这一点。
+	if value, ok := OpenModelCatalog(home).StoredCredential("STORED_ONLY_REF"); !ok || value != "stored-value-sc-01" {
+		t.Fatalf("重新读盘取不到库里的值（ok=%v）", ok)
+	}
+
+	if _, err := store.DeleteCredential("STORED_ONLY_REF", nil); err != nil {
+		t.Fatalf("DeleteCredential: %v", err)
+	}
+	if value, ok := store.StoredCredential("STORED_ONLY_REF"); ok || value != "" {
+		t.Fatalf("删掉之后不许回落到环境变量")
+	}
+}
+
 // 脏文档：非法独立槽位 / 值里带 NUL 都在读盘时 fail-loud，且错误串不带值。
 func TestModelCatalogRejectsBadCredentialDocument(t *testing.T) {
 	write := func(t *testing.T, body string) string {

@@ -380,7 +380,19 @@ func loadModsIn(manifestPath, home string, maxChars, maxInlineTokens int, sub *s
 		closeLoadedWasm(context.Background())
 		return nil, err
 	}
-	return applied, nil
+	// 凭据模块与 plugin-runtime 同一条理由追加在 Apply **之后**：它不是可配置
+	// 能力，而是宿主基础设施。放进 builtinModules 会被 dsh.toml 白名单静默丢掉
+	// （Apply 对没列出的模块只打一行 Warn），症状就是「界面上存了 API Key，
+	// 搜索却还是不生效」——正是这条接缝要修的那个用户可见缺口。
+	//
+	// **必须排在最前**（不是追加在尾部）：search 装配时按"基线默认 provider 当下
+	// 是否可用"决定钉哪个（见 modules/search 的 newWebProvidersFromEnv 注释）。
+	// 那个判定发生在 Register 期，凭据服务还没注册的话，只存了凭据库 key 的部署
+	// 会算成"默认 provider 不可用"→ 不钉 → 到选择期两个 provider 同时可用 →
+	// WEB_PROVIDER_AMBIGUOUS（搜索直接不可用）。同层按声明顺序激活，所以放在
+	// 第 0 位就是"凭据先就位、search 再判定"。TestCredentialsModuleRunsBeforeSearch
+	// 钉着这条顺序假设。
+	return append([]kernel.Module{credentialsModule(home)}, applied...), nil
 }
 
 // loadModsWithPlugins = loadMods + 插件运行时模块（`plugin-runtime`）。

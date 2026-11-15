@@ -7,6 +7,8 @@
 //
 // 注册的 provider（id 与官方完全一致）：
 //
+// 注册的 provider（id 与官方完全一致）：
+//
 //	deepseek-search-api   DeepSeek Search API（官方 rc.2 基础组合默认 searchProvider）
 //	deepseek-fetch-api    DeepSeek Fetch API（页面 Markdown）
 //	searxng               SearxNG 风格端点（自建）
@@ -40,6 +42,11 @@
 // 旧字段 `baseURL` / `apiKeyEnv` / `apiKey`（宿主对应 DSHD_WEB_BASE_URL / DSHD_WEB_API_KEY_ENV /
 // DSHD_WEB_API_KEY）**读得到但不生效**：官方明确它们已不是 schema 字段，
 // 加载不报错、也没有效果。
+//
+// DeepSeek 的 key 走**两层**来源，优先级照官方 credentials provider：宿主独立
+// 凭据存储（`credentials.set` 写的那个文件，见 spi.CredentialKey）优先，
+// 环境变量只是回落。三条 DeepSeek provider（原生搜索 / search-api / fetch-api）
+// 用的是同一对别名 ref，所以「界面上存了 API Key」对它们同时生效。
 package search
 
 import (
@@ -76,7 +83,7 @@ func ModuleWithEnv(getenv func(string) string) kernel.Module {
 		Backend:  kernel.BackendStatic,
 		Provides: []string{"web"},
 		Register: func(s *kernel.Scope) error {
-			seam, err := NewWebProvidersFromEnv(getenv)
+			seam, err := newWebProvidersFromEnv(getenv, scopeCredentials{scope: s})
 			if err != nil {
 				return err
 			}
@@ -85,10 +92,33 @@ func ModuleWithEnv(getenv func(string) string) kernel.Module {
 	}
 }
 
-// NewWebProvidersFromEnv 按环境装配默认 provider 集合。
+// scopeCredentials 把作用域里的凭据服务接成 provider 的凭据入口。
+//
+// 解析时**现注入**：模块只拿自己的 `*Scope`，不拿 `*App`、不做全局单例（R2）。
+// 没有这个服务时（干净装配 / dsh.toml 白名单没列凭据模块）返回 ("", false)，
+// provider 退化成"只读环境变量"，与接入前逐字节一致。
+//
+// 顺序要求分两件事：
+//   - 凭据**值**的解析与装配顺序无关（每次解析现注入）；
+//   - 但 search 在 Register 期还要读一次凭据来决定"基线默认 provider 钉不钉"
+//     （见 newWebProvidersFromEnv），所以宿主装配必须把凭据模块排在 search 之前
+//     （cmd/dshd/main.go 的 loadModsIn；TestCredentialsModuleRunsBeforeSearch 钉着）。
+//     否则只存了凭据库 key 的部署会算成"默认不可用"→ 不钉 → 两个 provider 同时
+//     可用 → WEB_PROVIDER_AMBIGUOUS。
+type scopeCredentials struct{ scope *kernel.Scope }
+
+func (c scopeCredentials) ResolveCredential(ref string) (string, bool) {
+	resolver, err := kernel.Inject(c.scope, spi.CredentialKey)
+	if err != nil || resolver == nil {
+		return "", false
+	}
+	return resolver.ResolveCredential(ref)
+}
+
+// NewWebProvidersFromEnv 按环境装配默认 provider 集合（**不问**宿主凭据库）。
 //
 // 生产（Module）与测试走**同一份**代码：provider 集合、钉死规则、可用性判定
-// 都不是测试专用的仿造品。
+// 都不是测试专用的仿造品；带凭据库的那条生产路径是 newWebProvidersFromEnv。
 //
 // 默认 provider 的规则（官方 rc.2 基础组合 `cordis.patch.yml:487-488`）：
 //   - 环境钉死优先（`DSHD_WEB_SEARCH_PROVIDER` / 官方同名变量）；
@@ -98,15 +128,21 @@ func ModuleWithEnv(getenv func(string) string) kernel.Module {
 //
 // 为什么不无条件钉：官方的基线默认是配在 cordis 配置里的，而 DeepSeek 那两条
 // 模型路由（账号/API-key）在官方宿主里会解析出凭据。本宿主还没有这两条路由插件，
-// Search/Fetch API 的凭据只能来自 `DEEPSEEK_API_KEY`；无条件钉死会让"只配了
-// SearxNG"的部署从"能用"退化成 `WEB_PROVIDER_CONFIGURED_UNAVAILABLE`。
-// 有凭据时（正常部署）默认值与官方完全一致。
+// Search/Fetch API 的凭据只能来自 `DEEPSEEK_API_KEY`（进程环境或宿主独立凭据库）；
+// 无条件钉死会让"只配了 SearxNG"的部署从"能用"退化成
+// `WEB_PROVIDER_CONFIGURED_UNAVAILABLE`。有凭据时（正常部署）默认值与官方完全一致。
 func NewWebProvidersFromEnv(getenv func(string) string) (*spi.WebProviders, error) {
+	return newWebProvidersFromEnv(getenv, nil)
+}
+
+// newWebProvidersFromEnv 是生产与测试**同一份**装配代码：provider 集合、
+// 钉死规则、可用性判定都不是测试专用的仿造品。
+func newWebProvidersFromEnv(getenv func(string) string, credentials spi.CredentialResolver) (*spi.WebProviders, error) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	searchAPI := NewDeepSeekSearchAPIFromEnv(getenv)
-	fetchAPI := NewDeepSeekFetchAPIFromEnv(getenv)
+	searchAPI := newDeepSeekSearchAPIFromEnv(getenv, credentials)
+	fetchAPI := newDeepSeekFetchAPIFromEnv(getenv, credentials)
 
 	searchPin := spi.WebSearchPinFromEnv(getenv)
 	if searchPin == "" && searchAPI.Available() {
@@ -123,7 +159,7 @@ func NewWebProvidersFromEnv(getenv func(string) string) (*spi.WebProviders, erro
 	if err := seam.RegisterSearch(&SearxNG{Endpoint: getenv("DSHD_SEARCH_URL")}); err != nil {
 		return nil, err
 	}
-	if err := seam.RegisterSearch(NewDeepSeekFromEnv(getenv)); err != nil {
+	if err := seam.RegisterSearch(newDeepSeek(getenv, credentials)); err != nil {
 		return nil, err
 	}
 	if err := seam.RegisterSearch(searchAPI); err != nil {
@@ -148,6 +184,34 @@ func NewDeepSeekFetchAPIFromEnv(getenv func(string) string) *DeepSeekFetchAPI {
 	getenv = normalizeGetenv(getenv)
 	return &DeepSeekFetchAPI{
 		Resolve: func() DeepSeekWebAPIOptions { return DeepSeekFetchAPIOptionsFromEnv(getenv) },
+	}
+}
+
+// newDeepSeekSearchAPIFromEnv 是生产的真实形态：环境快照上多给一个凭据库入口。
+//
+// 为什么不改 NewDeepSeekSearchAPIFromEnv 的签名：它是公开的装配入口，测试与
+// 插件替换都按它构造"只按环境"的快照；生产那条（带凭据库）单列一个内部构造器，
+// 两者共用同一份 options 解析，所以配置面不会漂。
+func newDeepSeekSearchAPIFromEnv(getenv func(string) string, credentials spi.CredentialResolver) *DeepSeekSearchAPI {
+	getenv = normalizeGetenv(getenv)
+	return &DeepSeekSearchAPI{
+		Resolve: func() DeepSeekWebAPIOptions {
+			options := DeepSeekSearchAPIOptionsFromEnv(getenv)
+			options.Credentials = credentials
+			return options
+		},
+	}
+}
+
+// newDeepSeekFetchAPIFromEnv 同上（fetch 侧）。
+func newDeepSeekFetchAPIFromEnv(getenv func(string) string, credentials spi.CredentialResolver) *DeepSeekFetchAPI {
+	getenv = normalizeGetenv(getenv)
+	return &DeepSeekFetchAPI{
+		Resolve: func() DeepSeekWebAPIOptions {
+			options := DeepSeekFetchAPIOptionsFromEnv(getenv)
+			options.Credentials = credentials
+			return options
+		},
 	}
 }
 

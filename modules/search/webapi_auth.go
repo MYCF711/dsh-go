@@ -267,12 +267,29 @@ func (o DeepSeekWebAPIOptions) credentialValue(ref string) string {
 	if ref == "" {
 		return ""
 	}
-	value := strings.TrimSpace(o.getenv(ref))
-	if value == "" && ref == DeepSeekAPIKeyRef {
+	refs := []string{ref}
+	if ref == DeepSeekAPIKeyRef {
 		// 宿主既有别名：与 DEEPSEEK_API_KEY 喂同一个字段。
-		value = strings.TrimSpace(o.getenv(DeepSeekAPIKeyEnvAlias))
+		refs = append(refs, DeepSeekAPIKeyEnvAlias)
 	}
-	return value
+	// 优先级照官方 credentials provider：**宿主独立凭据存储 > 进程环境**，
+	// 且两个别名 ref 下要"先整轮问库、再整轮问环境"——逐个别名地 库→env 会让
+	// 库里的别名输给环境里的主名，正好把"文件优先于环境"反过来。
+	if o.Credentials != nil {
+		for _, candidate := range refs {
+			if value, ok := o.Credentials.ResolveCredential(candidate); ok {
+				if trimmed := strings.TrimSpace(value); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	for _, candidate := range refs {
+		if value := strings.TrimSpace(o.getenv(candidate)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // misconfiguredSource 是设置解析不出来的凭据源（官方 `misconfigured`，`index.ts:300-315`）。

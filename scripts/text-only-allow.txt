@@ -113,7 +113,7 @@ cmd/dshd/serve_subagents_api.go:178 | renderChildPromptContent：拼子代理的
 cmd/dshd/serve_title_auto.go:245 | autoTitleUserMessage：自动标题**只取用户正文**，思考/调用不参与起标题
 cmd/dshd/serve_session_api.go:137 | officialSnippetOf：搜索片段只可能来自正文（思考与调用不参与检索），空正文就是没有可搜的
 internal/session/image_offload.go:677 | joinTextWithPlaceholders：把 text 块与图片占位拼成**一段文本**（产物本身就是字符串）
-modules/search/deepseek.go:309 | mapDeepSeekSearch：snippet 来自 text 块的 citations，别的块类型没有 citations
+modules/search/deepseek.go:mapDeepSeekSearch | mapDeepSeekSearch：snippet 来自 text 块的 citations，别的块类型没有 citations（用函数作用域登记：本文件行号会随改动漂移）
 modules/tools/mcp.go:1064 | mcpExtractText：MCP 内容块的 text 提取（函数名与用途就是"取文本"；同函数 image/audio/resource_link 各有分支）
 internal/agent/side_query.go:43 | side query 的流回调：只消费正文增量（EventContent），别的 kind 本就不该进这一路
 
