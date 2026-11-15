@@ -1,6 +1,7 @@
 package transport
 
-// 官方桌面端 media / market 侧 21 个方法的契约测试。
+// 官方桌面端 media / market 侧 18 个方法的契约测试（pluginMarket.* 4 个方法
+// 已在 handlers_plugin_market_official.go，见那个文件的测试与 cmd/dshd 的端到端）。
 //
 // 这些测试只打本包的 `ServeOfficialMediaMarketAPI`（Lead 接线后由 /api 路由调它），
 // 因此不依赖 server.go 的分发表——**路由接线是 Lead 的验收项**，测试里用
@@ -12,8 +13,10 @@ package transport
 //   - `cotTranslation.translate`：真的把文本送出去，返回模型真实输出（用本地假
 //     SSE 网关验证管线；空输出/网关失败一律报错，不拿原文顶替）；
 //   - `officeToPdf.render`：501 并点名 LibreOffice 依赖；
-//   - `pluginMarket.*` 3 个 + `pluginRecommendations.describe`：501 并点名缺的索引
-//     服务；参数严格性（缺必填/未知字段/范围）回 400；
+//   - `pluginRecommendations.describe`：501 并点名缺的推荐记录；参数严格性
+//     （缺必填/未知字段）回 400；
+//（`pluginMarket.*` 4 个方法不属本文件：真实实现在 handlers_plugin_market_official.go，
+// 见 handlers_plugin_market_official_test.go 与 cmd/dshd 的端到端用例。）
 //   - `dynamicCordisRunner.*` 11 个：501 且消息里写明 R6（明确不做，不是欠账）。
 
 import (
@@ -27,7 +30,7 @@ import (
 	"testing"
 )
 
-// officialMediaMarketMethodNames 是官方清单里的 21 个名字（逐字来自
+// officialMediaMarketMethodNames 是官方清单里**归本文件**的 18 个名字（逐字来自
 // docs/evidence/official-desktop-api-methods-0.2.2-rc.1.txt）。
 var officialMediaMarketMethodNames = []string{
 	"cotTranslation.translate",
@@ -43,9 +46,6 @@ var officialMediaMarketMethodNames = []string{
 	"dynamicCordisRunner.syncInspectManifest",
 	"dynamicCordisRunner.undefineFromPanel",
 	"officeToPdf.render",
-	"pluginMarket.readEntryDetail",
-	"pluginMarket.search",
-	"pluginMarket.setIndexes",
 	"pluginRecommendations.describe",
 	"speech.cancelPreparation",
 	"speech.configure",
@@ -103,13 +103,13 @@ func mmErrorOf(t *testing.T, body string) mmErrorBody {
 }
 
 // ---------------------------------------------------------------------------
-// 方法集合：21 个一个不多一个不少
+// 方法集合：本文件的 18 个一个不多一个不少
 // ---------------------------------------------------------------------------
 
-func TestOfficialMarketMethodSetCoversAll21(t *testing.T) {
+func TestOfficialMarketMethodSetCoversAll18(t *testing.T) {
 	got := OfficialMediaMarketMethods()
-	if len(got) != 21 {
-		t.Fatalf("方法数必须是 21，拿到 %d", len(got))
+	if len(got) != 18 {
+		t.Fatalf("方法数必须是 18，拿到 %d", len(got))
 	}
 	gotNames := make([]string, 0, len(got))
 	for _, m := range got {
@@ -132,10 +132,19 @@ func TestOfficialMarketMethodSetCoversAll21(t *testing.T) {
 		}
 		seen[name] = true
 	}
-	// 不属本组的方法必须 false（否则会抢走别人的路由）。
-	for _, other := range []string{"pluginManager.inspect", "schedule.list", "speech", "speech.", "pluginMarket"} {
+	// 不属本组的方法必须 false（否则会抢走别人的路由）。pluginMarket.* 4 个方法
+	// 有真实实现，归 IsOfficialPluginMarketAPIMethod；本组再认领一次就会盖掉它。
+	for _, other := range []string{"pluginManager.inspect", "schedule.list", "speech", "speech.", "pluginMarket",
+		"pluginMarket.search", "pluginMarket.listIndexes", "pluginMarket.setIndexes", "pluginMarket.readEntryDetail",
+		"pluginRegistryProbe.fastest"} {
 		if IsOfficialMediaMarketMethod(other) {
 			t.Fatalf("%q 不该被本组认领", other)
+		}
+	}
+	for _, owned := range []string{"pluginMarket.listIndexes", "pluginMarket.search", "pluginMarket.setIndexes",
+		"pluginMarket.readEntryDetail", "pluginRegistryProbe.fastest"} {
+		if IsOfficialMediaMarketMethod(owned) {
+			t.Fatalf("%q 由 handlers_plugin_market_official.go 认领，本组不许重复认领", owned)
 		}
 	}
 	// 接错路由要当场 404，不能给"空成功"。
@@ -454,125 +463,23 @@ func TestOfficialOfficeRenderUnimplemented(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// pluginMarket.* / pluginRecommendations.*：未实现 + 严格参数
+// pluginRecommendations.describe：未实现 + 严格参数
 // ---------------------------------------------------------------------------
 
-func TestOfficialMarketSearchUnimplemented(t *testing.T) {
+func TestOfficialPluginRecommendationsDescribeUnimplemented(t *testing.T) {
 	s := mmTestServer(t)
 
-	// 嵌套写法（贴着官方 wire）。
-	code, body := mmServe(t, s, "pluginMarket.search",
-		`{"url":"https://market.example/index.json","query":{"text":"lsp","sort":{"kind":"relevance"},"offset":0,"limit":50}}`)
+	// 官方结果有 refused 分支，但本仓整条链路不存在 → 501（不假装"只是不可用"）。
+	code, body := mmServe(t, s, "pluginRecommendations.describe", `{"agentId":"s-1","callId":"call-7"}`)
 	if code != http.StatusNotImplemented {
 		t.Fatalf("要 501，拿到 %d（%s）", code, body)
 	}
 	e := mmErrorOf(t, body)
-	if !strings.Contains(e.Error.Message, "pluginMarket.search") {
-		t.Fatalf("消息要点名方法：%s", e.Error.Message)
-	}
-	if !strings.Contains(e.Error.Message, "market.example") {
-		t.Fatalf("消息要带上 url，便于排查：%s", e.Error.Message)
-	}
-	if strings.Contains(body, `"plugins"`) || strings.Contains(body, `"total"`) {
-		t.Fatalf("未实现却回了搜索结果字段：%s", body)
-	}
-
-	// 平铺写法同样认。
-	code, body = mmServe(t, s, "pluginMarket.search",
-		`{"url":"https://market.example/index.json","sort":{"kind":"index"},"offset":0,"limit":1}`)
-	if code != http.StatusNotImplemented {
-		t.Fatalf("平铺写法要 501，拿到 %d（%s）", code, body)
-	}
-
-	// 参数严格性。
-	for _, bad := range []struct {
-		body string
-		why  string
-	}{
-		{`{"query":{"sort":{"kind":"index"},"offset":0,"limit":1}}`, "缺 url"},
-		{`{"url":"u"}`, "缺 sort/offset/limit"},
-		{`{"url":"u","sort":{"kind":"index"},"offset":0}`, "缺 limit"},
-		{`{"url":"u","sort":{"kind":"index"},"offset":-1,"limit":1}`, "offset 为负"},
-		{`{"url":"u","sort":{"kind":"index"},"offset":0,"limit":0}`, "limit 太小"},
-		{`{"url":"u","sort":{"kind":"index"},"offset":0,"limit":101}`, "limit 太大"},
-		{`{"url":"u","sort":{"kind":"index"},"offset":0.5,"limit":1}`, "offset 不是整数"},
-		{`{"url":"u","sort":"index","offset":0,"limit":1}`, "sort 不是对象"},
-		{`{"url":"u","sort":{"kind":"index"},"offset":0,"limit":1,"labels":["a",2]}`, "labels 元素不是字符串"},
-		{`{"url":"u","sort":{"kind":"index"},"offset":0,"limit":1,"refresh":"yes"}`, "refresh 不是布尔"},
-		{`{"url":"u","sort":{"kind":"index"},"offset":0,"limit":1,"nope":true}`, "未知字段"},
-	} {
-		code, body := mmServe(t, s, "pluginMarket.search", bad.body)
-		if code != http.StatusBadRequest {
-			t.Fatalf("%s 要 400，拿到 %d（%s）", bad.why, code, body)
-		}
-	}
-}
-
-func TestOfficialMarketReadEntryDetailAndSetIndexes(t *testing.T) {
-	s := mmTestServer(t)
-
-	code, body := mmServe(t, s, "pluginMarket.readEntryDetail",
-		`{"url":"https://m/x.json","name":"@acme/audit","version":"1.2.3","language":"zh-CN","options":{"refresh":true}}`)
-	if code != http.StatusNotImplemented {
-		t.Fatalf("要 501，拿到 %d（%s）", code, body)
-	}
-	e := mmErrorOf(t, body)
-	if !strings.Contains(e.Error.Message, "@acme/audit") {
-		t.Fatalf("消息要带上条目名：%s", e.Error.Message)
-	}
-	if strings.Contains(body, `"status":"found"`) || strings.Contains(body, `"markdown"`) {
-		t.Fatalf("未实现却回了文档：%s", body)
-	}
-	if code, body := mmServe(t, s, "pluginMarket.readEntryDetail",
-		`{"url":"u","name":"n","version":"1","language":"zh"}`); code != http.StatusNotImplemented {
-		t.Fatalf("不带 options 也要 501，拿到 %d（%s）", code, body)
-	}
-	for _, bad := range []struct {
-		body string
-		why  string
-	}{
-		{`{"name":"n","version":"1","language":"zh"}`, "缺 url"},
-		{`{"url":"u","version":"1","language":"zh"}`, "缺 name"},
-		{`{"url":"u","name":"n","language":"zh"}`, "缺 version"},
-		{`{"url":"u","name":"n","version":"1"}`, "缺 language"},
-		{`{"url":"u","name":"n","version":"1","language":"zh","options":{"npmFileSources":{"a":1}}}`, "npmFileSources 不是数组"},
-		{`{"url":"u","name":"n","version":"1","language":"zh","options":{"refresh":"x"}}`, "refresh 不是布尔"},
-		{`{"url":"u","name":"n","version":"1","language":"zh","junk":1}`, "未知字段"},
-	} {
-		code, body := mmServe(t, s, "pluginMarket.readEntryDetail", bad.body)
-		if code != http.StatusBadRequest {
-			t.Fatalf("%s 要 400，拿到 %d（%s）", bad.why, code, body)
-		}
-	}
-
-	code, body = mmServe(t, s, "pluginMarket.setIndexes", `{"urls":["https://a/i.json","https://b/i.json"]}`)
-	if code != http.StatusNotImplemented {
-		t.Fatalf("要 501，拿到 %d（%s）", code, body)
-	}
-	e = mmErrorOf(t, body)
-	if !strings.Contains(e.Error.Message, "2 个 url") {
-		t.Fatalf("消息要说清几个 url 没落盘：%s", e.Error.Message)
-	}
-	for _, bad := range []struct{ body, why string }{
-		{`{}`, "缺 urls"},
-		{`{"urls":"https://a"}`, "urls 不是数组"},
-		{`{"urls":[1]}`, "元素不是字符串"},
-		{`{"urls":[],"x":1}`, "未知字段"},
-	} {
-		code, body := mmServe(t, s, "pluginMarket.setIndexes", bad.body)
-		if code != http.StatusBadRequest {
-			t.Fatalf("%s 要 400，拿到 %d（%s）", bad.why, code, body)
-		}
-	}
-
-	// describe：官方结果有 refused 分支，但本仓整条链路不存在 → 501（不假装"只是不可用"）。
-	code, body = mmServe(t, s, "pluginRecommendations.describe", `{"agentId":"s-1","callId":"call-7"}`)
-	if code != http.StatusNotImplemented {
-		t.Fatalf("要 501，拿到 %d（%s）", code, body)
-	}
-	e = mmErrorOf(t, body)
 	if !strings.Contains(e.Error.Message, "call-7") || !strings.Contains(e.Error.Message, "推荐") {
 		t.Fatalf("消息要带上 callId 并说清缺推荐子系统：%s", e.Error.Message)
+	}
+	if strings.Contains(body, `"result"`) {
+		t.Fatalf("未实现却回了结果：%s", body)
 	}
 	for _, bad := range []struct{ body, why string }{
 		{`{"callId":"call-7"}`, "缺 agentId"},

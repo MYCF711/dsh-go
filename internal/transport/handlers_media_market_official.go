@@ -1,11 +1,17 @@
 package transport
 
-// 本文件是官方桌面端 0.2.2-rc.1「media / market 侧」21 个 typert 方法的 L1
-// 契约实现（官方源：@deepseek-ai/dsh-experimental-api-speech-to-text /
+// 本文件是官方桌面端「media / market 侧」**除 pluginMarket 之外的 18 个** typert
+// 方法的 L1 契约实现（官方源：@deepseek-ai/dsh-experimental-api-speech-to-text /
 // dsh-experimental-client-ui-cot-translation / dsh-office-to-pdf /
-// dsh-plugin-market / dsh-plugin-recommendations / dsh-cordis-host-runner 的
-// `lib/typert.host.js`，从 app.asar 只读解；方法清单见
+// dsh-plugin-recommendations / dsh-cordis-host-runner 的 `lib/typert.host.js`，从
+// app.asar 只读解；方法清单见
 // docs/evidence/official-desktop-api-methods-0.2.2-rc.1.txt）。
+//
+// `pluginMarket.*` 4 个方法**不在本文件**：它们有真实实现（internal/market 的真
+// HTTP 索引源 + cmd/dshd/serve_plugin_market.go），归
+// handlers_plugin_market_official.go，且 server.go 把这几个名字路由在
+// IsOfficialMediaMarketMethod 之前。本文件原先的三个同名 501 分支已删除——
+// 同一方法两处结论必然漂，那正是"账本写 501、实际早有真实现"的成因。
 //
 // 对齐口径与 `handlers_agent_official.go` / `handlers_pluginmanager_official.go`
 // 一致：
@@ -14,7 +20,7 @@ package transport
 //   - **L2**（`remote.mux` + typert Connection envelope）未实现，因此本文不声称
 //     与官方桌面端 wire 兼容。
 //
-// 本文件只做协议翻译与**参数形状校验**，不读盘、不伪造任何结果。21 个方法逐条
+// 本文件只做协议翻译与**参数形状校验**，不读盘、不伪造任何结果。18 个方法逐条
 // 结论（与 RESULT 的三列表一致）：
 //
 //  1. `cotTranslation.translate` —— **真实现**：把文本送真实模型网关
@@ -27,12 +33,9 @@ package transport
 //     的资源，`transcribe` 更不能编一段文字冒充转写结果。
 //  3. `officeToPdf.render` —— 未实现：本仓没有 Office 渲染器（官方是
 //     libreoffice-kit + 后台转换队列 + 字体缺失检测）。不拿文本抽取冒充 PDF。
-//  4. `pluginMarket.*` 3 个 + `pluginRecommendations.describe` —— 未实现：市场
-//     三个方法需要「已配置的第三方索引源 + HTTP 取回索引文档 + 索引文档 schema
-//     校验 + 模糊匹配/排序/分页 + 安装状态计算」，本仓只有**已安装**插件目录
-//     （`internal/pluginmgr`），没有市场索引存储、没有索引源设置项、没有
-//     npm 文件 CDN / Git 提交读取器；recommendations 依赖的"已记录推荐卡"在官方
-//     是模型侧工具产物，本仓整条链路都不存在。
+//  4. `pluginRecommendations.describe` —— 未实现：它依赖的"已记录推荐卡"在官方
+//     是模型侧工具产物，本仓整条链路都不存在（`internal/recommendations` 只覆盖
+//     插件清单/启用这类卡片，不产出 describe 要的记录）。
 //  5. `dynamicCordisRunner.*` 11 个 —— 未实现，且**按红线 R6 明确不做**（宿主不嵌
 //     JS 运行时，不 fork/vendor dsc）。这 11 个方法没有一个只是数据搬运：每个都以
 //     "在宿主里执行 Cordis 插件 JS 并结算那次运行"为语义，宿主侧没有合法执行路径。
@@ -63,10 +66,6 @@ const (
 
 	MethodOfficeToPdfRender Method = "officeToPdf.render"
 
-	MethodPluginMarketSearch          Method = "pluginMarket.search"
-	MethodPluginMarketReadEntryDetail Method = "pluginMarket.readEntryDetail"
-	MethodPluginMarketSetIndexes      Method = "pluginMarket.setIndexes"
-
 	MethodPluginRecommendationsDescribe Method = "pluginRecommendations.describe"
 
 	MethodDynamicCordisRunnerGetClientCode            Method = "dynamicCordisRunner.getClientCode"
@@ -82,7 +81,8 @@ const (
 	MethodDynamicCordisRunnerUndefineFromPanel        Method = "dynamicCordisRunner.undefineFromPanel"
 )
 
-// OfficialMediaMarketMethods 按固定顺序返回本文件实现的 21 个方法。
+// OfficialMediaMarketMethods 按固定顺序返回本文件实现的 18 个方法（pluginMarket
+// 4 个方法已在 handlers_plugin_market_official.go，不在此列）。
 //
 // 它给快照/文档/门禁用：新增或删除一个方法必须显式改这里，不能让"方法悄悄少了
 // 一个"从路由表里漏过去。
@@ -101,9 +101,6 @@ func OfficialMediaMarketMethods() []Method {
 		MethodDynamicCordisRunnerSyncInspectManifest,
 		MethodDynamicCordisRunnerUndefineFromPanel,
 		MethodOfficeToPdfRender,
-		MethodPluginMarketReadEntryDetail,
-		MethodPluginMarketSearch,
-		MethodPluginMarketSetIndexes,
 		MethodPluginRecommendationsDescribe,
 		MethodSpeechCancelPreparation,
 		MethodSpeechConfigure,
@@ -112,9 +109,9 @@ func OfficialMediaMarketMethods() []Method {
 	}
 }
 
-// IsOfficialMediaMarketMethod 判断一个 /api 路径名是否属于本文件的 21 个方法。
+// IsOfficialMediaMarketMethod 判断一个 /api 路径名是否属于本文件的 18 个方法。
 //
-// 路由侧只需要这一次判断（**不要**在 server.go 里摊开 21 个 case：官方方法还会
+// 路由侧只需要这一次判断（**不要**在 server.go 里摊开 18 个 case：官方方法还会
 // 继续加，而那张路由表是冻结的）。
 func IsOfficialMediaMarketMethod(name string) bool {
 	switch Method(name) {
@@ -131,9 +128,6 @@ func IsOfficialMediaMarketMethod(name string) bool {
 		MethodDynamicCordisRunnerSyncInspectManifest,
 		MethodDynamicCordisRunnerUndefineFromPanel,
 		MethodOfficeToPdfRender,
-		MethodPluginMarketReadEntryDetail,
-		MethodPluginMarketSearch,
-		MethodPluginMarketSetIndexes,
 		MethodPluginRecommendationsDescribe,
 		MethodSpeechCancelPreparation,
 		MethodSpeechConfigure,
@@ -144,7 +138,7 @@ func IsOfficialMediaMarketMethod(name string) bool {
 	return false
 }
 
-// ServeOfficialMediaMarketAPI 是这 21 个方法在 `/api` 上的唯一入口。
+// ServeOfficialMediaMarketAPI 是这 18 个方法在 `/api` 上的唯一入口。
 //
 // 调用方（server.go 的 handleAPI）只需在既有前缀判断之前加一条：
 //
@@ -203,12 +197,6 @@ func routeOfficialMediaMarketMethod(r *http.Request, method Method, p *officialP
 		return officialCotTranslationTranslate(r, p)
 	case MethodOfficeToPdfRender:
 		return officialOfficeToPdfRender(p)
-	case MethodPluginMarketSearch:
-		return officialPluginMarketSearch(p)
-	case MethodPluginMarketReadEntryDetail:
-		return officialPluginMarketReadEntryDetail(p)
-	case MethodPluginMarketSetIndexes:
-		return officialPluginMarketSetIndexes(p)
 	case MethodPluginRecommendationsDescribe:
 		return officialPluginRecommendationsDescribe(p)
 	}
@@ -734,99 +722,14 @@ func officialOfficeToPdfRender(p *officialParams) (any, error) {
 }
 
 // ---------------------------------------------------------------------------
-// pluginMarket.*（3）—— 本仓只有"已安装插件目录"，没有市场索引服务
+// pluginMarket.* 的归属：**不在这里**
 // ---------------------------------------------------------------------------
-
-// 官方 `pluginMarket.search(url, query: MarketQuery) → MarketSearchResult`。
-func officialPluginMarketSearch(p *officialParams) (any, error) {
-	view, err := mmOpen(p, "query")
-	if err != nil {
-		return nil, err
-	}
-	url, err := view.strNonEmpty("url")
-	if err != nil {
-		return nil, err
-	}
-	if _, _, err := view.str("text"); err != nil {
-		return nil, err
-	}
-	if _, _, err := view.str("category"); err != nil {
-		return nil, err
-	}
-	if _, err := view.strings("labels", false); err != nil {
-		return nil, err
-	}
-	if err := view.object("sort", true); err != nil {
-		return nil, err
-	}
-	if _, err := view.intNonNegative("offset", 0, 0); err != nil {
-		return nil, err
-	}
-	if _, err := view.intNonNegative("limit", 1, 100); err != nil {
-		return nil, err
-	}
-	if _, _, err := view.boolean("refresh"); err != nil {
-		return nil, err
-	}
-	if _, _, err := view.number("fetchedAt"); err != nil {
-		return nil, err
-	}
-	if err := view.finish(); err != nil {
-		return nil, err
-	}
-	return nil, officialNotImplemented(
-		"pluginMarket.search 未接线：本仓没有插件市场索引服务（索引源设置、索引文档取回与 schema 校验、模糊匹配/排序/分页、安装状态计算都没有）。url=%q", url)
-}
-
-// 官方 `pluginMarket.readEntryDetail(url, name, version, language, options?) →
-// {status:"found",origin,markdown,document} | {status:"none"}`。
-func officialPluginMarketReadEntryDetail(p *officialParams) (any, error) {
-	view, err := mmOpen(p, "options")
-	if err != nil {
-		return nil, err
-	}
-	url, err := view.strNonEmpty("url")
-	if err != nil {
-		return nil, err
-	}
-	name, err := view.strNonEmpty("name")
-	if err != nil {
-		return nil, err
-	}
-	version, err := view.strNonEmpty("version")
-	if err != nil {
-		return nil, err
-	}
-	language, err := view.strNonEmpty("language")
-	if err != nil {
-		return nil, err
-	}
-	if _, err := view.strings("npmFileSources", false); err != nil {
-		return nil, err
-	}
-	if _, _, err := view.boolean("refresh"); err != nil {
-		return nil, err
-	}
-	if err := view.finish(); err != nil {
-		return nil, err
-	}
-	return nil, officialNotImplemented(
-		"pluginMarket.readEntryDetail 未接线：本仓没有市场索引、也没有 npm 文件 CDN / Git 提交读取器，读不到条目长文档。url=%q name=%q version=%q language=%q",
-		url, name, version, language)
-}
-
-// 官方 `pluginMarket.setIndexes(urls: string[]) → void`。
-func officialPluginMarketSetIndexes(p *officialParams) (any, error) {
-	urls, err := mmTop(p).strings("urls", true)
-	if err != nil {
-		return nil, err
-	}
-	if err := p.finish(); err != nil {
-		return nil, err
-	}
-	return nil, officialNotImplemented(
-		"pluginMarket.setIndexes 未接线：本仓没有插件市场索引源设置项（没有可写位置、没有 plugin-market/changed 事件），拒绝假装写成功（%d 个 url 未落盘）", len(urls))
-}
+//
+// `pluginMarket.listIndexes/search/readEntryDetail/setIndexes` 与
+// `pluginRegistryProbe.fastest` 的真实实现在 handlers_plugin_market_official.go +
+// internal/market + cmd/dshd/serve_plugin_market.go；server.go 把它们路由在
+// IsOfficialMediaMarketMethod 之前。这里**不再**保留同名 501 分支：同一方法两处
+// 结论会漂，而这三种正是"账本写着 501、实际早就有真实现"的来源。
 
 // ---------------------------------------------------------------------------
 // pluginRecommendations.describe —— 本仓没有推荐卡记录

@@ -49,10 +49,16 @@ func recommendationIndex(t *testing.T) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(market.Document{
-			Version: 1,
+			Format: 1,
+			Title:  market.LocalizedText{"en": "Market"},
+			Metadata: market.IndexMetadata{
+				Labels: map[string]market.Declaration{"official": {Title: market.LocalizedText{"en": "Official"}}},
+			},
 			Plugins: []market.Plugin{{
-				Name: recPlugin, Title: map[string]string{"en": "Audit"}, Description: map[string]string{"en": "security audit"},
-				Labels: []string{"official"}, Versions: []market.Version{{Version: "1.0.0"}},
+				Name: recPlugin, Title: market.LocalizedText{"en": "Audit"},
+				Description: market.LocalizedText{"en": "security audit"},
+				Metadata:    market.PluginMetadata{Keywords: []string{}, Labels: []string{"official"}, SortKeys: map[string]float64{}},
+				Versions:    []market.Version{{Version: "1.0.0", PublishTimestamp: 1762000000, Source: &market.Source{Type: "npm"}}},
 			}},
 		})
 	}))
