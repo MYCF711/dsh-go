@@ -211,7 +211,7 @@ func eligible(plugin market.Plugin, bundle pluginmgr.BundleState) bool {
 	if strings.TrimSpace(plugin.Name) == "" || plugin.Name != bundle.Name {
 		return false
 	}
-	if !hasLabel(plugin.Labels, "official") && !strings.HasPrefix(plugin.Name, "@deepseek-ai/") {
+	if !hasLabel(plugin.Metadata.Labels, "official") && !strings.HasPrefix(plugin.Name, "@deepseek-ai/") {
 		return false
 	}
 	available := false
@@ -236,7 +236,7 @@ func hasLabel(labels []string, want string) bool {
 	return false
 }
 
-func localized(values map[string]string, language, fallback string) string {
+func localized(values market.LocalizedText, language, fallback string) string {
 	if values != nil {
 		if value := strings.TrimSpace(values[language]); value != "" {
 			return value

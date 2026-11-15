@@ -24,7 +24,8 @@ package transport
 //
 // 本仓 writeJSON 把 `{"result":null}` 视为静默成功并拒绝；但官方 `pick` 的
 // null 是**值**（用户取消），不是"没有载荷"。这里显式写 enveloped 的
-// `{"result":null}`，并在代码里注明这条唯一例外。
+// `{"result":null}`。走这条兜底的只有"官方结果类型本身就是 `T|null`"的方法
+// （本仓目前只有 `directoryPicker.pick` 与 `pluginRegistryProbe.fastest`）。
 //
 // # 接线（WIRING）
 //
@@ -267,9 +268,10 @@ func (s *Server) ServeOfficialNativeAPI(w http.ResponseWriter, r *http.Request, 
 
 // writeOfficialNullResult 写官方 `string|null` 里的 null。
 //
-// 这是 writeJSON "成功不许是空载荷" 规则的**唯一**例外：`directoryPicker.pick`
-// 的返回类型就是 `string|null`，null 是"用户取消"这个值本身。没有别的成功
-// 结果可以走这里。
+// 这是 writeJSON "成功不许是空载荷" 规则的例外，且只对"官方结果类型本身就是
+// `T|null`"的方法成立：`directoryPicker.pick`（null = 用户取消）与
+// `pluginRegistryProbe.fastest`（null = 没有更快的 registry）。两者的 null 都是
+// **值**，不是"没有载荷"；别的成功结果不许走这里。
 func writeOfficialNullResult(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

@@ -3,24 +3,32 @@ package main
 // PARITY-W3-MARKET：pluginMarket 4 方法与 pluginRegistryProbe.fastest 的宿主实现。
 // 索引存储/HTTP 在 internal/market；安装状态来自当前 pluginmgr.Manager。
 //
-// 0.2.2-rc.2 的两处契约（本文件负责）：
+// 结果形状照官方 typert 逐字段给（`dsh-plugin-market/lib/typert.host.js` 的
+// MarketSearchResult / MarketListingEntry / MarketListingVersion），映射轨迹就是
+// 官方 `dsh-plugin-market/src/index.ts` 的 `search` + `listingOf` + `installationOf`
+// + `compatibilityOf`：
 //
-//  1. 版本行 `update: boolean`（`dsh-plugin-market/src/index.ts:481-487`、
-//     `types.ts` 的 MarketListingVersion.update）：
-//     已装副本来自**完整 commit 钉住的 git spec**（`pluginManager` 把它列成
-//     `update: 'git'`）、这一版更新、且这一版钉住**同仓库同 path 目录**的另一个
-//     commit 时才是 true。判据逐条复刻官方 `listingOf`，不做近似。
+//   - `entries[]` 的每个版本行带 `install{spec,registry?}`、`compatibility`（union
+//     对象，不是 bool）、`update`、`publishTimestamp`（Unix 秒）；
+//   - `defaultVersion` = 最高兼容且（有稳定版时）不带预发布标签的版本；
+//   - `installation.status` 五态里宿主能判的是 not-installed / installed /
+//     update-available / different-version；`provided`（发行版随附、未安装）没有
+//     数据源，所以不会出现——不是编一个。
+//
+// 另外两处 rc.2 契约（本文件负责）：
+//
+//  1. 版本行 `update: boolean`（官方 listingOf）：已装副本来自**完整 commit 钉住的
+//     git spec**、这一版更新、且钉住同仓库同 path 目录时才是 true。
 //  2. 私有 Git 插件详情：索引没有内联 README 时，按这一版声明的 git 来源读仓库
-//     README；https 被拒时由仓库缓存回退 SSH（release note「只有 SSH 凭据也能看
-//     私有 Git 插件」）。真实 git 调用在 internal/pluginmgr/official 的
-//     RepositoryCache，本文件只做编排与错误投影。
+//     README；https 被拒时由仓库缓存回退 SSH。真实 git 调用在
+//     internal/pluginmgr/official 的 RepositoryCache，本文件只做编排与错误投影。
 
 import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -40,24 +48,44 @@ type marketRepositoryReader interface {
 // dsh-plugin-detail 的 readmeName 覆盖的常见拼写）。
 var marketRepositoryReadmeNames = []string{"README.md", "readme.md", "Readme.md", "README"}
 
+// marketRegistryProbeEndpoints 是官方 pluginRegistryProbe 竞速的两个公共 registry
+// ping 地址（`dsh-client-ui-plugin-manager/src/index.ts:62`），逐字相同。
+var marketRegistryProbeEndpoints = []string{
+	"https://registry.npmjs.org/-/ping",
+	"https://registry.npmmirror.com/-/ping",
+}
+
+// marketRegistryProbeTimeout 是官方 registryProbeTimeoutMs 的默认值（1500ms）。
+const marketRegistryProbeTimeout = 1500 * time.Millisecond
+
 type pluginMarketAPI struct {
-	store   *market.Store
-	manager *pluginmgr.Manager
-	probe   *pluginmgr.RegistryClient
+	store *market.Store
 	// bundles 是已装副本的真实投影；nil 表示没有插件管理器（不假装有）。
 	bundles func() ([]pluginmgr.BundleState, error)
+	// exemptions 是 profile 里的版本豁免（官方 annotator 每页现读一次）。
+	exemptions func() map[string][]string
 	// repositories 是私有 Git 仓库详情读取（nil = 未接线，回结构化错误而不是假成功）。
 	repositories marketRepositoryReader
+	// probeClient / probeEndpoints 是 pluginRegistryProbe.fastest 的真实探测面
+	//（测试注入本地端点，生产是官方两个公共 registry）。
+	probeClient    *http.Client
+	probeEndpoints []string
+	probeTimeout   time.Duration
 }
 
 func newPluginMarketAPI(home string, manager *pluginmgr.Manager) *pluginMarketAPI {
 	api := &pluginMarketAPI{
-		store:   market.Open(home),
-		manager: manager,
-		probe:   pluginmgr.RegistryFromEnv(nil),
+		store:          market.Open(home),
+		probeClient:    &http.Client{Timeout: marketRegistryProbeTimeout},
+		probeEndpoints: marketRegistryProbeEndpoints,
+		probeTimeout:   marketRegistryProbeTimeout,
 	}
 	if manager != nil {
 		api.bundles = manager.Bundles
+		api.exemptions = func() map[string][]string {
+			exemptions, _ := manager.VersionExemptions()
+			return exemptions
+		}
 	}
 	// 仓库缓存落在 home 下：与官方 detailCacheDir 同一职责（可丢、可重建的缓存）。
 	api.repositories = officialpluginmgr.NewRepositoryCache(filepath.Join(home, "cache", "plugin-market-repositories"))
@@ -75,7 +103,8 @@ func (a *pluginMarketAPI) ListIndexes(ctx context.Context) ([]transport.Official
 	}
 	out := make([]transport.OfficialMarketIndex, 0, len(entries))
 	for _, entry := range entries {
-		out = append(out, transport.OfficialMarketIndex{URL: entry.URL, Title: entry.Title, Description: entry.Description, Error: entry.Error})
+		out = append(out, transport.OfficialMarketIndex{URL: entry.URL, Title: officialLocalizedText(entry.Title),
+			Description: officialLocalizedText(entry.Description), Error: entry.Error})
 	}
 	return out, nil
 }
@@ -85,7 +114,12 @@ func (a *pluginMarketAPI) SetIndexes(_ context.Context, urls []string) error {
 		// 允许清空；但空索引源在 list/search 时仍会结构化 refused。
 		return a.store.SetURLs(nil)
 	}
-	return a.store.SetURLs(urls)
+	if err := a.store.SetURLs(urls); err != nil {
+		// 索引 URL 不合法是**调用方的参数问题**（官方是 plugin-market/invalid-index-url），
+		// 不是上游不可用：回 400，别让客户端按 502 去重试。
+		return &transport.PluginMarketError{Status: http.StatusBadRequest, Code: "bad_request", Message: err.Error()}
+	}
+	return nil
 }
 
 // installedBundleMap 读一次已装副本，供搜索/详情判定共用（同一份真值）。
@@ -109,52 +143,212 @@ func (a *pluginMarketAPI) Search(ctx context.Context, rawURL string, q transport
 		return transport.OfficialMarketSearchResult{}, &transport.PluginMarketError{Status: 400, Code: "bad_request", Message: "缺 url"}
 	}
 	result, err := a.store.Search(ctx, rawURL, market.Query{Text: q.Text, Category: q.Category, Labels: q.Labels,
-		Sort: q.Sort, Offset: q.Offset, Limit: q.Limit, Refresh: q.Refresh, FetchedAt: q.FetchedAt})
+		Sort: q.SortSpec(), Offset: q.Offset, Limit: q.Limit, Refresh: q.Refresh, FetchedAt: q.FetchedAt})
 	if err != nil {
 		return transport.OfficialMarketSearchResult{}, &transport.PluginMarketError{Status: 502, Code: "index_unavailable", Message: err.Error()}
 	}
 	installed := a.installedBundleMap()
-	plugins := make([]transport.OfficialMarketPlugin, 0, len(result.Plugins))
+	entries := make([]transport.OfficialMarketEntry, 0, len(result.Plugins))
 	for _, plugin := range result.Plugins {
-		item := transport.OfficialMarketPlugin{Name: plugin.Name, Title: plugin.Title, Description: plugin.Description,
-			Author: plugin.Author, Keywords: plugin.Keywords, Category: plugin.Category, Labels: plugin.Labels,
-			Installation: map[string]any{"status": "not-installed"}}
-		bundle, hasBundle := installed[plugin.Name]
-		for _, version := range plugin.Versions {
-			item.Versions = append(item.Versions, transport.OfficialMarketPluginVersion{Version: version.Version,
-				PublishedAt: version.PublishedAt, Deprecated: version.Deprecated, Engines: version.Engines, Compatible: true,
-				Update: marketVersionUpdatable(plugin.Name, version, bundle, hasBundle)})
+		entry, err := a.listingEntry(plugin, installed)
+		if err != nil {
+			return transport.OfficialMarketSearchResult{}, &transport.PluginMarketError{Status: 502, Code: "index_unavailable", Message: err.Error()}
 		}
-		if len(item.Versions) > 0 {
-			item.DefaultVersion = item.Versions[0].Version
-		}
-		if wantsVersion, ok := installedVersionOf(installed, plugin.Name); ok {
-			if len(item.Versions) > 0 && wantsVersion == item.Versions[0].Version {
-				item.Installation = map[string]any{"status": "installed", "installedVersion": wantsVersion}
-			} else {
-				item.Installation = map[string]any{"status": "different-version", "installedVersion": wantsVersion}
-			}
-		}
-		plugins = append(plugins, item)
+		entries = append(entries, entry)
 	}
-	return transport.OfficialMarketSearchResult{Index: transport.OfficialMarketIndex{URL: rawURL,
-		Title: result.Index.Title, Description: result.Index.Description}, Plugins: plugins,
-		Total: result.Total, Offset: result.Offset, NextOffset: result.NextOffset, FetchedAt: result.FetchedAt}, nil
+	return transport.OfficialMarketSearchResult{URL: rawURL,
+		Title:       officialLocalizedText(result.Index.Title),
+		Description: officialLocalizedText(result.Index.Description),
+		Metadata:    officialIndexMetadata(result.Index.Metadata),
+		FetchedAt:   result.FetchedAt,
+		Entries:     entries,
+		Total:       result.Total,
+		NextOffset:  result.NextOffset}, nil
 }
 
-func installedVersionOf(installed map[string]pluginmgr.BundleState, name string) (string, bool) {
-	bundle, ok := installed[name]
-	if !ok || bundle.Version == "" {
-		return "", false
+// listingEntry 是官方 `listingOf` 的宿主实现：一页里的每个插件补齐
+// defaultVersion / installation / 每版本的 install、compatibility、update。
+func (a *pluginMarketAPI) listingEntry(plugin market.Plugin, installed map[string]pluginmgr.BundleState) (transport.OfficialMarketEntry, error) {
+	bundle, hasBundle := installed[plugin.Name]
+	entry := transport.OfficialMarketEntry{
+		Name:        plugin.Name,
+		Title:       officialLocalizedText(plugin.Title),
+		Description: officialLocalizedText(plugin.Description),
+		Icon:        plugin.Icon,
+		Author:      plugin.Author,
+		Homepage:    plugin.Homepage,
+		Metadata: transport.OfficialMarketPluginMetadata{
+			Category: plugin.Metadata.Category,
+			Keywords: plugin.Metadata.Keywords,
+			Labels:   plugin.Metadata.Labels,
+			SortKeys: plugin.Metadata.SortKeys,
+		},
 	}
-	return bundle.Version, true
+	if plugin.Repository != nil {
+		entry.Repository = &transport.OfficialMarketRepository{URL: plugin.Repository.URL, Directory: plugin.Repository.Directory}
+	}
+	entry.Versions = make([]transport.OfficialMarketListingVersion, 0, len(plugin.Versions))
+	stable := false
+	for _, version := range plugin.Versions {
+		if !marketPrerelease(version.Version) {
+			stable = true
+			break
+		}
+	}
+	for _, version := range plugin.Versions {
+		compatibility, err := a.compatibilityOf(plugin.Name, version)
+		if err != nil {
+			return transport.OfficialMarketEntry{}, err
+		}
+		spec, ok := marketInstallSpec(plugin.Name, version)
+		if !ok {
+			return transport.OfficialMarketEntry{}, wrappedMarketError(
+				"索引里 " + plugin.Name + "@" + version.Version + " 的来源算不出 install.spec（官方 format 1 的 source 必须是 npm|git 且字段完整）")
+		}
+		entry.Versions = append(entry.Versions, transport.OfficialMarketListingVersion{
+			Version:          version.Version,
+			PublishTimestamp: version.PublishTimestamp,
+			Source:           officialMarketSource(version.Source),
+			Install:          transport.OfficialMarketInstall{Spec: spec, Registry: marketSourceRegistry(version.Source)},
+			Engines:          transport.OfficialMarketEngines{DSH: version.Engines.DSH},
+			Compatibility:    compatibility,
+			Update:           marketVersionUpdatable(plugin.Name, version, bundle, hasBundle),
+		})
+	}
+	entry.DefaultVersion = marketDefaultVersion(entry.Versions, stable)
+	measured := entry.DefaultVersion
+	if measured == "" && len(entry.Versions) > 0 {
+		measured = entry.Versions[0].Version
+	}
+	entry.Installation = marketInstallationOf(bundle, hasBundle, measured)
+	return entry, nil
 }
 
-// marketInstallSpec 复刻官方 `marketInstallTarget`（dsh-plugin-market-index/src/index.ts:329-334）：
+// marketDefaultVersion 复刻官方 `listingOf` 的 defaultVersion 规则：最高兼容版本，
+// 但"这个包有稳定版"时只认不带预发布标签的那些；一个都不兼容 → 空（官方缺席）。
+func marketDefaultVersion(versions []transport.OfficialMarketListingVersion, stable bool) string {
+	for _, version := range versions {
+		if !version.Compatibility.Compatible {
+			continue
+		}
+		if stable && marketPrerelease(version.Version) {
+			continue
+		}
+		return version.Version
+	}
+	return ""
+}
+
+// marketPrerelease 判 SemVer 预发布：核心版本之后的 `-` 标签（build metadata 里
+// 的 `-` 不算，所以先切掉 `+` 之后的部分）。
+func marketPrerelease(version string) bool {
+	version = strings.TrimSpace(version)
+	if index := strings.Index(version, "+"); index >= 0 {
+		version = version[:index]
+	}
+	return strings.Contains(version, "-")
+}
+
+// marketInstallationOf 复刻官方 `installationOf` 的宿主可判分支。
+//
+// 官方五态里的 `provided`（发行版随附但未安装）需要"安装提供的 catalog"这一数据源，
+// 本仓没有 → 不会出现；除此之外三个判据逐条对齐。
+func marketInstallationOf(bundle pluginmgr.BundleState, hasBundle bool, version string) transport.OfficialMarketInstallation {
+	if !hasBundle {
+		return transport.OfficialMarketInstallation{Status: "not-installed"}
+	}
+	installedVersion := strings.TrimSpace(bundle.Version)
+	if installedVersion == "" {
+		return transport.OfficialMarketInstallation{Status: "different-version"}
+	}
+	if installedVersion == version {
+		return transport.OfficialMarketInstallation{Status: "installed", InstalledVersion: installedVersion}
+	}
+	if comparison, err := pluginmgr.CompareVersions(version, installedVersion); err == nil && comparison > 0 {
+		return transport.OfficialMarketInstallation{Status: "update-available", InstalledVersion: installedVersion}
+	}
+	return transport.OfficialMarketInstallation{Status: "different-version", InstalledVersion: installedVersion}
+}
+
+// compatibilityOf 复刻官方 `compatibilityOf`：只有 `engines.dsh` 一个要求面
+// （官方构造的 manifest 也只放 name/version/engines.dsh），runtime 版本取宿主注入值。
+func (a *pluginMarketAPI) compatibilityOf(name string, version market.Version) (transport.OfficialMarketCompatibility, error) {
+	manifest := pluginmgr.Manifest{ID: name, Version: version.Version}
+	if rangeExpr := strings.TrimSpace(version.Engines.DSH); rangeExpr != "" {
+		manifest.Engines = &pluginmgr.Engines{DSH: rangeExpr}
+	}
+	var exemptions map[string][]string
+	if a.exemptions != nil {
+		exemptions = a.exemptions()
+	}
+	issue, err := pluginmgr.EvaluateCompatibility(manifest, exemptions, pluginmgr.HostRuntimeVersion)
+	if err != nil {
+		return transport.OfficialMarketCompatibility{}, wrappedMarketError(
+			"判定 " + name + "@" + version.Version + " 的 engines.dsh 兼容性失败: " + err.Error())
+	}
+	if issue == nil {
+		return transport.OfficialMarketCompatibility{Compatible: true}, nil
+	}
+	exempted := issue.Exempted
+	return transport.OfficialMarketCompatibility{Compatible: false, RuntimeVersion: issue.RuntimeVersion,
+		Requirements: issue.Requirements, Exempted: &exempted}, nil
+}
+
+// wrappedMarketError 把内部失败投影成 502：索引/兼容性判定失败是上游数据问题，
+// 不是客户端的参数问题。
+func wrappedMarketError(message string) error {
+	return &transport.PluginMarketError{Status: http.StatusBadGateway, Code: "index_unavailable", Message: message}
+}
+
+func officialLocalizedText(text market.LocalizedText) transport.OfficialLocalizedText {
+	if len(text) == 0 {
+		return nil
+	}
+	out := make(transport.OfficialLocalizedText, len(text))
+	for language, value := range text {
+		out[language] = value
+	}
+	return out
+}
+
+func officialIndexMetadata(metadata market.IndexMetadata) transport.OfficialMarketIndexMetadata {
+	out := transport.OfficialMarketIndexMetadata{
+		Categories: make(map[string]transport.OfficialMarketDeclaration, len(metadata.Categories)),
+		Labels:     make(map[string]transport.OfficialMarketDeclaration, len(metadata.Labels)),
+		SortKeys:   make(map[string]transport.OfficialMarketSortKey, len(metadata.SortKeys)),
+	}
+	for id, declaration := range metadata.Categories {
+		out.Categories[id] = transport.OfficialMarketDeclaration{Title: officialLocalizedText(declaration.Title)}
+	}
+	for id, declaration := range metadata.Labels {
+		out.Labels[id] = transport.OfficialMarketDeclaration{Title: officialLocalizedText(declaration.Title)}
+	}
+	for id, declaration := range metadata.SortKeys {
+		out.SortKeys[id] = transport.OfficialMarketSortKey{Title: officialLocalizedText(declaration.Title), Order: declaration.Order}
+	}
+	return out
+}
+
+func officialMarketSource(source *market.Source) transport.OfficialMarketSource {
+	if source == nil {
+		return transport.OfficialMarketSource{}
+	}
+	return transport.OfficialMarketSource{Type: source.Type, Registry: source.Registry,
+		URL: source.URL, Commit: source.Commit, Path: source.Path}
+}
+
+func marketSourceRegistry(source *market.Source) string {
+	if source == nil {
+		return ""
+	}
+	return source.Registry
+}
+
+// marketInstallSpec 复刻官方 `marketInstallTarget`（dsh-plugin-market-index/src/index.ts）：
 // npm → `name@version`；git → `git+<url>.git#<commit>[&path:/<dir>]`。
 //
-// 索引没声明 source（rc.2 之前的老索引）时返回 false：没有来源信息就判不了
-// "同仓库另一 commit"，`update` 只能是 false——这是索引缺字段，不是官方不支持。
+// 索引没声明 source（rc.2 之前的旧索引形状）时返回 false：没有来源信息就判不了
+// "同仓库另一 commit"，也装不了，调用方必须报错而不是发一个空 spec。
 func marketInstallSpec(name string, version market.Version) (string, bool) {
 	source := version.Source
 	if source == nil {
@@ -266,7 +460,7 @@ func (a *pluginMarketAPI) ReadEntryDetail(ctx context.Context, rawURL, name, ver
 		}
 	}
 	// 老索引的兜底：语言化 description / title（不是仓库内容，original 仍标 readme）。
-	for _, text := range []map[string]string{plugin.Description, plugin.Title} {
+	for _, text := range []market.LocalizedText{plugin.Description, plugin.Title} {
 		if value := localizedMarketText(text, language); value != "" {
 			return transport.OfficialMarketEntryDetail{Status: "found", Origin: "readme", Markdown: value, Document: document}, nil
 		}
@@ -276,7 +470,7 @@ func (a *pluginMarketAPI) ReadEntryDetail(ctx context.Context, rawURL, name, ver
 
 // localizedMarketText 与 internal/market 的 localized 同一条口径：
 // 精确语言 → 语言主标签 → en。
-func localizedMarketText(text map[string]string, language string) string {
+func localizedMarketText(text market.LocalizedText, language string) string {
 	if text == nil {
 		return ""
 	}
@@ -346,36 +540,64 @@ func marketRepositoryError(source *market.Source, err error) *transport.PluginMa
 	}
 }
 
-func (a *pluginMarketAPI) Fastest(ctx context.Context, urls []string) (transport.OfficialRegistryProbeResult, error) {
-	if len(urls) == 0 && a.probe != nil && a.probe.Base() != "" {
-		urls = []string{a.probe.Base()}
+// Fastest 是官方 `pluginRegistryProbe.fastest`：**无参数**，竞速公共 registry 的
+// HTTPS ping，回"最先成功那个的 origin URL"，都失败回空串（官方 null）。
+// 官方结果缓存 300s（registryProbeCacheTtlMs）；宿主不缓存——这不是形状问题，
+// 只是多打两次 ping。
+func (a *pluginMarketAPI) Fastest(ctx context.Context) (string, error) {
+	endpoints := a.probeEndpoints
+	if len(endpoints) == 0 {
+		return "", nil
 	}
-	if len(urls) == 0 {
-		return transport.OfficialRegistryProbeResult{}, &transport.PluginMarketError{Status: 503, Code: "registry_unavailable",
-			Message: "pluginRegistryProbe.fastest 没有 registry URL 可探测（设置 DSHD_PLUGIN_REGISTRY 或传 urls）"}
+	timeout := a.probeTimeout
+	if timeout <= 0 {
+		timeout = marketRegistryProbeTimeout
 	}
-	type measured struct {
-		url string
-		d   time.Duration
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	winner := make(chan string, len(endpoints))
+	for _, endpoint := range endpoints {
+		go func(endpoint string) {
+			winner <- a.pingRegistry(probeCtx, endpoint)
+		}(endpoint)
 	}
-	results := make([]measured, 0, len(urls))
-	for _, raw := range urls {
-		start := time.Now()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(raw, "/")+"/-/ping", nil)
-		if err != nil {
-			continue
+	for range endpoints {
+		select {
+		case registry := <-winner:
+			if registry != "" {
+				return registry, nil
+			}
+		case <-probeCtx.Done():
+			return "", nil
 		}
-		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-		if err == nil {
-			resp.Body.Close()
-		}
-		results = append(results, measured{url: raw, d: time.Since(start)})
 	}
-	if len(results) == 0 {
-		return transport.OfficialRegistryProbeResult{}, &transport.PluginMarketError{Status: 502, Code: "provider_unavailable", Message: "pluginRegistryProbe.fastest 所有 URL 都不可达"}
+	return "", nil
+}
+
+// pingRegistry 打一次 `/-/ping`；成功回 `<scheme>://<host>/`（官方
+// `new URL('/', endpoint).href` 同一形状），失败回空串。
+func (a *pluginMarketAPI) pingRegistry(ctx context.Context, endpoint string) string {
+	client := a.probeClient
+	if client == nil {
+		client = &http.Client{Timeout: marketRegistryProbeTimeout}
 	}
-	sort.Slice(results, func(i, j int) bool { return results[i].d < results[j].d })
-	return transport.OfficialRegistryProbeResult{Registry: results[0].url, LatencyMs: results[0].d.Milliseconds()}, nil
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ""
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return ""
+	}
+	response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return ""
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host + "/"
 }
 
 var _ transport.OfficialPluginMarketAPI = (*pluginMarketAPI)(nil)

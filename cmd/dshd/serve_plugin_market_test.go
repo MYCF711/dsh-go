@@ -119,13 +119,14 @@ func TestMarketVersionUpdatableThreeStates(t *testing.T) {
 // TestMarketSearchRowsAlwaysCarryUpdate：版本行的 `update` 必须**总是显式下发**
 // （不是 omitempty）——缺席会被客户端读成"老宿主，别显示升级按钮"。
 func TestMarketSearchRowsAlwaysCarryUpdate(t *testing.T) {
-	index := `{"version":1,"title":{"en":"Market"},"description":{"en":"plugins"},"plugins":[
-	  {"name":"acme.audit","title":{"en":"Audit"},"description":{"en":"audit"},"keywords":[],
+	index := `{"format":1,"title":{"en":"Market"},"description":{"en":"plugins"},"metadata":{},"plugins":[
+	  {"name":"acme.audit","title":{"en":"Audit"},"description":{"en":"audit"},
+	   "metadata":{"keywords":[]},
 	   "versions":[
-	     {"version":"2.0.0","source":{"type":"git","url":"https://example.com/o/r","commit":"` + testCommitB + `"}},
-	     {"version":"3.0.0","source":{"type":"npm"}}]},
+	     {"version":"2.0.0","publishTimestamp":1762000000,"source":{"type":"git","url":"https://example.com/o/r","commit":"` + testCommitB + `"}},
+	     {"version":"3.0.0","publishTimestamp":1762100000,"source":{"type":"npm"}}]},
 	  {"name":"acme.plain","title":{"en":"Plain"},"description":{"en":"plain"},
-	   "versions":[{"version":"1.0.0"}]}]}`
+	   "versions":[{"version":"1.0.0","publishTimestamp":1761900000,"source":{"type":"npm"}}]}]}`
 	server := marketIndexServer(t, index)
 	bundles := []pluginmgr.BundleState{{Name: "acme.audit", Version: "1.0.0",
 		Source: "git+https://example.com/o/r.git#" + testCommitA}}
@@ -134,30 +135,35 @@ func TestMarketSearchRowsAlwaysCarryUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := api.Search(context.Background(), server.URL+"/index.json", transport.OfficialMarketQuery{
-		Limit: 50, Sort: map[string]any{"kind": "index"}})
+		Limit: 50, Sort: transport.OfficialMarketSort{Kind: "index"}})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
-	found := map[string]transport.OfficialMarketPlugin{}
-	for _, plugin := range result.Plugins {
+	found := map[string]transport.OfficialMarketEntry{}
+	for _, plugin := range result.Entries {
 		found[plugin.Name] = plugin
 	}
 	audit, ok := found["acme.audit"]
 	if !ok || len(audit.Versions) != 2 {
 		t.Fatalf("acme.audit 版本行缺失：%+v", found)
 	}
-	if !audit.Versions[0].Update {
-		t.Fatalf("同仓库另一 commit 的新版本必须 update=true：%+v", audit.Versions[0])
+	// 版本行按 SemVer 降序（官方 validator 同一行为），所以按版本号取，不按位置。
+	byVersion := map[string]transport.OfficialMarketListingVersion{}
+	for _, version := range audit.Versions {
+		byVersion[version.Version] = version
 	}
-	if audit.Versions[1].Update {
-		t.Fatalf("npm 版本行不许 update=true（官方只认 git 副本）：%+v", audit.Versions[1])
+	if !byVersion["2.0.0"].Update {
+		t.Fatalf("同仓库另一 commit 的新版本必须 update=true：%+v", audit.Versions)
+	}
+	if byVersion["3.0.0"].Update {
+		t.Fatalf("npm 版本行不许 update=true（官方只认 git 副本）：%+v", audit.Versions)
 	}
 	if plain := found["acme.plain"]; len(plain.Versions) != 1 || plain.Versions[0].Update {
 		t.Fatalf("缺 source 的索引行 update 必须是 false：%+v", plain.Versions)
 	}
 
 	// wire 上必须有 `"update":false` 这个键（不能靠 omitempty 消失）。
-	raw, err := json.Marshal(audit.Versions[1])
+	raw, err := json.Marshal(byVersion["3.0.0"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,11 +191,11 @@ func (f *fakeRepositoryReader) ReadFile(_ context.Context, url, commit, name str
 	return nil, &officialpluginmgr.RepositoryFailure{Reason: "invalid", Message: name + " 不存在"}
 }
 
-const privateIndex = `{"version":1,"title":{"en":"Market"},"description":{"en":"plugins"},"plugins":[
+const privateIndex = `{"format":1,"title":{"en":"Market"},"description":{"en":"plugins"},"plugins":[
   {"name":"acme.private","title":{"en":"Private"},"description":{"en":"private"},
-   "versions":[{"version":"2.0.0","source":{"type":"git","url":"https://example.com/secret.git","commit":"` + testCommitB + `"}}]},
-  {"name":"acme.public","keywords":[],
-   "versions":[{"version":"1.0.0","source":{"type":"npm"}}]}]}`
+   "versions":[{"version":"2.0.0","publishTimestamp":1762000000,"source":{"type":"git","url":"https://example.com/secret.git","commit":"` + testCommitB + `"}}]},
+  {"name":"acme.public","metadata":{"keywords":[]},
+   "versions":[{"version":"1.0.0","publishTimestamp":1761900000,"source":{"type":"npm"}}]}]}`
 
 // TestMarketReadEntryDetailFallsBackToRepository：索引没有内联 README 时，按
 // 这一版声明的 git 来源读仓库 README（origin=repository）。
