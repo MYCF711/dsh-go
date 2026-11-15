@@ -301,6 +301,11 @@ func TestProjectionRestoreFloor(t *testing.T) {
 			},
 			"last": nil,
 		}},
+		// 官方 plan（stateVersion 4）：两个位都是 false + 三个空槽。
+		ProjectionKeyPlan: {Ver: 4, Seq: 2, Val: map[string]any{
+			"active": false, "wanted": nil, "running": nil,
+			"activeAtLastHeader": nil, "entered": false,
+		}},
 	}
 	// 最低可用 watermark = 2 → 尾部读从 2 开始（那一格是锚点：Restore 会
 	// 把它当已折叠事件跳过，但它证明日志还延伸到这里）。
@@ -398,6 +403,9 @@ func TestProjectionUnitsAreOfficialShapes(t *testing.T) {
 	// assistant/text | assistant/reasoning 增量）：dsh-session-stats/lib/types/projection.js:66-77。
 	// 最后是 tokenUsage（官方 stateVersion 2，事件来源 assistant/message.usage 与
 	// llm/retry-started）：dsh-token-meter/src/usage-projection.ts:111-144。
+	// 本版新增 plan（官方 stateVersion 4）：plan/mode 事件是 v4 词汇表成员，
+	// 加上宿主两个计划模式工具 enter_plan_mode / exit_plan_mode 的
+	// tool/call + tool/result 配对，是宿主能折出真值的键。
 	want := []string{
 		ProjectionKeySessionListMetadata,
 		ProjectionKeyTitle,
@@ -405,6 +413,7 @@ func TestProjectionUnitsAreOfficialShapes(t *testing.T) {
 		ProjectionKeyConversationContinuation,
 		ProjectionKeySessionStats,
 		ProjectionKeyTokenUsage,
+		ProjectionKeyPlan,
 	}
 	if len(keys) != len(want) {
 		t.Fatalf("units = %v，期望 %v", keys, want)

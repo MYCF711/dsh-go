@@ -271,3 +271,113 @@ func TestAcceptedThenRecordWritesDecision(t *testing.T) {
 		t.Fatal("未注册 action 的 Record 竟然成功")
 	}
 }
+
+// DelegateVerbs：官方 kind 的 act() 自己按 phase 分派；声明过的动词不能被宿主的
+// 默认闸门（openPhases / 共享终态）提前拦掉。
+func TestDelegateVerbsReachKindOnFinalAndClosedPhases(t *testing.T) {
+	home := t.TempDir()
+	service := New(home)
+	called := map[string]int{}
+	if _, err := service.Register(Kind{
+		Action:        "create_page",
+		Verbs:         map[string]VerbPolicy{"create": {Writes: true}, "restore": {Global: true}, "cancel": {}},
+		OpenPhases:    []string{"failed"},
+		DelegateVerbs: map[string]bool{"restore": true, "cancel": true},
+		Act: func(_ context.Context, proposal Proposal, verb string, _ map[string]json.RawMessage) (KindResult, error) {
+			called[verb]++
+			return Settled(Decision{
+				CallID: proposal.CallID, Action: proposal.Action, Phase: PhaseOf(verb),
+			}), nil
+		},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	seedSession(t, home, "s-d", func(lg *session.Log) {
+		appendProposal(t, lg, 1, "call-d", "create_page", nil)
+		if err := lg.Append("plugin:action-cards/decision", map[string]any{
+			"callId": "call-d", "action": "create_page", "phase": "removed",
+		}); err != nil {
+			t.Fatalf("decision: %v", err)
+		}
+	})
+
+	// restore 声明过 DelegateVerbs：removed（共享终态）也要交给 kind。
+	result, err := service.Act(context.Background(), "s-d", "call-d", "restore", nil)
+	if err != nil {
+		t.Fatalf("Act restore: %v", err)
+	}
+	if called["restore"] != 1 || result.Status != StatusSettled || result.Decision.Phase != "restored" {
+		t.Fatalf("restore 应真的进 kind，实际 called=%v result=+%v", called, result)
+	}
+
+	// cancel 也声明过：即使当前 phase 已回到 removed，仍交给 kind。
+	if _, err := service.Act(context.Background(), "s-d", "call-d", "cancel", nil); err != nil {
+		t.Fatalf("Act cancel: %v", err)
+	}
+	if called["cancel"] != 1 {
+		t.Fatalf("声明过 DelegateVerbs 的 cancel 应进 kind，实际 %v", called)
+	}
+
+	// create 没有声明：removed 是共享终态 → 直接回已记录的 decision，不进 kind。
+	result, err = service.Act(context.Background(), "s-d", "call-d", "create", nil)
+	if err != nil {
+		t.Fatalf("Act create: %v", err)
+	}
+	if called["create"] != 0 || result.Status != StatusSettled || result.Decision.Phase != "cancelled" {
+		t.Fatalf("未声明的动词应被默认闸门拦下，实际 called=%v result=%+v", called, result)
+	}
+}
+
+// PhaseOf 给上面的假 kind 一个可断言的 phase 名（真实 kind 自己决定 phase）。
+func PhaseOf(verb string) string {
+	switch verb {
+	case "restore":
+		return "restored"
+	case "cancel":
+		return "cancelled"
+	default:
+		return "created"
+	}
+}
+
+// Act 传下去的 context 必须带上会话 id 与当前 decision（官方 kind 靠它读回
+// 之前记录的字段，例如 bundleName）。
+func TestActContextCarriesSessionAndDecision(t *testing.T) {
+	home := t.TempDir()
+	service := New(home)
+	type seen struct {
+		sessionID string
+		decision  Decision
+		has       bool
+	}
+	var got seen
+	if _, err := service.Register(Kind{
+		Action: "create_page", Verbs: map[string]VerbPolicy{"undo": {Global: true}},
+		DelegateVerbs: map[string]bool{"undo": true},
+		Act: func(ctx context.Context, _ Proposal, _ string, _ map[string]json.RawMessage) (KindResult, error) {
+			got.sessionID = SessionFrom(ctx)
+			got.decision, got.has = DecisionFrom(ctx)
+			return Settled(Decision{Phase: "undone"}), nil
+		},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	seedSession(t, home, "s-ctx", func(lg *session.Log) {
+		appendProposal(t, lg, 1, "call-ctx", "create_page", nil)
+		if err := lg.Append("plugin:action-cards/decision", map[string]any{
+			"callId": "call-ctx", "action": "create_page", "phase": "installed",
+			"data": map[string]any{"bundleName": "dsh-local-view-x"},
+		}); err != nil {
+			t.Fatalf("decision: %v", err)
+		}
+	})
+	if _, err := service.Act(context.Background(), "s-ctx", "call-ctx", "undo", nil); err != nil {
+		t.Fatalf("Act undo: %v", err)
+	}
+	if got.sessionID != "s-ctx" || !got.has || got.decision.Phase != "installed" {
+		t.Fatalf("Act 上下文 = %+v", got)
+	}
+	if got.decision.Data["bundleName"] != "dsh-local-view-x" {
+		t.Fatalf("Act 上下文里的 decision.data 丢了字段：%+v", got.decision.Data)
+	}
+}
