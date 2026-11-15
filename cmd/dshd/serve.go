@@ -1073,7 +1073,9 @@ func cmdServe(args []string) error {
 	if err := attachOfficialAnalytics(srv, *home); err != nil {
 		fmt.Fprintf(os.Stderr, "analytics: %v\n", err)
 	}
-	srv.AttachOfficialCordisAPI(newCordisService(*home))
+	// cordis 的两条真实事件（dynamic-package / dynamic-retract）落到**归属会话**的
+	// Transport journal 与 WS —— 与 agent 生命周期帧同一个出口（见 serve_journal.go）。
+	srv.AttachOfficialCordisAPI(newCordisService(*home).withEvents(journals, srv.Publish))
 	if useModelRunner {
 		mr.pub = srv.Publish
 	} else {
