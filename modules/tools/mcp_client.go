@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"dshgo/internal/mcp"
 )
 
 const (
@@ -49,6 +51,9 @@ type mcpClient struct {
 	closed   bool
 	readErr  error
 	closeOne sync.Once
+	// closeResult 记住第一次关闭的判定，重复调用不返回零值（零值看起来像
+	// "关闭未确认"，会让重启被永久拒绝）。
+	closeResult mcp.CloseResult
 
 	// done 在读泵退出时关闭；processDone 在 cmd.Wait 返回时关闭。
 	// 两个分开是因为"流断了"和"进程收了"之间可能差一小段，而 Close 要等的是后者。
@@ -298,32 +303,87 @@ func (c *mcpClient) notify(method string, params any) error {
 }
 
 // Close 收掉整棵进程树并等到 Wait 返回。幂等。
+func (c *mcpClient) Close() mcp.CloseResult {
+	return c.CloseWithBudget(mcpCloseWait, nil)
+}
+
+// CloseWithBudget 是有界、可判定的关闭：收掉整棵进程树，并在预算内确认它真的
+// 退出了。
 //
-// 顺序有讲究：先关 stdin（让守规矩的 server 自己退），再 TerminateJobObject
-// （Windows 上一次性收掉它派生的全部后代），最后才 Process.Kill 兜底。
+// 为什么需要"可判定"：官方把传输关闭（closeConfirmed）与本地清理（cleanupError）
+// 分开报告，而 `mcpManager.probe`/`restart` 正是按这两位数决定"能不能替换"。
+// 一个只返回 void 的 Close 让所有调用方都只能猜"大概关掉了吧"——猜错的代价是
+// 两个实例抢同一个工具命名空间。
+//
+// 顺序与 Close 相同：先关 stdin（让守规矩的 server 自己退），再
+// TerminateJobObject（Windows 上一次收掉全部后代），最后 Process.Kill 兜底。
 // 只 Kill 父进程的话，孙进程会变成孤儿继续持有端口/文件锁。
-func (c *mcpClient) Close() {
+//
+// budget <= 0 时用默认 mcpCloseWait；ctx 只影响等待（提前取消 = 不确认关闭）。
+func (c *mcpClient) CloseWithBudget(budget time.Duration, ctx context.Context) mcp.CloseResult {
+	if budget <= 0 {
+		budget = mcpCloseWait
+	}
+	var result mcp.CloseResult
 	c.closeOne.Do(func() {
+		var cleanupErr error
 		c.mu.Lock()
 		c.closed = true
 		c.mu.Unlock()
 
-		_ = c.stdin.Close()
+		// stdin 已随子进程退出而断掉时这里是 EPIPE：那不是清理失败。
+		if err := c.stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			cleanupErr = fmt.Errorf("关 MCP stdin: %w", err)
+		}
 		if c.tree != nil {
-			_ = c.tree.Stop()
+			if err := c.tree.Stop(); err != nil {
+				cleanupErr = fmt.Errorf("收 MCP 进程树: %w", err)
+			}
 		}
 		if c.cmd.Process != nil {
 			_ = c.cmd.Process.Kill() // 只杀本 client 启动并登记的 PID
 		}
+		timer := time.NewTimer(budget)
+		defer timer.Stop()
+		var canceled <-chan struct{}
+		if ctx != nil {
+			canceled = ctx.Done()
+		}
 		select {
 		case <-c.processDone:
-		case <-time.After(mcpCloseWait):
+			result.CloseConfirmed = true
+		case <-canceled:
+			result.CloseConfirmed = false
+			if cleanupErr == nil {
+				cleanupErr = errors.New("关 MCP 连接被取消：子进程是否已退出未知")
+			}
+		case <-timer.C:
+			result.CloseConfirmed = false
+			if cleanupErr == nil {
+				cleanupErr = fmt.Errorf("MCP 子进程未在 %s 内退出", budget)
+			}
 		}
 		if c.tree != nil {
-			_ = c.tree.Close()
+			if err := c.tree.Close(); err != nil && cleanupErr == nil {
+				cleanupErr = fmt.Errorf("释放 MCP Job Object: %w", err)
+			}
 		}
 		_ = c.stdout.Close()
+		if cleanupErr != nil {
+			result.CleanupError = cleanupErr.Error()
+		}
+		c.mu.Lock()
+		c.closeResult = result
+		c.mu.Unlock()
 	})
+	c.mu.Lock()
+	stored := c.closeResult
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return stored
+	}
+	return result
 }
 
 // readMCPLine 按行读，但把"单行超限"和"读错误"分开报。

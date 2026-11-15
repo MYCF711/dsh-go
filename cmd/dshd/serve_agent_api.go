@@ -25,6 +25,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/agent"
 	"dshgo/internal/modes"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
@@ -83,6 +85,18 @@ type agentOfficialDeps struct {
 	// 必须清 **这份实例** 的覆盖，只清盘上新 store 不会生效（t143）。
 	sandboxPresets *modes.Registry
 	sandboxStore   *sandboxModeStore
+	// pub 是 WS 推送通道（`transport.Server.Publish`）。Team 选择变更要同时进
+	// 每会话 Transport journal（可恢复）与 WS（在线订阅者立刻看到）；为 nil 时
+	// 只入 journal（测试夹具用），生产由 serve.go 接上 `srv.Publish`。
+	pub func(topic string, frame transport.ServerFrame)
+	// agents 是**进程内唯一的**活体 agent 注册表（官方 `ctx.agents` 的宿主落点，
+	// `serve.go` 里造一次，同一份也交给 goal-round 驱动）。
+	//
+	// 为什么 agent 面需要它：子代理的 residency epoch（`subagent/start` /
+	// `subagent/end`）与"这个 child 现在在不在跑"只有一个真值，就是这张表。
+	// 这里**不**再存一份影子状态；nil = 这次装配没有活体状态（测试夹具），
+	// 此时委派登记明确跳过，绝不编一条边出来。
+	agents *agent.Registry
 }
 
 // agentOfficialAPI 持有进程内（**不持久化**）的 goal activation。
@@ -108,6 +122,12 @@ type agentOfficialAPI struct {
 	commandsErr      error
 	children         *transport.OfficialChildRegistry
 	questionWaits    *transport.OfficialQuestionWaits
+
+	// teamModeMu 串行化 `agentTeams.setEnabled` 的"读投影 → 比较 → append"。
+	// 官方用 TeamJournal.transact 按 Lead 串行化同一件事；没有它，两个并发调用
+	// 会都看到旧值，各写一条同值 `team/mode`（投影幂等，但"用户改过一次"的事实
+	// 与 journal 帧都会多一份）。
+	teamModeMu sync.Mutex
 }
 
 // agentGoalTimes 是某个 goal id 的创建/最后变更时间（epoch 毫秒）。
@@ -809,7 +829,51 @@ func (a *agentOfficialAPI) subagentsPrompt(req transport.OfficialSubagentPromptR
 	// 子代理工具在 `dshd run` 子进程里 spawn，本进程只认盘上的父子帧
 	// （见 serve_subagents_api.go 的 adoptChild）。
 	a.adoptChild(req.ChildSessionID)
-	return a.childRegistry().Prompt(context.Background(), req)
+	receipt, err := a.childRegistry().Prompt(context.Background(), req)
+	if err != nil {
+		// 投递没被接受 = 没有这次委派，也就没有 `subagent/start` 边。
+		return receipt, err
+	}
+	// 投递**真的被宿主投递通道接受**之后才登记 residency epoch：这一步发
+	// `subagent/start`（官方 `subagent/start` 的语义就是"provider 发布了这个 child"）。
+	// 结算（`subagent/end`）在 runner 那一层——serve 进程里只有它看得到 child 那一轮跑完
+	// （`serve_goal_round.go` 的 settleSubagent）。
+	a.beginChildRun(req.ParentSessionID, req.ChildSessionID)
+	return receipt, nil
+}
+
+// beginChildRun 登记一次真实的子代理 residency epoch。
+//
+// provider 用官方的 `spawn`（`agent.ProviderSpawn`，证据在 `internal/agent/registry.go`）：
+// 本宿主只有一种子代理后端，就是"新起一条子会话"的 spawn，不是 fork。
+//
+// 一个 child 同时最多一次激活：已经有未结算的 run 时不重复发边（官方 activation
+// 也是"一个 child 一个 epoch"）。登记失败只记录——投递已经成功，编一条边或回滚
+// 投递都是更糟的选择。
+func (a *agentOfficialAPI) beginChildRun(parentSessionID, childSessionID string) {
+	if a == nil || a.deps.agents == nil {
+		return
+	}
+	reg, home := a.deps.agents, a.deps.home
+	if _, open := reg.RunForChild(childSessionID); open {
+		return
+	}
+	if err := ensureAgentRegistered(reg, home, parentSessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "父会话 agent 登记失败（session=%s）：%v\n", parentSessionID, err)
+		return
+	}
+	// child 的归属用**这次请求里的父**：`childRegistry().Prompt` 已经按 durable 的
+	// `subagent/spawn` 记录校过父子（不匹配就是 403 cross_session），能走到这里
+	// 说明它就是这个 child 的真父。比再查一次盘更直接，也不会把父子关系记反。
+	if _, ok := reg.Get(childSessionID); !ok {
+		if _, err := reg.Create(childSessionID, parentSessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "子会话 agent 登记失败（session=%s）：%v\n", childSessionID, err)
+			return
+		}
+	}
+	if _, err := reg.BeginSubagent(parentSessionID, childSessionID, agent.ProviderSpawn, ""); err != nil {
+		fmt.Fprintf(os.Stderr, "委派登记失败（parent=%s child=%s）：%v\n", parentSessionID, childSessionID, err)
+	}
 }
 
 // subagentsInterruptByParent 按父授权中断子会话当前轮（官方 `interruptByParent`）。
@@ -819,6 +883,192 @@ func (a *agentOfficialAPI) subagentsInterruptByParent(childSessionID, parentSess
 	}
 	a.adoptChild(childSessionID)
 	return a.childRegistry().InterruptByParent(childSessionID, parentSessionID)
+}
+
+// ---------------------------------------------------------------------------
+// agentTeams.* / subagents.interruptByUser（官方 0.2.2-rc.2 的 Team 分派面）
+// ---------------------------------------------------------------------------
+
+// agentTeamMode 读一个会话**官方投影**的 Team 模式（官方 `isEnabled` 的宿主投影）。
+//
+// 真相是**会话事件**：官方 `isEnabled`（`dsh-agent-team/src/index.ts:94-97`）读的是
+// `team/mode {enabled}` 的投影，从未出现过就是 false（`src/projection.ts:107` 的
+// `enabled: state.enabled === true`）。
+//
+// 为什么不再保留 `<home>/state/agent-team-mode.json`：B2 那份文档是"v4 事件层还没
+// 落地"时的临时替代品。事件层（B3 的已知事件表/投影/WS 翻译）已经就绪，两份真值
+// 只会分叉，而界面 `session.projections` 读的是事件那份——分叉时用户看到的就是错的。
+func (a *agentOfficialAPI) agentTeamMode(sessionID string) (bool, error) {
+	events, err := a.agentReadEvents(sessionID)
+	if err != nil {
+		return false, err
+	}
+	enabled := false
+	for _, ev := range events {
+		if ev.Type != session.EventTeamMode {
+			continue
+		}
+		payload, err := session.ParseTeamModePayload(ev.Data)
+		if err != nil {
+			// 读不懂的历史事件不能当成"没设置过"：那会把用户打开的开关静默关掉。
+			return false, fmt.Errorf("%w: 会话 %s 的 team/mode（seq %d）载荷非法: %v",
+				transport.ErrStatePersistence, sessionID, ev.Seq, err)
+		}
+		enabled = payload.Enabled
+	}
+	return enabled, nil
+}
+
+// agentAppendTeamMode 把一次选择写成 durable `team/mode` 事件。
+//
+// 对应官方 `root.session.append('team/mode', {enabled})`
+// （`dsh-agent-team/src/index.ts:116`）；载荷用唯一构造点 `session.TeamModeEvent`
+// （形状 `{enabled:boolean}`——官方 `teamModeSchema` 是 strict，多一个键都不合法）。
+//
+// 落盘语义：`Log.Append` 把整帧交给 v4 codec（zstd 帧一次写完），返回 nil 就是
+// "已经在文件里"；返回错误时**没有**任何事件被追加，调用方据此不投影任何帧
+// （绝不出现"事件说开了但状态没变"）。
+func (a *agentOfficialAPI) agentAppendTeamMode(sessionID string, enabled bool) (err error) {
+	path, err := a.agentSessionPath(sessionID)
+	if err != nil {
+		return err
+	}
+	logw, err := session.OpenSessionAt(path)
+	if err != nil {
+		return fmt.Errorf("%w: 打开会话 %s 写 team/mode 失败: %v", transport.ErrStatePersistence, sessionID, err)
+	}
+	defer func() {
+		if closeErr := logw.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("%w: 关闭会话 %s 失败: %v", transport.ErrStatePersistence, sessionID, closeErr)
+		}
+	}()
+	if err := logw.Append(session.EventTeamMode, session.TeamModeEvent(enabled)); err != nil {
+		return fmt.Errorf("%w: 追加 team/mode 失败: %v", transport.ErrStatePersistence, err)
+	}
+	return nil
+}
+
+// agentProjectTeamMode 把同一次选择投影进**每会话 Transport journal**（并推 WS）。
+//
+// 为什么 v4 之外还要这一步：v4 事件只让 `session.projections` / `session.page`
+// 看见；而 `session.history` 与 `/ws` 的 `session:<id>` 读的是 Transport journal
+// （docs/transport-contract.md §2：WS 与 history 必须是同一个 seq 域）。不投影，
+// 断线重连的客户端按 seq 补洞时就会**少一帧**，而且缺口看不出来。
+func (a *agentOfficialAPI) agentProjectTeamMode(sessionID string, enabled bool) error {
+	data, err := json.Marshal(session.TeamModeEvent(enabled))
+	if err != nil {
+		return fmt.Errorf("%w: 序列化 team/mode 载荷: %v", transport.ErrStatePersistence, err)
+	}
+	if _, err := emitFrameResult(a.deps.journals, a.deps.pub, sessionID, session.EventTeamMode, data); err != nil {
+		// v4 事件已经落盘（官方语义：appended selection remains active）；这里失败
+		// 只说明**投影**没进 journal。报错让调用方知道，重试不会再 append 一条
+		// 重复事件（判据是 v4 投影，不是这份 journal）。
+		return fmt.Errorf("%w: team/mode 进 transport journal 失败: %v", transport.ErrStatePersistence, err)
+	}
+	return nil
+}
+
+// agentTeamsSetEnabled 是官方 `agentTeams.setEnabled` 的宿主实现。
+//
+// 官方语义逐条落地（`dsh-agent-team/src/index.ts:111-118`）：
+//   - **只允许树根改**：root !== agent → TEAM_LEAD_REQUIRED（本宿主用它自己的
+//     durable `subagent/spawn` 记录判"是不是别人的子会话"，与 internal/agent 同源）；
+//   - `signal?.throwIfAborted()`：本仓方法没有 signal 参数，wire 层也不接受；
+//   - `if (this.isEnabled(root) !== enabled) root.session.append('team/mode', {enabled})`
+//     → **同值不重复 append**。判据就是 v4 投影本身（`agentTeamMode`），所以重复
+//     调用不会写出第二条同值事件，也不会在 journal 里多一帧；
+//   - `await this.ctx.sessions.flush(root.session)`：v4 追加是同步落盘，写失败回
+//     ErrStatePersistence 且**不**投影任何帧。
+func (a *agentOfficialAPI) agentTeamsSetEnabled(req transport.OfficialAgentTeamSetEnabledRequest) error {
+	sessionID := strings.TrimSpace(req.Agent)
+	if sessionID == "" {
+		return fmt.Errorf("%w: agent 是空串", transport.ErrOfficialBadInput)
+	}
+	if err := a.agentEnsureSession(sessionID); err != nil {
+		return err
+	}
+	// 树根判定：这条会话自己带 `subagent/spawn` 记录（childSessionId == 自己）
+	// 就说明它是某个父的子会话，不是树根。
+	if _, isChild, err := agent.FindChild(a.deps.home, sessionID); err != nil {
+		return fmt.Errorf("%w: 判树根失败: %v", transport.ErrOfficialBadInput, err)
+	} else if isChild {
+		return transport.ErrOfficialTeamLeadRequired
+	}
+	// 串行化"读投影 → 比较 → append"（官方 TeamJournal.transact 的宿主对应物）。
+	a.teamModeMu.Lock()
+	defer a.teamModeMu.Unlock()
+	current, err := a.agentTeamMode(sessionID)
+	if err != nil {
+		return err
+	}
+	if current == req.Enabled {
+		return nil
+	}
+	if err := a.agentAppendTeamMode(sessionID, req.Enabled); err != nil {
+		return err
+	}
+	return a.agentProjectTeamMode(sessionID, req.Enabled)
+}
+
+// agentTeamsIsEnabled 读一个会话**生效的** Team 模式（官方 `isEnabled` 的宿主投影）。
+// 默认 false：从未设置过就是关（`dsh-agent-team/src/index.ts:94-97`）。
+func (a *agentOfficialAPI) agentTeamsIsEnabled(sessionID string) (bool, error) {
+	return a.agentTeamMode(strings.TrimSpace(sessionID))
+}
+
+// agentInterruptByUser 是官方 `subagents.interruptByUser` 的宿主实现。
+//
+// 官方口径（`dsh-subagent` 的 interruptByUser 描述逐字）：
+//   - 授权在**目标会话**上由网关完成，所以这里**不再查父**（不跑 catalog/history/
+//     persistence/parent Agent lookup），只把取消信号交给真实的取消通道；
+//   - "不存在 / 空闲 / 已完成的目标是 accepted no-op"——这是官方的明确语义，
+//     不是把错误吞掉：信号确实被接纳了，只是没有在飞的一轮可停；
+//   - accepted 只表示信号被接纳，**不代表目标已静止**。
+func (a *agentOfficialAPI) agentInterruptByUser(childSessionID string) (transport.OfficialAccepted, error) {
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return transport.OfficialAccepted{}, fmt.Errorf("%w: childSessionId 是空串", transport.ErrOfficialBadInput)
+	}
+	if a == nil || a.deps.interrupt == nil {
+		return transport.OfficialAccepted{}, fmt.Errorf(
+			"%w: subagents.interruptByUser 未接线：宿主没有取消通道（cmd/dshd/serve.go 的 agentOfficialDeps.interrupt）",
+			transport.ErrOfficialNotImplemented)
+	}
+	// 目标会话不存在 = 官方 accepted no-op（先判，避免取消通道把"没这条会话"
+	// 当内部错误）。
+	if !a.agentSessionExists(childSessionID) {
+		return transport.OfficialAccepted{Accepted: true}, nil
+	}
+	if err := a.deps.interrupt(childSessionID); err != nil {
+		// 空闲（没有在飞的一轮）也是 accepted：目标本来就静止。
+		if errors.Is(err, ErrNoSuchTurn) || errors.Is(err, transport.ErrNoSuchSession) {
+			return transport.OfficialAccepted{Accepted: true}, nil
+		}
+		return transport.OfficialAccepted{}, err
+	}
+	return transport.OfficialAccepted{Accepted: true}, nil
+}
+
+// bindTeamRC2 把 rc.2 Team 分派面的两个方法交给 Transport（与 bind() 共享同一份
+// 宿主状态：同一个 home、同一个取消通道、同一个 Team 选择存储）。
+func (a *agentOfficialAPI) bindTeamRC2() transport.OfficialAgentTeamRC2API {
+	return transport.OfficialAgentTeamRC2API{
+		SetEnabled:      a.agentTeamsSetEnabled,
+		InterruptByUser: a.agentInterruptByUser,
+	}
+}
+
+// newAgentOfficialAPIWithTeamRC2 同时交回 rc.2 Team 分派面的实现。
+//
+// 接线（Lead 在 cmd/dshd/serve.go 补两行，见报告 B2 的"接线行"）：
+//
+//	core := newAgentOfficialAPICore(agentOfficialDeps{...})
+//	srv.AttachOfficialAgentAPI(core.bind())
+//	srv.AttachOfficialAgentTeamRC2API(core.bindTeamRC2())
+//	srv.DetachOfficialAgentTeamRC2API() // 测试收尾用
+func newAgentOfficialAPIWithTeamRC2(deps agentOfficialDeps) (transport.OfficialAgentAPI, transport.OfficialAgentTeamRC2API) {
+	core := newAgentOfficialAPICore(deps)
+	return core.bind(), core.bindTeamRC2()
 }
 
 // ---------------------------------------------------------------------------
@@ -982,6 +1232,12 @@ func (a *agentOfficialAPI) agentPresetRoster() ([]modes.Mode, error) {
 	return out, nil
 }
 
+// defaultPresetID 是"这个 home 当前生效的默认 preset"：设置里的 selectedDefault，
+// 缺失/失效时回落 modes.DefaultID（解析只有一份实现，见 agent_preset_default.go）。
+func (a *agentOfficialAPI) defaultPresetID() string {
+	return selectedAgentPresetDefault(a.deps.home)
+}
+
 // agentPresetsList 是官方 `agentPresets.list` 的宿主实现（零参数）。
 //
 // 真值来源就是 `agentPresetRoster()`：内置 modes（编译期声明）+ 用户
@@ -1009,7 +1265,7 @@ func (a *agentOfficialAPI) agentPresetsList() (transport.OfficialAgentPresetRost
 		seen[mode.ID] = struct{}{}
 		out = append(out, transport.OfficialAgentPreset{
 			ID:          mode.ID,
-			IsDefault:   mode.ID == modes.DefaultID,
+			IsDefault:   mode.ID == a.defaultPresetID(),
 			Name:        mode.Name,
 			Description: mode.Description,
 		})
@@ -1137,7 +1393,8 @@ func (a *agentOfficialAPI) agentSessionPreset(sessionID string) (string, error) 
 	if value, ok := doc.Sessions[sessionID]; ok && value != "" {
 		return value, nil
 	}
-	return modes.DefaultID, nil
+	// 会话没点名 preset：用设置里写下的默认（官方 defaultId 的语义）。
+	return a.defaultPresetID(), nil
 }
 
 func (a *agentOfficialAPI) agentPresetSelect(sessionID, presetID string) (string, error) {
@@ -1196,100 +1453,6 @@ func agentPresetIDs(roster []modes.Mode) string {
 		ids = append(ids, mode.ID)
 	}
 	return strings.Join(ids, ", ")
-}
-
-// ---------------------------------------------------------------------------
-// skills.list
-// ---------------------------------------------------------------------------
-
-// agentSkillRoots 与 `skill.Module(filepath.Join(home, "skills"))` 的查找顺序一致：
-// 主目录在前，`DSHD_SKILLS_EXTRA`（`;` 分隔）追加在后。
-func (a *agentOfficialAPI) agentSkillRoots() []string {
-	var out []string
-	if a.deps.home != "" {
-		out = append(out, filepath.Join(a.deps.home, "skills"))
-	}
-	for _, p := range strings.Split(os.Getenv("DSHD_SKILLS_EXTRA"), ";") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func (a *agentOfficialAPI) skillsList(sessionID string) (transport.OfficialSkillCatalog, error) {
-	if err := a.agentEnsureSession(sessionID); err != nil {
-		return transport.OfficialSkillCatalog{}, err
-	}
-	// modelInvocable 的真实判据：当前 preset 的工具表里还有没有 `skill` 工具。
-	// preset 选择落在 state 覆盖里；读不到就按默认 preset 算。
-	modelInvocable := true
-	if preset, err := a.agentSessionPreset(sessionID); err == nil {
-		if mode, ok := modes.Lookup(preset); ok {
-			modelInvocable = mode.Allows("skill")
-		}
-	}
-	seen := map[string]bool{}
-	catalog := transport.OfficialSkillCatalog{Skills: []transport.OfficialSkill{}}
-	for _, root := range a.agentSkillRoots() {
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return transport.OfficialSkillCatalog{}, fmt.Errorf("读 skill 目录 %s: %w", root, err)
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() || seen[entry.Name()] {
-				continue
-			}
-			path := filepath.Join(root, entry.Name(), "SKILL.md")
-			info, err := os.Stat(path)
-			if err != nil || info.IsDir() {
-				continue
-			}
-			seen[entry.Name()] = true
-			meta := agentSkillFrontmatter(path)
-			catalog.Skills = append(catalog.Skills, transport.OfficialSkill{
-				Path: path, Name: entry.Name(),
-				Description: meta["description"], WhenToUse: meta["when_to_use"],
-				ModelInvocable: modelInvocable,
-			})
-		}
-	}
-	sort.Slice(catalog.Skills, func(i, j int) bool { return catalog.Skills[i].Name < catalog.Skills[j].Name })
-	return catalog, nil
-}
-
-// agentSkillFrontmatter 只读 SKILL.md 顶部的 `---` 块。取不到就是空串，不猜。
-func agentSkillFrontmatter(path string) map[string]string {
-	out := map[string]string{}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return out
-	}
-	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
-	lines := strings.SplitN(text, "\n", 60)
-	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return out
-	}
-	for _, line := range lines[1:] {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "---" {
-			break
-		}
-		key, value, ok := strings.Cut(trimmed, ":")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		value = strings.Trim(value, `"'`)
-		if key != "" && value != "" {
-			out[key] = value
-		}
-	}
-	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -1376,7 +1539,7 @@ func agentJoinReference(dirPart, name string) string {
 // ---------------------------------------------------------------------------
 
 func (a *agentOfficialAPI) agentUploadDir() string {
-	return filepath.Join(a.deps.home, "state", "uploads")
+	return uploadStateDir(a.deps.home)
 }
 
 // agentUploadName 把显示名洗成一个安全的叶子名（**从不当作路径**）。
@@ -1432,7 +1595,7 @@ func (a *agentOfficialAPI) fileUploadsUpload(sessionID string, req transport.Off
 	sum := sha256.Sum256(data)
 	digest := hex.EncodeToString(sum[:])
 	dir := a.agentUploadDir()
-	blobPath := filepath.Join(dir, "blobs", digest)
+	blobPath := uploadBlobPath(a.deps.home, digest)
 	if _, statErr := os.Stat(blobPath); statErr != nil {
 		if err := os.MkdirAll(filepath.Dir(blobPath), 0o755); err != nil {
 			return transport.OfficialFileUploadValue{}, fmt.Errorf("%w: 建上传目录: %v", transport.ErrStatePersistence, err)

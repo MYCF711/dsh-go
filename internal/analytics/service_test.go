@@ -293,7 +293,12 @@ func TestExportConfiguredCollectorReceivesSanitizedAndOfflineQueues(t *testing.T
 	}
 	select {
 	case got := <-capturedCh:
-		if !strings.Contains(string(got.body), `"events"`) {
+		// 载荷是 OTLP/HTTP JSON（logs）而不是宿主自有的 ExportBatch：
+		// 形状判据从旧的 `"events"` 改成 OTLP 信封，断言更严不更松——
+		// 补发的两条记录必须真的在 resourceLogs[0].scopeLogs[0].logRecords 里。
+		if !strings.Contains(string(got.body), `"resourceLogs"`) ||
+			!strings.Contains(string(got.body), `"scopeLogs"`) ||
+			strings.Count(string(got.body), `"eventName":"desktop_app_launch"`) != 2 {
 			t.Fatalf("补发 body 形状不对：%s", got.body)
 		}
 	case <-time.After(3 * time.Second):

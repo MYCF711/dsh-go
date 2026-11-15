@@ -64,7 +64,10 @@ func (s *Screen) enterAlt() {
 	s.inAlt = true
 	s.prevTitle = currentTitle()
 	// 1000=按钮事件，1003=任意移动（hover），1006=SGR 坐标；Leave 成对关闭。
-	fmt.Fprint(s.out, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1003h\x1b[?1006h"+oscTitle(productName))
+	// 1004=焦点上报（DECSET）：终端在获得/失去焦点时发 `CSI I` / `CSI O`，
+	// 这是 taskNotifications=unfocused 档唯一能判断"你在不在这个窗口"的依据。
+	// 不支持的终端会安静忽略它——那时焦点保持"未知"，按聚焦处理（上游同义）。
+	fmt.Fprint(s.out, "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?1004h"+oscTitle(productName))
 	setConsoleTitle(productName)
 }
 
@@ -76,7 +79,7 @@ func (s *Screen) Leave() {
 	s.inAlt = false
 	// prevTitle 为空（非 Windows，或终端的标题读不出来）时只吐退出序列；
 	// 吐一个空的 OSC 会把人家的标题清掉，那比不恢复更糟。
-	out := "\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?25h\x1b[?1049l"
+	out := "\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?1004l\x1b[?25h\x1b[?1049l"
 	if s.prevTitle != "" {
 		out += oscTitle(s.prevTitle)
 	}

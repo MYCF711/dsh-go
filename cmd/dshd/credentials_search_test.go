@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -96,6 +97,7 @@ func TestSearchUsesStoredCredentialWithoutEnvironment(t *testing.T) {
 
 	srv, seenKey := deepSeekKeyCapture(t)
 	t.Setenv("DEEPSEEK_SEARCH_BASE_URL", srv.URL)
+	t.Setenv("DSHD_WEB_SEARCH_PROVIDER", search.DeepSeekProviderID)
 
 	seam := assembleSearch(t, home)
 	if !seam.SearchReady() {
@@ -115,6 +117,7 @@ func TestSearchStoredCredentialBeatsEnvironment(t *testing.T) {
 	srv, seenKey := deepSeekKeyCapture(t)
 	t.Setenv("DEEPSEEK_SEARCH_BASE_URL", srv.URL)
 	t.Setenv("DEEPSEEK_API_KEY", envKey)
+	t.Setenv("DSHD_WEB_SEARCH_PROVIDER", search.DeepSeekProviderID)
 
 	seam := assembleSearch(t, home)
 	assertProviderKey(t, seam, seenKey, storedKey)
@@ -135,6 +138,7 @@ func TestSearchStoredAliasBeatsEnvironmentPrimary(t *testing.T) {
 	srv, seenKey := deepSeekKeyCapture(t)
 	t.Setenv("DEEPSEEK_SEARCH_BASE_URL", srv.URL)
 	t.Setenv("DEEPSEEK_API_KEY", envKey)
+	t.Setenv("DSHD_WEB_SEARCH_PROVIDER", search.DeepSeekProviderID)
 
 	seam := assembleSearch(t, home)
 	assertProviderKey(t, seam, seenKey, storedAliasKey)
@@ -149,6 +153,7 @@ func TestSearchFallsBackToEnvironmentWhenStoreEmpty(t *testing.T) {
 	srv, seenKey := deepSeekKeyCapture(t)
 	t.Setenv("DEEPSEEK_SEARCH_BASE_URL", srv.URL)
 	t.Setenv("DEEPSEEK_API_KEY", envKey)
+	t.Setenv("DSHD_WEB_SEARCH_PROVIDER", search.DeepSeekProviderID)
 
 	seam := assembleSearch(t, home)
 	assertProviderKey(t, seam, seenKey, envKey)
@@ -188,6 +193,7 @@ func TestSearchSeesCredentialStoredAfterAssembly(t *testing.T) {
 	home := t.TempDir()
 	srv, seenKey := deepSeekKeyCapture(t)
 	t.Setenv("DEEPSEEK_SEARCH_BASE_URL", srv.URL)
+	t.Setenv("DSHD_WEB_SEARCH_PROVIDER", search.DeepSeekProviderID)
 
 	seam := assembleSearch(t, home)
 	if seam.SearchReady() {
@@ -218,5 +224,96 @@ func assertProviderKey(t *testing.T, seam *spi.WebProviders, seenKey func() stri
 	}
 	if got := seenKey(); got != wantKey {
 		t.Fatalf("请求头里的 key 不是预期那一档（凭据库/环境的优先级反了或没接上）")
+	}
+}
+
+// assembleSearchWithCredentialsFirst 按**生产顺序**装配（凭据模块在前、search 在后）。
+//
+// 顺序在这里不是风格问题：search 在 Register 期就按"rc.2 基线默认 provider 当下
+// 是否可用"决定钉哪个 provider（modules/search/search.go 的 newWebProvidersFromEnv）。
+// 凭据服务晚注册 → 只存了凭据库 key 的部署会算成"默认 provider 不可用" → 不钉 →
+// 到选择期两个 provider 同时可用 → WEB_PROVIDER_AMBIGUOUS。所以宿主的装配顺序
+// 必须让凭据先就位（cmd/dshd/main.go 的 loadModsIn）。
+func assembleSearchWithCredentialsFirst(t *testing.T, home string) *spi.WebProviders {
+	t.Helper()
+	k := kernel.New("test-credentials-search-ordered")
+	root := k.Root()
+	t.Cleanup(root.Dispose)
+	mods := []kernel.Module{credentialsModule(home), search.Module()}
+	if _, err := kernel.Assemble(root, mods); err != nil {
+		t.Fatalf("装配 credentials + search 模块失败: %v", err)
+	}
+	seam, err := kernel.Inject(root, spi.WebKey)
+	if err != nil {
+		t.Fatalf("注入 web 接缝失败: %v", err)
+	}
+	return seam
+}
+
+// 宿主装配顺序：凭据模块必须排在 search **之前**（理由见上面那个 helper 的注释）。
+func TestCredentialsModuleRunsBeforeSearch(t *testing.T) {
+	home := t.TempDir()
+	mods, err := loadMods(filepath.Join(home, "dsh.toml"), home, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("loadMods: %v", err)
+	}
+	credentialsAt, searchAt := -1, -1
+	for i, mod := range mods {
+		switch mod.ID {
+		case "credentials":
+			credentialsAt = i
+		case "search":
+			searchAt = i
+		}
+	}
+	if credentialsAt < 0 {
+		t.Fatal("装配列表里没有 credentials 模块（凭据库接缝没接上）")
+	}
+	if searchAt < 0 {
+		t.Fatal("装配列表里没有 search 模块")
+	}
+	if credentialsAt != 0 || searchAt <= credentialsAt {
+		t.Fatalf("凭据模块必须排在最前（credentials=%d, search=%d）：search 在 Register 期就要问得到凭据", credentialsAt, searchAt)
+	}
+}
+
+// 只把 key 存进凭据库（环境全空）→ **默认路径**必须就绪，并选中 rc.2 基线默认
+// 的 deepseek-search-api。这是"界面存了 key 就能搜"在默认配置下的形态：
+// 不钉 provider，靠的完全是凭据库。
+func TestSearchDefaultProviderUsesStoredCredential(t *testing.T) {
+	clearSearchCredentials(t)
+	const storedKey = "stored-only-default-path-key"
+	home := t.TempDir()
+	storeCredential(t, home, "DEEPSEEK_API_KEY", storedKey)
+
+	seam := assembleSearchWithCredentialsFirst(t, home)
+	if !seam.SearchReady() {
+		t.Fatal("凭据库里有 key 时默认搜索路径必须就绪")
+	}
+	provider, err := seam.SelectSearch()
+	if err != nil {
+		t.Fatalf("默认（未钉死）选择失败: %v", err)
+	}
+	if provider.ID() != search.DeepSeekSearchAPIProviderID {
+		t.Fatalf("默认应选中基线默认 provider %q，实际 %q", search.DeepSeekSearchAPIProviderID, provider.ID())
+	}
+}
+
+// 同一条链路的反证：凭据只在环境里时也要能选中基线默认 provider。
+func TestSearchDefaultProviderUsesEnvironmentCredential(t *testing.T) {
+	clearSearchCredentials(t)
+	home := t.TempDir() // 空凭据库
+	t.Setenv("DEEPSEEK_API_KEY", "env-default-path-key")
+
+	seam := assembleSearchWithCredentialsFirst(t, home)
+	if !seam.SearchReady() {
+		t.Fatal("环境里有 key 时默认搜索路径必须就绪")
+	}
+	provider, err := seam.SelectSearch()
+	if err != nil {
+		t.Fatalf("默认选择失败: %v", err)
+	}
+	if provider.ID() != search.DeepSeekSearchAPIProviderID {
+		t.Fatalf("默认应选中 %q，实际 %q", search.DeepSeekSearchAPIProviderID, provider.ID())
 	}
 }

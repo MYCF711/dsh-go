@@ -57,6 +57,58 @@ func TestReturnsImageForModel(t *testing.T) {
 	if d := res.Data.(data); d.MIME != "image/png" || d.Bytes == 0 {
 		t.Fatalf("Data 不对: %+v", d)
 	}
+	// `spi.Image.Path` 必须标出**源文件**：spill-policy 的 token 预算臂靠它把
+	// "全文在哪"写进恢复文件（官方 #79 "The policy never substitutes an unreadable
+	// path for an image"）。相对路径要归一成绝对路径，正斜杠口径与提示词一致。
+	imagePath := res.Images[0].Path
+	if imagePath == "" {
+		t.Fatal("Result.Images[0].Path 不能为空：模型超预算时就没有可读路径可用")
+	}
+	if !filepath.IsAbs(imagePath) {
+		t.Fatalf("Path 必须归一成绝对路径，得到 %q", imagePath)
+	}
+	if strings.Contains(imagePath, `\`) {
+		t.Fatalf("Path 必须是正斜杠口径（与提示词的路径口径一致），得到 %q", imagePath)
+	}
+	if got, want := filepath.FromSlash(imagePath), p; got != want {
+		t.Fatalf("Path=%q，want %q", got, want)
+	}
+	if info, statErr := os.Stat(imagePath); statErr != nil || info.IsDir() {
+		t.Fatalf("Path 必须指向一个真实常规文件: stat=%v isDir=%v", statErr, statErr == nil && info.IsDir())
+	}
+}
+
+// 相对路径也要归一成绝对路径（模型给的是相对工作目录的路径）。
+func TestImagePathIsAbsoluteForRelativeInput(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "rel.png")
+	glyph := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	glyph.Set(0, 0, color.RGBA{R: 1, G: 2, B: 3, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, glyph); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 进程 cwd 切到图片目录，传裸文件名。
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+
+	tool := &Tool{}
+	res, err := tool.Exec(context.Background(), json.RawMessage(`{"file_path":"rel.png"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Images[0].Path; !filepath.IsAbs(got) || filepath.FromSlash(got) != p {
+		t.Fatalf("相对路径没归一成 %q，得到 %q", p, got)
+	}
 }
 
 // 改过名的文本文件：按内容判类型，不信扩展名。

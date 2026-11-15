@@ -1,0 +1,919 @@
+package settingsform
+
+import "net/http"
+
+// 官方 0.2.2-rc.2 的客户端 UI / 插件设置命名空间：`locale` / `ui-theme` /
+// `ui-chat` / `ui-settings`（设置面板的「语言 / 外观 / 工作细节 / 开发者工具」
+// 行读的就是这 4 个，官方 `settings.general.item` 的 NS+Path）、
+// `ui-conversation` 与 `session-log-deepseek`（2026-11-13 补的两个 general slot），
+// 以及 2026-11-14 新增的 `session-telemetry-otel`（官方
+// dsh-session-telemetry-otel 的开关；本宿主没有 OTel 后端，见下面第 4 条差异）。
+//
+// # 权威源（随 rc.2 asar 发布的 TypeScript 原件）
+//
+// <official-rc2>/dsh/node_modules/@deepseek-ai/
+//
+//	dsh-client-locale/src/locale-settings.ts:6-35
+//	  LOCALE_SETTINGS_NAMESPACE='locale'、LOCALE_PREFERENCE_FIELD='preference'
+//	  :12 LOCALE_ID_PATTERN=/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/u
+//	  :31 preference: z.string().pattern(...).required(false)  —— 无默认值（缺省交给浏览器）
+//	dsh-client-ui-theme/src/theme-settings.ts:6-147
+//	  :21 DEFAULT_PREFERENCE='system'、:24/:27 FONT_SIZE_MIN=10 / FONT_SIZE_MAX=22
+//	  :30 DEFAULT_FONT_SIZE=14
+//	  :57-61 FONT_SIZE_SPECS：text 10..22=14 / code 10..16=11 / terminal 10..20=13
+//	  :72-76 FONT_FAMILY_FIELDS：textFontFamily / codeFontFamily / terminalFontFamily
+//	  :139-147 ThemeSettingsSchema：三个 *FontFamily 都是 z.string().default('')
+//	dsh-client-ui-chat/src/chat-settings.ts:6-98
+//	  :36 TRANSCRIPT_VIEW_MODES={compact,standard,detailed,verbose}
+//	  :45/:48 LEGACY normal / expanded（读作 detailed、不作为选项、不回写）
+//	  :56 DEFAULT_TRANSCRIPT_VIEW_MODE='detailed'
+//	  :21 DEFAULT_COLLAPSE_TIMING='completion'、:33 DEFAULT_FOLDED_REPLIES='all'
+//	  :65 DEFAULT_PERFORMANCE_USAGE='detailed'、:71 DEFAULT_LINK_OPENING='sidebar'
+//	  :88-95 ChatSettingsFields：transcriptView 是
+//	    z.union([...current, normal, expanded]).loose()（无默认值，写入宽松）
+//	dsh-client-ui-settings/src/developer-tools-settings.ts:5-19
+//	  :5 DEVELOPER_TOOLS_NAMESPACE='ui-settings'、:15 enabled: z.boolean().default(true)
+//
+// # 线上形状
+//
+// 注册到 Host 的不是 `*SettingsSchema`，而是各包 host 侧的 `Config`
+// （dsh-client-*/src/index.ts：`export const Config = z.object({...})`，字段与
+// 默认值同 *SettingsSchema，另外每个叶子 `.volatile()`）。`settings.describe`
+// 下发 `volatileForm(Config).toJSON()`——见 dsh-settings/src/index.ts:338
+// （`schema: form.toJSON()`）、src/schema.ts:16-60（plainSchema 只删
+// `meta.volatile`，其余 meta 原样）。所以线上 envelope 的每个叶子仍带
+// default/min/max/step/pattern/required/loose，且根 object 带 `meta.default={}`。
+//
+// 本文件的 envelope 与官方 node_modules 实跑结果逐字段一致
+// （复现脚本：tmp/GO8-RC2/_ns/dump-schema.mjs → _ns/official-envelopes.json）。
+// 唯一例外是下面第 3 条那一个默认值节点（enabled 的 meta.default）。
+//
+// # 与官方有意不同的四处（都是"更严 / 更诚实"，并已在报告里登记）
+//
+//  1. `transcriptView` 的官方 schema 是 `.loose()`：坏值在官方会被**静默退回
+//     默认**。本宿主沿用既有 fail-loud 政策（不许静默截断），坏值直接四字段
+//     错误；schema 仍按官方发布 `meta.loose=true`（形状不失真）。
+//  2. 未知字段：官方 object 解析会把额外键原样带过；本宿主拒绝
+//     （`unknown_field`），与 `llm` 命名空间既有行为一致。
+//  3. `session-log-deepseek.enabled` 的默认值是 **false**，官方
+//     `dsh-session-log-deepseek/src/index.ts:60` 是 `z.boolean().default(true)`。
+//     官方那个 `true` 的前提是官方宿主里有 wire 上传方：该插件
+//     `inject: ['deepseekLlmApiExtensions','sessions']`（:44）并
+//     `register('dsh_session_log', {prepare, accept})`（:196-261，accept 在 2xx
+//     后写 `session-log-deepseek/delivery-accepted` 水位），只在官方 DeepSeek
+//     Messages 路由上生效。本仓 `internal/llm` 的 `ResolveProvider` 走的是用户
+//     自配的 OpenAI 兼容端点（默认 magpie 网关），没有这个扩展点，也没有任何
+//     消费 `dsh_session_log` 的生产代码——声明 `true` 而无人消费就是**静默成功**。
+//     因此默认取 `false`（= 本仓真实生效值），并且显式声明 `true` 会被
+//     `not_implemented`（501）拒绝，见 checkSessionLogDeepSeekEnabled。
+//  4. `session-telemetry-otel.mode` 的默认值是 **DISABLED**，官方
+//     `dsh-session-telemetry-otel/src/index.ts:37/:117` 是 `FEEDBACK_ONLY`。
+//     官方那个默认前提是 OTel SDK 管线：`inject = ['sessions','otel']`（:145）、
+//     `ctx.otel.createSessionLogReporter(...)`（:190）与 on-demand 的
+//     `SessionTelemetryCoordinator`（:219-222）。本仓没有 OTel SDK，也没有会话
+//     遥测通道（`internal/analytics` 只有端点环境变量），声明 `FEEDBACK_ONLY`
+//     而无人导出同样是静默成功。因此默认取 `DISABLED`（官方该模式下也只 warn、
+//     不导出，见 :156-163），`FEEDBACK_ONLY` 被 `not_implemented`（501）拒绝。
+
+// 命名空间的名字（官方常量逐字）。
+const (
+	// NamespaceLocale 是 dsh-client-locale 的命名空间。
+	NamespaceLocale = "locale"
+	// NamespaceUITheme 是 dsh-client-ui-theme 的命名空间。
+	NamespaceUITheme = "ui-theme"
+	// NamespaceUIChat 是 dsh-client-ui-chat 的命名空间。
+	NamespaceUIChat = "ui-chat"
+	// NamespaceUISettings 是 dsh-client-ui-settings（开发者工具）的命名空间。
+	NamespaceUISettings = "ui-settings"
+	// NamespaceUIConversation 是 dsh-client-ui-conversation 的命名空间。
+	NamespaceUIConversation = "ui-conversation"
+	// NamespaceSessionLogDeepSeek 是 dsh-session-log-deepseek 的上传开关命名空间。
+	NamespaceSessionLogDeepSeek = "session-log-deepseek"
+	// NamespaceSessionTelemetryOTel 是 dsh-session-telemetry-otel 的命名空间
+	// （官方插件名逐字：`@deepseek-ai/dsh-session-telemetry-otel`）。
+	NamespaceSessionTelemetryOTel = "session-telemetry-otel"
+)
+
+// 字段名（官方常量逐字）。
+const (
+	// FieldPreference 是 locale / ui-theme 共用的 `preference`。
+	FieldPreference = "preference"
+	// FieldFontSize 是会话正文的字号（px）。
+	FieldFontSize = "fontSize"
+	// FieldCodeFontSize 是代码块字号（px）。
+	FieldCodeFontSize = "codeFontSize"
+	// FieldTerminalFontSize 是侧栏终端字号（px）。
+	FieldTerminalFontSize = "terminalFontSize"
+	// FieldTextFontFamily / FieldCodeFontFamily / FieldTerminalFontFamily 是三类
+	// 字体列表；空串表示沿用内置字体栈。
+	FieldTextFontFamily     = "textFontFamily"
+	FieldCodeFontFamily     = "codeFontFamily"
+	FieldTerminalFontFamily = "terminalFontFamily"
+	// FieldTranscriptView 是工作细节的展示模式。
+	FieldTranscriptView = "transcriptView"
+	// FieldCollapseTiming 是 Turn 收起的时机。
+	FieldCollapseTiming = "collapseTiming"
+	// FieldFoldedReplies 是收起时保留哪些助手回复。
+	FieldFoldedReplies = "foldedReplies"
+	// FieldPerformanceUsage 是性能与用量明细的粒度。
+	FieldPerformanceUsage = "performanceUsage"
+	// FieldLinkOpening 是点击 HTTP(S) 链接的落点。
+	FieldLinkOpening = "linkOpening"
+	// FieldDeveloperToolsEnabled 是开发者工具总开关。
+	FieldDeveloperToolsEnabled = "enabled"
+	// FieldBusyEnter 是 `ui-conversation.busyEnter`（submission-settings.ts:11
+	// `BUSY_ENTER_FIELD = 'busyEnter'`）。
+	FieldBusyEnter = "busyEnter"
+	// FieldSessionLogEnabled 是 `session-log-deepseek.enabled`
+	// （dsh-session-log-deepseek/src/index.ts:59-61）。
+	FieldSessionLogEnabled = "enabled"
+	// FieldSessionTelemetryMode 是 `session-telemetry-otel.mode`
+	// （dsh-session-telemetry-otel/src/index.ts:117）。
+	FieldSessionTelemetryMode = "mode"
+	// FieldSessionTelemetryExporterURL 是官方 `exporter.url`
+	// （dsh-session-telemetry-otel/src/index.ts:93-96 的 `Omit<LogExporterOptions,'url'> & {url?}`
+	// 里的那一个 url；线上是嵌套对象，本仓 L1 表单只投影这个叶子）。
+	FieldSessionTelemetryExporterURL = "exporterURL"
+	// FieldSessionTelemetryShutdownTimeoutMillis 是官方 `shutdownTimeoutMillis`。
+	FieldSessionTelemetryShutdownTimeoutMillis = "shutdownTimeoutMillis"
+	// FieldSessionTelemetryMaxRequestBytes 是官方 `maxRequestBytes`。
+	FieldSessionTelemetryMaxRequestBytes = "maxRequestBytes"
+)
+
+// 官方默认值（逐条对应上面权威源的 file:line）。
+const (
+	// DefaultThemePreference 是 theme-settings.ts:21 的 DEFAULT_PREFERENCE。
+	DefaultThemePreference = "system"
+	// DefaultFontSize / DefaultCodeFontSize / DefaultTerminalFontSize 是
+	// theme-settings.ts:57-61 FONT_SIZE_SPECS 的 default。
+	DefaultFontSize         = 14
+	DefaultCodeFontSize     = 11
+	DefaultTerminalFontSize = 13
+	// FontSizeMin / FontSizeMax / CodeFontSizeMin / CodeFontSizeMax /
+	// TerminalFontSizeMin / TerminalFontSizeMax 是同一张表的 min/max。
+	FontSizeMin         = 10
+	FontSizeMax         = 22
+	CodeFontSizeMin     = 10
+	CodeFontSizeMax     = 16
+	TerminalFontSizeMin = 10
+	TerminalFontSizeMax = 20
+	// DefaultTranscriptView 是 chat-settings.ts:56 的 DEFAULT_TRANSCRIPT_VIEW_MODE
+	// （客户端默认值：schema 本身没有 meta.default）。
+	DefaultTranscriptView = "detailed"
+	// DefaultCollapseTiming / DefaultFoldedReplies / DefaultPerformanceUsage /
+	// DefaultLinkOpening 是 chat-settings.ts:21/:33/:65/:71。
+	DefaultCollapseTiming   = "completion"
+	DefaultFoldedReplies    = "all"
+	DefaultPerformanceUsage = "detailed"
+	DefaultLinkOpening      = "sidebar"
+	// DefaultDeveloperToolsEnabled 是 developer-tools-settings.ts:15。
+	DefaultDeveloperToolsEnabled = true
+	// DefaultBusyEnter 是 submission-settings.ts:19
+	// （DEFAULT_BUSY_ENTER_BEHAVIOR = 'queue'）。
+	DefaultBusyEnter = "queue"
+	// DefaultSessionLogEnabled 是 `session-log-deepseek.enabled` 的**本仓**默认值。
+	//
+	// 与官方不同：官方 `dsh-session-log-deepseek/src/index.ts:60` 是
+	// `z.boolean().default(true)`，前提是官方宿主里存在 wire 上传方
+	// （:44 `inject: ['deepseekLlmApiExtensions','sessions']` +
+	// :196-261 `register('dsh_session_log', {prepare, accept})`，只在官方
+	// DeepSeek Messages 路由上）。本仓没有这个 sink（生产代码里
+	// `grep -rn "dsh_session_log" --include=*.go` 为 0 处消费），声明 true 就是
+	// 静默成功，所以这里的真实生效默认值是 false；显式写 true 由
+	// checkSessionLogDeepSeekEnabled 以 501 not_implemented 拒绝。
+	DefaultSessionLogEnabled = false
+	// DefaultSessionTelemetryMode 是 `session-telemetry-otel.mode` 的**本仓**默认值。
+	//
+	// 与官方不同：官方 index.ts:37/:117 是 `FEEDBACK_ONLY`，前提是 OTel SDK 的
+	// session-log reporter（:190 `ctx.otel.createSessionLogReporter`）与 on-demand
+	// coordinator（:219-222）。本仓没有 OTel SDK 与会话遥测通道，声明
+	// FEEDBACK_ONLY 无人导出 = 静默成功；官方在 DISABLED 下也只是 warn 不上传
+	// （:156-163），因此本仓默认取那个真实生效值。
+	DefaultSessionTelemetryMode = SessionTelemetryModeDisabled
+	// DefaultShutdownTimeoutMillis 是官方部署配置里的
+	// `shutdownTimeoutMillis: 3000`（dsh-base/cordis.patch.yml:222；官方 schema
+	// 本身无 default，见 index.ts:120 + DEFAULT_SHUTDOWN_TIMEOUT_MILLIS :125）。
+	DefaultShutdownTimeoutMillis = 3000
+	// DefaultMaxRequestBytes 是官方部署配置里的 `maxRequestBytes: 4000000`
+	// （dsh-base/cordis.patch.yml:223，等于官方 schema 的上限
+	// index.ts:121 `.step(1).min(1).max(4_000_000)`）。
+	DefaultMaxRequestBytes = 4000000
+	// MaxRequestBytesLimit 是官方 OTLP 请求体上限（index.ts:106/:121 的 4,000,000）。
+	MaxRequestBytesLimit = 4000000
+	// ShutdownTimeoutMillisMin / ShutdownTimeoutMillisMax 是官方构造期对
+	// `shutdownTimeoutMillis` 的运行时判据：必须是**正的**且不大于 Node 的
+	// 定时器上限 MAX_TIMER_DELAY_MILLIS（index.ts:129/:185-186）。
+	ShutdownTimeoutMillisMin = 1
+	ShutdownTimeoutMillisMax = 2147483647
+	// LegacyTranscriptViewNormal / LegacyTranscriptViewExpanded 是
+	// chat-settings.ts:45/:48 的两代旧值：读作 detailed，不作为选项、不回写。
+	LegacyTranscriptViewNormal   = "normal"
+	LegacyTranscriptViewExpanded = "expanded"
+	// LocaleIDPattern 是 locale-settings.ts:12 的 LOCALE_ID_PATTERN.source。
+	LocaleIDPattern = `^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$`
+)
+
+// 官方枚举（顺序即官方定义序）。
+var (
+	// ThemePreferences 是 theme-settings.ts:6 THEME_PREFERENCES。
+	ThemePreferences = []string{"light", "dark", "system"}
+	// TranscriptViewModes 是 chat-settings.ts:36 TRANSCRIPT_VIEW_MODES。
+	TranscriptViewModes = []string{"compact", "standard", "detailed", "verbose"}
+	// CollapseTimings 是 chat-settings.ts:15 COLLAPSE_TIMINGS。
+	CollapseTimings = []string{"completion", "next-input"}
+	// FoldedRepliesValues 是 chat-settings.ts:27 FOLDED_REPLIES。
+	FoldedRepliesValues = []string{"all", "final"}
+	// PerformanceUsageModes 是 chat-settings.ts:59 PERFORMANCE_USAGE_MODES。
+	PerformanceUsageModes = []string{"compact", "detailed"}
+	// LinkOpenings 是 chat-settings.ts:68 LinkOpening 的两个分支。
+	LinkOpenings = []string{"sidebar", "new-tab"}
+	// SessionTelemetryModes 是官方 `SessionTelemetryMode` 的两个取值，顺序即官方
+	// enum 定义序（dsh-session-telemetry-otel/src/index.ts:31-34）。
+	SessionTelemetryModes = []string{SessionTelemetryModeFeedbackOnly, SessionTelemetryModeDisabled}
+)
+
+// 官方 `SessionTelemetryMode` 的字面量（index.ts:31-34）。
+const (
+	// SessionTelemetryModeFeedbackOnly 是官方默认模式：只在用户显式提交 feedback
+	// 时捕获会话历史（index.ts:86）。
+	SessionTelemetryModeFeedbackOnly = "FEEDBACK_ONLY"
+	// SessionTelemetryModeDisabled 不构造任何 SDK 状态，只在 feedback 落地时 warn
+	// （index.ts:33/:156-163）。
+	SessionTelemetryModeDisabled = "DISABLED"
+)
+
+// 字段种类（envelope 节点形状）。
+const (
+	uiKindEnum    = "enum"
+	uiKindString  = "string"
+	uiKindInteger = "integer"
+	uiKindBoolean = "boolean"
+	// uiKindNumber 是官方**裸 `z.number()`**：envelope 上只有 meta.default，
+	// 没有 step/min/max（`dsh-bash-local/src/index.ts:102-104` 的
+	// `timeoutMs: z.number().default(120_000)` 就是这种）。与 uiKindInteger 的
+	// 差别只在 envelope 形状，不在宿主接受的取值（本仓 L1 表单仍按整数毫秒/字节）。
+	uiKindNumber = "number"
+)
+
+// 官方 string 字段的 meta.role（envelope 上逐字发布的形状）。
+const (
+	// uiRoleCredentialRef 是 `z.string().role('credential-ref')`：值是**凭据引用名**
+	// （如 DEEPSEEK_API_KEY），不是凭据本身。
+	uiRoleCredentialRef = "credential-ref"
+	// uiRoleSecret 是 `z.string().role('secret')`：值从不上线，只报"有没有设"。
+	uiRoleSecret = "secret"
+)
+
+// uiField 是一个官方字段声明。**schema envelope 与 sections 字段投影都从这一张
+// 表生成**：否则「schema 说 min 10 / section 说 min 22」这类漂移只能靠人肉核对。
+type uiField struct {
+	name string
+	kind string
+	// enum 只对 uiKindEnum 生效（顺序即官方定义序）。它是**schema 的 union 分支**：
+	// 旧值（transcriptView 的 normal/expanded）必须在里面，否则读一份存着旧值的
+	// 文档就会在校验期失败。
+	enum []string
+	// choices 是 sections[] 里给界面的**可选项**；nil 表示与 enum 相同。
+	// transcriptView 用它把两代旧值排除在选项之外（官方裁定的"不作为选项"）。
+	choices []string
+	// min/max 只对 uiKindInteger 生效。
+	min *int64
+	max *int64
+	// def 是官方 meta.default；nil 表示官方**没有**默认值（locale.preference、
+	// ui-chat.transcriptView 就是这种）。
+	def any
+	// pattern / patternFlags 只对 uiKindString 生效（官方 meta.pattern）。
+	pattern      string
+	patternFlags string
+	// loose 只对 uiKindEnum 生效（官方 transcriptView 的 .loose()）。
+	loose bool
+	// role 是官方 string 字段的 meta.role（credential-ref / secret）；空 = 无该键。
+	role string
+	// baseOnly 表示"Base 里有默认值，但官方 schema 没有 meta.default"：
+	// 默认值来自客户端常量（transcriptView 的 DEFAULT_TRANSCRIPT_VIEW_MODE）。
+	baseOnly bool
+	// required 非 nil 时写进 meta.required（locale.preference 是 false）。
+	required *bool
+}
+
+func uiEnumField(name string, values []string, def any) uiField {
+	return uiField{name: name, kind: uiKindEnum, enum: append([]string(nil), values...), def: def}
+}
+
+func uiStringField(name string, def any) uiField {
+	return uiField{name: name, kind: uiKindString, def: def}
+}
+
+func uiIntegerField(name string, minimum, maximum, def int64) uiField {
+	low, high := minimum, maximum
+	return uiField{name: name, kind: uiKindInteger, min: &low, max: &high, def: def}
+}
+
+// uiMinOnlyIntegerField 声明官方 `z.number().step(1).min(v)` 形状：有 step、有下限、
+// **没有上限**（`dsh-web-deepseek-api/src/index.ts:101` 的 searchRequestsPerSecond
+// 与 `dsh-web-search-deepseek/src/index.ts:78` 的 maxUses 都是这种）。
+func uiMinOnlyIntegerField(name string, minimum int64, def any) uiField {
+	low := minimum
+	return uiField{name: name, kind: uiKindInteger, min: &low, def: def}
+}
+
+// uiBareNumberField 声明官方裸 `z.number().default(v)`：envelope 只有 default。
+func uiBareNumberField(name string, def any) uiField {
+	return uiField{name: name, kind: uiKindNumber, def: def}
+}
+
+func uiBooleanField(name string, def bool) uiField {
+	return uiField{name: name, kind: uiKindBoolean, def: def}
+}
+
+func (f uiField) withPattern(pattern, flags string) uiField {
+	f.pattern, f.patternFlags = pattern, flags
+	return f
+}
+
+func (f uiField) withRequired(required bool) uiField {
+	value := required
+	f.required = &value
+	return f
+}
+
+func (f uiField) withLoose() uiField {
+	f.loose = true
+	return f
+}
+
+// withRole 发布官方 `z.string().role(...)` 的 meta.role。
+func (f uiField) withRole(role string) uiField {
+	f.role = role
+	return f
+}
+
+// withBaseOnly 声明"Base 的默认值来自客户端常量，schema 里没有 meta.default"。
+func (f uiField) withBaseOnly() uiField {
+	f.baseOnly = true
+	return f
+}
+
+// withChoices 单独声明界面可选项（不给默认值 = 与 schema 分支相同）。
+func (f uiField) withChoices(choices []string) uiField {
+	f.choices = append([]string(nil), choices...)
+	return f
+}
+
+// meta 返回官方的 node meta：先放默认值，再放该字段特有的约束。
+//
+// 官方 toJSON 的 meta 里数字是 number（JSON 解码后就是 float64），
+// normalizeSchemaMeta 负责把 int 归一成 float64。
+func (f uiField) meta() map[string]any {
+	meta := map[string]any{}
+	switch f.kind {
+	case uiKindEnum:
+		if f.def != nil {
+			meta["default"] = f.def
+		}
+		if f.loose {
+			meta["loose"] = true
+		}
+	case uiKindString:
+		// secret 的值从不上线：官方 plainSchema 对 role==='secret' 的节点删掉
+		// default 与 required（schema.ts 的 plainSchema 那三步里的第二步）。
+		if f.def != nil && f.role != uiRoleSecret {
+			meta["default"] = f.def
+		}
+		if f.pattern != "" {
+			pattern := map[string]any{"source": f.pattern}
+			if f.patternFlags != "" {
+				pattern["flags"] = f.patternFlags
+			}
+			meta["pattern"] = pattern
+		}
+	case uiKindInteger:
+		meta["step"] = 1
+		if f.min != nil {
+			meta["min"] = *f.min
+		}
+		if f.max != nil {
+			meta["max"] = *f.max
+		}
+		if f.def != nil {
+			meta["default"] = f.def
+		}
+	case uiKindNumber:
+		// 裸 z.number()：官方 envelope 上只有 default，一个约束键都没有。
+		if f.def != nil {
+			meta["default"] = f.def
+		}
+	case uiKindBoolean:
+		if f.def != nil {
+			meta["default"] = f.def
+		}
+	}
+	if f.role != "" {
+		meta["role"] = f.role
+	}
+	if f.required != nil && f.role != uiRoleSecret {
+		meta["required"] = *f.required
+	}
+	return meta
+}
+
+// schemaNode 把一个字段建成官方 envelope 节点，返回 refs 里的 uid。
+//
+// union 的每个分支都是 `z.const(v).required()`（官方 `z.union([...strings])`
+// 走 Schema.from(primitive) → const().required()，实跑 toJSON 也是
+// meta.required=true）。注意与 `llm` 的 retryableCodes 不同：那里官方是裸
+// `z.const(code)`，分支上没有 required。
+func (f uiField) schemaNode(b *schemaEnvelope) int {
+	switch f.kind {
+	case uiKindEnum:
+		branches := make([]int, 0, len(f.enum))
+		for _, value := range f.enum {
+			branches = append(branches, b.constNode(value, true))
+		}
+		return b.unionNode(branches, f.meta())
+	case uiKindString:
+		return b.node("string", f.meta(), nil)
+	case uiKindInteger:
+		return b.node("number", f.meta(), nil)
+	case uiKindNumber:
+		return b.node("number", f.meta(), nil)
+	case uiKindBoolean:
+		return b.node("boolean", f.meta(), nil)
+	}
+	return -1
+}
+
+// fieldSpec 是同一个字段在 sections[] 里的机器可读投影。
+//
+// sections 是本仓 L1 的 additive 面（官方 describe 只有 namespaces）：GUI 的设置
+// 面板按 `sections[].fields[].current` 画当前值，所以声明式命名空间也必须给
+// 字段投影，否则界面只能看到 schema、看不到值。
+func (f uiField) fieldSpec() FieldSpec {
+	spec := FieldSpec{Name: f.name}
+	switch f.kind {
+	case uiKindEnum:
+		spec.Type = FieldTypeString
+		if f.choices != nil {
+			spec.Enum = append([]string(nil), f.choices...)
+		} else {
+			spec.Enum = append([]string(nil), f.enum...)
+		}
+	case uiKindString:
+		spec.Type = FieldTypeString
+	case uiKindInteger:
+		spec.Type = FieldTypeInteger
+		if f.min != nil {
+			value := *f.min
+			spec.Minimum = &value
+		}
+		if f.max != nil {
+			value := *f.max
+			spec.Maximum = &value
+		}
+	case uiKindBoolean:
+		spec.Type = FieldTypeBoolean
+	case uiKindNumber:
+		// 官方裸 number 在 sections[] 里仍投影成 integer：L1 表单只画整数输入框，
+		// 而这些字段的真实语义（毫秒 / 字节 / token 数）本来就是整数。
+		spec.Type = FieldTypeInteger
+	}
+	if f.role == uiRoleSecret {
+		spec.Secret = true
+	}
+	return spec
+}
+
+// uiNamespace 是一个客户端 UI 命名空间的完整声明。
+type uiNamespace struct {
+	ns     string
+	title  string
+	fields []uiField
+	// base 是官方默认值（Store 没有该命名空间时 describe 用它）。
+	// 与字段自己的 meta.default 允许不同：`transcriptView` 的官方 schema 没有
+	// default（缺省由客户端按 DEFAULT_TRANSCRIPT_VIEW_MODE 补），而设置表单的
+	// 默认值就是那个客户端默认值。
+	base map[string]any
+	// normalize 是读路径的有效值投影（官方客户端读取时做的那一步）。
+	// **只影响 describe/get 的 value 与 section.current，从不写回存储。**
+	normalize func(value map[string]any)
+	// check 是 schema 与字段级校验都表达不了的**语义**判据，在字段校验之后跑
+	// （所以坏类型/坏枚举仍先得到 400，不会被语义分支盖掉）。当前用它的两处都是
+	// "这个开关说了一件本宿主做不到的事"：session-log-deepseek.enabled 与
+	// session-telemetry-otel.mode 的真实上传/导出后端不存在，声明"开"就是
+	// 静默成功，因此返回四字段 not_implemented（501）。返回 nil 表示通过。
+	check func(value map[string]any) error
+	// schemaOnly 是 L1 表单表达不了、只进 schema envelope 的字段（数组 / 嵌套对象）。
+	//
+	// `FieldSpec` 只有 string/integer/boolean 三种标量，`sections[].fields` 装不下
+	// `allowedModels: {provider, model}[]` 这种节点。官方 settings 的 schema 里它是
+	// 真字段，所以 envelope 必须照样发布（否则客户端 rehydrate 出来的表单少一截）；
+	// 只是 GUI 的通用表单不画它，语义校验走 check。
+	schemaOnly []schemaOnlyField
+}
+
+// schemaOnlyField 是一个只发 schema、不进 sections[] 的字段声明。
+type schemaOnlyField struct {
+	name string
+	// node 在同一个 envelope builder 上建节点（uid 因此与标量字段连续、无空洞）。
+	node func(b *schemaEnvelope) int
+}
+
+// schema 生成官方 schemastery envelope（根 object 带 meta.default={}，与官方
+// toJSON 一致）。
+func (ns uiNamespace) schema() any {
+	b := newSchemaEnvelope()
+	dict := make(map[string]any, len(ns.fields)+len(ns.schemaOnly))
+	for _, field := range ns.fields {
+		dict[field.name] = field.schemaNode(b)
+	}
+	for _, field := range ns.schemaOnly {
+		dict[field.name] = field.node(b)
+	}
+	root := b.node("object", map[string]any{"default": map[string]any{}}, map[string]any{"dict": dict})
+	return b.envelope(root)
+}
+
+// fieldSpecs 返回 sections[] 用的字段投影（顺序即官方字段序）。
+func (ns uiNamespace) fieldSpecs() []FieldSpec {
+	out := make([]FieldSpec, 0, len(ns.fields))
+	for _, field := range ns.fields {
+		out = append(out, field.fieldSpec())
+	}
+	return out
+}
+
+// validate 是写/读路径共用的语义校验：先把原因说成精确的四字段错误
+// （invalid_type / invalid_enum / invalid_value / out_of_range / unknown_field），
+// 再交给 envelope 兜一遍（validateDeclaredValue 的顺序）。
+func (ns uiNamespace) validate(value any) error {
+	if value == nil {
+		return nil
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return newInvalidTypeError([]string{ns.ns}, "object", value)
+	}
+	known := make(map[string]bool, len(ns.fields)+len(ns.schemaOnly))
+	for _, field := range ns.fields {
+		known[field.name] = true
+	}
+	for _, field := range ns.schemaOnly {
+		known[field.name] = true
+	}
+	for key := range object {
+		if !known[key] {
+			return &Error{
+				Code:    "unknown_field",
+				Message: ns.ns + " 没有字段 " + key,
+				Hint:    "只提交 settings.describe 里 " + ns.ns + " 的 schema 字段",
+				Status:  400,
+			}
+		}
+	}
+	for _, field := range ns.fields {
+		raw, present := object[field.name]
+		if !present || raw == nil {
+			// 官方 schema 里这些字段都可空：缺省/null 取 meta.default 或交给客户端。
+			continue
+		}
+		if err := field.validate(ns.ns, raw); err != nil {
+			return err
+		}
+	}
+	if ns.check != nil {
+		return ns.check(object)
+	}
+	return nil
+}
+
+func (f uiField) validate(namespace string, raw any) error {
+	path := []string{namespace, f.name}
+	switch f.kind {
+	case uiKindEnum:
+		text, ok := raw.(string)
+		if !ok {
+			return newInvalidTypeError(path, "string", raw)
+		}
+		for _, candidate := range f.enum {
+			if text == candidate {
+				return nil
+			}
+		}
+		return &Error{
+			Code:    "invalid_enum",
+			Message: joinPath(path) + " 的值 " + quoteValue(text) + " 不在 " + joinEnum(f.enum) + " 中",
+			Hint:    "只提交 settings.describe 里该字段 schema 列出的值",
+			Status:  400,
+		}
+	case uiKindString:
+		text, ok := raw.(string)
+		if !ok {
+			return newInvalidTypeError(path, "string", raw)
+		}
+		if f.pattern != "" {
+			if err := matchPattern(f.pattern, f.patternFlags, text, path); err != nil {
+				return err
+			}
+		}
+		return nil
+	case uiKindInteger, uiKindNumber:
+		number, ok := integerValue(raw)
+		if !ok {
+			return newInvalidTypeError(path, "integer", raw)
+		}
+		if f.kind == uiKindNumber {
+			// 裸 number 没有官方的 min/max 声明（envelope 上就不许有），
+			// 这里也就只判类型；"必须为正"这类运行时判据由各命名空间的
+			// check（官方构造函数里也才是那一层）负责。
+			return nil
+		}
+		// 官方有"只有下限、没有上限"的字段（agent-loop 的 maxParallelToolCalls
+		// 是 `.min(1)`，searchRequestsPerSecond / maxUses 是 `.min(1)`），
+		// 所以两侧都要按"有没有声明"分开取，不能假定另一个端点也存在。
+		minimum, maximum := "", ""
+		if f.min != nil {
+			minimum = formatInt(*f.min)
+		}
+		if f.max != nil {
+			maximum = formatInt(*f.max)
+		}
+		if f.min != nil && number < *f.min {
+			return newOutOfRangeError(path, raw, minimum, maximum)
+		}
+		if f.max != nil && number > *f.max {
+			return newOutOfRangeError(path, raw, minimum, maximum)
+		}
+		return nil
+	case uiKindBoolean:
+		if _, ok := raw.(bool); !ok {
+			return newInvalidTypeError(path, "boolean", raw)
+		}
+		return nil
+	}
+	return nil
+}
+
+// quoteValue / joinEnum / formatInt 是错误文案的小工具（保持与既有错误同风格）。
+func quoteValue(value string) string { return "\"" + value + "\"" }
+
+func joinEnum(values []string) string {
+	out := "["
+	for index, value := range values {
+		if index > 0 {
+			out += " "
+		}
+		out += value
+	}
+	return out + "]"
+}
+
+func formatInt(value int64) string {
+	return formatNumber(float64(value))
+}
+
+// normalizeTranscriptView 是官方 chat-settings.ts:41-48 的读映射：
+// 两代旧值（normal / expanded）一律读作 detailed。
+//
+// **不回写**：这里只改 describe/get 投影出来的 value，存储里的 user 段原样保留
+// （`NamespaceView.User` 与持久文档都不动），所以下次读还是同一份旧值。
+func normalizeTranscriptView(value map[string]any) {
+	raw, ok := value[FieldTranscriptView].(string)
+	if !ok {
+		return
+	}
+	if raw == LegacyTranscriptViewNormal || raw == LegacyTranscriptViewExpanded {
+		value[FieldTranscriptView] = DefaultTranscriptView
+	}
+}
+
+// clientUINamespaces 返回 4 个命名空间的声明（顺序：locale / ui-theme /
+// ui-chat / ui-settings，与官方 settings.general.item 的行序一致）。
+func clientUINamespaces() []uiNamespace {
+	return []uiNamespace{
+		{
+			ns:    NamespaceLocale,
+			title: "Language",
+			fields: []uiField{
+				uiStringField(FieldPreference, nil).
+					withPattern(LocaleIDPattern, "u").
+					withRequired(false),
+			},
+			// 官方默认值就是"缺省"：不写 preference，交给浏览器。
+			base: map[string]any{},
+		},
+		{
+			ns:    NamespaceUITheme,
+			title: "Appearance",
+			fields: []uiField{
+				uiEnumField(FieldPreference, ThemePreferences, DefaultThemePreference),
+				uiIntegerField(FieldFontSize, FontSizeMin, FontSizeMax, DefaultFontSize),
+				uiIntegerField(FieldCodeFontSize, CodeFontSizeMin, CodeFontSizeMax, DefaultCodeFontSize),
+				uiIntegerField(FieldTerminalFontSize, TerminalFontSizeMin, TerminalFontSizeMax, DefaultTerminalFontSize),
+				uiStringField(FieldTextFontFamily, ""),
+				uiStringField(FieldCodeFontFamily, ""),
+				uiStringField(FieldTerminalFontFamily, ""),
+			},
+			base: map[string]any{
+				FieldPreference:         DefaultThemePreference,
+				FieldFontSize:           DefaultFontSize,
+				FieldCodeFontSize:       DefaultCodeFontSize,
+				FieldTerminalFontSize:   DefaultTerminalFontSize,
+				FieldTextFontFamily:     "",
+				FieldCodeFontFamily:     "",
+				FieldTerminalFontFamily: "",
+			},
+		},
+		{
+			ns:    NamespaceUIChat,
+			title: "Chat",
+			fields: []uiField{
+				// 官方合并"当前 4 个模式 + 2 个旧值"为一个 loose union：
+				// 旧值是**可读可存**的（既不作为选项展示，也不回写），所以
+				// schema 的 union 带旧值、section 的可选项只给当前 4 个。
+				uiEnumField(FieldTranscriptView, transcriptViewAcceptableValues(), nil).
+					withLoose().
+					withChoices(TranscriptViewModes).
+					withBaseOnly(),
+				uiEnumField(FieldCollapseTiming, CollapseTimings, DefaultCollapseTiming),
+				uiEnumField(FieldFoldedReplies, FoldedRepliesValues, DefaultFoldedReplies),
+				uiEnumField(FieldPerformanceUsage, PerformanceUsageModes, DefaultPerformanceUsage),
+				uiEnumField(FieldLinkOpening, LinkOpenings, DefaultLinkOpening),
+			},
+			base: map[string]any{
+				FieldTranscriptView:   DefaultTranscriptView,
+				FieldCollapseTiming:   DefaultCollapseTiming,
+				FieldFoldedReplies:    DefaultFoldedReplies,
+				FieldPerformanceUsage: DefaultPerformanceUsage,
+				FieldLinkOpening:      DefaultLinkOpening,
+			},
+			normalize: normalizeTranscriptView,
+		},
+		{
+			ns:    NamespaceUISettings,
+			title: "Developer tools",
+			fields: []uiField{
+				uiBooleanField(FieldDeveloperToolsEnabled, DefaultDeveloperToolsEnabled),
+			},
+			base: map[string]any{FieldDeveloperToolsEnabled: DefaultDeveloperToolsEnabled},
+		},
+		{
+			// 官方 `submission-settings.ts`：`ui-conversation.busyEnter`
+			// 枚举 {queue, steer}，`DEFAULT_BUSY_ENTER_BEHAVIOR = 'queue'`（:19）。
+			// 语义：智能体忙时按 Enter 是**排队**还是**插话**。
+			ns:    NamespaceUIConversation,
+			title: "Conversation",
+			fields: []uiField{
+				uiEnumField(FieldBusyEnter, BusyEnterBehaviors, DefaultBusyEnter),
+			},
+			base: map[string]any{FieldBusyEnter: DefaultBusyEnter},
+		},
+		{
+			// 官方 `dsh-session-log-deepseek/src/index.ts:59-61`：
+			// `session-log-deepseek` 声明 `enabled: z.boolean().default(true).volatile()`。
+			// **本仓默认 false**（不是照抄官方）——官方 true 的前提是 wire 上传方，
+			// 本仓没有那个 sink；理由与证据见文件头第 3 条与
+			// DefaultSessionLogEnabled 的注释。`enabled: true` 会被 check 拒绝，
+			// 只有 `false` 能保存成功（那是本仓真实生效值）。
+			ns:    NamespaceSessionLogDeepSeek,
+			title: "Session log upload",
+			fields: []uiField{
+				uiBooleanField(FieldSessionLogEnabled, DefaultSessionLogEnabled),
+			},
+			base:  map[string]any{FieldSessionLogEnabled: DefaultSessionLogEnabled},
+			check: checkSessionLogDeepSeekEnabled,
+		},
+		{
+			// 官方 `dsh-session-telemetry-otel/src/index.ts:116-122` 的 Config
+			// （`mode` / `exporter` / `processor` / `shutdownTimeoutMillis` /
+			// `maxRequestBytes`，部署值见 dsh-base/cordis.patch.yml:218-231）是本
+			// 命名空间的权威源。本仓把官方 Config 折成 L1 表单能表达的四条：
+			//   - `mode` 与官方 enum 同值同序（index.ts:31-34/:117），默认 DISABLED；
+			//   - `exporterURL` 只取官方 `exporter.url` 那一个叶子（index.ts:93-96，
+			//     线上 `exporter` 是 `z.any()` 的嵌套对象，L1 表达不了）；
+			//   - `shutdownTimeoutMillis` / `maxRequestBytes` 用官方部署默认值
+			//     （cordis.patch.yml:222-223），后者的上限就是官方 schema 的
+			//     4,000,000（index.ts:121）。
+			// 本仓没有 OTel SDK 与会话遥测通道，所以 `FEEDBACK_ONLY` 由 check 以
+			// 501 not_implemented 拒绝；`DISABLED` 保存成功（官方该模式下也确实
+			// 只 warn、不导出，index.ts:156-163）。
+			ns:    NamespaceSessionTelemetryOTel,
+			title: "Session telemetry",
+			fields: []uiField{
+				uiEnumField(FieldSessionTelemetryMode, SessionTelemetryModes, DefaultSessionTelemetryMode),
+				// exporterURL 的默认值是**空串（未配置）**：官方默认端点来自部署
+				// 环境（cordis.patch.yml:225 `process.env.DSH_TELEMETRY_OTLP_URL ??
+				// 'https://dsh-otel-collector.deepseeksvc.com/v1/logs'`），本仓没有
+				// 导出器，抄那个 collector 就是让界面显示一个不存在的 sink。
+				uiStringField(FieldSessionTelemetryExporterURL, ""),
+				uiIntegerField(FieldSessionTelemetryShutdownTimeoutMillis,
+					ShutdownTimeoutMillisMin, ShutdownTimeoutMillisMax, DefaultShutdownTimeoutMillis),
+				uiIntegerField(FieldSessionTelemetryMaxRequestBytes,
+					1, MaxRequestBytesLimit, DefaultMaxRequestBytes),
+			},
+			base: map[string]any{
+				FieldSessionTelemetryMode:                  DefaultSessionTelemetryMode,
+				FieldSessionTelemetryExporterURL:           "",
+				FieldSessionTelemetryShutdownTimeoutMillis: DefaultShutdownTimeoutMillis,
+				FieldSessionTelemetryMaxRequestBytes:       DefaultMaxRequestBytes,
+			},
+			check: checkSessionTelemetryOTelMode,
+		},
+	}
+}
+
+// checkSessionLogDeepSeekEnabled 拒绝 `session-log-deepseek.enabled = true`。
+//
+// 这不是"参数不合法"（值本身合法、也是官方默认），而是**本宿主没有消费方**：
+// 声明 true 只会让界面显示"已上传"，而增量会话日志一个字节都不会出去。四字段
+// 里的 message 要能让人直接看出缺的是哪一块，hint 给可执行的下一步。
+func checkSessionLogDeepSeekEnabled(value map[string]any) error {
+	enabled, ok := value[FieldSessionLogEnabled].(bool)
+	if !ok || !enabled {
+		return nil
+	}
+	return &Error{
+		Code: "not_implemented",
+		Message: "session-log-deepseek.enabled=true 在本宿主不可用：缺的是把增量会话日志作为 " +
+			"`dsh_session_log` 顶层字段挂到官方 DeepSeek 请求上的**上传方**——官方 " +
+			"dsh-session-log-deepseek/src/index.ts:44 `inject: ['deepseekLlmApiExtensions','sessions']`、" +
+			":196-261 `register('dsh_session_log', {prepare, accept})`，accept 在 2xx 后写 " +
+			"`session-log-deepseek/delivery-accepted` 水位；该扩展点只存在于官方 DeepSeek Messages 路由，" +
+			"而本仓 internal/llm 的 ResolveProvider 走的是用户自配的 OpenAI 兼容端点（默认 magpie 网关），" +
+			"没有任何代码消费 dsh_session_log。",
+		Hint:      "保持 enabled=false（本仓默认，也是真实生效值）；确实要上传会话日志时改用官方宿主。",
+		Retryable: false,
+		Status:    http.StatusNotImplemented,
+	}
+}
+
+// checkSessionTelemetryOTelMode 拒绝 `session-telemetry-otel.mode = FEEDBACK_ONLY`。
+//
+// 同样不是取值问题（官方默认就是它），而是本仓没有导出后端：官方该模式要构造
+// OTel SDK 的 byte-bounded session-log reporter 与 on-demand coordinator
+// （index.ts:145/:190/:219-222），本仓两者都没有，声明 FEEDBACK_ONLY 只会把
+// "已开启会话共享"写进设置而没有任何导出。
+func checkSessionTelemetryOTelMode(value map[string]any) error {
+	mode, _ := value[FieldSessionTelemetryMode].(string)
+	if mode != SessionTelemetryModeFeedbackOnly {
+		return nil
+	}
+	return &Error{
+		Code: "not_implemented",
+		Message: "session-telemetry-otel.mode=FEEDBACK_ONLY 在本宿主不可用：缺的是 OpenTelemetry SDK 的 " +
+			"byte-bounded session-log reporter（官方 dsh-session-telemetry-otel/src/index.ts:190 " +
+			"`ctx.otel.createSessionLogReporter({...})`，含 :184-186 的 shutdown 期限与 :121 的 " +
+			"maxRequestBytes 字节上界）与 on-demand coordinator（:219-222 " +
+			"`new SessionTelemetryCoordinator(..., {capture:'on-demand', includeHistory:true})`）；" +
+			"官方靠 :145 `inject = ['sessions','otel']` 拿到 otel 服务，本仓没有 OTel SDK，也没有会话遥测通道" +
+			"（internal/analytics 只有端点环境变量）。",
+		Hint:      "保持 mode=DISABLED（本仓默认；官方该模式下也只 warn、不上传）；确实要会话遥测时改用官方宿主。",
+		Retryable: false,
+		Status:    http.StatusNotImplemented,
+	}
+}
+
+// BusyEnterBehaviors 是官方 BUSY_ENTER_BEHAVIORS（submission-settings.ts:13）。
+var BusyEnterBehaviors = []string{"queue", "steer"}
+
+// transcriptViewAcceptableValues 是官方 TRANSCRIPT_VIEW_SETTING_VALUES：
+// 当前模式在前、旧值在后（chat-settings.ts:51-53 的拼接顺序）。
+func transcriptViewAcceptableValues() []string {
+	out := make([]string, 0, len(TranscriptViewModes)+2)
+	out = append(out, TranscriptViewModes...)
+	out = append(out, LegacyTranscriptViewNormal, LegacyTranscriptViewExpanded)
+	return out
+}
+
+// MaxSafeInteger 是 JS 的 Number.MAX_SAFE_INTEGER：官方 schema 在"不设上限"处
+// 逐字用的就是它（`dsh-subagent/src/index.ts:196-197` 的 `.max(Number.MAX_SAFE_INTEGER)`）。
+const MaxSafeInteger int64 = 9007199254740991
+
+// uiNamespaceSpec 把一份声明翻成注册表能收的 NamespaceSpec。
+//
+// **schema / sections / base 同源**就靠这一处：字段投影（fieldSpecs）、envelope
+// （schema）、默认值（base）与语义校验（validate）全部从同一个 uiNamespace 生成，
+// 所以不存在"schema 说 min 1、section 说 min 10"这种漂移。
+func uiNamespaceSpec(namespace uiNamespace) NamespaceSpec {
+	return NamespaceSpec{
+		NS:      namespace.ns,
+		Title:   namespace.title,
+		Applies: "live",
+		Fields:  namespace.fieldSpecs(),
+		Schema:  namespace.schema(),
+		Base:    deepCloneMap(namespace.base),
+		Validate: func(value any) error {
+			return namespace.validate(value)
+		},
+		Normalize: namespace.normalize,
+	}
+}
+
+// buildClientUINamespaceSpecs 把声明转成注册表能收的 NamespaceSpec。
+func buildClientUINamespaceSpecs() []NamespaceSpec {
+	namespaces := clientUINamespaces()
+	specs := make([]NamespaceSpec, 0, len(namespaces))
+	for _, namespace := range namespaces {
+		specs = append(specs, uiNamespaceSpec(namespace))
+	}
+	return specs
+}

@@ -40,26 +40,41 @@ const (
 type Tool struct {
 	box  *box
 	kind string
+	// agentsDir 是队友名册目录（官方 rc.2 的"具名成员"在这里）。
+	// 只有 list_agents 用到；空表示这个实例不读名册。
+	agentsDir string
+	// resolveAgent 把**名字**解成 Session id（官方 `ctx.subagents.resolveName` 的宿主位）。
+	// 为 nil 表示宿主还没接线：此时按名字寻址会**响亮失败**，而不是编一个地址
+	// （用名字当信箱键会写出一个没人读的信箱，那是静默失败）。
+	resolveAgent func(name string) (sessionID string, ok bool)
 }
 
 func (t *Tool) Name() string { return t.kind }
 
 // Description 只讲"什么时候用"，不讲实现；<=120 字由 desc-len.py 把关。
+//
+// 三条与官方 rc.2 对齐（`dsh-tool-subagent-control/src/index.ts:43-157`、
+// `.../src/list-agents.ts:45-56`）：send_message 按**名字**寻址、
+// list_agents 列整棵树（根 + 可达成员，行带状态与描述）、wait_agent 只等 inbox。
 func (t *Tool) Description() string {
 	switch t.kind {
 	case kindSend:
-		return "给另一个会话留一条消息，等它用 wait_agent 取走；要叫醒别人时用。"
+		return "给协作树里的另一个 agent 发消息（按名字寻址）；要叫醒别人时用。"
 	case kindWait:
 		return "取自己信箱里的新消息，有就立刻返回，超时返回空列表；接手别人的活之前用。"
 	default:
-		return "列出用过信箱的会话和各自消息数，看谁在等你，或核对会话 id 有没有写错。"
+		return "列出协作树成员：根与可达队友的名字、状态、描述；核对名字或看谁在跑时用。"
 	}
 }
 
 func (t *Tool) Schema() json.RawMessage {
 	switch t.kind {
 	case kindSend:
-		return json.RawMessage(`{"type":"object","properties":{"agent_id":{"type":"string","description":"目标会话 id，例如 acp-aaa"},"target":{"type":"string","description":"同 agent_id，DSH 的写法"},"message":{"type":"string","description":"消息正文"}},"required":["message"],"additionalProperties":false}`)
+		// 官方 rc.2：`agent`（**名字或 Session id**）+ `message`，两个都必填。
+		// 旧键 `agent_id` 已删除：再传它必须参数校验失败
+		// （`docs/upgrade-guide/v0.2.2-alpha.3/subagent-names/guide.md:11-12`）。
+		// 本仓还额外记录：历史上我们用过 `target`，同样在这里被拒（见 send）。
+		return json.RawMessage(`{"type":"object","properties":{"agent":{"type":"string","description":"协作树里另一个 agent 的名字（如 lead/reviewer），或它的 Session id"},"message":{"type":"string","description":"消息正文"}},"required":["agent","message"],"additionalProperties":false}`)
 	case kindWait:
 		return json.RawMessage(`{"type":"object","properties":{"timeout_seconds":{"type":"integer","description":"最多等多少秒，默认 60，上限 300"}},"additionalProperties":false}`)
 	default:
@@ -75,12 +90,14 @@ func (t *Tool) Caps() spi.Caps {
 	return spi.Caps{}
 }
 
+// sendArgs 是官方 rc.2 的形状：`agent` + `message`（两个都必填）。
+//
+// 这里**故意不**保留 `agent_id` / `target` 字段：它们不是别名问题，而是
+// 契约变更——官方明确"再传 `agent_id` 会参数校验失败"，我们照做，
+// 让模型立刻看到该用哪个键，而不是发到一条没人读的信箱里。
 type sendArgs struct {
-	To string `json:"agent_id"`
-	// Target 是 DSH 的另一种写法（对齐测试报「DSH 要求但我们不认 target」）。
-	// 两个都收：模型按 DSH 的 schema 写 target 时不该失败。
-	Target string `json:"target"`
-	Text   string `json:"message"`
+	Agent string `json:"agent"`
+	Text  string `json:"message"`
 }
 
 type waitArgs struct {
@@ -112,27 +129,42 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 // ---- send_message ----
 
 func (t *Tool) send(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
+	// 先看有没有 rc.1 的旧键：官方 rc.2 删了 `agent_id`，再传它必须**参数校验失败**
+	// （`docs/upgrade-guide/v0.2.2-alpha.3/subagent-names/guide.md:11-12`）。
+	// 用 map 探测而不是结构体，因为 encoding/json 会把未知键静默丢掉——
+	// 那样模型会收到"缺 agent"，看不出真正改了什么。
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return spi.Result{Hint: `参数不合法：期望 {"agent":"<名字或 Session id>","message":"<正文>"}`}, err
+	}
+	for _, legacy := range []string{"agent_id", "target"} {
+		if _, has := probe[legacy]; has {
+			return spi.Result{
+				Hint: fmt.Sprintf(
+					"send_message 不再接受 %q：官方 rc.2 改成 agent（**名字或 Session id**），例如 "+
+						`{"agent":"lead/reviewer","message":"…"}`, legacy),
+			}, fmt.Errorf("team: 参数 %q 已随 rc.2 删除", legacy)
+		}
+	}
 	var a sendArgs
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return spi.Result{Hint: `参数不合法：期望 {"agent_id":"<会话 id>","message":"<正文>"}`}, err
+		return spi.Result{Hint: `参数不合法：期望 {"agent":"<名字或 Session id>","message":"<正文>"}`}, err
 	}
 	self := spi.SessionFrom(ctx)
-	// target 是 DSH schema 里的名字；agent_id 是我们的。两者都给时以 agent_id 为准。
-	if a.To == "" {
-		a.To = a.Target
-	}
 	if self == "" {
 		return spi.Result{Hint: "这个工具要在会话里跑：发件人靠当前会话 id 署名，没有会话就没法发"}, errors.New("team: 缺少会话上下文")
 	}
-	to := strings.TrimSpace(a.To)
-	if to == "" {
-		return spi.Result{Hint: `to 不能为空：填目标会话 id；不知道 id 就先调 list_agents 查`}, errors.New("team: to 为空")
+	to, nameShaped, err := t.resolveTarget(a.Agent)
+	if err != nil {
+		return spi.Result{Hint: moreHint(err)}, err
 	}
+	// 名字与 Session id 的形态在官方模型下不可区分（`acp-aaa` 也满足名字正则），
+	// 所以这里不猜；宿主没接名字目录时的提示落在结果正文里（见下面的 text）。
 	if to == self {
-		return spi.Result{Hint: "to 就是自己：你在给自己写信，没人会来收。换成对方会话 id，或直接往下做"}, errors.New("team: to 等于 self")
+		return spi.Result{Hint: "agent 就是自己：你在给自己写信，没人会来收。换成协作树里另一个 agent，或直接往下做"}, errors.New("team: agent 等于 self")
 	}
 	if err := checkID(to); err != nil {
-		return spi.Result{Hint: "to 里有非法字符（路径分隔符或 ..）：会话 id 形如 acp-aaa，用 list_agents 看真名"}, err
+		return spi.Result{Hint: "agent 里有非法字符（路径分隔符或 ..）：给 Session id 时形如 acp-aaa，给名字时形如 reviewer，用 list_agents 看真名"}, err
 	}
 	if strings.TrimSpace(a.Text) == "" {
 		return spi.Result{Hint: "text 不能为空：把要对方做的事一句话写清，别只发个招呼"}, errors.New("team: text 为空")
@@ -172,10 +204,17 @@ func (t *Tool) send(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		return spi.Result{Hint: "写入没成功，消息可能只写了一半：重试前先用 list_agents 看条数确认"}, err
 	}
 
+	text := fmt.Sprintf("已投递：%s → %s。对方下次调 wait_agent 就能取到；它不会主动醒，别指望立刻有回应。", msg.ID, to)
+	if nameShaped && t.resolveAgent == nil {
+		text += "\n注意：宿主还没接名字目录（名字 → 子会话），本次是按 **Session id** 投递的；" +
+			"如果你传的是队友名字，对方收不到。"
+	}
 	return spi.Result{
 		Summary: fmt.Sprintf("已发给 %s（%s）", to, msg.ID),
-		Data:    map[string]any{"id": msg.ID, "agent_id": to, "at": msg.At},
-		Text:    fmt.Sprintf("已投递：%s → %s。对方下次调 wait_agent 就能取到；它不会主动醒，别指望立刻有回应。", msg.ID, to),
+		// 官方 rc.2 的结果里身份是名字（`agent`）；本仓按 Session id 投递，所以两个都给：
+		// `agent` 是当前地址，`agent_id` 保留为宿主兼容键（deprecated）。
+		Data: map[string]any{"id": msg.ID, "agent": to, "agent_id": to, "at": msg.At},
+		Text: text,
 	}, nil
 }
 
@@ -262,19 +301,136 @@ func (t *Tool) wait(ctx context.Context, raw json.RawMessage) (spi.Result, error
 
 // ---- list_agents ----
 
+// list_agents 行状态枚举（官方 rc.2）。
+//
+// 官方：`dsh-tool-subagent-control/src/list-agents.ts:12`
+// （`'running' | 'inactive' | 'corrupt' | 'unsupported' | 'unavailable'`）与
+// `:49-53` 的语义：running = 正在干活；inactive = 没有回合在跑（不代表任务成败）；
+// corrupt/unsupported/unavailable = 这一行自己的**后代**读不出来（行本身仍可发消息）。
+const (
+	agentStatusRunning     = "running"
+	agentStatusInactive    = "inactive"
+	agentStatusCorrupt     = "corrupt"
+	agentStatusUnsupported = "unsupported"
+	agentStatusUnavailable = "unavailable"
+)
+
+// listAgentRow 是官方 rc.2 的 list_agents 行：`{name, status, description?}`。
+//
+// 官方：`list-agents.ts:14-19`（输出 schema `additionalProperties:false`）。
+// 注意 rc.2 **删掉了** `scope` 参数与 `kind/id/label/parent/depth/reason` 这些键
+// （`docs/upgrade-guide/v0.2.2-alpha.3/subagent-names/guide.md:13`），
+// 所以这里**只**有这三个字段——多一个都会让按官方文档读的解析器出问题。
+type listAgentRow struct {
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Description string `json:"description,omitempty"`
+}
+
+// renderAgentRows 是官方文本行格式：`<name> [<status>] — <description>`
+// （`list-agents.ts:74-76`，没有 description 时省略后半段）。
+func renderAgentRows(rows []listAgentRow) string {
+	var sb strings.Builder
+	for i, row := range rows {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(row.Name)
+		sb.WriteString(" [")
+		sb.WriteString(row.Status)
+		sb.WriteString("]")
+		if row.Description != "" {
+			sb.WriteString(" — ")
+			sb.WriteString(row.Description)
+		}
+	}
+	return sb.String()
+}
+
+// mailboxAgent 是**旧版** list_agents 的行（信箱视角）。保留为附加数据：
+// 官方 rc.2 的 list_agents 行只讲协作树成员，信箱统计是宿主自有的补充信息。
+type mailboxAgent struct {
+	SessionID    string `json:"session_id"`
+	Messages     int    `json:"messages"`
+	LastModified string `json:"last_modified"`
+	Mailbox      string `json:"mailbox"`
+}
+
+// list 列协作树成员（官方口径），并把信箱统计作为附加数据保留。
+//
+// 数据来源与**诚实边界**：
+//   - 根行 = 调用者自己（它此刻正在执行这次工具调用，所以 `running` 是事实）；
+//   - 具名队友来自 `<home>/state/team/agents.json`（spawn_teammate 写的名册）。本仓
+//     队友没有常驻进程、没有回合在跑，所以状态是 `inactive`——这是真实状态，
+//     不是拿不到状态时的占位符；
+//   - **断层**：名册没有"名字 → 子会话"映射，所以本模块给不出队友的 Session id，
+//     也给不出父子层级（官方 `depth`/`parent` 在 rc.2 已从行里删掉，所以行格式
+//     不受影响；受影响的是 `send_message` 按名字寻址，见 resolveTarget）。
 func (t *Tool) list(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
-	entries, err := os.ReadDir(t.box.dir)
-	if err != nil && !os.IsNotExist(err) {
-		return spi.Result{Hint: "读不了信箱目录：检查 <home>/state/mail 的权限，别当作没有会话"}, err
+	self := spi.SessionFrom(ctx)
+
+	// 信箱视角的旧数据：谁用过信箱、各有几条。它不再是行，但仍是真实信息。
+	mailboxes, err := t.mailboxSnapshot()
+	if err != nil {
+		return spi.Result{Hint: "读不了信箱目录：检查 <home>/state/mail 的权限；别当作没有队友"}, err
 	}
 
-	type agent struct {
-		SessionID    string `json:"session_id"`
-		Messages     int    `json:"messages"`
-		LastModified string `json:"last_modified"`
-		Mailbox      string `json:"mailbox"`
+	rows := make([]listAgentRow, 0, 1+len(mailboxes))
+	if self != "" {
+		// 根名固定 `lead`（`dsh-subagent/src/names.ts:13`）；描述用官方的 "root agent"
+		// （`list-agents.ts:88`）。
+		rows = append(rows, listAgentRow{Name: ROOTAgentName, Status: agentStatusRunning, Description: "root agent"})
 	}
-	agents := []agent{}
+	if t.agentsDir != "" {
+		f, err := loadSpawnFile(filepath.Join(t.agentsDir, spawnFileName))
+		if err != nil {
+			return spi.Result{
+				Hint: fmt.Sprintf("名册 %s 读不出来（现在列不了队友）；先修它，或直接报告维护者",
+					filepath.ToSlash(filepath.Join(t.agentsDir, spawnFileName))),
+			}, fmt.Errorf("读取队友名册失败: %w", err)
+		}
+		for _, a := range f.Agents {
+			rows = append(rows, listAgentRow{
+				Name:        a.Name,
+				Status:      agentStatusInactive,
+				Description: a.Description,
+			})
+		}
+	}
+
+	data := map[string]any{
+		"agents": rows,
+		"count":  len(rows),
+		// 附加（宿主自有，不是官方字段）：信箱统计。
+		"mailboxes":     mailboxes,
+		"mailbox_count": len(mailboxes),
+	}
+	text := renderAgentRows(rows)
+	if len(rows) <= 1 && len(mailboxes) == 0 {
+		return spi.Result{
+			Summary: "协作树里还没有其他成员",
+			Data:    data,
+			Text:    text,
+			Hint:    "先用 spawn_teammate 建一个具名队友，或 send_message 按 Session id 联系另一个会话",
+		}, nil
+	}
+	return spi.Result{
+		Summary: fmt.Sprintf("协作树 %d 个成员（%d 个信箱）", len(rows), len(mailboxes)),
+		Data:    data,
+		Text:    strings.TrimRight(text, "\n"),
+	}, nil
+}
+
+// mailboxSnapshot 是旧 list_agents 的信箱统计（按最后修改时间倒序）。
+func (t *Tool) mailboxSnapshot() ([]mailboxAgent, error) {
+	entries, err := os.ReadDir(t.box.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := []mailboxAgent{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
@@ -289,35 +445,72 @@ func (t *Tool) list(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		if info, err := e.Info(); err == nil {
 			mod = info.ModTime().Format(time.RFC3339)
 		}
-		agents = append(agents, agent{
+		out = append(out, mailboxAgent{
 			SessionID:    strings.TrimSuffix(e.Name(), ".jsonl"),
 			Messages:     n,
 			LastModified: mod,
 			Mailbox:      filepath.ToSlash(path),
 		})
 	}
-	// 最近活跃的排前面：找"谁刚找过我"时不用自己扫表。
-	sort.Slice(agents, func(i, j int) bool { return agents[i].LastModified > agents[j].LastModified })
+	sort.Slice(out, func(i, j int) bool { return out[i].LastModified > out[j].LastModified })
+	return out, nil
+}
 
-	if len(agents) == 0 {
-		return spi.Result{
-			Summary: "信箱是空的",
-			Data:    map[string]any{"agents": agents, "count": 0},
-			Text:    "还没有任何会话用过信箱。",
-			Hint:    "先 send_message 给对方会话 id 留一条，之后这里才会出现条目；id 不确定就问人",
-		}, nil
+// resolveTarget 把官方 `agent` 参数解成信箱地址（Session id）。
+//
+// 官方：`agent` 同时接受**名字**与 **Session id**（guide `subagent-names.md:11`；
+// `resolveName` 见 `dsh-subagent` 的实现）。本宿主的现实是：
+//   - Session id：直接可用（信箱就是按 Session id 存的）；
+//   - 名字：需要"名字 → 子会话"的 catalog 映射，宿主还没接线（`internal/agent`
+//     的具名目录不在本模块作用域）。这时**响亮失败**并说清要什么，
+//     绝不把名字当信箱键——那会写出一个永远没人读的信箱。
+//
+// 返回的 nameShaped 告诉调用方"这个输入在官方命名模型下**也可能是名字**"：
+// 宿主没接名字目录时，调用方要把这份不确定性说给模型，而不是假装名字解析成功。
+func (t *Tool) resolveTarget(agent string) (target string, nameShaped bool, err error) {
+	target = strings.TrimSpace(agent)
+	if target == "" {
+		return "", false, fmt.Errorf("%w: agent 不能为空：填协作树里另一个 agent 的名字或 Session id", errTeamNoAddress)
 	}
+	// 名字形态：小写字母开头、只含小写字母/数字/连字符（可带 `/` 路径段）。
+	nameShaped = looksLikeAgentName(target)
+	if !nameShaped {
+		return target, false, nil
+	}
+	if t.resolveAgent == nil {
+		// 宿主没有名字目录：把输入按 Session id 用（这正是 rc.2 明确允许的第二种形态），
+		// 同时把"这也可能是名字"的不确定性交回调用方。
+		return target, true, nil
+	}
+	if sessionID, ok := t.resolveAgent(target); ok && strings.TrimSpace(sessionID) != "" {
+		return strings.TrimSpace(sessionID), true, nil
+	}
+	return "", true, fmt.Errorf("%w: 协作树里没有叫 %q 的成员（用 list_agents 看现有名字）", errTeamNoAddress, target)
+}
 
-	var sb strings.Builder
-	sb.WriteString("会话 id\t消息数\t最后修改\n")
-	for _, a := range agents {
-		sb.WriteString(fmt.Sprintf("%s\t%d\t%s\n", a.SessionID, a.Messages, a.LastModified))
+// errTeamNoAddress 表示"给了地址但解不出来"。
+var errTeamNoAddress = errors.New("team: 地址解不出来")
+
+// looksLikeAgentName 判断一个地址是不是**名字形态**（可带 `/` 路径）。
+func looksLikeAgentName(value string) bool {
+	segments := strings.Split(value, "/")
+	if len(segments) == 0 {
+		return false
 	}
-	return spi.Result{
-		Summary: fmt.Sprintf("%d 个会话用过信箱", len(agents)),
-		Data:    map[string]any{"agents": agents, "count": len(agents)},
-		Text:    strings.TrimRight(sb.String(), "\n"),
-	}, nil
+	for _, segment := range segments {
+		if !IsAgentName(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+// moreHint 取错误自带的下一步提示；没有就回一句通用说明。
+func moreHint(err error) string {
+	if errors.Is(err, errTeamNoAddress) {
+		return "检查 agent：用 list_agents 看协作树成员；名字形如 reviewer，Session id 形如 acp-aaa"
+	}
+	return "检查 agent 参数后重试"
 }
 
 // renderMessages 把消息拼成模型直接能读的正文；Text 非空时投影不再包 JSON。
@@ -436,16 +629,50 @@ func checkID(id string) error {
 	return nil
 }
 
+// ModuleOptions 是装配期可注入的覆盖项（nil = 走环境变量/内置默认）。
+//
+// 官方的覆盖方式是 profile 的配置行（`$DSH_HOME/profiles/<profile>/cordis.patch.yml`
+// 里 `agent-team.config` 与 `tool-subagent-control.config.interrupt`）；本仓
+// `cmd/dshd/main.go` 的接线签名是 `team.Module(dir)`，所以配置注入走这个显式入口，
+// 环境变量是没有 profile 时的等价覆盖。
+type ModuleOptions struct {
+	// Team 覆盖 `agent-team` 配置（官方只有 maxTasks 与 defaultEnabled）。
+	Team *TeamConfig
+	// SubagentControlInterrupt 覆盖 `tool-subagent-control.interrupt`。
+	// nil = 内置默认（false：模型默认拿不到 interrupt_agent），可用环境变量改回 true。
+	SubagentControlInterrupt *bool
+}
+
 // Module 返回装配用的模块描述。dir 是信箱目录（接线时传 <home>/state/mail）。
-func Module(dir string) kernel.Module {
+func Module(dir string) kernel.Module { return ModuleWithOptions(dir, ModuleOptions{}) }
+
+// ModuleWithOptions 是 Module 的可配置版本（profile 覆盖走这里）。
+func ModuleWithOptions(dir string, opts ModuleOptions) kernel.Module {
 	b := &box{dir: dir}
 	return kernel.Module{
 		ID:       "tool-team",
 		Backend:  kernel.BackendStatic,
 		Requires: []string{"tools"},
 		Register: func(s *kernel.Scope) error {
-			// 名册人数上限（官方 agentTeam.maxMembers）在装配期解析一次：写错环境
-			// 变量要在这里就炸，而不是等第 17 个队友登记时才报一个看不出源头的错。
+			// 配置在**装配期**解析一次：写错一个数/一个布尔要在这里就炸，
+			// 而不是等第 N 个队友登记或某次 send_message 才报一个看不出源头的错。
+			// `agent-team` 配置（maxTasks/defaultEnabled）由任务板模块自己解析
+			// （`modules/tool/teamtask` 的 maxTasks 默认即官方 256）；本模块只校验
+			// 调用方注入的那份配置**合法**，避免"合了配置却没人校验"。
+			if opts.Team != nil {
+				if _, err := ParseTeamConfig(map[string]any{
+					"maxTasks":       opts.Team.MaxTasks,
+					"defaultEnabled": opts.Team.DefaultEnabled,
+				}); err != nil {
+					return err
+				}
+			}
+			// rc.2：interrupt 内置默认 false，可被 profile / 环境变量打开。
+			control, err := ResolveSubagentControlConfig(opts.SubagentControlInterrupt, os.Getenv)
+			if err != nil {
+				return err
+			}
+			// 旧上限：只读保留（rc.2 删除了 maxMembers），写错值仍然 fail-loud。
 			maxMembers, err := teamMaxMembers(os.Getenv)
 			if err != nil {
 				return err
@@ -454,17 +681,24 @@ func Module(dir string) kernel.Module {
 			if err != nil {
 				return err
 			}
-			for _, kind := range []string{kindSend, kindWait, kindList} {
-				if err := reg.Register(&Tool{box: b, kind: kind}); err != nil {
-					return err
-				}
-			}
 			// spawn_teammate 写的是 <home>/state/team/agents.json，而 Module 的入参
 			// 是信箱目录 <home>/state/mail。**不能直接把 dir 传下去**——
 			// 踩过：队友名单落进了 state/mail/agents.json，和收件箱混在一起。
 			agentsDir := filepath.Join(filepath.Dir(dir), "team")
+			for _, kind := range []string{kindSend, kindWait, kindList} {
+				// list_agents 要读具名名册（官方行格式里的 name/description 来自这里）。
+				if err := reg.Register(&Tool{box: b, kind: kind, agentsDir: agentsDir}); err != nil {
+					return err
+				}
+			}
 			if err := reg.Register(&spawnTool{dir: agentsDir, maxMembers: maxMembers}); err != nil {
 				return err
+			}
+			// 官方内置配置把 `interrupt` 设为 false（base `cordis.patch.yml:389`），
+			// 所以**默认不注册** interrupt_agent：模型拿不到它。
+			// 服务层的中断 API（subagents.interruptByUser）不受此开关影响。
+			if !control.Interrupt {
+				return nil
 			}
 			// 中断标记写的是同一份 agents.json，所以也用 agentsDir。
 			return reg.Register(&interruptTool{dir: agentsDir})

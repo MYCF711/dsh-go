@@ -48,6 +48,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // 官方方法名。字符串必须与官方 `createTypertRemoteInfo` 里 `'workspace/create'`
@@ -156,6 +157,43 @@ type OfficialWorkspacePinValue struct {
 // OfficialWorkspaceArchiveValue 是 archive/unarchive 的结果：完整的归档集。
 type OfficialWorkspaceArchiveValue struct {
 	ArchivedSessionIDs []string `json:"archivedSessionIds"`
+}
+
+// 官方 `dsh-workspace` 在归档/反归档时并行广播的两个 cordis 事件
+// （`@deepseek-ai/dsh-workspace/src/index.ts:156`、`:163`）。
+//
+// 为什么宿主必须发：官方 rc.2 的 worktree 归档清理服务就是这两个事件的监听者
+// （`dsh-experimental-worktree/src/archive.ts:86`：归档后排队清理；`:87-93`：反归档时
+// 把未准入的移除标 cancelled、等已准入的结算）。不发事件 = "清理"与"反归档"之间
+// 没有任何协调点，客户端也无从显示"恢复中"、更无从阻止重复操作。
+const (
+	// OfficialWorkspaceEventArchived 是 `workspace/session-archived`：归档**已落盘**
+	// 并停过活动之后广播。订阅者失败只记日志，**不回滚归档**（index.ts:399-406）。
+	OfficialWorkspaceEventArchived = "workspace/session-archived"
+	// OfficialWorkspaceEventUnarchiving 是 `workspace/session-unarchiving`：把会话移出
+	// 归档集**之前**广播。监听者拒绝 = **保留归档态**（index.ts:423-431）。
+	OfficialWorkspaceEventUnarchiving = "workspace/session-unarchiving"
+)
+
+// OfficialWorkspaceSessionActivity 是两个归档事件的载荷
+// （官方 `SessionActivityRequest`，index.ts:98-100）：**只有** sessionId 一个键。
+type OfficialWorkspaceSessionActivity struct {
+	SessionID string `json:"sessionId"`
+}
+
+// officialWorkspaceEvents 是 dsh-workspace 广播给客户端的事件白名单。
+//
+// 只收官方真实声明过的那两个（index.ts:156/163）。往 journal 里灌别的类型，
+// 客户端按官方词汇表解释时会把它判成未知事件——那比少发一个事件更难查。
+var officialWorkspaceEvents = map[string]struct{}{
+	OfficialWorkspaceEventArchived:    {},
+	OfficialWorkspaceEventUnarchiving: {},
+}
+
+// IsOfficialWorkspaceEvent 判断是否是 dsh-workspace 广播的官方事件。
+func IsOfficialWorkspaceEvent(event string) bool {
+	_, ok := officialWorkspaceEvents[event]
+	return ok
 }
 
 // OfficialWorkspaceDirectoryEntry 是 `workspaceFiles/list` 的一行。
@@ -376,6 +414,52 @@ func (s *Server) officialWorkspaceMounts() (OfficialWorkspaceAPI, OfficialDirect
 	officialWorkspaceMount.mu.RLock()
 	defer officialWorkspaceMount.mu.RUnlock()
 	return officialWorkspaceMount.api[s], officialWorkspaceMount.picker[s]
+}
+
+// ProjectOfficialWorkspaceEvent 把官方 workspace 族事件投影到客户端可见的两条
+// **既有**通道（不新开协议面）：
+//
+//   - 每会话 transport journal：`session.history` 与官方 mux `session/events`
+//     尾部流（`OpenOfficialJournalTail`）读的是同一份；
+//   - `/ws` 的 `session:<id>` topic：在线订阅者立刻收到同一帧。
+//
+// 顺序与 `metadataCommit` 一致：**先入账（拿到 seq）再推**，WS 不会先于可恢复的
+// 提交；seq/time 都是真实的，客户端按 seq 补洞不缺口。
+//
+// 返回 error 的语义按官方：`workspace/session-archived` 的投递失败只记日志、
+// 不回滚归档；`workspace/session-unarchiving` 的投递失败 = 监听者拒绝，调用方
+// （宿主）必须**保留归档态**。空 sessionID 是"没有会话可投影"，安静返回 nil。
+//
+// 不知道 event 是什么：只认 dsh-workspace 真实声明的那两个（见
+// `officialWorkspaceEvents`），别的名字直接拒绝——它不是官方事件，进 journal
+// 只会变成客户端不认识的类型。
+func (s *Server) ProjectOfficialWorkspaceEvent(sessionID, event string) error {
+	if s == nil {
+		return nil
+	}
+	if !IsOfficialWorkspaceEvent(event) {
+		return fmt.Errorf("transport: %q 不是 dsh-workspace 广播的官方事件（可选 %s / %s）",
+			event, OfficialWorkspaceEventArchived, OfficialWorkspaceEventUnarchiving)
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	if s.opt.Journals == nil {
+		// 没有序号域就没有可恢复的投影目标：**不伪造 seq**，也不假装投递成功。
+		return fmt.Errorf("transport: 没有每会话 journal，%s 无法投影到 WS/journal", event)
+	}
+	data, err := json.Marshal(OfficialWorkspaceSessionActivity{SessionID: sessionID})
+	if err != nil {
+		return fmt.Errorf("transport: 序列化 %s 载荷: %w", event, err)
+	}
+	now := time.Now().UnixMilli()
+	frame, err := s.opt.Journals.Append(sessionID, event, data, now)
+	if err != nil {
+		return fmt.Errorf("transport: %s 入 journal 失败: %w", event, err)
+	}
+	s.Publish(SessionTopicPrefix+sessionID, frame)
+	return nil
 }
 
 // ---------------------------------------------------------------------------

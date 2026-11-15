@@ -25,6 +25,12 @@ type hostRunOptions struct {
 	autoCompact int
 	// maxChars 是工具输出外置阈值（字符）。
 	maxChars int
+	// maxInlineTokens 是官方 #79 `dsh-spill-policy` 的 `config.maxInlineTokens`
+	// （文本与图片共享的估算 token 预算；0 = 未配置，回落
+	// DSHD_MAX_INLINE_TOKENS）。它必须和 maxChars 一样**逐字段透传**给
+	// 子进程 `dshd run`：否则"从界面起的会话"与"命令行起的会话"预算不同，
+	// 而这种差异在界面上完全看不出来。
+	maxInlineTokens int
 	// workspaceBytes 是 AGENTS.md 进系统提示的字节上限（0 = 不传）。
 	workspaceBytes int
 	// contextWindow / maxOutput 是显式容量声明（0 = 按模型容量解析）。
@@ -66,6 +72,8 @@ func addHostRunFlags(fs *flag.FlagSet) *hostRunOptions {
 		"每步前估算超过多少 token 就自动压缩（0/false=关闭，true=默认 40000）")
 	fs.IntVar(&o.maxChars, "max-chars", defaultMaxChars,
 		"工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
+	fs.IntVar(&o.maxInlineTokens, "max-inline-tokens", 0,
+		"工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
 	fs.IntVar(&o.workspaceBytes, "workspace-bytes", defaultWorkspaceBytes,
 		"AGENTS.md 进系统提示的字节上限（0=不传）")
 	fs.IntVar(&o.contextWindow, "context-window", 0,
@@ -89,6 +97,7 @@ func (o *hostRunOptions) args() []string {
 	args := []string{
 		"--auto-compact", strconv.Itoa(o.autoCompact),
 		"--max-chars", strconv.Itoa(o.maxChars),
+		"--max-inline-tokens", strconv.Itoa(o.maxInlineTokens),
 		"--workspace-bytes", strconv.Itoa(o.workspaceBytes),
 		"--context-window", strconv.Itoa(o.contextWindow),
 		"--max-output", strconv.Itoa(o.maxOutput),

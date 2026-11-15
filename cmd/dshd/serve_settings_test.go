@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,9 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"dshgo/internal/llm"
 	"dshgo/internal/settingsform"
 )
 
@@ -244,8 +247,35 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	described := postPluginGlue(t, clientA, serverA.base, "settings.describe", map[string]any{}, http.StatusOK)
 	logSettingsEvidence(t, "REAL_DESCRIBE", described)
 	result := described["result"].(map[string]any)
-	if len(result["namespaces"].([]any)) != 2 || len(result["sections"].([]any)) != 2 || len(result["errors"].([]any)) != 0 {
+	// 19 个命名空间 = 原来的 11 个 + 官方 4 条设置页的 8 个（2026-11-15）。
+	//
+	// 为什么多 8 行（**这是官方形状变多，不是判据放宽**）：官方客户端用
+	// `ctx.configForms.whileServed([ns...])` 决定设置页出不出来，宿主不服务
+	// 那条命名空间时页面永远不显示。4 页对应的命名空间是一到三条：
+	//
+	//	settings-agent-loop  → agent-loop
+	//	settings-shell       → bash-sandbox / pwsh-sandbox
+	//	settings-subagent    → subagent / subagent-model-selection-settings
+	//	settings-web-search  → web / web-deepseek-api / web-search-deepseek
+	//
+	// 原来的 11 个：model / permission / llm + 官方客户端与插件的 7 个 UI 命名空间
+	// （locale / ui-theme / ui-chat / ui-settings / ui-conversation /
+	// session-log-deepseek / session-telemetry-otel，后两者是本仓"能力上不做但
+	// 结构化拒绝"的开关：声明 true / FEEDBACK_ONLY 会得到 501）+ 官方
+	// agent-preset registry 的 selectedDefault。
+	// `llm` 是 0.2.2-rc.2 加的（发布 `providers.<route>.retryPolicy` 节点，
+	// 官方 UI 的"重试条件/次数/等待时间"就是从这里读候选与正下界的）；这些 UI
+	// 命名空间与它共用同一份 <home>/state/settings-namespaces.json，
+	// 带 revision 乐观锁。
+	if len(result["namespaces"].([]any)) != 19 || len(result["sections"].([]any)) != 19 || len(result["errors"].([]any)) != 0 {
 		t.Fatalf("bad real describe: %+v", result)
+	}
+	llmSection := f2LLMSection(t, result)
+	if llmSection["writable"] != true {
+		t.Fatalf("rc.2 的 llm 命名空间必须可写（缺口 #2），实际 %v：%v", llmSection["writable"], llmSection)
+	}
+	if providers, ok := f2LLMNamespace(t, result)["value"].(map[string]any)["providers"].(map[string]any); !ok || len(providers) != 0 {
+		t.Fatalf("全新 home 的 llm.value 应是空 providers 字典：%v", f2LLMNamespace(t, result)["value"])
 	}
 	initialGet := postPluginGlue(t, clientA, serverA.base, "settings.form.get", map[string]any{"ns": "permission"}, http.StatusOK)
 	if current, revision := settingsEnvelopeCurrent(t, initialGet); current != "allow" || revision != 0 {
@@ -342,6 +372,67 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	}
 	logSettingsEvidence(t, "REAL_AFTER_RESET_RESTART", afterResetRestart)
 
+	// ── 官方客户端 / 插件 UI 设置命名空间：真 dshd 上可读、可写、可重置 ──
+	//
+	// 真机截图暴露的缺口就是这 4 行：宿主没发布命名空间时设置面板显示「未知」。
+	// 这里走真实 HTTP + 真实 <home>/state/settings-namespaces.json，并跨一次重启。
+	uiNamespaces := []string{
+		"locale", "ui-theme", "ui-chat", "ui-settings",
+		// 2026-11-13 补：官方另两个 general slot 的命名空间。
+		"ui-conversation", "session-log-deepseek",
+		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的开关。
+		"session-telemetry-otel",
+		// 2026-11-15 补：官方 agent-preset registry 的 selectedDefault。
+		"agent-preset-registry",
+	}
+	for _, ns := range uiNamespaces {
+		section := f2Section(t, result, ns)
+		if section["writable"] != true {
+			t.Fatalf("%s 的 section 必须可写：%v", ns, section)
+		}
+		fields, ok := section["fields"].([]any)
+		if !ok || len(fields) == 0 {
+			t.Fatalf("%s 的 section 必须带字段投影（界面按 current 画值）：%v", ns, section)
+		}
+	}
+	uiThemeSet := postPluginGlue(t, clientA, serverA.base, "settings.form.set", map[string]any{
+		"ns": "ui-theme", "path": []string{"fontSize"}, "value": 18, "expectedRevision": 0,
+	}, http.StatusOK)
+	if got := settingsFieldCurrent(t, uiThemeSet, "fontSize"); got != float64(18) {
+		t.Fatalf("ui-theme.fontSize 写入后 current=%v，want 18", got)
+	}
+	logSettingsEvidence(t, "REAL_UI_THEME_SET", uiThemeSet)
+	uiChatLegacy := postPluginGlue(t, clientA, serverA.base, "settings.form.set", map[string]any{
+		"ns": "ui-chat", "path": []string{"transcriptView"}, "value": "normal", "expectedRevision": 0,
+	}, http.StatusOK)
+	if got := settingsFieldCurrent(t, uiChatLegacy, "transcriptView"); got != "detailed" {
+		t.Fatalf("ui-chat 的旧值 normal 必须读作 detailed，实际 %v", got)
+	}
+	logSettingsEvidence(t, "REAL_UI_CHAT_LEGACY", uiChatLegacy)
+
+	serverA.stop()
+	serverA = startPluginGlueServer(t, exe, homeA, decoy)
+	clientA = connectPluginGlueServer(t, serverA)
+	uiThemeReload := postPluginGlue(t, clientA, serverA.base, "settings.form.get", map[string]any{"ns": "ui-theme"}, http.StatusOK)
+	if got := settingsFieldCurrent(t, uiThemeReload, "fontSize"); got != float64(18) {
+		t.Fatalf("重启后 ui-theme.fontSize 必须仍是 18，实际 %v", got)
+	}
+	logSettingsEvidence(t, "REAL_UI_THEME_AFTER_RESTART", uiThemeReload)
+
+	outOfRange := postPluginGlue(t, clientA, serverA.base, "settings.form.set", map[string]any{
+		"ns": "ui-theme", "path": []string{"fontSize"}, "value": 23, "expectedRevision": 1,
+	}, http.StatusBadRequest)
+	assertPluginGlueError(t, outOfRange, "out_of_range")
+	logSettingsEvidence(t, "REAL_UI_THEME_OUT_OF_RANGE", outOfRange)
+
+	uiThemeReset := postPluginGlue(t, clientA, serverA.base, "settings.form.reset", map[string]any{
+		"ns": "ui-theme", "expectedRevision": 1,
+	}, http.StatusOK)
+	if got := settingsFieldCurrent(t, uiThemeReset, "fontSize"); got != float64(14) {
+		t.Fatalf("reset 后 ui-theme.fontSize 必须回到官方默认 14，实际 %v", got)
+	}
+	logSettingsEvidence(t, "REAL_UI_THEME_RESET", uiThemeReset)
+
 	// A real dshd modelRunner must put the persisted new-session default on the
 	// actual OpenAI-compatible request. The endpoint is local and answers one
 	// ordinary SSE assistant message; no external model or GUI is involved.
@@ -382,7 +473,7 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 			t.Fatalf("runtime request model=%q", got)
 		}
 		t.Logf("REAL_RUNTIME_MODEL session=%s model=%s", runtimeSession, got)
-	case <-time.After(15 * time.Second):
+	case <-time.After(realChainWait):
 		t.Fatalf("model request not received; serve stderr=%s", modelServer.stderr.String())
 	}
 	deadline := time.Now().Add(15 * time.Second)
@@ -409,4 +500,397 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	t.Log("SETTINGS_FORM_REAL_SUMMARY OK=1 FAIL=0")
 }
 
-const postTimeoutForSettings = 15 * time.Second
+// postTimeoutForSettings 是这些真进程用例的 HTTP 客户端超时。
+//
+// 60s 而不是 15s：这些请求打在**真 dshd 子进程**上（起进程 + 建 home + 绑端口 +
+// 走一遍 settings 写入 + 落盘 + revision 乐观锁）。CI runner 只有 2 核，还套着
+// `-race`（二进制更慢），15s 在负载高时不够——2026-11-13 已两次红在
+// `TestSettingsFormRealDSHD…`（PR #17 round 4、PR #19）。
+//
+// **超时是环境容差，不是行为契约**：放宽它不降低任何断言强度，
+// 等不到照样 fail-closed。
+const postTimeoutForSettings = 60 * time.Second
+
+// ---------------------------------------------------------------------------
+// F2 · `llm` 命名空间写入面（rc.2 已知缺口 #2）
+// ---------------------------------------------------------------------------
+//
+// D4 只发布了 `providers.<route>.retryPolicy` 的 schema，宿主设置存储没有 llm
+// 的读写分支，所以 describe 里 `sections.llm.writable=false`、写回结构化
+// `read_only`。官方 UI 这一面是**可写**的（重试条件/次数/等待时间都能改），
+// 缺口 #2 就是补这条写入面：能改、能读回、下一轮真按新策略重试。
+
+// f2Post 发一次 L1 settings Transport 请求，返回 HTTP 状态与原始响应体。
+func f2Post(t *testing.T, client *http.Client, base, method string, body any) (int, []byte) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("%s 序列化参数: %v", method, err)
+	}
+	response, err := client.Post(base+"/api/"+method, "application/json", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("%s POST: %v", method, err)
+	}
+	defer response.Body.Close()
+	var payload bytes.Buffer
+	if _, err := payload.ReadFrom(response.Body); err != nil {
+		t.Fatalf("%s 读响应: %v", method, err)
+	}
+	return response.StatusCode, payload.Bytes()
+}
+
+func f2Result(t *testing.T, label string, status int, payload []byte, want int) map[string]any {
+	t.Helper()
+	if status != want {
+		t.Fatalf("%s 应 %d，实际 %d：%s", label, want, status, payload)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("%s 响应不是 JSON: %v 原文=%s", label, err, payload)
+	}
+	result, ok := envelope["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s 响应缺 result 对象：%s", label, payload)
+	}
+	return result
+}
+
+// f2Call 发一次设置请求并按期望状态码取 result 对象。
+func f2Call(t *testing.T, client *http.Client, base, method string, body any, want int) map[string]any {
+	t.Helper()
+	status, payload := f2Post(t, client, base, method, body)
+	return f2Result(t, method, status, payload, want)
+}
+
+// f2AssertSettingsError 钉住 Transport 四字段错误（code/message/hint/retryable）
+// 与"Hint 必须能告诉客户端怎么改"。
+func f2AssertSettingsError(t *testing.T, label string, status int, payload []byte, wantStatus int, wantCode, wantInMessage string) {
+	t.Helper()
+	if status != wantStatus {
+		t.Fatalf("%s 应 %d，实际 %d：%s", label, wantStatus, status, payload)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		t.Fatalf("%s 响应不是 JSON: %v 原文=%s", label, err, payload)
+	}
+	rawError, ok := envelope["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s 响应缺 error 对象：%s", label, payload)
+	}
+	for _, key := range []string{"code", "message", "hint", "retryable"} {
+		if _, present := rawError[key]; !present {
+			t.Fatalf("%s 错误缺四字段之一 %q：%s", label, key, payload)
+		}
+	}
+	if rawError["code"] != wantCode {
+		t.Fatalf("%s code = %v，期望 %s：%s", label, rawError["code"], wantCode, payload)
+	}
+	message, _ := rawError["message"].(string)
+	if wantInMessage != "" && !strings.Contains(message, wantInMessage) {
+		t.Fatalf("%s 的 message 应提到 %q，实际 %q", label, wantInMessage, message)
+	}
+	if hint, _ := rawError["hint"].(string); strings.TrimSpace(hint) == "" {
+		t.Fatalf("%s 的 Hint 不能为空（要告诉客户端怎么改）：%s", label, payload)
+	}
+}
+
+// f2LLMSection 从 describe 结果里取 llm 的 section。
+// f2Section 按 ns 取 describe 的 sections 一项。
+func f2Section(t *testing.T, described map[string]any, ns string) map[string]any {
+	t.Helper()
+	sections, ok := described["sections"].([]any)
+	if !ok {
+		t.Fatalf("describe 缺 sections：%v", described)
+	}
+	for _, raw := range sections {
+		section, ok := raw.(map[string]any)
+		if ok && section["ns"] == ns {
+			return section
+		}
+	}
+	t.Fatalf("describe 没有 %s section：%v", ns, sections)
+	return nil
+}
+
+// settingsFieldCurrent 取一次 settings.form.get/set/reset 结果里某个字段的 current。
+func settingsFieldCurrent(t *testing.T, envelope map[string]any, name string) any {
+	t.Helper()
+	result, ok := envelope["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("envelope 缺 result：%v", envelope)
+	}
+	fields, ok := result["fields"].([]any)
+	if !ok {
+		t.Fatalf("result 缺 fields：%v", result)
+	}
+	for _, raw := range fields {
+		field, ok := raw.(map[string]any)
+		if ok && field["name"] == name {
+			return field["current"]
+		}
+	}
+	t.Fatalf("fields 里没有 %q：%v", name, fields)
+	return nil
+}
+
+func f2LLMSection(t *testing.T, described map[string]any) map[string]any {
+	t.Helper()
+	sections, ok := described["sections"].([]any)
+	if !ok {
+		t.Fatalf("describe 缺 sections：%v", described)
+	}
+	for _, raw := range sections {
+		section, ok := raw.(map[string]any)
+		if ok && section["ns"] == "llm" {
+			return section
+		}
+	}
+	t.Fatalf("describe 没有 llm section：%v", sections)
+	return nil
+}
+
+// f2LLMNamespace 从 describe 结果里取 llm 的 namespace 视图。
+func f2LLMNamespace(t *testing.T, described map[string]any) map[string]any {
+	t.Helper()
+	namespaces, ok := described["namespaces"].([]any)
+	if !ok {
+		t.Fatalf("describe 缺 namespaces：%v", described)
+	}
+	for _, raw := range namespaces {
+		namespace, ok := raw.(map[string]any)
+		if ok && namespace["ns"] == "llm" {
+			return namespace
+		}
+	}
+	t.Fatalf("describe 没有 llm namespace：%v", namespaces)
+	return nil
+}
+
+// f2StoredRetryPolicy 从 describe 的 llm.value 里取 `providers.<route>.retryPolicy`。
+func f2StoredRetryPolicy(t *testing.T, described map[string]any, route string) map[string]any {
+	t.Helper()
+	namespace := f2LLMNamespace(t, described)
+	value, ok := namespace["value"].(map[string]any)
+	if !ok {
+		t.Fatalf("llm.value 不是对象：%v", namespace["value"])
+	}
+	providers, ok := value["providers"].(map[string]any)
+	if !ok {
+		t.Fatalf("llm.value.providers 不是对象：%v", value)
+	}
+	profile, ok := providers[route].(map[string]any)
+	if !ok {
+		t.Fatalf("llm.value.providers.%s 不是对象：%v", route, providers)
+	}
+	policy, ok := profile["retryPolicy"].(map[string]any)
+	if !ok {
+		t.Fatalf("providers.%s 没有 retryPolicy：%v", route, profile)
+	}
+	return policy
+}
+
+// f2ProviderRetryPolicyValue 拼一份合法的 retryPolicy 值。
+func f2ProviderRetryPolicyValue(maxRetries, initialDelayMs, maxDelayMs int, codes []any) map[string]any {
+	return map[string]any{
+		"mode":           "normal",
+		"maxRetries":     maxRetries,
+		"retryableCodes": codes,
+		"backoff": map[string]any{
+			"initialDelayMs": initialDelayMs,
+			"maxDelayMs":     maxDelayMs,
+			"jitterRatio":    0,
+		},
+	}
+}
+
+// TestSettingsLLMNamespaceWritableRoundTripAndValidation 是缺口 #2 的读写闭环：
+//   - describe 的 `sections.llm.writable` 必须是 true（D4 阶段是 false）；
+//   - `settings.form.set` 能改 `providers.<route>.retryPolicy`，重开存储后读回同一份值；
+//   - 非法值（负/零延迟、空 code、未知键、越界 maxRetries、非法 mode、重复 code）
+//     → 四字段错误 + Hint，且 revision 与已存值都不变（不静默截断、不写半份）；
+//   - `expectedRevision` 冲突语义与 model/permission 一致（409 revision_conflict）；
+//   - 多段 path 的 unset 与"reset 不带 path = 整段清空"都真的落盘。
+func TestSettingsLLMNamespaceWritableRoundTripAndValidation(t *testing.T) {
+	home := t.TempDir()
+	store, _, _ := openSettingsStores(t, home, "base-model", "allow")
+	server := httptest.NewServer(newSettingsFormHTTPHandler(store))
+	defer server.Close()
+	client := server.Client()
+
+	status, payload := f2Post(t, client, server.URL, "settings.describe", map[string]any{})
+	described := f2Result(t, "settings.describe", status, payload, http.StatusOK)
+	section := f2LLMSection(t, described)
+	if section["writable"] != true {
+		t.Fatalf("llm 命名空间必须可写（rc.2 缺口 #2），实际 writable=%v：%v", section["writable"], section)
+	}
+	if section["revision"] != float64(0) {
+		t.Fatalf("全新 home 的 llm revision 应为 0，实际 %v", section["revision"])
+	}
+	value := f2LLMNamespace(t, described)["value"].(map[string]any)
+	if providers, ok := value["providers"].(map[string]any); !ok || len(providers) != 0 {
+		t.Fatalf("全新 home 的 llm.value 应是空的 providers 字典：%v", value)
+	}
+
+	route := "openai-completions"
+	policy := f2ProviderRetryPolicyValue(1, 1, 5, []any{"SERVER"})
+	set := f2Call(t, client, server.URL, "settings.form.set", map[string]any{
+		"ns": "llm", "path": []string{"providers", route, "retryPolicy"},
+		"value": policy, "expectedRevision": float64(0),
+	}, http.StatusOK)
+	if set["revision"] != float64(1) {
+		t.Fatalf("第一次写入后 revision 应为 1，实际 %v", set["revision"])
+	}
+
+	// 重开存储（等价于 dshd 重启）：同一条值必须还在，revision 不能归零。
+	reopened, _, _ := openSettingsStores(t, home, "base-model", "allow")
+	reopenedServer := httptest.NewServer(newSettingsFormHTTPHandler(reopened))
+	defer reopenedServer.Close()
+	status, payload = f2Post(t, reopenedServer.Client(), reopenedServer.URL, "settings.describe", map[string]any{})
+	reloaded := f2Result(t, "settings.describe(reopen)", status, payload, http.StatusOK)
+	if stored := f2StoredRetryPolicy(t, reloaded, route); stored["maxRetries"] != float64(1) || stored["mode"] != "normal" {
+		t.Fatalf("重开后读回的值不对：%v", stored)
+	}
+	if got := f2LLMSection(t, reloaded)["revision"]; got != float64(1) {
+		t.Fatalf("重开后 revision 应为 1，实际 %v", got)
+	}
+	if got := f2LLMSection(t, reloaded)["writable"]; got != true {
+		t.Fatalf("重开后 llm 仍必须可写，实际 %v", got)
+	}
+
+	// 非法值矩阵：每一条都必须整次拒绝（四字段错误 + Hint），revision 停在 1。
+	invalid := []struct {
+		name          string
+		policy        map[string]any
+		wantCode      string
+		wantInMessage string
+	}{
+		{"负延迟", f2ProviderRetryPolicyValue(1, -1, 5, []any{"SERVER"}), "out_of_range", "initialDelayMs"},
+		{"零延迟", f2ProviderRetryPolicyValue(1, 0, 5, []any{"SERVER"}), "out_of_range", "initialDelayMs"},
+		{"空 code 数组", f2ProviderRetryPolicyValue(1, 1, 5, []any{}), "out_of_range", "retryableCodes"},
+		{"未知键", map[string]any{"mode": "normal", "retryAttempts": 1}, "unknown_field", "retryAttempts"},
+		{"maxRetries 越界", f2ProviderRetryPolicyValue(9007199254740992, 1, 5, []any{"SERVER"}), "out_of_range", "maxRetries"},
+		{"initialDelayMs > maxDelayMs", f2ProviderRetryPolicyValue(1, 100, 10, []any{"SERVER"}), "out_of_range", "maxDelayMs"},
+		{"mode 非法", map[string]any{"mode": "sometimes"}, "invalid_enum", "sometimes"},
+		{"重复 code", f2ProviderRetryPolicyValue(1, 1, 5, []any{"SERVER", "SERVER"}), "invalid_value", "重复"},
+	}
+	for _, testCase := range invalid {
+		status, payload = f2Post(t, client, server.URL, "settings.form.set", map[string]any{
+			"ns": "llm", "path": []string{"providers", route, "retryPolicy"},
+			"value": testCase.policy, "expectedRevision": float64(1),
+		})
+		f2AssertSettingsError(t, "非法策略 "+testCase.name, status, payload, http.StatusBadRequest, testCase.wantCode, testCase.wantInMessage)
+	}
+	status, payload = f2Post(t, client, server.URL, "settings.describe", map[string]any{})
+	afterRejected := f2Result(t, "settings.describe(after rejects)", status, payload, http.StatusOK)
+	if got := f2LLMSection(t, afterRejected)["revision"]; got != float64(1) {
+		t.Fatalf("被拒的写入不许改动 revision，实际 %v", got)
+	}
+	if got := f2StoredRetryPolicy(t, afterRejected, route)["maxRetries"]; got != float64(1) {
+		t.Fatalf("被拒的写入不许改动已存的值，实际 maxRetries=%v", got)
+	}
+
+	// revision 冲突语义与其它命名空间一致。
+	status, payload = f2Post(t, client, server.URL, "settings.form.set", map[string]any{
+		"ns": "llm", "path": []string{"providers", route, "retryPolicy"},
+		"value": f2ProviderRetryPolicyValue(2, 1, 5, []any{"SERVER"}), "expectedRevision": float64(0),
+	})
+	f2AssertSettingsError(t, "过期 revision", status, payload, http.StatusConflict, "revision_conflict", "expected=0")
+
+	// 多段 path 的 unset（settings.mutate）与整命名空间 reset。
+	mutated := f2Call(t, client, server.URL, "settings.mutate", map[string]any{
+		"ns": "llm", "expectedRevision": float64(1),
+		"ops": []any{map[string]any{"op": "unset", "path": []string{"providers", route, "retryPolicy"}}},
+	}, http.StatusOK)
+	if mutated["revision"] != float64(2) {
+		t.Fatalf("unset 后 revision 应为 2，实际 %v", mutated["revision"])
+	}
+	status, payload = f2Post(t, client, server.URL, "settings.describe", map[string]any{})
+	unset := f2Result(t, "settings.describe(unset)", status, payload, http.StatusOK)
+	unsetProviders := f2LLMNamespace(t, unset)["value"].(map[string]any)["providers"].(map[string]any)
+	if profile, ok := unsetProviders[route].(map[string]any); !ok || len(profile) != 0 {
+		t.Fatalf("unset 之后该路由下不应再有 retryPolicy：%v", unsetProviders)
+	}
+
+	reset := f2Call(t, client, server.URL, "settings.form.reset", map[string]any{
+		"ns": "llm", "expectedRevision": float64(2),
+	}, http.StatusOK)
+	if reset["revision"] != float64(3) {
+		t.Fatalf("整命名空间 reset 后 revision 应为 3，实际 %v", reset["revision"])
+	}
+	status, payload = f2Post(t, client, server.URL, "settings.describe", map[string]any{})
+	afterReset := f2Result(t, "settings.describe(reset)", status, payload, http.StatusOK)
+	resetValue := f2LLMNamespace(t, afterReset)["value"].(map[string]any)
+	if providers, ok := resetValue["providers"].(map[string]any); !ok || len(providers) != 0 {
+		t.Fatalf(`reset 不带 path 必须清空 user 段（回落到声明默认 {"providers":{}}），实际 %v`, resetValue)
+	}
+	if got := f2LLMSection(t, afterReset)["revision"]; got != float64(3) {
+		t.Fatalf("reset 后 describe 的 revision 应为 3，实际 %v", got)
+	}
+}
+
+// TestSettingsLLMRetryPolicyChangesRealAttempts 是缺口 #2 的端到端：
+// 经真实设置 Transport 改 `providers.<route>.retryPolicy.maxRetries` → 读回 →
+// 用**计数假网关**（本机 httptest，一个字节都不出网）验证客户端真发的请求
+// 次数随设置变化（2 次 → 4 次），即"下一轮真生效"。
+func TestSettingsLLMRetryPolicyChangesRealAttempts(t *testing.T) {
+	home := t.TempDir()
+	store, _, _ := openSettingsStores(t, home, "", "allow")
+	server := httptest.NewServer(newSettingsFormHTTPHandler(store))
+	defer server.Close()
+	client := server.Client()
+
+	var attempts int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":{"message":"upstream boom"}}`))
+	}))
+	defer gateway.Close()
+
+	route := llm.ProviderAPIOpenAICompletions
+	model := fmt.Sprintf(`{"id":"retry-e2e","api":%q,"baseURL":%q}`, route, gateway.URL)
+	initialRevision := int64(0)
+	if _, err := llm.OpenModelCatalog(home).Upsert(json.RawMessage(model), nil, &initialRevision); err != nil {
+		t.Fatalf("upsert 模型: %v", err)
+	}
+
+	writePolicy := func(revision int64, maxRetries int) {
+		t.Helper()
+		payload := map[string]any{
+			"ns": "llm", "path": []string{"providers", route, "retryPolicy"},
+			"value": f2ProviderRetryPolicyValue(maxRetries, 1, 5, []any{"SERVER"}),
+		}
+		if revision > 0 {
+			payload["expectedRevision"] = revision
+		}
+		f2Call(t, client, server.URL, "settings.form.set", payload, http.StatusOK)
+	}
+	runAttempts := func(maxRetries int) int {
+		t.Helper()
+		provider, err := llm.OpenModelCatalog(home).ResolveProvider("retry-e2e")
+		if err != nil {
+			t.Fatalf("ResolveProvider: %v", err)
+		}
+		if provider.Retry == nil || provider.Retry.MaxRetries != maxRetries {
+			t.Fatalf("设置里的 maxRetries=%d 没进 provider 解析（缺口 #2 未生效）：%+v", maxRetries, provider.Retry)
+		}
+		raw, err := provider.RetryPolicyJSON()
+		if err != nil || !strings.Contains(raw, fmt.Sprintf(`"maxRetries":%d`, maxRetries)) {
+			t.Fatalf("传给 dshd run 子进程的策略 JSON = %q err=%v", raw, err)
+		}
+		atomic.StoreInt32(&attempts, 0)
+		if _, err := provider.Client().Stream(context.Background(), llm.Request{Model: "retry-e2e"}, nil); err == nil {
+			t.Fatal("假网关恒回 502，这一轮必须失败")
+		}
+		return int(atomic.LoadInt32(&attempts))
+	}
+
+	writePolicy(0, 1)
+	if got := runAttempts(1); got != 2 {
+		t.Fatalf("maxRetries=1 → 首发 + 1 次重试 = 2 次请求，实际 %d 次", got)
+	}
+	writePolicy(1, 3)
+	if got := runAttempts(3); got != 4 {
+		t.Fatalf("maxRetries=3 → 首发 + 3 次重试 = 4 次请求，实际 %d 次", got)
+	}
+}

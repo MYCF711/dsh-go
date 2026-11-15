@@ -141,5 +141,11 @@ ok  	dshgo/cmd/dshd	5.497s
 - 未启动 GUI、未改 UI；UI apiclient/pluginapi/dssettings 消费是后续任务，不能把宿主夹具称为可见设置页完成。
 - 真实模型请求使用本地 OpenAI 兼容 SSE 端点，证明 dshd 实际请求模型与 turn 完成；未调用外部模型、未做完整工作日或真实工具审批长跑。
 - 首切只有 model/permission 两个 namespace。agent-loop、shell、subagent、web-search、session-log 没有用空 schema 冒充已实现。
+  - **2026-11-15 更新**：官方 4 条设置页的 8 个命名空间（`agent-loop` / `bash-sandbox` /
+    `pwsh-sandbox` / `subagent` / `subagent-model-selection-settings` / `web` /
+    `web-deepseek-api` / `web-search-deepseek`）已按官方 envelope 实做并注册，
+    `settings.describe` 从 11 行变 19 行；消费者与**仍未接上的缺口**（bash 两个预算、
+    subagent 模型选择、旧 Messages 搜索的 apiKey/apiKeyEnv、发布面窄于官方 served
+    schema）逐条登记在 [settings-namespaces-official-pages.md](settings-namespaces-official-pages.md)。
 - 未新增 WS type 或 document-updated 推送；客户端可在写响应中折叠描述符，重连后重新 describe。
 - 未提供新的 CLI 子命令；现有 CLI flag 继续作为启动默认来源，HTTP 复用真实存储与运行链。

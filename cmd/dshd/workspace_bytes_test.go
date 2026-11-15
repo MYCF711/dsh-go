@@ -64,7 +64,7 @@ func TestWorkspaceBytesDefaultMatchesOfficialTarget(t *testing.T) {
 // skill 工具根本列不出东西。
 func TestBuiltinModulesBootstrapsEmptyHomeSkills(t *testing.T) {
 	home := t.TempDir()
-	_ = builtinModules(t.TempDir(), home, 0, nil)
+	_ = builtinModules(t.TempDir(), home, 0, 0, nil)
 	st, err := os.Stat(filepath.Join(home, "skills"))
 	if err != nil || !st.IsDir() {
 		t.Fatalf("builtinModules 没有自举出 <home>/skills：%v", err)

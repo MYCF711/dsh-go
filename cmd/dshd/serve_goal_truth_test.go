@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"dshgo/internal/agent"
 	"dshgo/internal/kernel"
 	"dshgo/internal/spi"
 	"dshgo/internal/transport"
@@ -35,7 +36,7 @@ func goalTruthCreateViaModelTool(t *testing.T, home, sessionID, objective string
 	defer k.Root().Dispose()
 	// 与 main.go 的接线逐字一致：整张 builtinModules 表，goal 模块拿
 	// `<home>/state/goals`（`builtinModules` 里的那一行）。
-	if _, err := kernel.Assemble(k.Root(), builtinModules(".", home, 0, nil)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(".", home, 0, 0, nil)); err != nil {
 		t.Fatalf("装配 builtinModules: %v", err)
 	}
 	reg, err := kernel.Inject(k.Root(), spi.ToolsKey)
@@ -106,7 +107,7 @@ func TestGoalTruthModelCreatedGoalReachesRoundDriver(t *testing.T) {
 	// 喂一轮真实 v4 turn/end{completed}，再问驱动"要不要续轮"。
 	// 活体状态与生产一致：`goalRoundRunner.Run` 在轮次前后各登记一次
 	// （驱动只在 whole-agent idle 时排下一轮）。
-	driver := newGoalRoundDriver(store, home)
+	driver := newGoalRoundDriver(store, home, agent.NewRegistry(agent.RegistryOptions{}))
 	if err := driver.Load(); err != nil {
 		t.Fatalf("读游标: %v", err)
 	}

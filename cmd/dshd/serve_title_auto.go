@@ -525,6 +525,7 @@ func (c autoTitleCall) generate(ctx context.Context) (string, error) {
 		return "", errors.New("session-title: 标题输入为空")
 	}
 	chat := llm.NewWithAPI(c.base, c.credential, c.api)
+	applyAccountRouteEnv(chat, os.Getenv)
 	chat.UserAgent = "dshd/" + version + " session-title"
 	resp, err := chat.Stream(ctx, llm.Request{
 		Model: c.model,

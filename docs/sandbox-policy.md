@@ -2,14 +2,23 @@
 
 ## 1. 当前结论
 
-当前没有完整沙盒权限实现，不能把下列已有能力称为沙盒：
+**第一阶段（sandbox-policy 核心）与第二阶段（生产接线）已落地；第三阶段（OS 级隔离）尚未落地。**
 
-- `internal/modes` 的 `default` / `read-only` 主要是工具可见性和 approval 半档；
-- `modules/fs/local` 只做路径边界和读后写观测，注释明确“刻意不做沙箱判定”；
-- `modules/exec/bash` 直接以宿主用户权限启动 bash；Windows Job Object 仅 `KILL_ON_JOB_CLOSE` 与进程树归属；
-- bash schema 没有 `sandbox_permissions`，pwsh 同样没有；`danger-full-access` 在 Go 宿主不是真实运行时档位。
+已到达的层级（每条都可按 `file:line` 复核）：
 
-因此当前是**审批 + FS路径限制 + 进程管理**，不是完整 sandbox-policy，也不是 OS 级命令隔离。官方映射见 `docs/official-plugins-022-map.md`：sandbox-policy MISSING，bash/pwsh-sandbox MISSING，fs-sandbox PARTIAL。
+- 三档是**真实运行时档位**：`internal/sandbox/policy.go:123 New` / `:197 evaluate` / `:273` 三档；`danger-full-access` 是其中一档，不再是"审批别名"；
+- 每档都捆上了 sandbox：`internal/modes/modes.go:37 SandboxMode` / `:66 Builtins`（四档 preset 每档带 `Sandbox`）；
+- bash / pwsh schema 都有 `sandbox_permissions`（`modules/exec/bash/tools.go:144`、`modules/tool/pwsh/pwsh.go:52`），per-call 升级链路真实（`modules/exec/bash/sandbox_scope.go:21`、`modules/tool/pwsh/pwsh.go:334 authorize`）；
+- 拒绝是**起进程之前**的结构化事实：allow/deny/needs-approval + 机器可读 reason + 实际 mode（`internal/sandbox/policy.go:181-194` 的 `Decision`）；
+- 策略层如实自报隔离层级：`internal/sandbox/policy.go:64-69` 的 `Enforcement`，档位只有一个真值 `policy-only-no-os-isolation`，并出现在 `sandboxPolicy.get/set` 结果里（`cmd/dshd/serve_sandbox_policy.go:281/317`、`cmd/dshd/serve.go:1104`）。
+
+**仍未到达的层级（不得写成 DONE）**：OS 级 runner。目前命令仍以宿主用户权限起进程；Windows Job Object 只负责进程树回收与 `KILL_ON_JOB_CLOSE`，FS 侧只有路径级边界（`internal/sandbox/fs.go:15 EvaluateFS`、`internal/sandbox/runtime.go:157 CheckWrite`）。官方对应两条包：`dsh-sandbox-local`（bwrap/Landlock/Seatbelt + Windows ACL runner）与 `dsh-sandbox-windows-acl`，本仓都没有。
+
+因此本仓当前是**三档策略 + 审批 + 路径级 FS 边界 + 进程管理**，enforcement 自报为 `policy-only-no-os-isolation`——这是有意为之的诚实标注，不是遗漏：官方 `dsh-pwsh-sandbox` 在无 runner 时 fail-closed 报 `SANDBOX_UNAVAILABLE`，本仓选择"策略层拒绝 + 明确自报未隔离"而不是"冒名沙盒"。
+
+Windows 上还有一条官方事实需要记住：`dsh-base/cordis.patch.yml:249-251` 对 `bash-sandbox` 写的是 `disabled: !!js process.platform === 'win32'`——**官方桌面端在 Windows 上根本没跑命令级 OS 沙箱**（同文件 `:281-283` 连 `tool-bash` 也 disabled）。本仓支持范围只有 Windows（AGENTS.md §0 裁定 2026-11-08），所以"Windows 上没有 OS 级 bash 沙箱"在能力面上**不低于官方**；本仓相对官方的增量是策略闸门仍然在跑（官方在 Windows 上整行关掉）。
+
+OS 级隔离要不要做、做到哪一层，见 §4；逐条插件结论见 `docs/base-plugins-partial19-official-shape.md`。
 
 ## 2. 第一阶段：sandbox-policy 核心（必须实现）
 

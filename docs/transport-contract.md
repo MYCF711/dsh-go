@@ -132,6 +132,7 @@ h11 4、h10 5、h14 7、h13 审批 2+4+3+2、ui-e2e 16）。
   真值只取这条会话最新的 `request/header.header.config.reasoningEffort` 或 `model/selection.reasoningEffort`，已知枚举为 `off/low/high/xhigh/max`。最新记录缺键、空串、`null`、非字符串、未知枚举，或旧 v4 没有配置记录时都省略 `effort`，客户端显示未知；不得回退旧记录，也不得拿本进程 `--reasoning`、模型名或目录能力冒充。
   v4 header 与 `request/context` 没有 effort，不写 v4、不改 codec、不改原 `model` 投影。`LoadResult` 键表只在尾部追加 `effort`，canonical 25、WS/journal、共享 golden 均不变。TUI 客户端用可选指针区分缺键与显式空串，切换会话先清旧值；详见 [`docs/tui-effort.md`](tui-effort.md)。
 - **type 白名单**：v4 原始事件名 + 显式登记的 `turn/done`、`turn/error`、`approval/request`、`approval/timeout`、`approval/cancel`、`session/reset`、`pong`。新增必须 snapshot-first。
+- **agent 生命周期帧（AGENT-EVENTS / 2026-11-14，只加不改）**：新增五类**进程内投影帧** `agent/created`、`agent/status`、`agent/disposed`、`subagent/start`、`subagent/end`，由 `cmd/dshd/agent_events.go` 的 `agentEventSink` 从**活体注册表**发出，payload 逐字段对齐官方 cordis 事件（`dsh-agent/src/runtime-types.ts:291-430`、`dsh-subagent/src/types.ts:95-124`）。它们**不进 v4 日志**（`internal/session/known_events.go` 的词汇表**不动**），只进每会话 Transport journal 与 WS，并随 `transport-journal.v1.jsonl` 跨重启恢复。**与官方的一处有意差异**：官方这 12 条 cordis 边明确**永不持久化**（消费方全在进程内），本仓为让界面在断线重连后仍能看到 agent 状态而**选择持久化**——代价与理由写在 `cmd/dshd/agent_events.go` 文件头。官方**唯一耐久的** v4 事件 `agent/inbox/spliced` 本仓至今**无写入点**（未闭合缺口，已登记）。`api.snapshot.json` 与共享 golden **无需改动**：本次没有新增/改名任何 API 方法与字段；帧类型白名单（`internal/transport/golden_frames_test.go` 的 `allowedTypes`）只作用于 golden 夹具。
 - **连接拓扑**：当前 ServerFrame 不带 topic，每会话一条独立 WS 订阅/连接，按连接归属隔离；不得同连接混订多个会话。
 - **seq**：每会话一个 Transport journal，事件只在追加时分配一次单调 seq。不是 v4 `ev.Seq`、全局 `serveTurnSeq` 或连接序号。turn/done、turn/error 与 approval 事件同入此域；pong 无 seq 且不入日志。
 - **消息身份（MSGID-IDENTITY / W56，2026-11-05 冻结）**：Transport 信封 `seq` 只用于水位、gap 和重放，不得作为 v4 内容身份。v4 信封本来就有持久 `Event.Seq`（`codecs/v4/read.go`；`session.Log.Append` 分配，`OpenSessionAt` 续写恢复），包括合法的 **`seq=0`**；因此 v4-backed `user/message` 与 `assistant/message` 在 follow/drain 投影成 WS/history 帧时，在 `data` **新增必选 `v4Seq`**，值就是该事件信封的 `Event.Seq`。不得用 Transport seq、墙钟、正文 hash 或进程内序号冒充。
@@ -236,6 +237,73 @@ W48 先完成管理器与适配器，W50 已把真实 dshd CLI 与 serve 主分�
 生产 `jobs.output` 的 scoped 回调把 `sessionId/cursor/limit/waitMs` 一并传到当前 `cmdRun`，IPC 也只携带当前页；旧 `JobsOutput` 回调仅作兼容分页 fallback。父进程按 session 登记自己启动的子进程 PID/完整 executable/stdin，应答同时核对随机 requestId、sessionId、job id；每次 stop 前用 `QueryFullProcessImageName` 复核精确 PID。禁止按镜像名查找、全局 `taskkill` 或操作其他会话。最终输出以原子写保存在当前 home 的 `state/jobs/<sessionId>/<id>.json`，停止和进程退出后仍可读，A/B home 不共享。
 
 真实 dshd + 临时 home 的 ready token→cookie 已验 schedule A/B、删除/重开、重复删除、冲突、clear-ended/readback；W69/W70 又以 Job Object/process group 与有界 Pager 完成 parent/child/grandchild 进程树停止和输出回读。W73 已由真实 UI apiclient/壳/自动化与后台任务页消费删除、clear-ended、rune 分页、truncated 与 stop/readback，证据 `../dsh-ui/docs/task-actions-ui.md`。完整命令、先红输出、日志与未验项见 [`docs/task-actions.md`](task-actions.md)；**可见 live GUI 与完整工作日仍未验**。
+
+## 3D. 409 的 `details.reason`（2026-11-12，additive）
+
+GP 报告 §5 第 3 条：409 的**两种来源**曾经只能靠 message 文本区分（界面里就是
+`strings.Contains(err.Error(), "滑出内存")`），文案一改就失效，而且判错的代价两个方向
+都难看——当成换代会重建基线（同一次点击又能再点），当成到头了会少一页。本层给 409 加一个
+**稳定机器字段** `details.reason`，**纯 additive**：`error` 仍然恰好四字段（`code`/
+`message`/`hint`/`retryable`，`TestEveryHTTPErrorHasFourFieldEnvelope` 钉住），
+reason 放在**信封顶层**的 `details` 里（与 `journalEpoch`/`lastSeq`/`capableWhen`
+平铺同一层，不是 error 对象的一部分）。
+
+### 线上形状
+
+```json
+{"error":{"code":"stale_epoch","message":"…","hint":"…","retryable":true},
+ "journalEpoch":7,"lastSeq":1024,
+ "details":{"reason":"history_evicted"}}
+```
+
+### 取值表（`ConflictReasons()` 是宿主侧唯一来源）
+
+| `details.reason` | 四字段 `code` | 语义 | 客户端下一步 |
+|---|---|---|---|
+| `stale_epoch` | `stale_epoch` | journal 换代，或客户端水位比当前还大 | 丢掉旧水位，重新 `session.load` 拿基线 |
+| `history_evicted` | `stale_epoch` | `sinceSeq` 之前的历史已滑出内存 journal | **不要重建**：这就是"没有更早的了"（分页到头） |
+| `revision_conflict` | `revision_conflict` | 乐观并发 revision 过期（读到的是旧版本） | 重新读最新 revision，再基于新内容重试 |
+| `job_finished` | `job_finished` | 任务已结束，不能重复停止/操作 | 只读 `jobs.output` |
+| `job_owner_not_live` | `job_owner_not_live` | 任务 owner 已不在（官方 `JOB_OWNER_NOT_LIVE`） | 换会话 / 等 owner 恢复 |
+| `stale_head` | `stale_head` | forge 写入基于旧 head（远端已前进） | 重新读 PR head 再提交 |
+| `agent_busy` | `busy` | 会话/管理器正忙（上一轮还没结束） | 等 `turn/done`，或先 `session.cancel` |
+| `NO_CONTINUABLE_FAILURE_OR_PENDING_INPUT` | `session/agent-busy` | 官方续跑不可用（**官方逐字值**，`dsh-api-session-controller/lib/index.js:895`） | 看 `hint`：先等当前轮/排队项消化完 |
+| `conflict` | 其它（`conflict`/`unsupported`/`error` 等兜底） | 叫不出更细名字的 409 | 按 `hint` |
+
+产出点（每个都有一条断言，见 `TestConflictProducersCarryReason` 与
+`TestHistoryConflictReasons`）：`server.go` 的 `handleSessionHistory`（两种 reason）、
+`serveEmptyPromptContinuation`（官方 reason）、`writePromptError`；`handlers_agent_official.go`；
+`handlers_config_patch.go`；`handlers_jobs.go`；`handlers_job_terminal_official.go`；
+`handlers_forge_write_official.go` / `handlers_forge_rc2.go`；`handlers_session_official.go`；
+`context_mcp_sidequery.go`；`handlers_mcp_manager_rc2.go`；`handlers_cua_rc2.go`。
+收口在**唯一出口** `writeJSON`（`withConflictReason`）：任何 409 都带 reason，
+不靠每个 handler 记得加。
+
+### 兼容规则（老客户端 / 老宿主）
+
+- **老客户端**：忽略顶层 `details` 即可。`error` 四字段、状态码、`message` 文案、
+  `journalEpoch`/`lastSeq` 等兄弟字段**全部没变**——这是 additive，不是破坏性变更。
+- **老宿主**（本字段之前）：响应里没有 `details`。客户端必须**先判结构、再兜底文本**，
+  且兜底只用于跨版本过渡；支持的最低宿主版本 ≥ 本字段之后，文本匹配即可删
+  （界面侧判据写在 `../dsh-ui/cmd/app/frames.go` 的 `journalEvictedError` 注释里）。
+- **两个 reason 共用一个 code 是刻意的**：`stale_epoch` 是既有客户端的码分支，
+  不能为了细分改码；细分只在 `details.reason` 里做。同理 `busy` → `agent_busy`、
+  `session/agent-busy` → 官方逐字值。
+- **`details` 里其它键**原样保留；调用点显式给的 reason 优先于按 code 的默认推导。
+
+### 机器快照与断言
+
+- 宿主快照 `internal/transport/testdata/api.snapshot.json` 的 `conflict_reasons`
+  是取值表本身（从 `ConflictReasons()` 反推，不手抄）；UI 侧
+  `testdata/api.snapshot.json` 的 `envelope.details.reason` 是**可选**字段
+  （老宿主不带，别写成必填）。
+- `TestConflictReasonsTable`（取值非空/不重名/三个必需语义都在）、
+  `TestConflictReasonForCode`（code → reason 逐行 + 产出点）、
+  `TestWithConflictReason`（信封合并规则：调用点优先、兄弟字段不丢、error 仍四字段）、
+  `TestConflictProducersCarryReason`（每个 409 产出点一条断言）、
+  `TestHistoryConflictReasons`（两种 `stale_epoch` 真的分得开、成功响应不带 `details`）。
+- 出口不变量：`TestEveryHTTPErrorHasFourFieldEnvelope` 对**每一条 409 响应**断言
+  `details.reason` 存在且取值在 `ConflictReasons()` 内。
 
 ## 4. H 表（需求 + 最近证据快照）
 
@@ -411,3 +479,100 @@ H14 通过后才能做 H6/H13 的线上联调。H8 可与 H14 并行；其余独
 - `session.follow` 的 `assistantStream:true` 被接受但**不产生额外帧**：本宿主没有 process-local 助手呈现帧（助手正文走 `assistant/message` durable 事件）。
 - `session.follow` 的 snapshot `header` 需要宿主提供 `OfficialSessionHeaderSource`（v4 首帧原样）。**没有就 501 点名缺它**，绝不拿 `createdAt:0` 编一个（客户端会显示 1970 年）。
 - 流不重放历史时的 `records` 是**空数组**（不是 `null`），`hasMore=false`。
+
+## 15. 官方 GUI 4 处契约缺口的宿主落点（2026-11-15，additive）
+
+GUI 账本里 4 条 PARTIAL 卡在宿主侧。本节记四条契约的**宿主真实落点**与**已登记裁剪**，
+形状全部照官方 rc.2 随包 TypeScript 原件，不新增自造字段。
+
+### 15.1 `session.prompt` 的官方 `PromptContentPart`（附件入口）
+
+官方形状（`@deepseek-ai/dsh-api-session-controller/src/types.ts:80-92`）：
+
+```ts
+type PromptContentPart =
+  | { type: 'text';  text: string }
+  | { type: 'image'; mediaType: ImageMediaType; data: string; name?: string }
+  | { type: 'file';  receiptId: Branded<'file-upload-receipt-id'> }
+```
+
+官方客户端**不认识**宿主的 `att-…` id：它先 `fileUploads.upload` 拿回执
+（`{receiptId, file:{attachmentId,name,bytes}}`），再把 `file`/`image` 两种 part 放进
+`session.prompt.content`。宿主侧解析点是
+[`cmd/dshd/attachments_official_prompt.go`](../cmd/dshd/attachments_official_prompt.go)
+的 `NormalizeOfficialContent`（在 `serve.go` 的两个 `PromptBlocks*` 回调里先于
+`ResolveBlocks` 执行），解析结果就是既有 attachment 块，后续模型 parts 与旧路径同源。
+
+- `type:"file"`：回执是**会话作用域**的（`<home>/state/uploads/<receiptId>.json`）；
+  读 blob 时重新校验大小/sha256，跨会话使用按 `not_found` 拒绝。
+- `type:"image"`：`mediaType` 只接受官方四个枚举（`image/png|jpeg|webp|gif`），
+  且必须与真实字节嗅探结果一致。
+- 线上新增字段：`ContentBlock.receiptId` / `.mediaType` / `.data`（`internal/transport/api.go`）。
+- 端到端：`TestSessionPromptBindsOfficialFileReceiptToAttachment`、
+  `TestSessionPromptBindsInlineImagePart`、`TestSessionPromptBindsTextReceiptAsText`、
+  `TestSessionPromptRejectsBadOfficialAttachmentParts`（真 HTTP + 真上传 + 真模型 parts）。
+
+### 15.2 设置命名空间 `agent-preset-registry.selectedDefault`
+
+官方 `AgentPresetRegistry.Config`（`dsh-agent-preset-registry/src/index.ts:52-59`）是
+`{default: string, selectedDefault: string(volatile)}`，`defaultId = selectedDefault ?? default`；
+管理界面通过 `settings.update('agent-preset-registry', {selectedDefault}, rev)` 写它。
+
+- 命名空间声明：[`internal/settingsform/agent_preset_schema.go`](../internal/settingsform/agent_preset_schema.go)
+  （注册进 `HostRegistry()`；`base.selectedDefault = modes.DefaultID`）。
+- 读/写落点：[`cmd/dshd/serve_settings.go`](../cmd/dshd/serve_settings.go) 的 `serveSettingsStore`
+  （写路径调用 `validateAgentPresetSelection`，未知 preset id 当场 400，不写进去再回落）。
+- 生效点（同一份解析
+  [`cmd/dshd/agent_preset_default.go`](../cmd/dshd/agent_preset_default.go) 的
+  `selectedAgentPresetDefault`）：`agentPresets.list.isDefault`、`agentPresetSelect` 的
+  未点名回落、`serveCreate` 写进 v4 header 的 `agentPreset`、`run` 的建会话。
+- 端到端：`TestAgentPresetDefaultSettingsNamespaceEndToEnd`（真 `/api/settings.describe|mutate|
+  form.reset` + 真新建会话读 header）、`TestAgentPresetDefaultRejectsUnknownPreset`、
+  `TestAgentPresetFallbackMatchesModesDefault`。
+
+### 15.3 `/api/changes.summary` / `.diff` / `.open`
+
+官方三条**文档相对路由**（`dsh-client-ui-deliverables/src/changes.ts:6-8`），消费端直接
+`fetch` + `response.json()`，**不是** `POST /api/<method>` 的 typert 方法：
+
+| 路由 | 方法 | 查询参数 | 成功体 |
+|---|---|---|---|
+| `/api/changes.summary` | GET | `sessionId`, `seq` | `{turn, files[], total, added, deleted, cwd?, snapshot?}`（裸对象，无 `result` 信封） |
+| `/api/changes.diff` | GET | `sessionId`, `seq`, `index` | `WorkspaceFileDiff`：`{kind:'text',path,display,before,after,hunks[],coarse}` \| `{kind:'binary'\|'oversized',path,display}` |
+| `/api/changes.open` | POST | `sessionId`, `seq`, `index`, `action?=reveal`, `application?` | `{opened:true}` |
+
+状态码语义（客户端只看状态码）：`400` 参数非法、`404` 该 seq/index 没有记录、
+`422` 本机无原生打开通道（客户端显示 `nativeUnavailable`）、`501` 宿主未接线、`500` 读记录/算 diff 失败。
+路由与分派：[`internal/transport/handlers_changes_routes.go`](../internal/transport/handlers_changes_routes.go)
+（在 `ServeHTTP` 里按路径接住，早于 `/api/` 前缀分支）。
+
+数据来源：每一轮 `dshd run` 由
+[`cmd/dshd/workspace_changes_recorder.go`](../cmd/dshd/workspace_changes_recorder.go)
+在 `turn/start` 后拍"开始"快照、收工后拍"结束"快照（工作区取**会话 header 的 `cwd`**，
+与 `session.header.cwd` 同一真值；进程 cwd 只在 header 缺 cwd 时兜底），`git diff-tree --numstat` 求差异，
+追加一条 `workspace/changes` 事件（data 只有 `{turn}`）并把摘要+快照身份写进
+`<home>/state/workspace-changes/<sessionId>/records/<seq>.json`；快照对象在该会话的私有
+git 对象库里（`GIT_OBJECT_DIRECTORY` + 仓库对象库当 alternate，仓库自身 index/refs/work tree 不动）。
+diff 由 `git --no-index --unified=3` 产出（`workspace_changes_diff.go`），路径展示规则逐条复刻官方
+`paths.ts` 的 `displayPathOf`/`durablePathOf`。
+
+**已登记裁剪**（不是静默省略）：
+
+- 非 git 工作目录：官方有"文件工具改动前后各存一份拷贝"的兜底，本仓还没有那条工具级捕获，
+  因此这些会话**没有** changes 记录（路由对这些 seq 回 404，不伪造空摘要）。
+- `coarse` 恒为 `false`：官方是"JS 行比较超过 `diffTimeoutMs` 就整文件替换"；本仓用 git 自己的
+  diff（进程上限 30s），没有对应的"行比较超时"事件可报。
+- 记录与私有对象库**不随会话删除清理**（官方是进程内存 + 会话 dispose 时删临时目录）：
+  这是持久化的代价，清理策略单列。
+- 端到端：`TestWorkspaceChangesRoutesServeRealGitDiff`（真 git 仓库 + 真改文件 + 真 HTTP 取
+  summary/diff/open）、`TestWorkspaceChangesSkipsTurnWithoutChanges`、
+  `TestWorkspaceChangesSkipsSubagentSessions`、`TestChangesRoutesReturnBareJSONAndClassifyErrors`、
+  `TestChangesRoutesRequireCookieAndReportUnwired`。
+
+### 15.4 `workspace.registry` 的会话归属与拖拽顺序
+
+官方 `workspaceView` 的 `sessionIds`（`dsh-api-workspace-controller/src/feed.ts:22-33`）与
+`workspace.insertSessionBefore`（同包 `src/index.ts:149`）在本仓 main 上已按官方形状实现
+（`SessionIDs` + 手动手册序 + `insertSessionBefore` 落盘）。本次只补**registry 级**端到端，
+证明"从 registry 读回来仍然带真实归属与手动顺序，且重启后不丢"：
+`TestWorkspaceRegistryCarriesSessionIDsAndManualOrder`。

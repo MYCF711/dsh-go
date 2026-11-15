@@ -49,12 +49,17 @@ func TestOfficialAccountStateAndStreams(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), "application/x-ndjson") {
 		t.Fatalf("watch HTTP=%d ct=%q body=%s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
 	}
-	var view OfficialAccountView
-	if err := json.Unmarshal([]byte(strings.TrimSpace(rec.Body.String())), &view); err != nil {
+	// 官方 0.2.2-rc.2：watch 的帧是 AccountUpdate `{type, state}`，
+	// state 才是 AccountView（typert.host.js:640-651）。rc.1 的扁平帧已废。
+	var update OfficialAccountUpdate
+	if err := json.Unmarshal([]byte(strings.TrimSpace(rec.Body.String())), &update); err != nil {
 		t.Fatalf("watch 帧不是 JSON：%v body=%s", err, rec.Body.String())
 	}
-	if view.Source != "local" || view.Status != "credential-stored" {
-		t.Fatalf("watch 帧：%+v", view)
+	if update.Type != OfficialAccountUpdateSnapshot {
+		t.Fatalf("watch 帧 type=%q，期望 snapshot", update.Type)
+	}
+	if update.State.Source != "local" || update.State.Status != "credential-stored" {
+		t.Fatalf("watch 帧 state：%+v", update.State)
 	}
 
 	expiry <- "session-expired"

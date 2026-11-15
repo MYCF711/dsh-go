@@ -27,6 +27,13 @@ func mustStart(t *testing.T, opts extern.Options) *extern.Client {
 	defer cancel()
 	c, err := extern.Start(ctx, opts)
 	if err != nil {
+		// CI runner 上不一定有可用的 node（2026-11-13 实测：`node --version` 退出 1，
+		// 于是 `cordis/node-unusable`）。这**不是产品缺陷**——产品侧的降级行为由
+		// `无 node 响亮降级` 那一条单独守；这里要的是"真 node 上的行为"，
+		// 没有 node 就跳过，不能判红。与 plugin_test.go 的 startClient 同一口径。
+		if strings.Contains(err.Error(), "node") || strings.Contains(err.Error(), "不可用") {
+			t.Skipf("本机无可用 node：%v", err)
+		}
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = c.Close() })

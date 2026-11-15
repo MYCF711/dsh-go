@@ -246,7 +246,9 @@ func TestW149MCPManagerCloseReclaimsFixture(t *testing.T) {
 	manager.Close()
 	// 断言的是"操作系统里的那个进程真的没了"，而不是"某个 Go channel 关了"。
 	// 后者在只 kill 父进程、孙进程变孤儿时仍然成立——那正是要防的泄漏形态。
-	deadline := time.Now().Add(10 * time.Second)
+	// 等 OS 进程真的消失。CI 2 核高负载下 10s 会误判成泄漏；
+	// 与其它真进程用例统一预算。这不会掩盖真泄漏：真泄漏等多久都还在。
+	deadline := time.Now().Add(realChainWait)
 	for processAlive(pid) {
 		if time.Now().After(deadline) {
 			t.Fatalf("manager.Close 之后 PID %d 仍存活（子进程泄漏）", pid)

@@ -43,6 +43,27 @@ const (
 	deepSeekUserAgent = "dsh-go/0.2.2"
 )
 
+// 官方 `dsh-web-search-deepseek` Config 里三个"设置页可编辑"字段（`src/index.ts:71-79`）
+// 的宿主接缝名。设置命名空间 `web-search-deepseek` 经 cmd/dshd 的设置叠加层变成
+// 这三个环境变量，**这里才是它们真正的消费方**：
+//
+//	web-search-deepseek.maxUses    → DSHD_SEARCH_MAX_USES
+//	web-search-deepseek.maxTokens  → DSHD_SEARCH_MAX_TOKENS
+//	web-search-deepseek.apiVersion → DSHD_SEARCH_API_VERSION
+//
+// 官方 schema 里 maxUses 是 `.step(1).min(1).default(5)`、maxTokens 是裸
+// `.number().default(4096)`、apiVersion 是 `.default('2023-06-01')`；三者空/非法/<=0
+// 一律回落官方默认（本仓既有约定：写坏配置不该把能力变成"永远拒绝"——0 次
+// web_search 或 0 输出 token 的请求只会稳定失败，那不是"关闭"）。
+const (
+	// envDeepSeekMaxUses 对应官方 `maxUses`（默认 DeepSeekDefaultMaxUses）。
+	envDeepSeekMaxUses = "DSHD_SEARCH_MAX_USES"
+	// envDeepSeekMaxTokens 对应官方 `maxTokens`（默认 DeepSeekDefaultMaxTokens）。
+	envDeepSeekMaxTokens = "DSHD_SEARCH_MAX_TOKENS"
+	// envDeepSeekAPIVersion 对应官方 `apiVersion`（默认 DeepSeekDefaultAPIVersion）。
+	envDeepSeekAPIVersion = "DSHD_SEARCH_API_VERSION"
+)
+
 // DeepSeek 是 DeepSeek 原生搜索 provider。
 type DeepSeek struct {
 	// BaseURL 是 Messages 兼容端点根（默认 DeepSeekDefaultBaseURL）。
@@ -68,21 +89,32 @@ type DeepSeek struct {
 
 // deepSeekAPIKeyRefs 是这把 key 在宿主里的**别名 ref**，顺序即优先级。
 //
-// 一个凭据两个名字：官方/模型目录写的是 DEEPSEEK_API_KEY，宿主搜索模块自己
-// 的命名是 DSHD_SEARCH_API_KEY。两者指向同一把 key，所以优先级链是
+// 一个凭据两个名字（`DeepSeekAPIKeyRef` / `DeepSeekAPIKeyEnvAlias`，与
+// Search/Fetch API 那两条 provider 共用同一对常量）。两者指向同一把 key，
+// 所以优先级链是
 // 「库里任意一个 > 环境里任意一个」，再在各自那一层按这个顺序取第一个非空
 // （见 resolvedAPIKey 的两轮循环：先整轮问库，再整轮问环境）。
-var deepSeekAPIKeyRefs = []string{"DEEPSEEK_API_KEY", "DSHD_SEARCH_API_KEY"}
+var deepSeekAPIKeyRefs = []string{DeepSeekAPIKeyRef, DeepSeekAPIKeyEnvAlias}
 
 // NewDeepSeekFromEnv 按环境造一个 DeepSeek provider（生产与测试同一份）。
 //
-// APIKey **故意不在这里快照**：key 的取值要走"凭据库 > 环境"（见
-// resolvedAPIKey），而库里的值可以在进程存活期间被 credentials.set 改掉。
-// 这里只交出两个入口（Getenv / Credentials），取值时机是 Available / Search。
+// 官方 `dsh-web-search-deepseek` 的 Config 字段 → 宿主环境变量：
 //
-// 端点与模型名仍只从环境读：它们是**设置项**，不是凭据 —— 官方
-// credentials.set 的 ref 就是凭据名（catalog 的 apiKeyEnv），把模型 id 当
-// 凭据存进去没有任何调用方会去读，只会造成第二份真值。
+//	baseURL    → DEEPSEEK_SEARCH_BASE_URL / DSHD_SEARCH_BASE_URL
+//	model      → DEEPSEEK_SEARCH_MODEL / DSHD_SEARCH_MODEL
+//	apiKey     → DEEPSEEK_API_KEY / DSHD_SEARCH_API_KEY（官方是 credential-ref：先问宿主独立凭据存储）
+//	apiVersion → DSHD_SEARCH_API_VERSION
+//	maxTokens  → DSHD_SEARCH_MAX_TOKENS
+//	maxUses    → DSHD_SEARCH_MAX_USES
+//
+// 后三条是 `web-search-deepseek` 设置页字段的**真实消费方**：cmd/dshd 装配时把设置
+// 文档叠在环境变量前面（settingsEnvOverlay），所以这里读到的就是用户在设置页里改的值。
+//
+// apiKey 与其余五个不同，**故意不在这里快照**：它的取值要走"凭据库 > 环境"
+// （见 resolvedAPIKey），而库里的值可以在进程存活期间被 credentials.set 改掉。
+// 这里只交出两个入口（Getenv / Credentials），取值时机是 Available / Search。
+// 端点/模型名不是凭据（凭据 ref 就是凭据名，见 catalog 的 apiKeyEnv），
+// 只从"设置叠加层之后的环境"读。
 func NewDeepSeekFromEnv(getenv func(string) string) *DeepSeek {
 	return newDeepSeek(getenv, nil)
 }
@@ -102,14 +134,28 @@ func newDeepSeek(getenv func(string) string, credentials spi.CredentialResolver)
 	if model == "" {
 		model = DeepSeekDefaultModel
 	}
+	// 官方 maxUses 有 `.min(1)`、maxTokens 是裸 number；两者都要正整数才生效。
+	maxUses := DeepSeekDefaultMaxUses
+	if n, ok := parseBoundedInt(getenv(envDeepSeekMaxUses), 1, 0); ok {
+		maxUses = n
+	}
+	maxTokens := DeepSeekDefaultMaxTokens
+	if n, ok := parseBoundedInt(getenv(envDeepSeekMaxTokens), 1, 0); ok {
+		maxTokens = n
+	}
+	// apiVersion 是非空才生效（官方 `.default('2023-06-01')`，空串等于没设）。
+	apiVersion := strings.TrimSpace(getenv(envDeepSeekAPIVersion))
+	if apiVersion == "" {
+		apiVersion = DeepSeekDefaultAPIVersion
+	}
 	return &DeepSeek{
 		BaseURL:     base,
 		Credentials: credentials,
 		Getenv:      getenv,
 		Model:       model,
-		APIVersion:  DeepSeekDefaultAPIVersion,
-		MaxTokens:   DeepSeekDefaultMaxTokens,
-		MaxUses:     DeepSeekDefaultMaxUses,
+		APIVersion:  apiVersion,
+		MaxTokens:   maxTokens,
+		MaxUses:     maxUses,
 	}
 }
 

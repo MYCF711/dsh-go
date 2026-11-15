@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dshgo/internal/transport"
@@ -28,6 +29,24 @@ type ChangeRequestProvider struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+
+	// TokenLookup 是 GraphQL 面的额外凭据解析（生产是 `gh auth token`）；
+	// nil 时用默认实现。测试注入空串即可确定性地覆盖"没有凭据"的分支。
+	TokenLookup func() string
+	// CLICredential 强制启用 `gh auth token` 兜底（默认按进程类型判断：
+	// 测试二进制不启用，见 graphql.go 的 cliCredentialEnabled）。
+	CLICredential bool
+
+	// 下面三个是官方 provider config 的对应项（0 = 官方默认）：
+	// maxReviewThreads 1000 / maxOutputBytes 8MiB / maxViewedFiles 3000。
+	// 只有 GraphQL 面用它们；测试把它调小以覆盖截断与超限分支。
+	MaxReviewThreads int
+	MaxReviewBytes   int
+	MaxViewedFiles   int
+
+	// tokenOnce/tokenValue 让 `gh auth token` 这类凭据解析只做一次（并发安全）。
+	tokenOnce  sync.Once
+	tokenValue string
 }
 
 func NewChangeRequestProviderFromEnv() *ChangeRequestProvider {
@@ -37,6 +56,18 @@ func NewChangeRequestProviderFromEnv() *ChangeRequestProvider {
 	}
 	base := strings.TrimRight(strings.TrimSpace(os.Getenv("DSHD_GITHUB_API_URL")), "/")
 	return &ChangeRequestProvider{BaseURL: base, Token: token, HTTP: &http.Client{Timeout: 45 * time.Second}}
+}
+
+// NewChangeRequestProviderWithCLICredential 与 NewChangeRequestProviderFromEnv
+// 相同，但显式启用 `gh auth token` 兜底（生产装配点可显式选用）。
+//
+// 说明：GraphQL 面的默认构造**已经**会在生产进程里走这条链（见
+// cliCredentialEnabled）；这个构造器是给"我就是要它、别管进程类型"的装配点用的
+// （例如把宿主二进制改个名字再跑的部署）。
+func NewChangeRequestProviderWithCLICredential() *ChangeRequestProvider {
+	provider := NewChangeRequestProviderFromEnv()
+	provider.CLICredential = true
+	return provider
 }
 
 type changeRequestRef struct {
@@ -102,20 +133,7 @@ func (p *ChangeRequestProvider) get(ctx context.Context, ref changeRequestRef, p
 		return nil, &ForgeHTTPError{Status: 502, Code: "provider_unavailable", Message: "读取 GitHub 响应失败：" + readErr.Error()}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		code := "provider_error"
-		switch resp.StatusCode {
-		case 401:
-			code = "auth_required"
-		case 403:
-			code = "forbidden"
-		case 404:
-			code = "not_found"
-		case 409:
-			code = "stale_head"
-		case 422:
-			code = "invalid_spec"
-		}
-		return nil, &ForgeHTTPError{Status: resp.StatusCode, Code: code, Message: fmt.Sprintf("GitHub %s 返回 HTTP %d: %s", path, resp.StatusCode, truncateForge(string(body), 500))}
+		return nil, forgeHTTPError(resp.StatusCode, path, body)
 	}
 	return body, nil
 }
@@ -142,8 +160,51 @@ type githubPR struct {
 	} `json:"head"`
 	Base struct {
 		Ref string `json:"ref"`
+		// SHA 是 host 与 head 一起记录的 base commit（官方 snapshot.baseSha）；
+		// rc.2 的 diff 从它起步，不再用 /pulls/{n} 的 diff。
+		SHA string `json:"sha"`
 	} `json:"base"`
-	RequestedReviewers []any `json:"requested_reviewers"`
+	// RequestedReviewers / RequestedTeams 是当前的评审请求（官方 reviewers
+	// 的前半段：requested=true）。type 让 bot 账号能与人对上号。
+	RequestedReviewers []githubReviewerUser `json:"requested_reviewers"`
+	RequestedTeams     []struct {
+		Slug         string `json:"slug"`
+		Name         string `json:"name"`
+		Organization struct {
+			Login string `json:"login"`
+		} `json:"organization"`
+	} `json:"requested_teams"`
+}
+
+// githubReviewerUser 是 REST 里的账号形状（评审请求与已提交评审共用）。
+type githubReviewerUser struct {
+	Login     string `json:"login"`
+	AvatarURL string `json:"avatar_url"`
+	Type      string `json:"type"`
+}
+
+// githubReview 是一条已提交的 PR review；state 取
+// APPROVED/CHANGES_REQUESTED/COMMENTED/DISMISSED/PENDING，commit_id 是该
+// review 提交时所在的 commit（官方 reviewers[].reviewedSha）。
+type githubReview struct {
+	State    string             `json:"state"`
+	CommitID string             `json:"commit_id"`
+	User     githubReviewerUser `json:"user"`
+}
+
+// githubCommit 是 REST commit（PR commits 列表的元素）。
+type githubCommit struct {
+	SHA     string `json:"sha"`
+	Parents []struct {
+		SHA string `json:"sha"`
+	} `json:"parents"`
+	Commit struct {
+		Message string `json:"message"`
+		Author  struct {
+			Name string `json:"name"`
+			Date string `json:"date"`
+		} `json:"author"`
+	} `json:"commit"`
 }
 
 func (p *ChangeRequestProvider) fetchPR(ctx context.Context, ref changeRequestRef) (githubPR, error) {
@@ -158,26 +219,37 @@ func (p *ChangeRequestProvider) fetchPR(ctx context.Context, ref changeRequestRe
 	return pr, nil
 }
 
-func (p *ChangeRequestProvider) reviewDecision(ctx context.Context, ref changeRequestRef, pr githubPR) string {
-	if len(pr.RequestedReviewers) > 0 {
-		return "review-required"
-	}
-	raw, err := p.get(ctx, ref, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=100", ref.Owner, ref.Repo, ref.Number), "application/vnd.github+json")
+// fetchReviews 读 PR 的已提交评审（GET /pulls/{n}/reviews?per_page=100，GitHub
+// 按提交时间升序返回）。失败返回 error，由调用方决定是否容忍：checks() 容忍
+// （评审读不到不该让整个快照失败，与旧 reviewDecision 的处置一致）。
+func (p *ChangeRequestProvider) fetchReviews(ctx context.Context, ref changeRequestRef) ([]githubReview, error) {
+	raw, err := p.get(ctx, ref, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=%d",
+		ref.Owner, ref.Repo, ref.Number, gitHubPageSize), "application/vnd.github+json")
 	if err != nil {
-		return "none"
+		return nil, err
 	}
-	var reviews []struct {
-		State string `json:"state"`
-		User  struct {
-			Login string `json:"login"`
-		} `json:"user"`
+	var reviews []githubReview
+	if err := json.Unmarshal(raw, &reviews); err != nil {
+		return nil, &ForgeHTTPError{Status: http.StatusBadGateway, Code: "provider_error",
+			Message: "GitHub reviews 响应不是 JSON: " + err.Error()}
 	}
-	if json.Unmarshal(raw, &reviews) != nil {
-		return "none"
+	return reviews, nil
+}
+
+// reviewDecisionFrom 算官方 reviewDecision（approved | changes-requested |
+// review-required | none）。只要有未完成的评审请求就先判 review-required
+// （旧实现的语义，保留）；否则按每个账号**最新一条**已提交评审聚合。
+func reviewDecisionFrom(pr githubPR, reviews []githubReview) string {
+	if len(pr.RequestedReviewers) > 0 || len(pr.RequestedTeams) > 0 {
+		return "review-required"
 	}
 	latest := map[string]string{}
 	for _, review := range reviews {
-		latest[review.User.Login] = strings.ToUpper(review.State)
+		login := strings.TrimSpace(review.User.Login)
+		if login == "" || strings.EqualFold(review.State, "PENDING") {
+			continue
+		}
+		latest[strings.ToLower(login)] = strings.ToUpper(review.State)
 	}
 	decision := "none"
 	for _, state := range latest {
@@ -191,20 +263,189 @@ func (p *ChangeRequestProvider) reviewDecision(ctx context.Context, ref changeRe
 	return decision
 }
 
-type githubCheckRuns struct {
-	TotalCount int `json:"total_count"`
-	CheckRuns  []struct {
-		Name        string  `json:"name"`
-		Status      string  `json:"status"`
-		Conclusion  string  `json:"conclusion"`
-		DetailsURL  string  `json:"details_url"`
-		StartedAt   *string `json:"started_at"`
-		CompletedAt *string `json:"completed_at"`
-		CheckSuite  struct {
-			Name string `json:"name"`
-		} `json:"check_suite"`
-	} `json:"check_runs"`
+// reviewerKind 把 REST 账号类型映射成官方 reviewer.kind（Bot → bot，其余 user）。
+func reviewerKind(kind string) string {
+	if strings.EqualFold(kind, "Bot") {
+		return "bot"
+	}
+	return "user"
 }
+
+// reviewVerdict 把 GitHub review state 映射成官方 ReviewVerdict；PENDING 等
+// 未提交状态没有 verdict（返回空串 → JSON null）。
+func reviewVerdict(state string) string {
+	switch strings.ToUpper(state) {
+	case "APPROVED":
+		return "approved"
+	case "CHANGES_REQUESTED":
+		return "changes-requested"
+	case "COMMENTED":
+		return "commented"
+	case "DISMISSED":
+		return "dismissed"
+	}
+	return ""
+}
+
+// reviewersFrom 拼官方 snapshot.reviewers：先 requested_reviewers[]（host
+// 顺序），再 requested_teams[]（kind=team、login=`org/slug`），最后是已提交
+// 评审的账号（requested=false，verdict/reviewedSha 取该账号**最新一条**已提交
+// review）；按 login（大小写不敏感）去重，作者永不在列表里（与官方一致）。
+//
+// codeOwner 只能来自 GraphQL（CODEOWNERS 计算），REST 没有这个信号，一律
+// false，不编造。
+func reviewersFrom(pr githubPR, reviews []githubReview) []transport.OfficialForgeChangeRequestReviewer {
+	out := []transport.OfficialForgeChangeRequestReviewer{}
+	seen := map[string]bool{}
+	author := strings.ToLower(strings.TrimSpace(pr.User.Login))
+	add := func(reviewer transport.OfficialForgeChangeRequestReviewer) {
+		key := strings.ToLower(strings.TrimSpace(reviewer.Login))
+		if key == "" || seen[key] || key == author {
+			return
+		}
+		seen[key] = true
+		out = append(out, reviewer)
+	}
+	for _, user := range pr.RequestedReviewers {
+		login := strings.TrimSpace(user.Login)
+		if login == "" {
+			continue
+		}
+		reviewer := transport.OfficialForgeChangeRequestReviewer{Kind: reviewerKind(user.Type), Login: login, Requested: true}
+		if avatar := strings.TrimSpace(user.AvatarURL); avatar != "" {
+			reviewer.AvatarURL = &avatar
+		}
+		add(reviewer)
+	}
+	for _, team := range pr.RequestedTeams {
+		slug := strings.TrimSpace(team.Slug)
+		if slug == "" {
+			continue
+		}
+		login := slug
+		if org := strings.TrimSpace(team.Organization.Login); org != "" {
+			login = org + "/" + slug
+		}
+		add(transport.OfficialForgeChangeRequestReviewer{Kind: "team", Login: login, Requested: true})
+	}
+	// reviews 是提交时间升序，所以后面的条目覆盖前面的 = 最新一条。
+	latest := map[string]githubReview{}
+	order := []string{}
+	for _, review := range reviews {
+		login := strings.TrimSpace(review.User.Login)
+		if login == "" || strings.EqualFold(review.State, "PENDING") {
+			continue
+		}
+		key := strings.ToLower(login)
+		if _, ok := latest[key]; !ok {
+			order = append(order, key)
+		}
+		latest[key] = review
+	}
+	for _, key := range order {
+		review := latest[key]
+		reviewer := transport.OfficialForgeChangeRequestReviewer{
+			Kind: reviewerKind(review.User.Type), Login: review.User.Login, Requested: false,
+		}
+		if avatar := strings.TrimSpace(review.User.AvatarURL); avatar != "" {
+			reviewer.AvatarURL = &avatar
+		}
+		if verdict := reviewVerdict(review.State); verdict != "" {
+			reviewer.Verdict = &verdict
+		}
+		if sha := strings.TrimSpace(review.CommitID); sha != "" {
+			reviewer.ReviewedSHA = &sha
+		}
+		add(reviewer)
+	}
+	return out
+}
+
+// githubCheckRun 是 REST 的一条 check run。ID 是 rc.2 重跑身份的基础：
+// 官方 snapshot.checks[].rerun 非 null 时，宿主经 /check-runs/{id}/rerequest
+// 重跑它。
+type githubCheckRun struct {
+	ID          int64   `json:"id"`
+	Name        string  `json:"name"`
+	Status      string  `json:"status"`
+	Conclusion  string  `json:"conclusion"`
+	DetailsURL  string  `json:"details_url"`
+	StartedAt   *string `json:"started_at"`
+	CompletedAt *string `json:"completed_at"`
+	CheckSuite  struct {
+		Name string `json:"name"`
+	} `json:"check_suite"`
+}
+
+type githubCheckRuns struct {
+	TotalCount int              `json:"total_count"`
+	CheckRuns  []githubCheckRun `json:"check_runs"`
+}
+
+// checkRuns 读 headSHA 这个 commit 的 check-runs（只读第一页）。调用方负责先
+// 用 fetchPR 确认它就是当前 head（checks / ChangeRequestRerunChecks 都先做这
+// 一步，head 已移动就 409 stale_head，不发这次读）。
+func (p *ChangeRequestProvider) checkRuns(ctx context.Context, ref changeRequestRef, headSHA string) (githubCheckRuns, error) {
+	var runs githubCheckRuns
+	raw, err := p.get(ctx, ref, fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=%d",
+		ref.Owner, ref.Repo, headSHA, gitHubPageSize), "application/vnd.github+json")
+	if err != nil {
+		return runs, err
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil {
+		return runs, &ForgeHTTPError{Status: http.StatusBadGateway, Code: "provider_error",
+			Message: "checks 响应不是 JSON: " + err.Error()}
+	}
+	return runs, nil
+}
+
+// checkState 把 GitHub 的 status/conclusion 投影成官方 CheckState。
+func checkState(status, conclusion string) string {
+	if !strings.EqualFold(status, "completed") {
+		return "pending"
+	}
+	switch strings.ToLower(conclusion) {
+	case "success":
+		return "success"
+	case "neutral":
+		return "neutral"
+	case "skipped":
+		return "skipped"
+	case "cancelled":
+		return "cancelled"
+	case "failure", "timed_out", "action_required", "startup_failure":
+		return "failure"
+	}
+	return "neutral"
+}
+
+// rerunIdentity 返回官方 snapshot.checks[].rerun：只有 completed 且 conclusion
+// 属于失败族（failure/timed_out/action_required/startup_failure/cancelled）且
+// host 给了 check run id 的项才带重跑身份；其余是 JSON null（不可重跑）。
+// 注意 cancelled 的 state 是 cancelled（不是 failure），但按官方口径它仍可重跑。
+func rerunIdentity(run githubCheckRun) *string {
+	if !strings.EqualFold(run.Status, "completed") || run.ID == 0 {
+		return nil
+	}
+	switch strings.ToLower(run.Conclusion) {
+	case "failure", "timed_out", "action_required", "startup_failure", "cancelled":
+		id := strconv.Itoa(int(run.ID))
+		return &id
+	}
+	return nil
+}
+
+// ThreadsCapableWhen 说明 `unresolvedThreads` / `threadsTruncated` 什么时候才是
+// **真值**（能力面说明，不是错误面）。
+//
+// 官方 ChangeRequestSnapshot 的这两个字段都取自 GraphQL 的 `reviewThreads`
+// （graphql.ts:554-555），而 threadsTruncated 的官方语义正是"unresolvedThreads
+// 只是下界"（dsh-experimental-forge/src/types.ts:169-171）。本 provider 在
+// GraphQL 不可用（没有凭据 / 请求失败 / head 在读的过程中移动）时退回 REST 下界：
+// `unresolvedThreads=0` 且 `threadsTruncated=true`。这条文案是给上层与报告展示
+// 的补救方式，绝不把下界伪装成已统计。
+const ThreadsCapableWhen = "unresolvedThreads 需要 GitHub GraphQL 读取 review threads：" +
+	"设置 GITHUB_TOKEN/GH_TOKEN，或先 `gh auth login`（REST 没有 review thread 解析态）"
 
 func (p *ChangeRequestProvider) checks(ctx context.Context, ref changeRequestRef, headSHA string) (OfficialChecks, error) {
 	pr, err := p.fetchPR(ctx, ref)
@@ -212,37 +453,22 @@ func (p *ChangeRequestProvider) checks(ctx context.Context, ref changeRequestRef
 		return OfficialChecks{}, err
 	}
 	if headSHA != "" && !strings.EqualFold(headSHA, pr.Head.SHA) {
-		return OfficialChecks{}, &ForgeHTTPError{Status: 409, Code: "stale_head", Message: fmt.Sprintf("head 已移动：显示 %s，当前 %s", headSHA, pr.Head.SHA)}
+		return OfficialChecks{}, staleHead(headSHA, pr.Head.SHA)
 	}
-	var runs githubCheckRuns
-	raw, err := p.get(ctx, ref, fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100", ref.Owner, ref.Repo, pr.Head.SHA), "application/vnd.github+json")
+	runs, err := p.checkRuns(ctx, ref, pr.Head.SHA)
 	if err != nil {
 		return OfficialChecks{}, err
 	}
-	if err := json.Unmarshal(raw, &runs); err != nil {
-		return OfficialChecks{}, &ForgeHTTPError{Status: 502, Code: "provider_error", Message: "checks 响应不是 JSON: " + err.Error()}
-	}
+	// 评审读不到不该让整个快照失败（旧 reviewDecision 同样容忍）；但 reviewers
+	// 就只剩评审请求的部分，这是真实可得信息的边界，不编造。
+	reviews, _ := p.fetchReviews(ctx, ref)
 	checks := make([]transport.OfficialForgeChangeRequestCheck, 0, len(runs.CheckRuns))
 	for _, run := range runs.CheckRuns {
-		state := "pending"
-		switch strings.ToLower(run.Status) {
-		case "completed":
-			switch strings.ToLower(run.Conclusion) {
-			case "success":
-				state = "success"
-			case "neutral":
-				state = "neutral"
-			case "skipped":
-				state = "skipped"
-			case "cancelled":
-				state = "cancelled"
-			case "failure", "timed_out", "action_required", "startup_failure":
-				state = "failure"
-			default:
-				state = "neutral"
-			}
+		state := checkState(run.Status, run.Conclusion)
+		check := transport.OfficialForgeChangeRequestCheck{
+			Name: run.Name, State: state, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,
+			Rerun: rerunIdentity(run),
 		}
-		check := transport.OfficialForgeChangeRequestCheck{Name: run.Name, State: state, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt}
 		if run.DetailsURL != "" {
 			u := run.DetailsURL
 			check.URL = &u
@@ -267,7 +493,7 @@ func (p *ChangeRequestProvider) checks(ctx context.Context, ref changeRequestRef
 			}
 		}
 	}
-	decision := p.reviewDecision(ctx, ref, pr)
+	decision := reviewDecisionFrom(pr, reviews)
 	mergeability := "unknown"
 	if pr.Mergeable != nil {
 		if *pr.Mergeable {
@@ -291,6 +517,41 @@ func (p *ChangeRequestProvider) checks(ctx context.Context, ref changeRequestRef
 		login := pr.User.Login
 		author = &login
 	}
+	var baseSHA *string
+	if base := strings.TrimSpace(pr.Base.SHA); base != "" {
+		baseSHA = &base
+	}
+	// BranchUpdates：REST 只有 mergeable_state=="behind" 这一个"head 落后 base"
+	// 的信号；官方语义要求空数组表示 head 已最新 / 冲突 / 用户无权更新 —— 这三种
+	// 我们无法区分，所以只在明确 behind 且 open 时才给 merge+rebase。
+	branchUpdates := []string{}
+	if state == "open" && strings.EqualFold(strings.TrimSpace(pr.MergeableState), "behind") {
+		branchUpdates = []string{"merge", "rebase"}
+	}
+	// CanRerunChecks：存在可重跑失败项，且**没有任何** pending check（简化口径：
+	// 官方按重跑身份判断同身份的 pending，REST 侧只看得到 check run，按全局
+	// pending 保守处理）。
+	canRerun := false
+	pending := false
+	for _, check := range checks {
+		if check.Rerun != nil {
+			canRerun = true
+		}
+		if check.State == "pending" {
+			pending = true
+		}
+	}
+	// unresolvedThreads / threadsTruncated 只有 GraphQL 能给出真值：官方
+	// ChangeRequestSnapshot 的这两个字段都取自 reviewThreads
+	// （graphql.ts:554-555）。这里与 changeRequestReview **共用同一份 thread 读取
+	// 实现**（graphqlReadReviewThreads），不是两套查询。读不到就退回 REST 下界：
+	// unresolvedThreads=0、threadsTruncated=true —— 官方 threadsTruncated 的语义
+	// 就是"unresolvedThreads 是下界"（types.ts:169-171），所以降级必须置真，
+	// 绝不把下界伪装成已统计（补救方式见 ThreadsCapableWhen）。
+	unresolvedThreads, threadsTruncated := 0, true
+	if threads, err := p.graphqlReadReviewThreads(ctx, ref, pr.Head.SHA); err == nil {
+		unresolvedThreads, threadsTruncated = threads.Unresolved(), threads.Truncated
+	}
 	res := transport.OfficialForgeChangeRequestChecks{
 		Ref: transport.OfficialForgeChangeRequestRef{Forge: "github", Host: ref.Host, Owner: ref.Owner, Name: ref.Repo, Number: pr.Number},
 		URL: pr.HTMLURL, Title: pr.Title, State: state, Draft: pr.Draft, Author: author,
@@ -298,8 +559,25 @@ func (p *ChangeRequestProvider) checks(ctx context.Context, ref changeRequestRef
 		Additions: pr.Additions, Deletions: pr.Deletions, Mergeability: mergeability,
 		MergeReady:     state == "open" && !pr.Draft && mergeability == "mergeable" && decision != "changes-requested" && rollup != "failure",
 		ReviewDecision: decision, Checks: checks, ChecksRollup: rollup,
-		ChecksTruncated: runs.TotalCount > len(checks), UnresolvedThreads: 0,
+		ChecksTruncated: runs.TotalCount > len(checks), UnresolvedThreads: unresolvedThreads,
 		UpdatedAt: pr.UpdatedAt, ClosedAt: closedAt,
+
+		BaseSHA:       baseSHA,
+		BranchUpdates: branchUpdates,
+		Reviewers:     reviewersFrom(pr, reviews),
+		// REST 的 reviews/requested_reviewers 一次拿全（per_page=100），没有
+		// "host 还有更多"的信号，所以不声称截断。
+		ReviewersTruncated: false,
+		// 派生能力位，不是权限位：open + 有 token（官方同样只按可否调用判断）。
+		CanRequestReviews: state == "open" && strings.TrimSpace(p.Token) != "",
+		CanRerunChecks:    canRerun && !pending,
+		// 官方 threadsTruncated 的口径（graphql.ts:555）：只有还有 review thread
+		// 没读到时才为真。GraphQL 不可用 → 上面的降级分支固定 true。
+		ThreadsTruncated: threadsTruncated,
+		// closingIssues 只能来自 GraphQL 的 closingIssuesReferences；官方 migration
+		// 允许 host 不给时用空数组 + false，这里不编造 issue。
+		ClosingIssues:          []transport.OfficialForgeChangeRequestIssue{},
+		ClosingIssuesTruncated: false,
 	}
 	res.MergeMethods = p.mergeMethods(ctx, ref)
 	return res, nil
@@ -344,6 +622,14 @@ func (p *ChangeRequestProvider) ChangeRequestChecks(ctx context.Context, params 
 	return p.checks(ctx, ref, params.HeadSHA)
 }
 
+// ChangeRequestDiff 读 PR 在某个 head 上的 unified diff。
+//
+// rc.2 口径（官方 ForgeProvider.diff(ref, headSha, base?)）：diff **必须**与一个
+// head 绑定。params.HeadSHA 非空且已不是当前 head → 409 stale_head；否则走
+// compare REST（`GET /repos/{o}/{r}/compare/{baseSha}...{headSha}`，Accept
+// application/vnd.github.v3.diff），不再用 `/pulls/{n}` 的 diff —— compare 从
+// base.sha 起步、两端都固定，且不受 PR 页面 300 文件上限影响。
+// params.HeadSHA 为空时按当前 head 读，并在结果里回真实 head（老调用方兼容）。
 func (p *ChangeRequestProvider) ChangeRequestDiff(ctx context.Context, params transport.OfficialForgeChangeRequestParams) (transport.OfficialForgeChangeRequestDiff, error) {
 	ref, err := parseChangeRequestURL(params.URL)
 	if err != nil {
@@ -353,7 +639,22 @@ func (p *ChangeRequestProvider) ChangeRequestDiff(ctx context.Context, params tr
 	if err != nil {
 		return transport.OfficialForgeChangeRequestDiff{}, err
 	}
-	raw, err := p.get(ctx, ref, fmt.Sprintf("/repos/%s/%s/pulls/%d", ref.Owner, ref.Repo, ref.Number), "application/vnd.github.v3.diff")
+	if params.HeadSHA != "" && !strings.EqualFold(params.HeadSHA, pr.Head.SHA) {
+		return transport.OfficialForgeChangeRequestDiff{}, staleHead(params.HeadSHA, pr.Head.SHA)
+	}
+	head := pr.Head.SHA
+	base := strings.TrimSpace(pr.Base.SHA)
+	if base == "" {
+		// base.sha 缺失（老宿主/替身）时退回 base 分支名：compare 会把分支名解析
+		// 成它当前的 tip，与 /pulls/{n} 的 diff 语义一致（都是 merge base 起点）。
+		base = strings.TrimSpace(pr.Base.Ref)
+	}
+	if base == "" || head == "" {
+		return transport.OfficialForgeChangeRequestDiff{}, &ForgeHTTPError{Status: 502, Code: "provider_error",
+			Message: "GitHub PR 没有 base commit / head commit，无法读 compare diff"}
+	}
+	raw, err := p.get(ctx, ref, fmt.Sprintf("/repos/%s/%s/compare/%s...%s",
+		ref.Owner, ref.Repo, compareRef(base), compareRef(head)), "application/vnd.github.v3.diff")
 	if err != nil {
 		return transport.OfficialForgeChangeRequestDiff{}, err
 	}
@@ -363,9 +664,20 @@ func (p *ChangeRequestProvider) ChangeRequestDiff(ctx context.Context, params tr
 	}
 	urls := map[string]string{}
 	for _, file := range files {
-		urls[file.Path] = "https://" + ref.Host + "/" + ref.Owner + "/" + ref.Repo + "/blob/" + pr.Head.SHA + "/" + file.Path
+		urls[file.Path] = "https://" + ref.Host + "/" + ref.Owner + "/" + ref.Repo + "/blob/" + head + "/" + file.Path
 	}
-	return transport.OfficialForgeChangeRequestDiff{HeadSHA: pr.Head.SHA, Files: files, FileURLs: urls}, nil
+	return transport.OfficialForgeChangeRequestDiff{HeadSHA: head, Files: files, FileURLs: urls}, nil
+}
+
+// ChangeRequestDiffAtHead 是官方 diff(ref, headSha) 的直译：headSha **必填**，
+// 必填为空 → 400 invalid_spec；head 已移动 → 409 stale_head。实现复用
+// ChangeRequestDiff（params.HeadSHA 非空时它做的正是这两件事 + compare 读取）。
+func (p *ChangeRequestProvider) ChangeRequestDiffAtHead(ctx context.Context, params transport.OfficialForgeChangeRequestParams) (transport.OfficialForgeChangeRequestDiff, error) {
+	if strings.TrimSpace(params.HeadSHA) == "" {
+		return transport.OfficialForgeChangeRequestDiff{}, &ForgeHTTPError{Status: 400, Code: "invalid_spec",
+			Message: "diffAtHead 需要 headSha（官方 diff(ref, headSha) 不允许省略）"}
+	}
+	return p.ChangeRequestDiff(ctx, params)
 }
 
 func (p *ChangeRequestProvider) ChangeRequestText(ctx context.Context, params transport.OfficialForgeChangeRequestParams) (string, error) {

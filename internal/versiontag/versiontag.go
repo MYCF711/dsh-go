@@ -46,7 +46,8 @@ func FromMainSource(path string) (string, error) {
 
 // ReleasePrefix 返回"发布版本前缀"——版本号里最后一个点之前的部分加上那个点。
 //
-// 例：`<major>.<minor>.<patch>-go.<n>` → 去掉最后一段，得到 `<major>.<minor>.<patch>-go.`。
+// 例：`<major>.<minor>.<patch>-go.<n>` → 去掉最后一段，得到 `<major>.<minor>.<patch>-go.`；
+// 测试版 `<major>.<minor>.<patch>-gobeta.<n>` 同理得到 `…-gobeta.`。
 // 守卫用它当针：任何**别的**文件里出现这个前缀，就说明有人把发布版本抄了第二份
 // （2026-11-09 的实际事故形态）。
 func ReleasePrefix(version string) string {

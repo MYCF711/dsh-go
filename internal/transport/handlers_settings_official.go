@@ -108,6 +108,15 @@ type OfficialCredentialInfo struct {
 	Configured bool   `json:"configured"`
 	Source     string `json:"source,omitempty"`
 	Writable   bool   `json:"writable"`
+	// Masked 是 provider 生成的**掩码预览**（官方 0.2.2-rc.2 新增字段，
+	// `dsh-credentials/src/types.ts:62-75`：`masked?: string`，"never the full
+	// value"）。只在 source=="catalog"（官方的 source:'file'）时出现；env 与
+	// dotenv 层没有——与官方 describe 同一条判据。
+	//
+	// 算法与来源：handlers_settings_credential_mask.go 的 officialMaskedPreview
+	// 逐字符复刻官方 maskCredential()；明文只在 internal/llm 包内作为 mask 函数
+	// 的入参出现一次，**不进 JSON、不进错误串、不进日志**。
+	Masked string `json:"masked,omitempty"`
 }
 
 // OfficialCredentialDescribeResult 是 credentials.describe 的结果
@@ -412,7 +421,9 @@ func officialExpectedRevision(o *officialObject) (*int64, error) {
 //
 // 码只取本仓既有词表里能对上 hint/retryable 的那几个：参数/取值类 → 400
 // bad_request，revision 过期 → 409 revision_conflict，未知 ns → 404，
-// 其余 → 500 internal（绝不渲染成成功）。
+// **能力上不做 → 501 not_implemented**（码与状态必须自洽：早先漏了这一支，
+// not_implemented 会落成 `code=bad_request` + `status=501`），其余 → 500
+// internal（绝不渲染成成功）。
 func officialSettingsError(err error) error {
 	var typed *officialError
 	if errors.As(err, &typed) {
@@ -428,6 +439,11 @@ func officialSettingsError(err error) error {
 			code = "not_found"
 		case "internal":
 			code = "internal"
+		case "not_implemented":
+			// settingsform 的语义校验（session-log-deepseek.enabled=true /
+			// session-telemetry-otel.mode=FEEDBACK_ONLY 这类"本宿主没有后端"）
+			// 返回的就是这个码 + 501；这里原样透出，不许折成参数类 400。
+			code = "not_implemented"
 		}
 		if status == 0 {
 			status = officialStatusForCode(code)
@@ -512,6 +528,13 @@ func officialCredentialsDescribe(api OfficialSettingsCredentialAPI, p *officialP
 		}
 		out[ref] = info
 	}
+	// 追加官方 rc.2 的 masked（只有本地存储层有；env/dotenv 层不返回）。
+	// 后端不支持这个可选能力时 masks 是 nil，响应形状与 rc.1 完全一致。
+	masks, err := officialCredentialMasks(api.Credentials, refs)
+	if err != nil {
+		return nil, officialSettingsError(err)
+	}
+	mergeOfficialCredentialMasks(out, masks)
 	return out, nil
 }
 

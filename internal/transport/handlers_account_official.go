@@ -1,14 +1,34 @@
 package transport
 
-// 本文件是官方桌面端 0.2.2-rc.1「账号 / 模型发现 / 产品分析 / 动作卡」10 个
-// typert 方法的 L1 语义实现。
+// 本文件是官方桌面端 0.2.2-rc.2「账号（含通知）/ 模型发现 / 产品分析 / 动作卡」
+// 17 个 typert 方法的 L1 语义实现。
 //
 // # 契约来源（逐条可核对）
 //
-//	account.*             dsh-api-account-controller/lib/typert.host.js
+//	account.*             dsh-deepseek-account/lib/typert.host.js
+//	                      （rc.2 用它取代 rc.1 的 dsh-api-account-controller；
+//	                       账号相关包整包删除，凭据键不变、不需要重新登录）
 //	llm.discoverModels    dsh-llm/lib/typert.host.js
 //	productAnalytics.*    dsh-client-product-analytics/lib/typert.host.js
 //	actionCards.act       dsh-action-cards/lib/typert.host.js
+//
+// # rc.1 → rc.2 的 account 结构变更（本文件的 9 条）
+//
+//  1. `account.watch` 的结果从扁平 `AccountView` 变成
+//     `AccountUpdate { type:'snapshot'|'credentials-changed', state:AccountView }`
+//     （typert.host.js:640-651）。**这是真正的 wire 变更**，见 serveAccountWatch。
+//  2. `account.watchExpiry` 的结果是 `{"type":"string","const":"session-expired"}`
+//     （typert.host.js:658-668）——只有这一个合法值，所以本仓不再发"基线帧"。
+//  3. `cancelSignIn / getState / signOut / startSignIn` 的 `attempt.phase`
+//     **枚举集合不变**，只是 z.union 里字面量的顺序变了（rc.2 以 failed/
+//     cancelled 开头）。集合等价 ⇒ 校验语义不变，本文件按 rc.2 顺序重排常量表。
+//  4. `getBalance / getProfile / hasRunningAccountTasks / watchExpiry` 与
+//     `startSignIn` 的两个参数只有 `typeSymbol` 的包名变化
+//     （dsh-api-account-controller → dsh-deepseek-account）。typeSymbol 是
+//     **L2 typert 元数据**，本仓 L1 wire 里没有任何 typeSymbol，因此这些变化
+//     在本层无对应物（L2 未实现，不声称 wire 兼容）。
+//
+// 新增的三个通知方法见文件末尾「account 通知三件套」一节。
 //
 // 前一个包在 `/tmp/official-api-src` 镜像里；后三个**不在**镜像里（镜像只有
 // 20 个包），从 `app.asar` 只读解出（sha256 5fa8a6b2…）。具体 file:line 见
@@ -46,6 +66,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
 )
 
@@ -65,6 +86,15 @@ const (
 	MethodAccountWatch                Method = "account.watch"
 	MethodAccountWatchExpiry          Method = "account.watchExpiry"
 
+	// 官方 0.2.2-rc.2 新增的通知三件套（dsh-deepseek-account）。
+	//
+	// 它们**取代**两条 bonus 专用方法：getNotifications ← getUnnotifiedBonuses，
+	// reportNotificationEvent ← ackBonusNotified（官方 upgrade-guide
+	// v0.2.2-rc.1/account-notification-fields 第 1 条）。
+	MethodAccountGetNotifications        Method = "account.getNotifications"
+	MethodAccountGetNotificationContent  Method = "account.getNotificationContent"
+	MethodAccountReportNotificationEvent Method = "account.reportNotificationEvent"
+
 	MethodLLMDiscoverModels Method = "llm.discoverModels"
 
 	MethodProductAnalyticsReport Method = "productAnalytics.report"
@@ -72,26 +102,32 @@ const (
 	MethodActionCardsAct Method = "actionCards.act"
 )
 
-// 官方 `SignInAttempt.phase` 的完整枚举（见 account-controller 的
-// cancelSignIn/getState 结果 schema）。
+// 官方 `SignInAttempt.phase` 的完整枚举（cancelSignIn/getState/signOut/
+// startSignIn 的结果 schema 里共用）。
+//
+// rc.2 的**集合与 rc.1 相同**，只是 z.union 字面量顺序变了（rc.2 以
+// failed、cancelled 开头；见 dsh-deepseek-account/lib/typert.host.js:44-47 与
+// 契约差异表 §3）。顺序不影响校验，但常量表按 rc.2 顺序排，便于逐条核对。
 const (
+	OfficialSignInPhaseFailed         = "failed"
+	OfficialSignInPhaseCancelled      = "cancelled"
 	OfficialSignInPhaseInitializing   = "initializing"
 	OfficialSignInPhaseWaitingBrowser = "waiting-browser"
 	OfficialSignInPhaseExchanging     = "exchanging"
 	OfficialSignInPhaseCommitting     = "committing"
 	OfficialSignInPhaseSucceeded      = "succeeded"
-	OfficialSignInPhaseCancelled      = "cancelled"
 	OfficialSignInPhaseExpired        = "expired"
-	OfficialSignInPhaseFailed         = "failed"
 )
 
 // OfficialSignInPhases 给宿主做白名单校验（值不在里面就是宿主自己编的）。
+//
+// 顺序与官方 rc.2 的 z.union 一致。
 func OfficialSignInPhases() []string {
 	return []string{
+		OfficialSignInPhaseFailed, OfficialSignInPhaseCancelled,
 		OfficialSignInPhaseInitializing, OfficialSignInPhaseWaitingBrowser,
 		OfficialSignInPhaseExchanging, OfficialSignInPhaseCommitting,
-		OfficialSignInPhaseSucceeded, OfficialSignInPhaseCancelled,
-		OfficialSignInPhaseExpired, OfficialSignInPhaseFailed,
+		OfficialSignInPhaseSucceeded, OfficialSignInPhaseExpired,
 	}
 }
 
@@ -118,10 +154,15 @@ const (
 	OfficialActionCardUnconfirmed = "unconfirmed"
 )
 
-// OfficialAccountMethods 按固定顺序返回本文件实现的 14 个方法。
+// OfficialAccountMethods 按固定顺序返回本文件实现的 17 个方法。
 //
 // 它给快照/文档/门禁用：新增或删除一个方法必须显式改这里，不能让
 // "方法悄悄多了一个"从路由表里漏过去。
+//
+// 前 11 个是 account 组：rc.1 的 9 个 + rc.2 的通知三件套。其中
+// `ackBonusNotified` / `getUnnotifiedBonuses` 在官方 rc.2 已删除，本仓按
+// "能力下限：只能更多不能更少"的规则**保留**为兼容实现（行为真实或结构化
+// 501，绝不静默空；见各自的 handler 注释）。
 func OfficialAccountMethods() []Method {
 	return []Method{
 		MethodAccountGetProfile,
@@ -135,15 +176,18 @@ func OfficialAccountMethods() []Method {
 		MethodAccountHasRunningTasks,
 		MethodAccountWatch,
 		MethodAccountWatchExpiry,
+		MethodAccountGetNotifications,
+		MethodAccountGetNotificationContent,
+		MethodAccountReportNotificationEvent,
 		MethodLLMDiscoverModels,
 		MethodProductAnalyticsReport,
 		MethodActionCardsAct,
 	}
 }
 
-// IsOfficialAccountMethod 判断一个 /api 路径名是否属于本文件的 14 个方法。
+// IsOfficialAccountMethod 判断一个 /api 路径名是否属于本文件的 17 个方法。
 //
-// 路由侧只需要这一次判断（**不要**在 server.go 里摊开 10 个 case：那样
+// 路由侧只需要这一次判断（**不要**在 server.go 里摊开十几个 case：那样
 // 每加一个官方方法都要动一次早已冻结的路由表）。
 func IsOfficialAccountMethod(name string) bool {
 	switch Method(name) {
@@ -152,6 +196,8 @@ func IsOfficialAccountMethod(name string) bool {
 		MethodAccountStartSignIn, MethodAccountCancelSignIn, MethodAccountSignOut,
 		MethodAccountGetState, MethodAccountHasRunningTasks,
 		MethodAccountWatch, MethodAccountWatchExpiry,
+		MethodAccountGetNotifications, MethodAccountGetNotificationContent,
+		MethodAccountReportNotificationEvent,
 		MethodLLMDiscoverModels, MethodProductAnalyticsReport, MethodActionCardsAct:
 		return true
 	}
@@ -311,6 +357,97 @@ type OfficialActionCardResult struct {
 }
 
 // ---------------------------------------------------------------------------
+// 官方 0.2.2-rc.2 通知三件套的 wire 结构
+// ---------------------------------------------------------------------------
+
+// 通知交互事件的三个合法值（官方 z.union 字面量，typert.host.js:136）。
+const (
+	OfficialNotificationEventDisplayed  = "displayed"
+	OfficialNotificationEventCTAClicked = "cta_clicked"
+	OfficialNotificationEventDismissed  = "dismissed"
+)
+
+// OfficialAccountNotificationEvents 按官方顺序返回事件的合法值。
+func OfficialAccountNotificationEvents() []string {
+	return []string{
+		OfficialNotificationEventDisplayed,
+		OfficialNotificationEventCTAClicked,
+		OfficialNotificationEventDismissed,
+	}
+}
+
+// 通知动作的样式（官方 z.union 两个字面量）。
+const (
+	OfficialNotificationStylePrimary   = "primary"
+	OfficialNotificationStyleSecondary = "secondary"
+)
+
+// 通知动作的目标类型（官方 discriminatedUnion('type') 的两个变体）。
+const (
+	OfficialNotificationTargetAppRoute = "app_route"
+	OfficialNotificationTargetDismiss  = "dismiss"
+)
+
+// officialNotificationMaxPollAfterSeconds 是官方 `nextPollAfterSeconds` 的上界
+// （notifications.js:23：`z.number().positive().max(2_147_483_647 / 1_000)`）。
+const officialNotificationMaxPollAfterSeconds = 2147483.647
+
+// OfficialAccountUpdateSnapshot / CredentialsChanged 是官方
+// `AccountUpdate.type` 的两个值（typert.host.js:648）。
+const (
+	OfficialAccountUpdateSnapshot           = "snapshot"
+	OfficialAccountUpdateCredentialsChanged = "credentials-changed"
+)
+
+// OfficialAccountNotificationAction 是通知上的一个动作。
+//
+// Target 用 RawMessage 原样保留：官方把平台的 `actions` 直接透传
+// （notifications.js:41-48），两种合法形状是
+// `{"type":"app_route","name":"account"}` 与 `{"type":"dismiss"}`。
+// 这里用 RawMessage 而不是只留 {type,name}，是为了不丢掉平台多给的字段
+// （官方 schema 是 additionalProperties:true）。
+type OfficialAccountNotificationAction struct {
+	Label  string          `json:"label"`
+	Style  string          `json:"style"`
+	Target json.RawMessage `json:"target"`
+}
+
+// OfficialAccountNotification 是一条已本地化的通知（官方 AccountNotification）。
+//
+// DisplayUntil 是 `string | null`：null = **永不过期**，所以必须是显式 null。
+// Data 是可选的业务数据（官方把赠金元数据搬到了这里）。
+type OfficialAccountNotification struct {
+	ID           string                              `json:"id"`
+	CreatedAt    string                              `json:"createdAt"`
+	DisplayUntil *string                             `json:"displayUntil"`
+	Title        string                              `json:"title"`
+	Body         string                              `json:"body"`
+	Actions      []OfficialAccountNotificationAction `json:"actions"`
+	Data         json.RawMessage                     `json:"data,omitempty"`
+}
+
+// OfficialAccountNotificationBatch 是官方 AccountNotificationBatch。
+//
+// 官方**移除**了 batch 的 accountId（账号由当前令牌决定），这里没有它。
+// Source 是本仓的额外字段（官方 schema 是 additionalProperties:true），
+// 让调用方能确认数据真的来自官方 Platform。
+type OfficialAccountNotificationBatch struct {
+	NextPollAfterSeconds float64                       `json:"nextPollAfterSeconds"`
+	Notifications        []OfficialAccountNotification `json:"notifications"`
+	Source               string                        `json:"source,omitempty"`
+}
+
+// OfficialAccountUpdate 是官方 `AccountUpdate`：`account.watch` 的每一帧。
+//
+// 这是 rc.1 → rc.2 的**真实 wire 变更**：rc.1 的 watch 帧是扁平的
+// `AccountView`（status/links/attempt 直接在顶上），rc.2 包了一层
+// type + state（typert.host.js:640-651）。
+type OfficialAccountUpdate struct {
+	Type  string              `json:"type"`
+	State OfficialAccountView `json:"state"`
+}
+
+// ---------------------------------------------------------------------------
 // 挂载点
 // ---------------------------------------------------------------------------
 
@@ -331,8 +468,21 @@ type OfficialAccountAPI struct {
 	AccountSignOut              func(ctx context.Context, client OfficialAccountClientMetadata) (OfficialAccountView, error)
 	AccountGetState             func(ctx context.Context) (OfficialAccountView, error)
 	AccountHasRunningTasks      func(ctx context.Context) (bool, error)
-	AccountWatch                func(ctx context.Context) (<-chan OfficialAccountView, error)
-	AccountWatchExpiry          func(ctx context.Context) (<-chan string, error)
+	// AccountWatchUpdates 是官方 rc.2 的 `account.watch`（AccountUpdate 流）。
+	// **优先于** AccountWatch 使用；两者都 nil 才是 not_implemented。
+	AccountWatchUpdates func(ctx context.Context) (<-chan OfficialAccountUpdate, error)
+	// AccountWatch 是 rc.1 的扁平 AccountView 流。保留只为兼容：官方 rc.2
+	// 的 wire 已经是 AccountUpdate，所以本文件会把它包成 type:"snapshot"。
+	// deprecated：新实现请用 AccountWatchUpdates。
+	AccountWatch       func(ctx context.Context) (<-chan OfficialAccountView, error)
+	AccountWatchExpiry func(ctx context.Context) (<-chan string, error)
+
+	// 官方 0.2.2-rc.2 的通知三件套。数据来自官方 Platform 的 harnessOrigin
+	// （云端），没有本地缓存；非 official provider 必须返回结构化错误，
+	// **不许**返回空批次假装"没有通知"。
+	AccountGetNotifications        func(ctx context.Context, client OfficialAccountClientMetadata) (*OfficialAccountNotificationBatch, error)
+	AccountGetNotificationContent  func(ctx context.Context, id string, client OfficialAccountClientMetadata) (*OfficialAccountNotification, error)
+	AccountReportNotificationEvent func(ctx context.Context, id, event string, client OfficialAccountClientMetadata) (bool, error)
 
 	LLMDiscoverModels func(ctx context.Context, settingsNS string, req OfficialModelDiscoveryRequest) ([]OfficialDiscoveredModel, error)
 
@@ -449,6 +599,12 @@ func routeOfficialAccountMethod(api OfficialAccountAPI, method Method, ctx conte
 		return officialAccountGetState(ctx, api, p)
 	case MethodAccountHasRunningTasks:
 		return officialAccountHasRunningTasks(ctx, api, p)
+	case MethodAccountGetNotifications:
+		return officialAccountGetNotifications(ctx, api, p)
+	case MethodAccountGetNotificationContent:
+		return officialAccountGetNotificationContent(ctx, api, p)
+	case MethodAccountReportNotificationEvent:
+		return officialAccountReportNotificationEvent(ctx, api, p)
 	case MethodLLMDiscoverModels:
 		return officialLLMDiscoverModels(ctx, api, p)
 	case MethodProductAnalyticsReport:
@@ -589,6 +745,13 @@ func officialAccountGetBalance(ctx context.Context, api OfficialAccountAPI, p *o
 	return map[string]any{officialAccountBalanceKey: balance}, nil
 }
 
+// officialAccountGetUnnotifiedBonuses 是 **deprecated** 的兼容实现。
+//
+// 官方 0.2.2-rc.2 删除了 `account/getUnnotifiedBonuses`，替代方法是
+// `account.getNotifications`（赠金元数据在 `notifications[].data` 里，
+// upgrade-guide v0.2.2-rc.1/account-notification-fields）。本仓保留它是因为
+// 能力下限规则：只能比官方更多，不能更少。行为必须**真实**（official provider
+// 走真实 Platform 端点 / Local 回带 source 标签的本地真值），绝不静默空。
 func officialAccountGetUnnotifiedBonuses(ctx context.Context, api OfficialAccountAPI, p *officialParams) (any, error) {
 	client, err := officialAccountClient(p)
 	if err != nil {
@@ -598,9 +761,13 @@ func officialAccountGetUnnotifiedBonuses(ctx context.Context, api OfficialAccoun
 		return nil, err
 	}
 	if api.AccountGetUnnotifiedBonuses == nil {
+		// deprecated：官方 0.2.2-rc.2 已删除本方法，通用通知方法
+		// account.getNotifications 取代它（赠金元数据搬进 notifications[].data）。
+		// 本仓按"能力下限：只能更多不能更少"保留为兼容实现。
 		return nil, officialNotImplemented(
-			"account.getUnnotifiedBonuses 未实现：需要官方账号服务/凭据——赠送记录由官方 " +
-				"DeepSeek Platform 账号服务下发，本宿主没有该服务（也不编造赠送记录）")
+			"account.getUnnotifiedBonuses 未实现（deprecated：官方 0.2.2-rc.2 已删除，替代为 " +
+				"account.getNotifications 的 notifications[].data）：需要官方账号服务/凭据——" +
+				"赠送记录由官方 DeepSeek Platform 账号服务下发，本宿主没有该服务（也不编造赠送记录）")
 	}
 	bonuses, err := api.AccountGetUnnotifiedBonuses(ctx, client)
 	if err != nil {
@@ -620,6 +787,10 @@ func officialAccountGetUnnotifiedBonuses(ctx context.Context, api OfficialAccoun
 // account.ackBonusNotified
 // ---------------------------------------------------------------------------
 
+// officialAccountAckBonusNotified 是 **deprecated** 的兼容实现。
+//
+// 官方 0.2.2-rc.2 删除了 `account/ackBonusNotified`，替代方法是
+// `account.reportNotificationEvent(id, event, client)`。保留理由同上。
 func officialAccountAckBonusNotified(ctx context.Context, api OfficialAccountAPI, p *officialParams) (any, error) {
 	accountID, err := p.str("accountId")
 	if err != nil {
@@ -643,8 +814,11 @@ func officialAccountAckBonusNotified(ctx context.Context, api OfficialAccountAPI
 		return nil, officialBadRequest("orderId 是空串")
 	}
 	if api.AccountAckBonusNotified == nil {
+		// deprecated：官方 0.2.2-rc.2 已删除本方法，account.reportNotificationEvent
+		// （event ∈ displayed|cta_clicked|dismissed）取代它。保留为兼容实现。
 		return nil, officialNotImplemented(
-			"account.ackBonusNotified 未实现：需要官方账号服务/凭据——已读回执要写到官方 " +
+			"account.ackBonusNotified 未实现（deprecated：官方 0.2.2-rc.2 已删除，替代为 " +
+				"account.reportNotificationEvent）：需要官方账号服务/凭据——已读回执要写到官方 " +
 				"DeepSeek Platform 账号服务，本宿主没有该服务（也不假装记下了）")
 	}
 	return api.AccountAckBonusNotified(ctx, accountID, orderID, client)
@@ -784,30 +958,32 @@ func (s *Server) serveAccountWatch(w http.ResponseWriter, r *http.Request, api O
 		writeOfficialError(w, err)
 		return
 	}
-	if api.AccountWatch == nil {
-		writeOfficialError(w, officialNotImplemented(
-			"account.watch 未接线：宿主没有账号状态流（AccountWatch）"))
-		return
-	}
-	stream, err := api.AccountWatch(r.Context())
+	updates, err := accountWatchUpdates(r.Context(), api)
 	if err != nil {
 		writeOfficialError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
+	writeOfficialStreamHeaders(w)
 	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		// 先把响应头推出去：官方 watch 是长流，客户端 open 阶段不该等第一帧。
+		flusher.Flush()
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case view, ok := <-stream:
+		case update, ok := <-updates:
 			if !ok {
 				return
 			}
-			raw, err := json.Marshal(view)
+			if update.Type != OfficialAccountUpdateSnapshot &&
+				update.Type != OfficialAccountUpdateCredentialsChanged {
+				// 官方 type 只有两个值。宿主给出别的值时不发（发了就是非法 wire），
+				// 也**不**悄悄改成 snapshot——直接断流，让调用方看见这次订阅坏了。
+				return
+			}
+			raw, err := json.Marshal(update)
 			if err != nil {
 				return
 			}
@@ -819,6 +995,46 @@ func (s *Server) serveAccountWatch(w http.ResponseWriter, r *http.Request, api O
 			}
 		}
 	}
+}
+
+// accountWatchUpdates 把两种绑定收敛成一条 AccountUpdate 流。
+//
+//   - AccountWatchUpdates：官方 rc.2 形状，直接用；
+//   - AccountWatch：rc.1 的扁平 AccountView 流，包成 type:"snapshot"
+//     （登录进度语义一致：官方 rc.2 里"初始订阅与登录进度"就是 snapshot）；
+//   - 都没接：四字段 501，说清缺哪个回调。
+func accountWatchUpdates(ctx context.Context, api OfficialAccountAPI) (<-chan OfficialAccountUpdate, error) {
+	if api.AccountWatchUpdates != nil {
+		return api.AccountWatchUpdates(ctx)
+	}
+	if api.AccountWatch == nil {
+		return nil, officialNotImplemented(
+			"account.watch 未接线：宿主没有账号状态流（AccountWatchUpdates / AccountWatch）")
+	}
+	legacy, err := api.AccountWatch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan OfficialAccountUpdate, 8)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case view, ok := <-legacy:
+				if !ok {
+					return
+				}
+				select {
+				case out <- OfficialAccountUpdate{Type: OfficialAccountUpdateSnapshot, State: view}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, nil
 }
 
 func (s *Server) serveAccountWatchExpiry(w http.ResponseWriter, r *http.Request, api OfficialAccountAPI, p *officialParams) {
@@ -836,17 +1052,24 @@ func (s *Server) serveAccountWatchExpiry(w http.ResponseWriter, r *http.Request,
 		writeOfficialError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
+	writeOfficialStreamHeaders(w)
 	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		// 官方结果只有 `"session-expired"` 一个合法值，所以**不能**再靠
+		// "基线帧"把响应头带出去；必须在开流时就 flush 响应头，
+		// 否则客户端会一直等到首个到期事件（可能几分钟）。
+		flusher.Flush()
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case event, ok := <-stream:
 			if !ok {
+				return
+			}
+			if event != officialSessionExpired {
+				// 官方 const 只允许这一个值。发别的就是非法 wire，所以断流。
 				return
 			}
 			raw, err := json.Marshal(event)
@@ -862,6 +1085,239 @@ func (s *Server) serveAccountWatchExpiry(w http.ResponseWriter, r *http.Request,
 		}
 	}
 }
+
+// officialSessionExpired 是官方 `account/watchExpiry` 结果的唯一合法值
+// （typert.host.js:658-668：`{"type":"string","const":"session-expired"}`）。
+const officialSessionExpired = "session-expired"
+
+// writeOfficialStreamHeaders 写 ndjson 流的响应头（不写 body）。
+func writeOfficialStreamHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+}
+
+// ---------------------------------------------------------------------------
+// account.getNotifications / getNotificationContent / reportNotificationEvent
+//
+// 官方 0.2.2-rc.2 新增的三件套（dsh-deepseek-account）：
+//
+//	typert.host.js:333  getNotificationContent(id, client) -> AccountNotification | null
+//	typert.host.js:382  getNotifications(client)          -> AccountNotificationBatch | null
+//	typert.host.js:476  reportNotificationEvent(id, event, client) -> boolean
+//
+// 数据**只能**来自官方 Platform 的 harnessOrigin（云端，官方没有本地通知缓存），
+// 所以宿主没接该能力时必须是四字段 501 并写清缺什么——**绝不允许**返回
+// `{notifications: []}`：那会把"我根本没问到"伪装成"确实没有通知"。
+// ---------------------------------------------------------------------------
+
+// 官方三个 `T | null` 结果在本仓 wire 上的包装键。
+//
+// **与官方 wire 的一处显式差异**（与 profile/balance/bonuses 同形）：本仓
+// `/api` 的成功信封不接受 `{"result":null}`（出口会把 null 变成 500），
+// 所以"没有通知"用 `{"batch":null}` / `{"content":null}` 表达。
+const (
+	officialAccountBatchKey   = "batch"
+	officialAccountContentKey = "content"
+)
+
+func officialAccountGetNotifications(ctx context.Context, api OfficialAccountAPI, p *officialParams) (any, error) {
+	client, err := officialAccountClient(p)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.finish(); err != nil {
+		return nil, err
+	}
+	if api.AccountGetNotifications == nil {
+		return nil, officialNotImplemented(
+			"account.getNotifications 未实现：需要官方账号服务/凭据——通知列表只能由官方 " +
+				"DeepSeek Platform 的 harnessOrigin " +
+				"/api/v0/users/notifications/list 取回（官方没有本地通知缓存），" +
+				"本宿主没有该服务（也不返回空批次冒充「没有通知」）")
+	}
+	batch, err := api.AccountGetNotifications(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	if batch == nil {
+		// 官方：未登录或授权在查询中变了 → null。这是确定的真值，不是空实现。
+		return map[string]any{officialAccountBatchKey: nil}, nil
+	}
+	if err := normalizeOfficialNotificationBatch(batch); err != nil {
+		return nil, err
+	}
+	return map[string]any{officialAccountBatchKey: batch}, nil
+}
+
+func officialAccountGetNotificationContent(ctx context.Context, api OfficialAccountAPI, p *officialParams) (any, error) {
+	id, err := p.str("id")
+	if err != nil {
+		return nil, err
+	}
+	client, err := officialAccountClient(p)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.finish(); err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, officialBadRequest("id 是空串")
+	}
+	if api.AccountGetNotificationContent == nil {
+		return nil, officialNotImplemented(
+			"account.getNotificationContent 未实现：需要官方账号服务/凭据——通知内容只能由官方 " +
+				"DeepSeek Platform 的 harnessOrigin /api/v0/users/notifications/content 取回，" +
+				"本宿主没有该服务（也不编造通知文案）")
+	}
+	content, err := api.AccountGetNotificationContent(ctx, id, client)
+	if err != nil {
+		return nil, err
+	}
+	if content == nil {
+		return map[string]any{officialAccountContentKey: nil}, nil
+	}
+	if err := normalizeOfficialNotification(content, "content"); err != nil {
+		return nil, err
+	}
+	return map[string]any{officialAccountContentKey: content}, nil
+}
+
+func officialAccountReportNotificationEvent(ctx context.Context, api OfficialAccountAPI, p *officialParams) (any, error) {
+	id, err := p.str("id")
+	if err != nil {
+		return nil, err
+	}
+	event, err := p.str("event")
+	if err != nil {
+		return nil, err
+	}
+	client, err := officialAccountClient(p)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.finish(); err != nil {
+		return nil, err
+	}
+	if id == "" {
+		return nil, officialBadRequest("id 是空串")
+	}
+	if !officialNotificationEventValid(event) {
+		return nil, officialBadRequest("event 必须是 %v 之一，收到 %q",
+			OfficialAccountNotificationEvents(), event)
+	}
+	if api.AccountReportNotificationEvent == nil {
+		return nil, officialNotImplemented(
+			"account.reportNotificationEvent 未实现：需要官方账号服务/凭据——事件要写到官方 " +
+				"DeepSeek Platform 的 harnessOrigin /api/v0/users/notifications/events，" +
+				"本宿主没有该服务（也不假装记下了这次交互）")
+	}
+	// 官方结果是裸 boolean：true = 平台接受了这次事件（acked 的取值不影响）。
+	return api.AccountReportNotificationEvent(ctx, id, event, client)
+}
+
+// officialNotificationEventValid 判断事件名是否合法。
+func officialNotificationEventValid(event string) bool {
+	for _, known := range OfficialAccountNotificationEvents() {
+		if event == known {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeOfficialNotificationBatch 校验并归一化一个批次。
+//
+// 归一化（官方 schema 的必填数组）：
+//   - Notifications 为 nil → `[]`（不是 null）；
+//
+// 校验（宿主违约 → 500 internal，绝不把非法形状发到 wire）：
+//   - nextPollAfterSeconds 必须是 `0 < x <= 2147483.647`
+//     （官方 notifications.js:23 的 `positive().max(2_147_483_647/1_000)`）；
+//   - 每条通知按 normalizeOfficialNotification 校验。
+func normalizeOfficialNotificationBatch(batch *OfficialAccountNotificationBatch) error {
+	if batch.NextPollAfterSeconds <= 0 || batch.NextPollAfterSeconds > officialNotificationMaxPollAfterSeconds {
+		return officialInternal(
+			"account.getNotifications 违约：nextPollAfterSeconds=%v（官方要求 0 < x <= %v）",
+			batch.NextPollAfterSeconds, officialNotificationMaxPollAfterSeconds)
+	}
+	if batch.Notifications == nil {
+		batch.Notifications = []OfficialAccountNotification{}
+	}
+	for i := range batch.Notifications {
+		if err := normalizeOfficialNotification(&batch.Notifications[i], "notifications["+strconv.Itoa(i)+"]"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// normalizeOfficialNotification 校验一条通知的官方形状。
+//
+// where 只用于错误信息定位（"notifications[2]" / "content"）。所有失败都是
+// **宿主违约**（internal），因为官方契约已经把这些字段钉死了；把违约数据
+// 发出去会让客户端拿到 sehema 之外的形状。
+func normalizeOfficialNotification(n *OfficialAccountNotification, where string) error {
+	if n.ID == "" {
+		return officialInternal("通知违约：%s.id 是空串（官方是不透明字符串，不能为空）", where)
+	}
+	if n.CreatedAt == "" {
+		return officialInternal("通知违约：%s.createdAt 缺失", where)
+	}
+	if n.Actions == nil {
+		n.Actions = []OfficialAccountNotificationAction{}
+	}
+	for i := range n.Actions {
+		action := &n.Actions[i]
+		switch action.Style {
+		case OfficialNotificationStylePrimary, OfficialNotificationStyleSecondary:
+		default:
+			return officialInternal("通知违约：%s.actions[%d].style=%q 越界（只允许 primary/secondary）",
+				where, i, action.Style)
+		}
+		if err := validateOfficialNotificationTarget(action.Target); err != nil {
+			return officialInternal("通知违约：%s.actions[%d].target 非法：%v", where, i, err)
+		}
+	}
+	if len(n.Data) == 0 {
+		n.Data = nil
+	}
+	return nil
+}
+
+// validateOfficialNotificationTarget 校验官方 target 的两个变体
+// （`{type:"app_route",name:"account"}` | `{type:"dismiss"}`）。
+func validateOfficialNotificationTarget(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return errInvalidNotificationTarget("缺 target")
+	}
+	var target struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &target); err != nil {
+		return errInvalidNotificationTarget("不是对象")
+	}
+	switch target.Type {
+	case OfficialNotificationTargetAppRoute:
+		if target.Name != "account" {
+			return errInvalidNotificationTarget(`app_route 必须带 name:"account"`)
+		}
+	case OfficialNotificationTargetDismiss:
+	default:
+		return errInvalidNotificationTarget("type=" + strconv.Quote(target.Type) + " 不在 app_route/dismiss 里")
+	}
+	return nil
+}
+
+// notificationTargetError 是 target 校验的错误类型（避免引入 errors 依赖链）。
+type notificationTargetError string
+
+func (e notificationTargetError) Error() string { return string(e) }
+
+func errInvalidNotificationTarget(reason string) error { return notificationTargetError(reason) }
 
 // ---------------------------------------------------------------------------
 // llm.discoverModels

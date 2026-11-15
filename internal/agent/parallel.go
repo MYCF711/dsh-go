@@ -13,9 +13,9 @@ package agent
 //  1. **保序**：messages 与 v4 事件的顺序 = 模型给的顺序，与完成先后无关。
 //     所以执行（会乱序）与结算（必须有序）是分开的两段：worker 只把结果写进
 //     各自的下标，事件与历史全部在调用方 goroutine 上按序产生。
-//  2. **审批单线程**：审批是"一问一答"的人机通道，两个并发审批会互相吃掉应答
-//     （见 blocksOnHuman 的注释）。需要等人的调用走**独立的一条车道**，
-//     同一时刻只有 1 个在等人。
+//  2. **审批单线程**：审批是"一问一答"的人机通道，两个并发审批会互相吃掉应答。
+//     需要等人的调用走**独立的一条车道**，同一时刻只有 1 个在等人。
+//     这条车道同时收"没声明并发安全"的调用——见 executionMode 的判据。
 //  3. **取消即整批停**：ctx 一取消，不再有新东西开工，worker 全部退出，
 //     不留 goroutine（`go test -race` + goroutine 计数一起断言）。
 //
@@ -91,43 +91,57 @@ func (l *Loop) maxParallelToolCalls(getenv func(string) string) int {
 	return MaxParallelToolCalls(getenv)
 }
 
-// blocksOnHuman 判断这条调用是不是"需要人先点头"的那一类（= 必须单线程）。
+// toolExecutionMode 是一条调用的调度模式：官方 `executionMode`（dsh-tools
+// `src/pipeline.ts:107-114` / `lib/pipeline.js:279-291`）的两值投影。
+type toolExecutionMode int
+
+const (
+	// modeExclusive：独占。官方称 exclusive——它清空并发池，是一条**屏障**。
+	modeExclusive toolExecutionMode = iota
+	// modeParallel：可并发。官方称 parallel——同一批里连续的安全调用进同一个池。
+	modeParallel
+)
+
+// executionMode 判定这条调用独占还是可并发。
 //
-// # 判据只有一条：Caps()
+// # 判据顺序（换顺序就是换语义）
 //
-// 不是拍脑袋，也不是按工具名。本仓已经把"要不要问人"定义在 `spi.Caps` 上
-// （`internal/spi/tool.go:42` 的 `NeedsApproval`），AGENTS §2 明写"审批与沙箱
-// 不按工具名猜"；宿主两条真实审批链用的也是同一判据
-// （`cmd/dshd/acp.go:528`、`internal/prompt/prompt.go:115`）。
-// 这里若另起一套（按名字白名单），第一天就会漏掉所有第三方/新工具。
+//  1. **查不到工具 ⇒ 独占**：未知/隐藏工具本来只会快速失败，串行化它没有代价；
+//     当成"可并发"等于给"查不到就默认放行"开后门。
 //
-// # 为什么必须闸住
+//  2. **审批优先 ⇒ 独占**：`Caps().NeedsApproval()` 压过工具自己的并发声明。
 //
-// 审批是**在 Runner 里同步等人**的：`guardedRunner.Run → g.ask`；无人值守时
-// 子进程把 `@@APPROVAL@@` 写到 stderr、再由父进程把应答写回 stdin。那条通道
-// 是**一问一答**的：`approvalCh` 只有 1 个缓冲位，满了直接丢
-// （`cmd/dshd/approval_stdio.go`）。两个审批并发 = 同时弹两个气泡，而应答只有
-// 一条——必然有一个调用永远等不到答案，或者吃到另一个的答案。这不是"慢"，
-// 是**审批结果错位**。
+//     为什么审批必须独占：审批是**在 Runner 里同步等人**的（`guardedRunner.Run
+//     → g.ask`）。无人值守时子进程把 `@@APPROVAL@@` 写到 stderr、父进程再把应答
+//     写回 stdin；那条通道一问一答、只有 1 个缓冲位，满了直接丢
+//     （`cmd/dshd/approval_stdio.go`）。两个审批并发 = 同时弹两个气泡，而应答
+//     只有一条 ⇒ 必然有一个调用等不到答案、或**吃到另一个的答案**。那不是"慢"，
+//     是审批结果错位。
 //
-// # 两种"查不到"的情况各自说清
+//     官方流水线不需要这道闸：它的审批在 pre-execute 里，prepare 严格按模型顺序
+//     串行、只有 dispatch 并发。本仓的审批发生在 Runner 内部，拿不到那个切分点，
+//     所以用车道把"等人"的调用整条隔出来。
 //
-//   - 表里没有的工具：保守按"要等人"处理。它本来只会快速失败（流水线对未知
-//     工具直接返回），串行化一个必失败的调用没有代价；反过来，把它当"不用等"
-//     就等于给将来任何"查不到就默认问人"的策略留了个后门。
-//   - `ask_user_question` 这类会弹交互的工具：Caps 是空的，因此**不在**这里闸。
-//     判据是"会不会阻塞等人"：`modules/tool/ask/ask.go` 直接返回
-//     `Result{Stop:true}`，由循环收尾把控制权交回人，没有等待通道可抢。
-//     两个 ask 并发时，UI 按 tool/result 的模型顺序逐条呈现，与串行时一致。
-func (l *Loop) blocksOnHuman(call llm.ToolCall) bool {
+//  3. **工具的 per-call 分类器 ⇒ 并发/独占**：`spi.ConcurrencySafe` 是唯一入口，
+//     fail-closed（没声明、返回 false、或 panic 都是独占）。
+//
+// 注意第 3 条是**逐调用**的：判据是这条调用的参数（`call.Function.Arguments`），
+// 不是工具名，也不是静态 Caps——官方 rc.2 就是这么定的（R2-G09）。
+func (l *Loop) executionMode(call llm.ToolCall) toolExecutionMode {
 	if l.Tools == nil {
-		return true
+		return modeExclusive
 	}
 	tool, ok := l.Tools.Get(call.Function.Name)
 	if !ok {
-		return true
+		return modeExclusive
 	}
-	return tool.Caps().NeedsApproval()
+	if tool.Caps().NeedsApproval() {
+		return modeExclusive
+	}
+	if spi.ConcurrencySafe(tool, json.RawMessage(call.Function.Arguments)) {
+		return modeParallel
+	}
+	return modeExclusive
 }
 
 // toolOutcome 是一次工具调用的完整结算物。
@@ -164,36 +178,19 @@ func (l *Loop) execToolCall(ctx context.Context, call llm.ToolCall) (out toolOut
 		}
 	}()
 	res, err := l.Runner.Run(ctx, call.Function.Name, json.RawMessage(call.Function.Arguments))
-	msg := llm.Message{Role: "tool", ToolCallID: call.ID, Name: call.Function.Name}
-	if err != nil {
-		// 失败结果**也是**工具真实产出：从原 res 出发，保留
-		// Text / Data / Artifacts / Truncated / View，只附加 err 与 IsError。
-		// 新建一个只有 Summary/Hint 的空 Result 会把 actual body 整个丢掉——
-		// 而失败时"它到底吐了什么"恰恰是模型判断下一步的唯一依据。
-		// Hint 随原 res 保留；err 与 IsError 仍经 Event 显式传递。
-		shown := res
-		failure := "Error: " + err.Error()
-		// 取消/中断 ≠ 失败：命令可能已经跑完了，只是我们没收到结果。
-		// DSH 的措辞就是这个意思——"结果未知，你自己决定要不要重试"。
-		// 说成 "failed" 会让模型以为命令没执行，从而做出错误判断。
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			failure = "The tool call was interrupted after it was recorded, but no result was durably recorded. " +
-				"Its outcome is unknown. Decide whether to retry from the tool's output or a safer read."
-			shown.Hint = "结果未知：先读一下现场（文件/进程/日志）确认它到底做没做，再决定重试与否"
-		}
-		// 没有真实正文时，错误摘要就是模型能看到的全部内容。
-		if shown.Text == "" {
-			shown.Summary = failure
-		}
-		msg.Content = renderBlocks(l.project(shown))
-		if shown.Text != "" {
-			// ProjectResult 在 Text 非空时**只用** Text，会把错误摘要整条藏掉：
-			// 模型于是只看到工具正文，以为这次调用成功了。失败既有"错在哪"，
-			// 也有工具真实返回了什么，两样都要进模型消息。
-			msg.Content = failure + "\n\n" + msg.Content
-		}
-		return toolOutcome{msg: msg, shown: shown, err: err}
+	if err == nil && ctx.Err() != nil {
+		// 取消压过成功（官方 lib/pipeline.js:478-484、toolAbortedResult:927-944：
+		// `return isAborted(signal) ? toolAbortedResult(result) : result`）。
+		//
+		// 工具体跑完了，但这一轮在它返回之前已经被取消 ⇒ 这个结果**不可信**
+		// （可能只写了一半，或者写完了但没人来得及确认）。记成成功会让模型
+		// 接着用一个不该存在的结果往下走；记成失败+ABORTED 只是让它重新发起。
+		err = ctx.Err()
 	}
+	if err != nil {
+		return l.failureOutcome(call, res, err)
+	}
+	msg := llm.Message{Role: "tool", ToolCallID: call.ID, Name: call.Function.Name}
 	msg.Content = renderBlocks(l.project(res))
 	out = toolOutcome{msg: msg, shown: res, stop: res.Stop}
 	if len(res.Images) > 0 {
@@ -204,6 +201,55 @@ func (l *Loop) execToolCall(ctx context.Context, call llm.ToolCall) (out toolOut
 		out.images = imgs
 	}
 	return out
+}
+
+// failureOutcome 把一次失败变成"模型消息 + 事件载荷"。
+//
+// 三样东西都要在，缺一条模型就会误判：
+//  1. 工具**真实产出**（Text/Data/Artifacts/Truncated/View）不能被换成空结果；
+//  2. Hint 是 R3 的下一步，原样保留；
+//  3. 错误**身份**（官方 error.info）：`context.Canceled` 归 `AbortError`+`ABORTED`；
+//     其余失败保持 nil（工具自己的一句话失败没有专用身份；`DeadlineExceeded`
+//     可能是工具自己的超时预算，不能混成"这一轮被取消"，理由见下面那条注释）。
+func (l *Loop) failureOutcome(call llm.ToolCall, res spi.Result, err error) toolOutcome {
+	msg := llm.Message{Role: "tool", ToolCallID: call.ID, Name: call.Function.Name}
+	// 失败结果**也是**工具真实产出：从原 res 出发，保留
+	// Text / Data / Artifacts / Truncated / View，只附加 err 与 IsError。
+	// 新建一个只有 Summary/Hint 的空 Result 会把 actual body 整个丢掉——
+	// 而失败时"它到底吐了什么"恰恰是模型判断下一步的唯一依据。
+	// Hint 随原 res 保留；err 与 IsError 仍经 Event 显式传递。
+	shown := res
+	failure := "Error: " + err.Error()
+	// 取消/中断 ≠ 失败：命令可能已经跑完了，只是我们没收到结果。
+	// DSH 的措辞就是这个意思——"结果未知，你自己决定要不要重试"。
+	// 说成 "failed" 会让模型以为命令没执行，从而做出错误判断。
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		failure = "The tool call was interrupted after it was recorded, but no result was durably recorded. " +
+			"Its outcome is unknown. Decide whether to retry from the tool's output or a safer read."
+		shown.Hint = "结果未知：先读一下现场（文件/进程/日志）确认它到底做没做，再决定重试与否"
+	}
+	// 取消的**身份**（官方 lib/pipeline.js:478-484）：被取消的 body 抛出物统一补
+	// AbortError + ABORTED，模型据此知道"这次没有结果、可以重新发起"。
+	//
+	// 只认 context.Canceled：DeadlineExceeded 可能来自工具自己的超时预算
+	// （`modules/tools` 的 timeout-policy 是 WithTimeout 派生的），那是"这条工具
+	// 超时"，不是"这一轮被取消"——把两者混成一个身份会让模型对超时也去"重新发起
+	// 整轮"。
+	if errors.Is(err, context.Canceled) {
+		shown = shown.WithErrorInfo(spi.ErrorNameAbort, spi.CodeAborted)
+	}
+	// 没有真实正文时，错误摘要就是模型能看到的全部内容。
+	if shown.Text == "" {
+		shown.Summary = failure
+	}
+	msg.Content = renderBlocks(l.project(shown))
+	if shown.Text != "" {
+		// ProjectResult 在 Text 非空时**只用** Text，会把错误摘要整条藏掉：
+		// 模型于是只看到工具正文，以为这次调用成功了。失败既有"错在哪"，
+		// 也有工具真实返回了什么，两样都要进模型消息。
+		msg.Content = failure + "\n\n" + msg.Content
+	}
+	return toolOutcome{msg: msg, shown: shown, err: err}
 }
 
 // runToolBatch 执行一次响应里的全部工具调用，并按**模型顺序**结算。
@@ -283,8 +329,9 @@ func (l *Loop) runToolBatch(ctx context.Context, turn, step int, calls []llm.Too
 
 // executeToolCalls 是并行执行的本体：两条车道 + 上限 1 的串行退化。
 //
-// 车道划分的判据见 blocksOnHuman。两条车道**同时**跑：审批类在等人时，
-// 只读工具不该陪着一起等——那正是并行要解决的问题。
+// 车道划分的唯一判据是 executionMode（官方 executionMode 的投影：审批优先 →
+// per-call 并发分类器 → fail-closed 独占）。两条车道**同时**跑：独占车道在等人
+// 时，可并发的只读工具不该陪着一起等——那正是并行要解决的问题。
 func (l *Loop) executeToolCalls(ctx context.Context, calls []llm.ToolCall, limit int) []toolOutcome {
 	out := make([]toolOutcome, len(calls))
 	if limit <= 1 || len(calls) == 1 {
@@ -297,11 +344,11 @@ func (l *Loop) executeToolCalls(ctx context.Context, calls []llm.ToolCall, limit
 		return out
 	}
 
-	serial := make([]int, 0, len(calls))   // 审批类：同一时刻最多 1 个
-	parallel := make([]int, 0, len(calls)) // 其余：最多 limit 个
+	exclusive := make([]int, 0, len(calls)) // 独占车道：同一时刻最多 1 个
+	parallel := make([]int, 0, len(calls))  // 并发池：最多 limit 个
 	for i, call := range calls {
-		if l.blocksOnHuman(call) {
-			serial = append(serial, i)
+		if l.executionMode(call) == modeExclusive {
+			exclusive = append(exclusive, i)
 			continue
 		}
 		parallel = append(parallel, i)
@@ -309,21 +356,25 @@ func (l *Loop) executeToolCalls(ctx context.Context, calls []llm.ToolCall, limit
 
 	var wg sync.WaitGroup
 
-	// 车道 B：审批类，按模型顺序一条一条来。
+	// 车道 B：独占调用，按模型顺序一条一条来。
 	//
-	// 为什么它不占 limit 的名额：等人在界面上点"允许"可能是一分钟。占着名额
-	// 会让同一批里的只读调用全部陪等——那等于没并行。
-	if len(serial) > 0 {
+	// 这条车道收两类：需要审批的（人等人在界面点"允许"可能是一分钟），以及
+	// **没有声明并发安全**的（默认值 fail-closed）。它们之间也互相独占：
+	// 两个写同一份文件的工具并发执行，结果是随机的读-改-写覆盖。
+	//
+	// 为什么它不占 limit 的名额：占着名额会让同一批里的只读调用全部陪等——
+	// 那等于没并行。
+	if len(exclusive) > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for _, i := range serial {
+			for _, i := range exclusive {
 				out[i] = l.execToolCall(ctx, calls[i])
 			}
 		}()
 	}
 
-	// 车道 A：可并行的调用，固定 worker 池，最多 limit 路。
+	// 车道 A：声明了并发安全、且这次参数判安全的调用，固定 worker 池，最多 limit 路。
 	//
 	// 固定池而不是"一个调用一个 goroutine 去抢信号量"：模型偶尔会在一条响应里
 	// 塞几十个调用，池子让"同时在跑的 goroutine"与上限同阶，取消时也只需等

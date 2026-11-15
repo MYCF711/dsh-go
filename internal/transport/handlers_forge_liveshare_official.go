@@ -121,7 +121,8 @@ const (
 )
 
 // OfficialForgeLiveshareMethods 返回这两个官方命名空间的全部方法
-// （19 个 forgePanel + 12 个 liveshareShares = 31，顺序固定）。
+// （19 个 forgePanel + 13 个 liveshareShares = 32，顺序固定；rc.2 新增
+// `liveshareShares.addSessions`）。
 //
 // 它给快照/文档/门禁用：新增或删除一个方法必须显式改这里。liveshare 的
 // 12 个在 handlers_liveshare_official.go 里，本函数只做拼装。
@@ -141,12 +142,18 @@ func OfficialForgeLiveshareMethods() []Method {
 	return append(forge, OfficialLiveshareMethods()...)
 }
 
-// IsOfficialForgeLiveshareMethod 判断一个 /api 路径名是否属于本族的 31 个方法
-// （19 forgePanel + 12 liveshareShares）。
+// IsOfficialForgeLiveshareMethod 判断一个 /api 路径名是否属于本族的 32 个方法
+// （19 forgePanel + 13 liveshareShares）。
 //
-// 路由侧只需要这一次判断（不要在 server.go 里摊开 31 个 case）。
+// 路由侧只需要这一次判断（不要在 server.go 里摊开 32 个 case）。
 func IsOfficialForgeLiveshareMethod(name string) bool {
 	if IsOfficialLiveshareMethod(name) || IsOfficialForgeChangeRequestMethod(name) {
+		return true
+	}
+	// rc.2 新增的 12 个 forgePanel 方法有真实 L1 契约层（handlers_forge_rc2.go），
+	// 但**不在**上面那张"逐方法未实现表"里：它们不回逐方法 501，而是走真实实现
+	// 或结构化能力缺失错误。认领它们只是为了让 server.go 那一处路由不漏。
+	if IsOfficialForgeRC2Method(name) {
 		return true
 	}
 	_, ok := forgeLiveshareSpecOf(Method(name))
@@ -397,10 +404,12 @@ func forgeLiveshareSpecOf(m Method) (forgeMethodSpec, bool) {
 // 分发
 // ---------------------------------------------------------------------------
 
-// serveOfficialForgeLiveshareAPI 处理本族的 31 个方法（Lead 的接线入口）。
+// serveOfficialForgeLiveshareAPI 处理本族的 43 个方法（Lead 的接线入口）：
+// rc.1 的 19 forgePanel + 12 liveshareShares = 31（本文件与 handlers_liveshare_official.go
+// 的既有口径），加上 rc.2 新增的 12 个 forgePanel（handlers_forge_rc2.go）。
 //
-// 19 个 forgePanel 仍在 handlers_forge_liveshare_official.go 里回结构化未实现；
-// 12 个 liveshareShares 交给 handlers_liveshare_official.go 的真实契约层。
+// 19 个 rc.1 forgePanel 仍回结构化未实现；12 个 liveshareShares 与 12 个 rc.2
+// forgePanel 各有真实契约层。
 func (s *Server) serveOfficialForgeLiveshareAPI(w http.ResponseWriter, r *http.Request, name string) {
 	// PARITY-W2-WRITE：merge/markReady/submitReview 有 provider 写实现时
 	// 先走受控写层；未接线（全 nil）保持旧 501。
@@ -410,6 +419,12 @@ func (s *Server) serveOfficialForgeLiveshareAPI(w http.ResponseWriter, r *http.R
 	}
 	if IsOfficialForgeChangeRequestMethod(name) {
 		s.ServeOfficialForgeChangeRequestAPI(w, r, name)
+		return
+	}
+	// rc.2 的 12 个 forgePanel 方法（handlers_forge_rc2.go）。必须在下面的逐方法
+	// 501 兜底之前：它们不在那个表里，晚一步就会被报成"不是这一族"。
+	if IsOfficialForgeRC2Method(name) {
+		s.ServeOfficialForgeRC2(w, r, name)
 		return
 	}
 	if IsOfficialLiveshareMethod(name) {

@@ -576,8 +576,10 @@ func TestMergedRoutesToOriginalTool(t *testing.T) {
 		{"hindsight", `{"action":"search_knowledge_pages","query":"x"}`, "hindsight_search_knowledge_pages", `{"query":"x"}`},
 		{"team_task", `{"action":"get","task_id":"task-1"}`, "team_task_get", `{"task_id":"task-1"}`},
 		// 撞名的那一处：update_action → action，外层 action 自己消失。
-		{"team_task", `{"action":"update","task_id":"task-1","update_action":"claim","owner":"me"}`,
-			"team_task_update", `{"action":"claim","owner":"me","task_id":"task-1"}`},
+		// rc.2 起 `team_task_update` 的 `expected_revision` 是**必填**（官方 CAS），
+		// 所以这里的合法参数必须带上它——否则模型照 DSH 传参会被我们拒。
+		{"team_task", `{"action":"update","task_id":"task-1","update_action":"claim","owner":"me","expected_revision":3}`,
+			"team_task_update", `{"action":"claim","owner":"me","task_id":"task-1","expected_revision":3}`},
 		// 不是合并名：原样交给原来的 Runner（合并不该碰别的工具）。
 		{"bash", `{"cmd":"ls"}`, "", ""},
 		{"read", `{"path":"README.md"}`, "", ""},

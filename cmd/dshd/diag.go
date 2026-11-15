@@ -34,7 +34,7 @@ func openDiag(home string) (*diag, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("建日志目录失败（%s）: %w", dir, err)
 	}
-	name := "dshd-" + time.Now().Format("2006-01-02") + ".log"
+	name := "dsh-go-" + time.Now().Format("2006-01-02") + ".log"
 	path := filepath.Join(dir, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {

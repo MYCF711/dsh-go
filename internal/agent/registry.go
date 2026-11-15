@@ -61,7 +61,8 @@ const (
 	EventSubagentEnd   = "subagent/end"
 )
 
-// 官方 `subagent/end` 的 stopReason 取值（dsh-subagent 的 `epochStopReason`）。
+// 官方 `subagent/end` 的 stopReason 取值（dsh-subagent 的 `epochStopReason`，
+// `src/lifecycle.ts:80-105`）。
 //
 // 只认这五个：编一个新的等于让读方把失败当成功。
 const (
@@ -72,26 +73,54 @@ const (
 	SubagentStopRefusal   = "refusal"
 )
 
+// ProviderSpawn 是本宿主唯一子代理后端的**官方 provider 名**。
+//
+// 官方 `subagents.registerProvider` 按名字登记后端，`dsh-base/cordis.patch.yml:374-378`
+// 给进程内 spawn 后端配的就是 `providerName: spawn`（`dsh-tool-subagent` 的
+// 默认 `provider` 同样是 `spawn`，同文件 :393-395）。本宿主的 `ChildSpawn` 建的是一条
+// **全新**子会话（不带父历史），语义正是 spawn 而不是 fork
+// （`dsh-subagent-spawn-in-process`：「runs a fresh child agent」，`inheritsParentContext = false`）。
+//
+// 所以 `subagent/start` 的 provider 字段填这个名字是**核过官方**的事实，
+// 不是随手编的字符串；编一个别的名字等于让读方对不上官方 provider 表。
+const ProviderSpawn = "spawn"
+
 // MaxAgentDepth 是默认委派深度上限（官方 `maxDepth` 语义：0 = 不限）。
 const MaxAgentDepth = 0
 
-// SubagentRun 是一次委派的**地址**。
+// SubagentRun 是一次委派的**地址**，字段与官方 `SubagentRunInfo` 逐字段对齐
+// （`dsh-subagent/src/types.ts:95-109`）：
+//
+//	runId            本次 residency epoch 的唯一标识（start/end 靠它配对）
+//	provider         建立这条 child 的 `ctx.subagents` provider 名
+//	parentSessionId  durable 的直接创建者（与"活的树根"无关，官方原话）
+//	id               child agent 的 id
+//	local            这次激活是否真的拥有一个进程内 Agent
 //
 // RunID 与 ChildID 分开：一个 child 会话可以被续问多次，每次委派是一个独立的
 // residency epoch，`subagent/start` 与 `subagent/end` 按 RunID 配对。
 type SubagentRun struct {
 	RunID    string `json:"runId"`
 	Provider string `json:"provider"`
-	ChildID  string `json:"id"`
+	// ParentSessionID 是 durable 的直接创建者。它不是从当前树根推出来的：
+	// 官方明确它是"创建时记下的那个父"，续问与树根变化都不改它。
+	ParentSessionID string `json:"parentSessionId"`
+	ChildID         string `json:"id"`
 	// Local 为真表示这是进程内子 agent（本宿主只有这一种）。
 	Local bool `json:"local"`
 }
 
-// SubagentSettled 是一条 `subagent/end` 边的完整负载。
+// SubagentSettled 是一条 `subagent/end` 边的完整负载（官方 `SubagentRunEndInfo`）。
 type SubagentSettled struct {
 	SubagentRun
 	StopReason string `json:"stopReason"`
 	// LastAssistantMessage 只在子代理真的说了话时出现（官方同样省略空值）。
+	//
+	// 与官方的已知差异：官方这里是 `readonly ContentBlock[]`（结构化末条输出），
+	// 宿主只持有**文本形式**。生产路径目前一律**不发**这个字段（空串即省略），
+	// 因为在这一层拿结构化块只会得到"只挑 text 块"的投影——那正是
+	// `scripts/text-only-guard.py` 拦的那个病。字段留着是为了让有真结构化输出的
+	// 调用方（未来的 `dshd run` 内侧）能填；没填就不假装有。
 	LastAssistantMessage string `json:"lastAssistantMessage,omitempty"`
 }
 
@@ -376,7 +405,7 @@ func (r *Registry) BeginSubagent(parentID, childID, provider, runID string) (Sub
 	if _, dup := r.runs[runID]; dup {
 		return SubagentRun{}, fmt.Errorf("agent registry: run id %q 已经登记过", runID)
 	}
-	run := SubagentRun{RunID: runID, Provider: provider, ChildID: childID, Local: true}
+	run := SubagentRun{RunID: runID, Provider: provider, ParentSessionID: parentID, ChildID: childID, Local: true}
 	r.runs[runID] = run
 	ts := r.now()
 	entry, exists := r.entries[childID]
@@ -425,6 +454,27 @@ func (r *Registry) EndSubagent(runID, stopReason, lastAssistantMessage string) (
 	})
 	delete(r.entries, run.ChildID)
 	return settled, nil
+}
+
+// RunForChild 报告这条 child 会话当前有没有一次**未结算**的委派，有则连 run id 一起给。
+//
+// 为什么需要它：结算 `subagent/end` 的那条真实路径（serve 进程里子会话那一轮跑完）
+// 手上只有 child 会话 id，没有 run id——run id 是委派发起时铸的。让调用方去存一份
+// run id 映射就是第二份真值；这里直接问注册表（它本来就是唯一真值）。
+//
+// 一个 child 同时最多一次激活（官方 activation 语义），所以返回值唯一。
+func (r *Registry) RunForChild(childID string) (string, bool) {
+	if r == nil || childID == "" {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for runID, run := range r.runs {
+		if run.ChildID == childID {
+			return runID, true
+		}
+	}
+	return "", false
 }
 
 func validSubagentStopReason(reason string) bool {

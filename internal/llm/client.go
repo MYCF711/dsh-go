@@ -41,6 +41,13 @@ type Client struct {
 	// 再退回全局 `DSHD_LLM_STREAM_IDLE_TIMEOUT_MS`，最后是官方默认 300000ms。
 	StreamIdleTimeout time.Duration
 
+	// Account 非 nil 时这条 client 走**账号令牌认证**（官方 #99
+	// `llm-deepseek-account`，只发 `x-dsh-auth-token`，不发 Bearer）。
+	//
+	// 与 APIKey 互斥：账号路由没有 api key。两个都设时 Account 优先——
+	// 静默改用 api key 会让"我明明登录了却用着旧 key"变成一个查不出来的状态。
+	Account *AccountAuth
+
 	// retry 是这条 client 的重试参数；nil = 生产默认（见 retry.go 的 defaultRetryConfig）。
 	//
 	// 故意不导出：重试的次数/预算/退避只能按 client、按请求各自持有。留一个
@@ -224,6 +231,22 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 		retryAfter, _ := parseRetryAfter(resp.Header, time.Now())
 		_ = resp.Body.Close()
 
+		// 官方 `onRequestError`（dsh-llm-deepseek-account/src/index.ts:44-47）：
+		// 账号路由收到 401 就把错误码换成 ACCOUNT_TOKEN_INVALID，并作废那份
+		// **仍然匹配**的令牌（不匹配 = 已被更新的登录取代，清它等于删掉新登录）。
+		// 放在形状协商之前：401 与 wire 形状无关，先协商只会拿着坏令牌再打一轮。
+		if c.Account != nil && resp.StatusCode == http.StatusUnauthorized {
+			token := c.accountToken(ctx)
+			if token != "" && c.Account.Reject != nil {
+				c.reportExtensionError(c.Account.Reject(ctx, token))
+			}
+			return nil, &AccountAuthError{
+				Code: AccountTokenInvalidCode,
+				Message: fmt.Sprintf("账号令牌被推理端点拒绝（HTTP 401）：%s",
+					errorSnippet(raw, c.APIKey, token)),
+			}
+		}
+
 		if next, change, ok := negotiateWire(profile, sentFields(req, profile), resp.StatusCode, string(raw)); ok &&
 			profileTries < maxWireAttempts && !attempted[next] && wireChangeAllowed(adapter, next) {
 			profile = next
@@ -252,6 +275,21 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 	}
 }
 
+// accountToken 解析这条 client 当前的账号令牌；没有可用令牌时返回空串。
+//
+// 空串是一个**确定的**状态（未登录 / 租约过期 / 目的地不允许），不是错误：
+// 调用方据此给出官方那条 ACCOUNT_SIGN_IN_REQUIRED。
+func (c *Client) accountToken(ctx context.Context) string {
+	if c.Account == nil || c.Account.Token == nil {
+		return ""
+	}
+	token, ok := c.Account.Token(ctx)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(token)
+}
+
 // post 只发**一次**请求，自己不认识重试：429/5xx 的重放、连接层抖动的重放
 // 统一在 Stream 里决定（那里才知道"流有没有开始往外发字"）。
 //
@@ -270,7 +308,19 @@ func (c *Client) post(ctx context.Context, body []byte) (*http.Response, error) 
 		ua = "dshd (dsh-go)"
 	}
 	hr.Header.Set("User-Agent", ua)
-	if c.APIKey != "" {
+	if c.Account != nil {
+		// 官方 `resolveAuth`（dsh-llm-deepseek-account/src/index.ts:34-39）：
+		// 先过目的地栅栏，再取令牌；拿不到就是 ACCOUNT_SIGN_IN_REQUIRED。
+		// 两条都 fail-loud——没有令牌时不发请求，而不是发一条注定 401 的请求。
+		if !c.Account.AllowsDestination(c.BaseURL) {
+			return nil, AccountAuthErrorFor("destination " + c.BaseURL + " is not the account inference origin " + c.Account.InferenceOrigin)
+		}
+		token := c.accountToken(ctx)
+		if token == "" {
+			return nil, AccountAuthErrorFor("")
+		}
+		hr.Header.Set(AccountTokenHeader, token)
+	} else if c.APIKey != "" {
 		hr.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 

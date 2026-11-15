@@ -23,10 +23,21 @@ func callLiveshare(t *testing.T, method, body string, api OfficialLiveshareAPI) 
 	return rec.Code, out
 }
 
-func TestOfficialLiveshareMethodsAreTheTwelve(t *testing.T) {
+// TestOfficialLiveshareMethodFamilyIsThirteen 钉住方法面：rc.1 的 12 个 + rc.2 的 1 个。
+//
+// 两张表分开是写作用域决定的（`OfficialForgeLiveshareMethods()` 的 31 计数被
+// handlers_forge_liveshare_official_test.go 钉住，那个文件不在本任务范围内），
+// 但**认领**必须是 13 个：`IsOfficialLiveshareMethod` 决定 /api 路由与分派。
+func TestOfficialLiveshareMethodFamilyIsThirteen(t *testing.T) {
 	methods := OfficialLiveshareMethods()
-	if len(methods) != 12 {
-		t.Fatalf("官方 liveshareShares 方法应是 12 个，实际 %d", len(methods))
+	if len(OfficialLiveshareMethods()) != 13 {
+		t.Fatalf("liveshareShares 方法应是 13 个（rc.1 的 12 + rc.2 的 addSessions），实际 %d", len(OfficialLiveshareMethods()))
+	}
+	if len(OfficialLiveshareRC2Methods()) != 1 || OfficialLiveshareRC2Methods()[0] != MethodLiveshareSharesAddSessions {
+		t.Fatalf("rc.2 新增方法应只有 addSessions，实际 %v", OfficialLiveshareRC2Methods())
+	}
+	if len(methods) != 13 {
+		t.Fatalf("官方 liveshareShares 方法应是 13 个（12 + rc.2 addSessions），实际 %d", len(methods))
 	}
 	seen := map[Method]bool{}
 	for _, method := range methods {
@@ -58,11 +69,31 @@ func fakeLiveshareAPI() OfficialLiveshareAPI {
 				return OfficialLiveshareCreatedShare{}, officialBadRequest("sessionId 业务校验失败")
 			}
 			return OfficialLiveshareCreatedShare{Link: "https://relay.example/s/share-1", ShareID: "share-1",
-				SessionID: "s-1", SessionMode: "view", Access: access}, nil
+				SessionID: "s-1", SessionIDs: []string{"s-1"}, SessionMode: "view", Access: access}, nil
+		},
+		// rc.2 addSessions：回包是"这条 share 现在服务的全部源会话"，主会话在第一位。
+		AddSessions: func(req OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error) {
+			if req.ShareID != "share-1" {
+				return OfficialLiveshareShareSessions{}, OfficialLiveshareNotFound("share %q 不存在", req.ShareID)
+			}
+			ids := []string{"s-1"}
+			for _, id := range req.SessionIDs {
+				dup := false
+				for _, seen := range ids {
+					if seen == id {
+						dup = true
+					}
+				}
+				if !dup {
+					ids = append(ids, id)
+				}
+			}
+			return OfficialLiveshareShareSessions{ShareID: req.ShareID, SessionIDs: ids}, nil
 		},
 		List: func() (OfficialLiveshareShareList, error) {
 			return OfficialLiveshareShareList{Shares: []OfficialLiveshareShareView{{
-				ShareID: "share-1", SessionID: "s-1", SessionTitle: "标题", Link: "https://relay.example/s/share-1",
+				ShareID: "share-1", SessionID: "s-1", SessionIDs: []string{"s-1", "s-2"},
+				SessionTitle: "标题", Link: "https://relay.example/s/share-1",
 				CreatedAt: "2026-11-08T12:00:00Z", AllowsFork: false, SessionMode: "view",
 				ViewerCapabilities: []OfficialLiveshareCapability{}, Online: true,
 			}}}, nil
@@ -123,6 +154,10 @@ func TestOfficialLiveshareMountedResultsRoundTrip(t *testing.T) {
 			if result["shareId"] != "share-1" || result["link"] == "" || result["sessionMode"] != "view" {
 				t.Fatalf("create result = %#v", result)
 			}
+			// rc.2 起 create 回包必须带 sessionIds，主会话在第一位。
+			if ids, ok := result["sessionIds"].([]any); !ok || len(ids) != 1 || ids[0] != "s-1" {
+				t.Fatalf("create result sessionIds = %#v", result["sessionIds"])
+			}
 			access := result["access"].(map[string]any)
 			if access["identityKeyAcl"] != true || access["mode"] != "open" {
 				t.Fatalf("access = %#v", access)
@@ -133,7 +168,29 @@ func TestOfficialLiveshareMountedResultsRoundTrip(t *testing.T) {
 			if len(shares) != 1 || shares[0].(map[string]any)["online"] != true {
 				t.Fatalf("list = %#v", result)
 			}
+			// rc.2 起 list 的每条 share 都带 sessionIds（required），主会话在第一位。
+			ids, ok := shares[0].(map[string]any)["sessionIds"].([]any)
+			if !ok || len(ids) != 2 || ids[0] != "s-1" || ids[1] != "s-2" {
+				t.Fatalf("list sessionIds = %#v", shares[0].(map[string]any)["sessionIds"])
+			}
 		}},
+		{"liveshareShares.addSessions", `{"request":{"shareId":"share-1","sessionIds":["s-2","s-2","s-3"]}}`,
+			func(t *testing.T, result map[string]any) {
+				if result["shareId"] != "share-1" {
+					t.Fatalf("addSessions result = %#v", result)
+				}
+				// 官方去重（[...new Set]）后是 s-2,s-3；主会话 s-1 仍在第一位。
+				ids := result["sessionIds"].([]any)
+				want := []string{"s-1", "s-2", "s-3"}
+				if len(ids) != len(want) {
+					t.Fatalf("addSessions sessionIds = %#v", ids)
+				}
+				for i, id := range want {
+					if ids[i] != id {
+						t.Fatalf("addSessions sessionIds[%d] = %v，want %q（全量 %#v）", i, ids[i], id, ids)
+					}
+				}
+			}},
 		{"liveshareShares.stop", `{"request":{"shareId":"share-1"}}`, func(t *testing.T, result map[string]any) {
 			if result["ok"] != true {
 				t.Fatalf("stop = %#v", result)
@@ -266,6 +323,10 @@ func TestOfficialLiveshareMissingImplIs501PerField(t *testing.T) {
 			body = `{"request":{"shareId":"share-1","sessionMode":"view"}}`
 		case MethodLiveshareSharesSetRelay:
 			body = `{"request":{"relayUrl":null}}`
+		case MethodLiveshareSharesAddSessions:
+			// rc.2 新增方法：合法参数（shareId + 非空 sessionIds），
+			// 这样才走得到"没有实现"那条分支，而不是先被参数校验拦下。
+			body = `{"request":{"shareId":"share-1","sessionIds":["s-1"]}}`
 		default:
 			body = `{"request":{"sessionId":"s-1","shareId":"share-1"}}`
 		}
@@ -308,7 +369,8 @@ func TestOfficialLiveshareRejectsFakeHostResults(t *testing.T) {
 		{
 			name: "create identityKeyAcl=false", method: "liveshareShares.create", body: `{"request":{"sessionId":"s-1"}}`,
 			api: OfficialLiveshareAPI{Create: func(OfficialLiveshareCreateRequest) (OfficialLiveshareCreatedShare, error) {
-				return OfficialLiveshareCreatedShare{ShareID: "share-1", Link: "x", SessionID: "s-1", SessionMode: "view",
+				return OfficialLiveshareCreatedShare{ShareID: "share-1", Link: "x", SessionID: "s-1",
+					SessionIDs: []string{"s-1"}, SessionMode: "view",
 					Access: OfficialLiveshareAccess{Mode: "open", IdentityKeyACL: false,
 						Selected:                    []OfficialLiveshareSelectedIdentity{},
 						DeploymentAllowedSubjectIDs: []string{}, ShareAllowedSubjectIDs: []string{}}}, nil
@@ -383,5 +445,241 @@ func TestOfficialLiveshareMountIsPerServer(t *testing.T) {
 	srvB.serveOfficialLiveshareAPI(rec, req, "liveshareShares.list")
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("B 未接线状态 = %d，want 501", rec.Code)
+	}
+}
+
+// TestOfficialLiveshareAddSessionsIsPartOfTheFamily 是 rc.2 新增方法的先红用例。
+//
+// 官方 0.2.2-rc.2 把 liveshareShares 从 12 个方法扩到 13 个：新增
+// `addSessions`（`host/share-remote.ts:66`，`invocation: direct`）。宿主侧
+// 必须与既有 12 个同形：认领 + 分派 + 参数校验 + 未接线时 501 点名回调。
+func TestOfficialLiveshareAddSessionsIsPartOfTheFamily(t *testing.T) {
+	const method = "liveshareShares.addSessions"
+	if !IsOfficialLiveshareMethod(method) {
+		t.Fatalf("%s 没被 IsOfficialLiveshareMethod 认领（rc.2 新增的第 13 个方法）", method)
+	}
+	if !IsOfficialForgeLiveshareMethod(method) {
+		t.Fatalf("%s 没被 IsOfficialForgeLiveshareMethod 认领（/api 路由会漏到通用 501）", method)
+	}
+
+	// 未接线：501 + 点名缺哪个回调（不是"不是这一族的方法"）。
+	status, out := callLiveshare(t, method, `{"request":{"shareId":"share-1","sessionIds":["s-1"]}}`, OfficialLiveshareAPI{})
+	if status != http.StatusNotImplemented {
+		t.Fatalf("未接线状态 = %d，want 501: %#v", status, out)
+	}
+	msg := out["error"].(map[string]any)["message"].(string)
+	if !strings.Contains(msg, "AddSessions") {
+		t.Fatalf("未接线正文没点名 OfficialLiveshareAPI.AddSessions：%q", msg)
+	}
+}
+
+// TestOfficialLiveshareAddSessionsParamsFailLoud 钉住 rc.2 新方法的参数面。
+//
+// 官方 zod：`request = {shareId: string, sessionIds: string[]}`（两者 required，
+// request 对象 additionalProperties:true）。实现层再加三条（
+// `owner-share-operations.ts:409-421`）：shareId 不能空串、去重后不能为空、
+// 任一项不能是空串。这些**必须**在回"未接线 501"之前变成 400——GUI 拼错参数时
+// 得到的是能改的错误，不是"等宿主实现"。
+func TestOfficialLiveshareAddSessionsParamsFailLoud(t *testing.T) {
+	api := fakeLiveshareAPI()
+	const method = "liveshareShares.addSessions"
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"缺 request", `{}`, "缺 request"},
+		{"request 为 null", `{"request":null}`, "不能是 null"},
+		{"request 不是对象", `{"request":[]}`, "必须是 JSON 对象"},
+		{"缺 shareId", `{"request":{"sessionIds":["s-1"]}}`, "缺 shareId"},
+		{"shareId 空串", `{"request":{"shareId":"","sessionIds":["s-1"]}}`, "空串"},
+		{"shareId 类型错", `{"request":{"shareId":3,"sessionIds":["s-1"]}}`, "必须是字符串"},
+		{"缺 sessionIds", `{"request":{"shareId":"share-1"}}`, "缺 sessionIds"},
+		{"sessionIds 为 null", `{"request":{"shareId":"share-1","sessionIds":null}}`, "不能是 null"},
+		{"sessionIds 不是数组", `{"request":{"shareId":"share-1","sessionIds":"s-1"}}`, "必须是字符串数组"},
+		{"sessionIds 空数组", `{"request":{"shareId":"share-1","sessionIds":[]}}`, "空数组"},
+		{"sessionIds 元素类型错", `{"request":{"shareId":"share-1","sessionIds":[1]}}`, "必须是字符串数组"},
+		{"sessionIds 里有空串", `{"request":{"shareId":"share-1","sessionIds":["s-1",""]}}`, "是空串"},
+		{"未知顶层字段", `{"request":{"shareId":"share-1","sessionIds":["s-1"]},"force":true}`, "不认识的字段"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, out := callLiveshare(t, method, tc.body, api)
+			if status != http.StatusBadRequest {
+				t.Fatalf("状态 = %d，want 400: %#v", status, out)
+			}
+			msg := out["error"].(map[string]any)["message"].(string)
+			if !strings.Contains(msg, tc.want) {
+				t.Fatalf("%q 没包含 %q", msg, tc.want)
+			}
+		})
+	}
+
+	// request 对象自身是 additionalProperties:true：多余字段不拒（官方契约如此）。
+	status, out := callLiveshare(t, method,
+		`{"request":{"shareId":"share-1","sessionIds":["s-2"],"note":"官方 request 额外字段合法"}}`, api)
+	if status != http.StatusOK {
+		t.Fatalf("request 额外字段应被接受，实际 %d: %#v", status, out)
+	}
+}
+
+// TestOfficialLiveshareAddSessionsRejectsFakeHostResults 钉住结果校验：
+// 宿主回假数据（少了刚加的会话、空 shareId、重复 id、nil 数组）必须 500。
+func TestOfficialLiveshareAddSessionsRejectsFakeHostResults(t *testing.T) {
+	const method = "liveshareShares.addSessions"
+	body := `{"request":{"shareId":"share-1","sessionIds":["s-2"]}}`
+	cases := []struct {
+		name string
+		api  OfficialLiveshareAPI
+		want string
+	}{
+		{
+			name: "缺 shareId",
+			api: officialLiveshareAddSessionsAPI(func(OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error) {
+				return OfficialLiveshareShareSessions{SessionIDs: []string{"s-1", "s-2"}}, nil
+			}),
+			want: "缺 shareId",
+		},
+		{
+			name: "sessionIds 是 nil",
+			api: officialLiveshareAddSessionsAPI(func(OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error) {
+				return OfficialLiveshareShareSessions{ShareID: "share-1"}, nil
+			}),
+			want: "是 nil",
+		},
+		{
+			name: "sessionIds 空数组",
+			api: officialLiveshareAddSessionsAPI(func(OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error) {
+				return OfficialLiveshareShareSessions{ShareID: "share-1", SessionIDs: []string{}}, nil
+			}),
+			want: "空数组",
+		},
+		{
+			name: "少了刚加的会话（假成功）",
+			api: officialLiveshareAddSessionsAPI(func(OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error) {
+				return OfficialLiveshareShareSessions{ShareID: "share-1", SessionIDs: []string{"s-1"}}, nil
+			}),
+			want: "状态没真的变",
+		},
+		{
+			name: "重复 id（幂等语义被破坏）",
+			api: officialLiveshareAddSessionsAPI(func(OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error) {
+				return OfficialLiveshareShareSessions{ShareID: "share-1", SessionIDs: []string{"s-1", "s-2", "s-2"}}, nil
+			}),
+			want: "重复",
+		},
+		{
+			name: "sessionIds 含空串",
+			api: officialLiveshareAddSessionsAPI(func(OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error) {
+				return OfficialLiveshareShareSessions{ShareID: "share-1", SessionIDs: []string{"s-1", "s-2", ""}}, nil
+			}),
+			want: "空串",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, out := callLiveshare(t, method, body, tc.api)
+			if status != http.StatusInternalServerError {
+				t.Fatalf("状态 = %d，want 500: %#v", status, out)
+			}
+			msg := out["error"].(map[string]any)["message"].(string)
+			if !strings.Contains(msg, tc.want) {
+				t.Fatalf("%q 没包含 %q", msg, tc.want)
+			}
+		})
+	}
+
+	// 宿主自己的业务错误要原样透出（四字段 + 码），不能被包成 500。
+	api := officialLiveshareAddSessionsAPI(func(OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error) {
+		return OfficialLiveshareShareSessions{}, OfficialLiveshareNotFound("share 不存在")
+	})
+	status, out := callLiveshare(t, method, body, api)
+	if status != http.StatusNotFound {
+		t.Fatalf("宿主 404 状态 = %d，want 404: %#v", status, out)
+	}
+	if code := out["error"].(map[string]any)["code"]; code != "not_found" {
+		t.Fatalf("码 = %v，want not_found", code)
+	}
+
+	// 越权：403 + permission_denied（四字段里 hint/retryable 仍然齐全）。
+	api = officialLiveshareAddSessionsAPI(func(OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error) {
+		return OfficialLiveshareShareSessions{}, OfficialLiveshareForbidden("跨 owner 的 share 不允许改")
+	})
+	status, out = callLiveshare(t, method, body, api)
+	if status != http.StatusForbidden {
+		t.Fatalf("宿主 403 状态 = %d，want 403: %#v", status, out)
+	}
+	obj := out["error"].(map[string]any)
+	if obj["code"] != "permission_denied" || obj["hint"] == "" || obj["retryable"] != false {
+		t.Fatalf("403 四字段 = %#v", obj)
+	}
+	if len(obj) != 4 {
+		t.Fatalf("错误体必须恰好四字段，得到 %d: %#v", len(obj), obj)
+	}
+
+	// 会话不存在：404 + no_such_session（hint 指向 session.list）。
+	api = officialLiveshareAddSessionsAPI(func(OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error) {
+		return OfficialLiveshareShareSessions{}, OfficialLiveshareSessionNotFound("会话不存在")
+	})
+	status, out = callLiveshare(t, method, body, api)
+	if status != http.StatusNotFound || out["error"].(map[string]any)["code"] != "no_such_session" {
+		t.Fatalf("会话不存在 = %d %#v", status, out)
+	}
+}
+
+// officialLiveshareAddSessionsAPI 只挂 addSessions（其余方法保持未接线）。
+func officialLiveshareAddSessionsAPI(
+	fn func(OfficialLiveshareAddSessionsRequest) (OfficialLiveshareShareSessions, error),
+) OfficialLiveshareAPI {
+	return OfficialLiveshareAPI{AddSessions: fn}
+}
+
+// TestOfficialLiveshareCreateAndListRequireSessionIDs 钉住 rc.2 的两处结构变更：
+// CreatedShare.sessionIds 与 OwnerShareView.sessionIds 都是 required，且主会话在
+// 第一位（`sessionId` 是第一项的派生视图，见 source-sessions.ts:primarySessionIdOf）。
+func TestOfficialLiveshareCreateAndListRequireSessionIDs(t *testing.T) {
+	access := OfficialLiveshareAccess{Mode: "open", Selected: []OfficialLiveshareSelectedIdentity{},
+		DeploymentAllowedSubjectIDs: []string{}, ShareAllowedSubjectIDs: []string{}, IdentityKeyACL: true}
+
+	// create 回包缺 sessionIds → 500（rc.2 起是 required，不再允许只给 sessionId）。
+	api := OfficialLiveshareAPI{Create: func(OfficialLiveshareCreateRequest) (OfficialLiveshareCreatedShare, error) {
+		return OfficialLiveshareCreatedShare{Link: "x", ShareID: "share-1", SessionID: "s-1",
+			SessionMode: "view", Access: access}, nil
+	}}
+	status, out := callLiveshare(t, "liveshareShares.create", `{"request":{"sessionId":"s-1"}}`, api)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("create 缺 sessionIds 状态 = %d，want 500: %#v", status, out)
+	}
+	if msg := out["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "sessionIds") {
+		t.Fatalf("create 缺 sessionIds 正文 = %q", msg)
+	}
+
+	// create 的 sessionIds[0] 必须等于 sessionId（主会话在第一位）。
+	api = OfficialLiveshareAPI{Create: func(OfficialLiveshareCreateRequest) (OfficialLiveshareCreatedShare, error) {
+		return OfficialLiveshareCreatedShare{Link: "x", ShareID: "share-1", SessionID: "s-1", SessionIDs: []string{"s-9"},
+			SessionMode: "view", Access: access}, nil
+	}}
+	status, out = callLiveshare(t, "liveshareShares.create", `{"request":{"sessionId":"s-1"}}`, api)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("create 主会话错位状态 = %d，want 500: %#v", status, out)
+	}
+	if msg := out["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "第一位") {
+		t.Fatalf("create 主会话错位正文 = %q", msg)
+	}
+
+	// list 的每条 share 缺 sessionIds → 500。
+	api = OfficialLiveshareAPI{List: func() (OfficialLiveshareShareList, error) {
+		return OfficialLiveshareShareList{Shares: []OfficialLiveshareShareView{{
+			ShareID: "share-1", SessionID: "s-1", SessionTitle: "标题", Link: "x",
+			CreatedAt: "2026-11-08T12:00:00Z", SessionMode: "view",
+			ViewerCapabilities: []OfficialLiveshareCapability{},
+		}}}, nil
+	}}
+	status, out = callLiveshare(t, "liveshareShares.list", `{}`, api)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("list 缺 sessionIds 状态 = %d，want 500: %#v", status, out)
+	}
+	if msg := out["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "sessionIds") {
+		t.Fatalf("list 缺 sessionIds 正文 = %q", msg)
 	}
 }

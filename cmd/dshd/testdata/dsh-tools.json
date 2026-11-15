@@ -1,7 +1,712 @@
 [
   {
+    "name": "agent_teams_add_member",
+    "description": "Add a member to the team roster. Planning and idle roster rows do not call a model. After approval, the member session starts with its first ready task or explicit message and remains durable for later work.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique member name inside the team."
+        },
+        "role": {
+          "type": "string",
+          "description": "Role of the member (e.g. researcher, engineer, reviewer)."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Optional LLM provider route. Use only when the user explicitly requests a different provider; requires model. Omit to use the configured member route (memberLlmProvider/memberModel) or the captain's current route."
+        },
+        "model": {
+          "type": "string",
+          "description": "Optional model override (used verbatim, including any \"/\" in the id). Omit for the configured memberModel default (paired with memberLlmProvider when set) or the captain's current model."
+        },
+        "reasoning_effort": {
+          "type": "string",
+          "description": "Optional reasoning effort override: one of the target model's supported effort ids, or \"default\" to force its default. When omitted, the captain's effort is inherited only for the same provider/model; a changed route uses the target default."
+        },
+        "executionPrompt": {
+          "type": "string",
+          "description": "Optional member-specific execution prompt. It remains editable while staged."
+        },
+        "tool_policy": {
+          "type": "string",
+          "description": "Optional id of a tool policy declared by the deployment owner (config toolPolicies). It restricts which global tools this member sees and may invoke: a policy allow-list also keeps the four coordination tools, and captain-only tools can never be reopened. Omit for the unchanged default tool set."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_amend_task",
+    "description": "Captain-only controlled contract amendment for one non-terminal quality task: replace a wrong objective/acceptance/verify/inScope/outOfScope when the original contract makes honest completion impossible (for example a verify command that cannot pass, or an inScope that forbids the file the objective names). The amendment is appended to the task's revisions ledger with previous values and the reason, and is rejected once a review/requirements task has passed judgment on this task. Members cannot amend contracts; the implementer re-reads the amended contract before its next quality gate. Lists are full replacements, not deltas.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task whose contract is being amended."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why the current contract is wrong; recorded in the revisions ledger."
+        },
+        "objective": {
+          "type": "string",
+          "description": "Replacement objective."
+        },
+        "acceptance": {
+          "type": "array",
+          "description": "Replacement acceptance criteria (full list, not a delta).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verify": {
+          "type": "array",
+          "description": "Replacement verification commands (full list, not a delta).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "inScope": {
+          "type": "array",
+          "description": "Replacement workspace-relative inScope paths (full list).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "outOfScope": {
+          "type": "array",
+          "description": "Replacement workspace-relative outOfScope paths (full list).",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "reason"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_approve",
+    "description": "Approve and start a staged team plan. Call this only in response to an explicit user approval in a new user turn; never call it during the turn that created or edited the plan. The Web Approve \u0026 Run button uses the same runtime directly.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "confirmation": {
+          "type": "string",
+          "description": "The user's explicit approval statement."
+        }
+      },
+      "required": [
+        "confirmation"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_claim_task",
+    "description": "Members claim their own ready task or read their existing attempt_id. Captains must use reassign_task to assign and wake a member; claim_task does not dispatch work. A member cannot own a second unfinished task. The returned attempt_id is required for updates and becomes stale after retry/reassignment.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "The task id to claim."
+        },
+        "assignee": {
+          "type": "string",
+          "description": "Deprecated: claim_task only supports a member claiming its own task. Captains must use reassign_task."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_create",
+    "description": "Create a team. Use approval=required for a two-phase plan: members and tasks remain unspawned/unclaimed until the user reviews the Web plan and explicitly approves it. Optional profiles expand their configured roster; seed profiles also expand template tasks, while captain profiles leave the graph for the Captain to design. approval=automatic preserves the legacy immediate-execution path.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name for the new team (used as its stable id)."
+        },
+        "description": {
+          "type": "string",
+          "description": "Team purpose / the goal the team will work on."
+        },
+        "profile": {
+          "type": "string",
+          "description": "Optional configured profile name."
+        },
+        "plan": {
+          "type": "object",
+          "description": "Optional complete ordinary-work roster and DAG in one atomic call, instead of separate add_member/create_task rounds. Mutually exclusive with profile. For quality gates use create_task with the explicit quality contract.",
+          "additionalProperties": false,
+          "properties": {
+            "members": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string"
+                  },
+                  "reasoning_effort": {
+                    "type": "string"
+                  },
+                  "tool_policy": {
+                    "type": "string",
+                    "description": "Optional owner-declared tool-policy id for this member."
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            },
+            "tasks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Local reference used by dependencies in this plan; the result maps it to a durable task id."
+                  },
+                  "subject": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "assignee": {
+                    "type": "string"
+                  },
+                  "dependencies": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "subject"
+                ]
+              }
+            }
+          },
+          "required": [
+            "members",
+            "tasks"
+          ]
+        },
+        "approval": {
+          "type": "string",
+          "description": "required stages the plan for explicit user review; automatic starts immediately. Defaults to automatic for API compatibility.",
+          "enum": [
+            "required",
+            "automatic"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_create_task",
+    "description": "Create a task in your team's task list. Use kind=work (default) for research, repository audits and general tasks. kind=review is only a quality gate for an existing implementation/repair task via reviewedTaskId. Every call must include a non-empty subject, including verification and review tasks. Tasks can depend on other tasks (dependencies): a task is only claimable once every dependency is completed. Optionally assign it to a member, who still claims it before working.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "subject": {
+          "type": "string",
+          "description": "Required non-empty title for this task. Never omit it, including for verification or review tasks."
+        },
+        "description": {
+          "type": "string",
+          "description": "What needs to be done, in detail."
+        },
+        "dependencies": {
+          "type": "array",
+          "description": "Task ids this task depends on (must be completed before this task can be claimed).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "assignee": {
+          "type": "string",
+          "description": "Member name when an owner is specified. Omission puts this task in the shared pool; roles, subjects and descriptions do not assign an owner."
+        },
+        "kind": {
+          "type": "string",
+          "description": "Explicit task kind. Omission means work with no quality gates, even if the subject says implementation/review. Quality kinds require a contract. An implementation may be planned before requirements passes when its dependency chain includes that requirements task.",
+          "enum": [
+            "work",
+            "requirements",
+            "implementation",
+            "verification",
+            "review",
+            "repair",
+            "integration"
+          ]
+        },
+        "round": {
+          "type": "number",
+          "description": "1-based review / requirements / repair round."
+        },
+        "objective": {
+          "type": "string",
+          "description": "Required non-empty objective for quality kinds."
+        },
+        "inScope": {
+          "type": "array",
+          "description": "Workspace-relative POSIX paths this task may change.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "outOfScope": {
+          "type": "array",
+          "description": "Workspace-relative POSIX paths this task must not change.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "acceptance": {
+          "type": "array",
+          "description": "Acceptance criteria. Required for quality kinds.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verify": {
+          "type": "array",
+          "description": "Verification commands. Required for implementation/repair.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deliverables": {
+          "type": "array",
+          "description": "Expected deliverable paths or names.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nonGoals": {
+          "type": "array",
+          "description": "Explicit non-goals.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reviewedTaskId": {
+          "type": "string",
+          "description": "Existing AgentTeams implementation/repair task id. Required for kind=review; an external repository audit is kind=work."
+        },
+        "sourceTaskId": {
+          "type": "string",
+          "description": "Source implementation/artifact. Required for kind=repair."
+        },
+        "sourceFindingIds": {
+          "type": "array",
+          "description": "Finding ids this repair must close.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "coverageOf": {
+          "type": "array",
+          "description": "User-constraint / goal items this task covers.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resume": {
+          "type": "boolean",
+          "description": "If true, clear halted in the same lock before creating the task."
+        },
+        "resumeReason": {
+          "type": "string",
+          "description": "Required non-empty reason when resume=true."
+        }
+      },
+      "required": [
+        "subject"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_delete",
+    "description": "End and archive your team: interrupts members and moves the current tasks and mailboxes out of active state for later inspection. Use when the work is done or explicitly abandoned. A same-name archive replaces its previous generation.",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "agent_teams_edit_plan",
+    "description": "Atomically revise an AgentTeams plan. While staged, edit tasks and roster without starting work. While running, only update_task is allowed, and only for pending tasks with no prior attempt: correct dependencies, assignees or descriptions before they start; newly ready work is scheduled after commit. Never edit active/finished attempts. Submit dependent edits in order. Never modify .agent-teams files directly.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "operations": {
+          "type": "array",
+          "description": "One atomic, ordered batch. Running teams allow only update_task for never-started pending tasks. If any operation is invalid, none of the edits are saved.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "update_member",
+                  "update_task",
+                  "add_task",
+                  "remove_task",
+                  "remove_member"
+                ]
+              },
+              "member_name": {
+                "type": "string",
+                "description": "Member name for update_member or remove_member."
+              },
+              "task_id": {
+                "type": "string",
+                "description": "Task id for update_task or remove_task."
+              },
+              "subject": {
+                "type": "string",
+                "description": "Required for add_task; optional replacement for update_task."
+              },
+              "description": {
+                "type": "string",
+                "description": "Optional task description."
+              },
+              "assignee": {
+                "type": "string",
+                "description": "Optional task assignee; an empty string moves it to the shared pool."
+              },
+              "dependencies": {
+                "type": "array",
+                "description": "Complete replacement dependency list for a task.",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "role": {
+                "type": "string",
+                "description": "Optional member role."
+              },
+              "provider": {
+                "type": "string",
+                "description": "Optional member provider; defaults to the current staged route."
+              },
+              "model": {
+                "type": "string",
+                "description": "Optional member model; defaults to the current staged route."
+              },
+              "reasoning_effort": {
+                "type": "string",
+                "description": "Optional member reasoning effort."
+              },
+              "execution_prompt": {
+                "type": "string",
+                "description": "Optional member-specific execution prompt."
+              },
+              "tool_policy": {
+                "type": "string",
+                "description": "Optional owner-declared tool-policy id for this member; an empty string clears it back to the unchanged default tool set."
+              }
+            },
+            "required": [
+              "action"
+            ]
+          }
+        }
+      },
+      "required": [
+        "operations"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_reassign_task",
+    "description": "Atomically retry, reassign, or let the captain take over one ready unfinished/failed task. The old attempt is revoked before its member is interrupted, so late updates cannot overwrite the new owner. Use assignee=\"captain\" only when you will finish that task in this turn; a captain can own only one unfinished takeover at a time, and an unfinished takeover returns to the member pool when the captain becomes idle.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task to retry/reassign."
+        },
+        "assignee": {
+          "type": "string",
+          "description": "Active member name, or \"captain\" for captain takeover."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why the task is being retried or reassigned."
+        }
+      },
+      "required": [
+        "task_id",
+        "assignee"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_remove_member",
+    "description": "Remove a member safely: revoke its current attempts, return all unfinished owned tasks to the shared pending pool, interrupt its live turn, and mark it removed.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the member to remove."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_resume",
+    "description": "Explicitly resume a halted team. Requires a non-empty reason. Does not recreate cancelled tasks; only still-pending work is scheduled.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Why the team is being resumed."
+        }
+      },
+      "required": [
+        "reason"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_send_message",
+    "description": "Send coordination or current-task guidance directly to the captain or a teammate. A running recipient receives it at the next model step; an idle recipient wakes. Messages are durably retained until read. Use task creation/reassignment for a new unit of work, not repeated status nudges.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "source_task_id": {
+          "type": "string",
+          "description": "Sender task, NOT the recipient task. Members include it with source_attempt_id. Captains sending guidance normally omit both source fields."
+        },
+        "source_attempt_id": {
+          "type": "string",
+          "description": "Sender execution capability paired with source_task_id. Stale reports are rejected. Omit for ordinary captain guidance."
+        },
+        "to": {
+          "type": "string",
+          "description": "Recipient: \"captain\" or a member name."
+        },
+        "content": {
+          "type": "string",
+          "description": "The message text."
+        },
+        "from": {
+          "type": "string",
+          "description": "Sender (defaults to the caller: the captain, or the calling member)."
+        }
+      },
+      "required": [
+        "to",
+        "content"
+      ]
+    }
+  },
+  {
+    "name": "agent_teams_status",
+    "description": "Team snapshot: members with live activity and tasks with status/assignee/dependencies/output. Captains also see every team mailbox; members see only their own inbox. Use after mailbox progress deliveries or for an explicit status request. After dispatch, end your turn while members work; do not repeatedly poll.",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "agent_teams_update_task",
+    "description": "Update a task status/output. Members must supply the current attempt_id returned by claim_task; stale attempts are rejected after takeover/reassignment. Terminal results are immutable, but owners and the captain can append acceptanceResults/commandsRun/evidence_note as attributed supplemental evidence, without reclaiming or changing the verdict. A captain must use reassign_task(assignee=\"captain\") before updating active member-owned work.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "The task id to update."
+        },
+        "attempt_id": {
+          "type": "string",
+          "description": "Members must explicitly include the current attempt_id from their assignment/claim in EVERY update, including failed reviews with findings. If omitted, retry with the same current id; omission does not revoke the attempt."
+        },
+        "status": {
+          "type": "string",
+          "description": "New status (in_progress, completed, failed, cancelled).",
+          "enum": [
+            "in_progress",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "output": {
+          "type": "string",
+          "description": "Original result summary; immutable after completion/failure."
+        },
+        "evidence_note": {
+          "type": "string",
+          "description": "Append-only supplementary observation on a terminal task. Does not reopen work or change the original result."
+        },
+        "verdict": {
+          "type": "string",
+          "description": "Required for completing requirements/review. needs_revision and reject must fail the task.",
+          "enum": [
+            "pass",
+            "needs_revision",
+            "reject"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "description": "Structured review findings. Required when verdict is needs_revision or reject; each item needs id, severity, problem, and requiredFix.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "blocker"
+                ]
+              },
+              "problem": {
+                "type": "string"
+              },
+              "requiredFix": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "type": "number"
+              },
+              "resolved": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "severity",
+              "problem",
+              "requiredFix"
+            ]
+          }
+        },
+        "changedPaths": {
+          "type": "array",
+          "description": "Workspace-relative POSIX paths changed by this implementation/repair.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "acceptanceResults": {
+          "type": "array",
+          "description": "Acceptance evidence in contract order: {criterion, status:\"passed\"|\"failed\", evidence?}. Supply one item per acceptance criterion.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "criterion": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "passed",
+                  "failed"
+                ]
+              },
+              "evidence": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "criterion",
+              "status"
+            ]
+          }
+        },
+        "commandsRun": {
+          "type": "array",
+          "description": "Verification evidence in contract order: {command, status:\"passed\"|\"failed\", exitCode?, evidence?}. Supply one item per verify command.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "passed",
+                  "failed"
+                ]
+              },
+              "exitCode": {
+                "type": "number"
+              },
+              "evidence": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command",
+              "status"
+            ]
+          }
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    }
+  },
+  {
     "name": "ask_user_question",
-    "description": "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding.",
+    "description": "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. An answer item with empty selected and no custom means the user skipped that question: continue without it, do not ask it again, and do not treat the skip as permission.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -128,6 +833,23 @@
     }
   },
   {
+    "name": "create_worktree",
+    "description": "Create a new Git branch and worktree from a local commit, branch, or tag, then change this session's working directory to it. Uncommitted files stay in the source checkout. Existing names fail. Use working_directory with cd to leave; the checkout and branch remain.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "New branch name, also used as the checkout directory: a few lowercase words joined by hyphens that describe the task, such as fix-login-retry. Omit to generate a unique name."
+        },
+        "from": {
+          "type": "string",
+          "description": "Local commit, branch, or tag to start from. Defaults to HEAD; no fetch is performed."
+        }
+      }
+    }
+  },
+  {
     "name": "edit",
     "description": "Edit an existing UTF-8 text file by replacing literal text.",
     "parameters": {
@@ -166,22 +888,6 @@
         "file_path",
         "old_string",
         "new_string"
-      ]
-    }
-  },
-  {
-    "name": "exit_plan_mode",
-    "description": "Use only in plan mode. Present your plan for the user's review and, on approval, leave plan mode. The user may approve (carry out the plan from your next step) or keep planning — their feedback comes back in the tool result; revise and present again.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "plan": {
-          "type": "string",
-          "description": "The complete plan, as markdown, starting with a # heading that names it."
-        }
-      },
-      "required": [
-        "plan"
       ]
     }
   },
@@ -461,43 +1167,6 @@
     }
   },
   {
-    "name": "hindsight_list_tags",
-    "description": "List the tags that actually exist in this bank, with how many memories carry each. Use this to DISCOVER families instead of guessing their names: every sibling tool takes a tag as input (hindsight_read_memory_chain expects one 'taken from a recalled memory`s tags'), so a family that never surfaced in a recall is otherwise unreachable. This matters most for per-session story tags (`story:\u003csessionId\u003e`), whose names are uuids no agent can guess. Measured on a real archive: 21 distinct tags, so the whole list is cheap; pass `prefix` (e.g. 'story:') to narrow it. Combine with hindsight_read_memory_chain to then read a whole family.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "prefix": {
-          "type": "string",
-          "description": "only return tags starting with this prefix, e.g. 'story:' (applied client-side; the server ignores its own prefix/ tag/ query params)"
-        },
-        "limit": {
-          "type": "string",
-          "description": "max rows, as a decimal string (default 200; capped at 1000)"
-        },
-        "offset": {
-          "type": "string",
-          "description": "rows to skip, as a decimal string (default 0) — the server pages natively"
-        }
-      }
-    }
-  },
-  {
-    "name": "hindsight_read_chunk",
-    "description": "Read the ORIGINAL text a memory was extracted from, by its chunk_id (recall returns one per row). This is the verbatim layer: the memory you were shown is a summary that has already rewritten the wording, so it cannot settle whether it distorted its source — only the chunk can. Reach for this when a memory states a rule, decision, number, or attribution that you are about to rely on, or when two memories conflict and you need to know which one the source actually supports. Note the chunk may contain several messages, including ones the summary dropped entirely.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "chunk_id": {
-          "type": "string",
-          "description": "the `chunk_id` of a memory, as returned by recall"
-        }
-      },
-      "required": [
-        "chunk_id"
-      ]
-    }
-  },
-  {
     "name": "hindsight_read_knowledge_page",
     "description": "Read the full content of one knowledge page by its id (from hindsight_list_knowledge_pages). Call this whenever a listed page is relevant to what you're about to do — e.g. read Conventions before writing new code, Component map before changing a subsystem, or an initiative's page before continuing that feature. A page may contain [[page:\u003cid\u003e]] links to related pages; follow one by calling this tool again with that id. Prefer reading a page over re-deriving the same understanding from source.",
     "parameters": {
@@ -509,62 +1178,6 @@
       },
       "required": [
         "page_id"
-      ]
-    }
-  },
-  {
-    "name": "hindsight_read_memory",
-    "description": "Read one memory in full by its id, including fields recall does not show (entities, occurred_start/end, document_id, chunk_id, and the raw metadata written at ingest). Use this when the injected memories look incomplete or mutually inconsistent — e.g. two rows describe the same decision with different conclusions, or a row's date is much later than the events it describes. Typically the first step of tracing a chain: read the row you doubt, then follow its chunk_id (hindsight_read_chunk) or its tags (hindsight_read_memory_chain).",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "memory_id": {
-          "type": "string",
-          "description": "the `id` of a memory, as returned by recall or by this tool's siblings"
-        }
-      },
-      "required": [
-        "memory_id"
-      ]
-    }
-  },
-  {
-    "name": "hindsight_read_memory_chain",
-    "description": "Read every memory sharing a tag, instead of only the handful recall ranked highest. Recall returns at most `rerank_max_candidates` rows (5 by default), chosen by topical similarity — so a row that is part of the same story but worded differently (a later correction, a \"this was a test\" note, a qualifier recorded in another session) can be excluded no matter how the query is phrased. When a recalled memory carries a tag that looks like a family (`trap:...`, `project:...`, `bank:...`, or any `key:value`), call this with that tag to see the whole family. Measured: 24 rows retrieved where recall returned 5, reaching a decisive row ranked 70th of 106. If you do not know the family's name, hindsight_list_tags lists what exists.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "tag": {
-          "type": "string",
-          "description": "a single tag, e.g. 'trap:TRAP-A' — taken from a recalled memory's `tags`"
-        },
-        "limit": {
-          "type": "string",
-          "description": "max rows, as a decimal string (default 50; capped at 200)"
-        },
-        "tags_match": {
-          "type": "string",
-          "description": "'all_strict' (default — only rows that really carry the tag) | 'all' (also return rows with no tags at all) | 'any_strict' | 'any' | 'exact'"
-        }
-      },
-      "required": [
-        "tag"
-      ]
-    }
-  },
-  {
-    "name": "hindsight_read_source",
-    "description": "Get the ORIGINAL text behind any memory, automatically following the extra hop that consolidated observations require. Use this instead of hindsight_read_chunk when you do not know whether a row is a raw fact or a merged observation: observations — the layer that carries a project's settled conclusions, and the layer most worth checking — have no chunk_id of their own and point at their source facts instead. This tool walks that hop for you and returns the memory, its source facts, and the first chunk text found. Prefer it when you are checking whether a conclusion is faithful to what was actually recorded.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "memory_id": {
-          "type": "string",
-          "description": "the `id` of a memory, as returned by recall or by hindsight_read_memory_chain"
-        }
-      },
-      "required": [
-        "memory_id"
       ]
     }
   },
@@ -610,17 +1223,17 @@
   },
   {
     "name": "interrupt_agent",
-    "description": "Interrupt one teammate's current turn while preserving its pending inbox. Team Lead only.",
+    "description": "Ask a subagent to stop its current work. This call returns without waiting for it to stop. You can continue a local subagent's conversation later with send_message. External executions stop permanently and cannot receive follow-ups. Subagents it started will keep running.",
     "parameters": {
       "type": "object",
       "properties": {
-        "target": {
+        "agent": {
           "type": "string",
-          "description": "Teammate target returned by spawn_teammate or list_agents."
+          "description": "The name of an agent created under you: your direct child or a deeper descendant."
         }
       },
       "required": [
-        "target"
+        "agent"
       ]
     }
   },
@@ -677,11 +1290,204 @@
     }
   },
   {
+    "name": "kifu_card",
+    "description": "生成与线上注入**同一份**记忆卡（跑十道闸）：给定文本，返回卡片正文、token 数、逐条 claim 与闸门结论。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "要查的文本（用户这句话 / 报错原文 / 主题词）。空串会被拒。"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "description": "返回条数上限（会被夹紧到 1–50）。"
+        },
+        "budgetTokens": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 2000
+        },
+        "scope": {
+          "type": "string",
+          "description": "作用域键（w:…）。不传 = 不限域；传了就只返回该域可见内容（A5 同语义）。"
+        },
+        "gates": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "kifu_get",
+    "description": "按 id 取一条记录（kinds: episodes/topics/claims/links/threads/joseki/adjudications）。只读。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "episodes",
+            "topics",
+            "claims",
+            "links",
+            "threads",
+            "joseki",
+            "adjudications"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "description": "记录 id（如 c-xxxxxxxx / ep-xxxxxxxx / t:…）。"
+        },
+        "dshHome": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "kifu_recent_failures",
+    "description": "最近的失败原文（按 occurredAt 倒序，带 ep+seq 出处）：用来\"先取已付过代价的失败\"。只读、零模型。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "description": "返回条数上限（会被夹紧到 1–50）。"
+        },
+        "scope": {
+          "type": "string",
+          "description": "作用域键（w:…）。不传 = 不限域；传了就只返回该域可见内容（A5 同语义）。"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "kifu_search",
+    "description": "按文本找相关记忆（轻量命中列表：棋谱 + seq + 种类 + 权重 + 命中理由）。只读、零模型。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "要查的文本（用户这句话 / 报错原文 / 主题词）。空串会被拒。"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "description": "返回条数上限（会被夹紧到 1–50）。"
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2
+        },
+        "scope": {
+          "type": "string",
+          "description": "作用域键（w:…）。不传 = 不限域；传了就只返回该域可见内容（A5 同语义）。"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "kifu_stats",
+    "description": "记忆库概览：棋谱/主题/claim/边/卷/定式的条数 + 最新时间。只读、零模型。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "dshHome": {
+          "type": "string",
+          "description": "可选：记忆库所在的 DSH_HOME（默认取环境变量）。"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "kifu_view",
+    "description": "以某个节点为中心的**邻域视图**（18×18 ≈ 324 节点）：返回中心 + 相连节点/边，边界边进 frontier；不够时顺着 frontier 再调一次。只读、零模型。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "episode",
+            "claim",
+            "library"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "description": "中心节点 id（如 ep-xxxxxxxx / c-xxxxxxxx / lib:docs/调研）。"
+        },
+        "maxNodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 324
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "scope": {
+          "type": "string",
+          "description": "作用域键（w:…）。不传 = 不限域；传了就只返回该域可见内容（A5 同语义）。"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "list_agents",
-    "description": "List the Lead and every durable teammate with an addressable target and current availability. inactive means no turn is executing, not a task result. provisioning and failed describe member creation.",
+    "description": "List your entire subagent tree: the root agent and all reachable continuable descendants, including yourself. Rows carry names, descriptions, and status. A descendant's name is its path from the root, such as reviewer/checker. You can message any other agent in the subagent tree. running means it is working; inactive means no turn is executing; it does not indicate task completion, success, or failure. corrupt, unsupported, or unavailable means this row's own descendants could not be read; the row itself is still a member you can message. While you remain active, you will be notified when a direct child finishes; there is no need to keep checking its status. Use send_message to continue the conversation.",
     "parameters": {
       "type": "object",
       "properties": {}
+    }
+  },
+  {
+    "name": "list_subagent_models",
+    "description": "Inspect the routes available for explicit subagent model selection. No arguments: authorized providers. `provider`: that provider's authorized models. `provider` + `model`: that model and its reasoning efforts. Query when choosing an explicit child route or reasoning effort. Omit optional fields rather than sending empty strings.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Registered LLM provider id."
+        },
+        "model": {
+          "type": "string",
+          "description": "Exact model id; requires provider."
+        }
+      }
     }
   },
   {
@@ -694,7 +1500,7 @@
   },
   {
     "name": "present",
-    "description": "Declare existing files as final deliverables for the user. Use it when the user needs a separate file, especially Office documents, spreadsheets, and slide decks; prefer your final response when that suffices. The user opens the current files; their contents are not copied.",
+    "description": "Declare existing files as final deliverables for the user. Hosts may show presented files only after your turn ends, so call it once the files are final. If the user needs to review files earlier, such as before a tool call that waits for their answer, link them in your message instead. Use it when the user needs a separate file, especially Office documents, spreadsheets, and slide decks; prefer your final response when that suffices. The user opens the current files; their contents are not copied.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -722,6 +1528,51 @@
       },
       "required": [
         "files"
+      ]
+    }
+  },
+  {
+    "name": "pwsh",
+    "description": "Execute a PowerShell command (`pwsh -Command`) and return its stdout/stderr. Each call runs in a fresh pwsh process; pass `workdir` instead of using `cd`. Paths use native Windows form (`C:\\...`); read environment variables with `$env:NAME`. Managed `$env:DSH_*` variables expose current harness environment facts. Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. On Windows a force-killed command settles as `[exit code: 1]` without a signal marker — treat it as an interruption, not a command failure. Provide `description` before `command` in the arguments. Before any delete or move, verify that the resolved absolute target path is the intended one; never run it against a computed path you have not checked. Do not assign to automatic variables such as `$HOME`; variable names are case-insensitive, so `$home` is the same read-only variable. Commands may run under a file sandbox; a blocked file operation is reported as `[sandbox: file access denied under \u003cmode\u003e mode]`, a policy denial: do not retry another way. Under the Windows sandbox, read-only pwsh runs in PowerShell ConstrainedLanguage mode, while workspace-write stays in FullLanguage unless host policy says otherwise. In read-only, prefer cmdlets and core types (`[string]`, `[datetime]`, `[regex]`, `[guid]`); .NET static calls (`[System.IO.*]::`, `[math]::`), `Add-Type`, COM objects, and reflection fail with \"only core types\" errors. `-f` formatting, property access, and core cmdlets work. In both confined modes, programs cannot open named pipes, so a command that captures another program's output through piped stdio (Node.js `child_process.spawn`/`exec` with the default `stdio: 'pipe'`) fails with EPERM, while `stdio: 'inherit'` and `stdio: 'ignore'` spawns work and PowerShell's own pipelines are unaffected. That EPERM is the documented boundary: do not retry the command another way — escalate the exact command once or restructure it to avoid capturing output.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples: \"ls\" → \"List files in current directory\"; \"git status\" → \"Show working tree status\"; \"Get-Process\" → \"List running processes\"."
+        },
+        "command": {
+          "type": "string",
+          "description": "The PowerShell command to execute."
+        },
+        "timeoutMs": {
+          "type": "number",
+          "description": "Timeout in milliseconds. The executor applies its configured default and cap; on expiry the command moves to the background as a job instead of being killed."
+        },
+        "workdir": {
+          "type": "string",
+          "description": "Working directory for this command. Defaults to the session workspace; a relative path is resolved against it."
+        },
+        "run_in_background": {
+          "type": "boolean",
+          "description": "Run in the background and return a job id immediately (collect with job_output, stop with job_kill). No timeout applies."
+        },
+        "sandbox_permissions": {
+          "type": "string",
+          "description": "The narrowest wider sandbox mode for a one-shot retry of the exact command the sandbox just denied; the retry asks the user for approval.",
+          "enum": [
+            "workspace-write",
+            "danger-full-access"
+          ]
+        },
+        "justification": {
+          "type": "string",
+          "description": "Required with sandbox_permissions: one sentence for the user explaining why this exact command needs the wider access. Use the language of the user’s current request."
+        }
+      },
+      "required": [
+        "description",
+        "command"
       ]
     }
   },
@@ -775,264 +1626,124 @@
   },
   {
     "name": "schedule_create",
-    "description": "Create a reminder in the current session that delivers prompt when it becomes due. Supply exactly one timing parameter: after_seconds, at, every_seconds, daily, weekly, or cron. Local times that do not exist in the zone are skipped; repeated local times fire once, at the earlier instant. After downtime, a recurring reminder delivers only its latest missed occurrence. Delivery can repeat after a crash.",
+    "description": "Create a scheduled task. At each occurrence of rrule, prompt is delivered to the target session as a scheduled message from the user. The result includes the task id and the next occurrence as scheduledAt in UTC and scheduledAtLocal in the zone of rrule. After downtime, only the latest missed occurrence is delivered. Delivery can repeat after a crash.",
     "parameters": {
       "type": "object",
       "properties": {
-        "prompt": {
-          "type": "string",
-          "description": "Reminder content to present when the target becomes due."
-        },
         "title": {
           "type": "string",
-          "description": "Concise task name in the user's language, at most 120 characters. Name only the core action and subject; keep essential target identifiers such as PR numbers and branch names. Do not include execution frequency (e.g. daily, hourly), scheduled dates/times, time zones, task status, or configuration and execution details (e.g. read-only mode, profile-tag filters), even when embedded in the requested or existing title. Do not append parenthetical notes. Put scheduling information in the timing parameters and execution instructions in prompt."
+          "description": "Task name of at most 120 characters in the user's language: action plus object. Omit timing, status, ids, and bracketed suffixes."
         },
-        "after_seconds": {
-          "type": "number",
-          "description": "Delay in whole seconds."
+        "prompt": {
+          "type": "string",
+          "description": "Instruction delivered at each occurrence."
         },
-        "every_seconds": {
-          "type": "number",
-          "description": "Fixed-rate interval in whole seconds, at least 60, aligned to the creation time; changing it with schedule_update re-aligns it to the save time."
+        "rrule": {
+          "type": "string",
+          "description": "Supported RFC 5545 subset: one DTSTART line, a newline, and one RRULE line. DTSTART ends in Z for UTC or carries TZID with an IANA time zone; a fixed offset such as UTC+5 is Etc/GMT-5, with the sign reversed. DTSTART must name an existing local time. A TZID rule keeps local clock time across daylight-saving changes; generated nonexistent local times are skipped, and repeated ones occur once, at the earlier instant. DTSTART may be in the past; delivery starts with the first occurrence after creation. A one-time delivery is RRULE:FREQ=DAILY;COUNT=1. No SECONDLY; BYSECOND takes one value. COUNT is at most 1000; use UNTIL for longer rules. MINUTELY and HOURLY accept no BY parts, so select clock times with DAILY or WEEKLY plus BYHOUR and BYMINUTE. BYMONTHDAY and ordinal BYDAY require MONTHLY or YEARLY; BYYEARDAY and BYWEEKNO require YEARLY. Ordinal BYDAY cannot combine with BYWEEKNO. Each FREQ period allows at most 10080 candidates before BYSETPOS, which accepts at most 31 values. UNTIL is a UTC instant ending in Z. Example: \"DTSTART;TZID=Asia/Singapore:20260901T080000\\nRRULE:FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1\""
         },
-        "daily": {
-          "type": "object",
-          "description": "Every day at a local time.",
-          "additionalProperties": false,
-          "properties": {
-            "time": {
-              "type": "string",
-              "description": "HH:mm:ss with optional 1-3 fractional digits, for example 23:00:00."
-            },
-            "time_zone": {
-              "type": "string",
-              "description": "UTC or IANA Area/Location, for example Asia/Shanghai."
-            }
-          },
-          "required": [
-            "time",
-            "time_zone"
+        "target": {
+          "type": "string",
+          "description": "this_session delivers to this session; new_once delivers to the same new session every time, opened at the first delivery; new opens a different new session for every delivery. New sessions use this session's working directory and preset. With this_session or new_once, a delivery waits until the previous one finishes, and only the latest occurrence that passed meanwhile is delivered. Use this_session for reminders and for follow-ups to this conversation; use new_once or new for independent work, such as a recurring report, and whenever the user asks for a new conversation.",
+          "enum": [
+            "this_session",
+            "new_once",
+            "new"
           ]
-        },
-        "weekly": {
-          "type": "object",
-          "description": "On the given weekdays at a local time.",
-          "additionalProperties": false,
-          "properties": {
-            "time": {
-              "type": "string",
-              "description": "HH:mm:ss with optional 1-3 fractional digits, for example 09:00:00."
-            },
-            "time_zone": {
-              "type": "string",
-              "description": "UTC or IANA Area/Location, for example Asia/Shanghai."
-            },
-            "weekdays": {
-              "type": "array",
-              "description": "ISO weekdays, Monday 1 through Sunday 7, without repetitions.",
-              "items": {
-                "type": "integer"
-              }
-            }
-          },
-          "required": [
-            "time",
-            "time_zone",
-            "weekdays"
-          ]
-        },
-        "cron": {
-          "type": "object",
-          "description": "Five-field Vixie cron expression in a time zone.",
-          "additionalProperties": false,
-          "properties": {
-            "expression": {
-              "type": "string",
-              "description": "minute hour day-of-month month day-of-week, for example \"*/15 9-17 * * 1-5\". When both day fields are restricted, a date matches if either one matches."
-            },
-            "time_zone": {
-              "type": "string",
-              "description": "UTC or IANA Area/Location, for example Asia/Shanghai."
-            }
-          },
-          "required": [
-            "expression",
-            "time_zone"
-          ]
-        },
-        "at": {
-          "oneOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "date": {
-                  "type": "string"
-                },
-                "time": {
-                  "type": "string"
-                },
-                "time_zone": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "date",
-                "time",
-                "time_zone"
-              ]
-            }
-          ],
-          "description": "Absolute target: an RFC 3339 date-time with offset, or a local date, time, and IANA time_zone."
         }
       },
       "required": [
+        "title",
         "prompt",
-        "title"
+        "rrule",
+        "target"
       ]
     }
   },
   {
-    "name": "schedule_delete",
-    "description": "Delete a reminder in the current session, active or inactive. Deletion does not retract a reminder message that is already queued.",
+    "name": "schedule_edit",
+    "description": "Update, pause, resume, or delete one scheduled task by id. Deleting does not retract queued messages.",
     "parameters": {
       "type": "object",
       "properties": {
         "id": {
           "type": "string",
-          "description": "Exact schedule id."
+          "description": "Task id."
+        },
+        "action": {
+          "type": "string",
+          "description": "update applies the provided fields, at least one; delete removes the task.",
+          "enum": [
+            "update",
+            "delete"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "description": "Task name of at most 120 characters in the user's language: action plus object. Omit timing, status, ids, and bracketed suffixes."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "New instruction delivered at each occurrence."
+        },
+        "rrule": {
+          "type": "string",
+          "description": "New recurrence in the schedule_create rrule format."
+        },
+        "target": {
+          "type": "string",
+          "description": "Omit to retain the destination and its creation settings. Providing target replaces them; new_once reserves a different Session. New targets capture this Session's working directory and preset. Choices are the same as schedule_create.",
+          "enum": [
+            "this_session",
+            "new_once",
+            "new"
+          ]
+        },
+        "active": {
+          "type": "boolean",
+          "description": "false pauses the task; true resumes only if its timing has a future occurrence. Otherwise provide a new rrule."
+        },
+        "expectedUpdatedAt": {
+          "type": "string",
+          "description": "updatedAt from the latest result that returned this task; if the task changed after that result, the result is schedule_conflict and nothing changes."
         }
       },
       "required": [
-        "id"
+        "id",
+        "action"
       ]
     }
   },
   {
     "name": "schedule_list",
-    "description": "List the active reminders in the current session.",
+    "description": "List scheduled tasks, including tasks created from other sessions. Active tasks come first, ordered by scheduledAt.",
     "parameters": {
       "type": "object",
-      "properties": {}
+      "properties": {
+        "active": {
+          "type": "boolean",
+          "description": "true for active tasks only; false for paused and ended tasks only; omitted for all tasks."
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Page size from 1 to 500; defaults to 100."
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Number of tasks to skip; defaults to 0."
+        }
+      }
     }
   },
   {
-    "name": "schedule_update",
-    "description": "Change a reminder in place, keeping its id. Supply a new title, prompt, or at most one timing parameter; omitted fields keep their stored values. To change a relative delay, create a new reminder.",
+    "name": "schedule_view",
+    "description": "View one scheduled task by id.",
     "parameters": {
       "type": "object",
       "properties": {
         "id": {
           "type": "string",
-          "description": "Schedule id returned by schedule_list."
-        },
-        "title": {
-          "type": "string",
-          "description": "New task name; follow the schedule_create title rules."
-        },
-        "prompt": {
-          "type": "string",
-          "description": "New reminder content."
-        },
-        "every_seconds": {
-          "type": "number",
-          "description": "Fixed-rate interval in whole seconds, at least 60, aligned to the creation time; changing it with schedule_update re-aligns it to the save time."
-        },
-        "daily": {
-          "type": "object",
-          "description": "Every day at a local time.",
-          "additionalProperties": false,
-          "properties": {
-            "time": {
-              "type": "string",
-              "description": "HH:mm:ss with optional 1-3 fractional digits, for example 23:00:00."
-            },
-            "time_zone": {
-              "type": "string",
-              "description": "UTC or IANA Area/Location, for example Asia/Shanghai."
-            }
-          },
-          "required": [
-            "time",
-            "time_zone"
-          ]
-        },
-        "weekly": {
-          "type": "object",
-          "description": "On the given weekdays at a local time.",
-          "additionalProperties": false,
-          "properties": {
-            "time": {
-              "type": "string",
-              "description": "HH:mm:ss with optional 1-3 fractional digits, for example 09:00:00."
-            },
-            "time_zone": {
-              "type": "string",
-              "description": "UTC or IANA Area/Location, for example Asia/Shanghai."
-            },
-            "weekdays": {
-              "type": "array",
-              "description": "ISO weekdays, Monday 1 through Sunday 7, without repetitions.",
-              "items": {
-                "type": "integer"
-              }
-            }
-          },
-          "required": [
-            "time",
-            "time_zone",
-            "weekdays"
-          ]
-        },
-        "cron": {
-          "type": "object",
-          "description": "Five-field Vixie cron expression in a time zone.",
-          "additionalProperties": false,
-          "properties": {
-            "expression": {
-              "type": "string",
-              "description": "minute hour day-of-month month day-of-week, for example \"*/15 9-17 * * 1-5\". When both day fields are restricted, a date matches if either one matches."
-            },
-            "time_zone": {
-              "type": "string",
-              "description": "UTC or IANA Area/Location, for example Asia/Shanghai."
-            }
-          },
-          "required": [
-            "expression",
-            "time_zone"
-          ]
-        },
-        "at": {
-          "oneOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "date": {
-                  "type": "string"
-                },
-                "time": {
-                  "type": "string"
-                },
-                "time_zone": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "date",
-                "time",
-                "time_zone"
-              ]
-            }
-          ],
-          "description": "Absolute target: an RFC 3339 date-time with offset, or a local date, time, and IANA time_zone."
+          "description": "Task id."
         }
       },
       "required": [
@@ -1042,22 +1753,42 @@
   },
   {
     "name": "send_message",
-    "description": "Send one message to another Team member. A running target receives it at the nearest step boundary; an inactive target starts or resumes a turn.",
+    "description": "Send a message to an agent. A working agent receives it at its next step; an idle agent starts a new turn with it. Returns delivery confirmation.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string",
+          "description": "The name of another agent in your subagent tree, as shown by list_agents."
+        },
+        "message": {
+          "type": "string",
+          "description": "The message to deliver to the agent."
+        }
+      },
+      "required": [
+        "agent",
+        "message"
+      ]
+    }
+  },
+  {
+    "name": "sidebar_open",
+    "description": "Open a local file, a local folder, or an HTTP(S) page in the sidebar of the calling conversation. A file opens in the sidebar editor (per-path dedupe: an already-open file is focused); a folder opens a file window whose tree is rooted at that folder; a URL opens in the sidebar browser (sandboxed iframe). The panel auto-expands for content opens and the tab title defaults to the file/folder name or the URL hostname. The path may be absolute or relative to the session working directory. The open lands in the CALLING session's sidebar: while that session's sidebar view is not connected (e.g. the session is not the active one), the open is queued and delivered when the session sidebar is next shown — the result reports `delivered` so you know whether it is visible right now. The side card setting \"model opens files/folders/pages in the sidebar\" must be on, and the target tab type must be enabled in that session's settings.",
     "parameters": {
       "type": "object",
       "properties": {
         "target": {
           "type": "string",
-          "description": "Member target returned by spawn_teammate or list_agents, including lead."
+          "description": "Absolute or session-cwd-relative local path, or an http:// / https:// URL."
         },
-        "message": {
+        "title": {
           "type": "string",
-          "description": "Self-contained message for the target."
+          "description": "Optional tab title (defaults to the file/folder name or the URL hostname)."
         }
       },
       "required": [
-        "target",
-        "message"
+        "target"
       ]
     }
   },
@@ -1078,42 +1809,8 @@
     }
   },
   {
-    "name": "spawn_teammate",
-    "description": "Create one named, durable teammate. Only the Team Lead may call this tool.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "Unique lower-kebab-case teammate name."
-        },
-        "description": {
-          "type": "string",
-          "description": "Short description of the delegated responsibility."
-        },
-        "prompt": {
-          "type": "string",
-          "description": "Complete initial task for the teammate."
-        },
-        "context": {
-          "type": "string",
-          "description": "fresh starts without Lead history; fork inherits completed Lead turns. Defaults to fresh.",
-          "enum": [
-            "fresh",
-            "fork"
-          ]
-        }
-      },
-      "required": [
-        "name",
-        "description",
-        "prompt"
-      ]
-    }
-  },
-  {
     "name": "subagent",
-    "description": "Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. This tool starts an independently managed subagent and immediately returns its id. The runtime notifies you when it finishes. The child reports results with `send_message`; use `send_message` to steer it while running or continue its conversation after it finishes.",
+    "description": "Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. This tool starts an independently managed subagent and immediately returns its name. If you are still online when it finishes, the runtime automatically delivers its completion notice. The notice includes the final answer unless the child sent you a message just before finishing. Use `send_message` to steer it while running or continue its conversation after it finishes. Omit `provider`, `model`, and `reasoning_effort` to use child defaults, falling back to compatible parent values.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -1123,11 +1820,27 @@
         },
         "description": {
           "type": "string",
-          "description": "A short (3-5 word) description of the delegated task, for display."
+          "description": "A short (3-5 word) description of the delegated task, for display. Use the language of the user's current request."
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional short name for the subagent, unique among the subagents you create: lower-case letters, digits, and hyphens, starting with a letter, at most 32 characters; lead is reserved for the root agent. Omitted names default to agent-1, agent-2, and so on."
         },
         "prompt": {
           "type": "string",
           "description": "The complete, self-contained task for the subagent. It does not share this conversation's context, so include everything it needs."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Child LLM provider id; requires `model`."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model id within that provider; requires `provider`."
+        },
+        "reasoning_effort": {
+          "type": "string",
+          "description": "Reasoning effort id; requires `provider` and `model`. Omit to use the selected model's default, even when it matches the parent or configured route."
         }
       },
       "required": [
@@ -1138,7 +1851,7 @@
   },
   {
     "name": "subagent_fork",
-    "description": "Delegate a task to a subagent that inherits this conversation: a child agent seeded with all completed turns so far (it does not see the current in-flight turn). Use this when the subtask builds on this conversation's context — a follow-up analysis, a review, a continuation — without consuming this conversation's context for the work itself. You receive its result, not its intermediate steps. This tool starts an independently managed subagent and immediately returns its id. The runtime notifies you when it finishes. The child reports results with `send_message`; use `send_message` to steer it while running or continue its conversation after it finishes.",
+    "description": "Delegate a task to a subagent that inherits this conversation: a child agent seeded with all completed turns so far (it does not see the current in-flight turn). Use this when the subtask builds on this conversation's context — a follow-up analysis, a review, a continuation — without consuming this conversation's context for the work itself. You receive its result, not its intermediate steps. This tool starts an independently managed subagent and immediately returns its name. If you are still online when it finishes, the runtime automatically delivers its completion notice. The notice includes the final answer unless the child sent you a message just before finishing. Use `send_message` to steer it while running or continue its conversation after it finishes.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -1148,7 +1861,11 @@
         },
         "description": {
           "type": "string",
-          "description": "A short (3-5 word) description of the delegated task, for display."
+          "description": "A short (3-5 word) description of the delegated task, for display. Use the language of the user's current request."
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional short name for the subagent, unique among the subagents you create: lower-case letters, digits, and hyphens, starting with a letter, at most 32 characters; lead is reserved for the root agent. Omitted names default to agent-1, agent-2, and so on."
         },
         "prompt": {
           "type": "string",
@@ -1229,7 +1946,11 @@
         },
         "owner": {
           "type": "string",
-          "description": "Optional member target from spawn_teammate or list_agents, matching ownerName; use unowned for tasks without an owner."
+          "description": "Optional owner agent name filter; cannot be combined with unowned."
+        },
+        "unowned": {
+          "type": "boolean",
+          "description": "Filter tasks by whether they have no owner; cannot be combined with owner."
         },
         "ready": {
           "type": "boolean",
@@ -1298,7 +2019,7 @@
         },
         "owner": {
           "type": "string",
-          "description": "Member target from spawn_teammate or list_agents for Lead-only reassign; omit to unassign."
+          "description": "Agent name of the root or any continuable descendant for root-only reassign; omit to unassign."
         }
       },
       "required": [
@@ -1408,7 +2129,7 @@
   },
   {
     "name": "wait_agent",
-    "description": "Wait for the next teammate status, message, or shared-task change after this call starts. This never wakes inactive members and returns noProgress immediately when no other member is running or provisioning. Re-list after wakeup or timeout instead of polling.",
+    "description": "Wait for input at your next step, including agent messages, completion notifications, and user steering. Returns immediately if new input is pending. `timedOut: false` means new input is pending. Pending input is delivered to the model after code execution finishes.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -1421,7 +2142,7 @@
   },
   {
     "name": "watch_ack",
-    "description": "Mark an issue/PR as handled: adds the ack label on GitHub (主理鱼:已处理 by default) and advances the local watermark, so the same item will never wake this session again — even after a restart or on another machine.",
+    "description": "Mark an issue/PR as handled: adds the ack label (主理鱼:已处理 by default on GitHub, 主理鱼-已处理 on Gitee) and advances the local watermark, so the same item will never wake this session again — even after a restart or on another machine.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -1430,16 +2151,31 @@
           "description": "owner/name; defaults to the only watched repo"
         },
         "number": {
-          "type": "number",
-          "description": "issue or PR number"
+          "type": [
+            "number",
+            "string"
+          ],
+          "description": "issue or PR number（Gitee 的编号是字符串，如 IKSQJH）"
         },
         "numbers": {
           "type": "string",
-          "description": "逗号分隔的多个编号，如 \"12,13,14\"（与 number 二选一）"
+          "description": "逗号分隔的多个编号，如 \"12,13,14\"（number 与 numbers 至少填一个）"
         },
         "label": {
           "type": "string",
-          "description": "ack label, default 主理鱼:已处理"
+          "description": "ack label, default 主理鱼:已处理 on GitHub / 主理鱼-已处理 on Gitee"
+        },
+        "note": {
+          "type": "string",
+          "description": "可选：一句话记下这条最后怎么处理的（如「已修，见 #57」「不修，上游已修」）。下次这条再被叫醒时会带回来，省得会话重新判一遍。"
+        },
+        "comment": {
+          "type": "boolean",
+          "description": "把 note 作为评论回写到原 issue/PR（默认 false）。必须同时给 note；这是显式写操作。"
+        },
+        "kind": {
+          "type": "string",
+          "description": "Gitee 评论回写时的条目类型：'issue'（默认）或 'pull'；GitHub 不需要。"
         },
         "format": {
           "type": "string",
@@ -1450,7 +2186,7 @@
   },
   {
     "name": "watch_doctor",
-    "description": "Self-check the watchers: gh login, repo access, ack label existence, isolation workdir. Read-only; prints a checklist.",
+    "description": "Self-check the watchers: gh login, repo access, ack label existence, isolation workdir. Prints a checklist. It does not change any watcher config, but it does write one temporary probe file inside the isolation workdir (and deletes it immediately) to prove the directory is writable.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -1467,13 +2203,13 @@
   },
   {
     "name": "watch_start",
-    "description": "Watch a GitHub repository and wake THIS session when its issues or pull requests change. Idempotent per (repo, session). Default interval 60 s, minimum 30 s.",
+    "description": "Watch a repository and wake THIS session when its issues or pull requests change. Works with GitHub (owner/name) and Gitee (prefix with gitee:, e.g. gitee:owner/name; a gitee.com URL also works). Pass several repos in one call separated by spaces or commas to create several watchers at once. Idempotent per (repo, session). Default interval 60 s, minimum 30 s.",
     "parameters": {
       "type": "object",
       "properties": {
         "repo": {
           "type": "string",
-          "description": "owner/name. Omit to infer from the current working directory."
+          "description": "owner/name (GitHub) 或 gitee:owner/name（Gitee）；多个用空格或逗号分隔。Omit to infer from the current working directory."
         },
         "intervalSec": {
           "type": "number",
@@ -1495,6 +2231,10 @@
           "type": "string",
           "description": "With onlyAssigned: require this login."
         },
+        "allowAuthors": {
+          "type": "array",
+          "description": "只要这些人提的（GitHub 登录名，可带 @）。空 = 谁都算。用来挡掉别人随手提的 issue。"
+        },
         "observe": {
           "type": "boolean",
           "description": "Observe only: record what WOULD be woken, never wake."
@@ -1510,6 +2250,10 @@
         "activeHours": {
           "type": "string",
           "description": "Wake only inside this window, e.g. \"09:00-23:00\" (supports overnight)."
+        },
+        "resume": {
+          "type": "boolean",
+          "description": "Only when the watcher is paused: resume it (default true). Pass false to change config while keeping it paused."
         },
         "format": {
           "type": "string",
@@ -1541,7 +2285,11 @@
         },
         "ackLabel": {
           "type": "string",
-          "description": "Label used as the handled marker (default 主理鱼:已处理). Two sessions watching the same repo share it unless each sets its own."
+          "description": "Label used as the handled marker (default 主理鱼:已处理 on GitHub / 主理鱼-已处理 on Gitee). Two sessions watching the same repo share it unless each sets its own."
+        },
+        "priority": {
+          "type": "object",
+          "description": "Priority switches; only explicitly supplied keys are changed. Boolean keys: reopened, comments, labels, unassigned, stale. Defaults: reopened/comments/labels=true; unassigned/stale=false. additionalProperties are unrestricted."
         }
       }
     }
@@ -1561,13 +2309,17 @@
   },
   {
     "name": "watch_stop",
-    "description": "Stop watching a repository for the current session.",
+    "description": "Stop watching a repository for the current session. By default this pauses it and keeps its state; pass delete:true to remove it and leave a tombstone.",
     "parameters": {
       "type": "object",
       "properties": {
         "repo": {
           "type": "string",
           "description": "owner/name"
+        },
+        "delete": {
+          "type": "boolean",
+          "description": "Delete the watcher and persist a tombstone instead of only pausing it (default false)."
         },
         "format": {
           "type": "string",
@@ -1590,14 +2342,20 @@
           "description": "owner/name; defaults to the only watched repo"
         },
         "number": {
-          "type": "number",
+          "type": [
+            "number",
+            "string"
+          ],
           "description": "issue or PR number to trace"
         },
         "format": {
           "type": "string",
           "description": "'text' (default) or 'json'."
         }
-      }
+      },
+      "required": [
+        "number"
+      ]
     }
   },
   {
@@ -1624,7 +2382,7 @@
       "properties": {
         "queries": {
           "type": "array",
-          "description": "1–4 search queries; their results are merged.",
+          "description": "1–10 search queries; their results are merged.",
           "items": {
             "type": "string"
           }

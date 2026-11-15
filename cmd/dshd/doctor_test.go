@@ -35,7 +35,7 @@ func TestDoctorReportsConcreteDetail(t *testing.T) {
 	var buf bytes.Buffer
 	rep.Render(&buf)
 	out := buf.String()
-	if !strings.Contains(out, "dshd doctor") {
+	if !strings.Contains(out, "dsh-go doctor") {
 		t.Fatalf("报告要有标题: %q", out)
 	}
 	// 网关不通时报告里要有 ✗ 和那条 base
@@ -168,7 +168,7 @@ func TestDoctorPointsAtLastLogError(t *testing.T) {
 		`{"level":"INFO","msg":"会话开始","session":"s1"}`,
 		`{"level":"WARN","msg":"工具调用失败","tool":"read","error":"/x 不存在"}`,
 	}
-	path := filepath.Join(dir, "dshd-2026-11-03.log")
+	path := filepath.Join(dir, "dsh-go-2026-11-03.log")
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestDoctorPointsAtLastLogError(t *testing.T) {
 	if !strings.Contains(c.Next, "/x 不存在") {
 		t.Fatalf("要带出最后一条错误原文: %q", c.Next)
 	}
-	if !strings.Contains(c.Next, "dshd-2026-11-03.log") {
+	if !strings.Contains(c.Next, "dsh-go-2026-11-03.log") {
 		t.Fatalf("要指到文件: %q", c.Next)
 	}
 }
@@ -242,7 +242,7 @@ func TestDiagFailsWhenLogFileReadOnly(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "dshd-"+time.Now().Format("2006-01-02")+".log")
+	path := filepath.Join(dir, "dsh-go-"+time.Now().Format("2006-01-02")+".log")
 	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

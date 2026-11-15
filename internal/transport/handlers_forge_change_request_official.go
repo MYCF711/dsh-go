@@ -35,6 +35,42 @@ type OfficialForgeChangeRequestCheck struct {
 	Workflow    *string `json:"workflow"`
 	StartedAt   *string `json:"startedAt"`
 	CompletedAt *string `json:"completedAt"`
+	// Rerun 是官方 rc.2 新增的**必填**字段：该 check 的重跑身份（branded
+	// ForgeCheckId），provider 不能重跑时必须是 JSON null。官方语义：同一身份
+	// 的 checks 一起重跑，它们的失败项在没有任何一项 pending 时可重跑。
+	Rerun *string `json:"rerun"`
+}
+
+// OfficialForgeChangeRequestReviewer 是官方 ChangeRequestReviewer（rc.2 的
+// `reviewers[]` 元素）。kind 取 user/bot/team；login 对 team 是
+// `organization/slug`。
+type OfficialForgeChangeRequestReviewer struct {
+	Kind        string  `json:"kind"`
+	Login       string  `json:"login"`
+	AvatarURL   *string `json:"avatarUrl"`
+	Requested   bool    `json:"requested"`
+	CodeOwner   bool    `json:"codeOwner"`
+	Verdict     *string `json:"verdict"`
+	ReviewedSHA *string `json:"reviewedSha"`
+}
+
+// OfficialForgeRepository 是官方 ForgeRepository（`{forge,host,owner,name}`，
+// 不含 change request 号）。
+type OfficialForgeRepository struct {
+	Forge string `json:"forge"`
+	Host  string `json:"host"`
+	Owner string `json:"owner"`
+	Name  string `json:"name"`
+}
+
+// OfficialForgeChangeRequestIssue 是官方 ChangeRequestIssue（rc.2 的
+// `closingIssues[]` 元素）。
+type OfficialForgeChangeRequestIssue struct {
+	Repository OfficialForgeRepository `json:"repository"`
+	Number     int                     `json:"number"`
+	Title      string                  `json:"title"`
+	State      string                  `json:"state"`
+	URL        string                  `json:"url"`
 }
 
 type OfficialForgeChangeRequestChecks struct {
@@ -59,6 +95,23 @@ type OfficialForgeChangeRequestChecks struct {
 	UnresolvedThreads int                               `json:"unresolvedThreads"`
 	UpdatedAt         string                            `json:"updatedAt"`
 	ClosedAt          *string                           `json:"closedAt"`
+
+	// ---- 官方 rc.2 新增的概览字段（ChangeRequestSnapshot 的必填项）----
+
+	// BaseSHA 是 host 与 headSha 一起记录的 base commit（官方是**可选**字段，
+	// provider 不报就省略）。
+	BaseSHA *string `json:"baseSha,omitempty"`
+	// BranchUpdates 是当前可把 base 分支的新提交带进 head 分支的方式
+	// （merge/rebase）；空数组表示 head 已最新、分支冲突、或用户无权更新。
+	BranchUpdates []string `json:"branchUpdates"`
+	// ReviewDecision 之后是评审人与概览动作能力。
+	Reviewers              []OfficialForgeChangeRequestReviewer `json:"reviewers"`
+	ReviewersTruncated     bool                                 `json:"reviewersTruncated"`
+	CanRequestReviews      bool                                 `json:"canRequestReviews"`
+	CanRerunChecks         bool                                 `json:"canRerunChecks"`
+	ThreadsTruncated       bool                                 `json:"threadsTruncated"`
+	ClosingIssues          []OfficialForgeChangeRequestIssue    `json:"closingIssues"`
+	ClosingIssuesTruncated bool                                 `json:"closingIssuesTruncated"`
 }
 
 type OfficialForgeChangeRequestHunk struct {

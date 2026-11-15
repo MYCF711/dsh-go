@@ -72,8 +72,10 @@ func TestTaskBoardRejects257thTask(t *testing.T) {
 
 	// 腾一条位置（完成 + 删除）之后必须又能建：上限不是"终身额度"。
 	id := f.Tasks[0].ID
+	// expected_revision 必填（官方 dsh-tool-agent-team/src/index.ts:205）：新任务从 revision 1 起步
+	// （官方 task-board.ts:69），这里删的是刚建出来、没有被改过的第一条。
 	if _, err := mk(dir, kindUpdate).Exec(ctx, json.RawMessage(
-		`{"task_id":"`+id+`","action":"delete","force":true}`)); err != nil {
+		`{"task_id":"`+id+`","expected_revision":1,"action":"delete","force":true}`)); err != nil {
 		t.Fatalf("删掉一条腾位置: %v", err)
 	}
 	if _, err := mk(dir, kindCreate).Exec(ctx, json.RawMessage(`{"subject":"补位","description":"现在有位置了"}`)); err != nil {

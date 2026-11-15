@@ -46,7 +46,14 @@ else
   # 交给订阅者，是真 bug；另 3 处是夹具与后台 sweepLoop 抢配置字段）。
   # 跑法只有一种：按 docs/race.md 装好 MinGW-w64，并显式 `CGO_ENABLED=1`。
   # CI 侧对应改动见 .github/workflows/ci.yml 的 `env: CGO_ENABLED: "1"`。
-  race_out="$(go test ./... -race 2>&1)"; race_rc=$?
+  #
+  # `-timeout 20m`：`go test` 的**单包**默认超时是 10m，而 cmd/dshd 的 subprocess 用例
+  # 在 -race 下每个约 28s（几十个），2 核 CI runner 上光这一个包就撞 10m。撞超时的输出
+  # 只留 `panic: test timed out`，check.sh 又只打 tail -25，于是 CI 上看到的就是光秃秃一句
+  # `FAIL go test -race`——那不是"测试挂了"，是门禁被自己的默认超时掐死（2026-11-12
+  # run 43180483371 起连续复现；本地 16 核 535s 刚好擦线）。放宽的是**等待时长**，不是断言：
+  # 照样要求全绿，只是给它跑完的时间。
+  race_out="$(go test ./... -race -timeout 20m 2>&1)"; race_rc=$?
   if [ $race_rc -eq 0 ]; then
     pass "go test -race"
   elif echo "$race_out" | grep -qiE 'requires cgo|C compiler|gcc.{0,12}not found|exec: "gcc"'; then
@@ -60,8 +67,24 @@ else
       bad "go test（不覆盖竞态的兜底跑）"
     fi
   else
+    # 只打 tail -25 会把"哪个包挂了 / 为什么挂"整段切掉。2026-11-12 在 CI 上踩过两次：
+    # 日志里先只剩一句 `FAIL go test -race`，补了包名/用例名之后仍然看不到失败**消息**
+    # （哪一行断言、什么错误），于是每一轮都要靠本地复现去猜。
+    # 所以：先按 `--- FAIL` 打出每条的完整上下文（含失败消息），再打 tail 25 供收尾。
+    # **不是**放宽判定——判定仍然只看 race_rc，这里只是把已经发生的事实打全。
+    #
+    # 12 行不够（2026-11-14 实证）：真进程用例在失败前会打十几条证据 t.Log
+    # （TestModelCatalog… 6 ACCEPT + 6 REJECT，TestSettingsForm… 12 条 GOLDEN_*），
+    # 真正的那条失败消息是 Go 最后 append 的——正好被 -A 12 切掉，CI 上就表现为
+    # "--- FAIL 后没有断言行"。窗口必须大于证据行数。
+    printf '%s\n' "$race_out" | grep -B 1 -A 60 -E '^[[:space:]]*--- FAIL' | head -800
+    printf '%s\n' "$race_out" | grep -E '^(WARNING: DATA RACE|panic:)' | head -20
     printf '%s\n' "$race_out" | tail -25
-    bad "go test -race"
+    # 环境面：CI 上这批失败是"很多包同时快速失败"的形状，先看磁盘/临时目录/进程数有没有被打满
+    # （race 跑 15 分钟会留一堆 t.TempDir 与子进程；磁盘满了就会满屏 "no space"）。
+    { echo "  ---- 环境 ----"; df -h . 2>/dev/null | tail -1; df -h /tmp 2>/dev/null | tail -1
+      echo "  TMP 条目数: $(ls -1 "${TMPDIR:-/tmp}" 2>/dev/null | wc -l)"; } || true
+    bad "go test -race（$(printf '%s' "$race_out" | grep -E '^(FAIL[[:space:]]+[^[:space:]]+)' | head -6 | awk '{print $2}' | tr '\n' ' ')）"
   fi
 
   # 权限分支守卫：每个"放不放行"的函数都得有测试钉着。
@@ -130,6 +153,28 @@ else
     fi
   else
     bad "找不到 scripts/single-source.py —— 同一条规则写第二份的病没有门禁"
+  fi
+
+  # PLAN §15：缺口登记表口径。scripts/gap-register-counts.py。
+  #
+  # 为什么要有它：`docs/host-stable-gap-register.md` 是全仓唯一的缺口底账，
+  # 而它长期写着 rc.1 的 193/97。数字是人手填的，改完代码没人回头改，
+  # 于是越错越久——2026-11-14 盘点查出 **149 条陈旧登记**。
+  # GUI 仓那份曾一模一样（分母写死 55 而官方 66，`--check` 却报 PASS），
+  # 修法是让它对官方清单逐 id 断言。这里做同一件事。
+  #
+  # 第 4 条断言在同一个脚本里：base 插件面另有一张**逐项表**
+  # （docs/evidence/base-plugins-per-item-0.2.2-rc.2.json，99 条 id+状态+落点）。
+  # 只守三面总数守不住"某一条悄悄改档"——149 条陈旧登记就是这么长出来的。
+  if [ -f scripts/gap-register-counts.py ]; then
+    if gr_out="$(python scripts/gap-register-counts.py --check 2>&1)"; then
+      pass "$(printf '%s' "$gr_out" | grep '^PASS' | sed 's/^PASS  *//')"
+    else
+      bad "缺口登记表口径: $(printf '%s' "$gr_out" | grep -E '^      - ' | head -2 | tr '
+' ' ')"
+    fi
+  else
+    bad "找不到 scripts/gap-register-counts.py —— 缺口底账的口径没人守了"
   fi
 
   # 变异清单自洽：每条的 old 片段必须**恰好出现一次**，

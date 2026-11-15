@@ -18,8 +18,14 @@ func TestSpawnTeammateContract(t *testing.T) {
 		args     string
 		wantHint string // Hint 里必须出现的片段
 	}{
+		// 官方命名模型（`dsh-subagent/src/names.ts:16,23-25`）：
+		// `^[a-z][a-z0-9-]{0,31}$` 且不得是根名 `lead`。
+		// 注意 `"a"` 在官方模型下**是合法的**（1 个字符也合规），
+		// 所以旧断言"名字太短"不再成立，换成真正非法的形态。
 		{"名字不合规", `{"name":"Bad_Name","description":"d","prompt":"p"}`, "小写"},
-		{"名字太短", `{"name":"a","description":"d","prompt":"p"}`, "小写"},
+		{"数字开头", `{"name":"1bad","description":"d","prompt":"p"}`, "小写"},
+		{"根名被占", `{"name":"lead","description":"d","prompt":"p"}`, "lead"},
+		{"超过 32 字符", `{"name":"` + strings.Repeat("a", 33) + `","description":"d","prompt":"p"}`, "小写"},
 		{"description 为空", `{"name":"ok","description":"  ","prompt":"p"}`, "负责"},
 		{"description 超 120 字", `{"name":"ok","description":"` + strings.Repeat("字", 130) + `","prompt":"p"}`, "超"},
 		{"prompt 为空", `{"name":"ok","description":"d","prompt":" "}`, "任务"},

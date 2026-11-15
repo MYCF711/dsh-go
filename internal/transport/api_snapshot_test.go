@@ -30,6 +30,12 @@ type apiSnapshot struct {
 		LoadResult     []string `json:"LoadResult"`
 		PromptResult   []string `json:"PromptResult"`
 	} `json:"types"`
+	// ConflictReasons 是 409 的 `details.reason` 取值表（GP §5 第 3 条）。
+	//
+	// 与 types 一样从**代码本身**取（`ConflictReasons()`），不手抄：手抄等于
+	// 复制一份契约，加了新取值测试照样绿、界面照样漏分支。它是**加在**四字段
+	// 错误体之外的稳定机器字段（`error` 仍然恰好四字段），所以老客户端忽略即可。
+	ConflictReasons []string `json:"conflict_reasons"`
 }
 
 // latestSnapshot 从**代码本身**算出当前契约。
@@ -42,6 +48,7 @@ func latestSnapshot() apiSnapshot {
 	s.Types.SessionSummary = jsonKeys(SessionSummary{})
 	s.Types.LoadResult = jsonKeys(LoadResult{})
 	s.Types.PromptResult = jsonKeys(PromptResult{})
+	s.ConflictReasons = ConflictReasons()
 	return s
 }
 

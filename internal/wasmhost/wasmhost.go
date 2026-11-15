@@ -33,6 +33,16 @@ import (
 // 还是"文件是对的但里面有问题"。
 var wasmMagic = []byte{0x00, 0x61, 0x73, 0x6d}
 
+// compilationCache 是**进程级**的编译产物缓存（wazero 官方支持的跨 runtime 共享形态）。
+//
+// 为什么必须有：同一份 wasm 字节会被反复编译——插件重载、实例重建、以及
+// `cmd/dshd` 里十几条 wasm 用例各装载一次。冷编译 4.4 MB 的 Go 客人实测
+// 单次 ~9s（-race 下），整个 cmd/dshd 包光是这一项就吃掉上百秒。
+// 缓存只存机器码：实例、store、实例名、隔离面仍然每次新建。
+//
+// 生命周期 = 进程（不 Close）：和 wazero 文档的用法一致，进程退出自然回收。
+var compilationCache = wazero.NewCompilationCache()
+
 // Module 是一个已装载的 wasm 模块。
 //
 // 用法：Load → Call / InvokeTool（可多次）→ Close。Close 幂等。
@@ -152,7 +162,15 @@ func Load(ctx context.Context, name, path string) (m *Module, err error) {
 
 	// CloseOnContextDone：ctx 取消时能把正在跑的 wasm 打断，
 	// 而不是把宿主的 goroutine 永久钉在一个死循环里（夹具里 spin() 就是干这个的）。
-	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true))
+	//
+	// WithCompilationCache：**编译产物是进程级共享的**。Go 客人 wasm 的机器码编译
+	// 一次约 9s（-race 下更贵），而同一份字节会被反复装载：插件重载、重建实例、
+	// 以及 `cmd/dshd` 里十几条 wasm 用例各装载一次。wazero 的 CompilationCache
+	// 就是官方给的跨 runtime 共享方式——**只共享编译后的机器码**，模块实例仍然
+	// 每次新建（隔离、store、实例名都不变）。
+	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().
+		WithCloseOnContextDone(true).
+		WithCompilationCache(compilationCache))
 	ok := false
 	defer func() {
 		if !ok {

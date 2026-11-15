@@ -3,6 +3,11 @@ package transport
 // 本文件是官方桌面端 0.2.2-rc.1「pluginManager 侧」15 个 typert 方法的 L1
 // 契约实现（官方源：@deepseek-ai/dsh-plugin-manager/lib/typert.host.js）。
 //
+// 0.2.2-rc.2 的结构性增量不在这里，而在 `handlers_plugin_update_rc2.go`：
+// `BundleInfo.update` 三态（+ 兼容保留的 `updatable`）、`installBundle` 的
+// `options.expected`、`updateBundle` 的 `options.spec`，以及
+// `ManagementError.code` 的新取值 `unexpected-package`。
+//
 // 对齐口径与 `handlers_agent_official.go` 一致：
 //   - **L1**：参数名与结果字段按官方 zod 契约；wire 仍走本仓既有的
 //     `POST /api/<method>` + 裸参数对象 + `{"result":…}` / 四字段 error。
@@ -29,8 +34,11 @@ package transport
 //     `{"active":false}`：本仓 `/api` 出口不允许 `{"result":null}`（会把 null
 //     变成 500），`active` 是客户端可判定、且不会伪装成"有载荷"的写法。
 //   - 需要 registry / pnpm / git / tarball 的能力（inspect 的三种非本地规格、
-//     listVersions 的 registry 查询、updateBundle 的在线下载、
-//     installBundle 的构建审批与 registry 选项）一律 501 并点名缺哪个能力。
+//     listVersions 的 registry 查询、installBundle 的构建审批与 registry 选项）
+//     一律 501 并点名缺哪个能力。rc.2 的 git 更新（`updateBundle` 的
+//     `options.spec`）分两段：**契约校验**（完整 commit、同仓库目录、版本必须
+//     更新）按官方 planGitUpdate 逐条实现并回 `invalid-spec`；校验通过后需要
+//     git 获取器 checkout 那个 commit，本仓没有，于是 501 并点名缺 git。
 //
 // 真实状态、持久化、A/B 隔离与取消回滚由 `internal/pluginmgr/official` 的
 // 适配器测试覆盖；本文件用假宿主钉住协议。
@@ -145,6 +153,14 @@ type OfficialPluginManagerAPI struct {
 	// ListBundles 返回**真实**已安装包清单（profile 状态 + 版本 + 来源）。
 	// 它不是安装动作，读路径不得写盘。
 	ListBundles func() ([]OfficialBundle, error)
+	// BundleUpdateKind 是宿主对官方 0.2.2-rc.2 `BundleInfo.update` 的**spec 级**
+	// 判据：按（已落盘来源 spec、包名、manifest 版本）回答 `registry` / `git` /
+	// 空（换不了）。行级门槛（installed/official/availability/插件管理/SemVer）
+	// 由协议层判，宿主只管"这个来源是不是可换的形态"。
+	//
+	// nil = 宿主说不出 → listBundles 的每一行**缺省** update（官方三态的第三态），
+	// 绝不用"猜"补出一个值。生产实现是 internal/pluginmgr.UpdateKind。
+	BundleUpdateKind func(source, name, version string) string
 	// ListPlugins 返回当前进程 Loader 的真实条目：enabled 来自持久化状态，
 	// fiberPhase 来自正在运行的加载器（active / null），不是假数据。
 	ListPlugins func() ([]OfficialPluginEntry, error)
@@ -655,9 +671,25 @@ type OfficialBundle struct {
 	Source          string                 `json:"source,omitempty"`
 	Optional        bool                   `json:"optional"`
 	Removable       bool                   `json:"removable"`
-	Updatable       bool                   `json:"updatable"`
-	ReadOnlyReason  string                 `json:"readOnlyReason,omitempty"`
-	Error           *OfficialBundleError   `json:"error,omitempty"`
+	// Update 是官方 0.2.2-rc.2 的 `BundleInfo.update?: 'registry' | 'git'`：
+	// 取值只有两个，**字段缺省**才是第三态（`updateBundle` 换不了）。语义、
+	// 判据与官方 file:line 见 handlers_plugin_update_rc2.go 顶部。
+	//
+	// 它由协议层按真实行状态 + 宿主判据算出（OfficialBundleUpdateKind），
+	// 生产者不要自己填：填错就等于向客户端谎报"能换新"。
+	Update string `json:"update,omitempty"`
+	// Updatable 是 rc.1 的 `BundleInfo.updatable: boolean`，**已废弃**：
+	// 0.2.2-rc.2 起官方改用 Update，并按 guide 的映射保持一致
+	// （`updatable:true` ⇔ `update:'registry'`）。
+	//
+	// 为什么还留着：能力下限是"只能更多不能更少"——rc.1 的客户端与快照
+	// 仍然读这个键，删掉它就是把既有能力拿走。新代码只读 Update。
+	//
+	// Deprecated: 用 Update。`update === 'registry'` 判"能列版本/换新"，
+	// `update !== ''` 判"updateBundle 至少能试着换"。
+	Updatable      bool                 `json:"updatable"`
+	ReadOnlyReason string               `json:"readOnlyReason,omitempty"`
+	Error          *OfficialBundleError `json:"error,omitempty"`
 	// Rows 与 Overrides 在官方 schema 里是必填数组：空也必须是 []。
 	Rows      []OfficialBundleRow `json:"rows"`
 	Overrides []string            `json:"overrides"`
@@ -838,6 +870,9 @@ type OfficialInstallBundleParams struct {
 	RequestID      *string
 	ApprovedBuilds []string
 	Registry       *string
+	// Expected 是 0.2.2-rc.2 新增的 `options.expected`：本次安装**必须**最终落在
+	// `name@version` 上，否则安装被撤销并回 `unexpected-package`。nil = 没要求。
+	Expected *OfficialExpectedPackage
 }
 
 // OfficialUpdateBundleParams 是 `updateBundle(name, version, options?)` 的入参。
@@ -846,6 +881,11 @@ type OfficialUpdateBundleParams struct {
 	Version   string
 	Registry  *string
 	RequestID *string
+	// Spec 是 0.2.2-rc.2 新增的 `options.spec`：git 形态的更新目标。
+	// 官方口径（typert.host.js）：**只有** `update:'git'` 的包需要它，且它必须
+	// 钉住同仓库目录的完整 commit；其余形态给了它就是 `invalid-spec`。
+	// 校验发生在宿主适配器里（形态判据属于 pluginmgr），不在这里做。
+	Spec *string
 }
 
 // OfficialBundleNameParams 是 `removeBundle(name)` 的入参。
@@ -975,6 +1015,11 @@ func officialPluginInstallBundle(api OfficialPluginManagerAPI, p *officialParams
 	if err != nil {
 		return nil, err
 	}
+	// 0.2.2-rc.2 新增：安装必须最终落在 expected 的包/版本上，否则回滚。
+	expected, err := pm.optionalExpected("expected")
+	if err != nil {
+		return nil, err
+	}
 	if err := pm.finish(); err != nil {
 		return nil, err
 	}
@@ -983,7 +1028,7 @@ func officialPluginInstallBundle(api OfficialPluginManagerAPI, p *officialParams
 	}
 	return api.InstallBundle(OfficialInstallBundleParams{
 		Spec: spec, Enabled: enabled, SaveExact: saveExact, RequestID: requestID,
-		ApprovedBuilds: approvedBuilds, Registry: registry,
+		ApprovedBuilds: approvedBuilds, Registry: registry, Expected: expected,
 	})
 }
 
@@ -1011,6 +1056,20 @@ func officialPluginUpdateBundle(api OfficialPluginManagerAPI, p *officialParams)
 	if err != nil {
 		return nil, err
 	}
+	// 0.2.2-rc.2 新增：git 形态的更新目标（必须钉住同仓库目录的完整 commit）。
+	// 这里只做"非空字符串"这一层；"是不是合法 git spec、是不是同一个仓库"
+	// 由宿主适配器按官方 planGitUpdate 的判据拒绝成 invalid-spec。
+	spec, hasSpec, err := pm.optionalString("spec")
+	if err != nil {
+		return nil, err
+	}
+	if hasSpec && strings.TrimSpace(spec) == "" {
+		return nil, officialBadRequest("spec 是空串：要么不给，要么给一个钉住完整 commit 的 git spec")
+	}
+	var specPtr *string
+	if hasSpec {
+		specPtr = &spec
+	}
 	if err := pm.finish(); err != nil {
 		return nil, err
 	}
@@ -1018,7 +1077,7 @@ func officialPluginUpdateBundle(api OfficialPluginManagerAPI, p *officialParams)
 		return nil, officialPluginMissing(MethodPluginManagerUpdateBundle)
 	}
 	return api.UpdateBundle(OfficialUpdateBundleParams{
-		Name: name, Version: version, Registry: registry, RequestID: requestID,
+		Name: name, Version: version, Registry: registry, RequestID: requestID, Spec: specPtr,
 	})
 }
 
@@ -1241,11 +1300,15 @@ func officialPluginListBundles(api OfficialPluginManagerAPI, p *officialParams) 
 	if err != nil {
 		return nil, err
 	}
-	return normalizeOfficialBundles(bundles), nil
+	return normalizeOfficialBundles(bundles, api.BundleUpdateKind), nil
 }
 
-// normalizeOfficialBundles 把 nil 归一成官方要求的空数组。
-func normalizeOfficialBundles(bundles []OfficialBundle) []OfficialBundle {
+// normalizeOfficialBundles 把 nil 归一成官方要求的空数组，并按 rc.2 契约补
+// `update` / 收敛兼容字段 `updatable`。
+//
+// `resolve` 是宿主的 spec 级判据（OfficialPluginManagerAPI.BundleUpdateKind）；
+// nil 时每一行都保持"update 缺省"，不猜。
+func normalizeOfficialBundles(bundles []OfficialBundle, resolve func(source, name, version string) string) []OfficialBundle {
 	if bundles == nil {
 		bundles = []OfficialBundle{}
 	}
@@ -1257,6 +1320,7 @@ func normalizeOfficialBundles(bundles []OfficialBundle) []OfficialBundle {
 			bundles[i].Overrides = []string{}
 		}
 	}
+	applyOfficialBundleUpdateKinds(bundles, resolve)
 	return bundles
 }
 

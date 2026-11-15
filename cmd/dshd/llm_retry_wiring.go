@@ -26,6 +26,9 @@ func newTurnChat(base, key, api string, env func(string) string) (agent.Chat, er
 		return nil, err
 	}
 	client := llm.NewWithAPI(base, key, api)
+	// 账号路由（官方 #99 llm-deepseek-account）走同一根环境通道：父进程按本轮
+	// provider 决定要不要账号认证，子进程只认 `DSHD_LLM_AUTH_HEADER` 这一个判据。
+	applyAccountRouteEnv(client, env)
 	if policy != nil {
 		client.ApplyRetryPolicy(policy)
 	}

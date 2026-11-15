@@ -194,3 +194,29 @@ func TestGlobZeroMatchMentionsIgnore(t *testing.T) {
 		t.Fatalf("摘要也要说清挡掉了多少: %q", res.Summary)
 	}
 }
+
+// glob 声明 per-call 并发安全（官方 rc.2：`dsh-tool-fs-search/src/glob.ts:780`
+// `isConcurrencySafe: () => true`）。
+//
+// 为什么读类工具要显式声明：SPI 的默认值是**独占**（fail-closed），
+// 不声明的话"一次读 6 个文件"会退回逐条串行——这正是并行要解决的问题。
+func TestGlobDeclaresConcurrencySafe(t *testing.T) {
+	tl, _ := newTool(t)
+	c, ok := any(tl).(spi.ConcurrencyClassifier)
+	if !ok {
+		t.Fatal("glob 必须实现 spi.ConcurrencyClassifier（官方 isConcurrencySafe）")
+	}
+	// 判据是逐调用参数：glob 没有任何"这次会写"的参数，所以每个参数都得判安全。
+	for _, raw := range []string{`{"pattern":"*.go"}`, `{"pattern":"**/*.md","path":"docs","limit":10}`} {
+		if !c.ConcurrencySafe(json.RawMessage(raw)) {
+			t.Fatalf("glob 对参数 %s 判成了独占；官方是 () => true", raw)
+		}
+		if !spi.ConcurrencySafe(tl, json.RawMessage(raw)) {
+			t.Fatalf("分类器判安全，但 spi.ConcurrencySafe 对参数 %s 仍判独占", raw)
+		}
+	}
+	// 声明并发安全的前提是不需要审批：审批类调用永远走单条"等人"车道。
+	if tl.Caps().NeedsApproval() {
+		t.Fatal("glob 是只读工具，不该要审批")
+	}
+}

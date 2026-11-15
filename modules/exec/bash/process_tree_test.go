@@ -113,13 +113,17 @@ func TestStopUnknownCrossInstanceAndDuplicate(t *testing.T) {
 	if err := a.Stop(idA); !errors.Is(err, spi.ErrJobFinished) {
 		t.Fatalf("重复停止必须明确拒绝: %v", err)
 	}
-	page, err := a.OutputPage(idA, 0, 1, 2*time.Second)
+	// 判据是"停止后**最终**能读到 ended"。给 10s 而不是 2s：这条会真起
+	// `sleep 30` 子进程，满载（并行包 + 覆盖率/race 构建）时收尾结算可能远超 2s，
+	// 2s 会误报成"停止没生效"；而"停止真的没生效"的表现是这条永远读不到 ended。
+	page, err := a.OutputPage(idA, 0, 1, 10*time.Second)
 	if err != nil || !page.Done {
 		t.Fatalf("停止后应可读 ended 状态: %+v, %v", page, err)
 	}
 
 	doneID := startTestJob(t, a, `printf done; sleep 0.1`)
-	if out, err := a.Output(doneID, 2*time.Second); err != nil || !out.Done {
+	// 同上：0.1s 的命令在满载机器上排队/启动可能就要几秒。
+	if out, err := a.Output(doneID, 10*time.Second); err != nil || !out.Done {
 		t.Fatalf("等待自然结束: %+v, %v", out, err)
 	}
 	if err := a.Stop(doneID); !errors.Is(err, spi.ErrJobFinished) {

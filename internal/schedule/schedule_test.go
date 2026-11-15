@@ -38,23 +38,51 @@ func TestNextAfterEveryCatchesUp(t *testing.T) {
 }
 
 // daily：当天时刻已过就明天，没过就今天。
+//
+// **必须显式给 time_zone**：daily/weekly 是墙钟语义，规则里没写时区时按
+// `time.Local` 算。开发机是 +08:00，GitHub Windows runner 是 UTC——旧写法把
+// `+08:00` 的期望写死却留给 `time.Local` 决定，于是本机绿、CI 必红
+// （2026-11-12 run 43191452874：TestNextAfterDaily/TestNextAfterWeekly）。
+// 这里钉 UTC，断言在任何 runner 上都成立；"省略 time_zone 用本地时区"的语义
+// 由下面 TestDailyUsesProcessLocalZoneWhenTimeZoneEmpty 单独钉住。
 func TestNextAfterDaily(t *testing.T) {
-	it := Item{Kind: "daily", DailyAt: "23:59"}
-	if got, want := nextAfter(it, at("2026-11-03T05:00:00+08:00")), at("2026-11-03T23:59:00+08:00"); !got.Equal(want) {
+	it := Item{Kind: "daily", DailyAt: "23:59", TimeZone: "UTC"}
+	if got, want := nextAfter(it, at("2026-11-03T05:00:00Z")), at("2026-11-03T23:59:00Z"); !got.Equal(want) {
 		t.Fatalf("没过点 = %v，期望 %v", got, want)
 	}
-	if got, want := nextAfter(it, at("2026-11-04T00:30:00+08:00")), at("2026-11-04T23:59:00+08:00"); !got.Equal(want) {
+	if got, want := nextAfter(it, at("2026-11-04T00:30:00Z")), at("2026-11-04T23:59:00Z"); !got.Equal(want) {
 		t.Fatalf("过了点 = %v，期望 %v", got, want)
 	}
 }
 
 // weekly：只在指定星期触发；当天时刻没过也算。
 func TestNextAfterWeekly(t *testing.T) {
-	it := Item{Kind: "weekly", WeeklyAt: "08:00", Weekdays: []int{1, 3}} // 周一、周三
-	// 2026-11-03 是周二 → 下一个是周三 08:00
-	got := nextAfter(it, at("2026-11-03T05:00:00+08:00"))
-	if want := at("2026-11-04T08:00:00+08:00"); !got.Equal(want) {
+	it := Item{Kind: "weekly", WeeklyAt: "08:00", Weekdays: []int{1, 3}, TimeZone: "UTC"} // 周一、周三
+	// 2026-11-03（UTC）是周二 → 下一个是周三 08:00 UTC
+	got := nextAfter(it, at("2026-11-03T05:00:00Z"))
+	if want := at("2026-11-04T08:00:00Z"); !got.Equal(want) {
 		t.Fatalf("周二之后 = %v，期望 %v", got, want)
+	}
+}
+
+// 省略 time_zone 时按**进程本地时区**算（官方语义），且结果必须落在 time.Local。
+//
+// 断言不写死任何偏移，而是用同一个 time.Local 反推期望值：任何 runner 的默认
+// 时区（UTC / +08:00 / 别的）都成立，同时仍然实质检查"墙钟 + 本地时区"两件事。
+func TestDailyUsesProcessLocalZoneWhenTimeZoneEmpty(t *testing.T) {
+	it := Item{Kind: "daily", DailyAt: "23:59"}
+	now := at("2026-11-03T05:00:00+08:00")
+	got := nextAfter(it, now)
+	if got.Location() != time.Local {
+		t.Fatalf("省略 time_zone 必须用 time.Local（%v），得到 %v", time.Local, got.Location())
+	}
+	local := now.In(time.Local)
+	want := time.Date(local.Year(), local.Month(), local.Day(), 23, 59, 0, 0, time.Local)
+	if !want.After(now) {
+		want = want.AddDate(0, 0, 1)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("本地墙钟的 23:59 = %v，期望 %v（time.Local=%v）", got, want, time.Local)
 	}
 }
 

@@ -85,6 +85,35 @@ func newError(code string, status int, format string, args ...any) *Error {
 // EventType 是工作区请求/生命周期记录的事件名（官方 `plugin:` 记录）。
 const EventType = "plugin:client-ui-forge/worktree"
 
+// EventTypeCreated 是官方 rc.2 的创建记录事件名：`create()` 成功（目录已建好、
+// 会话目录已切过去）后追加一条，data 是官方 `CreatedWorktree` 形状。
+//
+// 它与旧的 EventType 并存：旧记录的行为一点没变，归档清理只认这一类记录
+// （官方 upgrade guide：release 前创建的 checkout 没有这条事件，永不被扫）。
+const EventTypeCreated = "plugin:worktree/created"
+
+// Creation 是一条 `plugin:worktree/created` 记录（官方 `CreatedWorktree`）。
+//
+// 字段顺序/名字对齐官方 zod schema（`path` / `branch` / `baseCommit` /
+// `repositoryRoot`，全部非空），Fold 校验时按此判据丢坏载荷。
+type Creation struct {
+	// Path 是 checkout 的绝对目录。
+	Path string `json:"path"`
+	// Branch 是新建的分支名。
+	Branch string `json:"branch"`
+	// BaseCommit 是解析出来的 commit object name。
+	BaseCommit string `json:"baseCommit"`
+	// RepositoryRoot 是源 checkout 的根。
+	RepositoryRoot string `json:"repositoryRoot"`
+}
+
+// valid 报告这条记录是否满足官方 schema（四个字段都非空；官方的 `.strict()`
+// 拒未知字段，本包只写自己这四个字段，读侧按非空判据即可）。
+func (c Creation) valid() bool {
+	return strings.TrimSpace(c.Path) != "" && strings.TrimSpace(c.Branch) != "" &&
+		strings.TrimSpace(c.BaseCommit) != "" && strings.TrimSpace(c.RepositoryRoot) != ""
+}
+
 // Record 是一条 worktree 记录（落进会话 v4 日志的 data）。
 type Record struct {
 	Type       string `json:"type"`
@@ -142,6 +171,13 @@ type Snapshot struct {
 	Created *Record
 	Failure *Record
 	Stopped *Record
+
+	// Creations 是本会话**自己创建**的 checkout（`plugin:worktree/created`
+	// 记录，按出现顺序，同一 path 只保留一条）。归档清理只用它。
+	//
+	// 旧 `plugin:client-ui-forge/worktree` 的 created 记录**不**产生 Creation：
+	// 官方语义是 release 前创建的 checkout 没有这条事件、永不被扫。
+	Creations []Creation
 }
 
 // Store 是会话日志的读写口（宿主实现；测试用内存实现）。
@@ -152,6 +188,16 @@ type Store interface {
 	AppendWorktree(sessionID string, record Record) error
 	// SetWorkingDirectory 把会话有效目录改成 dir（会追加 working-directory/change）。
 	SetWorkingDirectory(sessionID, dir string) error
+}
+
+// CreatedAppender 是 Store 的可选扩展：能写官方 `plugin:worktree/created` 记录。
+//
+// 为什么是可选接口而不是给 Store 加方法：Store 的既有实现（宿主 cmd/dshd 与
+// 测试 fake）不受影响——实现了就落这条记录，没实现就跳过（旧记录行为不变）。
+// 归档清理只认这条记录，所以**宿主 store 要实现它**，否则归档时没有可清理的
+// 创建记录（官方语义：没有事件 = 永不被扫）。
+type CreatedAppender interface {
+	AppendCreated(sessionID string, creation Creation) error
 }
 
 // Fold 把会话事件折叠成 Snapshot。
@@ -173,6 +219,17 @@ func Fold(headerCwd string, events []v4.Event) Snapshot {
 			if err := json.Unmarshal(event.Data, &data); err == nil && strings.TrimSpace(data.Cwd) != "" {
 				snapshot.Cwd = data.Cwd
 			}
+		case EventTypeCreated:
+			// 官方 rc.2 的创建记录：只折**本会话自己的**创建（本包拿到的就是本
+			// 会话日志；fork 继承前缀的 owned 判据不在这一层）。
+			var creation Creation
+			if err := json.Unmarshal(event.Data, &creation); err != nil || !creation.valid() {
+				continue
+			}
+			if snapshot.hasCreation(creation.Path) {
+				continue
+			}
+			snapshot.Creations = append(snapshot.Creations, creation)
 		case EventType:
 			var record Record
 			if err := json.Unmarshal(event.Data, &record); err != nil {
@@ -256,6 +313,17 @@ func Fold(headerCwd string, events []v4.Event) Snapshot {
 	return snapshot
 }
 
+// hasCreation 报告同一 path 是否已经折过（Windows 的大小写/分隔符差异算同一 path）。
+func (s Snapshot) hasCreation(path string) bool {
+	key := pathKey(path)
+	for _, creation := range s.Creations {
+		if pathKey(creation.Path) == key {
+			return true
+		}
+	}
+	return false
+}
+
 // State 是对外（测试/投影）的状态视图。
 type State struct {
 	Status     Status
@@ -266,6 +334,10 @@ type State struct {
 	Step       string
 	Reason     string
 	Cwd        string
+	// BaseCommit 是创建/恢复时解析出来的 commit（Snapshot.Created.BaseCommit）：
+	// rc.2 `forgePanel.diffBases` 的 automatic fork point 要它（官方 `forkPoint`
+	// 在 created.path 就是会话 checkout 时用 created.baseCommit）。
+	BaseCommit string
 }
 
 // Git 是 git 命令执行口（真实实现是 ExecGit；测试可注入）。
@@ -302,6 +374,9 @@ type Service struct {
 	git   Git
 	now   func() time.Time
 
+	// reclaim 是 rc.2「归档会话时清理工作树」的进程内状态（见 archive.go）。
+	reclaim *reclamation
+
 	mu       sync.Mutex
 	sessions map[string]*sessionState
 }
@@ -320,7 +395,13 @@ type attempt struct {
 
 // NewService 造一个 worktree 服务。
 func NewService(store Store, git Git) *Service {
-	return &Service{store: store, git: git, now: time.Now, sessions: map[string]*sessionState{}}
+	return &Service{
+		store:    store,
+		git:      git,
+		now:      time.Now,
+		reclaim:  newReclamation(),
+		sessions: map[string]*sessionState{},
+	}
 }
 
 func (s *Service) sessionState(sessionID string) *sessionState {
@@ -378,6 +459,9 @@ func stateOf(snapshot Snapshot) State {
 	}
 	if snapshot.Failure == nil && snapshot.Stopped == nil && snapshot.Requested && snapshot.Created == nil && !snapshot.Withdrawn {
 		state.Status = StatusOpen
+	}
+	if snapshot.Created != nil {
+		state.BaseCommit = snapshot.Created.BaseCommit
 	}
 	return state
 }
@@ -856,6 +940,20 @@ func (s *Service) create(ctx context.Context, sessionID string, record Record) e
 	if err := s.store.SetWorkingDirectory(sessionID, record.Directory); err != nil {
 		return err
 	}
+	// 官方 rc.2：创建成功（目录已建好、会话已进入）后追加 `plugin:worktree/created`
+	// 记录，归档时只有这些记录能成为清理候选。Store 没实现扩展就跳过（旧记录
+	// 行为不变）；写失败按官方语义让这次创建报错——checkout 与分支都保留。
+	if appender, ok := s.store.(CreatedAppender); ok && record.SourceRoot != "" {
+		creation := Creation{
+			Path:           record.Directory,
+			Branch:         record.Branch,
+			BaseCommit:     baseCommit,
+			RepositoryRoot: record.SourceRoot,
+		}
+		if err := appender.AppendCreated(sessionID, creation); err != nil {
+			return err
+		}
+	}
 	s.notify(state)
 	return nil
 }
@@ -1018,6 +1116,16 @@ func canonicalPath(path string) string {
 		path = absolute
 	}
 	return filepath.Clean(path)
+}
+
+// pathKey 把路径归一成可比较的 key：**不做文件系统 I/O**（日志折叠/去重用），
+// 只统一分隔符、清掉冗余段并折成小写（Windows 路径大小写不敏感）。
+func pathKey(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return strings.ToLower(filepath.Clean(filepath.FromSlash(path)))
 }
 
 func isDir(path string) bool {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 
 	"dshgo/codecs/v4"
@@ -37,6 +38,7 @@ func newSideQueryService(home, model, base, api, reasoning string, src *sessionS
 	service := &sideQueryService{home: home, model: model, base: base, api: api, reasoning: reasoning, src: src, active: map[string]map[string]context.CancelFunc{}}
 	service.newRunner = func(model, base, credential, api string) independentSideRunner {
 		chat := llm.NewWithAPI(base, credential, api)
+		applyAccountRouteEnv(chat, os.Getenv)
 		chat.UserAgent = "dshd/" + version + " side-query"
 		return &agent.SideQueryRunner{Chat: chat, Model: model, Reasoning: reasoning}
 	}

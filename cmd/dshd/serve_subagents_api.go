@@ -45,6 +45,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"dshgo/internal/agent"
@@ -152,6 +153,15 @@ func (a *agentOfficialAPI) adoptChild(childSessionID string) {
 	if err != nil || !found {
 		// 认不出归属：不编，让 Prompt 按 no_such_session 回。
 		return
+	}
+	// 这个孩子也要进**活体注册表**（官方 `ctx.agents` 的落点）：本进程第一次
+	// 真的持有它的句柄，`agent/created` 就该在这里发出去。父子归属按**盘上的
+	// 真实父**登记（`ensureAgentRegistered` 只认 durable 的 `subagent/spawn` 记录），
+	// 与下面 Spawn 用的是同一份事实。
+	if a.deps.agents != nil {
+		if regErr := ensureAgentRegistered(a.deps.agents, a.deps.home, rec.ChildSessionID); regErr != nil {
+			fmt.Fprintf(os.Stderr, "认领子会话 %q 进活体注册表失败：%v\n", rec.ChildSessionID, regErr)
+		}
 	}
 	// Create 闭包在盘上已认到时是幂等的（不会重建、不会截断历史）。
 	_, _ = reg.Spawn(rec.ChildSessionID, rec.ParentSessionID, rec.Cwd)

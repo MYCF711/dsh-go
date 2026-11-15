@@ -46,6 +46,17 @@ func (t *Tool) Description() string {
 }
 func (t *Tool) Schema() json.RawMessage { return schema }
 
+// ConcurrencySafe 声明 glob 可以和同批其它调用并发（官方 rc.2：
+// `dsh-tool-fs-search/src/glob.ts:780` `isConcurrencySafe: () => true`）。
+//
+// 为什么敢声明：glob 只读文件系统（`Caps` 为空），每次调用自带 path/limit，
+// 结果只落在自己的返回值里；不写任何共享状态。判据仍是**逐调用**的参数——
+// 只是 glob 没有任何"这次会写"的参数，所以每个参数都安全。
+func (t *Tool) ConcurrencySafe(args json.RawMessage) bool {
+	_ = args // 逐调用签名保留：以后若加了"会写"的参数，在这里按 args 判
+	return true
+}
+
 type args struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path"`

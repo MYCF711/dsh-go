@@ -1,9 +1,12 @@
 # AGENTS.md · DSH-GO
 
-> Go 重写 DSH 宿主；上游基线 `0.2.2-rc.1`，当前版本读源码与 `CHANGELOG.md`。
+> Go 重写 DSH 宿主；上游基线 **`0.2.2-rc.2`**（rc.1 基线作为历史对照保留），当前版本读源码与 `CHANGELOG.md`。
 > 原目标：低占用、高性能、可替换能力、还原 DSH 使用体验并接管真实工作。界面在独立 `../dsh-ui` 用 Go+Viva；Web 仅可关闭过渡件。
 
 ## 0. 每次开工按此顺序
+
+0. **官方基线已是 `0.2.2-rc.2`（用户 2026-11-12 指令）**：先读 [`docs/official-baseline-0.2.2-rc.2.md`](docs/official-baseline-0.2.2-rc.2.md) —— rc.1→rc.2 的硬数字（方法 193→**223**、base 插件 97→**99**、包 +13/−7、`hostProtocolVersion` 仍 4）、新增/删除方法逐条、官方 19 条升级指南索引；机器可核证据在 `docs/evidence/official-{desktop-api-methods,base-plugins,ui-plugins}-0.2.2-rc.2.txt` 与 `docs/evidence/official-method-contract-delta-0.2.2-rc.2.md`。**不要再用 rc.1 的 193/97 口径下结论。**
+
 
 0. **接手先读交接（2026-11-09 归档）**：GO.2 宿主与 TUI2GO 当前现场、已完成门、已闭合阻断与边界，全在 [`docs/handoff-go2-tui2go-2026-11-09.md`](docs/handoff-go2-tui2go-2026-11-09.md)。**宿主 HS-17/HS-18 已 GO=1；TUI2GO 最终 `PLAY-FINAL-INPUT-AUDIT` 已 GO=1（2026-11-09 04:52 两档 20/20，证据 `tmp/GO2-TEAM/PLAY-FINAL-INPUT-AUDIT/`）**——发布/push 仍需用户当次明确授权，且 `TUI-GO.lnk` 要由用户在可见桌面人工确认一次。TUI 选型/GUI 融合/Viva 升级线另见 [`docs/handoff-2026-11-09.md`](docs/handoff-2026-11-09.md)。
 0. **双线并行：自己的产品 + 完善 Viva（用户 2026-11-09 03:30 指令）**：**Viva 是轮子，轮子不稳，产品就不稳。先把轮子做稳，再谈产品。**
@@ -134,4 +137,35 @@ go list -deps ./internal/kernel   # 不含 modules/ 与业务包
 
 - 稳定规则在本文件与 PLAN；宿主顺序只在 `PLAN.md` §14.1，跨线契约/证据只在 `docs/transport-contract.md`。
 - 决策先改 PLAN；代码冲突先判文档过期还是代码越约。委派附完整任务书，不假设对方读过全文。
-- 版本：稳定版 `<上游版本>-go.<N>`，测试版 `<上游版本>-beta.<N>`；前缀升级后各自从 1 开始；仓库 LF；只 ack 完成项；定时唤醒不能操作 goal 就直接推进。
+- 版本：**稳定版 `<上游版本>-go.<N>`，任务途中的测试版 `<上游版本>-gobeta.<N>`**（用户 2026-11-12 指令；`-gobeta.` 与 `-go.` 两种形态都由 `cmd/dshtui/internal/vsinfo` 与 `cmd/dshtui/brand_test.go` 的形态判据支持）；前缀升级后各自从 1 开始；仓库 LF；只 ack 完成项；定时唤醒不能操作 goal 就直接推进。
+
+### 命名规范（用户 2026-11-13 裁定，**以此为准**）
+
+**官方的 rc 通道不占我们版本号的位。** `0.2.2-rc.1` 与 `0.2.2-rc.2` 都是官方 `0.2.2` 的预发布小版本；
+我们跟着**主版本** `0.2.2` 走，`.N` 是我们自己的发版序号，**持续递增、不因上游换 rc 而重置**。
+
+```text
+0.2.2-go.1   (官方 0.2.2-rc.1 基线)
+0.2.2-go.2   (官方 0.2.2-rc.1 基线)
+0.2.2-go.3   (官方 0.2.2-rc.2 基线)   ← 2026-11-13 起
+```
+
+- **反例（已修）**：`0.2.2-rc.2-go.1` —— 把官方 rc 塞进了我们的版本号，导致 `.1` 看起来"倒退"、且与既有 `0.2.2-go.1/2` 断档。
+- **唯一出处**：`cmd/dshd/main.go` 的 `version` 与 `cmd/dshtui/brand.go` 的 `version`（同值）；
+  其余任何地方**不得**出现版本字面量，由 `cmd/dshd/version_guard_test.go` 守着
+  （测试夹具也要用假版本 `9.8.x` / `9.9.x`，否则前缀撞上真版本就红——2026-11-13 踩过）。
+
+**产品名与命令 token**（`cmd/dshd/main.go:productName` / `cmd/dshtui/brand.go:productName`）：
+
+| 层 | 名字 | 说明 |
+|---|---|---|
+| 产品名（宿主） | **`DSH GO`** | `--version` 首词、Windows 版本资源、OSC 标题 |
+| 产品名（TUI） | **`DSH TUI GO`** | 同上 |
+| 命令 token（用户可见） | **`dsh-go`** | 错误前缀、`dsh-go doctor`、`--help` 用法行、wasm 提示 |
+| 发布物 | `dsh-<版本>.exe` / `DSH TUI GO.exe` | `scripts/build.sh` 的 `PRODUCTS` 表 |
+| 源码目录 | `cmd/dshd/` | **内部路径，保留不改**（改它要动全部 import + 3695 处引用，零收益） |
+| Go module | `dshgo` | 内部 |
+
+> 官方 rc.2 的命名事实（`Desktop-0.2.2-rc.2/`）：可执行 `DeepSeek Harness.exe`、
+> npm 包 `@deepseek-ai/dsh-desktop-runtime@0.2.2-rc.2`。我们**不**冒用官方产品名，
+> 用 `DSH GO` 表明是 Go 重写；`dsh-` 前缀与官方的 `@deepseek-ai/dsh-*` 对齐。

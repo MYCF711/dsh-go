@@ -96,3 +96,54 @@ func TestAllowWritesPersists(t *testing.T) {
 		t.Fatal("allow_writes=true 应当落盘")
 	}
 }
+
+// 只有 schedule_list 能并发：它只读本会话的 JSON 文件。
+// create/update/delete 会写**同一份**文件（读-改-写），并发就会互相覆盖。
+//
+// 官方 rc.2（`dsh-tool-schedule/src/index.ts:406,426`）里 list/view 是
+// `isConcurrencySafe: () => true`，三个写工具**没有**声明。
+func TestScheduleListIsConcurrencySafeWritesAreNot(t *testing.T) {
+	dir := t.TempDir()
+	list := mk(dir, kindList)
+	if !spi.ConcurrencySafe(list, json.RawMessage(`{}`)) {
+		t.Fatal("schedule_list 必须声明并发安全（官方 isConcurrencySafe: () => true）")
+	}
+	if list.Caps().NeedsApproval() {
+		t.Fatal("schedule_list 只读，不该要审批——要审批就走不了并发车道")
+	}
+	for _, kind := range []string{kindCreate, kindUpdate, kindDelete} {
+		if spi.ConcurrencySafe(mk(dir, kind), json.RawMessage(`{}`)) {
+			t.Fatalf("%s 会读-改-写同一份文件，必须独占", kind)
+		}
+	}
+}
+
+// 没有会话上下文 ⇒ 官方 `ToolContextUnavailableError` / `TOOL_CONTEXT_UNAVAILABLE`。
+//
+// 这不是"参数错了"：模型改参数也没用，必须让接线补上会话。身份里说清这一点，
+// 模型才不会一遍遍重试（§4 官方 `lib/types/contracts.js:42-56`）。
+func TestScheduleWithoutSessionCarriesToolContextUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct{ kind, args string }{
+		{kindCreate, `{"title":"t","prompt":"p","kind":"every","every_seconds":300}`},
+		{kindList, `{}`},
+		{kindUpdate, `{"title":"改"}`},
+		{kindDelete, `{"id":"sch-0001-abcd"}`},
+	} {
+		res, err := mk(dir, tc.kind).Exec(context.Background(), json.RawMessage(tc.args))
+		if err == nil {
+			t.Fatalf("%s 没有会话上下文时必须报错，不能假装成功", tc.kind)
+		}
+		if res.Hint == "" {
+			t.Fatalf("%s 失败时必须给 Hint（R3）", tc.kind)
+		}
+		if res.Info == nil {
+			t.Fatalf("%s 的失败结果没有错误身份（官方 error.info）: %+v", tc.kind, res)
+		}
+		if res.Info.Name != spi.ErrorNameToolContextUnavailable ||
+			res.Info.Code != spi.CodeToolContextUnavailable {
+			t.Fatalf("%s 的身份 = %+v，期望 ToolContextUnavailableError/TOOL_CONTEXT_UNAVAILABLE",
+				tc.kind, *res.Info)
+		}
+	}
+}

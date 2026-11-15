@@ -347,9 +347,15 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		if err != nil {
 			return "", nil, err
 		}
+		// 走到这条分支说明这个会话在本进程里还没登记过（客户端没先 resume）。
+		// 文件里可能已经有轮次，所以编号必须从日志恢复，不能从 1 起：
+		// 判据与 Resume / cmdRun 是同一份（session.NextTurnAt）。
+		// 读盘放在锁外：长会话的日志可能几十 MB，不该占着 runner 的互斥锁。
+		firstUsed := session.NextTurnAt(l.Path) - 1
 		r.mu.Lock()
 		if r.logs[sessionID] == nil {
 			r.logs[sessionID] = l
+			r.turns[sessionID] = firstUsed
 		}
 		logw = r.logs[sessionID]
 	}
@@ -459,8 +465,9 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 			} else {
 				blocks = []spi.Block{{Type: "text", Text: "（无结果）"}}
 			}
+			// rc.2：失败结果的 code 不能被折叠（见 turn_error_codes.go）。
 			if err := logw.Append("tool/result",
-				session.ToolResultEventWithView(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}, viewOf(e.Result))); err != nil {
+				toolResultEventOf(e, blocks, cwd, []int64{lastCallSeq})); err != nil {
 				return err
 			}
 		case agent.EventTurnEnd:
@@ -492,6 +499,9 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	}
 
 	loop := &agent.Loop{
+		// ACP 这条入口同样要把 workflow 的耐久帧写进会话日志（否则同一段
+		// workflow 在 run 入口有节点、在 ACP 入口没有——两条路走的是同一个工具）。
+		Events:    newSessionEventSink(logw),
 		Chat:      llm.New(r.base, os.Getenv("DSHD_LLM_KEY")),
 		Tools:     view,
 		Runner:    runner,
@@ -863,6 +873,12 @@ func (r *acpRunner) Resume(ctx context.Context, sessionID, cwd string) error {
 	}
 	r.logs[sessionID] = logw
 	r.hist[sessionID] = hist
+	// 轮次编号是**会话级**身份，不是进程级：resume 之后接着发 prompt 必须从
+	// 日志里已经开过的轮数续上，否则宿主重启/重连一次就又从 turn:1 开始，
+	// 同一个会话里出现第二个 turn:1（消费者会把两轮当成一轮）。
+	// `turns` 记的是"已经用掉的轮次"，所以种成 下一个-1：下面 Prompt 里的 ++
+	// 才正好等于 session.NextTurn(back)。
+	r.turns[sessionID] = session.NextTurn(back) - 1
 	r.mu.Unlock()
 	attachHistory(logw) // resume 之后也要能回查
 
@@ -914,7 +930,9 @@ func (r *acpRunner) Fork(ctx context.Context, sessionID, cwd string) (string, er
 	r.mu.Lock()
 	r.logs[newID] = writer
 	r.hist[newID] = session.History(back)
-	r.turns[newID] = 0
+	// fork 出来的日志已经带走了父会话的节点（system/developer 消息上还留着源轮次），
+	// 所以新轮次同样从**这份日志**续：判据与其他入口同源（session.NextTurn）。
+	r.turns[newID] = session.NextTurn(back) - 1
 	r.sessionModes[newID] = parentMode.ID
 	r.mu.Unlock()
 	// fork 出来的会话继承父会话**当前**档位；registerSandbox 会拒绝任何放大。
@@ -952,6 +970,9 @@ func cmdACP(argv []string) error {
 		"推理强度：空=不要（默认）| xhigh | max")
 	base := fs.String("base", envOr("DSHD_LLM_BASE", defaultLLMBase), "OpenAI 兼容端点")
 	maxChars := fs.Int("max-chars", defaultMaxChars, "工具输出外置阈值（字符）")
+	// 与 run/serve 同一个旋钮（官方 0.2.2 #79 `config.maxInlineTokens`）：三个入口
+	// 各差一个开关，就会出现"同一份配置换个客户端就不生效"的差异。
+	maxInlineTokens := fs.Int("max-inline-tokens", 0, "工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
 	home := fs.String("home", defaultHome(), "会话根目录")
 	steps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步")
 	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "AGENTS.md 进系统提示的字节上限（0=不传）")
@@ -1005,7 +1026,7 @@ func cmdACP(argv []string) error {
 	if d := diagOrWarn(*home); d != nil {
 		defer d.Close()
 	}
-	mods, err := loadMods(*manifest, *home, *maxChars, nil)
+	mods, err := loadMods(*manifest, *home, *maxChars, *maxInlineTokens, nil)
 	if err != nil {
 		return err
 	}
@@ -1221,27 +1242,86 @@ func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes i
 // （@deepseek-ai/dsh-sdk-minimal/cordis.patch.yml:118）：设了就排在提示词**第一段**，
 // 没设/全空白 = 宿主既有形状逐字节不变。两个入口（run / acp）都经过这里，
 // 所以不存在"某个入口偷偷不读"。
+//
+// 官方 #53 `agent-instructions` 默认开（`dsh-base` 带着它、每链 65,536 字节，
+// 见 `@deepseek-ai/dsh-agent-instructions/README.md:30`）：所以这里**默认打开**
+// project root→cwd 指令链（`prompt.Context.EnableInstructionChain`）。关闭方式
+// `DSHD_INSTRUCTION_CHAIN=0`（显式关，不是"没设就不开"）。
+//
+// 为什么默认开而不是默认关：能力下限规则要求"官方默认有的，我们不能默认没有"。
+// 官方在 base 组合里就是开着的；本仓以前只有"一个全局文件 + 一个 cwd AGENTS.md"
+// 两点链，等于默认少了整条 project 链（monorepo 里 `pkg/AGENTS.md` 根本看不到）。
+// 显式 `--agents`（`ExtraRulesPath`）给出时链让位：那是宿主独有的"单手册"入口。
 func buildSystemPromptWithHome(reg spi.ToolRegistry, model, cwd, home string, workspaceBytes int) (string, error) {
 	globalRulesPath := ""
+	sharedGlobalRulesPath := ""
 	if home != "" {
 		globalRulesPath = filepath.Join(home, "AGENTS.md")
+		// 用户全局链的第二根（`$DSH_AGENTS_HOME/AGENTS.md` → `~/.agents/AGENTS.md`）。
+		//
+		// **只在有 harness home 时才解析**：没有 home 的装配（测试夹具与
+		// `buildSystemPrompt` 这个"没有显式 home"的入口）不存在"用户全局链"这个
+		// 概念，去读进程的 `~/.agents/AGENTS.md` 等于让宿主的提示词随跑测试那台
+		// 机器的家目录漂移。生产两个入口（run / acp）都带 home，所以能力不受影响。
+		sharedGlobalRulesPath = resolveSharedGlobalRulesPath()
 	}
 	tools, err := orderedPromptTools(reg.Tools())
 	if err != nil {
 		return "", err
 	}
 	return prompt.Default(prompt.Context{
-		Model:             model,
-		Cwd:               cwd,
-		Platform:          runtime.GOOS + "/" + runtime.GOARCH,
-		Date:              time.Now().Format("2006-01-02"),
-		Tools:             tools,
-		GlobalRulesPath:   globalRulesPath,
-		MaxGlobalBytes:    workspaceBytes,
-		MaxWorkspaceBytes: workspaceBytes,
-		ExtraRulesPath:    *rulesPath,
-		PersonaPrefix:     strings.TrimSpace(os.Getenv(personaPrefixEnv)),
+		Model:                  model,
+		Cwd:                    cwd,
+		Platform:               runtime.GOOS + "/" + runtime.GOARCH,
+		Date:                   time.Now().Format("2006-01-02"),
+		Tools:                  tools,
+		GlobalRulesPath:        globalRulesPath,
+		SharedGlobalRulesPath:  sharedGlobalRulesPath,
+		MaxGlobalBytes:         workspaceBytes,
+		MaxWorkspaceBytes:      workspaceBytes,
+		ExtraRulesPath:         *rulesPath,
+		PersonaPrefix:          strings.TrimSpace(os.Getenv(personaPrefixEnv)),
+		EnableInstructionChain: instructionChainEnabled(),
 	}), nil
+}
+
+// sharedAgentsHomeEnv 是用户全局链**第二根**的根目录环境变量。
+//
+// 官方 `@deepseek-ai/dsh-agent-instructions/README.md:40`："The harness home holding
+// the user-global `AGENTS.md` is process policy rather than row configuration: the
+// plugin resolves `$DSH_HOME`, or `~/.dsh` ... The shared agents root resolves the
+// same way, from `$DSH_AGENTS_HOME` or `~/.agents`."
+const sharedAgentsHomeEnv = "DSH_AGENTS_HOME"
+
+// resolveSharedGlobalRulesPath 回答"shared agents root 的 AGENTS.md 在哪"。
+//
+// 解析顺序与官方同形（`$DSH_AGENTS_HOME` → `~/.agents`）；两个都拿不到就返回空
+// （= 这条链只有 harness-home 一根，与改动前逐字节一致）。**不猜**其它目录：
+// 猜出来的第二根会把某个碰巧存在的文件悄悄提升成"用户全局约定"。
+func resolveSharedGlobalRulesPath() string {
+	if root := strings.TrimSpace(os.Getenv(sharedAgentsHomeEnv)); root != "" {
+		return filepath.Join(root, "AGENTS.md")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".agents", "AGENTS.md")
+}
+
+// instructionChainEnabledEnv 是 #53 指令链的开关环境变量。
+//
+// 三值约定与本仓其它开关一致：未设/空前缀 = 默认（**开**，官方默认）；
+// `0/false/off/no` = 关（回到旧的两点链）。
+const instructionChainEnabledEnv = "DSHD_INSTRUCTION_CHAIN"
+
+// instructionChainEnabled 回答"这次装配要不要走官方 project 指令链"。
+func instructionChainEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(instructionChainEnabledEnv))) {
+	case "0", "false", "off", "no":
+		return false
+	}
+	return true
 }
 
 // personaPrefixEnv 是官方 `systemPrompt.personaPrefix` 的环境变量名。

@@ -1,5 +1,9 @@
 {
   "_说明": "权限分支登记表：每个决定『放不放行』的函数都必须写明钉住它的测试函数名。scripts/perm-guard.py 会检查这张表与代码一致。",
+  "_本轮登记说明": {
+    "internal/agent/parallel.go::executionMode": "rc.2 同步把 blocksOnHuman 改名成 executionMode（判据从 bool 扩成三档：查不到工具 / Caps().NeedsApproval() / 逐调用的 spi.ConcurrencySafe ⇒ 都返回 modeExclusive），所以**改登记、不删条目**。它拦的是『这条工具调用要不要走等人车道、能不能并发』：NeedsApproval 为真就独占——审批通道是一问一答、只有 1 个缓冲位（cmd/dshd/approval_stdio.go），两个并发审批会吃到对方的应答。钉它的用例仍是 TestApprovalClassToolsAreSerialized（parallel_test.go:417，原来钉 blocksOnHuman 的那条）；另有一条 TestApprovalOverridesDeclaredConcurrencySafety（parallel_test.go:1042）钉『审批压过工具自己声明的并发安全』。",
+    "internal/agent/parallel.go::maxParallelToolCalls": "本轮新增的并发上限解析：字段优先，否则读 DSHD_MAX_PARALLEL_TOOL_CALLS，未设置/非法/≤0 一律回落官方默认 10（负数不解释成『无限』）。它是真实权限分支——这个数字直接决定『同一批调用里有多少个可以同时动磁盘/网络/同一批文件』：调大就是放宽并发放行，会改变真实副作用（并发写同一文件的顺序、对端看到的 QPS），所以不能当成资源旋钮随手改。守卫命中的由头是紧跟其后的 executionMode 文档注释（perm-guard 按 func 边界切块、注释算进上一个函数体——与 cmd/dshd/main.go::cmdTools 那条豁免同一成因），但函数本身是真判定，因此**登记测试而不是豁免**：TestMaxParallelToolCallsParsing（parallel_test.go:644，含默认值 10 / env 三值 / 字段压过 env 三段）。"
+  },
   "gates": {
     "cmd/dshd/acp.go::approvalDecision": "TestApprovalDecision",
     "cmd/dshd/acp.go::Prompt": "TestACPPromptPassesModeApproval",
@@ -14,7 +18,8 @@
     "cmd/dshd/approval_stdio.go::markerAsk": "TestMarkerAskReadsResponse",
     "internal/transport/handlers_jobs.go::handleSessionSetPermission": "TestHandleSessionSetPermission",
     "cmd/dshd/serve_approval.go::reply": "TestApprovalReplyWritesParseableLine",
-    "internal/agent/parallel.go::blocksOnHuman": "TestApprovalClassToolsAreSerialized",
+    "internal/agent/parallel.go::executionMode": "TestApprovalClassToolsAreSerialized",
+    "internal/agent/parallel.go::maxParallelToolCalls": "TestMaxParallelToolCallsParsing",
     "cmd/dshd/serve_sandbox_policy.go::sandboxApprovalValue": "TestSandboxLegacyApprovalValueStillReturnsRealMode"
   },
   "exempt": {

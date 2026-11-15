@@ -196,3 +196,52 @@ func TestAppendChildTurnKeepsHistory(t *testing.T) {
 		t.Fatalf("复用后子会话不见了: %v", err)
 	}
 }
+
+// TestAppendChildTurnAdvancesNumericTurn 钉住复用路径的**数值 turn 递增**。
+//
+// 复用同一个具名子代理时，每一趟往返都是子会话里新的一轮，assistant/message
+// 上的数值 turn 必须递增。从前这里写死 `AssistantMessageEvent(1, 1, …)`，
+// 于是第三趟往返的 assistant 消息仍然标着 `turn:1`——界面 Turn 大纲与消息分组
+// 按它分组（见 `internal/session/turn.go` 的说明），几趟往返被并成同一轮。
+func TestAppendChildTurnAdvancesNumericTurn(t *testing.T) {
+	home := newChildFixture(t)
+	rec, err := ChildSpawn{Home: home, ParentSessionID: "parent-1", Cwd: home}.Spawn(ChildSpawnOptions{
+		AgentID: "reviewer", Prompt: "第一件事", Answer: "做完了",
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	for i, round := range []struct{ prompt, answer string }{
+		{"第二件事", "也做完了"},
+		{"第三件事", "还做完了"},
+	} {
+		if err := AppendChildTurn(home, home, rec.ChildSessionID, round.prompt, round.answer); err != nil {
+			t.Fatalf("追加第 %d 趟: %v", i+2, err)
+		}
+	}
+
+	log := readSession(t, home, rec.ChildSessionID)
+	var turns []int
+	for _, ev := range log.Events {
+		if ev.Type != "assistant/message" {
+			continue
+		}
+		var data struct {
+			Turn int `json:"turn"`
+		}
+		if err := json.Unmarshal(ev.Data, &data); err != nil {
+			t.Fatalf("解析 assistant/message: %v", err)
+		}
+		turns = append(turns, data.Turn)
+	}
+	want := []int{1, 2, 3}
+	if len(turns) != len(want) {
+		t.Fatalf("assistant/message 有 %d 条，期望 %d 条（turns=%v）", len(turns), len(want), turns)
+	}
+	for i := range want {
+		if turns[i] != want[i] {
+			t.Fatalf("第 %d 趟往返的数值 turn = %d，期望 %d（全部实得 %v）；"+
+				"恒为 1 会让界面把几趟往返并成同一轮", i+1, turns[i], want[i], turns)
+		}
+	}
+}

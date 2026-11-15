@@ -105,38 +105,68 @@ func scanDSHTools(t *testing.T) []dshTool {
 	if _, err := os.Stat(sessions); err != nil {
 		t.Skip("本机没有真实会话目录")
 	}
-	out := map[string]dshTool{}
-	err := filepath.Walk(sessions, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(p, ".zstd") || len(out) >= 60 {
+	// 采样顺序 = **按修改时间从新到旧**。
+	//
+	// 为什么不是 Walk 的目录序：夹具要对拍的是"**当前**这个 DSH 版本发给模型的工具表"。
+	// 本机 home 里同时躺着 rc.1 与 rc.2 的会话，目录序会把半年前的会话先抽进来，
+	// 于是升级到 rc.2 后夹具仍是 rc.1 的形状（0.2.2-rc.2 的实际踩点：`send_message`
+	// 已从 `agent_id/target` 改成 `agent`，旧夹具却还钉着 `target`）。
+	// 取最新 60 个 = 取最近跑过的那个版本的形状。
+	files := make([]string, 0, 128)
+	if walkErr := filepath.Walk(sessions, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(p, ".zstd") {
 			return nil
 		}
-		raw, err := v4.ReadFile(p)
+		files = append(files, p)
+		return nil
+	}); walkErr != nil {
+		t.Fatal(walkErr)
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		fi, err := os.Stat(files[i])
 		if err != nil {
-			return nil
+			return false
 		}
-		for _, ev := range raw.Events {
-			if ev.Type != "request/header" {
-				continue
+		fj, err := os.Stat(files[j])
+		if err != nil {
+			return true
+		}
+		return fi.ModTime().After(fj.ModTime())
+	})
+	out := map[string]dshTool{}
+	err := func() error {
+		for _, p := range files {
+			if len(out) >= 60 {
+				break
 			}
-			var d struct {
-				Header struct {
-					Tools []dshTool `json:"tools"`
-				} `json:"header"`
+			raw, err := v4.ReadFile(p)
+			if err != nil {
+				return nil
 			}
-			if json.Unmarshal(ev.Data, &d) != nil {
-				continue
-			}
-			for _, tl := range d.Header.Tools {
-				if tl.Name != "" {
-					if _, ok := out[tl.Name]; !ok {
-						out[tl.Name] = tl
+			for _, ev := range raw.Events {
+				if ev.Type != "request/header" {
+					continue
+				}
+				var d struct {
+					Header struct {
+						Tools []dshTool `json:"tools"`
+					} `json:"header"`
+				}
+				if json.Unmarshal(ev.Data, &d) != nil {
+					continue
+				}
+				for _, tl := range d.Header.Tools {
+					if tl.Name != "" {
+						if _, ok := out[tl.Name]; !ok {
+							out[tl.Name] = tl
+						}
 					}
 				}
+				break
 			}
-			break
 		}
 		return nil
-	})
+	}()
 	if err != nil {
 		t.Fatal(err)
 	}

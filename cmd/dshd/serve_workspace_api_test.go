@@ -13,19 +13,25 @@ package main
 // /api 路由会调用的同一个函数，所以参数校验、官方字段、错误信封都走真实代码路径。
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
+	"dshgo/internal/worktree"
 )
 
 // officialWorkspaceHarness 是一套"真 home + 真 host + 真 transport 分派"的夹具。
@@ -1101,5 +1107,637 @@ func TestOfficialWorkspaceChangesDirectoryBoundary(t *testing.T) {
 		} else {
 			mustRefused("link-in", "workspace-file/not-regular-file")
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 官方 rc.2 归档事件：`workspace/session-archived` / `workspace/session-unarchiving`
+// （已知缺口 #3）
+// ---------------------------------------------------------------------------
+//
+// 官方依据（`tmp/GO8-RC2/official-rc2/dsh/node_modules/@deepseek-ai/dsh-workspace/src/index.ts`）：
+//
+//	:98-100  SessionActivityRequest = { sessionId }（两个事件共用这一个载荷）
+//	:156     `workspace/session-archived` 声明
+//	:403     归档**落盘之后**广播（订阅者失败只 warn，不回滚归档）
+//	:163     `workspace/session-unarchiving` 声明
+//	:426     把 id 移出归档集**之前**广播；监听者拒绝 → 保留归档态
+//
+// 客户端可见性走本仓既有两条通道（不新开协议面）：
+//   - 每会话 transport journal：`session.history` 与官方 `session/events` 尾部流读同一份；
+//   - `/ws` 的 `session:<id>` topic（Hub）。
+
+// officialWorkspaceEventFixture 是"真 host + 真 Transport（带 journal）"的夹具。
+type officialWorkspaceEventFixture struct {
+	home     string
+	source   *sessionSource
+	journals *transport.Journals
+	srv      *transport.Server
+	host     *officialWorkspaceHost
+	sessions int
+}
+
+func newOfficialWorkspaceEventFixture(t *testing.T) *officialWorkspaceEventFixture {
+	t.Helper()
+	home := t.TempDir()
+	source := newSessionSource(home, "")
+	journals := transport.NewJournals(nil)
+	srv, err := transport.NewServer(transport.Options{Source: source, Journals: journals})
+	if err != nil {
+		t.Fatalf("transport.NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	host := attachOfficialWorkspace(srv, home, source, nil)
+	if host == nil {
+		t.Fatal("attachOfficialWorkspace 返回 nil")
+	}
+	t.Cleanup(srv.DetachOfficialWorkspaceAPI)
+	return &officialWorkspaceEventFixture{home: home, source: source, journals: journals, srv: srv, host: host}
+}
+
+// harness 给 fixture 套上"走 transport 分派"的调用口（与 officialWorkspaceHarness 同一条路径）。
+func (f *officialWorkspaceEventFixture) harness() *officialWorkspaceHarness {
+	return &officialWorkspaceHarness{
+		home: f.home, host: f.host, api: f.host.workspaceAPI(), picker: f.host.directoryPickerAPI(),
+	}
+}
+
+// eventSession 建一条真实会话并返回它的 id（测试内唯一）。
+func (f *officialWorkspaceEventFixture) eventSession(t *testing.T, name string) string {
+	t.Helper()
+	dir := newOfficialWorkspaceDir(t, t.TempDir(), name)
+	f.sessions++
+	id := fmt.Sprintf("22222222-2222-2222-2222-%012d", f.sessions)
+	newRealSession(t, f.home, dir, id)
+	return id
+}
+
+// journalFrames 取某会话 journal 里的**全部**帧（SinceNothing 是排他下界 -1）。
+func journalFrames(journals *transport.Journals, sessionID string) []transport.ServerFrame {
+	frames, _, _ := journals.Get(sessionID).Since(transport.SinceNothing, 0)
+	return frames
+}
+
+func journalFrameTypes(frames []transport.ServerFrame) []string {
+	out := make([]string, 0, len(frames))
+	for _, frame := range frames {
+		out = append(out, frame.Type)
+	}
+	return out
+}
+
+// requireJournalEvent 断言 journal 里恰有一条该事件，且载荷是官方的 `{sessionId}`。
+func requireJournalEvent(t *testing.T, journals *transport.Journals, sessionID, event string) transport.ServerFrame {
+	t.Helper()
+	frames := journalFrames(journals, sessionID)
+	var found []transport.ServerFrame
+	for _, frame := range frames {
+		if frame.Type == event {
+			found = append(found, frame)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("journal 里应恰有 1 条 %s，实际 %d 条（全部帧：%v）",
+			event, len(found), journalFrameTypes(frames))
+	}
+	frame := found[0]
+	var payload map[string]any
+	if len(frame.Data) == 0 {
+		t.Fatalf("%s 帧没有 data（官方载荷是 {sessionId}）", event)
+	}
+	if err := json.Unmarshal(frame.Data, &payload); err != nil {
+		t.Fatalf("%s 的 data 不是 JSON 对象：%q", event, frame.Data)
+	}
+	if len(payload) != 1 {
+		t.Fatalf("%s 的载荷必须**只有** sessionId（官方 SessionActivityRequest）：%v", event, payload)
+	}
+	if got, _ := payload["sessionId"].(string); got != sessionID {
+		t.Fatalf("%s 的 sessionId 不对：%q（期望 %q）", event, got, sessionID)
+	}
+	if frame.Seq <= 0 {
+		t.Fatalf("%s 帧必须带 journal seq（客户端要靠它补洞）：%+v", event, frame)
+	}
+	if frame.Time <= 0 {
+		t.Fatalf("%s 帧必须带 time（毫秒墙钟）：%+v", event, frame)
+	}
+	return frame
+}
+
+// requireNoJournalEvent 断言 journal 里没有该事件。
+func requireNoJournalEvent(t *testing.T, journals *transport.Journals, sessionID, event string) {
+	t.Helper()
+	for _, frame := range journalFrames(journals, sessionID) {
+		if frame.Type == event {
+			t.Fatalf("%s 不该出现在 journal 里（官方只在真的变更时广播）：%v",
+				event, journalFrameTypes(journalFrames(journals, sessionID)))
+		}
+	}
+}
+
+// TestOfficialWorkspaceArchiveEventsLandInJournalAndStream 是缺口 #3 的正面判据：
+//
+//  1. 归档 → journal 里出现 `workspace/session-archived`，载荷恰为 `{sessionId}`；
+//  2. 反归档 → journal 里出现 `workspace/session-unarchiving`，同一载荷；
+//  3. 幂等路径**不**广播（官方：已经在集合里 / 本来就不在集合里都直接解析）；
+//  4. 官方 stream（mux `session/events` 尾部流）读同一份 journal，客户端从流里也看得到，
+//     且顺序是 archived 在前、unarchiving 在后。
+func TestOfficialWorkspaceArchiveEventsLandInJournalAndStream(t *testing.T) {
+	f := newOfficialWorkspaceEventFixture(t)
+	sessionID := f.eventSession(t, "alpha")
+	api := f.host.workspaceAPI()
+
+	// 归档：事件在**落盘之后**（官方 :403 在 setState 之后）。
+	if _, err := api.ArchiveSession(sessionID, false); err != nil {
+		t.Fatalf("archiveSession: %v", err)
+	}
+	requireJournalEvent(t, f.journals, sessionID, "workspace/session-archived")
+
+	// 再归档一次：官方 "An already archived id resolves without writing, asking, or stopping."
+	// → 不广播第二条。
+	if _, err := api.ArchiveSession(sessionID, false); err != nil {
+		t.Fatalf("重复 archiveSession: %v", err)
+	}
+	requireJournalEvent(t, f.journals, sessionID, "workspace/session-archived")
+
+	// 反归档：事件在**落盘之前**（官方 :426 在 setState 之前）。
+	if _, err := api.UnarchiveSession(sessionID); err != nil {
+		t.Fatalf("unarchiveSession: %v", err)
+	}
+	requireJournalEvent(t, f.journals, sessionID, "workspace/session-unarchiving")
+
+	// 再反归档一次（本来就不在集合里）：官方直接解析，不广播。
+	if _, err := api.UnarchiveSession(sessionID); err != nil {
+		t.Fatalf("重复 unarchiveSession: %v", err)
+	}
+	requireJournalEvent(t, f.journals, sessionID, "workspace/session-unarchiving")
+
+	// 官方 stream 尾部流：同一份 journal，顺序与落盘顺序一致。
+	stream, fault := f.srv.OpenOfficialJournalTail(sessionID, transport.SinceNothing, 16)
+	if fault != nil {
+		t.Fatalf("开 session/events 尾部流失败：%d %s：%s", fault.Status, fault.Code, fault.Message)
+	}
+	defer stream.Close()
+	var seen []string
+	for i := 0; i < 2; i++ {
+		raw, done, streamFault := stream.Next(context.Background())
+		if streamFault != nil {
+			t.Fatalf("读 session/events 流失败：%s", streamFault.Message)
+		}
+		if done {
+			break
+		}
+		var frame map[string]any
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatalf("流帧不是 JSON：%v（%s）", err, raw)
+		}
+		if typ, _ := frame["type"].(string); typ != "" {
+			seen = append(seen, typ)
+		}
+	}
+	if len(seen) != 2 || seen[0] != "workspace/session-archived" || seen[1] != "workspace/session-unarchiving" {
+		t.Fatalf("官方 stream 里的顺序应是 [session-archived, session-unarchiving]，实际 %v", seen)
+	}
+}
+
+// TestOfficialWorkspaceUnarchiveEventFiresBeforeArchiveSetChanges 钉住官方**顺序**：
+//
+// `workspace/session-unarchiving` 必须在把 id 移出归档集**之前**广播
+// （`dsh-workspace/src/index.ts:426` → `:427` 的 setState）。否则监听者（官方是 worktree
+// 归档清理服务，`dsh-experimental-worktree/src/archive.ts:87-93`）就无法判断"这条会话
+// 现在是不是还在归档集里"，取消/结算清理也就无从谈起。
+func TestOfficialWorkspaceUnarchiveEventFiresBeforeArchiveSetChanges(t *testing.T) {
+	f := newOfficialWorkspaceEventFixture(t)
+	sessionID := f.eventSession(t, "order")
+	api := f.host.workspaceAPI()
+
+	if _, err := api.ArchiveSession(sessionID, false); err != nil {
+		t.Fatalf("archiveSession: %v", err)
+	}
+
+	// 投影口是宿主侧唯一的"广播点"：在它被调用时读一次归档集，就是监听者看到的现场。
+	type snapshot struct {
+		event       string
+		stillInSet  bool
+		archivedSet []string
+	}
+	var seen []snapshot
+	original := f.host.projectEvent
+	if original == nil {
+		t.Fatal("attachOfficialWorkspace 没给宿主接上事件投影口（projectEvent 为 nil）")
+	}
+	f.host.projectEvent = func(sessionID, event string) error {
+		f.host.mu.Lock()
+		defer f.host.mu.Unlock()
+		if err := f.host.ensureLoadedLocked(); err != nil {
+			t.Fatalf("事件回调里读 registry 失败：%v", err)
+		}
+		seen = append(seen, snapshot{
+			event:       event,
+			stillInSet:  officialContains(f.host.doc.ArchivedSessionIDs, sessionID),
+			archivedSet: append([]string(nil), f.host.doc.ArchivedSessionIDs...),
+		})
+		return original(sessionID, event)
+	}
+	defer func() { f.host.projectEvent = original }()
+
+	if _, err := api.UnarchiveSession(sessionID); err != nil {
+		t.Fatalf("unarchiveSession: %v", err)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("反归档应广播**一条**事件，实际 %d 条：%+v", len(seen), seen)
+	}
+	if seen[0].event != "workspace/session-unarchiving" {
+		t.Fatalf("反归档广播的事件名不对：%q", seen[0].event)
+	}
+	if !seen[0].stillInSet {
+		t.Fatalf("workspace/session-unarchiving 必须在移出归档集**之前**广播，"+
+			"实际广播时归档集已经是 %v（会话已不在里面）", seen[0].archivedSet)
+	}
+	if got := f.host.doc.ArchivedSessionIDs; len(got) != 0 {
+		t.Fatalf("反归档落盘后归档集应为空：%v", got)
+	}
+}
+
+// TestOfficialWorkspaceUnarchiveEventRejectionRetainsArchive 钉住官方另一句原话：
+// "A rejection retains the archived state."（`docs/subsystems/workspace.md` / index.ts:163）
+//
+// 事件投递失败 = 监听者拒绝 → 归档态必须保留，且方法要**响亮**失败（不能静默成功）。
+func TestOfficialWorkspaceUnarchiveEventRejectionRetainsArchive(t *testing.T) {
+	f := newOfficialWorkspaceEventFixture(t)
+	sessionID := f.eventSession(t, "reject")
+	api := f.host.workspaceAPI()
+
+	if _, err := api.ArchiveSession(sessionID, false); err != nil {
+		t.Fatalf("archiveSession: %v", err)
+	}
+	original := f.host.projectEvent
+	if original == nil {
+		t.Fatal("attachOfficialWorkspace 没给宿主接上事件投影口（projectEvent 为 nil）")
+	}
+	f.host.projectEvent = func(string, string) error {
+		return fmt.Errorf("worktree 清理服务拒绝了这次反归档")
+	}
+	defer func() { f.host.projectEvent = original }()
+
+	if _, err := api.UnarchiveSession(sessionID); err == nil {
+		t.Fatal("事件投递失败时反归档必须报错，不能静默成功")
+	}
+	// 归档态保留：下面用 registry 面读回来（不是看函数返回值）。
+	f.host.mu.Lock()
+	if err := f.host.ensureLoadedLocked(); err != nil {
+		f.host.mu.Unlock()
+		t.Fatalf("读 registry: %v", err)
+	}
+	still := officialContains(f.host.doc.ArchivedSessionIDs, sessionID)
+	f.host.mu.Unlock()
+	if !still {
+		t.Fatal("监听者拒绝后归档态必须保留（官方 \"A rejection retains the archived state.\"），实际已被移出")
+	}
+}
+
+// TestOfficialWorkspaceArchiveEventReachesWS 证明事件真的能到 `/ws`：
+// 走的是既有 Hub 的 `session:<id>` topic，不是"只在进程内"的假事件。
+func TestOfficialWorkspaceArchiveEventReachesWS(t *testing.T) {
+	f := newOfficialWorkspaceEventFixture(t)
+	sessionID := f.eventSession(t, "ws")
+	mounted := httptest.NewServer(f.srv)
+	defer mounted.Close()
+
+	client := newOfficialWireTestClient(t)
+	connect, err := client.Get(mounted.URL + "/connect?token=" + f.srv.Token())
+	if err != nil {
+		t.Fatalf("GET /connect: %v", err)
+	}
+	connect.Body.Close()
+	if connect.StatusCode != http.StatusSeeOther {
+		t.Fatalf("/connect 应 303，实际 %d", connect.StatusCode)
+	}
+	cookieRequest, err := http.NewRequest(http.MethodGet, mounted.URL+"/", nil)
+	if err != nil {
+		t.Fatalf("构造 cookie 查询: %v", err)
+	}
+	cookies := client.Jar.Cookies(cookieRequest.URL)
+	if len(cookies) == 0 {
+		t.Fatal("/connect 没给 cookie")
+	}
+
+	// 先归档再订阅：`session/events` 的既有订阅回放会把 journal 里的帧补上（这正是
+	// 客户端断线重连的路径），所以这里不必抢时序。
+	if resp, err := client.Post(mounted.URL+"/api/workspace.archiveSession", "application/json",
+		strings.NewReader(`{"sessionId":"`+sessionID+`"}`)); err != nil {
+		t.Fatalf("POST workspace.archiveSession: %v", err)
+	} else {
+		body := make([]byte, 0)
+		buf := make([]byte, 512)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			body = append(body, buf[:n]...)
+			if readErr != nil {
+				break
+			}
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("archiveSession 应 200，实际 %d：%s", resp.StatusCode, body)
+		}
+	}
+
+	ws, handshake := dialOfficialWS(t, mounted.URL, "/ws", cookies)
+	defer ws.Close()
+	if handshake.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("/ws 升级应 101，实际 %d", handshake.StatusCode)
+	}
+	ws.writeText(t, `{"t":"sub","topic":"session:`+sessionID+`","sinceSeq":-1}`)
+	frame := ws.readJSON(t, 5*time.Second)
+	if typ, _ := frame["type"].(string); typ != "workspace/session-archived" {
+		t.Fatalf("WS 上第一条应是 workspace/session-archived，实际 %q（%v）", typ, frame)
+	}
+	data, ok := frame["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("WS 帧的 data 不是对象：%v", frame)
+	}
+	if got, _ := data["sessionId"].(string); got != sessionID {
+		t.Fatalf("WS 帧的 sessionId 不对：%q（期望 %q）", got, sessionID)
+	}
+}
+
+// dialOfficialWS 用真 cookie 打通 `/ws`（返回未关闭的连接；调用方负责 Close）。
+//
+// 与 `dialWireMux` 同一套裸 WS 客户端（复用 `wireWS` 的读写），只换了路径：
+// `/ws` 是 L1 的订阅面，`/api/remote.mux` 是 L2 的。
+func dialOfficialWS(t *testing.T, base, path string, cookies []*http.Cookie) (*wireWS, *http.Response) {
+	t.Helper()
+	address := strings.TrimPrefix(base, "http://")
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatalf("连接 %s: %v", address, err)
+	}
+	keyBytes := make([]byte, 16)
+	if _, err := rand.Read(keyBytes); err != nil {
+		conn.Close()
+		t.Fatalf("生成 key: %v", err)
+	}
+	var request strings.Builder
+	fmt.Fprintf(&request, "GET %s HTTP/1.1\r\nHost: %s\r\n", path, address)
+	request.WriteString("Upgrade: websocket\r\nConnection: Upgrade\r\n")
+	fmt.Fprintf(&request, "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n",
+		base64.StdEncoding.EncodeToString(keyBytes))
+	for _, cookie := range cookies {
+		fmt.Fprintf(&request, "Cookie: %s=%s\r\n", cookie.Name, cookie.Value)
+	}
+	request.WriteString("\r\n")
+	if _, err := conn.Write([]byte(request.String())); err != nil {
+		conn.Close()
+		t.Fatalf("写握手: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	response, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		conn.Close()
+		t.Fatalf("读握手响应: %v", err)
+	}
+	return &wireWS{conn: conn, br: br}, response
+}
+
+// ---------------------------------------------------------------------------
+// 反归档与 rc.2「归档时清理工作树」状态机的协同（缺口 #3 第 2 条）
+// ---------------------------------------------------------------------------
+//
+// 官方指南（`docs/upgrade-guide/v0.2.2-rc.1/archive-worktrees/guide.md` §Migration 2）：
+// "To resume an archived Session whose checkout was removed, unarchive it and use
+// **Restore worktree**. The retained branch is checked out at the recorded path."
+//
+// 也就是说 checkout 被归档清理移除之后，恢复走 `forgePanel.restoreWorktree` 背后的
+// `worktree.Service.RestoreWorktree`（internal/worktree/worktree.go:636）。反归档
+// 必须在这条路径上如实报告结果：走了就说走了，失败了就**响亮**失败，不许静默成功。
+
+// fakeArchiveWorktree 是反归档协同用的假 worktree 能力（真实现是 *worktree.Service）。
+type fakeArchiveWorktree struct {
+	state      worktree.State
+	stateErr   error
+	restoreErr error
+	restored   []string
+
+	// 取消点（官方 archive.ts:87-93）：默认"没有在途尝试"（零值 = no-op）。
+	cancelErr    error
+	cancellation worktree.CleanupCancellation
+	cancelled    []string
+}
+
+func (f *fakeArchiveWorktree) State(string) (worktree.State, error) {
+	if f.stateErr != nil {
+		return worktree.State{}, f.stateErr
+	}
+	return f.state, nil
+}
+
+func (f *fakeArchiveWorktree) CancelArchiveCleanup(sessionID string) (worktree.CleanupCancellation, error) {
+	f.cancelled = append(f.cancelled, sessionID)
+	return f.cancellation, f.cancelErr
+}
+
+func (f *fakeArchiveWorktree) RestoreWorktree(sessionID string) error {
+	f.restored = append(f.restored, sessionID)
+	return f.restoreErr
+}
+
+// TestOfficialWorkspaceUnarchiveRestoresWorktreeRemovedByArchiveCleanup
+//
+// 反归档时 checkout 已经被归档清理移除 → 必须走官方恢复路径（RestoreWorktree），
+// 而且反归档本身仍然成功（官方语义：恢复是独立动作）。
+func TestOfficialWorkspaceUnarchiveRestoresWorktreeRemovedByArchiveCleanup(t *testing.T) {
+	f := newOfficialWorkspaceEventFixture(t)
+	sessionID := f.eventSession(t, "restore")
+	api := f.host.workspaceAPI()
+	if _, err := api.ArchiveSession(sessionID, false); err != nil {
+		t.Fatalf("archiveSession: %v", err)
+	}
+
+	removed := filepath.Join(t.TempDir(), "checkout-removed-by-cleanup")
+	fake := &fakeArchiveWorktree{state: worktree.State{
+		Status:    worktree.StatusCreated,
+		Directory: removed,
+		Branch:    "dsh/worktree-x",
+	}}
+	f.host.worktreeOverride = fake
+
+	set, err := api.UnarchiveSession(sessionID)
+	if err != nil {
+		t.Fatalf("checkout 被清理后反归档仍应成功（恢复是独立动作）：%v", err)
+	}
+	if len(set) != 0 {
+		t.Fatalf("反归档后归档集应为空：%v", set)
+	}
+	if len(fake.restored) != 1 || fake.restored[0] != sessionID {
+		t.Fatalf("checkout 已不在时必须调官方恢复路径 RestoreWorktree(%q)，实际 %v", sessionID, fake.restored)
+	}
+}
+
+// TestOfficialWorkspaceUnarchiveReportsWorktreeRestoreFailure 是"不能假装恢复"的判据：
+//
+// 恢复失败 → 反归档整体**响亮**失败（四字段 500 internal），错误里带真实原因与
+// 真实目录，并明说归档集已经变了；不许返回 200 让客户端以为工作树回来了。
+func TestOfficialWorkspaceUnarchiveReportsWorktreeRestoreFailure(t *testing.T) {
+	f := newOfficialWorkspaceEventFixture(t)
+	sessionID := f.eventSession(t, "restorefail")
+	if _, err := f.host.workspaceAPI().ArchiveSession(sessionID, false); err != nil {
+		t.Fatalf("archiveSession: %v", err)
+	}
+
+	removed := filepath.Join(t.TempDir(), "checkout-gone")
+	fake := &fakeArchiveWorktree{
+		state:      worktree.State{Status: worktree.StatusCreated, Directory: removed},
+		restoreErr: fmt.Errorf("git worktree add 失败：目标分支已被占用"),
+	}
+	f.host.worktreeOverride = fake
+
+	// wire 层：四字段 500 internal（不是 200 + 空 result），message 带真实原因。
+	code, out := f.harness().call(t, "workspace.unarchiveSession", map[string]any{"sessionId": sessionID})
+	if code != http.StatusInternalServerError {
+		t.Fatalf("恢复失败应报 500 internal，实际 %d（%v）", code, out)
+	}
+	errObj, _ := out["error"].(map[string]any)
+	if errObj["code"] != "internal" {
+		t.Fatalf("四字段 code 应是 internal：%v", out)
+	}
+	message, _ := errObj["message"].(string)
+	if !strings.Contains(message, removed) {
+		t.Fatalf("错误里必须点名被清理的 checkout 目录 %q：%s", removed, message)
+	}
+	if !strings.Contains(message, "目标分支已被占用") {
+		t.Fatalf("错误里必须带官方恢复路径的真实失败原因：%s", message)
+	}
+	if !strings.Contains(message, "已移出归档集") {
+		t.Fatalf("错误里必须如实说明归档态已经改变（否则客户端会以为状态没动）：%s", message)
+	}
+	if len(fake.restored) != 1 || fake.restored[0] != sessionID {
+		t.Fatalf("恢复必须真的走官方路径一次：%v", fake.restored)
+	}
+
+	// 归档集已经落盘为空（这是真实状态，不因为恢复失败而回滚）。
+	f.host.mu.Lock()
+	if err := f.host.ensureLoadedLocked(); err != nil {
+		f.host.mu.Unlock()
+		t.Fatalf("读 registry: %v", err)
+	}
+	stillArchived := officialContains(f.host.doc.ArchivedSessionIDs, sessionID)
+	f.host.mu.Unlock()
+	if stillArchived {
+		t.Fatal("官方语义下 unarchive 的归档集变更在恢复之前就已落盘，不该回滚")
+	}
+}
+
+// TestOfficialWorkspaceUnarchiveSkipsWorktreeRestoreWhenNothingToRestore
+//
+// 两条"无恢复可做"的分支都不能乱动工作树：
+//   - checkout 还在（清理被跳过/保留策略生效）；
+//   - 这条会话压根没创建过 checkout。
+func TestOfficialWorkspaceUnarchiveSkipsWorktreeRestoreWhenNothingToRestore(t *testing.T) {
+	f := newOfficialWorkspaceEventFixture(t)
+
+	// ① checkout 仍在。
+	sessionID := f.eventSession(t, "present")
+	present := t.TempDir()
+	if _, err := f.host.workspaceAPI().ArchiveSession(sessionID, false); err != nil {
+		t.Fatalf("archiveSession: %v", err)
+	}
+	presentFake := &fakeArchiveWorktree{state: worktree.State{
+		Status: worktree.StatusCreated, Directory: present,
+	}}
+	f.host.worktreeOverride = presentFake
+	if _, err := f.host.workspaceAPI().UnarchiveSession(sessionID); err != nil {
+		t.Fatalf("checkout 还在时反归档应成功：%v", err)
+	}
+	if len(presentFake.restored) != 0 {
+		t.Fatalf("checkout 还在时不许调 RestoreWorktree（官方在目录存在时也是 409）：%v", presentFake.restored)
+	}
+
+	// ② 没有创建过 checkout。
+	noWorktree := f.eventSession(t, "none")
+	if _, err := f.host.workspaceAPI().ArchiveSession(noWorktree, false); err != nil {
+		t.Fatalf("archiveSession: %v", err)
+	}
+	noneFake := &fakeArchiveWorktree{state: worktree.State{Status: worktree.StatusNone}}
+	f.host.worktreeOverride = noneFake
+	if _, err := f.host.workspaceAPI().UnarchiveSession(noWorktree); err != nil {
+		t.Fatalf("没有 checkout 时反归档应成功：%v", err)
+	}
+	if len(noneFake.restored) != 0 {
+		t.Fatalf("没有创建过 checkout 时不许调 RestoreWorktree：%v", noneFake.restored)
+	}
+}
+
+// TestOfficialWorkspaceUnarchiveWithoutWorktreeServiceIsStillHonest
+//
+// 宿主没有 worktree 服务（不带 serve 循环的入口）时：
+// 反归档本身照官方语义成功，但不许声称"检查/恢复过"——只记一行 stderr。
+func TestOfficialWorkspaceUnarchiveWithoutWorktreeServiceIsStillHonest(t *testing.T) {
+	f := newOfficialWorkspaceEventFixture(t)
+	sessionID := f.eventSession(t, "nowt")
+	api := f.host.workspaceAPI()
+	if _, err := api.ArchiveSession(sessionID, false); err != nil {
+		t.Fatalf("archiveSession: %v", err)
+	}
+	// 把服务能力拿掉：override 与 prompts 都为空（fixture 的 prompts 本来就是 nil）。
+	f.host.worktreeOverride = nil
+	if _, err := api.UnarchiveSession(sessionID); err != nil {
+		t.Fatalf("没有 worktree 服务时反归档仍应成功（恢复检查会记 stderr）：%v", err)
+	}
+	// 事件照发（归档/反归档各一条），只是"恢复检查"这件事做不了——它只进 stderr，
+	// 不伪造任何"已恢复"的帧。
+	requireJournalEvent(t, f.journals, sessionID, "workspace/session-archived")
+	requireJournalEvent(t, f.journals, sessionID, "workspace/session-unarchiving")
+}
+
+// TestOfficialWorkspaceConcurrentUnarchiveBroadcastsOnce
+//
+// 并发反归档（UI 连点、或 restore 与 unarchive 撞在一起）只能广播**一条**
+// `workspace/session-unarchiving`、只做**一次**工作树恢复：
+//
+// 官方 registry 用写队列把 check-then-write 串起来（`enqueueOperation`），所以
+// 第二个调用看到的是"已经不在归档集里"→ 直接解析，不再广播。这里用
+// `archiveOps` 达到同样效果。
+func TestOfficialWorkspaceConcurrentUnarchiveBroadcastsOnce(t *testing.T) {
+	f := newOfficialWorkspaceEventFixture(t)
+	sessionID := f.eventSession(t, "concurrent")
+	api := f.host.workspaceAPI()
+	if _, err := api.ArchiveSession(sessionID, false); err != nil {
+		t.Fatalf("archiveSession: %v", err)
+	}
+
+	// checkout 已被清理：并发里只该有一次恢复（第二次不该再调）。
+	removed := filepath.Join(t.TempDir(), "concurrent-gone")
+	fake := &fakeArchiveWorktree{state: worktree.State{
+		Status: worktree.StatusCreated, Directory: removed,
+	}}
+	f.host.worktreeOverride = fake
+
+	const callers = 4
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			_, errs[slot] = api.UnarchiveSession(sessionID)
+		}(i)
+	}
+	wg.Wait()
+	for slot, err := range errs {
+		if err != nil {
+			t.Fatalf("第 %d 个并发反归档失败：%v", slot, err)
+		}
+	}
+
+	// 事件只一条：`requireJournalEvent` 断言"恰有 1 条"。
+	requireJournalEvent(t, f.journals, sessionID, "workspace/session-unarchiving")
+	if len(fake.restored) != 1 {
+		t.Fatalf("并发反归档只该恢复一次工作树，实际 %d 次：%v", len(fake.restored), fake.restored)
+	}
+	// 取消点同样只准入一次：并发里第二个调用看到的是"已经不在归档集"，直接解析
+	// （官方 index.ts:426 的提前 return），不会再去取消/恢复第二遍。
+	if len(fake.cancelled) != 1 {
+		t.Fatalf("并发反归档只该调一次 CancelArchiveCleanup，实际 %d 次：%v",
+			len(fake.cancelled), fake.cancelled)
 	}
 }

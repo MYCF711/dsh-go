@@ -22,9 +22,9 @@ import (
 	"dshgo/internal/compact"
 	"dshgo/internal/kernel"
 	"dshgo/internal/llm"
-	"dshgo/internal/modes"
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
+	timermod "dshgo/internal/timer"
 	"dshgo/modules/exec/bash"
 	"dshgo/modules/fs/local"
 	"dshgo/modules/search"
@@ -39,6 +39,7 @@ import (
 	"dshgo/modules/tool/hindsight"
 	"dshgo/modules/tool/history"
 	"dshgo/modules/tool/nowline"
+	officetool "dshgo/modules/tool/office"
 	planmod "dshgo/modules/tool/plan"
 	pluginmod "dshgo/modules/tool/plugin"
 	"dshgo/modules/tool/present"
@@ -52,6 +53,7 @@ import (
 	subagentfork "dshgo/modules/tool/subagentfork"
 	team "dshgo/modules/tool/team"
 	teamtask "dshgo/modules/tool/teamtask"
+	"dshgo/modules/tool/terminalpanel"
 	todo "dshgo/modules/tool/todo"
 	unlagmod "dshgo/modules/tool/unlag"
 	watch "dshgo/modules/tool/watch"
@@ -66,7 +68,7 @@ import (
 
 // 这三个由 -ldflags 覆盖（scripts/build.sh），默认值给 go run 用。
 var (
-	version   = "0.2.2-go.2"
+	version   = "0.2.2-go.4"
 	commit    = "dev"
 	buildTime = "unknown"
 )
@@ -88,12 +90,20 @@ var hostHistory = &historyHolder{}
 // 为什么抽出来：`run` / `exec` 要在**合成目录**（静态 + 插件）上再建一条流水线
 // （见 hostToolRunner），而 builtinModules 里那条建在静态目录上。两边各写一份
 // Options 一定会漂——最典型的是 SpillDir 写错，于是外置出去的 artifact 模型读不到。
-func toolsOptions(home string, maxChars int) tools.Options {
+func toolsOptions(home string, maxChars, maxInlineTokens int) tools.Options {
 	return tools.Options{
 		// artifact 落在 home 下（不是系统 temp）：FS 只放行了这个目录，
 		// 放 temp 里模型读不到自己刚被外置的结果。
 		SpillDir: filepath.Join(home, "artifacts"),
 		MaxChars: maxChars,
+		// 官方 0.2.2 #79 `dsh-spill-policy` 的 `config.maxInlineTokens`
+		// （文本与图片共享的估算 token 预算）。
+		//
+		// 三值语义在 modules/tools：0 = 未配置（回落到 DSHD_MAX_INLINE_TOKENS，
+		// 再没有就是关闭）、正值 = 这个预算、负值 = 非法（装配期 fail-loud）。
+		// 这里只负责把 `--max-inline-tokens` 的值原样交下去——**不再**只靠环境变量：
+		// 环境变量在 --help 里看不见，等于一个藏起来的开关（与 --reasoning 同一条理由）。
+		MaxInlineTokens: maxInlineTokens,
 		// 官方 0.2.2 #78 `session-checkpoint-policy` 的 `tools/execute` 钩子：
 		// 顶层调用的工具体是副作用边界，执行前先让请求前缀耐久；
 		// 失败即零执行（pipeline 里 fail-closed，见 modules/tools/pipeline.go）。
@@ -110,14 +120,14 @@ func toolsOptions(home string, maxChars int) tools.Options {
 // 「模型看得见、runner 回 unknown tool」是必然结果，不是配置问题。
 // 这里用同一个构造函数（tools.NewPipeline）、同一份 Options、同一条 bus，
 // 只把目录换成合成表——审批、沙箱、超时、外置、R3 兜底一样不少。
-func hostToolRunner(root *kernel.Scope, table spi.ToolRegistry, home string, maxChars int) spi.Runner {
-	return tools.NewPipeline(table, root.Bus(), toolsOptions(home, maxChars))
+func hostToolRunner(root *kernel.Scope, table spi.ToolRegistry, home string, maxChars, maxInlineTokens int) spi.Runner {
+	return tools.NewPipeline(table, root.Bus(), toolsOptions(home, maxChars, maxInlineTokens))
 }
 
 // builtinModules 按工作区与 home 装配默认实现。
 // artifacts 目录要放行给 FS 读：工具输出被外置成 artifact 之后，
 // Hint 会告诉模型「用 read 读全文」——不放行那句 Hint 就是假的。
-func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Module {
+func builtinModules(wd, home string, maxChars, maxInlineTokens int, sub *subProvider) []kernel.Module {
 	if sub == nil {
 		sub = &subProvider{} // 没绑定：工具会明确报「还没装配好」，不会假装能派
 	}
@@ -129,7 +139,14 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 	}
 	return []kernel.Module{
 		// 默认实现也是插件（A3）：它们与第三方插件走同一个 Register(scope)。
-		tools.Module(toolsOptions(home, maxChars)),
+		tools.Module(toolsOptions(home, maxChars, maxInlineTokens)),
+		// 官方 base 插件 #46：受管 `DSH_*` 环境注册表。装在这里（shell 工具之前）只是
+		// 为了让模块图读起来是"先有能力再有用它的工具"——工具是**惰性** inject 的，
+		// 真实顺序由能力图决定。装配代码见 shellenv_wiring.go。
+		shellEnvModule(home),
+		// 官方 base 插件 #3：随 scope 释放的定时器。补这一层之前 `internal/timer`
+		// 零生产 importer（能力有实现、没有挂载点），消费者拿不到 ctx.timeout/interval。
+		timermod.Module(),
 		bash.Module(wd, bash.Options{}),
 		local.Module(wd, local.WithExtraReadRoot(filepath.Join(home, "artifacts"))),
 		read.Module(),
@@ -138,7 +155,11 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		glob.Module(),
 		grep.Module(),
 		historyModule(hostHistory),
-		search.Module(),
+		// 官方 web 命名空间的三个设置（`web` 的 provider 选择、`web-deepseek-api`
+		// 的 9 个字段、`web-search-deepseek` 的端点/模型/请求参数）在这里变成
+		// provider 的配置：把"设置优先的 getenv"传进去，modules/search 一个字段
+		// 都不用改（它本来就只从同一个 getenv 接缝读，见 settings_effective.go）。
+		search.ModuleWithEnv(settingsEnvOverlay(home, os.Getenv)),
 		history.Module(),
 		wdtool.Module(),
 		wsdeps.Module(),
@@ -155,7 +176,11 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		webfetch.Module(),
 		websearch.Module(),
 		readimage.Module(),
-		pwsh.Module(),
+		// 官方 `pwsh-sandbox.timeoutMs` / `maxOutputBytes` 的真实落点：
+		// 只有**用户显式写过**的值才注入（没写过 = 工具自己的官方默认
+		// 120s / 64000，见 modules/tool/pwsh 的 DefaultTimeout /
+		// DefaultMaxOutputBytes）。零值 Option 一律被忽略，不会把默认值改成 0。
+		pwsh.Module(pwshBudgetOptions(home)...),
 		github.Module(),
 		repohere.Module(),
 		execlit.Module(),
@@ -166,11 +191,23 @@ func builtinModules(wd, home string, maxChars int, sub *subProvider) []kernel.Mo
 		schedule.Module(filepath.Join(home, "state", "schedules")),
 		watch.Module(filepath.Join(home, "state", "watch")),
 		nowline.Module(),
+		// rc.2 新包 `dsh-terminal-panel` 的两个只读工具（user_terminal_list / read）。
+		//
+		// 数据源按入口形态解析（见 terminal_bridge.go）：serve 起的工具子进程走 stdio 桥，
+		// 独立 run/exec 如实报"这里读不到终端"，子代理会话给官方原文拒绝。
+		// `readUserTerminals:false` 时两个工具都不注册（ModuleFromEnv 从宿主环境解析）。
+		terminalpanel.ModuleFromEnv(os.Getenv),
 		subagentModule(sub),
 		subagenttool.Module(),
-		subagentfork.Module(inheritFromCtx(home)),
+		subagentfork.Module(seedForCtx(home)),
 		skill.Module(filepath.Join(home, "skills")),
 		hindsight.Module(home),
+		// Office 三工具（office_convert / office_recalculate / office_render）。
+		// provider 从共享槽取：serve 进程里就是 cmdServe 建的那一份，run/tools/exec
+		// 里则由这里建一份 —— 关键是**同一进程只此一份**（同一引擎/同一准入队列/
+		// 同一 generation），否则工具面与 Transport 面各排队一半、generation 打架。
+		// 见 cmd/dshd/serve_office_kit.go 的 sharedOfficeKitProvider。
+		officetool.Module(sharedOfficeKitProvider(home)),
 		// MCP 客户端：把 mcp.json 里声明的 server 的 tools/list 真正注册成 spi.Tool
 		// （此前只数字数、从不注册）。漏掉 dsh.toml 的白名单条目会让它被静默跳过。
 		tools.MCPModule(home),
@@ -255,7 +292,7 @@ func usage() {
   dshd plugins --root <dir> <action> [flags] 管理受限本地插件包；root 必须显式给出
   dshd wasm inspect --module <path>          魔数/sha256/导出函数名（按名字排序）
   dshd wasm call --module <path> --fn <f>    调用导出函数；--args 2,3 --timeout 2s 可选，返回值打成一行（如 = 5）
-  dshd version                               版本
+  dsh-go version                             版本
 `)
 }
 
@@ -310,8 +347,8 @@ func cwdOrDot() string {
 	return wd
 }
 
-func loadMods(manifestPath, home string, maxChars int, sub *subProvider) ([]kernel.Module, error) {
-	return loadModsIn(manifestPath, home, maxChars, sub, cwdOrDot())
+func loadMods(manifestPath, home string, maxChars, maxInlineTokens int, sub *subProvider) ([]kernel.Module, error) {
+	return loadModsIn(manifestPath, home, maxChars, maxInlineTokens, sub, cwdOrDot())
 }
 
 // loadModsIn 是 loadMods 的同一份实现，工作目录由调用方给定。
@@ -320,8 +357,8 @@ func loadMods(manifestPath, home string, maxChars int, sub *subProvider) ([]kern
 // 变成**工具的根**：read/edit/glob/grep/bash 的相对路径都按它解析。不这么做就会出现
 // 「系统提示里写着 Workspace: A，工具却在 B 里干活」——那正是 ACP 那条注释里
 // 实测踩过的坑（文件不存在 → 在宿主启动目录里翻）。
-func loadModsIn(manifestPath, home string, maxChars int, sub *subProvider, workdir string) ([]kernel.Module, error) {
-	mods := builtinModules(workdir, home, maxChars, sub)
+func loadModsIn(manifestPath, home string, maxChars, maxInlineTokens int, sub *subProvider, workdir string) ([]kernel.Module, error) {
+	mods := builtinModules(workdir, home, maxChars, maxInlineTokens, sub)
 
 	// wasm 模块在 Apply **之前**装：装不起来（缺文件/魔数不对/digest 不符）
 	// 就该在启动时炸，而不是等到第一次调用——那正是 digest 校验存在的意义。
@@ -347,7 +384,15 @@ func loadModsIn(manifestPath, home string, maxChars int, sub *subProvider, workd
 	// 能力，而是宿主基础设施。放进 builtinModules 会被 dsh.toml 白名单静默丢掉
 	// （Apply 对没列出的模块只打一行 Warn），症状就是「界面上存了 API Key，
 	// 搜索却还是不生效」——正是这条接缝要修的那个用户可见缺口。
-	return append(applied, credentialsModule(home)), nil
+	//
+	// **必须排在最前**（不是追加在尾部）：search 装配时按"基线默认 provider 当下
+	// 是否可用"决定钉哪个（见 modules/search 的 newWebProvidersFromEnv 注释）。
+	// 那个判定发生在 Register 期，凭据服务还没注册的话，只存了凭据库 key 的部署
+	// 会算成"默认 provider 不可用"→ 不钉 → 到选择期两个 provider 同时可用 →
+	// WEB_PROVIDER_AMBIGUOUS（搜索直接不可用）。同层按声明顺序激活，所以放在
+	// 第 0 位就是"凭据先就位、search 再判定"。TestCredentialsModuleRunsBeforeSearch
+	// 钉着这条顺序假设。
+	return append([]kernel.Module{credentialsModule(home)}, applied...), nil
 }
 
 // loadModsWithPlugins = loadMods + 插件运行时模块（`plugin-runtime`）。
@@ -358,14 +403,14 @@ func loadModsIn(manifestPath, home string, maxChars int, sub *subProvider, workd
 // 为什么加在 Apply **之后**：插件运行时不是可配置项。放进 builtinModules 会被
 // dsh.toml 的白名单静默丢掉（Apply 对没列出的模块只打一行 Warn 就跳过）——
 // 那正是「装好了插件、模型却永远看不见」的复现路径。
-func loadModsWithPlugins(manifestPath, home string, maxChars int, sub *subProvider) ([]kernel.Module, *pluginRuntime, error) {
-	return loadModsWithPluginsIn(manifestPath, home, maxChars, sub, cwdOrDot())
+func loadModsWithPlugins(manifestPath, home string, maxChars, maxInlineTokens int, sub *subProvider) ([]kernel.Module, *pluginRuntime, error) {
+	return loadModsWithPluginsIn(manifestPath, home, maxChars, maxInlineTokens, sub, cwdOrDot())
 }
 
 // loadModsWithPluginsIn 是 loadModsWithPlugins 的同一份实现，工作目录由调用方给定
 // （run 入口传官方 `workingDirectory.defaultDirectory`，见 loadModsIn）。
-func loadModsWithPluginsIn(manifestPath, home string, maxChars int, sub *subProvider, workdir string) ([]kernel.Module, *pluginRuntime, error) {
-	mods, err := loadModsIn(manifestPath, home, maxChars, sub, workdir)
+func loadModsWithPluginsIn(manifestPath, home string, maxChars, maxInlineTokens int, sub *subProvider, workdir string) ([]kernel.Module, *pluginRuntime, error) {
+	mods, err := loadModsIn(manifestPath, home, maxChars, maxInlineTokens, sub, workdir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -373,7 +418,15 @@ func loadModsWithPluginsIn(manifestPath, home string, maxChars int, sub *subProv
 	if err != nil {
 		return nil, nil, err
 	}
-	return append(mods, pluginmod.Runtime(rt.Manager())), rt, nil
+	// 官方 #1 `tool-plugin-manager`：运行时插件面的管理工具（list/set/豁免/安装卸载）。
+	//
+	// 与上面 `pluginmod.Module(...)` 的 `plugin` 工具是**两层**：那个管 dsh.toml 的
+	// 编译期 [[module]] 白名单，这个管 state.json + 运行时装载器（见
+	// cmd/dshd/tool_plugin_manager.go 的文件头）。同样加在 Apply 之后、同样不进
+	// builtinModules：插件管理工具本身不能因为白名单里没写就消失。
+	api := newOfficialPluginManagerAPI(rt)
+	mods = append(mods, pluginmod.Runtime(rt.Manager()), pluginManagerModule(pluginManagerAPI{api}))
+	return mods, rt, nil
 }
 
 // syncPlugins 让运行时与 state.json 对齐（启动路径：enabled 的包必须真在跑）。
@@ -443,7 +496,7 @@ func cmdModules(argv []string) error {
 	if err := fs.Parse(argv[1:]); err != nil {
 		return err
 	}
-	mods, err := loadMods(*manifest, defaultHome(), 0, nil)
+	mods, err := loadMods(*manifest, defaultHome(), 0, 0, nil)
 	if err != nil {
 		return err
 	}
@@ -498,7 +551,7 @@ func cmdTools(argv []string) error {
 	if err != nil {
 		return err
 	}
-	mods, pluginRT, err := loadModsWithPlugins(*manifest, defaultHome(), 0, nil)
+	mods, pluginRT, err := loadModsWithPlugins(*manifest, defaultHome(), 0, 0, nil)
 	if err != nil {
 		return err
 	}
@@ -625,6 +678,11 @@ func cmdRun(argv []string) (retErr error) {
 	maxSteps := fs.Int("max-steps", defaultTurnMaxSteps, "最多几步")
 	home := fs.String("home", defaultHome(), "会话根目录")
 	maxChars := fs.Int("max-chars", defaultMaxChars, "工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
+	// 官方 0.2.2 #79 `dsh-spill-policy` 的 `config.maxInlineTokens`：文本与图片**共享**
+	// 的估算 token 预算。0 = 未配置（回落到 DSHD_MAX_INLINE_TOKENS，再没有就是关闭）。
+	// 负值不在这里挡：装配期由 modules/tools 的 Options.Validate fail-loud（与官方
+	// "Invalid config fails at load" 同一形状），这样库层与宿主是同一份判据。
+	maxInlineTokens := fs.Int("max-inline-tokens", 0, "工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
 	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "AGENTS.md 进系统提示的字节上限（0=不传）")
 	resumeSession := fs.String("session", "", "续这个会话（空=新建）；cwd 可省，按 id 找")
 	// 工具表默认压掉参数说明：20 次 A/B（10 个任务 × 两种表）结果一致，输入省 22%。
@@ -752,7 +810,7 @@ func cmdRun(argv []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	mods, pluginRT, err := loadModsWithPluginsIn(*manifest, *home, *maxChars, subp, workDir)
+	mods, pluginRT, err := loadModsWithPluginsIn(*manifest, *home, *maxChars, *maxInlineTokens, subp, workDir)
 	if err != nil {
 		return err
 	}
@@ -800,7 +858,7 @@ func cmdRun(argv []string) (retErr error) {
 	if _, err := kernel.Inject(root, spi.ToolRunnerKey); err != nil {
 		return err
 	}
-	runner := hostToolRunner(root, reg, *home, *maxChars)
+	runner := hostToolRunner(root, reg, *home, *maxChars, *maxInlineTokens)
 
 	// 新会话的工作目录与工具根是同一个值（装配期就定死的 workDir，见上面）。
 	// `--home` 是会话根，不是工作目录——两者互不替代。
@@ -828,12 +886,17 @@ func cmdRun(argv []string) (retErr error) {
 	var logw *session.Log
 	if sessID == "" {
 		sessID = "session-" + session.NewID()
-		logw, err = session.CreateSession(*home, cwd, sessID, modes.DefaultID)
+		logw, err = session.CreateSession(*home, cwd, sessID, selectedAgentPresetDefault(*home))
 	} else {
 		var path string
 		path, err = session.ResolvePath(*home, cwd, sessID)
 		if err == nil {
-			logw, err = session.OpenSessionAt(path)
+			// 走**能回收死锁**的版本：宿主被强杀时上一轮的 `.lock` 不会被
+			// 任何人 release（defer 一行都跑不到），留到下一次续写就把这一轮
+			// 直接顶成"会话正被另一个进程写入"——而那个进程根本已经不存在了。
+			// 只回收"锁内容是本包写的形状 + 那个 pid 确实已经退出"的锁，
+			// 活进程的锁与认不出的锁一律照原样拒绝（见 internal/session/stale_lock.go）。
+			logw, err = session.OpenSessionAtRecoveringStale(path)
 		}
 	}
 	if err != nil {
@@ -842,9 +905,17 @@ func cmdRun(argv []string) (retErr error) {
 	defer logw.Close()
 	jobsStdio := os.Getenv("DSHD_JOBS_STDIO") == "1"
 	steerStdio := os.Getenv("DSHD_STEER_STDIO") == "1"
-	if jobsStdio || steerStdio {
+	// rc.2 终端面板的父→子 roster 桥（`user_terminal_list` / `user_terminal_read`）。
+	// 应答走**同一根 stdin**，所以缺了 startStdinDispatcher 就没人读——工具只能等到超时。
+	termStdio := userTerminalsViaStdio()
+	if jobsStdio || steerStdio || termStdio {
 		// 所有父→子请求共享唯一 stdin 读端，避免 buffered reader 抢读/丢行。
 		startStdinDispatcher()
+	}
+	// 数据源无条件挂上（不只是有桥时）：没有桥时 list/read 结构化说明"要 serve"，
+	// 但**子代理判定**仍走本地真实谱系——子代理必须在任何形态下都被拒绝。
+	if err := provideUserTerminalBridge(root, *home); err != nil {
+		return fmt.Errorf("终端面板数据源挂载失败: %w", err)
 	}
 	if jobsStdio {
 		// jobs 通道必须在 agent loop 开始前建立；旧实现到 loop 结束才启动，
@@ -894,7 +965,7 @@ func cmdRun(argv []string) (retErr error) {
 		}
 		sys += "\n\n" + dir
 	}
-	logSessionStart(*home, sessID, logw.Path, cwd, modes.DefaultID)
+	logSessionStart(*home, sessID, logw.Path, cwd, selectedAgentPresetDefault(*home))
 	// 把"当前会话"指给 history_search——`run` 以前没这一步，模型回查只会得到
 	// "没有活动会话"。ACP 那边早就指了，这里补上。
 	attachHistory(logw)
@@ -909,12 +980,32 @@ func cmdRun(argv []string) (retErr error) {
 	// 把"一次调用的 call+result"成对写完。
 	kernel.OnTyped[*spi.Call](root.Bus(), root, spi.EventToolResult, newNestedV4(logw).record)
 
-	if err := logw.Append("system/message", session.SystemMessageData(1, 1, sys)); err != nil {
+	// 这一轮的**会话级**轮次编号。数值 `turn` 是既有身份
+	// （`docs/transport-contract.md`「消息身份」与 `turn/done.turnId`、
+	// `tool/call.callId` 并列），真值只能来自 append-only 的 v4 日志：
+	// serve 的每一轮都是一个新进程（`dshd run --session <id>`），任何进程内计数器
+	// 都会让第二次 prompt 又写 `turn:1`，第二轮起所有轮次在界面上混成一轮。
+	//
+	// `back` 是上面为历史/装载集**已经读出来**的那份日志（不重复读盘）：
+	// 它只含本轮之前的 turn/start，正好就是"已经开过几轮"。
+	turn := session.NextTurn(back)
+	if backErr != nil {
+		// 读不出来就没法知道已经开过几轮：退回 1 而不是猜一个更大的号。
+		// 但绝不静默——轮次号重复是消费者能看见的错，得留下痕迹。
+		fmt.Fprintf(os.Stderr, "turn：会话日志读不出来（%v），本轮轮次编号退回 %d\n", backErr, turn)
+	}
+
+	if err := logw.Append("system/message", session.SystemMessageData(turn, 1, sys)); err != nil {
 		return err
 	}
-	if err := logw.Append("turn/start", session.TurnStartData(1)); err != nil {
+	if err := logw.Append("turn/start", session.TurnStartData(turn)); err != nil {
 		return err
 	}
+	// 这一轮的变更记录器：`turn/start` 之后**立刻**拍"开始"快照（工具一改文件就晚了），
+	// 收工时在 `turn/end` 之后补 `workspace/changes` 事件与记录。defer 注册在这里 →
+	// 后进先出：先 tc.Exit 写 turn/end，再 finish 写变更，最后才 logw.Close。
+	changesTurn := startWorkspaceChangesTurn(*home, logw, cwd, turn)
+	defer changesTurn.finish()
 	// v4 `request/context`：这一轮请求用的模型（`session.load.model`、`context.usage`
 	// 都只读这条事件，而宿主以前从不写它——我们自己的会话在界面上"没有模型"）。
 	//
@@ -937,7 +1028,7 @@ func cmdRun(argv []string) (retErr error) {
 	//
 	// 注册在这个位置是有意的：defer 是后进先出，所以它比上面那个
 	// `defer logw.Close()` 先跑——补写结局时文件还开着。
-	tc := newTurnCloser(logw, 1)
+	tc := newTurnCloser(logw, turn)
 	defer func() {
 		if r := recover(); r != nil {
 			// panic 也是"这一轮没跑完"的一种。先补结局，再把 panic 原样抛回去：
@@ -1037,7 +1128,10 @@ func cmdRun(argv []string) (retErr error) {
 	// 无限任务），步数只是死循环安全阀。
 	// 官方 subagent.maxActiveSubagents：并发子代理上限（默认 8；desktop profile
 	// 覆盖为 20）。解析在建循环之前、发请求之前：写错就 fail-closed。
-	subGate, err := subagentGateFromEnv(os.Getenv)
+	//
+	// 设置文档里的 `subagent.maxActiveSubagents` 优先（用户显式写过才覆盖，
+	// 没写过继续走环境变量 / 官方默认；见 settings_effective.go 的三条判据）。
+	subGate, err := subagentGateFromSettings(*home, os.Getenv)
 	if err != nil {
 		return err
 	}
@@ -1048,10 +1142,20 @@ func cmdRun(argv []string) (retErr error) {
 		// 可续问子会话的落点。空着会让 Continuable 明确失败——所以必须给。
 		home: *home,
 		gate: subGate,
+		// 官方 subagent.maxDepth（默认 1）：设置文档写过就用它，否则 nil 走默认。
+		depthLimit: effectiveSubagentMaxDepth(*home),
 	})
 	loop := &agent.Loop{
 		Chat:   chat,
 		Steers: steerInbox,
+		// 官方 agent-loop.maxParallelToolCalls（默认 10）：设置文档写过就用它，
+		// 没写过保持 0 = 走 DSHD_MAX_PARALLEL_TOOL_CALLS / 官方默认
+		// （internal/agent/parallel.go:99-105 的三段解析）。
+		MaxParallelToolCalls: effectiveAgentLoopMaxParallel(*home),
+		// 工具写的耐久会话事件（workflow 的 4 类 `tool-workflow/*` 帧）落到本会话
+		// 的 v4 日志：serve 的 follow 会把它镜像成 journal 帧，GUI 再投影出节点。
+		// 不给它，workflow 就会"跑得起来但界面上什么都没有"。
+		Events: newSessionEventSink(logw),
 		// 容量声明由调用方给（serve 透传 --context-window/--max-output）；
 		// 循环里唯一的解析点是 llm.ResolveModelCapacity，这里不重复算。
 		Capacity: llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput},
@@ -1169,8 +1273,9 @@ func cmdRun(argv []string) (retErr error) {
 				} else {
 					blocks = []spi.Block{{Type: "text", Text: "（无结果）"}}
 				}
+				// rc.2：失败结果的 code 不能被折叠（见 turn_error_codes.go）。
 				if err := logw.Append("tool/result",
-					session.ToolResultEventWithView(e.Turn, e.Step, e.CallID, blocks, e.IsError, cwd, []int64{lastCallSeq}, viewOf(e.Result))); err != nil {
+					toolResultEventOf(e, blocks, cwd, []int64{lastCallSeq})); err != nil {
 					return err
 				}
 				emitJobs(root)
@@ -1205,7 +1310,10 @@ func cmdRun(argv []string) (retErr error) {
 		runMessage = llm.Message{Role: "user", Parts: runParts}
 	}
 	hist := append(append([]llm.Message(nil), baseHist...), runMessage)
-	hist, err = loop.Run(runCtx, 1, hist)
+	// turn 传的是**会话级**编号（见上面 `session.NextTurn(back)`）：这一步里
+	// 所有 v4 事件（step/*、tool/call、tool/result、assistant/message）都带它，
+	// 写死 1 会让第二轮起的工具事件全落到第一轮名下。
+	hist, err = loop.Run(runCtx, turn, hist)
 	if err != nil {
 		return err
 	}
@@ -1261,6 +1369,11 @@ func (c *turnCloser) Exit(ctx context.Context, err error) error {
 	if c == nil || c.closed {
 		return nil
 	}
+	// rc.2：真失败且错误对象自带稳定码时，落盘要保留 code（不折叠成 UNKNOWN）；
+	// 取消/超时与无码错误仍走既有的 aborted/error + turnEndForExit 判定。
+	if failure, ok := turnEndFailureOfExit(ctx, err); ok {
+		return c.writeFailure(failure)
+	}
 	kind, detail := turnEndForExit(ctx, err)
 	return c.write(kind, detail)
 }
@@ -1278,6 +1391,21 @@ func (c *turnCloser) write(kind, detail string) error {
 		return nil
 	}
 	if err := c.logw.Append("turn/end", session.TurnEndData(c.turn, kind, detail)); err != nil {
+		return err
+	}
+	c.closed = true
+	return nil
+}
+
+// writeFailure 写一条**保留 code** 的失败轮（rc.2）。
+//
+// 与 write 共用 closed 幂等：同一轮只能有一条 turn/end，否则只读日志的消费者
+// 会把一轮数成两轮。
+func (c *turnCloser) writeFailure(failure session.TurnEndError) error {
+	if c == nil || c.closed {
+		return nil
+	}
+	if err := c.logw.Append("turn/end", session.TurnEndErrorData(c.turn, failure)); err != nil {
 		return err
 	}
 	c.closed = true
@@ -1396,7 +1524,7 @@ func cmdExec(argv []string) error {
 	if *toolName == "" {
 		return fmt.Errorf("缺 --tool")
 	}
-	mods, pluginRT, err := loadModsWithPlugins(*manifest, defaultHome(), 0, nil)
+	mods, pluginRT, err := loadModsWithPlugins(*manifest, defaultHome(), 0, 0, nil)
 	if err != nil {
 		return err
 	}
@@ -1413,7 +1541,7 @@ func cmdExec(argv []string) error {
 	if err != nil {
 		return err
 	}
-	runner := hostToolRunner(root, reg, defaultHome(), 0)
+	runner := hostToolRunner(root, reg, defaultHome(), 0, 0)
 	res, err := runner.Run(root.Context(), *toolName, json.RawMessage(*rawArgs))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "执行失败: %v\n", err)

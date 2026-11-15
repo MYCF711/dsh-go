@@ -89,12 +89,43 @@ type ChildSpawnOptions struct {
 	// 描述文字是给人看的，拿它当 id 会让每次委派换一条子会话（见
 	// modules/tool/subagent 的同名断言）。
 	AgentID string
+	// Name 是这条子代理的**官方名字**（`subagent/catalog` v3 的 `name`）。
+	//
+	// 官方规则（`dsh-subagent/src/names.ts:23-25`）：`^[a-z][a-z0-9-]{0,31}$`，
+	// 且不得是保留名 `lead`；同一父代理下唯一。显式给了就必须合法——名字不合法是
+	// 调用方的契约错误，不是"悄悄降级"的理由。
+	//
+	// 省略时的来源：AgentID（**仅当**它本身就是合法 agent 名时）；
+	// 两者都没有（匿名委派）→ 不写 catalog 事实，子会话日志与改动前逐字节一致。
+	Name string
+	// Label 是官方 v3 `continuable` 的创建标签（人读的展示标签，必填）。
+	//
+	// 省略时用 AgentID；AgentID 也空就拒绝（官方 continuable 必须有 label，
+	// 见 `subagent_catalog.go` 的 nativeCatalogFact 校验）。
+	Label string
 	// Prompt 是这次委派的正文（写成子会话的第一条 user 消息）。
 	Prompt string
 	// Answer 是子代理交回的正文（写成第一条 assistant 消息）。
 	// 空 = 只留提问：委派失败时**不编**一个空回答。
 	Answer string
+	// Seed 是 fork 种子的 durable 事件（父会话已完成轮次的真实事件，**原样**）。
+	//
+	// 官方 `dsh-subagent-fork-in-process/src/index.ts:72-78`：fork 的种子在创建时
+	// 取一次，然后"becomes part of the child's own durable transcript"——
+	// 所以它必须**落进子会话自己的日志**，之后父会话再怎么长也进不来。
+	//
+	// 空 = 不是 fork 委派（或首轮完成之前 fork），子会话日志与改动前逐字节一致。
+	// 写法见 `appendSeedEvents`：事件按原顺序搬、data 原样、只补一个来源标记，
+	// 不重排、不合并、不重新编造字段。
+	Seed []SeedEvent
 }
+
+// SeedEvent 是一条要从父会话搬进子会话的事件。
+//
+// 为什么暴露 `v4.Event` 而不是让 agent 层自己投影：种子的语义是"**父会话的那条事件**"，
+// 投影（怎么拼成模型看的一段文本）已经由 `cmd/dshd/subagent_seed.go` 做完，
+// 这里只管把它落成子会话里的一条真实事件——两层各自的职责不混。
+type SeedEvent = v4.Event
 
 // AgentChildSessionIDSeparator 是官方 `${id}-session-${uuid}` 里的中缀。
 const AgentChildSessionIDSeparator = "-session-"
@@ -141,6 +172,86 @@ func validateAgentID(agentID string) error {
 		return fmt.Errorf("agent id %q 不能含中缀 %q", agentID, AgentChildSessionIDSeparator)
 	}
 	return nil
+}
+
+// childCatalogIdentity 决定这条子代理要写的官方名字与标签（`subagent/catalog` v3）。
+//
+// 三种情况：
+//   - 显式给了 `Name`：原样用（合法性由 `childCatalogPreflight` 里的官方校验器判）；
+//   - 没给 `Name` 但有 `AgentID`，且 `AgentID` 本身就是合法 agent 名：用 `AgentID`
+//     ——本宿主的"具名 agent"与官方"子代理名"在这里是同一个概念，不让调用方写两遍；
+//   - 都没有（匿名委派，或 AgentID 不是合法名字）：返回空名 = **不写** catalog 事实，
+//     子会话日志与改动前逐字节一致。AgentID 不是合法名字（例如带大写）不算委派失败：
+//     它是落盘目录标签（规则见 `validateAgentID`），比官方 agent 名宽。
+func childCatalogIdentity(opts ChildSpawnOptions) (name, label string) {
+	name = strings.TrimSpace(opts.Name)
+	label = strings.TrimSpace(opts.Label)
+	agentID := strings.TrimSpace(opts.AgentID)
+	if name == "" {
+		if agentID == "" || !session.CatalogChildNameValid(agentID) {
+			return "", ""
+		}
+		name = agentID
+	}
+	if label == "" {
+		label = agentID
+	}
+	return name, label
+}
+
+// childCatalogPreflight 在**建子会话之前**自检这条 catalog v3 事实。
+//
+// 两件事，都交给 B3 已定的那两个校验器，这里不另写一套规则：
+//  1. 载荷规则（官方 `nativeCatalogFact`）：`name` 匹配 `^[a-z][a-z0-9-]{0,31}$`、
+//     不是保留名 `lead`、v3 `continuable` 必带非空 `label`；
+//  2. 同代唯一（官方 `duplicate catalog child`）：把这一条**候选**接在父会话本代
+//     durable 事实后面，交给 `session.ValidateSubagentCatalogGeneration` 判重。
+//
+// 父会话日志读不到时（CLI/测试里"父会话没有落盘"是常态），判重无从判起：只校验
+// 载荷规则。这不是静默降级——本宿主的 catalog 事实本来就写在**子会话自己**的日志里
+// （父会话在那个时刻由运行中的这一轮持锁，见 Spawn 的注释），父日志里通常没有事实。
+func childCatalogPreflight(home, parentSessionID, childSessionID string, createdAt int64, name, label string) error {
+	payload := session.SubagentCatalogV3(childSessionID, createdAt, session.CatalogModeContinuable, label, name)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("子代理目录事实序列化失败：%w", err)
+	}
+	if _, err := session.ValidateSubagentCatalogPayload(raw); err != nil {
+		return fmt.Errorf("子代理名 %q 不合法：%w", name, err)
+	}
+	events, inherited, ok := parentCatalogEvents(home, parentSessionID)
+	if !ok {
+		return nil
+	}
+	seq := inherited
+	for _, event := range events {
+		if event.Seq >= seq {
+			seq = event.Seq + 1
+		}
+	}
+	events = append(events, v4.Event{
+		Type: session.EventSubagentCatalog, Seq: seq, Time: createdAt, Data: raw,
+	})
+	if err := session.ValidateSubagentCatalogGeneration(events, inherited); err != nil {
+		return fmt.Errorf("子代理名 %q 与本代已有子代理冲突：%w", name, err)
+	}
+	return nil
+}
+
+// parentCatalogEvents 读父会话的 durable 事件，返回 (事件, 本代起点, 是否读到了)。
+//
+// 本代起点恒为 0：本宿主目前没有可读的 fork 前缀计数（`InheritedEventCount` 由
+// 调用方给，宿主各处传 0）。这里跟随同一口径，不为此另造一个"真值"。
+func parentCatalogEvents(home, parentSessionID string) ([]v4.Event, int64, bool) {
+	path, err := session.FindByID(home, parentSessionID)
+	if err != nil || strings.TrimSpace(path) == "" {
+		return nil, 0, false
+	}
+	back, err := v4.ReadFile(path)
+	if err != nil {
+		return nil, 0, false
+	}
+	return back.Events, 0, true
 }
 
 // Spawn 建一条 durable v4 子会话，写下父子帧与这次委派的真实往返。
@@ -192,20 +303,30 @@ func (s ChildSpawn) Spawn(opts ChildSpawnOptions) (ChildRecord, error) {
 			"子会话 %q 已经存在（%s）：拒绝重建（重建会截断它的历史）", child, path)
 	}
 
-	lg, err := session.CreateSession(home, cwd, child, modes.DefaultID)
-	if err != nil {
-		return ChildRecord{}, fmt.Errorf("建子会话 %q 失败: %w", child, err)
-	}
+	// rc.2：这条子代理的官方名字/标签，以及**派发前**自检（在建子会话之前做完：
+	// 名字不合法或与本代冲突时，不该先落一份空子会话再失败）。
+	catalogName, catalogLabel := childCatalogIdentity(opts)
 	now := s.Now
 	if now == nil {
 		now = time.Now
+	}
+	spawnedAt := now().UnixMilli()
+	if catalogName != "" {
+		if err := childCatalogPreflight(home, parent, child, spawnedAt, catalogName, catalogLabel); err != nil {
+			return ChildRecord{}, err
+		}
+	}
+
+	lg, err := session.CreateSession(home, cwd, child, modes.DefaultID)
+	if err != nil {
+		return ChildRecord{}, fmt.Errorf("建子会话 %q 失败: %w", child, err)
 	}
 	rec := ChildRecord{
 		ChildSessionID:  child,
 		ParentSessionID: parent,
 		AgentID:         agentID,
 		Cwd:             cwd,
-		SpawnedAt:       now().UnixMilli(),
+		SpawnedAt:       spawnedAt,
 	}
 	frame := map[string]any{
 		"childSessionId":  rec.ChildSessionID,
@@ -219,6 +340,28 @@ func (s ChildSpawn) Spawn(opts ChildSpawnOptions) (ChildRecord, error) {
 		frame["agentId"] = agentID
 	}
 	appendErr := lg.Append(EventChildSpawn, frame)
+	// rc.2：官方 `subagent/catalog` v3（带 `name`）——前置不兼容已由 Lead 裁决
+	// （见 `internal/session/subagent_catalog.go` 的常量块注释）。
+	//
+	// 为什么写在**子会话**日志里而不是父会话：官方是父代理 append（`dsh-subagent/src/
+	// catalog.ts:155`），但本宿主的 spawn 发生在父会话那一轮**正在跑**的时候，父日志
+	// 由那一轮持着写锁（`session.OpenSessionAt` 抢的是同一把 writer claim），再开一次
+	// 会直接失败。而子会话日志是才建出来的、本函数独有；本宿主的目录投影也是**扫描
+	// durable 子会话**得到的（`cmd/dshd/serve_session_api_t04.go` 的 SubagentCatalog），
+	// 所以事实放在子会话里同样可读，且不与父轮的写入者抢锁。
+	if appendErr == nil && catalogName != "" {
+		appendErr = lg.Append(session.EventSubagentCatalog,
+			session.SubagentCatalogV3(child, rec.SpawnedAt, session.CatalogModeContinuable,
+				catalogLabel, catalogName))
+	}
+	// fork 种子：父会话已完成轮次的真实事件，原样搬进来。
+	//
+	// **顺序有讲究**：种子写在父子帧与 catalog 事实**之后**、这次委派的 user 之前。
+	// 子会话的历史本来就是"先有来历（帧），再有继承来的过去（种子），最后是我这一趟"；
+	// 反过来会把子代理自己的任务排到历史中间，续问时读起来像是"它在替别人说话"。
+	if appendErr == nil && len(opts.Seed) > 0 {
+		appendErr = appendSeedEvents(lg, opts.Seed)
+	}
 	if appendErr == nil {
 		if p := strings.TrimSpace(opts.Prompt); p != "" {
 			appendErr = lg.Append("user/message",
@@ -241,8 +384,86 @@ func (s ChildSpawn) Spawn(opts ChildSpawnOptions) (ChildRecord, error) {
 	return rec, nil
 }
 
-// FindChild 从 durable 日志里认出这个 child 属于谁。
+// appendSeedEvents 把 fork 种子逐条写进子会话日志。
 //
+// 三条规矩（每一条都对应"种子会骗人"的一种方式）：
+//  1. **只搬对话事件**：`user/message` / `assistant/message` / `tool/result`。
+//     别的类型（`turn/start`、`request/*`、压缩事件…）不进来：它们的 seq 指向父日志，
+//     搬到新文件里就是指向一条不相关的事件（与 `internal/session/fork.go` 不搬
+//     `headerSeq` 同一个理由）。子会话不伪造轮次边界，它只是"生来就带着这段历史"。
+//  2. **data 原样、只补来源标记**：`finish` 原因、`isError`、`meta.cwd`、
+//     `tool_call_id` 都是被 fork 之后依然为真的事实，重写它们等于把结论改掉。
+//  3. **user 消息加 `source.kind = fork-seed`**：区分"继承来的历史"与"派我的这一趟"。
+//     只补 user 一种（它是轮次的开头，也是将来最可能被误当成"用户刚说的话"的那一类）；
+//     assistant/tool 不碰，一个字节都不改。
+func appendSeedEvents(lg *session.Log, seed []SeedEvent) error {
+	for _, ev := range seed {
+		if err := appendSeedEvent(lg, ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// appendSeedEvent 搬一条种子事件。
+//
+// **只接受三种事件**（`seedEventTypes`），别的一律响亮失败：调用方（`cmd/dshd` 的
+// `buildForkSeed`）已经按同一份判据筛过一遍，这里再拦是防止某个新入口把
+// `turn/start` / `request/*` 之类的父日志帧误塞进来——那些进了子会话只会是一条
+// 指向"别的日志的 seq"的孤儿记录，读路径看不出来，写路径也不报错。
+func appendSeedEvent(lg *session.Log, ev SeedEvent) error {
+	if strings.TrimSpace(ev.Type) == "" {
+		return fmt.Errorf("fork 种子事件缺少 type：写进子会话也没有任何投影认得它")
+	}
+	if !seedEventTypes[ev.Type] {
+		return fmt.Errorf("fork 种子不接受 %q 事件（只搬 user/message、assistant/message、tool/result）", ev.Type)
+	}
+	if len(ev.Data) == 0 {
+		return fmt.Errorf("fork 种子事件 %q 没有 data", ev.Type)
+	}
+	switch ev.Type {
+	case "user/message":
+		return lg.Append(ev.Type, seedUserData(ev.Data))
+	default:
+		// assistant/message 与 tool/result：data 原样（finish/isError/cwd 都是
+		// fork 之后依然为真的事实，重写它们等于改结论）。
+		return lg.Append(ev.Type, json.RawMessage(ev.Data))
+	}
+}
+
+// seedEventTypes 是种子允许搬的事件类型（与 `cmd/dshd/subagent_seed.go` 的
+// `buildForkSeed` 同一份判据：只搬对话事件）。
+var seedEventTypes = map[string]bool{
+	"user/message":      true,
+	"assistant/message": true,
+	"tool/result":       true,
+}
+
+// seedUserData 给一条继承来的 user 消息补上来历。
+//
+// 只动 `source.kind`：正文、块顺序、附件/引用身份全部原样（那些是真实用户输入的证据）。
+// 解不开就原样搬——一条读不懂的 user 消息也比"悄悄消失"强。
+func seedUserData(data json.RawMessage) any {
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return data
+	}
+	source, _ := payload["source"].(map[string]any)
+	if source == nil {
+		source = map[string]any{}
+	}
+	source["kind"] = SeedSourceKind
+	payload["source"] = source
+	return payload
+}
+
+// SeedSourceKind 是"这条消息来自 fork 种子"的 `source.kind`。
+//
+// 与 `cmd/dshd/subagent_seed.go` 的常量同值：那边造种子、这边落盘，
+// 两处必须写同一个词，否则读日志的人要认两种标记。
+const SeedSourceKind = "fork-seed"
+
+// FindChild 从 durable 日志里认出这个 child 属于谁。
 // 返回 (record, true, nil) 表示盘上确有一条父子帧；false 表示这个子会话不存在
 // **或**它的日志里没有父子帧（对 `subagents.prompt` 而言两者都该是
 // no_such_session：没有归属就没有授权）。

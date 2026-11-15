@@ -17,15 +17,20 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 
+	"dshgo/internal/agent"
 	"dshgo/internal/config"
+	"dshgo/internal/cua"
 	"dshgo/internal/llm"
 	"dshgo/internal/modes"
 	"dshgo/internal/native"
+	"dshgo/internal/officekit"
 	"dshgo/internal/pluginmgr"
 	"dshgo/internal/session"
 	"dshgo/internal/settingsform"
 	"dshgo/internal/transport"
+	"dshgo/internal/updater"
 	"dshgo/modules/exec/bash"
+	"dshgo/modules/tool/websearch/providerapi"
 )
 
 // errNoModel 是 serve 的 turnRunner 给出的回答：**故意**失败。
@@ -251,6 +256,15 @@ func cmdServe(args []string) error {
 	}
 	defer func() { _ = pluginRT.Close(context.Background()) }()
 
+	// 官方 #6 `deepseek-llm-api-extensions` + #17 `plugin-package-inventory-deepseek`
+	// 的生产注册点（装配期一次）：本进程之后发出的每条 DeepSeek 官方协议模型请求
+	// 都带 `dsh_plugin_packages`（活跃包库存，每次请求现读 manager+loader 投影）。
+	// 见 serve_llm_extensions.go。注册失败只让这一个字段缺席，不拦 HTTP 服务：
+	// 但必须说出来，否则"注册了却发不出去"又会变成一次静默成功。
+	if err := registerPluginPackagesExtension(pluginRT); err != nil {
+		fmt.Fprintf(os.Stderr, "DeepSeek 请求扩展注册失败（%v）；dsh_plugin_packages 不会出现在模型请求里\n", err)
+	}
+
 	// 插件热重载（HS-14）：**默认关闭**。pluginHMRConfig 的零值就是 disabled，
 	// 只有显式 `DSHD_PLUGIN_HMR=1` 才走这个分支；关闭时连 Run 都不调用
 	// （Run 对关闭状态直接回 ErrHMROff，那是调用方的 bug 而不是"空转成功"）。
@@ -286,9 +300,51 @@ func cmdServe(args []string) error {
 	// 通用设置直接复用上面两份 runner 已读取的存储，不读 ui-config。
 	settingsStore := newServeSettingsStore(*serveModel, *servePolicy, modelOverrides, permissionOverrides)
 	settingsStore.setLoadErrors(modelLoadErr, permissionLoadErr)
+
+	// 更新渠道：官方把它归**壳配置**（`dsh-client-ui-settings-general/src/types.ts:60`
+	// 「UI choices persist in the shell configuration, independently of Host settings」），
+	// 所以它**不是** settings 命名空间，落 `<home>/state/update-channel.json`。
+	//
+	// 本构建自带的渠道由打包决定；本仓只有 stable 一种产物，所以 Packaged=stable。
+	updateChannel, channelErr := updater.New(updater.Options{
+		Dir:      filepath.Join(*home, "state"),
+		Packaged: updater.ChannelStable,
+	})
+	if channelErr != nil {
+		// 壳配置目录算不出来就是装配错误：响亮失败，不静默退化成"没有更新渠道"。
+		return fmt.Errorf("初始化更新渠道服务: %w", channelErr)
+	}
+	_ = updateChannel // 在 srv 建好后挂上（见下面 AttachDesktopUpdateChannel）
+
+	// 更新状态：渠道服务的**兄弟**——那边管"我选哪个渠道"，这边管"现在有没有新版本、
+	// 更新入口在哪"（官方 `dsh-client-ui-settings-general/src/types.ts:30-35`）。
+	//
+	// 更新来源是**我们自己的 GitHub 仓**：`GET /repos/MYCF711/dsh-go/releases`
+	// （用户 2026-11-13 指令「走我们的 go 仓库更新」），不是官方的 Electron 更新通道。
+	// 运行中版本从 `main.version` 注入——版本号唯一出处是 `cmd/dshd/main.go`。
+	//
+	// 出网策略：进程启动不发请求，只有界面问 `desktopUpdate.status`（观察）或
+	// 用户点 `desktopUpdate.open`（重试）才查；TTL 缓存 + 单飞 + ETag 条件请求。
+	githubToken := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+	if githubToken == "" {
+		githubToken = strings.TrimSpace(os.Getenv("GH_TOKEN"))
+	}
+	updateStatus, statusErr := updater.NewStatusService(updater.StatusOptions{
+		Version: version,
+		Channel: updateChannel,
+		Token:   githubToken,
+	})
+	if statusErr != nil {
+		// 运行版本解析不了 / 没有渠道来源都是装配错误：响亮失败，
+		// 不静默退化成"永远查不到更新"（那种沉默比一条启动错误难查十倍）。
+		return fmt.Errorf("初始化更新状态服务: %w", statusErr)
+	}
+	// 渠道一变过滤规则就变了（stable 不看 prerelease），缓存的结论立刻作废。
+	unsubscribeChannelChange := updateChannel.Subscribe(func(updater.State) { updateStatus.Invalidate() })
+	defer unsubscribeChannelChange()
 	// 持久模型目录与 active 默认共用 W61 store；目录本身不保存第二个 active。
 	// 损坏目录只让目录 API fail-loud，绝不拿空目录覆盖原文件。
-	modelCatalog := llm.OpenModelCatalog(*home)
+	modelCatalog := openHostModelCatalog(*home)
 	if _, err := modelCatalog.List(); err != nil {
 		fmt.Fprintf(os.Stderr, "模型目录读盘失败（%v）；修复前目录 API 会报错\n", err)
 	}
@@ -422,10 +478,24 @@ func cmdServe(args []string) error {
 		moRunner = &modelOverrideLoopRunner{base: lr, permissions: permissionOverrides, recordEffort: true, catalog: modelCatalog}
 		runner = moRunner
 	}
+	// 活体 agent 注册表（官方 `ctx.agents` 的宿主落点）：**整个 serve 进程一份**，
+	// 注册表的每条边都经 agentEventSink 落进**该会话**的 Transport journal
+	// ——界面读的就是它（`/ws` 与 `session.history` 同一个 seq 域）。
+	//
+	// 以前这里传的是零值 `RegistryOptions{}`：`Emit == nil` 于是五条生命周期边
+	// 一条都不发，界面上 agent 面永远是空的。这一份同时交给 goal-round 驱动
+	// （排轮判据）与 agent 面（`subagents.*`），不再各造一张表。
+	//
+	// pub 晚绑定：注册表必须早于 `NewServer`（runner 要它），而 `srv.Publish`
+	// 只有 `NewServer` 返回之后才有值。
+	agentPub := &agentEventPub{}
+	agents := agent.NewRegistry(agent.RegistryOptions{
+		Emit: agentEventSink{journals: journals, pub: agentPub}.Emit,
+	})
 	// 官方 goal-round-driver（官方插件 #60）：真实 turn 正常收工后按 active goal 推进轮次。
 	// 只包一层 turnRunner（Run/RunContent/Steer/SteerContent 原样透传），不新建 turn、
 	// 不排 prompt；启动先重算一次，把上个进程漏记的轮次补上。
-	goalRounds := newGoalRoundDriver(goalOverrides, *home)
+	goalRounds := newGoalRoundDriver(goalOverrides, *home, agents)
 	if err := goalRounds.Load(); err != nil {
 		fmt.Fprintf(os.Stderr, "goal 轮次游标读盘失败（%v）；修复前不推进轮次\n", err)
 	}
@@ -462,10 +532,42 @@ func cmdServe(args []string) error {
 	}
 	defer officialJT.Close()
 
+	// rc.2 `dsh-terminal-panel` 的两个只读工具（`user_terminal_list` / `user_terminal_read`）
+	// 跑在**每轮的工具子进程**里，而真 roster 只在这个进程里。装一条父→子 stdio 帧桥：
+	// 子进程问、这里答，答的就是 `terminal.list` / `terminal.watch` 那一份（见 terminal_bridge.go）。
+	if _, err := installUserTerminalBridge(broker, officialJT, *home); err != nil {
+		return fmt.Errorf("终端面板桥安装失败: %w", err)
+	}
+
 	// 配置树（HS-14）：`config.patch.*` 的唯一真值。启动即打开，损坏 fail-loud。
-	configTree, err := config.OpenStore(filepath.Join(*home, "state", "config-tree.json"))
+	configPath := filepath.Join(*home, "state", "config-tree.json")
+	configTree, err := config.OpenStore(configPath)
 	if err != nil {
 		return fmt.Errorf("配置树打开失败: %w", err)
+	}
+	// 官方 #4 `hmr` 的**前半**（profile 配置热重载，官方默认开）。
+	//
+	// 在这之前 `Store.Reload()` 没有任何调用者：改了配置树文件，进程内看到的
+	// 还是旧树，必须重启。这里接上一个独立的轮询组件（`serve_config_hmr.go`），
+	// 只读、只 Reload、只广播 revision 变化，**不重装任何插件**。
+	//
+	// 关闭方式：`DSHD_PROFILE_HMR=0`（见 configHMRConfigFromEnv 的注释）；
+	// 它拒绝监听 `profiles/*/cordis.patch.yml`（铁律 3 的那个文件）。
+	configHMR, err := NewConfigHMR(configTree, configHMRConfigFromEnv(configPath))
+	if err != nil {
+		return fmt.Errorf("配置热重载装配失败: %w", err)
+	}
+	if configHMR.Enabled() {
+		hmrCtx, hmrCancel := context.WithCancel(context.Background())
+		defer hmrCancel()
+		// 消费者：把新的 revision 写进日志，并把"谁需要知道"留给以后接——
+		// 现在没有任何内存投影依赖配置树（读的都是 Store.Tree() 的实时快照），
+		// 所以这里只观测，不假装重建了什么。
+		offChange := configHMR.OnChange(func(c ConfigHMRChange) {
+			fmt.Fprintf(os.Stderr, "profile 配置已热重载：revision %d → %d\n", c.From, c.To)
+		})
+		defer offChange()
+		go func() { _ = configHMR.Run(hmrCtx) }()
 	}
 	configDescriptors := transport.NewRegistry()
 	if err := configDescriptors.RegisterAll(transport.ConfigPatchDescriptors()); err != nil {
@@ -477,6 +579,11 @@ func cmdServe(args []string) error {
 		return err
 	}
 
+	// 官方 deliverables 三条变更路由的后端与"桌面打开"通道：native 服务要在
+	// Options 之前造好，才能让 Changes.Open 与 session.openWorkspacePath 用**同一个**
+	// 实例（两处各造一个服务，行为一致但状态面会分叉）。
+	changesStore := newWorkspaceChangesStore(*home)
+	nativeSvc := native.NewService()
 	srv, err := transport.NewServer(withOfficialSessionOptions(*home, withSessionOperationOptions(*home, transport.Options{
 		Source: src,
 		// 只把适配器交给 Transport；它们在既有 cookie 认证之后才会被调用。
@@ -486,17 +593,32 @@ func cmdServe(args []string) error {
 		SettingsFormHandler: newSettingsFormHTTPHandler(settingsStore),
 		ModelCatalogHandler: newModelCatalogHTTPHandler(modelCatalog, settingsStore),
 		Attachments:         attachments,
+		// 官方 deliverables 的 /api/changes.summary|diff|open。记录与快照对象由
+		// 每一轮的 `dshd run` 子进程写进 <home>/state/workspace-changes/<sid>/，
+		// 这里只读；没有记录的 seq 回 404（不伪造空摘要）。
+		Changes: transport.ChangesAPI{
+			Summary: changesStore.Summary,
+			Diff:    changesStore.Diff,
+			Open:    changesOpenOnDesktop(changesStore, nativeSvc),
+		},
 		// 官方 0.2.2 wire（M1）：默认关，DSHD_OFFICIAL_WIRE=1 才挂载。
 		// 返回 nil 时 transport 一个字节都不变（见 Options.HandlerWrap）。
 		// 静态前端必须在**最外层**：GET /?token= 要先到前端，再到 wire。
 		// 未设置 DSHD_FRONTEND_DIR（或目录不存在）时 front == nil，包装退化成
 		// 原样，既有行为逐字节不变。
-		HandlerWrap: frontendMount(front, officialWireMount(officialWireDeps{
+		HandlerWrap: transport.MCPManagerMountAround(transport.MCPManagerDeps{
+			// 三个 mcpManager.*（probe/restart/watch）与 mcp.list/reconnect/toggle
+			// 共用**同一份**服务状态：都取自 mcpServers 的嵌入式 tools.MCPManager。
+			List:      mcpServers.MCPManager.List,
+			Probe:     mcpServers.MCPManager.Probe,
+			Restart:   mcpServers.MCPManager.Restart,
+			Subscribe: mcpServers.MCPManager.Subscribe,
+		}, frontendMount(front, officialWireMount(officialWireDeps{
 			Home:        *home,
 			Journals:    journals,
 			Attachments: attachments,
 			Events:      approvalEvents,
-		})),
+		}))),
 		ContextUsage: src.ContextUsage,
 		MCPList: func(sessionID string) ([]transport.MCPServerView, error) {
 			if _, err := src.resolve(sessionID); err != nil {
@@ -691,6 +813,14 @@ func cmdServe(args []string) error {
 			return serveWorkspaceList(path)
 		},
 		Delete: func(sessionID string) error {
+			// 先摘活体 agent、**再**删目录：`agent/disposed` 要进的是这条会话**自己的**
+			// Transport journal，而目录删掉之后那个文件就不存在了——顺序反了就成了
+			// "边发了但没人收得到"（写盘按设计 fail-loud，只会在 stderr 刷一行）。
+			// 放在删除之前还有第二个好处：删除中途失败（取消超时等）时，注册表里
+			// 也不会留一个已经没人认领的 agent；下一条消息进来会重新登记。
+			if err := agents.Dispose(sessionID); err != nil {
+				fmt.Fprintf(os.Stderr, "agent 收尾失败（session=%s）：%v\n", sessionID, err)
+			}
 			return serveDelete(*home, sessionID, broker, prompts)
 		},
 		Fork: func(sessionID, title string) (string, error) {
@@ -724,14 +854,24 @@ func cmdServe(args []string) error {
 			return prompts.SubmitPlacement(context.Background(), sessionID, text, placement)
 		},
 		PromptBlocks: func(sessionID string, blocks []transport.ContentBlock) (transport.PromptResult, error) {
-			resolved, err := attachments.ResolveBlocks(blocks)
+			// 官方 PromptContentPart（file/receiptId、image/mediaType+data）先解析成
+			// 宿主附件块，再走与旧 attachment 块完全同一条 ResolveBlocks。
+			normalized, err := attachments.NormalizeOfficialContent(sessionID, blocks)
+			if err != nil {
+				return transport.PromptResult{}, err
+			}
+			resolved, err := attachments.ResolveBlocks(normalized)
 			if err != nil {
 				return transport.PromptResult{}, err
 			}
 			return prompts.SubmitBlocks(context.Background(), sessionID, resolved)
 		},
 		PromptBlocksPlacement: func(sessionID string, blocks []transport.ContentBlock, placement string) (transport.PromptResult, error) {
-			resolved, err := attachments.ResolveBlocks(blocks)
+			normalized, err := attachments.NormalizeOfficialContent(sessionID, blocks)
+			if err != nil {
+				return transport.PromptResult{}, err
+			}
+			resolved, err := attachments.ResolveBlocks(normalized)
 			if err != nil {
 				return transport.PromptResult{}, err
 			}
@@ -767,11 +907,23 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 注册表的 WS 推送出口在这里接上：`NewServer` 已返回、服务还没开始收请求，
+	// 所以这一次赋值对所有请求 goroutine 都是 happens-before（壳里另有锁）。
+	agentPub.set(srv.Publish)
 	// 其余官方 0.2.2 方法接线（additive；宿主实现全在 cmd/dshd 与
 	// internal/pluginmgr/official，Transport 只做协议翻译）。
-	srv.AttachOfficialAgentAPI(newAgentOfficialAPI(agentOfficialDeps{
+	// rc.2：同一个 core 同时提供 `subagents.*` 与 `agentTeams.setEnabled` /
+	// `subagents.interruptByUser`（Team 分派面），两边共享同一份进程内状态。
+	agentAPICore := newAgentOfficialAPICore(agentOfficialDeps{
 		home: *home, goals: goalOverrides, journals: journals, src: src,
 		sandboxPresets: sandboxPresets, sandboxStore: sandboxStore,
+		// 活体注册表是**同一份**：subagents.* 的委派 epoch（subagent/start|end）
+		// 与排轮判据读的是同一张表，不是第二份影子状态。nil 时那些方法明确
+		// no-op（不编边），不会静默成功。
+		agents: agents,
+		// Team 选择变更（`team/mode`）要同时进每会话 journal（可恢复）与 WS
+		// （在线订阅者立刻看到同一帧）。不接的话在线界面要等下一次轮询。
+		pub: srv.Publish,
 		submit: func(sessionID, text string) (transport.PromptResult, error) {
 			return prompts.Submit(context.Background(), sessionID, text)
 		},
@@ -786,16 +938,36 @@ func cmdServe(args []string) error {
 			_, err := prompts.CancelPlacement(sessionID, "interrupt", "")
 			return err
 		},
-	}))
+	})
+	srv.AttachOfficialAgentAPI(agentAPICore.bind())
+	srv.AttachOfficialAgentTeamRC2API(agentAPICore.bindTeamRC2())
+	// 壳侧更新渠道：官方归壳配置，不走 settings 命名空间。
+	srv.AttachDesktopUpdateChannel(updateChannel)
+	// 壳侧更新状态：与渠道是兄弟，同样是官方 preload 桥的 Go 等价物。
+	srv.AttachDesktopUpdateStatus(updateStatus)
+	// 官方 0.2.2-rc.2 电脑操作面（9 个 cuaAccess.*）。默认实现就是真 Service：
+	// 平台/权限状态、应用决策、图标、设置页、审批状态机都是真的；AX/窗口控制在
+	// 无 provider 的平台按官方形状回结构化未实现。
+	srv.AttachOfficialCUARc2API(transport.NewOfficialCUARc2APIFromService(cua.NewService(cua.Options{HomeDir: *home})))
 	srv.AttachOfficialSettingsCredentialAPI(transport.OfficialSettingsCredentialAPI{
-		Settings:    settingsform.New(settingsStore),
+		// rc.2 起 describe 要带 `llm` 命名空间（`providers.<route>.retryPolicy`），
+		// 所以用 HostRegistry 的 Service；默认 Registry 的行为一字未变。
+		Settings:    settingsform.NewService(settingsStore, settingsform.HostRegistry()),
 		Credentials: transport.NewCatalogCredentialStore(modelCatalog),
 	})
 	wsHost := attachOfficialWorkspace(srv, *home, src, prompts)
 	attachOfficialWorkspaceFollow(srv, wsHost)
 	worktreeSvc := attachOfficialWorktree(srv, src)
 	prompts.worktree = worktreeSvc
-	nativeSvc := attachOfficialNative(srv, native.NewService(), func() (string, error) {
+	// 官方 rc.2「归档会话时清理工作树」：给**同一个** worktree 服务注入 ArchiveHost
+	// （保留策略 / 是否仍被引用 / 创建者会话的沙箱策略），并在
+	// workspace.archiveSession 成功之后自动排期清理（inspection 在后台）。
+	attachWorktreeArchive(srv, worktreeArchiveDeps{
+		Home: *home, Workspace: wsHost, Service: worktreeSvc,
+		Sessions: &worktreeSessionStore{src: src},
+		Presets:  sandboxPresets, Modes: sandboxStore,
+	})
+	nativeSvc = attachOfficialNative(srv, nativeSvc, func() (string, error) {
 		return ensureSettingsDocument(*home, settingsStore)
 	})
 	_ = nativeSvc
@@ -824,14 +996,53 @@ func cmdServe(args []string) error {
 	srv.AttachOfficialForgeGitAPI(newForgeGitAPI(func(sessionID string) (string, error) {
 		return src.Cwd(sessionID)
 	}))
+	// rc.2 Forge 面 12 个方法（internal/transport/handlers_forge_rc2.go）。
+	// 第二个参数与 worktree 面板共用**同一个** *worktree.Service 实例（清理状态、
+	// revision 必须同源）；会话目录解析器与上面的 forgePanel git 族同源（src.Cwd）。
+	srv.AttachOfficialForgeRC2API(newForgeRC2API(func(sessionID string) (string, error) {
+		return src.Cwd(sessionID)
+	}, worktreeSvc))
 	if forgeHost, ferr := newForgePanelHost(*home); ferr == nil && forgeHost != nil {
 		srv.AttachOfficialForgePanelAPI(forgeHost.api())
 	}
 	srv.AttachOfficialLLMProviderAPI(newLLMProviderAPI(modelCatalog))
-	accountAPI := newAccountOfficialAPI(accountOfficialDeps{home: *home, catalog: modelCatalog})
+	// 官方 0.2.2-rc.2 `web.listProviders`：清单来自 web 接缝的**真实注册表**
+	// （谁注册了、谁现在可用、配置钉的是哪个），不是写死的一份。
+	srv.AttachOfficialWebProviderAPI(providerapi.ProviderAPI(os.Getenv))
+	accountDeps := accountOfficialDeps{home: *home, catalog: modelCatalog}
+	accountAPI := newAccountOfficialAPI(accountDeps)
 	accountAPI.ActionCardAct = actionCardAct(*home)
 	srv.AttachOfficialAccountAPI(accountAPI)
-	srv.AttachOfficialOfficePDFAPI(newOfficePDFAPI(*home))
+	// 官方 base 插件 #23 `authorization`：把真实登录流注册进通用 flow 注册表。
+	//
+	// 补这一段之前，非 account 的凭据流**无处注册**、UI 也列不出"现在能授权
+	// 什么"。provider 建立失败时注册表仍然存在但没有 flow（`begin` 回 NO_FLOW，
+	// 不静默成功）——这是配置错误下的正确形状，而不是假装能登录。
+	if authProvider, providerErr := accountProviderFromDeps(accountDeps); providerErr == nil {
+		authz, err := newAuthorizationRegistry(authProvider)
+		if err != nil {
+			return fmt.Errorf("authorization flow 注册失败: %w", err)
+		}
+		srv.AttachAuthorizationRegistry(authz)
+	} else {
+		authz, err := newAuthorizationRegistry(nil)
+		if err != nil {
+			return err
+		}
+		srv.AttachAuthorizationRegistry(authz)
+	}
+	// Office 面（rc.2 新权威面 officeKit.* + 兼容保留的 officeToPdf.*）共用**同一个**
+	// provider：同一引擎、同一准入队列、同一 generation、同一产物仓。
+	// provider 没有引擎也照样建（官方语义「It now registers without Kit」），
+	// 具体操作才按 unavailable 失败 → Transport 出 501 + capableWhen。
+	officeKitProvider := officekit.Open(officekit.Options{Home: *home,
+		OutputDirectory: filepath.Join(*home, "office-kit", "outputs")})
+	defer officeKitProvider.Close()
+	// 登记为进程内共享实例：工具面（office_convert/recalculate/render）从这一份取，
+	// 避免「Transport 一套引擎状态、工具又一套」（见 cmd/dshd/serve_office_kit.go）。
+	shareOfficeKitProvider(*home, officeKitProvider)
+	srv.AttachOfficialOfficeKitAPI(newOfficeKitAPI(officeKitProvider, *home).withSessionCwd(src.Cwd))
+	srv.AttachOfficialOfficePDFAPI(newOfficePDFAPIWith(*home, officeKitProvider))
 	srv.AttachOfficialSpeechAPI(newSpeechAPI())
 	attachActionCardsView(srv, *home)
 	if err := attachOfficialAnalytics(srv, *home); err != nil {

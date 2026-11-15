@@ -925,3 +925,153 @@ func minInt(a, b int) int {
 	}
 	return b
 }
+
+// ---------------------------------------------------------------------------
+// rc.2：空 content 续跑（R1-G11）与事件页准入（R1-G01）
+// ---------------------------------------------------------------------------
+
+// continuationFixtureEvents 造一段"上一轮因可续错误码失败"的会话。
+func continuationFixtureEvents(code string) []DurableEvent {
+	raw := func(s string) json.RawMessage { return json.RawMessage(s) }
+	return []DurableEvent{
+		{Type: "turn/start", Seq: 0, Time: 1000, Data: raw(`{"turn":1}`)},
+		{Type: "user/message", Seq: 1, Time: 1001, Data: raw(`{"content":[{"type":"text","text":"问"}],"source":{"kind":"user"},"surfaceOp":"append"}`)},
+		{Type: "assistant/attempt", Seq: 2, Time: 1002, Data: raw(`{"turn":1,"step":1,"stream":[]}`)},
+		{Type: "turn/end", Seq: 3, Time: 1003, Data: raw(`{"turn":1,"reason":{"kind":"error","error":{"code":"` + code + `"}}}`)},
+	}
+}
+
+// 官方 rc.2（`dsh-api-session-controller/lib/index.js:4147-4152`）：
+// 空 content 的 prompt 合法，`source.kind` 变 `retry`；非空才是 `user`。
+func TestOfficialPromptSourceKind(t *testing.T) {
+	if got := OfficialPromptAdmissionFor(nil, 1, "queue", false, false).SourceKind; got != "user" {
+		t.Fatalf("非空 content 的 source.kind = %q，want user", got)
+	}
+	got := OfficialPromptAdmissionFor(nil, 0, "queue", false, false)
+	if got.SourceKind != "retry" {
+		t.Fatalf("空 content 的 source.kind = %q，want retry", got.SourceKind)
+	}
+}
+
+// 六类可续错误码 + 三重前置条件齐了才放行（官方 `:895`）。
+func TestOfficialPromptContinuationEligible(t *testing.T) {
+	for _, code := range []string{"RATE_LIMIT", "SERVER", "TIMEOUT", "TRANSPORT", "EMPTY_RESPONSE", "STREAM_CLOSED"} {
+		admission := OfficialPromptAdmissionFor(continuationFixtureEvents(code), 0, "queue", false, false)
+		if admission.Fault != nil {
+			t.Fatalf("%s 是可续码，空 content + queue 必须放行，得到 %v", code, admission.Fault)
+		}
+		if !admission.Continuation || admission.SourceKind != "retry" {
+			t.Fatalf("%s 应判为续跑：%+v", code, admission)
+		}
+	}
+}
+
+func TestOfficialPromptContinuationRejected(t *testing.T) {
+	cases := []struct {
+		name           string
+		events         []DurableEvent
+		mode           string
+		nextTurn       bool
+		nextStep       bool
+		wantReason     string
+		wantSourceKind string
+	}{
+		{"mode 不是 queue", continuationFixtureEvents("RATE_LIMIT"), "steer", false, false, OfficialPromptContinuationReason, "retry"},
+		{"不可续错误码", continuationFixtureEvents("CONTEXT_LENGTH_EXCEEDED"), "queue", false, false, OfficialPromptContinuationReason, "retry"},
+		{"没有失败轮", continuationFixtureEvents("RATE_LIMIT")[:3], "queue", false, false, OfficialPromptContinuationReason, "retry"},
+		{"nextTurn 非空", continuationFixtureEvents("RATE_LIMIT"), "queue", true, false, OfficialPromptContinuationReason, "retry"},
+		{"nextStep 有 user 消息", continuationFixtureEvents("RATE_LIMIT"), "queue", false, true, OfficialPromptContinuationReason, "retry"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			admission := OfficialPromptAdmissionFor(c.events, 0, c.mode, c.nextTurn, c.nextStep)
+			if admission.Fault == nil {
+				t.Fatalf("必须被拒：%+v", admission)
+			}
+			if admission.Fault.Code != "session/agent-busy" || admission.Fault.Status != http.StatusConflict {
+				t.Fatalf("拒绝码 = %q/%d，want session/agent-busy/409", admission.Fault.Code, admission.Fault.Status)
+			}
+			if reason, _ := admission.Details["reason"].(string); reason != c.wantReason {
+				t.Fatalf("details.reason = %v，want %q", admission.Details["reason"], c.wantReason)
+			}
+			if admission.SourceKind != c.wantSourceKind {
+				t.Fatalf("source.kind = %q，want %q", admission.SourceKind, c.wantSourceKind)
+			}
+		})
+	}
+}
+
+// 空 content 放宽：只有**非空**却全空白的 content 才拒（官方 `:4147` 的 `content.length > 0 &&`）。
+func TestOfficialPromptContentRejected(t *testing.T) {
+	cases := []struct {
+		length       int
+		hasNonSpace  bool
+		wantRejected bool
+	}{
+		{0, false, false}, // 空 content = 续跑请求，合法
+		{1, false, true},  // 非空但全空白 = 拒
+		{1, true, false},  // 有正文
+		{2, false, true},  // 两个块都空白
+	}
+	for _, c := range cases {
+		if got := OfficialPromptContentRejected(c.length, c.hasNonSpace); got != c.wantRejected {
+			t.Fatalf("内容长度 %d / 有正文 %v：rejected = %v，want %v", c.length, c.hasNonSpace, got, c.wantRejected)
+		}
+	}
+}
+
+// session.events / session.page 也不许把"我们解释不了的事件"静默交给客户端。
+func TestOfficialSessionEventsEventAdmission(t *testing.T) {
+	events := append(continuationFixtureEvents("RATE_LIMIT"),
+		DurableEvent{Type: "future/protocol-event", Seq: 4, Time: 1004, Data: json.RawMessage(`{"x":1}`)})
+	src := &fakeOfficialSource{events: events, logEnd: 4}
+	s := officialServerWith(t, src, Options{})
+
+	rec := postOfficial(t, s.handleSessionEvents, `{"address":{"kind":"session","sessionId":"s1"}}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("未知 required 事件必须报错（%d），得到 %d：%s", http.StatusInternalServerError, rec.Code, rec.Body.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("错误体不是 JSON：%v", err)
+	}
+	errObj, _ := envelope["error"].(map[string]any)
+	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "future/protocol-event") {
+		t.Fatalf("错误必须点名未知类型：%v", envelope)
+	}
+	for _, key := range []string{"code", "message", "hint", "retryable"} {
+		if _, has := errObj[key]; !has {
+			t.Fatalf("四字段缺 %s：%v", key, envelope)
+		}
+	}
+
+	// ignorable 的未知事件照录（官方保留未解释载荷），页照常 200。
+	ignorable := append(continuationFixtureEvents("RATE_LIMIT"),
+		DurableEvent{Type: "future/protocol-event", Seq: 4, Time: 1004, Data: json.RawMessage(`{"x":1}`), Ignorable: true})
+	src2 := &fakeOfficialSource{events: ignorable, logEnd: 4}
+	s2 := officialServerWith(t, src2, Options{})
+	rec2 := postOfficial(t, s2.handleSessionEvents, `{"address":{"kind":"session","sessionId":"s1"}}`)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("ignorable 未知事件不该被拒：%d %s", rec2.Code, rec2.Body.String())
+	}
+	page := unwrapResult(t, rec2.Body.Bytes())
+	records, _ := page["records"].([]any)
+	if len(records) != len(ignorable) {
+		t.Fatalf("ignorable 事件必须原样在页里：%d != %d", len(records), len(ignorable))
+	}
+}
+
+// rc.2 `team/mode` 必须在 HTTP 投影面（session.projections）同样可见，
+// 与 WS 的 observeProjections 用同一份折叠逻辑给出同一个键。
+func TestOfficialSessionProjectionsTeamMode(t *testing.T) {
+	events := append(continuationFixtureEvents("RATE_LIMIT"),
+		DurableEvent{Type: "team/mode", Seq: 4, Time: 1004, Data: json.RawMessage(`{"enabled":true}`)})
+	src := &fakeOfficialSource{events: events, logEnd: 4}
+	s := officialServerWith(t, src, Options{})
+
+	values := unwrapResult(t, postOfficial(t, s.handleSessionProjections, `{"sessionId":"s1"}`).Body.Bytes())["values"].(map[string]any)
+	team, ok := values["teamMode"].(map[string]any)
+	if !ok || team["enabled"] != true {
+		t.Fatalf("session.projections 的 teamMode 必须是 {enabled:true}：%v", values["teamMode"])
+	}
+}

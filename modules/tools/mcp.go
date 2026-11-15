@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"dshgo/internal/kernel"
+	"dshgo/internal/mcp"
 	"dshgo/internal/spi"
 )
 
@@ -112,8 +113,31 @@ type mcpServerConfig struct {
 	Cwd                string              `json:"cwd"`
 	Enabled            *bool               `json:"enabled"`
 	ToolCallTimeoutMS  int                 `json:"toolCallTimeoutMs"`
+	CloseTimeoutMS     int                 `json:"closeTimeoutMs"`
 	FailOnStartupError bool                `json:"failOnStartupError"`
 	Reconnect          *MCPReconnectConfig `json:"reconnect"`
+	// 官方 0.2.2 的条目带 transport 字段（stdio | streamable-http）。
+	// 本宿主只实现 stdio：出现别的取值时**不许**静默当成 stdio 起进程，
+	// 而是把它当"结构化未实现"报出来（probe/restart 返回四字段错误）。
+	Transport string            `json:"transport"`
+	URL       string            `json:"url"`
+	Headers   map[string]string `json:"headers"`
+}
+
+// closeBudget 是关这一代连接的预算（官方 DEFAULT_CLOSE_TIMEOUT_MS = 5000ms）。
+func (c mcpServerConfig) closeBudget() time.Duration {
+	if c.CloseTimeoutMS > 0 {
+		return time.Duration(c.CloseTimeoutMS) * time.Millisecond
+	}
+	return mcpCloseWait
+}
+
+// transportName 给出工程意义上的传输名：未写 = stdio（本仓历史契约）。
+func (c mcpServerConfig) transportName() string {
+	if c.Transport == "" {
+		return "stdio"
+	}
+	return c.Transport
 }
 
 func (c mcpServerConfig) enabled() bool { return c.Enabled == nil || *c.Enabled }
@@ -218,29 +242,120 @@ type mcpServer struct {
 	name   string
 	config mcpServerConfig
 	raw    map[string]json.RawMessage
+	// reg 是**唯一**的服务状态表（internal/mcp.Registry）。本文件不另存一份
+	// 状态字符串：所有状态变化都经 publish() 写进 registry，mcp.list 与
+	// mcpManager.watch 读同一份。
+	reg *mcp.Registry
 
 	mu           sync.Mutex
 	client       *mcpClient
-	status       string
-	lastError    string
+	status       mcp.Status
 	tools        []MCPToolDef
 	instructions string
 	hasTools     bool
 	hasResources bool
 	reconnecting bool
+	// failure 留存第一份清理失败（官方 ManagedRecord.failure）：
+	// 它不为空时，重启一律拒绝，直到宿主重启。
+	failure *mcp.CloseResult
 }
 
-func (s *mcpServer) snapshot() (client *mcpClient, status string, tools []MCPToolDef) {
+func (s *mcpServer) snapshot() (client *mcpClient, status mcp.Status, tools []MCPToolDef) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.client, s.status, s.tools
 }
 
-func (s *mcpServer) setStatus(status, lastError string) {
+// publish 写一次状态：本地留一份用于诊断文案，registry 是公开口径。
+func (s *mcpServer) publish(status mcp.Status) {
 	s.mu.Lock()
 	s.status = status
-	s.lastError = lastError
 	s.mu.Unlock()
+	if s.reg != nil {
+		// Publish 的错误只可能是"状态组合非法"或"registry 已关闭"，
+		// 两种都不该让进程路径崩掉；状态本身仍然留在本地供日志用。
+		_ = s.reg.Publish(s.name, status)
+	}
+}
+
+// publishConnected 是"连上并把这一代工具注册完"的那一个状态。
+func (s *mcpServer) publishConnected(toolCount int) {
+	s.publish(mcp.Status{State: mcp.StateConnected, ToolCount: toolCount, ConnectedAt: time.Now().UnixMilli()})
+}
+
+// publishLoadFailure 是官方 mount 失败的口径：failed/load + 原文。
+func (s *mcpServer) publishLoadFailure(err error) {
+	s.publish(mcp.Status{State: mcp.StateFailed, Reason: mcp.ReasonLoad, LastError: err.Error()})
+}
+
+// publishReconnecting 是官方 reconnecting 口径：连了几次、几次为上限、下次什么时候。
+func (s *mcpServer) publishReconnecting(attempt, maxAttempts int, nextRetry time.Time, lastErr string) {
+	s.publish(mcp.Status{
+		State:       mcp.StateReconnecting,
+		Attempt:     attempt,
+		MaxAttempts: maxAttempts,
+		NextRetryAt: nextRetry.UnixMilli(),
+		LastError:   lastErr,
+	})
+}
+
+// publishGaveUp 是官方 gave-up 口径：本轮预算耗尽，工具保持注册但调用会失败。
+func (s *mcpServer) publishGaveUp(lastErr string) {
+	s.publish(mcp.Status{State: mcp.StateFailed, Reason: mcp.ReasonGaveUp, LastError: lastErr})
+}
+
+// publishClosed 把一次关闭判定摊成官方状态：
+//   - 关闭确认且没有清理错误 → 有活实例时是 closed；
+//   - 有留存失败 → failed/cleanup（带留存结果）；
+//   - 首次出现未确认关闭 → failed/unclosed-generation。
+func (s *mcpServer) publishClosed(result mcp.CloseResult) {
+	retained, hasFailure := s.retainCleanupFailure(result)
+	switch {
+	case hasFailure:
+		s.publish(mcp.Status{State: mcp.StateFailed, Reason: mcp.ReasonCleanup, Close: retained})
+	case !result.CloseConfirmed || result.CleanupError != "":
+		s.publish(mcp.Status{State: mcp.StateFailed, Reason: mcp.ReasonUnclosedGeneration, Close: retained})
+	default:
+		s.publish(mcp.Status{State: mcp.StateClosed, Close: retained})
+	}
+}
+
+// retainCleanupFailure 留存第一份清理诊断与任何未确认的关闭（官方同一手法）：
+// 后到的"确认关闭"不许掩盖先前的未确认。
+func (s *mcpServer) retainCleanupFailure(result mcp.CloseResult) (mcp.CloseResult, bool) {
+	if result.CloseConfirmed && result.CleanupError == "" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.failure == nil {
+			return result, false
+		}
+		return *s.failure, true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failure == nil {
+		s.failure = &result
+		return result, true
+	}
+	merged := mcp.CloseResult{
+		CloseConfirmed: result.CloseConfirmed && s.failure.CloseConfirmed,
+		CleanupError:   s.failure.CleanupError,
+	}
+	if merged.CleanupError == "" {
+		merged.CleanupError = result.CleanupError
+	}
+	s.failure = &merged
+	return merged, true
+}
+
+// retainedFailure 报告是否有留存的清理失败（重启的硬门）。
+func (s *mcpServer) retainedFailure() (mcp.CloseResult, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failure == nil {
+		return mcp.CloseResult{CloseConfirmed: true}, false
+	}
+	return *s.failure, true
 }
 
 // call 在 server 的连接上发一条请求。没连上时给的是**可操作**的失败。
@@ -248,21 +363,26 @@ func (s *mcpServer) call(ctx context.Context, method string, params any, out any
 	client, status, _ := s.snapshot()
 	if client == nil {
 		return fmt.Errorf("%w: server %q 当前状态 %s；先 mcp.reconnect 或检查它的 stderr",
-			ErrMCPServerDisconnected, s.name, status)
+			ErrMCPServerDisconnected, s.name, status.State)
 	}
 	return client.call(ctx, method, params, out)
 }
 
-// stop 收掉当前一代连接。
-func (s *mcpServer) stop() {
+// stop 收掉当前一代连接，返回可判定的关闭结果（官方 closeConfirmed/cleanupError）。
+//
+// "没有活连接"也算确认关闭：官方 closeConfirmed 的判据就是"传输关闭已确认，
+// 或压根没建 transport"。把它算成未确认会让每一次全新启动都被判成清理失败。
+func (s *mcpServer) stop() mcp.CloseResult {
 	s.mu.Lock()
 	client := s.client
+	budget := s.config.closeBudget()
 	s.client = nil
 	s.tools = nil
 	s.mu.Unlock()
-	if client != nil {
-		client.Close()
+	if client == nil {
+		return mcp.CloseResult{CloseConfirmed: true}
 	}
+	return client.CloseWithBudget(budget, nil)
 }
 
 // MCPManager 管全部配置好的 server。
@@ -273,6 +393,11 @@ type MCPManager struct {
 	servers map[string]*mcpServer
 	order   []string
 	loadErr error
+	// reg 是全部 server 状态的唯一去处（mcp.list / mcpManager.watch 共用）。
+	reg *mcp.Registry
+	// lifecycleMu 串行化"会替换活实例"的操作（restart/reconnect/toggle），
+	// 对齐官方那条"settled operation tail serializing every lifecycle operation"。
+	lifecycleMu sync.Mutex
 
 	closed   atomic.Bool
 	closedCh chan struct{}
@@ -284,6 +409,7 @@ func OpenMCPManager(home string) *MCPManager {
 	m := &MCPManager{
 		path:     filepath.Join(home, "mcp.json"),
 		servers:  map[string]*mcpServer{},
+		reg:      mcp.NewRegistry(),
 		closedCh: make(chan struct{}),
 	}
 	raw, err := os.ReadFile(m.path)
@@ -327,7 +453,17 @@ func OpenMCPManager(home string) *MCPManager {
 			m.loadErr = fmt.Errorf("MCP server %q 名字非法：必须匹配 %s（1-32 位 [A-Za-z0-9_-]）", name, mcpServerNamePattern)
 			return m
 		}
-		m.servers[name] = &mcpServer{name: name, config: config, raw: fields, status: "disconnected"}
+		server := &mcpServer{name: name, config: config, raw: fields, reg: m.reg}
+		initial := mcp.Status{State: mcp.StateConnecting}
+		if !config.enabled() {
+			initial = mcp.Status{State: mcp.StateDisabled}
+		}
+		// 登记失败只可能是状态组合非法，这里的状态是常量，出错即编程错误。
+		if err := m.reg.Track(name, true, initial); err != nil {
+			m.loadErr = fmt.Errorf("MCP server %q 初始状态非法: %w", name, err)
+			return m
+		}
+		m.servers[name] = server
 		m.order = append(m.order, name)
 	}
 	return m
@@ -351,10 +487,17 @@ func (m *MCPManager) StartAll() error {
 	enabled := make([]*mcpServer, 0, len(m.order))
 	for _, name := range m.order {
 		server := m.servers[name]
-		if server.config.enabled() {
+		switch {
+		case !server.config.enabled():
+			server.publish(mcp.Status{State: mcp.StateDisabled})
+		case server.config.transportName() != "stdio":
+			// 结构化未实现：本宿主只起 stdio 子进程。静默跳过会让 mcp.list
+			// 显示一个永远 connecting 的行，管理面看不出真正原因。
+			server.publishLoadFailure(mcp.UnsupportedTransport(server.name, server.config.transportName()))
+			slog.Default().Warn("MCP server 的 transport 本宿主未实现，跳过",
+				"server", server.name, "transport", server.config.transportName())
+		default:
 			enabled = append(enabled, server)
-		} else {
-			server.setStatus("disabled", "")
 		}
 	}
 	m.mu.Unlock()
@@ -365,9 +508,12 @@ func (m *MCPManager) StartAll() error {
 			continue
 		}
 		if errors.Is(err, ErrMCPProtocol) {
+			// 契约违规是装配期错误：必须让装配失败，不许当成"临时连不上"。
+			server.publishLoadFailure(err)
 			contractErrs = append(contractErrs, fmt.Errorf("MCP server %q: %w", server.name, err))
 			continue
 		}
+		server.publishLoadFailure(err)
 		slog.Default().Warn("MCP server 连接失败：它的工具不会进工具表",
 			"server", server.name, "error", err)
 	}
@@ -375,13 +521,16 @@ func (m *MCPManager) StartAll() error {
 }
 
 // connect 起新一代连接并做工具发现。
+//
+// 状态口径与官方一致：开始 attempt 时 connecting{attempt:0}，成功后
+// connected{toolCount, connectedAt}；失败的状态由调用方按场景发布
+// （首次挂载失败 = failed/load，重连预算耗尽 = failed/gave-up）。
 func (m *MCPManager) connect(server *mcpServer) error {
 	server.stop()
-	server.setStatus("connecting", "")
+	server.publish(mcp.Status{State: mcp.StateConnecting})
 
 	client, init, tools, err := mcpHandshake(server.config)
 	if err != nil {
-		server.setStatus("error", err.Error())
 		return err
 	}
 	server.mu.Lock()
@@ -390,10 +539,9 @@ func (m *MCPManager) connect(server *mcpServer) error {
 	server.instructions = strings.TrimSpace(init.Instructions)
 	server.hasTools = len(init.Capabilities.Tools) > 0 && string(init.Capabilities.Tools) != "null"
 	server.hasResources = len(init.Capabilities.Resources) > 0 && string(init.Capabilities.Resources) != "null"
-	server.status = "connected"
-	server.lastError = ""
 	server.reconnecting = false
 	server.mu.Unlock()
+	server.publishConnected(len(tools))
 
 	m.wg.Add(1)
 	go func() {
@@ -500,14 +648,24 @@ func (m *MCPManager) watch(server *mcpServer, client *mcpClient) {
 		return
 	}
 	server.client = nil
-	server.status = "error"
+	server.reconnecting = false
+	lastErr := "MCP 子进程已退出"
 	if err := client.WaitError(); err != nil {
-		server.lastError = err.Error()
-	} else {
-		server.lastError = "MCP 子进程已退出"
+		lastErr = err.Error()
 	}
 	stderr := client.Stderr()
 	server.mu.Unlock()
+	policy := server.config.reconnectPolicy()
+	switch {
+	case m.closed.Load():
+		return
+	case !policy.enabled:
+		// 重连关掉 = 这一代到此为止（官方 reconnect-disabled）。
+		server.publish(mcp.Status{State: mcp.StateFailed, Reason: mcp.ReasonReconnectDisabled, LastError: lastErr})
+		return
+	default:
+		server.publishReconnecting(1, policy.maxAttempts, time.Now().Add(policy.initialDelay), lastErr)
+	}
 	if stderr != "" {
 		slog.Default().Warn("MCP server 退出前的 stderr", "server", server.name, "stderr", stderr)
 	}
@@ -539,7 +697,10 @@ func (m *MCPManager) scheduleReconnect(server *mcpServer) {
 			server.mu.Unlock()
 		}()
 		delay := policy.initialDelay
+		lastErr := ""
 		for attempt := 1; attempt <= policy.maxAttempts; attempt++ {
+			// 每一次退避都是一次对外可见的状态（官方 reconnecting 带下次时间）。
+			server.publishReconnecting(attempt, policy.maxAttempts, time.Now().Add(delay), lastErr)
 			select {
 			case <-m.closedCh:
 				return
@@ -558,6 +719,7 @@ func (m *MCPManager) scheduleReconnect(server *mcpServer) {
 				slog.Default().Info("MCP server 重连成功", "server", server.name, "attempt", attempt)
 				return
 			} else {
+				lastErr = err.Error()
 				slog.Default().Warn("MCP server 重连失败", "server", server.name, "attempt", attempt, "error", err)
 			}
 			delay *= 2
@@ -566,6 +728,7 @@ func (m *MCPManager) scheduleReconnect(server *mcpServer) {
 			}
 		}
 		// 官方：耗尽预算后工具保持可用名字但调用失败，只有重新加载插件才能回来。
+		server.publishGaveUp(lastErr)
 		slog.Default().Error("MCP server 重连预算耗尽；它的工具仍注册着，但调用会失败（用 mcp.reconnect 手动恢复）",
 			"server", server.name, "maxAttempts", policy.maxAttempts)
 	}()
@@ -578,19 +741,16 @@ func (m *MCPManager) Statuses() ([]MCPStatus, error) {
 	if m.loadErr != nil {
 		return nil, m.loadErr
 	}
-	out := make([]MCPStatus, 0, len(m.order))
-	for _, name := range m.order {
-		server := m.servers[name]
-		server.mu.Lock()
-		row := MCPStatus{Name: name, Status: server.status, LastError: server.lastError}
-		switch {
-		case !server.config.enabled():
-			row.Status = "disabled"
-		case server.client != nil:
-			count := len(server.tools)
+	// 读 registry（不是 server 上的副本）：这是"mcp.list 与 mcpManager.watch
+	// 共用同一份状态"的落点，两条面永远不会出现不同的 status。
+	views := m.reg.List()
+	out := make([]MCPStatus, 0, len(views))
+	for _, view := range views {
+		row := MCPStatus{Name: view.Name, Status: legacyStatusName(view.Status), LastError: view.Status.LastError}
+		if view.Status.State == mcp.StateConnected {
+			count := view.Status.ToolCount
 			row.ToolCount = &count
 		}
-		server.mu.Unlock()
 		out = append(out, row)
 	}
 	return out, nil
@@ -644,7 +804,14 @@ func (m *MCPManager) Reconnect(name string) error {
 	if !server.config.enabled() {
 		return fmt.Errorf("MCP server %s 已 disabled，不能 reconnect", name)
 	}
-	return m.connect(server)
+	// 会替换活实例：与 restart/toggle 串行，避免两代实例互相覆盖。
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if err := m.connect(server); err != nil {
+		server.publishLoadFailure(err)
+		return err
+	}
+	return nil
 }
 
 // Toggle 打开/关闭一个 server，并把 enabled 写回 mcp.json。
@@ -691,14 +858,24 @@ func (m *MCPManager) Toggle(name string, enabled bool) error {
 	server.config.Enabled = &enabled
 	m.mu.Unlock()
 
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	if !enabled {
-		server.stop()
-		server.setStatus("disabled", "")
+		// 关掉一个 server 也是一次 unmount：关闭没确认 / 清理报错都要留存，
+		// 否则"关不干净"会被 disabled 这个状态掩掉，之后重启还会被同一个
+		// 幽灵实例抢 namespace。
+		closed := server.stop()
+		retained, hasFailure := server.retainCleanupFailure(closed)
+		if hasFailure {
+			server.publish(mcp.Status{State: mcp.StateFailed, Reason: mcp.ReasonCleanup, Close: retained})
+			return nil
+		}
+		server.publish(mcp.Status{State: mcp.StateDisabled})
 		return nil
 	}
-	server.setStatus("disconnected", "")
 	if err := m.connect(server); err != nil {
 		// 磁盘与内存都保持 enabled=true + error；不得回滚成用户没有请求过的状态。
+		server.publishLoadFailure(err)
 		return err
 	}
 	return nil
@@ -746,9 +923,15 @@ func (m *MCPManager) Close() {
 	}
 	m.mu.Unlock()
 	for _, server := range servers {
-		server.stop()
+		closed := server.stop()
+		if !closed.CloseConfirmed || closed.CleanupError != "" {
+			// 已释放的管理器不再发事件（官方同一取舍），但最后的未确认关闭
+			// 要在 registry 关掉之前留痕，否则"关不干净"永远查不出来。
+			server.publishClosed(closed)
+		}
 	}
 	m.wg.Wait()
+	m.reg.Close()
 }
 
 // MCPPublicToolName 是公开名的**唯一**实现（官方 publicToolName 的逐条移植）。
@@ -1248,6 +1431,207 @@ func mcpResourceReadSchema(serverDescription string) json.RawMessage {
 	}
 	raw, _ := json.Marshal(schema)
 	return raw
+}
+
+// ---- 官方 0.2.2 MCP 管理面：mcpManager.probe / restart / watch ----
+//
+// 这三个方法**不新建状态机**：它们读写的都是上面那一个 mcp.Registry
+// （mcp.list / mcp.reconnect / mcp.toggle 也写它）。probe 用一条独立的
+// 一次性连接（不占 serverName、不注册工具、不碰活实例），restart 走官方
+// "清理未确认就禁止替换"的门，watch 直接订 registry 的唤醒流。
+
+// mcpProbeClientName 是官方 probe 的 clientInfo.name（probe.ts:66）。
+// 它只是 server 侧日志，不是产品版本。
+const (
+	mcpProbeClientName    = "dsh-mcp-probe"
+	mcpProbeClientVersion = "0.0.1"
+)
+
+// legacyStatusName 是 mcp.list 的旧字符串口径（**不变**：界面还在读它）。
+//
+// 官方状态 richer，但既有 wire 已经开始被人消费；把新词汇直接塞进去会让
+// 老客户端 switch 到未知值。新的官方形状只从 mcpManager.watch/list 出去。
+func legacyStatusName(status mcp.Status) string {
+	switch status.State {
+	case mcp.StateConnected:
+		return "connected"
+	case mcp.StateDisabled:
+		return "disabled"
+	case mcp.StateConnecting, mcp.StateReconnecting:
+		return "connecting"
+	default:
+		// closed / failed / waiting-credentials 对旧口径都是"现在不可用"。
+		return "error"
+	}
+}
+
+// Views 返回官方 `McpManagedServerView[]`（watch 的元素、list 的行）。
+func (m *MCPManager) Views() []mcp.View { return m.reg.List() }
+
+// List 是 mcpManager.list 的等价入口（本任务只要求三个方法，list 一并给出，
+// 保证管理面能先拿一次性快照再决定要不要开流）。
+func (m *MCPManager) List() ([]mcp.View, error) {
+	m.mu.Lock()
+	loadErr := m.loadErr
+	m.mu.Unlock()
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	return m.reg.List(), nil
+}
+
+// Subscribe 开一条**真实**状态流：首帧是当前列表，之后每次状态/条目变化
+// 再给一份完整列表（Registry 唤醒，不是定时轮询出来的假流）。
+func (m *MCPManager) Subscribe(ctx context.Context) (<-chan []mcp.View, error) {
+	m.mu.Lock()
+	loadErr := m.loadErr
+	m.mu.Unlock()
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if m.closed.Load() {
+		return nil, mcp.ErrDisposed
+	}
+	return m.reg.Subscribe(ctx), nil
+}
+
+// Probe 是官方 mcpManager.probe：探一个 server 的管理面能力，**不动**活实例。
+//
+// 门与官方 manager.probe 一致：已释放、未知 server、清理未完成都直接报错；
+// 本宿主另有两条：transport 不是 stdio（结构化未实现）、配置读取失败。
+func (m *MCPManager) Probe(ctx context.Context, name string) (mcp.ProbeResult, error) {
+	server, err := m.requireServer(name)
+	if err != nil {
+		return mcp.ProbeResult{}, err
+	}
+	if transport := server.config.transportName(); transport != "stdio" {
+		return mcp.ProbeResult{}, mcp.UnsupportedTransport(name, transport)
+	}
+	if _, hasFailure := server.retainedFailure(); hasFailure {
+		return mcp.ProbeResult{}, mcp.CleanupIncomplete(name)
+	}
+	target := mcp.ClientProbeTarget{
+		Starter:       stdioProbeStarter{config: server.config},
+		ClientName:    mcpProbeClientName,
+		ClientVersion: mcpProbeClientVersion,
+	}
+	return mcp.ProbeServer(ctx, target, mcp.ProbeOptions{
+		// 官方 mcpManager.probe 不传选项：整场用 10s、翻页 16、工具名 512，
+		// 清理预算取这个条目自己的 closeTimeoutMs。
+		CloseTimeoutMs: int(server.config.closeBudget() / time.Millisecond),
+	})
+}
+
+// Restart 是官方 mcpManager.restart：dispose 活着的实例，再挂一个全新的，
+// 带上全新的重连预算。清理未确认时**拒绝替换**（ErrCleanupIncomplete）。
+func (m *MCPManager) Restart(ctx context.Context, name string) error {
+	if _, err := m.requireServer(name); err != nil {
+		return err
+	}
+	// 会替换活实例：与 reconnect/toggle 串行（官方那条 settle 的 tail）。
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	return mcp.Restart(ctx, mcpRestController{manager: m}, name)
+}
+
+// requireServer 取 server 并做三条门（loadErr / 已释放 / 未知）。
+func (m *MCPManager) requireServer(name string) (*mcpServer, error) {
+	server := m.server(name)
+	m.mu.Lock()
+	loadErr := m.loadErr
+	m.mu.Unlock()
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if m.closed.Load() {
+		return nil, mcp.ErrDisposed
+	}
+	if server == nil {
+		return nil, mcp.UnknownServer(name)
+	}
+	return server, nil
+}
+
+func (m *MCPManager) server(name string) *mcpServer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.servers[name]
+}
+
+// stdioProbeStarter 把探针要的那条独立连接接到本仓既有的 stdio 客户端上：
+// 进程控制（Windows Job Object、有界回收）只有这一份实现。
+type stdioProbeStarter struct{ config mcpServerConfig }
+
+func (s stdioProbeStarter) Start(context.Context) (mcp.Conn, error) {
+	client, err := startMCPClient(s.config)
+	if err != nil {
+		return nil, err
+	}
+	return &stdioProbeConn{client: client, budget: s.config.closeBudget()}, nil
+}
+
+type stdioProbeConn struct {
+	client *mcpClient
+	budget time.Duration
+}
+
+func (c *stdioProbeConn) Call(ctx context.Context, method string, params any, out any) error {
+	return c.client.call(ctx, method, params, out)
+}
+
+func (c *stdioProbeConn) Notify(method string, params any) error {
+	return c.client.notify(method, params)
+}
+
+func (c *stdioProbeConn) Close(ctx context.Context) mcp.CloseResult {
+	return c.client.CloseWithBudget(c.budget, ctx)
+}
+
+// mcpRestController 是 mcp.Restart 的动作面：决策在 internal/mcp，动作在这里。
+type mcpRestController struct{ manager *MCPManager }
+
+func (c mcpRestController) Disposed() bool { return c.manager.closed.Load() }
+
+func (c mcpRestController) Exists(name string) bool { return c.manager.server(name) != nil }
+
+func (c mcpRestController) Enabled(name string) bool {
+	server := c.manager.server(name)
+	return server != nil && server.config.enabled()
+}
+
+func (c mcpRestController) Stop(name string) (mcp.CloseResult, bool) {
+	server := c.manager.server(name)
+	if server == nil {
+		return mcp.CloseResult{CloseConfirmed: true}, true
+	}
+	closed := server.stop()
+	retained, hasFailure := server.retainCleanupFailure(closed)
+	if hasFailure {
+		return retained, false
+	}
+	return closed, true
+}
+
+func (c mcpRestController) Mount(name string) error {
+	server := c.manager.server(name)
+	if server == nil {
+		return mcp.UnknownServer(name)
+	}
+	if err := c.manager.connect(server); err != nil {
+		// 官方 mount 失败的口径：failed/load + 原文。
+		server.publishLoadFailure(err)
+		return err
+	}
+	return nil
+}
+
+func (c mcpRestController) Publish(name string, status mcp.Status) error {
+	server := c.manager.server(name)
+	if server == nil {
+		return mcp.UnknownServer(name)
+	}
+	server.publish(status)
+	return nil
 }
 
 // MCPModule 把 MCP 工具接进内核。

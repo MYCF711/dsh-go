@@ -318,10 +318,22 @@ type Message struct {
 // ContentBlock 是 session.prompt、user/message、load/history 共用的有序块。
 // attachment 块线上只需 attachmentId；宿主解析真实 store 后补齐元数据。
 // reference 块只接受真实 file path 或 sessionId，referenceId 由宿主生成并持久化。
+//
+// 另外三个字段承载官方 rc.2 `PromptContentPart` 的两支非 attachment 形状
+// （`{type:'file', receiptId}` 与 `{type:'image', mediaType, data, name?}`）：
+// 官方客户端上传后只回执，不传宿主内部 attachment id，所以 receiptId 是
+// **线上字段**，由宿主解析成 attachment 块后才落盘（见 cmd/dshd 的
+// NormalizeOfficialContent）。Data 只走线上输入，不会出现在 durable 块里。
 type ContentBlock struct {
-	Type          string `json:"type"`
-	Text          string `json:"text,omitempty"`
-	AttachmentID  string `json:"attachmentId,omitempty"`
+	Type         string `json:"type"`
+	Text         string `json:"text,omitempty"`
+	AttachmentID string `json:"attachmentId,omitempty"`
+	// ReceiptID 是官方 `fileUploads.upload` 回执（`rcpt-…`），指向同一会话的暂存文件。
+	ReceiptID string `json:"receiptId,omitempty"`
+	// MediaType 是官方 image 块声明的图片媒体类型（必须与真实字节嗅探结果一致）。
+	MediaType string `json:"mediaType,omitempty"`
+	// Data 是官方 image 块内联的 base64 图片字节。
+	Data          string `json:"data,omitempty"`
 	Name          string `json:"name,omitempty"`
 	ByteSize      int64  `json:"byteSize,omitempty"`
 	MIME          string `json:"mime,omitempty"`

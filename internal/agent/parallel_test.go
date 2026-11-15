@@ -57,10 +57,14 @@ func setParallelEnv(t *testing.T, v string) {
 // ---------- 探针工具 ----------
 
 // probeTool 是行为完全由闭包决定的工具：并发/阻塞/失败都由用例自己编排。
+//
+// safe 是**逐调用**并发分类器（官方 `isConcurrencySafe(args)`）：
+// nil 表示"声明了方法但这条参数不安全"，与"根本没声明"是两件事（后者见 plainProbe）。
 type probeTool struct {
 	name string
 	caps spi.Caps
 	exec func(ctx context.Context, args json.RawMessage) (spi.Result, error)
+	safe func(args json.RawMessage) bool
 }
 
 func (t *probeTool) Name() string            { return t.name }
@@ -69,6 +73,31 @@ func (t *probeTool) Description() string     { return "并行用例的探针工�
 func (t *probeTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 
 func (t *probeTool) Exec(ctx context.Context, args json.RawMessage) (spi.Result, error) {
+	return t.exec(ctx, args)
+}
+
+func (t *probeTool) ConcurrencySafe(args json.RawMessage) bool {
+	if t.safe == nil {
+		return false
+	}
+	return t.safe(args)
+}
+
+// alwaysSafe 是"这条工具永远可以并发"的声明（官方 `() => true`）。
+func alwaysSafe(json.RawMessage) bool { return true }
+
+// plainProbe **没有** ConcurrencySafe 方法：全仓绝大多数工具就是这样。
+// 它钉的是 fail-closed 默认值——忘了接线只会变慢，不会跟别人一起写同一个文件。
+type plainProbe struct {
+	name string
+	exec func(ctx context.Context, args json.RawMessage) (spi.Result, error)
+}
+
+func (t *plainProbe) Name() string            { return t.name }
+func (t *plainProbe) Caps() spi.Caps          { return spi.Caps{} }
+func (t *plainProbe) Description() string     { return "未声明并发分类器的探针工具" }
+func (t *plainProbe) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (t *plainProbe) Exec(ctx context.Context, args json.RawMessage) (spi.Result, error) {
 	return t.exec(ctx, args)
 }
 
@@ -211,9 +240,13 @@ func toolCallResponse(names ...string) *llm.Response {
 }
 
 // sleepTool 造一个"睡 d 再返回"的只读工具，并把自己的名字记进完成顺序。
+//
+// 只读 + 声明并发安全：官方 rc.2 里 read/glob/grep/webfetch 这类工具都是
+// `isConcurrencySafe: () => true`。并发度/上限/保序几组用例都靠它。
 func sleepTool(name string, d time.Duration, done func(name string)) *probeTool {
 	return &probeTool{
 		name: name,
+		safe: alwaysSafe,
 		exec: func(context.Context, json.RawMessage) (spi.Result, error) {
 			time.Sleep(d)
 			if done != nil {
@@ -400,6 +433,7 @@ func TestApprovalClassToolsAreSerialized(t *testing.T) {
 	}
 	readTool := &probeTool{
 		name: "readOnly",
+		safe: alwaysSafe, // 只读 + 声明并发安全：不该陪审批类一起等
 		exec: func(context.Context, json.RawMessage) (spi.Result, error) {
 			entered <- "readOnly"
 			return spi.Result{Summary: "只读 ok"}, nil
@@ -540,6 +574,7 @@ func TestBatchCancellationStopsEverythingWithoutLeak(t *testing.T) {
 	mk := func(name string) *probeTool {
 		return &probeTool{
 			name: name,
+			safe: alwaysSafe,
 			exec: func(ctx context.Context, _ json.RawMessage) (spi.Result, error) {
 				atomic.AddInt32(&running, 1)
 				entered <- name
@@ -751,4 +786,421 @@ func TestToolPanicPropagatesOnCallerGoroutine(t *testing.T) {
 		t.Fatalf("这一轮应该 panic 而不是返回错误：%v", err)
 	}
 	t.Fatal("这一轮应该 panic 而不是正常收工")
+}
+
+// ---------- 10. per-call 并发分类器（官方 0.2.2-rc.2） ----------
+//
+// 官方判据（`dsh-tools/src/pipeline.ts:107-114`，与 `lib/pipeline.js:279-291` 逐字相同）：
+//
+//	executionMode(exec) {
+//	  const tool = this.resolveExecution(...)
+//	  if (!tool?.isConcurrencySafe) return { kind: 'exclusive' }
+//	  try { return tool.isConcurrencySafe(exec.arguments) === true
+//	          ? { kind: 'parallel' } : { kind: 'exclusive' } }
+//	  catch { return { kind: 'exclusive' } }
+//	}
+//
+// 三件事必须都在：**逐调用**（判据是这次调用的参数）、**fail-closed**（没声明/抛错 = 独占）、
+// **审批优先**（要等人的调用即使声明了并发安全也必须单条车道）。
+
+// callSpec 是一条"名字 + 参数"的工具调用：参数就是分类器的判据，用例必须能逐调用给。
+type callSpec struct{ name, args string }
+
+// toolCallResponseOf 造一条带自定义参数的响应（call id 仍是 c1..cn，顺序即模型顺序）。
+func toolCallResponseOf(specs ...callSpec) *llm.Response {
+	calls := make([]llm.ToolCall, 0, len(specs))
+	for i, s := range specs {
+		calls = append(calls, llm.ToolCall{
+			ID: fmt.Sprintf("c%d", i+1), Type: "function",
+			Function: llm.Func{Name: s.name, Arguments: s.args},
+		})
+	}
+	return &llm.Response{FinishReason: "tool_calls", ToolCalls: calls}
+}
+
+// concurrency 观测"同一时刻有几个工具在跑"。
+type concurrency struct {
+	mu  sync.Mutex
+	now int
+	max int
+}
+
+func (c *concurrency) enter() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now++
+	if c.now > c.max {
+		c.max = c.now
+	}
+}
+
+func (c *concurrency) leave() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now--
+}
+
+func (c *concurrency) peak() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.max
+}
+
+// 没接线 = 独占：两个各自睡 150ms 的普通工具必须一个接一个，不能同时跑。
+//
+// 这是 fail-closed 的行为证据（不是接口形状证据）：全仓绝大多数工具还没接线，
+// 如果默认值是"安全"，它们会立刻在真实宿主里并发写同一批文件。
+func TestUndeclaredToolsAreExclusive(t *testing.T) {
+	setParallelEnv(t, "10")
+
+	obs := &concurrency{}
+	mk := func(name string) spi.Tool {
+		return &plainProbe{name: name, exec: func(context.Context, json.RawMessage) (spi.Result, error) {
+			obs.enter()
+			time.Sleep(150 * time.Millisecond)
+			obs.leave()
+			return spi.Result{Summary: name + " ok"}, nil
+		}}
+	}
+	chat := &scriptedChat{steps: []*llm.Response{
+		toolCallResponse("a", "b"),
+		{Content: "完", FinishReason: "stop"},
+	}}
+	l, _ := newParallelLoop(t, chat, mk("a"), mk("b"))
+
+	started := time.Now()
+	if _, err := l.Run(context.Background(), 1, nil); err != nil {
+		t.Fatalf("不该失败：%v", err)
+	}
+	elapsed := time.Since(started)
+	if peak := obs.peak(); peak != 1 {
+		t.Fatalf("没声明分类器的工具同时跑了 %d 个，必须是 1 个（官方 fail-closed：兜底独占）", peak)
+	}
+	if elapsed < 280*time.Millisecond {
+		t.Fatalf("2×150ms 的未接线工具只用了 %v：说明它们被当成并发安全了", elapsed)
+	}
+}
+
+// 判据是**这次调用的参数**：同一个工具，只读参数并发、写参数独占。
+func TestPerCallClassifierDecidesByArguments(t *testing.T) {
+	setParallelEnv(t, "10")
+
+	obs := &concurrency{}
+	tool := &probeTool{
+		name: "fsop",
+		// 官方形状：分类器收 args，自己决定。这里只有 "write":false 才算安全。
+		safe: func(args json.RawMessage) bool {
+			return strings.Contains(string(args), `"write":false`)
+		},
+		exec: func(_ context.Context, args json.RawMessage) (spi.Result, error) {
+			obs.enter()
+			time.Sleep(150 * time.Millisecond)
+			obs.leave()
+			return spi.Result{Summary: string(args)}, nil
+		},
+	}
+
+	runBatch := func(t *testing.T, args string) time.Duration {
+		t.Helper()
+		chat := &scriptedChat{steps: []*llm.Response{
+			toolCallResponseOf(callSpec{"fsop", args}, callSpec{"fsop", args}),
+			{Content: "完", FinishReason: "stop"},
+		}}
+		l, _ := newParallelLoop(t, chat, tool)
+		started := time.Now()
+		if _, err := l.Run(context.Background(), 1, nil); err != nil {
+			t.Fatalf("不该失败：%v", err)
+		}
+		return time.Since(started)
+	}
+
+	t.Run("只读参数并发", func(t *testing.T) {
+		before := obs.peak()
+		elapsed := runBatch(t, `{"write":false}`)
+		if peak := obs.peak(); peak < 2 {
+			t.Fatalf("只读参数的两个调用同时只跑了 %d 个（之前 %d），应当并发", peak, before)
+		}
+		if elapsed > 260*time.Millisecond {
+			t.Fatalf("只读参数的两个调用用了 %v：应当并发（≈150ms）", elapsed)
+		}
+	})
+
+	t.Run("写参数独占", func(t *testing.T) {
+		// 换一批新探针，避免上一批的 max 影响判断。
+		obs2 := &concurrency{}
+		tool2 := &probeTool{name: "fsop", safe: tool.safe,
+			exec: func(_ context.Context, args json.RawMessage) (spi.Result, error) {
+				obs2.enter()
+				time.Sleep(150 * time.Millisecond)
+				obs2.leave()
+				return spi.Result{Summary: string(args)}, nil
+			}}
+		chat := &scriptedChat{steps: []*llm.Response{
+			toolCallResponseOf(callSpec{"fsop", `{"write":true}`}, callSpec{"fsop", `{"write":true}`}),
+			{Content: "完", FinishReason: "stop"},
+		}}
+		l, _ := newParallelLoop(t, chat, tool2)
+		started := time.Now()
+		if _, err := l.Run(context.Background(), 1, nil); err != nil {
+			t.Fatalf("不该失败：%v", err)
+		}
+		if peak := obs2.peak(); peak != 1 {
+			t.Fatalf("写参数的两个调用同时跑了 %d 个，必须 1 个", peak)
+		}
+		if elapsed := time.Since(started); elapsed < 280*time.Millisecond {
+			t.Fatalf("写参数的两个调用只用了 %v：分类器没按参数生效", elapsed)
+		}
+	})
+}
+
+// 同一批 6 个 grep：并发 vs `DSHD_MAX_PARALLEL_TOOL_CALLS=1` 串行。
+//
+// 断言三样：墙钟收益（并发 < 串行的一半）、保序（messages/事件按模型顺序）、
+// 以及"同一工具名、不同参数"这条也被 per-call 分类器覆盖。
+func TestSixGrepCallsRunInParallelAndKeepModelOrder(t *testing.T) {
+	const (
+		sleep = 120 * time.Millisecond
+		n     = 6
+	)
+	// 真实 grep 是 `isConcurrencySafe: () => true`（dsh-tool-fs-search/src/grep.ts:1095）。
+	obs := &concurrency{}
+	grepTool := &probeTool{
+		name: "grep",
+		safe: alwaysSafe,
+		exec: func(_ context.Context, args json.RawMessage) (spi.Result, error) {
+			obs.enter()
+			time.Sleep(sleep)
+			obs.leave()
+			// Summary 才是默认投影会送进模型消息的那一份（Loop.Project 为空时）。
+			return spi.Result{Summary: "grep " + string(args)}, nil
+		},
+	}
+	specs := make([]callSpec, 0, n)
+	names := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		pattern := fmt.Sprintf("p%d", i+1)
+		specs = append(specs, callSpec{"grep", `{"pattern":"` + pattern + `"}`})
+		names = append(names, pattern)
+	}
+
+	run := func(t *testing.T, env string) (time.Duration, *eventRecorder, []llm.Message) {
+		t.Helper()
+		setParallelEnv(t, env)
+		chat := &scriptedChat{steps: []*llm.Response{
+			toolCallResponseOf(specs...),
+			{Content: "完", FinishReason: "stop"},
+		}}
+		l, rec := newParallelLoop(t, chat, grepTool)
+		started := time.Now()
+		hist, err := l.Run(context.Background(), 1, nil)
+		if err != nil {
+			t.Fatalf("不该失败：%v", err)
+		}
+		return time.Since(started), rec, hist
+	}
+
+	parallelWall, rec, hist := run(t, "10")
+	if peak := obs.peak(); peak < n-1 {
+		t.Fatalf("并发上限 10 时 6 个 grep 最多同时跑了 %d 个", peak)
+	}
+	if parallelWall > 3*sleep {
+		t.Fatalf("6×%v 的 grep 并发用了 %v：应当≈1 份耗时", sleep, parallelWall)
+	}
+
+	serialWall, _, _ := run(t, "1")
+	if serialWall < n*sleep*4/5 {
+		t.Fatalf("上限 1 时 6 个 grep 只用了 %v：必须是逐条串行（≈%v）", serialWall, n*sleep)
+	}
+	if parallelWall*2 > serialWall {
+		t.Fatalf("并发没有收益：并发 %v，串行 %v", parallelWall, serialWall)
+	}
+
+	// 保序：历史与事件都按模型给的 c1..c6，且正文与参数一一对应。
+	byCall := toolMessagesByCallID(hist)
+	for i, pattern := range names {
+		callID := fmt.Sprintf("c%d", i+1)
+		if !strings.Contains(byCall[callID].Content, pattern) {
+			t.Fatalf("tool 消息 %s 的正文 = %q，应当对应参数 %q（保序被打乱）",
+				callID, byCall[callID].Content, pattern)
+		}
+	}
+	if ids := resultCallIDs(rec.snapshot()); len(ids) != n {
+		t.Fatalf("tool/result 事件 = %d 条，期望 %d 条", len(ids), n)
+	} else {
+		for i, id := range ids {
+			if want := fmt.Sprintf("c%d", i+1); id != want {
+				t.Fatalf("tool/result 事件顺序 = %v，第 %d 条应为 %s", ids, i+1, want)
+			}
+		}
+	}
+	t.Logf("6×grep（每次 %v）：并发上限10 = %v；上限1（串行）= %v", sleep, parallelWall, serialWall)
+}
+
+// 审批优先于并发声明：需要等人的调用即使声明了并发安全，也必须单条车道。
+//
+// 理由与 Caps 判据同在：审批通道是一问一答的，两个审批并发 = 应答错位。
+func TestApprovalOverridesDeclaredConcurrencySafety(t *testing.T) {
+	setParallelEnv(t, "10")
+
+	entered := make(chan string, 4)
+	release := make(chan struct{})
+	writer := &probeTool{
+		name: "writer",
+		caps: spi.Caps{Writes: true}, // 需要审批
+		safe: alwaysSafe,             // 但工具自己声明了并发安全
+		exec: func(context.Context, json.RawMessage) (spi.Result, error) {
+			entered <- "writer"
+			<-release
+			return spi.Result{Summary: "writer ok"}, nil
+		},
+	}
+	chat := &scriptedChat{steps: []*llm.Response{
+		toolCallResponse("writer", "writer"),
+		{Content: "完", FinishReason: "stop"},
+	}}
+	l, _ := newParallelLoop(t, chat, writer)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := l.Run(context.Background(), 1, nil)
+		done <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("第一个审批类调用没进来")
+	}
+	select {
+	case <-entered:
+		t.Fatalf("两个需要审批的调用同时进了审批通道：即使声明并发安全也必须单条车道")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("放行之后第二个审批类调用没进来")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("不该失败：%v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("批次没结算完")
+	}
+}
+
+// ---------- 11. 取消的错误身份（官方 AbortError + ABORTED） ----------
+
+// 工具体已被调用、随后这轮被取消 ⇒ 结果带 `AbortError`/`ABORTED`
+// （官方 `lib/pipeline.js:478-484` 与 `:927-944` 的 toolAbortedResult）。
+func TestCancelledToolResultCarriesAbortIdentity(t *testing.T) {
+	setParallelEnv(t, "10")
+
+	entered := make(chan struct{}, 1)
+	tool := &probeTool{
+		name: "slow",
+		safe: alwaysSafe,
+		exec: func(ctx context.Context, _ json.RawMessage) (spi.Result, error) {
+			entered <- struct{}{}
+			<-ctx.Done()
+			// 工具自己给了 Hint（R3）：补身份时不许把它吞掉。
+			return spi.Result{Hint: "先核实现场再决定重试"}, ctx.Err()
+		},
+	}
+	chat := &scriptedChat{steps: []*llm.Response{toolCallResponse("slow")}}
+	l, rec := newParallelLoop(t, chat, tool)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = l.Run(ctx, 1, nil)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("工具没进入")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("取消之后 Run 没返回")
+	}
+
+	var got *spi.Result
+	for _, e := range rec.snapshot() {
+		if e.Kind == EventToolResult && e.CallID == "c1" {
+			got = e.Result
+		}
+	}
+	if got == nil {
+		t.Fatal("没有 tool/result 事件")
+	}
+	if got.Info == nil {
+		t.Fatalf("取消的结果没有错误身份：%+v（官方要求 AbortError + ABORTED）", *got)
+	}
+	if got.Info.Name != spi.ErrorNameAbort || got.Info.Code != spi.CodeAborted {
+		t.Fatalf("取消的身份 = %+v，期望 AbortError/ABORTED", *got.Info)
+	}
+	if got.Hint == "" {
+		t.Fatal("补身份时把工具的 Hint 吞掉了（R3 失败：只说错、不说下一步）")
+	}
+}
+
+// 工具体正常返回、但这一轮已被取消 ⇒ 结果仍记 ABORTED
+// （官方：`return isAborted(signal) ? toolAbortedResult(result) : result`，取消压过成功）。
+func TestSuccessAfterCancellationBecomesAborted(t *testing.T) {
+	setParallelEnv(t, "10")
+
+	entered := make(chan struct{}, 1)
+	tool := &probeTool{
+		name: "ignore-cancel",
+		safe: alwaysSafe,
+		exec: func(ctx context.Context, _ json.RawMessage) (spi.Result, error) {
+			entered <- struct{}{}
+			<-ctx.Done() // 等到这一轮被取消，然后**照常成功返回**
+			return spi.Result{Summary: "其实跑完了", Text: "done"}, nil
+		},
+	}
+	chat := &scriptedChat{steps: []*llm.Response{toolCallResponse("ignore-cancel")}}
+	l, rec := newParallelLoop(t, chat, tool)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = l.Run(ctx, 1, nil)
+	}()
+
+	<-entered
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("取消之后 Run 没返回")
+	}
+
+	for _, e := range rec.snapshot() {
+		if e.Kind != EventToolResult || e.CallID != "c1" {
+			continue
+		}
+		if e.Result == nil || e.Result.Info == nil {
+			t.Fatalf("取消压过成功时结果必须带身份：%+v", e.Result)
+		}
+		if e.Result.Info.Name != spi.ErrorNameAbort || e.Result.Info.Code != spi.CodeAborted {
+			t.Fatalf("身份 = %+v，期望 AbortError/ABORTED", *e.Result.Info)
+		}
+		if !e.IsError {
+			t.Fatal("取消压过成功时 isError 必须为 true")
+		}
+		return
+	}
+	t.Fatal("没有 tool/result 事件")
 }

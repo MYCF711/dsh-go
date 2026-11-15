@@ -17,6 +17,17 @@ package main
 // 由 DSHD_ACCOUNT_PROVIDER 选择）。只有 productAnalytics.report 与
 // actionCards.act 仍为 nil（产品决策/无运行时，不属于本任务）。
 //
+// 官方 0.2.2-rc.2 又加了三件套（getNotifications / getNotificationContent /
+// reportNotificationEvent）并把 account.watch 的结果改成 AccountUpdate。这四条
+// 由本文件的 bindAccountNotifications / bindAccountWatchUpdates 绑定：
+//
+//   - 通知三件套**只**在 official provider 下可用（官方通知来自 harnessOrigin
+//     的云端，没有本地缓存）；Local/self-hosted 回结构化 501，说清缺什么。
+//     harnessOrigin 的覆盖用 DSHD_ACCOUNT_HARNESS_ORIGIN（默认
+//     https://harness.deepseek.com，与 platformOrigin 是两个不同的 origin）。
+//   - account.watch 用 provider 的 WatchUpdates（带 snapshot / credentials-changed
+//     分类）；rc.1 的扁平 AccountWatch 绑定仍在，供旧装配使用。
+//
 // # 本地账号授权存储（`<home>/state/account-grant.json`）
 //
 // 官方 `account.*` 的语义都挂在"本地账号授权（account grant）"上：
@@ -44,6 +55,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -86,7 +98,18 @@ type accountGrantDocument struct {
 	AckedOrderIDs []string                         `json:"ackedOrderIds"`
 }
 
-// accountOfficialAPI 持有 home，并把真实实现绑定成 Transport 的回调。
+// accountOfficialAPI 持有 home。
+//
+// **注意（rc.2 现状）**：下面 loadGrant/saveGrant/getUnnotifiedBonuses/
+// ackBonusNotified/signOut 这一组是 PARITY-ACCOUNT 之前的**历史实现**，现在
+// 只有 discoverModels 还在用（它不依赖账号授权）。account 的其余方法一律由
+// `internal/account` 的 provider 绑定（见 bindAccountProvider）。
+//
+// 它们没有被挂到任何回调上，所以**不参与** rc.2 的 deprecated 兼容路径；
+// 真正的兼容行为是 provider 的 Bonuses/AckBonus（official 走真实 Platform 端点，
+// Local 回带 source 标签的本地真值）。这一组留着是因为删它会连带删掉
+// `<home>/state/account-grant.json` 的旧解析器；清理属于独立任务，登记在
+// tmp/GO8-RC2/reports/A4-account.md 的"遗留"一节。
 type accountOfficialAPI struct {
 	deps accountOfficialDeps
 }
@@ -102,7 +125,134 @@ func newAccountOfficialAPI(deps accountOfficialDeps) transport.OfficialAccountAP
 	}
 	api := bindAccountProvider(provider)
 	api.LLMDiscoverModels = legacy.discoverModels
+	// 官方 0.2.2-rc.2 的四项（通知三件套 + AccountUpdate 流）。
+	bindAccountNotifications(&api, provider)
+	bindAccountWatchUpdates(&api, provider)
 	return api
+}
+
+// bindAccountNotifications 把通知三件套绑到 provider。
+//
+// 三件套**只有** official provider 有真实后端：官方通知来自 harnessOrigin 的
+// /api/v0/users/notifications/{list,content,events}，官方实现里没有任何本地
+// 通知缓存（dsh-deepseek-account/lib/index.js:1040/1063/1087）。所以 Local /
+// self-hosted 下 provider 返回 account.ErrNoNotificationBackend，这里翻译成
+// **结构化 not_implemented（501）并把"缺什么"写进 message**——绝不返回空
+// 批次（那会把"没问到"伪装成"没有通知"）。
+func bindAccountNotifications(api *transport.OfficialAccountAPI, provider account.Provider) {
+	api.AccountGetNotifications = func(ctx context.Context, c transport.OfficialAccountClientMetadata) (*transport.OfficialAccountNotificationBatch, error) {
+		batch, err := provider.Notifications(ctx, accountClient(c))
+		if err != nil {
+			return nil, mapAccountNotificationError(err)
+		}
+		if batch == nil {
+			// 官方语义：未登录 → null。
+			return nil, nil
+		}
+		out := &transport.OfficialAccountNotificationBatch{
+			NextPollAfterSeconds: batch.NextPollAfterSeconds,
+			Source:               string(batch.Source),
+			Notifications:        make([]transport.OfficialAccountNotification, 0, len(batch.Notifications)),
+		}
+		for _, n := range batch.Notifications {
+			out.Notifications = append(out.Notifications, accountNotification(n))
+		}
+		return out, nil
+	}
+	api.AccountGetNotificationContent = func(ctx context.Context, id string, c transport.OfficialAccountClientMetadata) (*transport.OfficialAccountNotification, error) {
+		content, err := provider.NotificationContent(ctx, id, accountClient(c))
+		if err != nil {
+			return nil, mapAccountNotificationError(err)
+		}
+		if content == nil {
+			return nil, nil
+		}
+		converted := accountNotification(*content)
+		return &converted, nil
+	}
+	api.AccountReportNotificationEvent = func(ctx context.Context, id, event string, c transport.OfficialAccountClientMetadata) (bool, error) {
+		ok, err := provider.ReportNotificationEvent(ctx, id, event, accountClient(c))
+		if err != nil {
+			return false, mapAccountNotificationError(err)
+		}
+		return ok, nil
+	}
+}
+
+// accountNotification 把 provider 的通知投影成 Transport 的官方形状。
+func accountNotification(n account.Notification) transport.OfficialAccountNotification {
+	out := transport.OfficialAccountNotification{
+		ID: n.ID, CreatedAt: n.CreatedAt, DisplayUntil: n.DisplayUntil,
+		Title: n.Title, Body: n.Body,
+		Actions: make([]transport.OfficialAccountNotificationAction, 0, len(n.Actions)),
+		Data:    n.Data,
+	}
+	for _, a := range n.Actions {
+		out.Actions = append(out.Actions, transport.OfficialAccountNotificationAction{
+			Label: a.Label, Style: a.Style, Target: a.Target,
+		})
+	}
+	return out
+}
+
+// mapAccountNotificationError 把 account 层的错误翻译成 Transport 的四字段码。
+//
+//   - 没有通知后端（Local/self-hosted）→ not_implemented（501），message 里
+//     已经写清"缺 harnessOrigin / 需要 official provider"；
+//   - 入参不合法（空 id / 未知事件）→ bad_request（400，正常不该走到这里，
+//     Transport 已经先校验过）；
+//   - 其余（云端不可达、协议坏、清凭据失败）→ internal（500）并保留原文，
+//     绝不允许降级成空结果或静默成功。
+func mapAccountNotificationError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, account.ErrNoNotificationBackend):
+		return fmt.Errorf("%w: %v", transport.ErrOfficialNotImplemented, err)
+	case errors.Is(err, account.ErrNotificationBadInput):
+		return fmt.Errorf("%w: %v", transport.ErrOfficialBadInput, err)
+	default:
+		return fmt.Errorf("%w: %v", transport.ErrStatePersistence, err)
+	}
+}
+
+// bindAccountWatchUpdates 把官方 rc.2 的 `account.watch`（AccountUpdate 流）绑到
+// provider.WatchUpdates。
+//
+// 为什么不复用 bindAccountProvider 里的 AccountWatch：那个是 rc.1 的扁平
+// AccountView 流，没有 snapshot/credentials-changed 的分类；客户端要靠分类
+// 决定"要不要清通知态并重启轮询"，所以必须走 WatchUpdates。
+func bindAccountWatchUpdates(api *transport.OfficialAccountAPI, provider account.Provider) {
+	api.AccountWatchUpdates = func(ctx context.Context) (<-chan transport.OfficialAccountUpdate, error) {
+		in, err := provider.WatchUpdates(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make(chan transport.OfficialAccountUpdate, 8)
+		go func() {
+			defer close(out)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case update, ok := <-in:
+					if !ok {
+						return
+					}
+					converted := transport.OfficialAccountUpdate{
+						Type:  update.Type,
+						State: accountView(update.State),
+					}
+					select {
+					case out <- converted:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}()
+		return out, nil
+	}
 }
 
 // accountErrorAPI 让配置错误以结构化错误返回，而不是永久 501。
@@ -135,7 +285,17 @@ func accountErrorAPI(err error, discover func(context.Context, string, transport
 		},
 		AccountHasRunningTasks: func(context.Context) (bool, error) { return false, err },
 		AccountWatch:           func(context.Context) (<-chan transport.OfficialAccountView, error) { return nil, err },
+		AccountWatchUpdates:    func(context.Context) (<-chan transport.OfficialAccountUpdate, error) { return nil, err },
 		AccountWatchExpiry:     func(context.Context) (<-chan string, error) { return nil, err },
+		AccountGetNotifications: func(context.Context, transport.OfficialAccountClientMetadata) (*transport.OfficialAccountNotificationBatch, error) {
+			return nil, err
+		},
+		AccountGetNotificationContent: func(context.Context, string, transport.OfficialAccountClientMetadata) (*transport.OfficialAccountNotification, error) {
+			return nil, err
+		},
+		AccountReportNotificationEvent: func(context.Context, string, string, transport.OfficialAccountClientMetadata) (bool, error) {
+			return false, err
+		},
 	}
 }
 

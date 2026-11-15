@@ -16,7 +16,8 @@ func changeRequestFixture(t *testing.T) (*ChangeRequestProvider, string) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/pulls/1") && strings.Contains(r.Header.Get("Accept"), "diff"):
+		case strings.HasPrefix(r.URL.Path, "/repos/o/r/compare/") && strings.Contains(r.Header.Get("Accept"), "diff"):
+			// rc.2 起 diff 走 compare REST（diff 必须与一个 head 绑定）。
 			_, _ = w.Write([]byte("diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1,2 +1,2 @@\n-old\n+new\n context\n"))
 		case strings.HasSuffix(r.URL.Path, "/pulls/1") && strings.Contains(r.URL.Path, "/repos/"):
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -25,7 +26,7 @@ func changeRequestFixture(t *testing.T) (*ChangeRequestProvider, string) {
 				"mergeable": true, "updated_at": "2026-11-08T00:00:00Z",
 				"user":                map[string]any{"login": "alice"},
 				"head":                map[string]any{"ref": "feature", "sha": "abc123"},
-				"base":                map[string]any{"ref": "main"},
+				"base":                map[string]any{"ref": "main", "sha": "base123"},
 				"requested_reviewers": []any{},
 			})
 		case strings.Contains(r.URL.Path, "/reviews"):

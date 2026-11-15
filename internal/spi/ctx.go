@@ -27,6 +27,9 @@ const (
 	runIDKey        ctxKey = 1
 	subDispatchKey  ctxKey = 2
 	toolDeadlineKey ctxKey = 3
+	eventSinkKey    ctxKey = 4
+	// subagentActivationKey 不在这里：它是服务键（kernel.Key），
+	// 只在装配期由模块相遇，不走每轮 ctx。
 )
 
 // WithSession 把会话 id 绑到 ctx 上；空 id 原样返回。
@@ -136,4 +139,26 @@ func ToolDeadlineFrom(ctx context.Context) (time.Duration, bool) {
 	}
 	d, ok := ctx.Value(toolDeadlineKey).(time.Duration)
 	return d, ok
+}
+
+// WithEventSink 把"耐久会话事件写口"绑到 ctx 上。
+//
+// 谁放：宿主每个入口在建循环时放一次（run/acp 各自持有该会话的 session.Log）。
+// 谁读：需要在会话日志里留下**结构化节点**的工具（目前是 workflow 的
+// `tool-workflow/*` 四类帧）。读不到就必须**放弃记录**而不是自己开文件——
+// 详见 EventSink 的契约。
+func WithEventSink(ctx context.Context, sink EventSink) context.Context {
+	if ctx == nil || sink == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, eventSinkKey, sink)
+}
+
+// EventSinkFrom 取事件写口；没有就返回 nil（工具据此明确降级/报错）。
+func EventSinkFrom(ctx context.Context) EventSink {
+	if ctx == nil {
+		return nil
+	}
+	s, _ := ctx.Value(eventSinkKey).(EventSink)
+	return s
 }

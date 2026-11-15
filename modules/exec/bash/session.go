@@ -82,13 +82,21 @@ type session struct {
 	grace time.Duration
 }
 
-func startSession(cwd string, grace time.Duration) (*session, error) {
+// startSession 起一条常驻 bash。
+//
+// managed 为真表示这次会话受"受管 shell 环境"（官方 `shell-env`）管辖：启动时先把
+// 继承环境里的 `DSH_*` 摘掉，这条命令自己的快照由 `session.run` 逐条注入
+// （见 shellenv.go 的说明）。为假时进程环境原样继承——旧行为不变。
+func startSession(cwd string, grace time.Duration, managed bool) (*session, error) {
 	bash, err := findBash()
 	if err != nil {
 		return nil, err
 	}
 	c := exec.Command(bash, "--noprofile", "--norc", "-s")
 	c.Dir = cwd
+	if managed {
+		c.Env = stripManagedEnv(os.Environ())
+	}
 	if err := prepareProcessTree(c); err != nil {
 		return nil, err
 	}
@@ -223,7 +231,10 @@ func (s *session) close() {
 }
 
 // run 写一条命令并等它结束（或空闲超时）。
-func (s *session) run(cmd string, idle time.Duration) (spi.ExecResult, *task, error) {
+//
+// env/managed 是这次执行的受管 `DSH_*` 快照：managed 为真时命令之前会插入
+// "先清空既有 DSH_*、再 export 快照"的脚本（官方"每次执行重建"语义）。
+func (s *session) run(cmd string, idle time.Duration, env map[string]string, managed bool) (spi.ExecResult, *task, error) {
 	s.mu.Lock()
 	if s.dead {
 		s.mu.Unlock()
@@ -238,9 +249,7 @@ func (s *session) run(cmd string, idle time.Duration) (spi.ExecResult, *task, er
 	s.task = t
 	s.mu.Unlock()
 
-	script := fmt.Sprintf(
-		"{ %s\n} 2>&1; __dshd_rc=$?\nprintf '\\001DSHD:%d:%%d\\001%%s\\001\\n' \"$__dshd_rc\" \"$PWD\"\n",
-		cmd, t.seq)
+	script := shellScript(cmd, t.seq, env, managed)
 	if _, err := io.WriteString(s.stdin, script); err != nil {
 		return spi.ExecResult{}, nil, fmt.Errorf("写命令到 bash 失败: %w", err)
 	}

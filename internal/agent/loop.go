@@ -193,6 +193,16 @@ type Loop struct {
 	// 它只影响这一次请求的 Messages 副本：Run 返回的历史里没有这条消息
 	// （见 runtime_context.go 的三条硬约束）。
 	RuntimeContext func() string
+	// Events 可选：让**工具**往当前会话日志里写耐久结构化事件的口子
+	// （目前是 workflow 的 4 类 `tool-workflow/*` 帧）。
+	//
+	// 为什么由循环放而不是工具自己找：写 v4 的只能有一个写入者，而"我在为
+	// 哪个会话干活"这件事只有循环知道（它同时持着 SessionID）。放在这里以后，
+	// 工具侧只认 `spi.EventSinkFrom(ctx)`，拿不到就明确降级/报错，不会去猜文件路径。
+	//
+	// nil = 不提供（子代理的循环就是这样：它的子会话在委派**结束之后**才物化，
+	// 执行期间没有可写的日志，硬造一个会写出两段互不相认的 seq）。
+	Events spi.EventSink
 	// PreStep 可选：每一步模型请求**发出之前**调用（官方 0.2.2 #78
 	// `session-checkpoint-policy` 的 `agent/pre-step` 钩子）。
 	//
@@ -278,6 +288,8 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 	// 数到第 3 次不再提醒（计数已经从上一轮接着走了），而模型的重复恰恰要在
 	// 每一轮里重新数。
 	ctx = spi.WithRunID(ctx, l.runID(turn))
+	// 耐久事件写口：与 session/runID 同一处注入（都在"这一轮属于谁"这个事实上）。
+	ctx = spi.WithEventSink(ctx, l.Events)
 	if l.Chat == nil {
 		return history, fmt.Errorf("agent: 没有配置 Chat")
 	}

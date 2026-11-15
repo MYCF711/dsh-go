@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
+	"dshgo/internal/settings"
 	"dshgo/internal/settingsform"
 )
 
@@ -29,6 +32,12 @@ type serveSettingsStore struct {
 	basePolicy        string
 	modelLoadErr      error
 	permissionLoadErr error
+	// namespaces 是"由插件声明的命名空间"的通用存储（<home>/state/settings-namespaces.json）。
+	//
+	// rc.2 起落在它上面的是 `llm`（`providers.<route>.retryPolicy`）与官方客户端的
+	// 4 个 UI 命名空间（locale / ui-theme / ui-chat / ui-settings）。internal/llm
+	// 解析 provider 时读**同一份**文档里 `llm` 段的策略，所以这里写进去下一轮真生效。
+	namespaces *settings.Store
 }
 
 // setLoadErrors 在 serve 启动装配时记录既有 store 的真实读盘结果。
@@ -39,7 +48,26 @@ func (s *serveSettingsStore) setLoadErrors(modelErr, permissionErr error) {
 }
 
 func newServeSettingsStore(baseModel, basePolicy string, models *modelOverrideStore, permissions *permissionOverrideStore) *serveSettingsStore {
-	return &serveSettingsStore{models: models, permissions: permissions, baseModel: baseModel, basePolicy: basePolicy}
+	store := &serveSettingsStore{models: models, permissions: permissions, baseModel: baseModel, basePolicy: basePolicy}
+	if models != nil {
+		// home = <home>/state/session-model.json 的上两级；声明式命名空间的持久段
+		// 落在同一 state 目录下的 settings-namespaces.json。这样它们与既有 override
+		// 文件同源同 home，不需要在装配点再传一份 home。
+		store.namespaces = settings.Open(filepath.Dir(filepath.Dir(models.path)))
+	}
+	return store
+}
+
+// homeDir 返回这份 store 所属的 home（namespace 文档落点的上两级）。
+//
+// 为什么不在构造时存一份：`serveSettingsStore` 的既有构造签名被四处调用点
+// （含测试）钉住，而 home 只有一个真实来源——`settings.Store` 自己的路径。
+// 从这里推出来，两个 store 永远指的是同一个 home。
+func (s *serveSettingsStore) homeDir() string {
+	if s == nil || s.namespaces == nil {
+		return ""
+	}
+	return filepath.Dir(filepath.Dir(s.namespaces.Path()))
 }
 
 func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, error) {
@@ -64,8 +92,38 @@ func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, erro
 			return settingsform.Document{}, fmt.Errorf("既有 permission 设置存储读取失败: %w", s.permissionLoadErr)
 		}
 		return readSettingsDocumentLocked(s.permissions.m, s.basePolicy, settingsform.FieldDefaultPreset)
+	case settingsform.NamespaceLLM,
+		settingsform.NamespaceLocale, settingsform.NamespaceUITheme,
+		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings,
+		// 2026-11-13 补：官方另两个 general slot 的命名空间。
+		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek,
+		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的命名空间（本仓无 OTel 后端，
+		// mode=FEEDBACK_ONLY 由 settingsform 的语义校验回 501）。
+		settingsform.NamespaceSessionTelemetryOTel,
+		// 2026-11-15 补：官方 agent-preset registry 的 selectedDefault（后续会话的
+		// 默认 preset；官方 UI 的"设为默认"写的就是这个命名空间）。
+		settingsform.NamespaceAgentPreset,
+		// 2026-11-15 补：官方 4 条设置页的 8 个命名空间。官方客户端用
+		// `ctx.configForms.whileServed([ns...])` 决定页面出不出来，宿主不服务
+		// 这条 ns 时页面永远不显示（GUI 那 4 页 MISSING 的根因）。它们与 llm/UI
+		// 那批一样落在 `<home>/state/settings-namespaces.json` 的同一份文档里。
+		settingsform.NamespaceAgentLoop,
+		settingsform.NamespaceBashSandbox, settingsform.NamespacePwshSandbox,
+		settingsform.NamespaceSubagent, settingsform.NamespaceSubagentModelSelection,
+		settingsform.NamespaceWeb, settingsform.NamespaceWebDeepSeekAPI,
+		settingsform.NamespaceWebSearchDeepSeek:
+		if s.namespaces == nil {
+			return settingsform.Document{}, settingsStoreNotWiredError(namespace)
+		}
+		// Base 由 settingsform 的声明默认值补（readOrigin 的 doc.Base==nil 分支）：
+		// 这里只给持久段的 user 与 revision。
+		value, revision, err := s.namespaces.Read(namespace)
+		if err != nil {
+			return settingsform.Document{}, fmt.Errorf("既有 %s 设置存储读取失败: %w", namespace, err)
+		}
+		return settingsform.Document{User: value, Revision: revision}, nil
 	default:
-		return settingsform.Document{}, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 model 或 permission", Status: http.StatusNotFound}
+		return settingsform.Document{}, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 settings.describe 返回的命名空间", Status: http.StatusNotFound}
 	}
 }
 
@@ -106,8 +164,56 @@ func (s *serveSettingsStore) Write(namespace string, user map[string]any, expect
 			return 0, fmt.Errorf("既有 permission 设置存储读取失败，拒绝写入: %w", s.permissionLoadErr)
 		}
 		return writeSettingsDocumentLocked(&s.permissions.m, user, expected, settingsform.NamespacePermission, settingsform.FieldDefaultPreset, s.permissions.flushLocked)
+	case settingsform.NamespaceLLM,
+		settingsform.NamespaceLocale, settingsform.NamespaceUITheme,
+		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings,
+		// 2026-11-13 补：官方另两个 general slot 的命名空间。
+		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek,
+		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的命名空间（见上面 Read 的说明）。
+		settingsform.NamespaceSessionTelemetryOTel,
+		// 2026-11-15 补：agent-preset registry（写路径另做"id 真实存在"校验，
+		// 见 agent_preset_default.go；不写进去一个装不起来的默认值）。
+		settingsform.NamespaceAgentPreset,
+		// 2026-11-15 补：官方 4 条设置页的 8 个命名空间（见 Read 的说明）。
+		// 字段级/语义校验都在 settingsform 的 Validate 里（同一份声明同时生成
+		// schema 与校验，写路径不另开一套判据）。
+		settingsform.NamespaceAgentLoop,
+		settingsform.NamespaceBashSandbox, settingsform.NamespacePwshSandbox,
+		settingsform.NamespaceSubagent, settingsform.NamespaceSubagentModelSelection,
+		settingsform.NamespaceWeb, settingsform.NamespaceWebDeepSeekAPI,
+		settingsform.NamespaceWebSearchDeepSeek:
+		if s.namespaces == nil {
+			return 0, settingsStoreNotWiredError(namespace)
+		}
+		if namespace == settingsform.NamespaceAgentPreset {
+			if err := validateAgentPresetSelection(s.homeDir(), user); err != nil {
+				return 0, err
+			}
+		}
+		revision, err := s.namespaces.Write(namespace, user, expected)
+		if err != nil {
+			var conflict *settings.RevisionConflictError
+			if errors.As(err, &conflict) {
+				// 与 model/permission 逐字同形的 409：客户端只需重新 describe。
+				return 0, settingsform.RevisionConflict(namespace, conflict.Expected, conflict.Actual)
+			}
+			return 0, fmt.Errorf("%s 设置存储写入失败: %w", namespace, err)
+		}
+		return revision, nil
 	default:
-		return 0, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 model 或 permission", Status: http.StatusNotFound}
+		return 0, &settingsform.Error{Code: "not_found", Message: "未知设置 namespace: " + namespace, Hint: "只使用 settings.describe 返回的命名空间", Status: http.StatusNotFound}
+	}
+}
+
+// settingsStoreNotWiredError 是 llm 文档存储没接线时的结构化错误（装配 bug）：
+// 说清"没写进去"，不假装成功。
+func settingsStoreNotWiredError(namespace string) error {
+	return &settingsform.Error{
+		Code:      "internal",
+		Message:   fmt.Sprintf("%s 命名空间的设置文档存储未接线（serve 装配缺 settings.Open）", namespace),
+		Hint:      "检查 newServeSettingsStore 的 models override store 是否接线",
+		Retryable: true,
+		Status:    http.StatusInternalServerError,
 	}
 }
 
@@ -216,7 +322,11 @@ var settingsMethodParams = map[string][]string{
 }
 
 func newSettingsFormHTTPHandler(store *serveSettingsStore) http.Handler {
-	return newSettingsFormHTTPHandlerWithService(settingsform.New(store))
+	// 官方 0.2.2-rc.2 起 `settings.describe` 要发布 `llm` 命名空间里的
+	// `providers.<route>.retryPolicy` 节点（重试条件/次数/等待时间的可选项就是
+	// 从这份 schema 读的）。HostRegistry 在默认两命名空间之上补 `llm`；
+	// 默认 Registry 保持不变（单独用它的人行为一字未变）。
+	return newSettingsFormHTTPHandlerWithService(settingsform.NewService(store, settingsform.HostRegistry()))
 }
 
 // newSettingsFormHTTPHandlerWithService 用显式 Service 构造 handler。
@@ -239,7 +349,7 @@ func newSettingsFormHTTPHandlerWithService(service *settingsform.Service) http.H
 			return
 		}
 		if method != "settings.describe" && method != "settings.form.describe" && params.NS == "" {
-			writeSettingsFormError(w, &settingsform.Error{Code: "bad_request", Message: method + " 缺 ns", Hint: "ns 必须是 describe 返回的 model 或 permission", Status: http.StatusBadRequest})
+			writeSettingsFormError(w, &settingsform.Error{Code: "bad_request", Message: method + " 缺 ns", Hint: "ns 必须是 settings.describe 返回的命名空间", Status: http.StatusBadRequest})
 			return
 		}
 		var result any

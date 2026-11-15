@@ -150,13 +150,24 @@ func (s *attachmentStore) Put(path string) (transport.Attachment, error) {
 	if int64(len(data)) != info.Size() {
 		return transport.Attachment{}, attachmentBadRequest("读取期间文件大小发生变化，请重试", nil)
 	}
+	return s.putBytes(filepath.Base(abs), data)
+}
+
+// putBytes 是"字节 → 受控附件对象"的**唯一**实现：Put（本地路径）与
+// PutData（回执/内联图片）都走这里，元数据校验与落盘规则因此只有一份。
+//
+// 它只信字节：MIME 由内容嗅探、图片必须完整解码通过（见 inspectAttachment）。
+func (s *attachmentStore) putBytes(name string, data []byte) (transport.Attachment, error) {
+	if len(data) == 0 || len(data) > attachmentMaxBytes {
+		return transport.Attachment{}, attachmentBadRequest("附件为空或超过大小上限", nil)
+	}
 	mime, width, height, err := inspectAttachment(data)
 	if err != nil {
 		return transport.Attachment{}, err
 	}
 	digest := sha256.Sum256(data)
 	attachment := transport.Attachment{
-		Name: filepath.Base(abs), ByteSize: int64(len(data)), MIME: mime,
+		Name: name, ByteSize: int64(len(data)), MIME: mime,
 		SHA256: hex.EncodeToString(digest[:]), Width: width, Height: height,
 	}
 	if err := os.MkdirAll(filepath.Join(s.root, "objects"), 0o700); err != nil {

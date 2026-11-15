@@ -148,6 +148,12 @@ func (b *approvalBroker) WatchSession(sessionID string, r io.Reader, alsoTo io.W
 		if b.actions != nil && b.actions.deliver(line) {
 			continue
 		}
+		// 终端面板的父→子 roster 桥（rc.2 `user_terminal_list` / `user_terminal_read`，
+		// 实现在 terminal_bridge.go）。标记前缀与审批/任务都不同，顺序不影响正确性；
+		// 放在这里是为了让读代码的人一眼看到"这条通道不止审批一件事"。
+		if serveUserTerminalBridgeLine(b, sessionID, line) {
+			continue
+		}
 		if respID, payload, ok := parseJobsOutResp(line); ok {
 			b.deliverJobsOut(respID, payload)
 			continue

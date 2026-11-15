@@ -89,6 +89,26 @@ func scanErrorResponse(t *testing.T, where string, status int, hdr http.Header, 
 		t.Errorf("%s：顶层没有 error 键：%s", where, body)
 		return ""
 	}
+	// 409 **必须**带 `details.reason`（GP 报告 §5 第 3 条）。
+	//
+	// 收口在 writeJSON（见 withConflictReason），所以这条断言是"从外面证明
+	// 没有任何 409 出口漏了它"：漏一个，界面就退化成匹配 message 文本。
+	// `error` 对象仍然是恰好四字段，reason 在信封顶层的 `details` 里。
+	if status == http.StatusConflict {
+		rawDetails, hasDetails := top["details"]
+		if !hasDetails {
+			t.Errorf("%s：409 缺少顶层 details.reason——界面只能猜 message 文本：%s", where, body)
+		} else {
+			var details map[string]any
+			if err := json.Unmarshal(rawDetails, &details); err != nil {
+				t.Errorf("%s：details 不是对象：%v（%s）", where, err, body)
+			} else if reason, _ := details["reason"].(string); reason == "" {
+				t.Errorf("%s：409 的 details.reason 为空：%s", where, body)
+			} else if !conflictReasonSet()[reason] {
+				t.Errorf("%s：details.reason=%q 不在 ConflictReasons() 取值表里：%s", where, reason, body)
+			}
+		}
+	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		t.Errorf("%s：error 不是对象：%s", where, body)

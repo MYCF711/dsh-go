@@ -22,6 +22,7 @@ type envModelRequest struct {
 func envModelPromptAndAssert(t *testing.T, client *http.Client, server *pluginGlueServer, sessionID, prompt string,
 	requests <-chan envModelRequest, wantModel, wantReasoning string) {
 	t.Helper()
+	baseline := effortGoalJournalLastSeq(t, client, server.base, sessionID)
 	accepted := postEffortGoalPromptWhenReady(t, client, server.base, sessionID, prompt)
 	turnID := accepted["result"].(map[string]any)["turnId"].(string)
 	select {
@@ -30,10 +31,10 @@ func envModelPromptAndAssert(t *testing.T, client *http.Client, server *pluginGl
 			t.Fatalf("runner request=%+v want model=%q reasoning=%q", request, wantModel, wantReasoning)
 		}
 		t.Logf("ENV_MODEL_RUNTIME session=%s model=%s reasoning=%s", sessionID, request.Model, request.Reasoning)
-	case <-time.After(15 * time.Second):
+	case <-time.After(effortGoalWait):
 		t.Fatalf("runner request timeout session=%s stderr=%s", sessionID, server.stderr.String())
 	}
-	waitEffortGoalTurn(t, client, server.base, sessionID, turnID)
+	waitEffortGoalTurn(t, client, server.base, sessionID, turnID, baseline)
 }
 
 func newEnvModelGateway(t *testing.T) (string, <-chan envModelRequest, *atomic.Int32) {

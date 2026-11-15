@@ -56,7 +56,7 @@ func TestJobsRealDSHDNaturalExitReadback(t *testing.T) {
 				} else {
 					select {
 					case <-finish:
-					case <-time.After(15 * time.Second):
+					case <-time.After(realChainWait):
 						t.Error("等待自然 job 结束后放行模型超时")
 					}
 					fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"natural job finished\"},\"finish_reason\":\"stop\"}]}\n\n")
@@ -136,7 +136,7 @@ func TestJobsRealDSHDNaturalExitReadback(t *testing.T) {
 			case err := <-waitCh:
 				waited = true
 				t.Fatalf("cmdRun 在登记 job 前退出: %v", err)
-			case <-time.After(15 * time.Second):
+			case <-time.After(realChainWait):
 				t.Fatal("等待真实自然 job id 超时")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

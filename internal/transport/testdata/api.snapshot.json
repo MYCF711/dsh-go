@@ -77,5 +77,16 @@
       "accepted",
       "turnId"
     ]
-  }
+  },
+  "conflict_reasons": [
+    "stale_epoch",
+    "history_evicted",
+    "revision_conflict",
+    "job_finished",
+    "job_owner_not_live",
+    "stale_head",
+    "agent_busy",
+    "NO_CONTINUABLE_FAILURE_OR_PENDING_INPUT",
+    "conflict"
+  ]
 }

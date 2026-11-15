@@ -84,14 +84,13 @@ func TestLocalProviderExpiryAndWatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 订阅即给基线（当前到期时刻；未登录为空串），随后才是真实到期帧。
-	if baseline := <-expiry; baseline == "session-expired" {
-		t.Fatalf("首帧必须是基线，实际=%q", baseline)
-	}
+	// 官方 watchExpiry 的结果是 `{"type":"string","const":"session-expired"}`
+	// （dsh-deepseek-account/lib/typert.host.js:658-668）：只有一个合法值，
+	// 所以订阅时不再发"基线帧"，第一帧就是真实到期事件。
 	select {
 	case event := <-expiry:
 		if event != "session-expired" {
-			t.Fatalf("expiry event=%q", event)
+			t.Fatalf("watchExpiry 只允许 session-expired，实际=%q", event)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("租约到期没有真实到期帧")

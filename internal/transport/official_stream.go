@@ -69,6 +69,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"dshgo/internal/session"
 )
 
 // officialStreamPollInterval 是流在没有 journal 广播可等时的兜底轮询间隔。
@@ -492,11 +494,42 @@ func (s *officialSessionStream) Next(ctx context.Context) (json.RawMessage, bool
 	}
 }
 
+// officialAdmitEvents 是流读取路径的**事件准入**（官方 rc.2 口径）。
+//
+// 规则原文（`dsh-session-format-v3-to-v4/lib/index.js:1022-1024`）：
+// "The owning admission stage rejects unknown required events; unknown ignorable
+// records retain their uninterpreted payloads."
+// 也就是：未知类型 + `ignorable:true` → 放行（保留未解释载荷，兼容更新版本写下的日志）；
+// 未知类型 + 非 ignorable → **报错**，不许静默跳过——跳过一条 required 事件
+// 会重建出一个错的会话，而错的会话比打不开更难发现。
+func officialAdmitEvents(method Method, events []DurableEvent) *OfficialStreamFault {
+	for _, ev := range events {
+		if err := session.AdmitEvent(ev.Type, ev.Ignorable); err != nil {
+			return officialStreamInternal(method,
+				"会话日志第 %d 条事件无法解释（类型不在官方 rc.2 词汇表，也不是宿主自有事件，且没有 ignorable 标记）：%v",
+				ev.Seq, err)
+		}
+	}
+	return nil
+}
+
+// officialFoldFault 把折叠期记下的"读不懂"错误转成显式 fault。
+// Apply 没有 error 返回值（要逐事件改动集），错误记在 fold 上、在这里上报——同样不吞。
+func officialFoldFault(method Method, fold *officialProjectionFold) *OfficialStreamFault {
+	if fold == nil || fold.foldErr == nil {
+		return nil
+	}
+	return officialStreamInternal(method, "投影折叠失败：%v", fold.foldErr)
+}
+
 // open 发 opening 帧（四个方法各一张）。
 func (s *officialSessionStream) open() (json.RawMessage, bool, *OfficialStreamFault) {
 	events, logEnd, err := s.source.events(s.sessionID)
 	if err != nil {
 		return nil, false, officialStreamFaultOf(s.kind, err)
+	}
+	if fault := officialAdmitEvents(s.kind, events); fault != nil {
+		return nil, false, fault
 	}
 	s.opened = true
 
@@ -547,6 +580,9 @@ func (s *officialSessionStream) open() (json.RawMessage, bool, *OfficialStreamFa
 		s.fold = newOfficialProjectionFoldFor(s.sessionID)
 		for _, ev := range events {
 			s.fold.Apply(ev)
+		}
+		if fault := officialFoldFault(s.kind, s.fold); fault != nil {
+			return nil, false, fault
 		}
 		return officialReady(s.kind)
 
@@ -624,6 +660,9 @@ func (s *officialSessionStream) step() (json.RawMessage, bool, *OfficialStreamFa
 		if len(events) == 0 {
 			return nil, false, nil
 		}
+		if fault := officialAdmitEvents(s.kind, events); fault != nil {
+			return nil, false, fault
+		}
 		ev := events[0]
 		s.cursor = ev.Seq
 		raw, merr := json.Marshal(officialEventFrame{Type: "event", Event: ev})
@@ -640,11 +679,17 @@ func (s *officialSessionStream) step() (json.RawMessage, bool, *OfficialStreamFa
 		if len(events) == 0 {
 			return nil, false, nil
 		}
+		if fault := officialAdmitEvents(s.kind, events); fault != nil {
+			return nil, false, fault
+		}
 		ev := events[0]
 		s.cursor = ev.Seq
 		// 官方语义：**每个已提交事件一帧**，changes 只列这个事件改动的键
 		// （可以是空数组——"这一条没改任何客户端可见键"，不是"没有能力"）。
 		changes := s.fold.Apply(ev)
+		if fault := officialFoldFault(s.kind, s.fold); fault != nil {
+			return nil, false, fault
+		}
 		raw, merr := json.Marshal(officialProjectionFrame{
 			Type: "projection", Seq: ev.Seq, Changes: changes,
 		})
@@ -803,6 +848,21 @@ type officialProjectionFold struct {
 	hasSubagent bool
 	spawnSeq    int64
 	lastTiming  *OfficialSubagentTiming
+
+	// teamMode / hasTeamMode 来自 rc.2 的 `team/mode`。
+	//
+	// 键名是**宿主自有**的 `teamMode`：官方 SessionProjectionMap 里没有这个键
+	// （官方把 `enabled` 折进 agent-team 插件的 `agentTeam: TeamProjection`，
+	// 而本宿主没有 agent-team 投影，也拼不出官方 TeamProjection 的
+	// `{inheritedEventCount,id,tasks,nextTaskNumber}`）。宁可给一个自有的、
+	// 语义单一的小键，也不伪造官方 `agentTeam` 的半个形状。
+	teamMode    map[string]any
+	hasTeamMode bool
+
+	// foldErr 记"这条已提交事件我们读不懂"的第一次错误（rc.2 起未知类型不得静默吞掉）。
+	// Apply 没有 error 返回值（调用方要 per-event 的改动集），所以错误记在这里，
+	// 由流帧机在 apply 之后**显式**转成 fault——不吞。
+	foldErr error
 }
 
 func newOfficialProjectionFold() *officialProjectionFold {
@@ -893,6 +953,23 @@ func (f *officialProjectionFold) Apply(ev DurableEvent) []officialProjectionChan
 				changes = append(changes, officialProjectionChange{Key: "subagentTiming", Val: timing})
 			}
 		}
+	case "team/mode":
+		// 官方 rc.2 新增类型：`{type:"team/mode", data:{enabled:boolean}}`
+		// （dsh-session/lib/types/known-event-types.js:68；载荷 schema
+		// dsh-agent-team/lib/types/projection.js:52 = {enabled:boolean}.strict()）。
+		//
+		// 记录第一次读不懂的形状而不是跳过：跳过会让 team 开关的状态静默丢失，
+		// 而"丢了但没人报错"比"报错"难查一个数量级。
+		payload, err := session.ParseTeamModePayload(ev.Data)
+		if err != nil {
+			if f.foldErr == nil {
+				f.foldErr = fmt.Errorf("seq %d team/mode 载荷非法: %w", ev.Seq, err)
+			}
+			return changes
+		}
+		f.teamMode, f.hasTeamMode = map[string]any{"enabled": payload.Enabled}, true
+		changes = append(changes, officialProjectionChange{Key: "teamMode", Val: f.teamMode})
+
 	case "turn/end":
 		// 子代理计时只对 spawn 之后的轮成立（WIRING §3）。没有子代理身份时
 		// 不是"0 毫秒"，而是这个键根本不存在——所以不发变化帧。
@@ -949,6 +1026,9 @@ func (f *officialProjectionFold) Values(asOfSeq int64, extras officialProjection
 		if f.lastTiming != nil {
 			values["subagentTiming"] = *f.lastTiming
 		}
+	}
+	if f.hasTeamMode {
+		values["teamMode"] = f.teamMode
 	}
 	return OfficialProjections{AsOfSeq: asOfSeq, Values: values}
 }

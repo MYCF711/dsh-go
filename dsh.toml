@@ -15,6 +15,10 @@ id      = "exec"
 backend = "static"
 
 [[module]]
+id      = "shell-env"
+backend = "static"
+
+[[module]]
 id      = "fs"
 backend = "static"
 
@@ -155,5 +159,12 @@ id      = "tool-skill"
 id      = "tool-hindsight"
 
 [[module]]
+id      = "tool-office"
+
+[[module]]
 id = "mcp-client"
+backend = "static"
+
+[[module]]
+id      = "tool-terminalpanel"
 backend = "static"

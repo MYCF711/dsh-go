@@ -43,6 +43,20 @@ type NamespaceSpec struct {
 	Title   string
 	Applies string
 	Fields  []FieldSpec
+	// Schema 是声明式 schemastery envelope（官方 schema.toJSON() 的线上形状）。
+	// 与 Fields 二选一：复杂节点（union/嵌套 dict/浮点下界）表达不了的字段走这里。
+	Schema any
+	// Base 是声明式默认值：Store 还没有这个命名空间的数据时 describe 用它，
+	// 同时它也是"这些默认值必须合法"的自检对象（注册期就校验，坏值 fail-loud）。
+	Base map[string]any
+	// Validate 是声明式命名空间的语义校验（schema 表达不了的跨字段规则）。
+	// Base 与 User 两层都要过它：坏值 fail-loud，不静默截断。
+	Validate func(value any) error
+	// Normalize 是**读路径**的有效值投影（官方客户端读取时做的那一步）。
+	// 只在 describe/get/mutate 的 value 与 section 字段的 current 上生效；
+	// 它从不写回存储，也不改变 user 段——所以旧值不会因为"读过一次"被改写。
+	// 典型用途：ui-chat 的 transcriptView 旧值 normal/expanded 读作 detailed。
+	Normalize func(value map[string]any)
 }
 
 // Registry 是已注册命名空间的有序表。
@@ -59,7 +73,27 @@ func (r *Registry) Register(spec NamespaceSpec) (func(), error) {
 	if spec.NS == "" {
 		return nil, &Error{Code: "bad_request", Message: "设置命名空间不能为空", Hint: "给一个稳定的 ns 名字", Status: 400}
 	}
-	if len(spec.Fields) == 0 {
+	if spec.Schema != nil {
+		// 声明式命名空间：字段由 envelope 表达，Flat Fields 可以为空；
+		// 但默认值必须在注册期就合法（坏 schema/default 不许发布上线）。
+		if spec.Base == nil {
+			return nil, &Error{
+				Code:    "bad_request",
+				Message: fmt.Sprintf("声明式命名空间 %q 缺少 Base 默认值", spec.NS),
+				Hint:    "给出 Store 缺失时 describe 用的默认值",
+				Status:  400,
+			}
+		}
+		section := sectionSpec{ns: spec.NS, schema: spec.Schema, validate: spec.Validate}
+		if err := validateDeclaredValue(section, spec.Base); err != nil {
+			return nil, &Error{
+				Code:    "bad_request",
+				Message: fmt.Sprintf("声明式命名空间 %q 的默认值不合法: %v", spec.NS, err),
+				Hint:    "修正 Base 或 schema；坏默认值不许发布给设置表单",
+				Status:  400,
+			}
+		}
+	} else if len(spec.Fields) == 0 {
 		return nil, &Error{
 			Code:    "bad_request",
 			Message: fmt.Sprintf("设置命名空间 %q 没有字段", spec.NS),
@@ -144,6 +178,7 @@ func (r *Registry) Specs() []NamespaceSpec {
 
 func cloneNamespaceSpec(spec NamespaceSpec) NamespaceSpec {
 	clone := spec
+	clone.Base = deepCloneMap(spec.Base)
 	clone.Fields = make([]FieldSpec, len(spec.Fields))
 	for index, field := range spec.Fields {
 		copied := field
@@ -167,6 +202,60 @@ func cloneNamespaceSpec(spec NamespaceSpec) NamespaceSpec {
 		clone.Fields[index] = copied
 	}
 	return clone
+}
+
+// HostRegistry 是宿主对外发布的设置命名空间表：默认两个（model / permission）
+// 加上 rc.2 的 provider 命名空间 `llm`（retryPolicy schema 的落点），以及官方
+// 客户端的 4 个 UI 命名空间 `locale` / `ui-theme` / `ui-chat` / `ui-settings`
+// （设置面板「语言 / 外观 / 工作细节 / 开发者工具」行的真值来源）。
+//
+// 为什么不塞进 DefaultRegistry：`settings.describe` 是线上 58 个方法之一，
+// 默认 registry 的形状（恰好两个命名空间）已被既有夹具与 cmd/dshd 的断言钉住；
+// 发布 llm 与 4 个 UI 命名空间是**显式**的宿主决定，由 serve 装配点选择
+// （见报告"接线行"）。
+func HostRegistry() *Registry {
+	registry := DefaultRegistry()
+	if _, err := registry.Register(buildProviderNamespaceSpec()); err != nil {
+		panic(fmt.Sprintf("settingsform: llm provider 命名空间非法: %v", err))
+	}
+	for _, spec := range buildClientUINamespaceSpecs() {
+		if _, err := registry.Register(spec); err != nil {
+			panic(fmt.Sprintf("settingsform: 客户端 UI 命名空间 %q 非法: %v", spec.NS, err))
+		}
+	}
+	// 官方 agent-preset registry 的 selectedDefault：管理界面写"后续会话的默认
+	// preset"的唯一通道（见 agent_preset_schema.go 的权威源）。
+	if _, err := registry.Register(agentPresetNamespaceSpec()); err != nil {
+		panic(fmt.Sprintf("settingsform: agent-preset 命名空间非法: %v", err))
+	}
+	// 官方 UI 的 4 个设置页各自的插件命名空间（2026-11-15 补）。
+	//
+	// 这 4 页在官方客户端里的存在条件是"宿主服务了它的命名空间"
+	// （`ctx.configForms.whileServed([...])`）：宿主不发，页面**永远不显示**。
+	// 每页对应的命名空间不一定是 1 个——官方页面绑的是执行器/provider 条目的
+	// 命名空间，一到三个不等：
+	//
+	//	settings-agent-loop    → agent-loop
+	//	settings-shell         → bash-sandbox / pwsh-sandbox
+	//	settings-subagent      → subagent / subagent-model-selection-settings
+	//	settings-web-search    → web / web-deepseek-api / web-search-deepseek
+	//
+	// 共 8 条（权威源逐条写在各自的 *_schema.go 文件头）。默认值照官方：
+	// 官方默认关闭的（subagent-model-selection-settings.enabled=false）就默认关闭，
+	// 只是**可以被打开**。
+	for _, group := range [][]NamespaceSpec{
+		buildAgentLoopNamespaceSpecs(),
+		buildShellSandboxNamespaceSpecs(),
+		buildSubagentNamespaceSpecs(),
+		buildWebNamespaceSpecs(),
+	} {
+		for _, spec := range group {
+			if _, err := registry.Register(spec); err != nil {
+				panic(fmt.Sprintf("settingsform: 设置页命名空间 %q 非法: %v", spec.NS, err))
+			}
+		}
+	}
+	return registry
 }
 
 // DefaultRegistry 返回宿主当前真实存在的两个命名空间（model / permission）。

@@ -206,24 +206,25 @@ func countInPackage(t *testing.T, dir, literal string) (int, []string) {
 // 子进程 argv 里：新增字段忘了接线时，生产 serve 链会静默退回 run 的写死默认值。
 func TestGuardHostRunOptionsFieldsAreAllForwarded(t *testing.T) {
 	opts := hostRunOptions{
-		autoCompact:    40001,
-		maxChars:       4001,
-		workspaceBytes: 65537,
-		contextWindow:  2000000,
-		maxOutput:      128001,
-		agents:         "docs/WORKER.md",
+		autoCompact:     40001,
+		maxChars:        4001,
+		maxInlineTokens: 4002,
+		workspaceBytes:  65537,
+		contextWindow:   2000000,
+		maxOutput:       128001,
+		agents:          "docs/WORKER.md",
 	}
 	argv := opts.args()
 	joined := strings.Join(argv, " ")
 	for _, flagName := range []string{
-		"--auto-compact", "--max-chars", "--workspace-bytes",
+		"--auto-compact", "--max-chars", "--max-inline-tokens", "--workspace-bytes",
 		"--context-window", "--max-output", "--agents",
 	} {
 		if !strings.Contains(joined, flagName) {
 			t.Errorf("hostRunOptions.args() 漏了 %s：serve 侧解析出来也传不到子进程（argv=%v）", flagName, argv)
 		}
 	}
-	for _, value := range []string{"40001", "4001", "65537", "2000000", "128001", "docs/WORKER.md"} {
+	for _, value := range []string{"40001", "4001", "4002", "65537", "2000000", "128001", "docs/WORKER.md"} {
 		if !strings.Contains(joined, value) {
 			t.Errorf("hostRunOptions.args() 没把值 %s 传下去（argv=%v）", value, argv)
 		}

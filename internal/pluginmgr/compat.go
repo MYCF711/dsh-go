@@ -22,7 +22,8 @@ package pluginmgr
 //   - peer 的 `workspace:^|~|*` 指"当前 runtime"；`engines.dsh` 上的 workspace:
 //     一律不满足（官方原文：including any workspace: `engines.dsh`, are unmet）；
 //   - 预发布版本**参与**比较（官方：Prereleases participate in ranges），
-//     所以本仓的发布版本号（`<major>.<minor>.<patch>-go.<n>` 形态）在 `^0.2.0` 里是满足的。
+//     所以本仓的发布版本号（稳定版 `<major>.<minor>.<patch>-go.<n>`、途中测试版
+//     `<major>.<minor>.<patch>-gobeta.<n>`）在 `^0.2.0` 里是满足的。
 //
 // # 本仓包的最小诚实体现在哪
 //
@@ -235,7 +236,7 @@ func compatibilityRequirements(manifest Manifest, runtimeVersion string) (map[st
 //     1.2.3 - 2.3.4             连字符区间
 //     A || B                    或；空格分隔 = 且
 //
-// 预发布参与比较（`<x>-go.<n>` 与 `<x>` 是两个不同版本），与官方一致。
+// 预发布参与比较（`<x>-go.<n>` / `<x>-gobeta.<n>` 与 `<x>` 是两个不同版本），与官方一致。
 func SatisfiesRange(version, expression string) (bool, error) {
 	current, err := parseSemver(version)
 	if err != nil {

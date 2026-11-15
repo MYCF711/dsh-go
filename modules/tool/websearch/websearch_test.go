@@ -3,6 +3,7 @@ package websearch
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -90,7 +91,7 @@ func TestSearchOK(t *testing.T) {
 	if seen := provider.seen(); len(seen) != 1 || seen[0] != "普遍性问题" {
 		t.Fatalf("查询没有传下去: %v", seen)
 	}
-	if provider.limits[0] != maxResults {
+	if provider.limits[0] != defaultMaxResults {
 		t.Fatalf("上限没有传下去: %d", provider.limits[0])
 	}
 }
@@ -153,7 +154,10 @@ func TestZeroHits(t *testing.T) {
 	}
 }
 
-// 输入边界：空数组 / 空词 / 超过 4 条。
+// 输入边界：空数组 / 空词 / 超过上限。
+//
+// 上限本身随官方基线走：rc.2 是 10（`dsh-tool-web/src/search.ts:23`），
+// rc.1 是 4。这里用包内常量断言，避免把某一个版本的数写死在测试里。
 func TestInputLimits(t *testing.T) {
 	tool := &Tool{Web: newSeam(t, &fakeProvider{id: "fake", available: true})}
 	if _, err := execSearch(t, tool, `{"queries":[]}`); err == nil {
@@ -162,8 +166,16 @@ func TestInputLimits(t *testing.T) {
 	if _, err := execSearch(t, tool, `{"queries":["  "]}`); err == nil {
 		t.Fatal("空词要报错")
 	}
-	if _, err := execSearch(t, tool, `{"queries":["a","b","c","d","e"]}`); err == nil {
-		t.Fatal("超过 4 条要报错")
+	over := make([]string, 0, defaultMaxQueries+1)
+	for i := 0; i < defaultMaxQueries+1; i++ {
+		over = append(over, fmt.Sprintf("q%d", i))
+	}
+	raw, err := json.Marshal(map[string]any{"queries": over})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Exec(context.Background(), raw); err == nil {
+		t.Fatalf("超过 %d 条要报错", defaultMaxQueries)
 	}
 }
 

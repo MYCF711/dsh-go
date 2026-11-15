@@ -91,10 +91,24 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 			fmt.Errorf("不支持的图片类型: %s", mime)
 	}
 
+	// 图片的**可读路径**要带出工具边界：spill-policy 的 token 预算臂（官方 #79）
+	// 在"结果含图片且超预算"时要把可读路径写进恢复文件，否则模型只能拿回一段
+	// "[Image: ...]" 的占位符、没有任何办法再看到这张图。`spi.Image` 原来只有
+	// MIME + base64，这条知识在工具边界上被丢掉了——现在由生产者填 `Path`。
+	//
+	// 相对路径按**进程 cwd** 解析成绝对路径（上面那次 os.Stat 就是按同一口径
+	// 成功的），再统一成正斜杠：宿主提示词里的路径口径就是正斜杠
+	// （internal/prompt/prompt.go 的 tools 段），模型拿这条路径直接 read_image 即可。
+	// Abs 失败（极端路径）就退回调用者给的那份，别让路径归一失败把整次读图搞挂。
+	imagePath := filepath.ToSlash(p)
+	if abs, absErr := filepath.Abs(p); absErr == nil {
+		imagePath = filepath.ToSlash(abs)
+	}
+
 	return spi.Result{
 		Summary: fmt.Sprintf("图片 %s（%s，%d 字节）", filepath.Base(p), mime, len(buf)),
 		Data:    data{Path: filepath.ToSlash(p), MIME: mime, Bytes: len(buf)},
-		Images:  []spi.Image{{MIME: mime, DataBase64: base64.StdEncoding.EncodeToString(buf)}},
+		Images:  []spi.Image{{MIME: mime, DataBase64: base64.StdEncoding.EncodeToString(buf), Path: imagePath}},
 	}, nil
 }
 

@@ -332,6 +332,8 @@ func effortGoalPromptAndAssert(t *testing.T, client *http.Client, server *plugin
 		Reasoning string `json:"reasoning_effort"`
 	}, wantModel, wantReasoning string) {
 	t.Helper()
+	// **先**取 journal 水位再提交：turnId 只作身份核对，先后顺序靠 seq 钉。
+	baseline := effortGoalJournalLastSeq(t, client, server.base, sessionID)
 	accepted := postEffortGoalPromptWhenReady(t, client, server.base, sessionID, prompt)
 	turnID := accepted["result"].(map[string]any)["turnId"].(string)
 	select {
@@ -339,16 +341,43 @@ func effortGoalPromptAndAssert(t *testing.T, client *http.Client, server *plugin
 		if request.Model != wantModel || request.Reasoning != wantReasoning {
 			t.Fatalf("runner request=%+v want model=%q reasoning=%q", request, wantModel, wantReasoning)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(effortGoalWait):
 		t.Fatalf("runner request timeout session=%s stderr=%s", sessionID, server.stderr.String())
 	}
-	waitEffortGoalTurn(t, client, server.base, sessionID, turnID)
+	waitEffortGoalTurn(t, client, server.base, sessionID, turnID, baseline)
 }
 
+// effortGoalWait 是"等真宿主收工"的上限。
+//
+// 这是**等待窗**，不是断言：CI 的 2 核 runner 上要同时跑上百个 -race 测试二进制，
+// 子进程被饿到几十秒是常态（2026-11-12 run 43194750916 上 15s 的窗口被撞穿，
+// 报出来的是 session.prompt 409 busy）。放宽的只是等它跑完的时间，判定一条没少。
+const effortGoalWait = 90 * time.Second
+
+// effortGoalJournalLastSeq 读一次 journal 的当前水位（lastSeq）。
+//
+// 为什么必须按 seq 设基准：宿主重启后 promptService 的 turn 序号从 0 重来
+// （turn-1、turn-2…），而 journal 是**持久化**的——只按 turnId 找 turn/done
+// 会命中**上一个进程**那一轮的帧，于是"以为这一轮已经收工"，紧接着的
+// session.prompt 撞 409 busy。客户端本来就不该假定 turnId 跨重启唯一
+// （契约里判断水位用的是 journalEpoch + seq）。
+func effortGoalJournalLastSeq(t *testing.T, client *http.Client, base, sessionID string) int {
+	t.Helper()
+	envelope := postPluginGlue(t, client, base, "session.history", map[string]any{
+		"id": sessionID, "sinceSeq": 0, "limit": 1,
+	}, http.StatusOK)
+	lastSeq, ok := envelope["result"].(map[string]any)["lastSeq"].(float64)
+	if !ok {
+		t.Fatalf("session.history 缺 lastSeq：%+v", envelope)
+	}
+	return int(lastSeq)
+}
+
+// postEffortGoalPromptWhenReady 提交一条 prompt；只在 409 busy（上一轮还没收工）时重试。
 func postEffortGoalPromptWhenReady(t *testing.T, client *http.Client, base, sessionID, prompt string) map[string]any {
 	t.Helper()
 	raw, _ := json.Marshal(map[string]any{"id": sessionID, "text": prompt})
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(effortGoalWait)
 	for {
 		resp, err := client.Post(base+"/api/session.prompt", "application/json", bytes.NewReader(raw))
 		if err != nil {
@@ -381,9 +410,9 @@ func postEffortGoalPromptWhenReady(t *testing.T, client *http.Client, base, sess
 	}
 }
 
-func waitEffortGoalTurn(t *testing.T, client *http.Client, base, sessionID, turnID string) {
+func waitEffortGoalTurn(t *testing.T, client *http.Client, base, sessionID, turnID string, sinceSeq int) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(effortGoalWait)
 	for {
 		envelope := postPluginGlue(t, client, base, "session.history", map[string]any{
 			"id": sessionID, "sinceSeq": 0, "limit": 1000,
@@ -392,6 +421,11 @@ func waitEffortGoalTurn(t *testing.T, client *http.Client, base, sessionID, turn
 		for _, raw := range frames {
 			frame := raw.(map[string]any)
 			if frame["type"] != "turn/done" && frame["type"] != "turn/error" {
+				continue
+			}
+			// 只认**本轮提交之后**的帧：turnId 在宿主重启后会重用（见
+			// effortGoalJournalLastSeq 的注释），光按 turnId 会命中上一个进程那一轮。
+			if seq, ok := frame["seq"].(float64); !ok || int(seq) <= sinceSeq {
 				continue
 			}
 			data := frame["data"].(map[string]any)

@@ -94,6 +94,20 @@ func (g *subagentGate) acquire(ctx context.Context) (func(), error) {
 	}, nil
 }
 
+// subagentGateFromSettings 是生产装配点的解析顺序：**设置文档 > 环境变量 > 官方默认**。
+//
+// 官方 `subagent.maxActiveSubagents` 是设置命名空间 `subagent` 里的一个字段
+// （`dsh-subagent/src/index.ts:195-198`），所以"界面写过的值"必须压过部署面的
+// 环境变量；设置里没写过（用户没动过）时保持环境变量的既有行为，避免一次
+// 界面保存把部署配置整体盖掉。设置值的范围由 schema 校验（>= 1），这里仍再判一次
+// 下限，避免校验层被改动时静默放行 0 槽的池。
+func subagentGateFromSettings(home string, env func(string) string) (*subagentGate, error) {
+	if limit, ok := effectiveSubagentMaxActive(home); ok && limit >= 1 {
+		return newSubagentGate(limit), nil
+	}
+	return subagentGateFromEnv(env)
+}
+
 // subagentGateFromEnv 按环境变量造池：不设 = 官方默认 8；非法 = 响亮失败。
 //
 // 非法值不许静默回退：配置写着 0 或 `eight` 却跑在 8 上，用户会以为"我调过了"。

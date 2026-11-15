@@ -39,10 +39,12 @@ type modelRunner struct {
 	// 存活期间登记，最终边界原子 drain-or-close，过晚提交不会变成新 turn。
 	steerMu sync.Mutex
 	steers  map[string]*modelTurnInbox
-	// wake/finished 处理 prompt ACK 后 Run goroutine 尚未注册的早到 steer；
+	// pending 是"Run goroutine 还没注册就先到"的 steer 队列（按 sessionID+turnID）：
+	// 注册方在**同一临界区**里把它们搬进新 inbox，首步 drain 因此一定看得到。
+	// 只等 wake 通知的话，"早到"会不会被首步接管取决于调度——2 核 runner 上会输。见 pendingSteer。
+	pending map[string][]*pendingSteer
 	// finished 每会话只记最新 turn，避免无限积累历史 turnID。
-	steerWake chan struct{}
-	finished  map[string]string
+	finished map[string]string
 }
 
 func (r *modelRunner) Run(ctx context.Context, sessionID, turnID, text string) error {
@@ -142,7 +144,10 @@ func (r *modelRunner) runModelTurnWithEffort(ctx context.Context, sessionID, tur
 		// attemptMark 是本 step 开始前的事件下标：降级重试要把这一次失败的
 		// 半截流（assistant/text 增量）从**落盘**里退回，否则一次失败会写成两段回答。
 		attemptMark := len(events)
-		resp, streamErr := llm.NewWithAPI(base, credential, api).Stream(ctx,
+		turnClient := llm.NewWithAPI(base, credential, api)
+		// 账号路由（官方 #99）：provider 的认证方式跟着这一轮的 api 走。
+		applyAccountRouteEnv(turnClient, os.Getenv)
+		resp, streamErr := turnClient.Stream(ctx,
 			llm.Request{Model: model, Messages: history, Stream: true, Reasoning: reasoning,
 				Temperature: r.temperature, Stop: r.stop}, func(e llm.Event) error {
 				typ := ""
@@ -386,7 +391,7 @@ func (r *modelRunner) persistModelEvents(sessionID string, events []modelTurnEve
 	if err != nil {
 		return fmt.Errorf("存不下来（找不到会话文件）: %w", err)
 	}
-	logw, err := session.OpenSessionAt(path)
+	logw, err := session.OpenSessionAtRecoveringStale(path)
 	if err != nil {
 		return fmt.Errorf("存不下来（打不开写入）: %w", err)
 	}
@@ -460,22 +465,16 @@ func (r *modelRunner) persistModelEvents(sessionID string, events []modelTurnEve
 	return tc.End(finish)
 }
 
-// nextTurnNumber 数一下这份日志里已经开过几个 turn，下一个就是它 +1。
+// nextTurnNumber 是"下一轮的**会话级** turn 编号"，判据只有一份：
+// `session.NextTurnAt`（数 v4 日志里已经开过几轮，下一个就是它 +1）。
 //
 // 为什么不用"进程内计数器"：serve 每轮可能换一个子进程，进程内计数从 1 开始，
 // 第二次就又写 turn:1——同一个会话里出现两个 turn:1，消费者会把两轮当成一轮。
 // 也不能问正在写的那个 Log（它不暴露已写事件），所以先纯读一遍文件。
 // 读失败就退到 1：轮次号错总比"写不进去"好，而写不进去调用方会拿到 error。
+//
+// 手里已经有 `*v4.Log` 的调用方（`cmdRun` 本来就为历史读了一份）请直接用
+// `session.NextTurn(back)`，不要为了编号再读一次几十 MB 的文件。
 func nextTurnNumber(path string) int {
-	log, err := v4.ReadFile(path)
-	if err != nil || log == nil {
-		return 1
-	}
-	n := 0
-	for _, ev := range log.Events {
-		if ev.Type == "turn/start" {
-			n++
-		}
-	}
-	return n + 1
+	return session.NextTurnAt(path)
 }

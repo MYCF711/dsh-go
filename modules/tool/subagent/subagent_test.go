@@ -77,8 +77,14 @@ func TestValidation(t *testing.T) {
 // 2026-11-09（GO.7 / agentLoop.agents[].id）：末尾多了 `"AgentID":""`——这是
 // **显式的契约变更**，不是"为变绿更新 golden"：具名委派需要一个稳定的 agent 标签，
 // 而"不传 id"时的请求形状必须仍然逐字节固定（零值字段照抄在 golden 里）。
+// requestGolden 是**工具层发出去的请求**的逐字节形状。
+//
+// `Seed` 是本任务新增的字段（官方 #70/#73 的结构化种子经 spi 传给子会话，
+// 见 `internal/spi/subagent.go` 的 SubagentRequest.Seed）。它在 spawn 路径上
+// 恒为 nil，所以这里就是 `"Seed":null`——**不是**把断言放宽成"包含某几段"，
+// 而是把新增字段写进同一份 golden：除了它以外一个字节都不许变。
 const requestGolden = `{"Prompt":"自包含的任务描述","Description":"查一件事",` +
-	`"Cwd":"","InheritSession":"","Inherit":"",` +
+	`"Cwd":"","InheritSession":"","Inherit":"","Seed":null,` +
 	`"Continuable":false,"ChildSessionID":"","ParentSessionID":"","AgentID":""}`
 
 // TestContinuableOmittedKeepsRequestShapeByteForByte 钉住默认关闭。

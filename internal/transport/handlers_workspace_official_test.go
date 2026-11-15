@@ -12,6 +12,7 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -978,5 +979,187 @@ func TestOfficialWorkspaceDirectoryTargetStatAndChanges(t *testing.T) {
 	change, _ = frames[2]["change"].(map[string]any)
 	if change["absent"] != true || change["absolutePath"] != dirAbs {
 		t.Fatalf("目录消失必须发 absent 帧：%v", frames[2])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 官方 cordis 事件投影：`workspace/session-archived` / `workspace/session-unarchiving`
+// ---------------------------------------------------------------------------
+//
+// 官方依据（`tmp/GO8-RC2/official-rc2/dsh/node_modules/@deepseek-ai/dsh-workspace/src/index.ts`）：
+//
+//	:98-100  SessionActivityRequest = { sessionId }（两个事件共用）
+//	:156     `workspace/session-archived` 声明；:403 归档落盘**之后**广播
+//	:163     `workspace/session-unarchiving` 声明；:426 移出归档集**之前**广播
+//
+// 本仓不新开协议面：事件走**既有**每会话 journal（`session.history` 与官方
+// `session/events` 尾部流读同一份）与 `/ws` 的 `session:<id>` topic（Hub）。
+
+// eventRecorder 是给 Hub 用的订阅者（只记帧）。
+type eventRecorder struct {
+	mu     sync.Mutex
+	frames []ServerFrame
+}
+
+func (r *eventRecorder) Push(frame ServerFrame) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.frames = append(r.frames, frame)
+	return nil
+}
+
+func (r *eventRecorder) got() []ServerFrame {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ServerFrame(nil), r.frames...)
+}
+
+// TestOfficialWorkspaceEventNamesAndPayloadMatchOfficial 钉住名字与载荷逐字一致。
+//
+// 载荷错了（比如多了字段、或叫 activity 而不是 sessionId）→ 客户端按官方
+// `SessionActivityRequest` 解析时拿不到 sessionId，事件等于没发。
+func TestOfficialWorkspaceEventNamesAndPayloadMatchOfficial(t *testing.T) {
+	if OfficialWorkspaceEventArchived != "workspace/session-archived" {
+		t.Fatalf("归档事件名必须是官方的 workspace/session-archived：%q", OfficialWorkspaceEventArchived)
+	}
+	if OfficialWorkspaceEventUnarchiving != "workspace/session-unarchiving" {
+		t.Fatalf("反归档事件名必须是官方的 workspace/session-unarchiving：%q", OfficialWorkspaceEventUnarchiving)
+	}
+	raw, err := json.Marshal(OfficialWorkspaceSessionActivity{SessionID: "s-1"})
+	if err != nil {
+		t.Fatalf("序列化官方载荷: %v", err)
+	}
+	if string(raw) != `{"sessionId":"s-1"}` {
+		t.Fatalf("官方 SessionActivityRequest 只有 sessionId 一个键，实际 %s", raw)
+	}
+	for _, event := range []string{OfficialWorkspaceEventArchived, OfficialWorkspaceEventUnarchiving} {
+		if !IsOfficialWorkspaceEvent(event) {
+			t.Fatalf("%s 应被认成官方 workspace 事件", event)
+		}
+	}
+	// 官方 `dsh-workspace` 只声明了这两个事件（`:156`/`:163`）。别的事件名不许混进来：
+	// 往 journal 里灌非官方类型，客户端按官方词汇表解释时会把整条日志判成未知事件。
+	for _, other := range []string{"workspace/session-stop", "workspace/session-unarchived", "workspace/changes", ""} {
+		if IsOfficialWorkspaceEvent(other) {
+			t.Fatalf("%q 不是 dsh-workspace 广播的事件，不该被认成官方事件", other)
+		}
+	}
+}
+
+// TestOfficialWorkspaceEventsProjectToJournalAndOfficialStream 证明事件真的到了客户端能读的
+// 两条既有通道上（journal / 官方 stream 尾部流 与 Hub→WS），载荷与 seq/time 都真实。
+func TestOfficialWorkspaceEventsProjectToJournalAndOfficialStream(t *testing.T) {
+	journals := NewJournals(nil)
+	srv, err := NewServer(Options{Journals: journals})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	if srv.hub == nil {
+		t.Fatal("Server 没有 hub：/ws 无法推送")
+	}
+	recorder := &eventRecorder{}
+	srv.hub.Subscribe(SessionTopicPrefix+"s-events", 0, recorder)
+
+	want := []string{OfficialWorkspaceEventArchived, OfficialWorkspaceEventUnarchiving}
+	for _, event := range want {
+		if err := srv.ProjectOfficialWorkspaceEvent("s-events", event); err != nil {
+			t.Fatalf("ProjectOfficialWorkspaceEvent(%s): %v", event, err)
+		}
+	}
+
+	frames, lastSeq, _ := journals.Get("s-events").Since(SinceNothing, 0)
+	if len(frames) != len(want) {
+		t.Fatalf("journal 里应有 %d 条事件帧，实际 %d 条：%+v", len(want), len(frames), frames)
+	}
+	if lastSeq != len(want) {
+		t.Fatalf("journal 水位应是 %d，实际 %d", len(want), lastSeq)
+	}
+	for i, event := range want {
+		frame := frames[i]
+		if frame.Type != event {
+			t.Fatalf("第 %d 条应是 %s，实际 %s", i, event, frame.Type)
+		}
+		if frame.Seq != i+1 {
+			t.Fatalf("%s 的 seq 应是 %d，实际 %d（客户端靠它补洞）", event, i+1, frame.Seq)
+		}
+		if frame.Time <= 0 {
+			t.Fatalf("%s 帧缺 time（毫秒墙钟）：%+v", event, frame)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(frame.Data, &payload); err != nil {
+			t.Fatalf("%s 的 data 不是 JSON 对象：%q", event, frame.Data)
+		}
+		if len(payload) != 1 {
+			t.Fatalf("%s 的载荷必须只有 sessionId：%v", event, payload)
+		}
+		if got, _ := payload["sessionId"].(string); got != "s-events" {
+			t.Fatalf("%s 的 sessionId 不对：%q", event, got)
+		}
+	}
+
+	// /ws：Hub 上真的推出去了（推送发生在 journal 入账之后，seq 一致）。
+	pushed := recorder.got()
+	if len(pushed) != len(want) {
+		t.Fatalf("WS 订阅者应收到 %d 帧，实际 %d：%+v", len(want), len(pushed), pushed)
+	}
+	for i, event := range want {
+		if pushed[i].Type != event || pushed[i].Seq != i+1 {
+			t.Fatalf("第 %d 条推给 WS 的帧不对：%+v（期望 %s seq=%d）", i, pushed[i], event, i+1)
+		}
+	}
+
+	// 官方 stream（mux `session/events` 尾部流）读的是同一份 journal。
+	stream, fault := srv.OpenOfficialJournalTail("s-events", SinceNothing, 16)
+	if fault != nil {
+		t.Fatalf("开 session/events 尾部流失败：%d %s：%s", fault.Status, fault.Code, fault.Message)
+	}
+	defer stream.Close()
+	for i, event := range want {
+		raw, done, streamFault := stream.Next(context.Background())
+		if streamFault != nil {
+			t.Fatalf("读 session/events 流失败：%s", streamFault.Message)
+		}
+		if done {
+			t.Fatalf("流提前结束，缺第 %d 帧", i)
+		}
+		var frame struct {
+			Seq  int             `json:"seq"`
+			Type string          `json:"type"`
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatalf("流帧不是 JSON：%v（%s）", err, raw)
+		}
+		if frame.Type != event || frame.Seq != i+1 {
+			t.Fatalf("流里第 %d 帧不对：%s seq=%d（期望 %s seq=%d）", i, frame.Type, frame.Seq, event, i+1)
+		}
+	}
+}
+
+// TestOfficialWorkspaceEventProjectionRejectsUnknownAndEmptyId
+//
+// 两个负向判据：
+//  1. 未声明的官方事件名必须拒绝（否则 journal 里会出现客户端不认识的类型）；
+//  2. 空会话 id 直接返回 nil：没有会话就没有 topic，不该造一条无主的 seq。
+func TestOfficialWorkspaceEventProjectionRejectsUnknownAndEmptyId(t *testing.T) {
+	journals := NewJournals(nil)
+	srv, err := NewServer(Options{Journals: journals})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+
+	if err := srv.ProjectOfficialWorkspaceEvent("s-1", "workspace/session-stop"); err == nil {
+		t.Fatal("workspace/session-stop 不是 dsh-workspace 广播给 UI 的事件，必须拒绝")
+	}
+	if frames, _, _ := journals.Get("s-1").Since(SinceNothing, 0); len(frames) != 0 {
+		t.Fatalf("被拒绝的事件名不许进 journal：%+v", frames)
+	}
+	if err := srv.ProjectOfficialWorkspaceEvent("   ", OfficialWorkspaceEventArchived); err != nil {
+		t.Fatalf("空 sessionId 应安静跳过（没有会话就没有 topic）：%v", err)
+	}
+	if frames, _, _ := srv.opt.Journals.Get("   ").Since(SinceNothing, 0); len(frames) != 0 {
+		t.Fatalf("空 sessionId 不许造帧：%+v", frames)
 	}
 }

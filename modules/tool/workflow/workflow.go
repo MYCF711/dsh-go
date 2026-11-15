@@ -37,10 +37,24 @@ const maxTextRunes = 3000
 // 从工具契约扩散成任意代码，闸门与审批都难守。
 // 参数名对齐是为了"接进来能调通"，语义差异写在这里和 Description 里，
 // 不假装我们跑的是 JS。
-var schema = json.RawMessage(`{"type":"object","properties":{"script":{"type":"string","description":"JSON 步骤表：[{\"tool\":\"grep\",\"args\":{…},\"save\":\"hit\"}]；后一步可用 ${hit} 引用前一步结果"},"meta":{"type":"object","description":"可选的元信息，原样回显在结果里，便于调用方对账"}},"required":["script"],"additionalProperties":false}`)
+var schema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "script": {"type": "string", "description": "JSON 操作表（不是 JS），按顺序执行：{op:agent,prompt,label,phase,schema,save} 跑一个子代理（失败得 null）；{op:parallel,agents:[…]} 并发一批；{op:pipeline,items,stages:[{prompt}]} 每项独立走完全链（无 barrier，可用 ${item}/${prev}/${index}）；{op:phase,title}；{op:log,message}；{op:tool,tool,args,save}；{op:return,value}。${名} 引用前面 save 的结果。没有 op 的项按旧步骤表 {tool,args,foreach,save} 处理，可混写"},
+    "meta": {"type": "object", "description": "工作流身份块（官方 meta）：name / description 必填，可带 whenToUse / phases[{title,detail,provider,model}]。用编排操作时必填，只用旧步骤表时可省略（原样回显）"},
+    "args": {"type": "object", "description": "可选输入，原样暴露给脚本（在操作里用 ${args} 引用）"},
+    "run_in_background": {"type": "boolean", "description": "官方参数；本宿主尚未实现工作流后台任务，传 true 会被明确拒绝（不会假装在后台跑）"}
+  },
+  "required": ["script"],
+  "additionalProperties": false
+}`)
 
 // Tool 是 workflow 工具本身。
-type Tool struct{}
+type Tool struct {
+	// svc 是两段式委派面：编排的 agent() 必须"先发布 child 再等结果"，
+	// 否则 workflow/agent-start 会落在子代理跑完之后（顺序与官方相反）。
+	svc spi.SubagentActivator
+}
 
 func (t *Tool) Name() string { return "workflow" }
 
@@ -48,9 +62,14 @@ func (t *Tool) Caps() spi.Caps { return spi.Caps{} }
 
 func (t *Tool) Schema() json.RawMessage { return schema }
 
-func (t *Tool) Description() string {
-	return "把一串工具调用写成步骤表一次跑完：前一步结果可用 ${var} 喂给后一步，省掉来回往返。"
-}
+func (t *Tool) Description() string { return workflowDescription }
+
+// workflowDescription 是给模型的用法说明。
+//
+// 长度受 `cmd/dshd/snapshot_test.go` 的 120 字上限约束（工具表预算，PLAN §15）：
+// **操作表的完整文档在 `script` 参数描述里**，这里只回答"什么时候用它"。
+const workflowDescription = "在明确要求工作流/大规模多代理编排时用：一份 JSON 操作表，" +
+	"按阶段扇出子代理（并行/流水线）、汇总返回值，前一步结果可喂给后一步。"
 
 type step struct {
 	Tool    string         `json:"tool"`
@@ -60,8 +79,16 @@ type step struct {
 }
 
 type args struct {
-	Script string         `json:"script"`
-	Meta   map[string]any `json:"meta"`
+	Script string `json:"script"`
+	// Meta 是官方 meta 块（原样数据）。用 any 而不是 map：meta 给了非对象时
+	// 要走到 META_INVALID（官方 meta.ts 的 "meta must be an object"），
+	// 而不是在参数解码那一步变成一句含糊的"参数形状不对"。
+	Meta any `json:"meta"`
+	// Args 是脚本输入（官方 args），在操作里通过 ${args} 引用。
+	Args any `json:"args"`
+	// RunInBackground 是官方参数（默认 true 的**能力**，见 Config.enableRunInBackground）。
+	// 本宿主没有工作流后台作业类型，传 true 必须明确拒绝，不许假装在后台跑。
+	RunInBackground bool `json:"run_in_background"`
 }
 
 // trace 是一步的结果，**成功失败都记**：模型要的是"哪一步出了什么事"。
@@ -84,21 +111,51 @@ type trace struct {
 	View      *spi.ViewSpec  `json:"view,omitempty"`
 }
 
+// Exec 是工具入口：先分辨脚本形态，再分派。
+//
+// 两种形态（同一个 `script` 参数）：
+//   - **操作表**（任一元素带 `op`）→ 官方工作流语义：真的发 6 个事件、真的落
+//     4 类耐久帧、真的扇出子代理；
+//   - **步骤表**（没有 `op`）→ 本仓既有语义，**逐字节不变**（老脚本不用改）。
+//
+// 为什么要分而不是合成一条路径：步骤表的既有纪律是"单步失败不算脚本失败、
+// 继续下一步"（这是刻意的软失败，给模型留纠错空间）；官方编排的纪律是"打错
+// 参数/撞上限就整段失败"（致命码）。两种纪律混进一条执行路径，最后一定在某一侧
+// 出错；分开之后各自的断言都能钉死。
 func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
 	var a args
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return spi.Result{Hint: `参数形状：{"script":"[{\"tool\":\"grep\",\"args\":{…}}]"}`}, err
+		return spi.Result{Hint: `参数形状：{"script":"[…]","meta":{…}}（script 里是 JSON 操作表或步骤表）`}, err
 	}
+	if strings.TrimSpace(a.Script) == "" {
+		return spi.Result{Hint: "script 不能为空：给一段 JSON 操作表或步骤表"}, fmt.Errorf("script 为空")
+	}
+	if a.RunInBackground {
+		return unsupportedBackgroundRun()
+	}
+	items, err := parseScriptItems(a.Script)
+	if err != nil {
+		return scriptParseFailure(err)
+	}
+	if scriptUsesOps(items) {
+		return t.execOrchestrated(ctx, a, items)
+	}
+	// 步骤表路径：语义与以前完全一致（包括错误文案与 Hint）。
 	var steps []step
 	if err := json.Unmarshal([]byte(a.Script), &steps); err != nil {
-		return spi.Result{
-			Hint: `script 是一段 JSON 步骤表（不是 JS），例如 [{"tool":"glob","args":{"pattern":"*.go"},"save":"f"}]`,
-		}, fmt.Errorf("script 不是合法的 JSON 步骤表: %w", err)
+		return scriptParseFailure(err)
 	}
 	if len(steps) == 0 {
 		return spi.Result{Hint: "script 里至少要有一步"}, fmt.Errorf("步骤为空")
 	}
+	return t.execSteps(ctx, a, steps)
+}
 
+// execSteps 是既有步骤表执行器（原 Exec 的主体，语义一个字节都没改）。
+//
+// 它只服务"没有编排操作"的脚本：单步失败记 trace 继续、Stop 向上传播、
+// 硬失败（没通道/嵌套太深）当场报错。
+func (t *Tool) execSteps(ctx context.Context, a args, steps []step) (spi.Result, error) {
 	sub := spi.SubDispatchFrom(ctx)
 	if sub.Runner == nil {
 		return spi.Result{
@@ -222,7 +279,7 @@ func runOne(ctx context.Context, r spi.Runner, idx int, st step, callArgs map[st
 		stop: res.Stop}, dataOf(res), nil
 }
 
-func buildResult(traces []trace, vars map[string]any, failed int, meta map[string]any, stop bool) spi.Result {
+func buildResult(traces []trace, vars map[string]any, failed int, meta any, stop bool) spi.Result {
 	var b strings.Builder
 	for _, tr := range traces {
 		mark := "ok"
@@ -339,18 +396,87 @@ func trunc(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
+// scriptSyntaxHint 是"script 不是 JSON"时给模型的固定提示。
+//
+// 关键是说清**参数名对、语法不对**：模型最常见的第一反应是"我拼错参数名了"，
+// 于是换个键名再试一次，白白多一轮往返。
+const scriptSyntaxHint = `script 是一段 **JSON**（不是 JS）：操作表 [{"op":"agent","prompt":"…"}] ` +
+	`或步骤表 [{"tool":"glob","args":{"pattern":"*.go"},"save":"f"}]`
+
+// parseScriptItems 把 script 解成"元素原位保留"的列表。
+//
+// 为什么保留 RawMessage 而不是一步解码到具体结构：要先判断它是不是操作表
+// （有没有 `op`），再决定用哪套解码器；一步解到某一边都会把另一边的合法
+// 写法判成语法错误。
+func parseScriptItems(script string) ([]json.RawMessage, error) {
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(script), &items); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("script 里没有任何项")
+	}
+	return items, nil
+}
+
+// scriptParseFailure 把"script 不是合法 JSON"统一成 SCRIPT_PARSE。
+//
+// 错误文本里**带码**：调用方（agent 循环/日志/未来的自动重试）要能机器路由，
+// 而 Hint 是给人看的——两者都要说清"参数名对、语法不对"。
+func scriptParseFailure(cause error) (spi.Result, error) {
+	return spi.Result{Hint: scriptSyntaxHint + "（SCRIPT_PARSE）"},
+		fmt.Errorf("workflow run failed (SCRIPT_PARSE): script 不是合法的 JSON: %w", cause)
+}
+
+// scriptUsesOps 判断脚本是不是操作表：任一元素带非空 `op` 字段即是。
+//
+// 为什么用"任一"而不是"全部"：两种写法允许**混写**（操作表里可以夹旧步骤），
+// 所以只要有一项是操作，整段就按编排语义跑（它要发事件、要有 meta）。
+func scriptUsesOps(items []json.RawMessage) bool {
+	for _, raw := range items {
+		var probe struct {
+			Op string `json:"op"`
+		}
+		if err := json.Unmarshal(raw, &probe); err == nil && probe.Op != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// unsupportedBackgroundRun 明确拒绝 run_in_background。
+//
+// 官方默认 `enableRunInBackground: true`，但那依赖 `ctx.jobs` 的 **workflow 作业
+// 类型**（dsh-tool-workflow/src/index.ts:263-316）：作业注册、输出环、完成通知
+// 一条链。本仓的 jobs 是**进程**作业表（spi.Job 只有 Output/Kill/List），没有
+// "注册一个非进程作业"的面。收下这个参数却前台跑，就是"静默成功"——
+// 这里选择明确拒绝，并把缺口写进报告。
+func unsupportedBackgroundRun() (spi.Result, error) {
+	return spi.Result{Hint: "本宿主没有 workflow 后台任务：run_in_background 依赖作业注册表支持" +
+			"非进程作业（官方 dsh-jobs 的 kind='workflow'），本仓 spi.Job 只有进程作业。" +
+			"去掉这个参数用前台执行；要后台跑，用 bash 的后台任务（run_in_background）包一层"},
+		fmt.Errorf("run_in_background is not supported by this host yet: no workflow job kind in the jobs registry")
+}
+
 // Module 返回装配用的模块描述。
 func Module() kernel.Module {
 	return kernel.Module{
-		ID:       "tool-workflow",
-		Backend:  kernel.BackendStatic,
-		Requires: []string{"tools"},
+		ID:      "tool-workflow",
+		Backend: kernel.BackendStatic,
+		// Requires 声明两条能力依赖：工具表，以及**两段式委派**（编排的 agent()
+		// 必须能"先发布 child 再等结果"）。缺后者时装配就失败并说清缺什么——
+		// 官方工作流引擎同样 inject `subagents`（dsh-workflow-ptc/src/index.ts:104）。
+		Requires: []string{"tools", "subagent-activation"},
 		Register: func(s *kernel.Scope) error {
 			reg, err := kernel.Inject(s, spi.ToolsKey)
 			if err != nil {
 				return err
 			}
-			return reg.Register(&Tool{})
+			activator, err := kernel.Inject(s, spi.SubagentActivationKey)
+			if err != nil {
+				return fmt.Errorf("workflow 的编排面需要子代理激活能力: %w", err)
+			}
+			return reg.Register(&Tool{svc: activator})
 		},
 	}
 }

@@ -78,7 +78,7 @@ func (s *Service) platformJSON(ctx context.Context, method, path string, token s
 		headers["x-dsh-auth-token"] = token
 	}
 	var raw json.RawMessage
-	if err := s.doJSONRaw(ctx, method, s.origin+path, headers, body, &raw); err != nil {
+	if _, err := s.doJSONRaw(ctx, method, s.origin+path, headers, body, &raw); err != nil {
 		return err
 	}
 	if out == nil {
@@ -87,18 +87,22 @@ func (s *Service) platformJSON(ctx context.Context, method, path string, token s
 	return unwrapPlatform(raw, out)
 }
 
-func (s *Service) doJSONRaw(ctx context.Context, method, endpoint string, headers map[string]string, body any, out *json.RawMessage) error {
+// doJSONRaw 发一次请求并返回原始响应体与 HTTP 状态码。
+//
+// 状态码必须回传：通知层要按官方语义把 401 翻译成"清凭据 + 回 null/false"，
+// 而不是当成普通故障（lib/types/protocol.js:187-192）。
+func (s *Service) doJSONRaw(ctx context.Context, method, endpoint string, headers map[string]string, body any, out *json.RawMessage) (int, error) {
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		reader = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -108,17 +112,17 @@ func (s *Service) doJSONRaw(ctx context.Context, method, endpoint string, header
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	raw, err := readLimited(resp)
 	if err != nil {
-		return err
+		return resp.StatusCode, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("account: %s %s HTTP %d: %s", method, endpoint, resp.StatusCode, truncate(string(raw), 300))
+		return resp.StatusCode, fmt.Errorf("account: %s %s HTTP %d: %s", method, endpoint, resp.StatusCode, truncate(string(raw), 300))
 	}
 	*out = raw
-	return nil
+	return resp.StatusCode, nil
 }
 
 func (s *Service) postForm(ctx context.Context, endpoint string, values url.Values, out any) error {
@@ -316,7 +320,8 @@ func (s *Service) completeOfficial(ctx context.Context, code string) (State, err
 		return State{}, err
 	}
 	s.resetTimerLocked()
-	s.notifyLocked()
+	// 令牌落盘 = 凭据写入 → credentials-changed（官方 AccountUpdate 语义）。
+	s.notifyKindLocked(UpdateCredentialsChanged)
 	return s.stateLocked(), nil
 }
 
@@ -425,7 +430,8 @@ func (s *Service) clearToken() error {
 		return err
 	}
 	s.resetTimerLocked()
-	s.notifyLocked()
+	// 令牌被清 = 凭据移除 → credentials-changed。
+	s.notifyKindLocked(UpdateCredentialsChanged)
 	return nil
 }
 

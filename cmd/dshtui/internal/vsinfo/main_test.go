@@ -58,6 +58,48 @@ func TestResourceSectionAligned(t *testing.T) {
 	}
 }
 
+// 版本形态：宿主/界面每次发布都会换号，而 `.syso` 的 VS 版本资源是**构建期**生成的。
+// 三代形态都要能拆：`<x.y.z>-go.<N>`（无上游 rc；从 rc.1 时代延续下来的 0.2.2 系列就是这个形态）、
+// `<x.y.z-rc.N>-gobeta.<N>` 与 `<x.y.z-rc.N>-go.<N>`（上游带 rc，任务途中用 gobeta、稳定版用 go）。
+//
+// 下面刻意用"假版本"（9.8.x / 9.9.x 系）：真版本字面量只有 main.go / brand.go 能出现，
+// 这一条由 version_guard 守着，测试夹具不该成为第二个版本源。
+// 2026-11-13 踩过：夹具原本写 `0.2.2-go.2`，当时版本是 `0.2.2-rc.2-go.1`（前缀带 rc）所以不撞；
+// 版本改成 `0.2.2-go.3` 后前缀 `0.2.2-go.` 与夹具重合，version_guard 当场红。
+//
+// 为什么值得钉：拆不出来时 vsinfo 会**直接 fail**，`scripts/build.sh` 的整套产物就构建不出来；
+// 而如果"宽松地"退回 release=整串，Windows 资源里会写进一个没人认得的版本号，且不报错。
+func TestFixedVersionShapes(t *testing.T) {
+	// ms = major<<16|minor，ls = patch<<16|build（见 fixedVersion 的既有语义）。
+	cases := []struct {
+		in     string
+		ms, ls uint32
+	}{
+		{"9.8.7-go.30", 9<<16 | 8, 7<<16 | 30},
+		{"9.9.6-go.2", 9<<16 | 9, 6<<16 | 2},
+		{"9.8.7-rc.6-gobeta.5", 9<<16 | 8, 7<<16 | 5},
+		{"9.8.7-rc.6-go.5", 9<<16 | 8, 7<<16 | 5},
+	}
+	for _, c := range cases {
+		ms, ls, err := fixedVersion(c.in)
+		if err != nil {
+			t.Fatalf("fixedVersion(%q) 报错：%v", c.in, err)
+		}
+		if ms != c.ms || ls != c.ls {
+			t.Fatalf("fixedVersion(%q) = (0x%08x,0x%08x)，想要 (0x%08x,0x%08x)", c.in, ms, ls, c.ms, c.ls)
+		}
+	}
+}
+
+// 认不出的形态必须报错，不许"猜一个 0 塞进去"。
+func TestFixedVersionRejectsUnknownShape(t *testing.T) {
+	for _, in := range []string{"", "v0.2.2-beta.1", "0.x.2-go.1", "0.2-go.1", "0.2.2-gobeta.x"} {
+		if _, _, err := fixedVersion(in); err == nil {
+			t.Fatalf("fixedVersion(%q) 应当报错", in)
+		}
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

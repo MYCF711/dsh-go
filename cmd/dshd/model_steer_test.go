@@ -19,6 +19,13 @@ import (
 	"dshgo/internal/transport"
 )
 
+// steerFrameWait 是等一帧 transport 事件的上限。
+//
+// 这是**等待窗**，不是断言：CI 的 2 核 runner 上要同时跑上百个 -race 测试二进制，
+// 8s 在这种负载下太紧（2026-11-12 run 43191452874 里这个用例在 CI 上红、本地绿）。
+// 放宽的只是等它跑完的时间，判定一条没少。
+const steerFrameWait = 30 * time.Second
+
 type steerWireMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
@@ -51,7 +58,7 @@ func waitSteerFrame(t *testing.T, frames <-chan transport.ServerFrame, typ strin
 			if f.Type == typ {
 				return f
 			}
-		case <-time.After(8 * time.Second):
+		case <-time.After(steerFrameWait):
 			t.Fatalf("等待 %s 超时", typ)
 		}
 	}

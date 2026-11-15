@@ -136,7 +136,7 @@ func (g *w149SideGateway) request(t *testing.T, prompt string) w149SeenSideReque
 
 func waitW149Signal(t *testing.T, signals <-chan string, want string) {
 	t.Helper()
-	deadline := time.After(15 * time.Second)
+	deadline := time.After(realChainWait)
 	for {
 		select {
 		case got := <-signals:
@@ -151,7 +151,7 @@ func waitW149Signal(t *testing.T, signals <-chan string, want string) {
 
 func waitW149GatewayRequest(t *testing.T, gateway *w149SideGateway, prompt string, failure <-chan w149StreamResult) {
 	t.Helper()
-	deadline := time.After(15 * time.Second)
+	deadline := time.After(realChainWait)
 	for {
 		gateway.mu.Lock()
 		_, exists := gateway.seen[prompt]
@@ -259,7 +259,7 @@ func waitW149SideStream(t *testing.T, result <-chan w149StreamResult) w149Stream
 			t.Fatalf("stream: %v raw=%q", got.err, got.raw)
 		}
 		return got
-	case <-time.After(15 * time.Second):
+	case <-time.After(realChainWait):
 		t.Fatal("side.query NDJSON 15 秒未收工")
 		return w149StreamResult{}
 	}
@@ -407,7 +407,7 @@ func TestW149RealDSHDSideQueryNonStreamingNDJSONABCancelCloseRestart(t *testing.
 		if result["requestId"] != "nonstream-cancel" || result["answer"] != nil || result["cancelled"] != true {
 			t.Fatalf("non-stream cancel result=%+v", result)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(realChainWait):
 		t.Fatal("非流式 side.cancel 未结束请求")
 	}
 	waitW149Signal(t, gateway.cancelled, "B-cancel-nonstream")

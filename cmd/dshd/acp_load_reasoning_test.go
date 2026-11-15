@@ -203,7 +203,7 @@ func TestACPLoadWireReplaysThoughtChunk(t *testing.T) {
 	}
 
 	var thoughts []string
-	deadline := time.After(10 * time.Second)
+	deadline := time.After(realChainWait)
 	for {
 		select {
 		case <-deadline:
