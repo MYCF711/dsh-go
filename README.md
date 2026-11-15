@@ -154,3 +154,4 @@ git merge --no-ff task/<id>                     # 全绿后显式合并
 MIT，见 [LICENSE](LICENSE)。
 
 上游项目与商标归 DeepSeek 所有；本仓是独立重写实现。
+# ci probe
