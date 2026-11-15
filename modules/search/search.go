@@ -18,6 +18,9 @@
 //	DEEPSEEK_API_KEY                       DeepSeek 凭据（Search/Fetch API 与原生搜索共用；别名 DSHD_SEARCH_API_KEY）
 //	DEEPSEEK_SEARCH_BASE_URL               原生搜索端点（默认 https://api.deepseek.com/anthropic/v1）
 //	DSHD_SEARCH_MODEL                      原生搜索用的模型 id（默认 deepseek-v4-flash）
+//	DSHD_SEARCH_MAX_USES                   原生 web_search 的单次最大使用次数（官方 maxUses，默认 5）
+//	DSHD_SEARCH_MAX_TOKENS                 原生搜索请求的输出上限（官方 maxTokens，默认 4096）
+//	DSHD_SEARCH_API_VERSION                anthropic-version 头（官方 apiVersion，默认 2023-06-01）
 //	DSHD_WEB_SEARCH_PROVIDER               钉死用哪个搜索 provider
 //	DSHD_WEB_FETCH_PROVIDER                钉死用哪个抓取 provider
 //
@@ -50,13 +53,30 @@ import (
 //
 // 它只 provide 一个 `spi.WebProviders`（搜索 + 抓取共用的接缝）；`http` 抓取 provider
 // 由 `modules/tool/webfetch` 注册进来，两边不互相 import。
-func Module() kernel.Module {
+//
+// 这是 ModuleWithEnv(os.Getenv) 的简写：行为与接缝引入前**逐字一致**。
+func Module() kernel.Module { return ModuleWithEnv(os.Getenv) }
+
+// ModuleWithEnv 用给定的 getenv 装配默认搜索能力。
+//
+// 为什么要这个接缝：`web` / `web-deepseek-api` / `web-search-deepseek` 三条设置页
+// 命名空间的值，在宿主里是"设置文档叠在环境变量**前面**"的一份读取器
+// （cmd/dshd/settings_effective.go 的 settingsEnvOverlay）。provider 集合、
+// 钉死规则、可用性判定都必须从**同一份** getenv 读，否则设置页改的值会与
+// 装配读到的值不是同一个东西——所以把读取器作为参数传进来，而不是在 Register 里
+// 写死 os.Getenv。
+//
+// getenv 为 nil 时走 os.Getenv（与 Module() 等价），调用方不必自己兜底。
+func ModuleWithEnv(getenv func(string) string) kernel.Module {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
 	return kernel.Module{
 		ID:       "search",
 		Backend:  kernel.BackendStatic,
 		Provides: []string{"web"},
 		Register: func(s *kernel.Scope) error {
-			seam, err := NewWebProvidersFromEnv(os.Getenv)
+			seam, err := NewWebProvidersFromEnv(getenv)
 			if err != nil {
 				return err
 			}

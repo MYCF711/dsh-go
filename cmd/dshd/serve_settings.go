@@ -102,7 +102,16 @@ func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, erro
 		settingsform.NamespaceSessionTelemetryOTel,
 		// 2026-11-15 补：官方 agent-preset registry 的 selectedDefault（后续会话的
 		// 默认 preset；官方 UI 的"设为默认"写的就是这个命名空间）。
-		settingsform.NamespaceAgentPreset:
+		settingsform.NamespaceAgentPreset,
+		// 2026-11-15 补：官方 4 条设置页的 8 个命名空间。官方客户端用
+		// `ctx.configForms.whileServed([ns...])` 决定页面出不出来，宿主不服务
+		// 这条 ns 时页面永远不显示（GUI 那 4 页 MISSING 的根因）。它们与 llm/UI
+		// 那批一样落在 `<home>/state/settings-namespaces.json` 的同一份文档里。
+		settingsform.NamespaceAgentLoop,
+		settingsform.NamespaceBashSandbox, settingsform.NamespacePwshSandbox,
+		settingsform.NamespaceSubagent, settingsform.NamespaceSubagentModelSelection,
+		settingsform.NamespaceWeb, settingsform.NamespaceWebDeepSeekAPI,
+		settingsform.NamespaceWebSearchDeepSeek:
 		if s.namespaces == nil {
 			return settingsform.Document{}, settingsStoreNotWiredError(namespace)
 		}
@@ -164,7 +173,15 @@ func (s *serveSettingsStore) Write(namespace string, user map[string]any, expect
 		settingsform.NamespaceSessionTelemetryOTel,
 		// 2026-11-15 补：agent-preset registry（写路径另做"id 真实存在"校验，
 		// 见 agent_preset_default.go；不写进去一个装不起来的默认值）。
-		settingsform.NamespaceAgentPreset:
+		settingsform.NamespaceAgentPreset,
+		// 2026-11-15 补：官方 4 条设置页的 8 个命名空间（见 Read 的说明）。
+		// 字段级/语义校验都在 settingsform 的 Validate 里（同一份声明同时生成
+		// schema 与校验，写路径不另开一套判据）。
+		settingsform.NamespaceAgentLoop,
+		settingsform.NamespaceBashSandbox, settingsform.NamespacePwshSandbox,
+		settingsform.NamespaceSubagent, settingsform.NamespaceSubagentModelSelection,
+		settingsform.NamespaceWeb, settingsform.NamespaceWebDeepSeekAPI,
+		settingsform.NamespaceWebSearchDeepSeek:
 		if s.namespaces == nil {
 			return 0, settingsStoreNotWiredError(namespace)
 		}

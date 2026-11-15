@@ -1,0 +1,378 @@
+{
+ "agent-loop": {
+  "refs": {
+   "200": {
+    "meta": {
+     "default": 10,
+     "min": 1,
+     "step": 1
+    },
+    "type": "number"
+   },
+   "201": {
+    "dict": {
+     "maxParallelToolCalls": 200
+    },
+    "meta": {
+     "default": {}
+    },
+    "type": "object"
+   }
+  },
+  "uid": 201
+ },
+ "bash-sandbox": {
+  "refs": {
+   "1": {
+    "meta": {
+     "default": 120000
+    },
+    "type": "number"
+   },
+   "2": {
+    "meta": {
+     "default": 64000
+    },
+    "type": "number"
+   },
+   "3": {
+    "dict": {
+     "maxOutputBytes": 2,
+     "timeoutMs": 1
+    },
+    "meta": {
+     "default": {}
+    },
+    "type": "object"
+   }
+  },
+  "uid": 3
+ },
+ "pwsh-sandbox": {
+  "refs": {
+   "1": {
+    "meta": {
+     "default": 120000
+    },
+    "type": "number"
+   },
+   "2": {
+    "meta": {
+     "default": 64000
+    },
+    "type": "number"
+   },
+   "3": {
+    "dict": {
+     "maxOutputBytes": 2,
+     "timeoutMs": 1
+    },
+    "meta": {
+     "default": {}
+    },
+    "type": "object"
+   }
+  },
+  "uid": 3
+ },
+ "subagent": {
+  "refs": {
+   "202": {
+    "meta": {
+     "default": 1,
+     "max": 9007199254740991,
+     "min": 0,
+     "step": 1
+    },
+    "type": "number"
+   },
+   "203": {
+    "meta": {
+     "default": 8,
+     "max": 9007199254740991,
+     "min": 1,
+     "step": 1
+    },
+    "type": "number"
+   },
+   "204": {
+    "dict": {
+     "maxActiveSubagents": 203,
+     "maxDepth": 202
+    },
+    "meta": {
+     "default": {}
+    },
+    "type": "object"
+   }
+  },
+  "uid": 204
+ },
+ "subagent-model-selection-settings": {
+  "refs": {
+   "229": {
+    "meta": {
+     "default": false
+    },
+    "type": "boolean"
+   },
+   "230": {
+    "meta": {
+     "min": 1,
+     "required": true
+    },
+    "type": "string"
+   },
+   "231": {
+    "meta": {
+     "min": 1,
+     "required": true
+    },
+    "type": "string"
+   },
+   "232": {
+    "dict": {
+     "model": 231,
+     "provider": 230
+    },
+    "meta": {
+     "default": {}
+    },
+    "type": "object"
+   },
+   "233": {
+    "inner": 232,
+    "meta": {
+     "default": []
+    },
+    "type": "array"
+   },
+   "234": {
+    "dict": {
+     "allowedModels": 233,
+     "enabled": 229
+    },
+    "meta": {
+     "default": {}
+    },
+    "type": "object"
+   }
+  },
+  "uid": 234
+ },
+ "web": {
+  "refs": {
+   "97": {
+    "meta": {},
+    "type": "string"
+   },
+   "98": {
+    "meta": {},
+    "type": "string"
+   },
+   "99": {
+    "dict": {
+     "fetchProvider": 98,
+     "searchProvider": 97
+    },
+    "meta": {
+     "default": {}
+    },
+    "type": "object"
+   }
+  },
+  "uid": 99
+ },
+ "web-deepseek-api": {
+  "refs": {
+   "205": {
+    "meta": {
+     "default": 10,
+     "max": 50,
+     "min": 1,
+     "step": 1
+    },
+    "type": "number"
+   },
+   "206": {
+    "meta": {
+     "default": 5,
+     "min": 1,
+     "step": 1
+    },
+    "type": "number"
+   },
+   "207": {
+    "meta": {
+     "default": true
+    },
+    "type": "boolean"
+   },
+   "208": {
+    "meta": {
+     "required": true
+    },
+    "type": "const",
+    "value": "auto"
+   },
+   "209": {
+    "meta": {
+     "required": true
+    },
+    "type": "const",
+    "value": "account"
+   },
+   "210": {
+    "meta": {
+     "required": true
+    },
+    "type": "const",
+    "value": "api-key"
+   },
+   "211": {
+    "list": [
+     208,
+     209,
+     210
+    ],
+    "meta": {
+     "default": "auto"
+    },
+    "type": "union"
+   },
+   "212": {
+    "meta": {
+     "required": true
+    },
+    "type": "const",
+    "value": "auto"
+   },
+   "213": {
+    "meta": {
+     "required": true
+    },
+    "type": "const",
+    "value": "account"
+   },
+   "214": {
+    "meta": {
+     "required": true
+    },
+    "type": "const",
+    "value": "api-key"
+   },
+   "215": {
+    "list": [
+     212,
+     213,
+     214
+    ],
+    "meta": {
+     "default": "auto"
+    },
+    "type": "union"
+   },
+   "216": {
+    "meta": {},
+    "type": "string"
+   },
+   "217": {
+    "meta": {
+     "role": "credential-ref"
+    },
+    "type": "string"
+   },
+   "218": {
+    "meta": {},
+    "type": "string"
+   },
+   "219": {
+    "meta": {
+     "role": "credential-ref"
+    },
+    "type": "string"
+   },
+   "220": {
+    "dict": {
+     "count": 205,
+     "fetchApiKeyEnv": 219,
+     "fetchBaseURL": 218,
+     "fetchBilling": 215,
+     "searchApiKeyEnv": 217,
+     "searchBaseURL": 216,
+     "searchBilling": 211,
+     "searchRequestsPerSecond": 206,
+     "sendOriginalQuestion": 207
+    },
+    "meta": {
+     "default": {}
+    },
+    "type": "object"
+   }
+  },
+  "uid": 220
+ },
+ "web-search-deepseek": {
+  "refs": {
+   "221": {
+    "meta": {
+     "role": "secret"
+    },
+    "type": "string"
+   },
+   "222": {
+    "meta": {
+     "default": "DEEPSEEK_API_KEY",
+     "role": "credential-ref"
+    },
+    "type": "string"
+   },
+   "223": {
+    "meta": {},
+    "type": "string"
+   },
+   "224": {
+    "meta": {
+     "default": "deepseek-v4-flash"
+    },
+    "type": "string"
+   },
+   "225": {
+    "meta": {
+     "default": "2023-06-01"
+    },
+    "type": "string"
+   },
+   "226": {
+    "meta": {
+     "default": 4096
+    },
+    "type": "number"
+   },
+   "227": {
+    "meta": {
+     "default": 5,
+     "min": 1,
+     "step": 1
+    },
+    "type": "number"
+   },
+   "228": {
+    "dict": {
+     "apiKey": 221,
+     "apiKeyEnv": 222,
+     "apiVersion": 225,
+     "baseURL": 223,
+     "maxTokens": 226,
+     "maxUses": 227,
+     "model": 224
+    },
+    "meta": {
+     "default": {}
+    },
+    "type": "object"
+   }
+  },
+  "uid": 228
+ }
+}

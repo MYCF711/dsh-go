@@ -136,12 +136,19 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 
 	result := settingsL1Describe(t, handler)
 	namespaces, ok := result["namespaces"].([]any)
-	if !ok || len(namespaces) != 11 {
-		t.Fatalf("settings.describe 必须报 11 个命名空间（model/permission/llm + 7 个客户端/插件 UI + agent-preset-registry）：%v", result["namespaces"])
+	if !ok || len(namespaces) != 19 {
+		// 19 = 原来的 11 个（model/permission/llm + 7 个客户端/插件 UI +
+		// agent-preset-registry）+ 官方 4 条设置页的 8 个命名空间（2026-11-15：
+		// agent-loop / bash-sandbox / pwsh-sandbox / subagent /
+		// subagent-model-selection-settings / web / web-deepseek-api /
+		// web-search-deepseek）。行数变多是**官方页面存在条件**的必然结果，
+		// 不是判据放宽：每一条都另有自己的 schema/默认值/写路径用例（见
+		// internal/settingsform/host_settings_pages_test.go）。
+		t.Fatalf("settings.describe 必须报 19 个命名空间（11 + 4 条设置页的 8 个）：%v", result["namespaces"])
 	}
 	sections, ok := result["sections"].([]any)
-	if !ok || len(sections) != 11 {
-		t.Fatalf("settings.describe 必须报 11 个 section：%v", result["sections"])
+	if !ok || len(sections) != 19 {
+		t.Fatalf("settings.describe 必须报 19 个 section（与 namespaces 一一对应）：%v", result["sections"])
 	}
 
 	defaults := []struct {

@@ -56,12 +56,20 @@ var schema = json.RawMessage(`{
 }`)
 
 const (
-	// 单次调用回给模型的输出上限。命令输出通常远超这个量，
-	// 与其让它把上下文撑爆，不如这里就截断并明说。
-	maxOutput = 64 << 10
-	// 默认/最长超时。超过这个量级的任务该用后台任务工具，不是这里。
-	defaultTimeout = 120 * time.Second
-	maxTimeout     = 600 * time.Second
+	// DefaultMaxOutputBytes 是单次调用回给模型的输出上限（字节）。命令输出通常
+	// 远超这个量，与其让它把上下文撑爆，不如这里就截断并明说。
+	//
+	// 取值逐字对齐官方：`@deepseek-ai/dsh-pwsh-local/src/index.ts:130` 的
+	// `maxOutputBytes: z.number().default(64_000)` —— 是 64000，**不是** 64KiB(65536)。
+	DefaultMaxOutputBytes = 64000
+	// DefaultTimeout 是"模型没给超时"时实际用的默认值（官方 `timeoutMs` 的出厂值）。
+	// 官方 `@deepseek-ai/dsh-pwsh-local/src/index.ts:128`：
+	// `timeoutMs: z.number().default(120_000)`。
+	DefaultTimeout = 120 * time.Second
+	// maxTimeout 是最长超时。官方 `@deepseek-ai/dsh-pwsh-local/src/index.ts:129` 的
+	// `maxTimeoutMs: z.number().default(600_000)`；超过这个量级的任务该用后台任务
+	// 工具，不是这里。
+	maxTimeout = 600 * time.Second
 )
 
 // legacyPrologue 只在退回 Windows PowerShell 5.1 时加：它重定向时按控制台代码页
@@ -83,6 +91,13 @@ type Tool struct {
 	scope *kernel.Scope
 	// execSeam 是测试注入的执行接缝；nil 时按 scope 取 spi.Exec。
 	execSeam spi.Exec
+	// timeoutBudget 是宿主注入的默认超时，对应官方设置 `pwsh-sandbox.timeoutMs`
+	// （`@deepseek-ai/dsh-pwsh-local/src/index.ts:128`）。0 = 未注入 → DefaultTimeout；
+	// 模型显式给 timeoutMs / timeout_seconds 时仍以模型为准（见 resolveTimeout）。
+	timeoutBudget time.Duration
+	// maxOutputBytes 是宿主注入的输出上限（字节），对应官方设置
+	// `pwsh-sandbox.maxOutputBytes`（`index.ts:130`）。0 = 未注入 → DefaultMaxOutputBytes。
+	maxOutputBytes int
 	// envMu / envProvider / envTried 是 `shellEnv` 能力（受管 DSH_* 环境）的惰性缓存，
 	// 见 shellenv.go。
 	envMu       sync.Mutex
@@ -108,6 +123,40 @@ func WithExecSeam(e spi.Exec) Option {
 	return func(t *Tool) {
 		if e != nil {
 			t.execSeam = e
+		}
+	}
+}
+
+// WithTimeoutBudget 注入官方设置 `pwsh-sandbox.timeoutMs` 的生效值
+// （`@deepseek-ai/dsh-pwsh-local/src/index.ts:128`）作为"模型没给超时"时的默认值。
+//
+// d <= 0 忽略，而不是"关掉超时"：0 毫秒会让每条命令立刻失败，官方在构造执行器时
+// 也用 `assertPositiveFinite('timeoutMs', ...)` 直接拒（`index.ts:108`）——这里按
+// 同一语义处理坏值：不生效、静默保留出厂默认，别把工具变成永远超时。
+// 超过 maxTimeout（官方 `maxTimeoutMs` 缺省 600_000，`index.ts:129`）的按上限夹住，
+// 与模型显式给 timeoutMs 时"超过 600s 夹到 600s"的既有语义一致。
+func WithTimeoutBudget(d time.Duration) Option {
+	return func(t *Tool) {
+		if d <= 0 {
+			return
+		}
+		if d > maxTimeout {
+			d = maxTimeout
+		}
+		t.timeoutBudget = d
+	}
+}
+
+// WithMaxOutputBytes 注入官方设置 `pwsh-sandbox.maxOutputBytes`
+// （`@deepseek-ai/dsh-pwsh-local/src/index.ts:130`）：输出限长与 `truncated` 标记
+// 都跟着它走。
+//
+// n <= 0 忽略：0 字节上限会让输出永远是空的，官方那边
+// `assertPositiveFinite('maxOutputBytes', ...)`（`index.ts:110`）同样直接拒。
+func WithMaxOutputBytes(n int) Option {
+	return func(t *Tool) {
+		if n > 0 {
+			t.maxOutputBytes = n
 		}
 	}
 }
@@ -173,11 +222,16 @@ type data struct {
 // resolveTimeout 决定这次调用的超时。
 //
 // 官方名 timeoutMs 优先；旧的 timeout_seconds 保留为兼容别名（能力下限：老调用
-// 仍然按秒生效）。两者都没给就用默认 120s；一律夹到上限 600s。
-func resolveTimeout(a args) (time.Duration, int64) {
+// 仍然按秒生效）。两者都没给就用**本工具的默认值**——宿主按 `pwsh-sandbox.timeoutMs`
+// 注入的 budget，没注入就是官方出厂 120s（DefaultTimeout）；一律夹到上限 600s。
+//
+// 必须是方法而不是包级函数：默认值现在跟着 `Tool` 走（见 WithTimeoutBudget），
+// 但"模型给了就用模型的、超过 600s 夹到 600s"这两条既有语义一个字没变。
+func (t *Tool) resolveTimeout(a args) (time.Duration, int64) {
+	def := t.defaultTimeout()
 	pick := func(d time.Duration) (time.Duration, int64) {
 		if d <= 0 {
-			d = defaultTimeout
+			d = def
 		}
 		if d > maxTimeout {
 			d = maxTimeout
@@ -195,7 +249,24 @@ func resolveTimeout(a args) (time.Duration, int64) {
 	if a.TimeoutSeconds > 0 {
 		return pick(time.Duration(a.TimeoutSeconds) * time.Second)
 	}
-	return pick(defaultTimeout)
+	return pick(def)
+}
+
+// defaultTimeout 是"模型没给超时"时的默认值：设置注入的优先，否则官方出厂值。
+func (t *Tool) defaultTimeout() time.Duration {
+	if t.timeoutBudget > 0 {
+		return t.timeoutBudget
+	}
+	return DefaultTimeout
+}
+
+// outputLimit 是这次调用的输出上限（字节），limitWriter 与截断文案都用它，
+// 保证"实际生效值"只有一处真源。
+func (t *Tool) outputLimit() int {
+	if t.maxOutputBytes > 0 {
+		return t.maxOutputBytes
+	}
+	return DefaultMaxOutputBytes
 }
 
 func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
@@ -269,7 +340,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		})
 	}
 
-	timeout, timeoutMS := resolveTimeout(a)
+	timeout, timeoutMS := t.resolveTimeout(a)
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -282,7 +353,8 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	if envList != nil {
 		cmd.Env = envList
 	}
-	out := &limitWriter{max: maxOutput}
+	limit := t.outputLimit()
+	out := &limitWriter{max: limit}
 	cmd.Stdout = out
 	cmd.Stderr = out
 
@@ -293,7 +365,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	body := out.String()
 	trunc := out.Truncated()
 	if trunc {
-		body += fmt.Sprintf("\n…（输出超过 %d 字节已截断：缩小范围、加 Select-Object -First N 或写到文件再读）", maxOutput)
+		body += fmt.Sprintf("\n…（输出超过 %d 字节已截断：缩小范围、加 Select-Object -First N 或写到文件再读）", limit)
 	}
 	if strings.TrimSpace(body) == "" {
 		body = "（无输出）"

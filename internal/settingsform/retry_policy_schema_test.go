@@ -555,6 +555,15 @@ func TestDefaultRegistryKeepsTwoNamespacesAfterRC2(t *testing.T) {
 		// 本仓 2026-11-15 新增：官方 agent-preset registry 的 selectedDefault
 		// （官方 dsh-agent-preset-registry/src/index.ts:52-59,82）。
 		"agent-preset-registry",
+		// 本仓 2026-11-15 新增：官方 4 条设置页的 8 个命名空间。官方客户端
+		// 用 `ctx.configForms.whileServed([ns...])` 决定页面出不出来，宿主不发
+		// 这几条，GUI 里那 4 页就是 MISSING。逐条的权威源（官方 file:line）写在
+		// agent_loop_schema.go / shell_sandbox_schema.go / subagent_schema.go /
+		// web_namespaces_schema.go 的文件头。
+		"agent-loop",
+		"bash-sandbox", "pwsh-sandbox",
+		"subagent", "subagent-model-selection-settings",
+		"web", "web-deepseek-api", "web-search-deepseek",
 	}
 	specs := HostRegistry().Specs()
 	if len(specs) != len(want) {
