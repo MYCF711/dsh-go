@@ -576,3 +576,82 @@ diff 由 `git --no-index --unified=3` 产出（`workspace_changes_diff.go`），
 （`SessionIDs` + 手动手册序 + `insertSessionBefore` 落盘）。本次只补**registry 级**端到端，
 证明"从 registry 读回来仍然带真实归属与手动顺序，且重启后不丢"：
 `TestWorkspaceRegistryCarriesSessionIDsAndManualOrder`。
+
+## 16. `directoryPicker` 的互斥组合 seam（2026-11-15，additive）
+
+官方把「怎么选工作区目录」做成**两套互斥后端**，不是三个平铺动词：一个 Context 只能
+组合其中一套，另一套的动词被**拒绝**并带上「本次组合是哪一套」。
+
+官方原件（rc.2 解包树 `node_modules/@deepseek-ai/`）：
+
+| 证明什么 | file:line |
+|---|---|
+| `native` 能力 = 一个 `pick(signal)` | `dsh-host-directory-picker/src/index.ts:19-28` |
+| `browse` 能力 = `list(path,signal)` + `createDirectory(path,name)` | `dsh-host-directory-picker/src/index.ts:35-59` |
+| 一个 Context 只能有一个实现，第二份直接抛 | `dsh-host-directory-picker/src/index.ts:96-113` |
+| 三个 wire 动词各自要哪个 kind；不匹配就报 `directory-picker/unavailable` + `{capability}` | `dsh-api-workspace-controller/src/directory-picker.ts:105-119` |
+| 该错误的 `details` 形状 `{ capability: string }` | `dsh-api-workspace-controller/src/types.ts:53-54` |
+| 官方唯一组合决策（远程权威/非回环/SSH/平台/显示会话） | `dsh-host-directory-picker-auto/src/resolve.ts:55-61` |
+
+### 16.1 宿主侧形状（`internal/transport`）
+
+`OfficialDirectoryPickerSeam{Kind,List,CreateDirectory}` + `AttachOfficialDirectoryPickerSeam(seam) error`：
+
+- `Kind` 只有官方两个字面量 `"native"` / `"browse"`（`DirectoryPickerKind`）；
+- `native` 声明必须**不带** `List`/`CreateDirectory`，`browse` 声明**必须带**两个原语；
+  其它组合 `Attach` 直接报错（= 官方"同时挂第二份会抛"），一个字段都不写进去；
+- `directoryPicker.pick` 属于 native，`list`/`createDirectory` 属于 browse。
+
+### 16.2 线上形状：不属于本次组合的动词怎么回
+
+```
+POST /api/directoryPicker.list            （宿主声明 native 时）
+501
+{"error":{"code":"not_implemented",
+          "message":"directory-picker/unavailable: directoryPicker.list needs the browse capability; the composed picker serves \"native\"",
+          "hint":"…","retryable":false},
+ "details":{"capability":"native"}}
+```
+
+- 官方码写在 `message` 前缀（本仓四字段信封是冻结的闭合码表，全仓同一条规矩）；
+- `{capability}` 平铺在信封顶层 `details`（与 `OfficialAgentFault.Details`、`stale_epoch` 的
+  `details.reason` 同一先例，见 `server.go` 的 `errorBodyFor`）；
+- HTTP 501：语义是「这台宿主没有这个交互」，客户端应换一套界面或隐藏入口，改参数不会变好；
+- 未声明组合的 Server（只有装配阶段的中间态）回同样的 501，但 `details.capability` 是空串。
+
+### 16.3 客户端怎么「问出」本次组合（不需要新方法）
+
+打一个**只读**动词即可，不需要弹框、不落盘：
+
+| 观察 | 结论 |
+|---|---|
+| `directoryPicker.list` → `200` + 官方 `DirectoryListing` | 组合是 **browse**（用 browse 那套界面） |
+| `directoryPicker.list` → `501` + `details.capability:"native"` | 组合是 **native**（用 native 那套界面） |
+
+`directoryPicker.pick` 的拒绝也是同形状（`details.capability:"browse"`），但**不要**用它当探针
+——声明 native 的宿主上它会真的弹一次系统目录框。
+
+### 16.4 本宿主的组合选择与两处显式差异
+
+`cmd/dshd/serve_directory_picker_seam.go` 是官方 `resolve.ts` 的移植，装配点在
+`serve.go`（`--directory-picker` / `DSH_DIRECTORY_PICKER`，空 = 自动）：
+
+1. **平台集合收窄到 Windows**：原生目录框只有 Windows 实现（`internal/native`），
+   darwin/linux 一律 browse —— 不假装能弹框。
+2. **未声明 = browse**。官方能按 `platform==win32` 直接选 native，是因为 Electron 主进程
+   一定坐在某个桌面会话里；`dshd serve` 不是（它可能被服务/计划任务/无人值守脚本/SSH 拉起），
+   手里的 `SESSIONNAME` 是继承来的环境变量、不构成「我能弹框」的证明。官方对含糊情形的
+   兜底就是 browse（`resolve.ts:50-51`），所以 native 由知道桌面存在的启动方**显式声明**；
+   声明与事实冲突（非回环绑定 / SSH / 非 Windows / 无桌面会话）时启动打一行 stderr，
+   pick 本身仍然 fail-loud。
+3. 两套**互斥替代**，不是叠加：任一时刻只有一套能服务，与官方一致。
+
+### 16.5 证据
+
+- `internal/transport/handlers_directory_picker_seam_test.go`：两条组合各自的拒绝形状 +
+  `details.capability` + 「被拒的动词一次都没打到真实实现」+ `Attach` 拒非法组合。
+- `cmd/dshd/serve_directory_picker_seam_test.go`：事实采样/声明解析/官方事实逐条的直方表；
+  `TestDirectoryPickerSeamEndToEnd` 是**真 HTTP**（真 `transport.Server`、真 `/connect` cookie、
+  真 `/api` 路由）下两条组合各跑一遍：native 组合 pick 200 且 browse 两个动词 501 且不落盘；
+  browse 组合 list 200（官方五字段）+ createDirectory 200 且**真建目录**、pick 501 且原生服务
+  被调用 **0** 次。

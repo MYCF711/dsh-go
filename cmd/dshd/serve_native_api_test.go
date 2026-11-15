@@ -22,6 +22,7 @@ import (
 
 type fakeNativeService struct {
 	mu           sync.Mutex
+	picks        int
 	pickPath     string
 	pickErr      error
 	canOpen      bool
@@ -32,10 +33,21 @@ type fakeNativeService struct {
 }
 
 func (f *fakeNativeService) PickFolder(context.Context) (string, error) {
+	f.mu.Lock()
+	f.picks++
+	f.mu.Unlock()
 	if f.pickErr != nil {
 		return "", f.pickErr
 	}
 	return f.pickPath, nil
+}
+
+// pickCalls 是 PickFolder 被调用的次数：seam 的"只能选一个"要断言**没被调用**，
+// 只看 HTTP 状态不够（先调后报错也能回 501）。
+func (f *fakeNativeService) pickCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.picks
 }
 
 func (f *fakeNativeService) OpenDocument(_ context.Context, path string) error {

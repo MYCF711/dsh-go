@@ -91,13 +91,13 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/serve.go:278",
+      "site": "cmd/dshd/serve.go:285",
       "what": "插件热重载循环",
       "sync": "读过：hmrCtx 取消即退；pluginRT.HMR() 内部自己串行化，不直写共享表",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve.go:570",
+      "site": "cmd/dshd/serve.go:577",
       "what": "profile 配置热重载循环（ConfigHMR.Run）",
       "sync": "读过：hmrCtx 取消即退；store.Reload() 与 store.Revision() 各自在 config.Store 的 mu 下；本组件自己的状态（checks/reloads/lastRev/onChange/lastErr）全在 ConfigHMR.mu 下；Tick 由 tickMu 串行化；消费者在锁外被调用，单个消费者 panic 被 recover 且只记 Err。不写任何文件。",
       "verified_at": "2026-11-14"

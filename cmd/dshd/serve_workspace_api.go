@@ -605,12 +605,27 @@ func (h *officialWorkspaceHost) workspaceAPI() transport.OfficialWorkspaceAPI {
 	}
 }
 
-// directoryPickerAPI 把真实目录浏览装成 transport 认的那份函数表。
-func (h *officialWorkspaceHost) directoryPickerAPI() transport.OfficialDirectoryPickerAPI {
-	return transport.OfficialDirectoryPickerAPI{
+// directoryPickerBrowseSeam 把真实目录浏览装成 browse 那套组合的声明。
+//
+// 它是**browse** 专用的：native 那套的 pick 由 OfficialNativeAPI 供，这里必须
+// 一个原语都不给（transport 的校验会把"两套同时给"当装配错误拒掉）。
+func (h *officialWorkspaceHost) directoryPickerBrowseSeam() transport.OfficialDirectoryPickerSeam {
+	return transport.OfficialDirectoryPickerSeam{
+		Kind:            transport.DirectoryPickerKindBrowse,
 		List:            h.pickerList,
 		CreateDirectory: h.pickerCreateDirectory,
 	}
+}
+
+// directoryPickerSeam 按本次启动声明的 kind 给出**恰好一套**组合。
+//
+// 这是 serve 装配期唯一该调的那个：声明 native 就只带 kind（pick 走原生能力），
+// 声明 browse 就带两个浏览原语。声明之外的 kind 交给 transport 校验报错。
+func (h *officialWorkspaceHost) directoryPickerSeam(kind transport.DirectoryPickerKind) transport.OfficialDirectoryPickerSeam {
+	if kind == transport.DirectoryPickerKindBrowse {
+		return h.directoryPickerBrowseSeam()
+	}
+	return transport.OfficialDirectoryPickerSeam{Kind: kind}
 }
 
 // initializeDefault 实现官方 `workspace/initializeDefault` 的宿主语义（对齐
@@ -1802,7 +1817,9 @@ func attachOfficialWorkspace(srv *transport.Server, home string, src *sessionSou
 	// （既有 official stream 通道，不新开协议面）。
 	host.projectEvent = srv.ProjectOfficialWorkspaceEvent
 	srv.AttachOfficialWorkspaceAPI(host.workspaceAPI())
-	srv.AttachOfficialDirectoryPickerAPI(host.directoryPickerAPI())
+	// directoryPicker 的 seam **不在**这里挂：组合是"声明一套"，声明来自这次启动的
+	// directoryPicker 决策（serve.go → attachOfficialDirectoryPickerSeam）。挂在这里
+	// 就等于把一个固定的 browse 组合安到所有部署形态上，那正是官方不允许的形状。
 	// 官方 0.2.2-rc.2 `workspaceFiles.search`（内置 ripgrep 语义）。
 	// 工作区根与 list/read/stat 同一条判据（会话日志头里的 cwd），
 	// 搜索实现是 internal/fssearch 的纯 Go 等价物（不启 rg 子进程，见其 doc）。
@@ -1821,5 +1838,5 @@ func attachOfficialWorkspace(srv *transport.Server, home string, src *sessionSou
 // 编译期钉住：这两个接口形状必须与 transport 的期望一致。
 var (
 	_ = transport.OfficialWorkspaceAPI{}
-	_ = transport.OfficialDirectoryPickerAPI{}
+	_ = transport.OfficialDirectoryPickerSeam{}
 )

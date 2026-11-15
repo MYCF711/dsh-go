@@ -35,7 +35,7 @@ func TestOfficialWorkspaceInitializeDefaultShape(t *testing.T) {
 			}}, created, nil
 		},
 	}
-	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerSeam{})
 
 	code, out := callOfficialWorkspace(t, srv, "workspace.initializeDefault", map[string]any{})
 	if code != http.StatusOK {
@@ -81,7 +81,7 @@ func TestOfficialWorkspaceInitializeDefaultUndefined(t *testing.T) {
 			return OfficialWorkspaceValue{}, false, nil
 		},
 	}
-	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerSeam{})
 
 	code, out := callOfficialWorkspace(t, srv, "workspace.initializeDefault", map[string]any{})
 	if code != http.StatusOK {
@@ -96,7 +96,7 @@ func TestOfficialWorkspaceInitializeDefaultUndefined(t *testing.T) {
 // TestOfficialWorkspaceInitializeDefaultNotAttached 未接线必须 501 并点名方法，
 // 不得静默成功。
 func TestOfficialWorkspaceInitializeDefaultNotAttached(t *testing.T) {
-	srv := officialWorkspaceTestServer(t, OfficialWorkspaceAPI{}, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, OfficialWorkspaceAPI{}, OfficialDirectoryPickerSeam{})
 	code, out := callOfficialWorkspace(t, srv, "workspace.initializeDefault", map[string]any{})
 	if code != http.StatusNotImplemented {
 		t.Fatalf("未接线时应 501，实际 %d（%v）", code, out)
@@ -116,7 +116,7 @@ func TestOfficialWorkspaceInitializeDefaultRejectsParams(t *testing.T) {
 			return OfficialWorkspaceValue{}, false, nil
 		},
 	}
-	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerAPI{})
+	srv := officialWorkspaceTestServer(t, api, OfficialDirectoryPickerSeam{})
 	code, out := callOfficialWorkspace(t, srv, "workspace.initializeDefault", map[string]any{"path": "/tmp/x"})
 	if code != http.StatusBadRequest {
 		t.Fatalf("多余参数应 400，实际 %d（%v）", code, out)

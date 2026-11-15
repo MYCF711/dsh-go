@@ -20,13 +20,23 @@ package transport
 //
 // 本文件只做协议翻译与形状校验：**不读盘、不认识 registry 文件、不认识 v4 会话**
 // （红线 R7）。所有真实状态由宿主经 `OfficialWorkspaceAPI` /
-// `OfficialDirectoryPickerAPI` 注入；某个能力宿主没接线时回**四字段的
+// `OfficialDirectoryPickerSeam` 注入；某个能力宿主没接线时回**四字段的
 // not_implemented** 并点名方法，绝不返回假数据、假目录列表、假 watch 帧。
 //
 // 接线的唯一入口是 `IsOfficialWorkspaceMethod` + `(*Server).serveOfficialWorkspaceAPI`：
-// `cmd/dshd` 侧 `AttachOfficialWorkspaceAPI` / `AttachOfficialDirectoryPickerAPI`
+// `cmd/dshd` 侧 `AttachOfficialWorkspaceAPI` / `AttachOfficialDirectoryPickerSeam`
 // 注入实现（见 `cmd/dshd/serve_workspace_api.go`），`internal/transport/server.go`
 // 的 /api 路由在既有 switch 之前调用一次即可（见 RESULT 的接线清单）。
+//
+// # directoryPicker 是 seam，不是三个平铺方法
+//
+// 官方把"怎么选目录"做成互斥的两套后端（native 的 `pick` / browse 的
+// `list`+`createDirectory`），一个 Context 只能组合其中一套，另一套的动词以
+// `directory-picker/unavailable` 拒绝并带上 `{capability}`。本文件照这个形状
+// 落成 `OfficialDirectoryPickerSeam{Kind,…}`（见其注释里的 file:line），
+// `AttachOfficialDirectoryPickerSeam` 在装配期强制"同时挂两套 = 报错"，
+// 三个动词分派时按声明的 kind 门控。客户端**问出**本次组合的方式就是打一个
+// 只读动词：200 = browse；`details.capability` = 本次声明的 kind。
 //
 // # 与官方 wire 的两处显式差异（都写进 RESULT，不静默）
 //
@@ -342,13 +352,87 @@ type OfficialWorkspaceAPI struct {
 	Commands func() (OfficialWorkspaceCommandList, error)
 }
 
-// OfficialDirectoryPickerAPI 是官方 `directoryPicker` 的浏览后端
-// （官方原生选择器在桌面端；L1 只实现 browse 两个动词）。
-type OfficialDirectoryPickerAPI struct {
+// DirectoryPickerKind 是官方目录选择侧**互斥后端**的 kind 字面量。
+//
+// # 为什么 directoryPicker 是一个 seam 而不是一组方法
+//
+// 官方把"怎么选目录"做成一个能力服务，而不是三个平铺的动词：同一 Context 只能有
+// **一个** `ctx.directoryPicker`，两个后端同时装载时后装的那份直接抛
+// （cordis 的标准重复服务行为）。原件（rc.2 解包树）：
+//
+//   - `@deepseek-ai/dsh-host-directory-picker/src/index.ts:19-28`
+//     `native`：`{kind:'native', pick(signal)}` —— 在宿主屏幕上弹一次 OS 选择框；
+//   - `:35-59` `browse`：`{kind:'browse', list(path,signal), createDirectory(path,name)}`
+//     —— 应用内浏览器用的逐层列目录/建目录原语（远程客户端也能用）；
+//   - `:96-113` `DirectoryPicker` 抽象服务 + "one implementation per context;
+//     loading a second throws"；
+//   - `@deepseek-ai/dsh-api-workspace-controller/src/directory-picker.ts:105-119`
+//     三个 wire 动词各自声明自己需要哪个 kind，kind 不匹配就**拒绝**而不是近似：
+//     `RemoteError('directory-picker/unavailable', …needs the <kind> capability;
+//     the composed picker serves "<kind>"…, { capability: <kind> })`。
+//
+// 所以本宿主侧的 seam 也必须能被客户端**问出来**「这次组合的是哪一套」：
+// 它落在了官方那条拒绝回复上（`details.capability`），不另造 describe 方法。
+type DirectoryPickerKind string
+
+const (
+	// DirectoryPickerKindNative 是官方 `pick` 那套（OS 原生目录框）。
+	DirectoryPickerKindNative DirectoryPickerKind = "native"
+	// DirectoryPickerKindBrowse 是官方 `list`/`createDirectory` 那套（应用内浏览）。
+	DirectoryPickerKindBrowse DirectoryPickerKind = "browse"
+)
+
+// Valid 报告 kind 是不是官方那两个字面量之一（空串 = 宿主没有声明，不是合法组合）。
+func (k DirectoryPickerKind) Valid() bool {
+	return k == DirectoryPickerKindNative || k == DirectoryPickerKindBrowse
+}
+
+// OfficialDirectoryPickerSeam 是官方 `directoryPicker` 的宿主侧组合声明。
+//
+// 它不是"三个动词的实现集合"，而是**恰好一套**后端的声明：`Kind` 说明这次组合的是
+// 哪一套，其余字段只允许填该套自己的动词（另一套必须留空——官方连"同时挂"都不允许）。
+// 校验在 AttachOfficialDirectoryPickerSeam，不在每个请求上重复判。
+type OfficialDirectoryPickerSeam struct {
+	// Kind 是本宿主**声明**的组合：native 或 browse。必填。
+	Kind DirectoryPickerKind
 	// List 列一层目录；path 为空表示宿主账户的 home（官方 acceptsUndefined:true）。
+	// 仅 Kind=browse 允许非 nil。
 	List func(path string) (OfficialDirectoryListing, error)
 	// CreateDirectory 在一个**绝对存在的父目录**下建一个子目录，返回新目录绝对路径。
+	// 仅 Kind=browse 允许非 nil。
 	CreateDirectory func(path, name string) (string, error)
+}
+
+// Validate 是"同时挂两套会报错"的强制点（对应官方重复服务直接抛）。
+//
+// 判据只有三条，都是结构性的：
+//   - Kind 必须是官方字面量（空串不是"没声明组合"，而是装配错误：想要没有目录选择
+//     就不该挂 seam）；
+//   - Kind=browse 必须有 list 与 createDirectory（声明了 browse 却没有浏览原语 =
+//     客户端会拿到一个永远 501 的浏览面）；
+//   - Kind=native 不许带 list/createDirectory（那就是同时挂两套，官方会抛）。
+func (p OfficialDirectoryPickerSeam) Validate() error {
+	switch p.Kind {
+	case DirectoryPickerKindNative:
+		if p.List != nil || p.CreateDirectory != nil {
+			return errors.New(
+				"directoryPicker seam: 声明的是 native（pick），却又给了 list/createDirectory —— " +
+					"官方只允许一套后端（dsh-host-directory-picker/src/index.ts:96-113 " +
+					"一个 Context 只能有一个 directoryPicker）；两套同时挂是装配错误")
+		}
+	case DirectoryPickerKindBrowse:
+		if p.List == nil || p.CreateDirectory == nil {
+			return errors.New(
+				"directoryPicker seam: 声明的是 browse，却缺 list/createDirectory —— " +
+					"官方 browse 能力就是这两个原语（dsh-host-directory-picker/src/index.ts:35-59）")
+		}
+	default:
+		return fmt.Errorf(
+			"directoryPicker seam: kind=%q 不是官方组合（只认 %q / %q）；"+
+				"要 native 就显式声明，要 browse 就给浏览原语",
+			string(p.Kind), DirectoryPickerKindNative, DirectoryPickerKindBrowse)
+	}
+	return nil
 }
 
 // officialWorkspaceMount 把两份实现挂到一个 Server 上。
@@ -359,10 +443,10 @@ type OfficialDirectoryPickerAPI struct {
 var officialWorkspaceMount = struct {
 	mu     sync.RWMutex
 	api    map[*Server]OfficialWorkspaceAPI
-	picker map[*Server]OfficialDirectoryPickerAPI
+	picker map[*Server]OfficialDirectoryPickerSeam
 }{
 	api:    map[*Server]OfficialWorkspaceAPI{},
-	picker: map[*Server]OfficialDirectoryPickerAPI{},
+	picker: map[*Server]OfficialDirectoryPickerSeam{},
 }
 
 // AttachOfficialWorkspaceAPI 给这个 Server 挂上官方 workspace 族的真实实现。
@@ -387,18 +471,36 @@ func (s *Server) DetachOfficialWorkspaceAPI() {
 	delete(officialWorkspaceMount.picker, s)
 }
 
-// AttachOfficialDirectoryPickerAPI 给这个 Server 挂上 directoryPicker 浏览后端。
-func (s *Server) AttachOfficialDirectoryPickerAPI(picker OfficialDirectoryPickerAPI) {
+// AttachOfficialDirectoryPickerSeam 给这个 Server 声明并挂上 directoryPicker 组合。
+//
+// 返回错误 = 这次装配**没有被接受**（kind 不合法 / 两套同时挂 / browse 缺原语），
+// 此时一个字段都没写进去：装配方必须把它当启动失败处理，不许忽略返回值。
+func (s *Server) AttachOfficialDirectoryPickerSeam(seam OfficialDirectoryPickerSeam) error {
 	if s == nil {
-		return
+		return errors.New("directoryPicker seam: Server 是 nil，挂不上去")
+	}
+	if err := seam.Validate(); err != nil {
+		return err
 	}
 	officialWorkspaceMount.mu.Lock()
 	defer officialWorkspaceMount.mu.Unlock()
-	officialWorkspaceMount.picker[s] = picker
+	officialWorkspaceMount.picker[s] = seam
+	return nil
 }
 
-// DetachOfficialDirectoryPickerAPI 摘掉 directoryPicker 后端（测试收尾用）。
-func (s *Server) DetachOfficialDirectoryPickerAPI() {
+// officialDirectoryPickerKind 返回这个 Server 声明的组合；第二个返回值 =
+// 到底声明过没有（未声明的 Server 只可能是装配阶段还没挂，见 handlers_native_official.go
+// 里 pick 那条分支的注释）。
+func (s *Server) officialDirectoryPickerKind() (DirectoryPickerKind, bool) {
+	_, seam := s.officialWorkspaceMounts()
+	if !seam.Kind.Valid() {
+		return "", false
+	}
+	return seam.Kind, true
+}
+
+// DetachOfficialDirectoryPickerSeam 摘掉 directoryPicker 后端（测试收尾用）。
+func (s *Server) DetachOfficialDirectoryPickerSeam() {
 	if s == nil {
 		return
 	}
@@ -407,9 +509,9 @@ func (s *Server) DetachOfficialDirectoryPickerAPI() {
 	delete(officialWorkspaceMount.picker, s)
 }
 
-func (s *Server) officialWorkspaceMounts() (OfficialWorkspaceAPI, OfficialDirectoryPickerAPI) {
+func (s *Server) officialWorkspaceMounts() (OfficialWorkspaceAPI, OfficialDirectoryPickerSeam) {
 	if s == nil {
-		return OfficialWorkspaceAPI{}, OfficialDirectoryPickerAPI{}
+		return OfficialWorkspaceAPI{}, OfficialDirectoryPickerSeam{}
 	}
 	officialWorkspaceMount.mu.RLock()
 	defer officialWorkspaceMount.mu.RUnlock()
@@ -561,7 +663,7 @@ func officialWorkspaceFault(err error) error {
 // 它是纯函数（实现从参数进来，不从 *Server 上取），因此宿主侧测试可以直接打它，
 // 而 `(*Server).serveOfficialWorkspaceAPI` 只是"取挂载 + 调它"的一层壳。
 // 认证、POST 校验、失败日志都已经在 handleAPI 里做过。
-func ServeOfficialWorkspace(w http.ResponseWriter, r *http.Request, name string, api OfficialWorkspaceAPI, picker OfficialDirectoryPickerAPI) {
+func ServeOfficialWorkspace(w http.ResponseWriter, r *http.Request, name string, api OfficialWorkspaceAPI, picker OfficialDirectoryPickerSeam) {
 	if !IsOfficialWorkspaceMethod(name) {
 		writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented",
 			fmt.Sprintf("不是官方 workspace 族的方法：%q", name)))
@@ -602,7 +704,7 @@ func (s *Server) serveOfficialWorkspaceAPI(w http.ResponseWriter, r *http.Reques
 
 // routeOfficialWorkspaceMethod 是大 switch，放在本文件里而不是 server.go：
 // 官方方法还会继续加，路由表却是冻结的。
-func routeOfficialWorkspaceMethod(api OfficialWorkspaceAPI, picker OfficialDirectoryPickerAPI, method Method, p *officialParams) (any, error) {
+func routeOfficialWorkspaceMethod(api OfficialWorkspaceAPI, picker OfficialDirectoryPickerSeam, method Method, p *officialParams) (any, error) {
 	switch method {
 	case MethodWorkspaceCreate:
 		return officialWorkspaceCreate(api, p)
@@ -1278,7 +1380,51 @@ func officialByteReadOptions(p *officialParams) (OfficialWorkspaceByteReadOption
 // directoryPicker.*
 // ---------------------------------------------------------------------------
 
-func officialDirectoryPickerList(picker OfficialDirectoryPickerAPI, p *officialParams) (any, error) {
+// directoryPickerUnavailable 造官方"这个动词不属于本次组合"的拒绝。
+//
+// 原件（rc.2 解包树）`dsh-api-workspace-controller/src/directory-picker.ts:105-119`：
+//
+//	requireCapability(kind, method) 在 capability().kind !== kind 时抛
+//	  RemoteError('directory-picker/unavailable',
+//	    `directoryPicker.${method} needs the ${kind} capability; the composed picker serves "${served}"`,
+//	    { capability: served })
+//
+// 本仓四字段信封是冻结的闭合码表，所以官方码 `directory-picker/unavailable` 写进
+// message 前缀（与本文件所有官方码同一条规矩），`{capability}` 落在信封顶层
+// `details` 那一格（与 OfficialAgentFault.Details 同一先例）。HTTP 状态取 501：
+// 语义是"这台宿主没有这个交互"，客户端该换一套界面或隐藏入口，改参数不会变好。
+//
+// 客户端据此**问出**本次组合：打一个只读动词（list）——200 = browse；
+// 这个拒绝的 details.capability = 本次声明的 kind。
+func directoryPickerUnavailable(method string, need, served DirectoryPickerKind) error {
+	details := map[string]any{"capability": string(served)}
+	if !served.Valid() {
+		return &officialError{
+			status: http.StatusNotImplemented, code: "not_implemented", details: details,
+			msg: fmt.Sprintf(
+				"directory-picker/unavailable: directoryPicker.%s needs the %s capability; "+
+					"本宿主没有声明 directoryPicker 组合（装配期必须挂一个 kind）", method, need),
+		}
+	}
+	return &officialError{
+		status: http.StatusNotImplemented, code: "not_implemented", details: details,
+		msg: fmt.Sprintf(
+			"directory-picker/unavailable: directoryPicker.%s needs the %s capability; "+
+				"the composed picker serves %q", method, need, string(served)),
+	}
+}
+
+// requireBrowseSeam 是两个 browse 动词共用的一道门：本次组合必须声明 browse。
+//
+// 返回错误时**一个字节都没读盘、没建目录**——不是先做再报"其实不该做"。
+func requireBrowseSeam(seam OfficialDirectoryPickerSeam, method string) error {
+	if seam.Kind == DirectoryPickerKindBrowse {
+		return nil
+	}
+	return directoryPickerUnavailable(method, DirectoryPickerKindBrowse, seam.Kind)
+}
+
+func officialDirectoryPickerList(picker OfficialDirectoryPickerSeam, p *officialParams) (any, error) {
 	// 官方 `path` 是 `acceptsUndefined: true`：省略 = 列 home。
 	path, hasPath, err := p.takeStr("path")
 	if err != nil {
@@ -1289,6 +1435,9 @@ func officialDirectoryPickerList(picker OfficialDirectoryPickerAPI, p *officialP
 	}
 	if hasPath {
 		path = strings.TrimSpace(path)
+	}
+	if err := requireBrowseSeam(picker, "list"); err != nil {
+		return nil, err
 	}
 	if picker.List == nil {
 		return nil, officialNotImplemented("directoryPicker.list 未接线：宿主没有目录浏览后端")
@@ -1306,7 +1455,7 @@ func officialDirectoryPickerList(picker OfficialDirectoryPickerAPI, p *officialP
 	return listing, nil
 }
 
-func officialDirectoryPickerCreateDirectory(picker OfficialDirectoryPickerAPI, p *officialParams) (any, error) {
+func officialDirectoryPickerCreateDirectory(picker OfficialDirectoryPickerSeam, p *officialParams) (any, error) {
 	path, hasPath, err := p.takeStr("path")
 	if err != nil {
 		return nil, err
@@ -1325,6 +1474,9 @@ func officialDirectoryPickerCreateDirectory(picker OfficialDirectoryPickerAPI, p
 		return nil, officialBadRequest("缺 name（单个非空白路径段）")
 	}
 	if err := officialDirectoryNameProblem(path, name); err != nil {
+		return nil, err
+	}
+	if err := requireBrowseSeam(picker, "createDirectory"); err != nil {
 		return nil, err
 	}
 	if picker.CreateDirectory == nil {
