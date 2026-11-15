@@ -60,3 +60,62 @@ func TestCordisNullReceiptIsLiteralNull(t *testing.T) {
 		}
 	}
 }
+
+// cordisRecorderAPI 只记录被认领的方法名，用于验证"真的走到真实现"。
+type cordisRecorderAPI struct{ calls []string }
+
+func (a *cordisRecorderAPI) HandleOfficialCordis(_ context.Context, method string, _ json.RawMessage) (any, error) {
+	a.calls = append(a.calls, method)
+	return map[string]any{"ok": true}, nil
+}
+
+// 路由顺序（server.go：`IsOfficialCordisMethod` 在 `IsOfficialMediaMarketMethod` 之前）：
+// 12 个 cordis 方法必须先由本文件的 ServeOfficialCordisAPI 认领。
+//
+// handlers_media_market_official.go 里原先那张 `officialCordisSpecs` R6-501 表对这些
+// 方法是**整条不可达**的（每个键都被 cordis 分支抢先），2026-11-15 删除。这条测试
+// 同时钉住两件事：真实现认领、以及 media/market 组**不再**认领——同一方法两处结论
+// 必然漂，那正是"账本写 501、实际早有真实现"的成因。
+func TestCordisMethodsRoutedToRealAPINotMediaMarket(t *testing.T) {
+	names := []string{
+		"dynamicCordisRunner.inventory",
+		"dynamicCordisRunner.getClientCode",
+		"dynamicCordisRunner.invoke",
+		"dynamicCordisRunner.reportClientGuardFailure",
+		"dynamicCordisRunner.reportRenderFailure",
+		"dynamicCordisRunner.resolveInspectQuery",
+		"dynamicCordisRunner.resolveRequestRun",
+		"dynamicCordisRunner.runHostHalf",
+		"dynamicCordisRunner.settleUserRun",
+		"dynamicCordisRunner.stopFromPanel",
+		"dynamicCordisRunner.syncInspectManifest",
+		"dynamicCordisRunner.undefineFromPanel",
+	}
+	if len(names) != 12 {
+		t.Fatalf("cordis 方法必须是 12 个，拿到 %d", len(names))
+	}
+	s := newTestServer(t, Options{})
+	defer s.Close()
+	api := &cordisRecorderAPI{}
+	s.AttachOfficialCordisAPI(api)
+	for _, name := range names {
+		if !IsOfficialCordisMethod(name) {
+			t.Fatalf("%s 不在 IsOfficialCordisMethod 里", name)
+		}
+		if IsOfficialMediaMarketMethod(name) {
+			t.Fatalf("%s 被 media/market 组重复认领：同一方法两处结论必然漂", name)
+		}
+		rec := postJSON(t, s, "/api/"+name, `{"pluginId":"p"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s 没走到真实现：status=%d body=%s", name, rec.Code, rec.Body.String())
+		}
+	}
+	if len(api.calls) != len(names) {
+		t.Fatalf("真实现应被调用 %d 次，实际 %d 次: %v", len(names), len(api.calls), api.calls)
+	}
+	for i, name := range names {
+		if api.calls[i] != name {
+			t.Fatalf("第 %d 个方法走到 %q，应为 %q", i, api.calls[i], name)
+		}
+	}
+}

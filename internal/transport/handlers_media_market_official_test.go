@@ -1,6 +1,6 @@
 package transport
 
-// 官方桌面端 media / market 侧 18 个方法的契约测试（pluginMarket.* 4 个方法
+// 官方桌面端 media / market 侧 7 个方法的契约测试（pluginMarket.* 4 个方法
 // 已在 handlers_plugin_market_official.go，见那个文件的测试与 cmd/dshd 的端到端）。
 //
 // 这些测试只打本包的 `ServeOfficialMediaMarketAPI`（Lead 接线后由 /api 路由调它），
@@ -17,7 +17,6 @@ package transport
 //     （缺必填/未知字段）回 400；
 //（`pluginMarket.*` 4 个方法不属本文件：真实实现在 handlers_plugin_market_official.go，
 // 见 handlers_plugin_market_official_test.go 与 cmd/dshd 的端到端用例。）
-//   - `dynamicCordisRunner.*` 11 个：501 且消息里写明 R6（明确不做，不是欠账）。
 
 import (
 	"encoding/json"
@@ -34,17 +33,6 @@ import (
 // docs/evidence/official-desktop-api-methods-0.2.2-rc.1.txt）。
 var officialMediaMarketMethodNames = []string{
 	"cotTranslation.translate",
-	"dynamicCordisRunner.getClientCode",
-	"dynamicCordisRunner.invoke",
-	"dynamicCordisRunner.reportClientGuardFailure",
-	"dynamicCordisRunner.reportRenderFailure",
-	"dynamicCordisRunner.resolveInspectQuery",
-	"dynamicCordisRunner.resolveRequestRun",
-	"dynamicCordisRunner.runHostHalf",
-	"dynamicCordisRunner.settleUserRun",
-	"dynamicCordisRunner.stopFromPanel",
-	"dynamicCordisRunner.syncInspectManifest",
-	"dynamicCordisRunner.undefineFromPanel",
 	"officeToPdf.render",
 	"pluginRecommendations.describe",
 	"speech.cancelPreparation",
@@ -103,13 +91,13 @@ func mmErrorOf(t *testing.T, body string) mmErrorBody {
 }
 
 // ---------------------------------------------------------------------------
-// 方法集合：本文件的 18 个一个不多一个不少
+// 方法集合：本文件的 7 个一个不多一个不少
 // ---------------------------------------------------------------------------
 
-func TestOfficialMarketMethodSetCoversAll18(t *testing.T) {
+func TestOfficialMarketMethodSetCoversAll7(t *testing.T) {
 	got := OfficialMediaMarketMethods()
-	if len(got) != 18 {
-		t.Fatalf("方法数必须是 18，拿到 %d", len(got))
+	if len(got) != 7 {
+		t.Fatalf("方法数必须是 7，拿到 %d", len(got))
 	}
 	gotNames := make([]string, 0, len(got))
 	for _, m := range got {
@@ -489,70 +477,6 @@ func TestOfficialPluginRecommendationsDescribeUnimplemented(t *testing.T) {
 		code, body := mmServe(t, s, "pluginRecommendations.describe", bad.body)
 		if code != http.StatusBadRequest {
 			t.Fatalf("%s 要 400，拿到 %d（%s）", bad.why, code, body)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// dynamicCordisRunner.*：按 R6 明确不做
-// ---------------------------------------------------------------------------
-
-func TestOfficialCordisUnimplementedByR6(t *testing.T) {
-	s := mmTestServer(t)
-
-	cases := []struct{ method, body string }{
-		{"dynamicCordisRunner.getClientCode", `{"agentId":"s-1","pluginId":"p","pluginRunId":"r"}`},
-		{"dynamicCordisRunner.invoke", `{"pluginId":"p","pluginRunId":"r","method":"m","args":{}}`},
-		{"dynamicCordisRunner.reportClientGuardFailure", `{"agentId":"s-1","pluginId":"p","pluginRunId":"r","failure":{}}`},
-		{"dynamicCordisRunner.reportRenderFailure", `{"agentId":"s-1","pluginId":"p","pluginRunId":"r","failure":{}}`},
-		{"dynamicCordisRunner.resolveInspectQuery", `{"agentId":"s-1","requestId":"q","resolution":"ok"}`},
-		{"dynamicCordisRunner.resolveRequestRun", `{"requestId":"q"}`},
-		{"dynamicCordisRunner.runHostHalf", `{"agentId":"s-1","pluginId":"p","packageId":"k","mode":"approve","requestId":"q","approveFutureVersions":true}`},
-		{"dynamicCordisRunner.settleUserRun", `{"agentId":"s-1","pluginId":"p","resolution":{"kind":"done"}}`},
-		{"dynamicCordisRunner.stopFromPanel", `{"agentId":"s-1","pluginId":"p"}`},
-		{"dynamicCordisRunner.syncInspectManifest", `{"providers":[]}`},
-		{"dynamicCordisRunner.undefineFromPanel", `{"agentId":"s-1","pluginId":"p"}`},
-	}
-	if len(cases) != 11 {
-		t.Fatalf("R6 覆盖的 cordis 方法必须是 11 个，拿到 %d", len(cases))
-	}
-	for _, tc := range cases {
-		code, body := mmServe(t, s, tc.method, tc.body)
-		if code != http.StatusNotImplemented {
-			t.Fatalf("%s 要 501，拿到 %d（%s）", tc.method, code, body)
-		}
-		e := mmErrorOf(t, body)
-		if e.Error.Code != "not_implemented" {
-			t.Fatalf("%s 的 code 要 not_implemented，拿到 %q", tc.method, e.Error.Code)
-		}
-		if !strings.Contains(e.Error.Message, "R6") {
-			t.Fatalf("%s 的消息必须写明 R6（明确不做，不是欠账）：%s", tc.method, e.Error.Message)
-		}
-		if !strings.Contains(e.Error.Message, "JS 运行时") {
-			t.Fatalf("%s 的消息要说清缺什么：%s", tc.method, e.Error.Message)
-		}
-	}
-}
-
-func TestOfficialCordisStrictParams(t *testing.T) {
-	s := mmTestServer(t)
-
-	for _, bad := range []struct{ method, body, why string }{
-		{"dynamicCordisRunner.getClientCode", `{"pluginId":"p","pluginRunId":"r"}`, "缺 agentId"},
-		{"dynamicCordisRunner.getClientCode", `{"agentId":"","pluginId":"p","pluginRunId":"r"}`, "agentId 空串"},
-		{"dynamicCordisRunner.getClientCode", `{"agentId":7,"pluginId":"p","pluginRunId":"r"}`, "agentId 类型错"},
-		{"dynamicCordisRunner.getClientCode", `{"agentId":"s","pluginId":"p","pluginRunId":"r","nope":1}`, "未知字段"},
-		{"dynamicCordisRunner.getClientCode", `{"agentId":"s","pluginId":null,"pluginRunId":"r"}`, "null 必填"},
-		{"dynamicCordisRunner.invoke", `{"pluginId":"p","pluginRunId":"r","method":"m"}`, "缺 args"},
-		{"dynamicCordisRunner.syncInspectManifest", `{}`, "缺 providers"},
-		{"dynamicCordisRunner.stopFromPanel", `{"agentId":"s"}`, "缺 pluginId"},
-	} {
-		code, body := mmServe(t, s, bad.method, bad.body)
-		if code != http.StatusBadRequest {
-			t.Fatalf("%s/%s 要 400，拿到 %d（%s）", bad.method, bad.why, code, body)
-		}
-		if e := mmErrorOf(t, body); e.Error.Code != "bad_request" {
-			t.Fatalf("%s/%s 的 code 要 bad_request，拿到 %q", bad.method, bad.why, e.Error.Code)
 		}
 	}
 }
