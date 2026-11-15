@@ -707,7 +707,7 @@ terminal.input/open/output, workspace.init/list
 
 | 方法 | 状态 | 推断链 |
 |---|---|---|
-| `dynamicCordisRunner.inventory` | **IMPLEMENTED** | 不在 R6 那 11 条 `officialCordisSpecs` 表里，只落通用 501；按"整族都要在宿主执行 Cordis JS"推断 → **PARITY-CORDIS-REGISTER：已实现（Go 核心 + 外部受管 Node 双轨）；非官方 wire；ESM/live-binding 不等价** |
+| `dynamicCordisRunner.inventory` | **IMPLEMENTED** | 由 `IsOfficialCordisMethod`（`server.go:602`）先认领，`handlers_media_market_official.go` 里那张 R6-501 表从未可达（2026-11-15 已删）；按"整族都要在宿主执行 Cordis JS"推断 → **PARITY-CORDIS-REGISTER：已实现（Go 核心 + 外部受管 Node 双轨）；非官方 wire；ESM/live-binding 不等价** |
 | `pluginManager.listPlugins` | IMPLEMENTED（T18R，T17 probe OK200） | 见上表 |
 | `account.signOut` | IMPLEMENTED | 本地删 `account-grant.json` 可验真；官方语义还含"Platform 后台撤销"那半（本仓无 Platform 可调）——按"缺子操作"口径可降为 PARTIAL |
 | `toolResults.watch` | IMPLEMENTED | unary 路径实测 VAL400；**流式面（NDJSON 帧内容）未实测**，结论来自 `official_stream_sources.go:181` |

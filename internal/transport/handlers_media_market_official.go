@@ -1,9 +1,10 @@
 package transport
 
-// 本文件是官方桌面端「media / market 侧」**除 pluginMarket 之外的 18 个** typert
-// 方法的 L1 契约实现（官方源：@deepseek-ai/dsh-experimental-api-speech-to-text /
+// 本文件是官方桌面端「media / market 侧」**除 pluginMarket 与 dynamicCordisRunner
+// 之外的 7 个** typert 方法的 L1 契约实现（官方源：
+// @deepseek-ai/dsh-experimental-api-speech-to-text /
 // dsh-experimental-client-ui-cot-translation / dsh-office-to-pdf /
-// dsh-plugin-recommendations / dsh-cordis-host-runner 的 `lib/typert.host.js`，从
+// dsh-plugin-recommendations 的 `lib/typert.host.js`，从
 // app.asar 只读解；方法清单见
 // docs/evidence/official-desktop-api-methods-0.2.2-rc.1.txt）。
 //
@@ -13,6 +14,12 @@ package transport
 // IsOfficialMediaMarketMethod 之前。本文件原先的三个同名 501 分支已删除——
 // 同一方法两处结论必然漂，那正是"账本写 501、实际早有真实现"的成因。
 //
+// `dynamicCordisRunner.*` 11 个方法**也不在本文件**：真实实现在
+// cmd/dshd/serve_cordis_api.go，认领在 handlers_cordis_official.go 的
+// IsOfficialCordisMethod，而 server.go 里那条分支排在 IsOfficialMediaMarketMethod
+// 之前。本文件原先那张 `officialCordisSpecs` R6-501 表**整条不可达**（每个键都先
+// 被 cordis 分支认领），2026-11-15 删除——同上，同一方法两处结论必然漂。
+//
 // 对齐口径与 `handlers_agent_official.go` / `handlers_pluginmanager_official.go`
 // 一致：
 //   - **L1**：参数名、必填/可选、结果字段按官方 zod 契约；wire 仍走本仓既有的
@@ -20,7 +27,7 @@ package transport
 //   - **L2**（`remote.mux` + typert Connection envelope）未实现，因此本文不声称
 //     与官方桌面端 wire 兼容。
 //
-// 本文件只做协议翻译与**参数形状校验**，不读盘、不伪造任何结果。18 个方法逐条
+// 本文件只做协议翻译与**参数形状校验**，不读盘、不伪造任何结果。7 个方法逐条
 // 结论（与 RESULT 的三列表一致）：
 //
 //  1. `cotTranslation.translate` —— **真实现**：把文本送真实模型网关
@@ -36,10 +43,6 @@ package transport
 //  4. `pluginRecommendations.describe` —— 未实现：它依赖的"已记录推荐卡"在官方
 //     是模型侧工具产物，本仓整条链路都不存在（`internal/recommendations` 只覆盖
 //     插件清单/启用这类卡片，不产出 describe 要的记录）。
-//  5. `dynamicCordisRunner.*` 11 个 —— 未实现，且**按红线 R6 明确不做**（宿主不嵌
-//     JS 运行时，不 fork/vendor dsc）。这 11 个方法没有一个只是数据搬运：每个都以
-//     "在宿主里执行 Cordis 插件 JS 并结算那次运行"为语义，宿主侧没有合法执行路径。
-//     这不是能力欠账，是设计边界。
 
 import (
 	"context"
@@ -56,6 +59,10 @@ import (
 
 // 官方方法名。字符串必须与官方 `createTypertRemoteInfo` 的键逐字对应
 // （官方 `'speech/prepare'`；本仓把 `/` 换成 `.`，与既有 58 个方法同形）。
+//
+// 末尾 11 个 `dynamicCordisRunner.*` 常量**不属于本文件的方法集合**（认领在
+// handlers_cordis_official.go 的 IsOfficialCordisMethod，server.go 先路由到那里）；
+// 常量因历史原因留在这里，供那边的方法集与实现引用。
 const (
 	MethodSpeechPrepare           Method = "speech.prepare"
 	MethodSpeechTranscribe        Method = "speech.transcribe"
@@ -81,25 +88,14 @@ const (
 	MethodDynamicCordisRunnerUndefineFromPanel        Method = "dynamicCordisRunner.undefineFromPanel"
 )
 
-// OfficialMediaMarketMethods 按固定顺序返回本文件实现的 18 个方法（pluginMarket
-// 4 个方法已在 handlers_plugin_market_official.go，不在此列）。
+// OfficialMediaMarketMethods 按固定顺序返回本文件实现的 7 个方法（pluginMarket
+// 4 个与 dynamicCordisRunner 11 个都有真实实现、归别的文件，不在此列）。
 //
 // 它给快照/文档/门禁用：新增或删除一个方法必须显式改这里，不能让"方法悄悄少了
 // 一个"从路由表里漏过去。
 func OfficialMediaMarketMethods() []Method {
 	return []Method{
 		MethodCotTranslationTranslate,
-		MethodDynamicCordisRunnerGetClientCode,
-		MethodDynamicCordisRunnerInvoke,
-		MethodDynamicCordisRunnerReportClientGuardFailure,
-		MethodDynamicCordisRunnerReportRenderFailure,
-		MethodDynamicCordisRunnerResolveInspectQuery,
-		MethodDynamicCordisRunnerResolveRequestRun,
-		MethodDynamicCordisRunnerRunHostHalf,
-		MethodDynamicCordisRunnerSettleUserRun,
-		MethodDynamicCordisRunnerStopFromPanel,
-		MethodDynamicCordisRunnerSyncInspectManifest,
-		MethodDynamicCordisRunnerUndefineFromPanel,
 		MethodOfficeToPdfRender,
 		MethodPluginRecommendationsDescribe,
 		MethodSpeechCancelPreparation,
@@ -109,24 +105,13 @@ func OfficialMediaMarketMethods() []Method {
 	}
 }
 
-// IsOfficialMediaMarketMethod 判断一个 /api 路径名是否属于本文件的 18 个方法。
+// IsOfficialMediaMarketMethod 判断一个 /api 路径名是否属于本文件的 7 个方法。
 //
-// 路由侧只需要这一次判断（**不要**在 server.go 里摊开 18 个 case：官方方法还会
+// 路由侧只需要这一次判断（**不要**在 server.go 里摊开 7 个 case：官方方法还会
 // 继续加，而那张路由表是冻结的）。
 func IsOfficialMediaMarketMethod(name string) bool {
 	switch Method(name) {
 	case MethodCotTranslationTranslate,
-		MethodDynamicCordisRunnerGetClientCode,
-		MethodDynamicCordisRunnerInvoke,
-		MethodDynamicCordisRunnerReportClientGuardFailure,
-		MethodDynamicCordisRunnerReportRenderFailure,
-		MethodDynamicCordisRunnerResolveInspectQuery,
-		MethodDynamicCordisRunnerResolveRequestRun,
-		MethodDynamicCordisRunnerRunHostHalf,
-		MethodDynamicCordisRunnerSettleUserRun,
-		MethodDynamicCordisRunnerStopFromPanel,
-		MethodDynamicCordisRunnerSyncInspectManifest,
-		MethodDynamicCordisRunnerUndefineFromPanel,
 		MethodOfficeToPdfRender,
 		MethodPluginRecommendationsDescribe,
 		MethodSpeechCancelPreparation,
@@ -138,7 +123,7 @@ func IsOfficialMediaMarketMethod(name string) bool {
 	return false
 }
 
-// ServeOfficialMediaMarketAPI 是这 18 个方法在 `/api` 上的唯一入口。
+// ServeOfficialMediaMarketAPI 是这 7 个方法在 `/api` 上的唯一入口。
 //
 // 调用方（server.go 的 handleAPI）只需在既有前缀判断之前加一条：
 //
@@ -199,9 +184,6 @@ func routeOfficialMediaMarketMethod(r *http.Request, method Method, p *officialP
 		return officialOfficeToPdfRender(p)
 	case MethodPluginRecommendationsDescribe:
 		return officialPluginRecommendationsDescribe(p)
-	}
-	if spec, ok := officialCordisSpecs[method]; ok {
-		return officialCordisRefused(method, spec, p)
 	}
 	return nil, officialNotImplemented("%s 未实现", method)
 }
@@ -756,106 +738,4 @@ func officialPluginRecommendationsDescribe(p *officialParams) (any, error) {
 	return nil, officialNotImplemented(
 		"pluginRecommendations.describe 未接线：本仓没有插件推荐子系统（推荐卡记录与卡文本目录都不存在）。agentId=%q callId=%q",
 		agentID, callID)
-}
-
-// ---------------------------------------------------------------------------
-// dynamicCordisRunner.*（11）—— 按红线 R6 明确不做
-// ---------------------------------------------------------------------------
-
-// officialCordisSpec 是一个 cordis 方法的官方参数清单（wire 名）。
-//
-// required 里的键必须出现且非 null；optional 里的键可以不给。**内部形状不做
-// 校验**：这些方法在本宿主上一律不执行（R6），深校验只会让"反正要 501"的调用
-// 多绕一步、也不会让任何东西变得更安全；但顶层键名仍然严格（官方 strictCodec
-// 是 additionalProperties:false），这样写错字段名依旧是 400 而不是 501。
-type officialCordisSpec struct {
-	required []string
-	optional []string
-}
-
-var officialCordisSpecs = map[Method]officialCordisSpec{
-	MethodDynamicCordisRunnerGetClientCode: {
-		required: []string{"agentId", "pluginId", "pluginRunId"},
-	},
-	MethodDynamicCordisRunnerInvoke: {
-		required: []string{"pluginId", "pluginRunId", "method", "args"},
-	},
-	MethodDynamicCordisRunnerReportClientGuardFailure: {
-		required: []string{"agentId", "pluginId", "pluginRunId", "failure"},
-	},
-	MethodDynamicCordisRunnerReportRenderFailure: {
-		required: []string{"agentId", "pluginId", "pluginRunId", "failure"},
-	},
-	MethodDynamicCordisRunnerResolveInspectQuery: {
-		required: []string{"agentId", "requestId", "resolution"},
-	},
-	MethodDynamicCordisRunnerResolveRequestRun: {
-		required: []string{"requestId"},
-		optional: []string{"resolution"},
-	},
-	MethodDynamicCordisRunnerRunHostHalf: {
-		required: []string{"agentId", "pluginId", "packageId", "mode", "requestId", "approveFutureVersions"},
-	},
-	MethodDynamicCordisRunnerSettleUserRun: {
-		required: []string{"agentId", "pluginId"},
-		optional: []string{"resolution"},
-	},
-	MethodDynamicCordisRunnerStopFromPanel: {
-		required: []string{"agentId", "pluginId"},
-	},
-	MethodDynamicCordisRunnerSyncInspectManifest: {
-		required: []string{"providers"},
-	},
-	MethodDynamicCordisRunnerUndefineFromPanel: {
-		required: []string{"agentId", "pluginId"},
-	},
-}
-
-// officialCordisRefused 校验顶层键名后，按 R6 给出"明确不做"的 501。
-//
-// 为什么不"尽量实现一部分"：这 11 个方法没有一个只是数据搬运 —— 每一个都以
-// "在宿主里执行 Client/Host 插件 JS"为语义（取 Client 代码、跑 Host 半边、
-// 结算一次运行、同步 inspect 清单…）。"宿主不嵌 JS 运行时"是 **R6**，所以它们是
-// 设计边界，不是能力欠账。
-func officialCordisRefused(method Method, spec officialCordisSpec, p *officialParams) (any, error) {
-	agentID := ""
-	for _, name := range spec.required {
-		raw, ok := p.take(name)
-		if !ok {
-			return nil, officialBadRequest("缺 %s", name)
-		}
-		if string(raw) == "null" {
-			return nil, officialBadRequest("%s 是 null：官方这个参数必填", name)
-		}
-		if name == "agentId" {
-			var s string
-			if err := json.Unmarshal(raw, &s); err != nil {
-				return nil, officialBadRequest("agentId 必须是字符串")
-			}
-			if strings.TrimSpace(s) == "" {
-				return nil, officialBadRequest("agentId 是空串")
-			}
-			agentID = s
-		}
-	}
-	for _, name := range spec.optional {
-		raw, ok := p.take(name)
-		if !ok {
-			continue
-		}
-		if string(raw) == "null" {
-			return nil, officialBadRequest("%s 是 null：要么不给，要么给一个值", name)
-		}
-	}
-	if err := p.finish(); err != nil {
-		return nil, err
-	}
-	if agentID != "" {
-		return nil, officialNotImplemented(
-			"%s 按红线 R6 明确不做：宿主不嵌 JS 运行时（也不 fork/vendor dsc），而这个方法以「在宿主里执行 Cordis 插件 JS 并结算那次运行」为语义（agentId=%q），没有任何合法执行路径。这不是能力欠账，是设计边界；需要动态插件执行请走独立进程方案",
-			method, agentID)
-	}
-	return nil, officialNotImplemented(
-		"%s 按红线 R6 明确不做：宿主不嵌 JS 运行时（也不 fork/vendor dsc），而这个方法以「在宿主里执行 Cordis 插件 JS 并结算那次运行」为语义，没有任何合法执行路径。这不是能力欠账，是设计边界；需要动态插件执行请走独立进程方案",
-		method)
 }

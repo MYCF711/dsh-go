@@ -99,7 +99,7 @@ internal/transport/handlers_session_official.go:1730 | 官方 QUEUE_EDIT_NON_TEX
 cmd/dshd/serve_queue_official.go:274 | 同上（本地入口同判据）：edit 的非 text 块直接报 ErrPlacementInvalid
 
 # 译文接口：空文的译文就是空文（显式写明的语义，不是丢内容）。
-internal/transport/handlers_media_market_official.go:612 | 官方 cotTranslation：空文译空文、不打模型也不算编内容；判的是入参
+internal/transport/handlers_media_market_official.go:594 | 官方 cotTranslation：空文译空文、不打模型也不算编内容；判的是入参
 
 # ---- "有没有内容"的判据在别处；这里只负责拼/取正文 ----
 

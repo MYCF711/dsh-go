@@ -5,6 +5,12 @@ package transport
 // 官方 Cordis 是进程内调用，没有可抄的 RPC wire；本仓 Go 核心 + 外部受管 node
 // 双轨（见 internal/cordis、internal/cordis/extern）。本文件只做 wire 方法分发，
 // 真实数据由 cmd/dshd 的 OfficialCordisAPI 提供。
+//
+// 2026-11-15：`handlers_media_market_official.go` 里那张 `officialCordisSpecs`
+// R6-501 表已删除——它对本文件这 12 个方法**整条不可达**（`server.go` 的
+// `IsOfficialCordisMethod` 分支排在 `IsOfficialMediaMarketMethod` 之前），却让
+// 账本与 R6 叙事多出一份"明确不做"的结论。那 11 个 wire 常量仍留在 media 文件里
+// （见那边的常量块注释），认领与实现在本文件。
 
 import (
 	"context"
