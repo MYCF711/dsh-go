@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 	"dshgo/internal/transport"
+	planmod "dshgo/modules/tool/plan"
 )
 
 // ---------------------------------------------------------------------------
@@ -153,6 +155,105 @@ func TestOfficialCommandExecuteRejectsAttachments(t *testing.T) {
 	}
 	if !strings.Contains(exec.Result.Text, "does not accept attachments") {
 		t.Fatalf("错误正文没说明不接受附件：%q", exec.Result.Text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// /plan（官方 @deepseek-ai/dsh-plan-mode）
+// ---------------------------------------------------------------------------
+
+func newPlanCommandSession(t *testing.T, f *agentAPIFixture) string {
+	t.Helper()
+	sessionID := f.newSession("", func(lg *session.Log) {
+		if err := lg.Append("plan/mode", map[string]any{"active": true}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := planmod.SetActiveAt(filepath.Join(f.home, "state", "plan"), sessionID, true); err != nil {
+		t.Fatalf("造计划模式状态: %v", err)
+	}
+	return sessionID
+}
+
+func TestOfficialCommandPlanOffCommitsRealStateAndProjection(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	sessionID := newPlanCommandSession(t, f)
+	list, err := f.api.CommandsList(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, ok := findCommand(list, hostCommandPlan)
+	if !ok || def.DefinitionID != officialPlanDefinitionID || def.Description != officialPlanDescription {
+		t.Fatalf("/plan 发现形状不是官方定义: %+v", def)
+	}
+	if def.Input == nil || def.Input.Hint != officialPlanInputHint || def.Input.Attachments == nil || !*def.Input.Attachments {
+		t.Fatalf("/plan input 必须是官方 [off|message] + attachments: %+v", def.Input)
+	}
+
+	exec, err := f.api.CommandsExecute(sessionID, "/plan off", nil)
+	if err != nil || exec == nil || exec.Result.Kind != "success" || exec.Result.Text != "Plan mode off." {
+		t.Fatalf("/plan off: exec=%+v err=%v", exec, err)
+	}
+	active, err := planmod.ActiveAt(filepath.Join(f.home, "state", "plan"), sessionID)
+	if err != nil || active {
+		t.Fatalf("/plan off 后状态应 inactive: active=%v err=%v", active, err)
+	}
+	events, err := f.core.agentReadEvents(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := session.ProjectPlan(events); got != (session.PlanProjection{Active: false, Pending: false}) {
+		t.Fatalf("command/run + plan/mode + command/done 后 projection=%+v", got)
+	}
+	if count := planModeFrameCount(t, f, sessionID, false); count != 1 {
+		t.Fatalf("/plan off 应写一条 plan/mode false，实际 %d", count)
+	}
+
+	repeated, err := f.api.CommandsExecute(sessionID, "/plan off", nil)
+	if err != nil || repeated == nil || repeated.Result.Kind != "success" ||
+		repeated.Result.Text != "Plan mode is already inactive." {
+		t.Fatalf("重复 /plan off 应是真实幂等结果: %+v err=%v", repeated, err)
+	}
+	if count := planModeFrameCount(t, f, sessionID, false); count != 1 {
+		t.Fatalf("重复 /plan off 不应再写 plan/mode，实际 %d", count)
+	}
+}
+
+func TestOfficialCommandPlanOffAttachmentUsesOfficialError(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	sessionID := newPlanCommandSession(t, f)
+	exec, err := f.api.CommandsExecute(sessionID, "/plan off", []transport.OfficialSubmittedAttachment{{
+		Type: "image", MediaType: "image/png", Data: "aGk=", Name: "note.png",
+	}})
+	if err != nil || exec == nil || exec.Result.Kind != "error" {
+		t.Fatalf("附件应结算为 error 结果: %+v err=%v", exec, err)
+	}
+	if exec.Result.Text != officialPlanOffWithAttachments {
+		t.Fatalf("附件错误必须逐字为 %q，实际 %q", officialPlanOffWithAttachments, exec.Result.Text)
+	}
+	active, err := planmod.ActiveAt(filepath.Join(f.home, "state", "plan"), sessionID)
+	if err != nil || !active {
+		t.Fatalf("附件被拒后不得退出: active=%v err=%v", active, err)
+	}
+	if count := planModeFrameCount(t, f, sessionID, false); count != 0 {
+		t.Fatalf("附件被拒后不得写 plan/mode false，实际 %d", count)
+	}
+	events, _ := f.core.agentReadEvents(sessionID)
+	if got := session.ProjectPlan(events); got != (session.PlanProjection{Active: true, Pending: false}) {
+		t.Fatalf("error command/done 后 projection 应收敛 active=true,pending=false: %+v", got)
+	}
+}
+
+func TestOfficialCommandPlanOnDoesNotFakeSteer(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	sessionID := f.newSession("", nil)
+	exec, err := f.api.CommandsExecute(sessionID, "/plan 先调研", nil)
+	if err == nil || exec != nil {
+		t.Fatalf("未接真实 steer 的 /plan on 必须响亮失败: exec=%+v err=%v", exec, err)
+	}
+	active, stateErr := planmod.ActiveAt(filepath.Join(f.home, "state", "plan"), sessionID)
+	if stateErr != nil || active {
+		t.Fatalf("失败的 /plan on 不得改状态: active=%v err=%v", active, stateErr)
 	}
 }
 
