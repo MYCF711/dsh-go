@@ -604,8 +604,10 @@ func cmdServe(args []string) error {
 		ConfigPatchHandler:  transport.NewConfigPatchHandler(configTree, nil),
 		Descriptors:         configDescriptors,
 		SettingsFormHandler: newSettingsFormHTTPHandler(settingsStore),
-		ModelCatalogHandler: newModelCatalogHTTPHandler(modelCatalog, settingsStore),
-		Attachments:         attachments,
+		// cotTranslation.limits/translate 与 settings.form.* 读同一份持久 namespace。
+		CotTranslationSettings: settingsform.NewService(settingsStore, settingsform.HostRegistry()),
+		ModelCatalogHandler:    newModelCatalogHTTPHandler(modelCatalog, settingsStore),
+		Attachments:            attachments,
 		// 官方 deliverables 的 /api/changes.summary|diff|open。记录与快照对象由
 		// 每一轮的 `dshd run` 子进程写进 <home>/state/workspace-changes/<sid>/，
 		// 这里只读；没有记录的 seq 回 404（不伪造空摘要）。

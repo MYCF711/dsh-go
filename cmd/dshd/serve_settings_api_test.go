@@ -104,7 +104,7 @@ func TestSettingsDescribeOfficialWireEnvelope(t *testing.T) {
 	if len(value) != 3 || value["writable"] != true || value["hasDocument"] != false {
 		t.Fatalf("result.value 不是官方 SettingsDescribeValue：%s", payload)
 	}
-	// 十九行 = 原来的十一行 + 官方 4 条设置页的 8 个命名空间（2026-11-15）。
+	// 二十行 = 十九行（11 + 4 条设置页的 8 个命名空间，2026-11-15）+ cot-translation（2026-11-17）。
 	//
 	// 为什么从 11 变 19（**不是放宽判据，而是官方形状变多了**）：这 8 条每一条
 	// 都是官方 UI 页面的"存在条件"——官方客户端用
@@ -123,8 +123,8 @@ func TestSettingsDescribeOfficialWireEnvelope(t *testing.T) {
 	// agent-preset-registry 是官方 agent-preset registry 的 selectedDefault
 	// （dsh-client-ui-agent-preset 的"设为默认"写的就是它）。
 	namespaces, ok := value["namespaces"].([]any)
-	if !ok || len(namespaces) != 19 {
-		t.Fatalf("result.value.namespaces 应是十九行（11 + 4 条设置页的 8 个命名空间）：%s", payload)
+	if !ok || len(namespaces) != 20 {
+		t.Fatalf("result.value.namespaces 应是二十行（19 + cot-translation）：%s", payload)
 	}
 	for _, rawNamespace := range namespaces {
 		namespace := rawNamespace.(map[string]any)
@@ -181,10 +181,10 @@ func TestSettingsDescribeOfficialWireShape(t *testing.T) {
 		t.Fatalf("hasDocument 应为 false（本宿主没有配置编辑器的本地文档）：%v", out["hasDocument"])
 	}
 	namespaces, ok := out["namespaces"].([]any)
-	if !ok || len(namespaces) != 19 {
-		// 19 = 原来的 11 行 + 官方 4 条设置页的 8 个命名空间（2026-11-15，逐条见
+	if !ok || len(namespaces) != 20 {
+		// 20 = 19 + cot-translation（2026-11-17）。多出来的行不是重复发布，是官方页面的存在条件。
 		// 上面那个用例的注释）。多出来的行不是重复发布，是官方页面的存在条件。
-		t.Fatalf("namespaces 应是 model/permission/llm + 7 个客户端/插件 UI 命名空间 + agent-preset-registry + 4 条设置页的 8 个命名空间共十九行，实际：%v", out["namespaces"])
+		t.Fatalf("namespaces 应是 model/permission/llm + 7 个客户端/插件 UI 命名空间 + agent-preset-registry + 4 条设置页的 8 个命名空间共二十行，实际：%v", out["namespaces"])
 	}
 	for _, raw := range namespaces {
 		namespace, ok := raw.(map[string]any)
@@ -203,7 +203,9 @@ func TestSettingsDescribeOfficialWireShape(t *testing.T) {
 			"subagent-model-selection-settings",
 			"web", "web-deepseek-api", "web-search-deepseek",
 			// 2026-11-15 补：官方 agent-preset registry 的 selectedDefault。
-			"agent-preset-registry":
+			"agent-preset-registry",
+			// 2026-11-17 补：官方实验包 cot-translation 的 configForms scope（mount.ts:81）。
+			"cot-translation":
 		default:
 			t.Fatalf("未知 namespace：%v", namespace["ns"])
 		}

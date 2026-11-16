@@ -154,7 +154,7 @@ func (s *Server) ServeOfficialMediaMarketAPI(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
-	result, err := routeOfficialMediaMarketMethod(r, Method(name), params)
+	result, err := routeOfficialMediaMarketMethod(s, r, Method(name), params)
 	if err != nil {
 		writeOfficialError(w, err)
 		return
@@ -168,7 +168,7 @@ func (s *Server) ServeOfficialMediaMarketAPI(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, result)
 }
 
-func routeOfficialMediaMarketMethod(r *http.Request, method Method, p *officialParams) (any, error) {
+func routeOfficialMediaMarketMethod(s *Server, r *http.Request, method Method, p *officialParams) (any, error) {
 	switch method {
 	case MethodSpeechPrepare:
 		return officialSpeechPrepare(p)
@@ -179,7 +179,7 @@ func routeOfficialMediaMarketMethod(r *http.Request, method Method, p *officialP
 	case MethodSpeechCancelPreparation:
 		return officialSpeechCancelPreparation(p)
 	case MethodCotTranslationTranslate:
-		return officialCotTranslationTranslate(r, p)
+		return s.officialCotTranslationTranslate(r, p)
 	case MethodOfficeToPdfRender:
 		return officialOfficeToPdfRender(p)
 	case MethodPluginRecommendationsDescribe:
@@ -548,7 +548,7 @@ const (
 //     （`dshgo/internal/llm`，与 `cmd/dshd` 完全同一套 env），返回模型真实输出；
 //   - `google` / `bing` → 501：本仓不代理第三方匿名翻译端点；
 //   - 模型输出空文本 → 报错，**不拿原文顶替**（拿原文冒充译文比报错更糟）。
-func officialCotTranslationTranslate(r *http.Request, p *officialParams) (any, error) {
+func (s *Server) officialCotTranslationTranslate(r *http.Request, p *officialParams) (any, error) {
 	view, err := mmOpen(p, "request")
 	if err != nil {
 		return nil, err
@@ -574,6 +574,29 @@ func officialCotTranslationTranslate(r *http.Request, p *officialParams) (any, e
 	}
 	if err := view.finish(); err != nil {
 		return nil, err
+	}
+
+	// 官方 resolveSelected（src/index.ts:94-100）：生产设置面已接线时，请求只能
+	// 使用当前接受的 provider；显式 targetLanguage 也必须与设置一致（auto 则由
+	// 客户端解析成界面语言）。未注入设置服务的旧嵌入方保留原有兼容行为。
+	if s != nil && s.opt.CotTranslationSettings != nil {
+		accepted, err := s.cotTranslationPreferences()
+		if err != nil {
+			return nil, err
+		}
+		if !hasProvider {
+			provider = accepted.Provider
+		}
+		if provider != accepted.Provider {
+			return nil, officialBadRequest(
+				"provider=%q 不是 cot-translation 当前选择的 %q；设置已变化，请刷新 limits 后重试",
+				provider, accepted.Provider)
+		}
+		if accepted.TargetLanguage != "auto" && target != accepted.TargetLanguage {
+			return nil, officialBadRequest(
+				"targetLanguage=%q 不是 cot-translation 当前选择的 %q；设置已变化，请刷新 limits 后重试",
+				target, accepted.TargetLanguage)
+		}
 	}
 
 	switch {
