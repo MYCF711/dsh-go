@@ -1102,6 +1102,9 @@ func cmdRun(argv []string) (retErr error) {
 	// 官方 `retryPolicy`（每 provider 一份）：策略由 serve 侧从模型目录读出、
 	// 经 DSHD_LLM_RETRY_POLICY 交给这一轮的 run 子进程。写错必须 fail-closed
 	// （一个请求都不发），不能静默回落到默认重试参数。
+	if err := registerSessionLogExtension(*home); err != nil {
+		fmt.Fprintf(os.Stderr, "DeepSeek 请求扩展注册失败（%v）；dsh_session_log 不会出现在模型请求里\n", err)
+	}
 	chat, err := newTurnChat(*base, os.Getenv("DSHD_LLM_KEY"), os.Getenv("DSHD_LLM_API"), os.Getenv)
 	if err != nil {
 		return err
@@ -1168,6 +1171,7 @@ func cmdRun(argv []string) (retErr error) {
 		Model:          *model,
 		System:         sys,
 		SessionID:      sessID,
+		SessionLog:     logw,
 		// 官方 0.2.2 #78 `agent/pre-step`：每一步模型请求之前先让请求前缀耐久。
 		// 第一步与 prompt 侧车同锚点（幂等命中），第二步起各自落一份。
 		PreStep: worktreePreStep(newWorktreeService(newSessionSource(*home, "")), sessID, func(ctx context.Context, step int) error {

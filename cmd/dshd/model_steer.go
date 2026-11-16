@@ -287,9 +287,10 @@ func (r *modelRunner) runModelTurn(ctx context.Context, sessionID, turnID string
 			history = append(history, input.message)
 		}
 		steerClient := llm.NewWithAPI(base, credential, api)
+		steerClient.OnExtensionError = reportLLMExtensionError
 		applyAccountRouteEnv(steerClient, os.Getenv)
 		resp, streamErr := steerClient.Stream(ctx,
-			llm.Request{Model: model, Messages: history, Stream: true}, nil)
+			llm.Request{Model: model, Messages: history, Stream: true, SessionID: sessionID}, nil)
 		if streamErr != nil {
 			streamErr = redactServeProviderError(streamErr, credential)
 			return fail(streamErr)

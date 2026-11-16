@@ -440,8 +440,8 @@ func officialSettingsError(err error) error {
 		case "internal":
 			code = "internal"
 		case "not_implemented":
-			// settingsform 对 session-log-deepseek.enabled=true 这类真实能力缺口
-			// 返回这个码 + 501；这里原样透出，不许折成参数类 400。
+			// settingsform 对真实能力缺口返回这个码 + 501；这里原样透出，
+			// 不许折成参数类 400。
 			code = "not_implemented"
 		}
 		if status == 0 {

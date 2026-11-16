@@ -19,13 +19,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/acp.go:1201",
+      "site": "cmd/dshd/acp.go:1202",
       "what": "父进程看门狗收尾：watch.Done() 之后关服务",
       "sync": "读过：只做 close/取消，不写会话文件；与主流程之间靠 context 取消 + 单向 channel",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/acp.go:1201",
+      "site": "cmd/dshd/acp.go:1202",
       "what": "父进程看门狗：watch.Done() 就取消本轮并关 stdin",
       "sync": "读过：只调 cancel() 与 os.Stdin.Close()，两个都幂等；不写共享状态",
       "verified_at": "2026-11-09"
@@ -91,13 +91,13 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/serve.go:285",
+      "site": "cmd/dshd/serve.go:288",
       "what": "插件热重载循环",
       "sync": "读过：hmrCtx 取消即退；pluginRT.HMR() 内部自己串行化，不直写共享表",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve.go:577",
+      "site": "cmd/dshd/serve.go:580",
       "what": "profile 配置热重载循环（ConfigHMR.Run）",
       "sync": "读过：hmrCtx 取消即退；store.Reload() 与 store.Revision() 各自在 config.Store 的 mu 下；本组件自己的状态（checks/reloads/lastRev/onChange/lastErr）全在 ConfigHMR.mu 下；Tick 由 tickMu 串行化；消费者在锁外被调用，单个消费者 panic 被 recover 且只记 Err。不写任何文件。",
       "verified_at": "2026-11-14"

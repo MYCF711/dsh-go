@@ -271,6 +271,9 @@ func cmdServe(args []string) error {
 	if err := registerPluginPackagesExtension(pluginRT); err != nil {
 		fmt.Fprintf(os.Stderr, "DeepSeek 请求扩展注册失败（%v）；dsh_plugin_packages 不会出现在模型请求里\n", err)
 	}
+	if err := registerSessionLogExtension(*home); err != nil {
+		fmt.Fprintf(os.Stderr, "DeepSeek 请求扩展注册失败（%v）；dsh_session_log 不会出现在模型请求里\n", err)
+	}
 
 	// 插件热重载（HS-14）：**默认关闭**。pluginHMRConfig 的零值就是 disabled，
 	// 只有显式 `DSHD_PLUGIN_HMR=1` 才走这个分支；关闭时连 Run 都不调用

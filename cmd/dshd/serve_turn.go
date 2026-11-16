@@ -145,11 +145,12 @@ func (r *modelRunner) runModelTurnWithEffort(ctx context.Context, sessionID, tur
 		// 半截流（assistant/text 增量）从**落盘**里退回，否则一次失败会写成两段回答。
 		attemptMark := len(events)
 		turnClient := llm.NewWithAPI(base, credential, api)
+		turnClient.OnExtensionError = reportLLMExtensionError
 		// 账号路由（官方 #99）：provider 的认证方式跟着这一轮的 api 走。
 		applyAccountRouteEnv(turnClient, os.Getenv)
 		resp, streamErr := turnClient.Stream(ctx,
 			llm.Request{Model: model, Messages: history, Stream: true, Reasoning: reasoning,
-				Temperature: r.temperature, Stop: r.stop}, func(e llm.Event) error {
+				Temperature: r.temperature, Stop: r.stop, SessionID: sessionID}, func(e llm.Event) error {
 				typ := ""
 				switch e.Kind {
 				case llm.EventReasoning:

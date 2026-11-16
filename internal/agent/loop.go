@@ -163,9 +163,12 @@ type Loop struct {
 	// 用 --tool-schema=compact 显式打开，并靠 A/B 数据决定要不要改默认。
 	CompactTools bool
 	// SessionID 绑到每一步的 ctx 上，让工具能回答"我在为哪个会话干活"。
-	// 空字符串不算错——单会话场景（`dshd run`）本来就是匿名的。
+	// 同时作为非 wire 身份传给 provider 扩展；空字符串表示直接/匿名请求。
 	SessionID string
-	MaxSteps  int
+	// SessionLog 是本会话已持有的 canonical writer；nil 时扩展只能走只读/
+	// 独立追加路径。它绝不进入模型请求 JSON。
+	SessionLog llm.SessionEventAppender
+	MaxSteps   int
 	// Steers 非空时，在当前 turn 的下一模型步边界注入用户消息。
 	Steers *SteerInbox
 	// Emit 观测量；返回错误即中断整个 turn。
@@ -359,10 +362,12 @@ func (l *Loop) Run(ctx context.Context, turn int, history []llm.Message) ([]llm.
 			requestMessages = withRuntimeContext(msgs, l.RuntimeContext())
 		}
 		req := llm.Request{
-			Model:     l.Model,
-			Messages:  requestMessages,
-			Tools:     l.toolDefs(),
-			MaxTokens: capacity.MaxOutput,
+			Model:      l.Model,
+			Messages:   requestMessages,
+			Tools:      l.toolDefs(),
+			MaxTokens:  capacity.MaxOutput,
+			SessionID:  l.SessionID,
+			SessionLog: l.SessionLog,
 			// 只有显式要了才带：默认不带，避免把不支持该参数的网关打挂。
 			Reasoning: l.Reasoning,
 			// 官方每请求采样面同一规矩：显式要了才带。
