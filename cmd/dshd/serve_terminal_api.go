@@ -550,12 +550,15 @@ type officialTerminalAttachStream struct {
 	id        string
 
 	mu       sync.Mutex
-	offset   int64
+	offset   int64 // PTY 保留输出的绝对字节游标（不是 wire sequence）
+	sequence int64 // 官方 TerminalFrame.sequence：本 attach 内逐 output +1
+	inputSeq int64 // 官方 TerminalInput.sequence：write/resize 共用，从 1 连续
 	opened   bool
 	finished bool
-	// pending 是上行帧处理完后要**先于**输出帧下发的 ack 帧（官方 result 的
-	// `{type:'ack', sequence, refusal?}`）。
+	// pending 是要先于后续输出帧下发的控制帧：上行 ack，以及 controller、
+	// rename、typed 控制权变化产生的 state。
 	pending  []json.RawMessage
+	claimed  bool
 	ticker   *time.Ticker
 	closed   chan struct{}
 	stopOnce sync.Once
@@ -566,7 +569,8 @@ var (
 	_ transport.OfficialTerminalUplink = (*officialTerminalAttachStream)(nil)
 )
 
-// Close 停掉兜底 ticker 并唤醒正在等待的 Next（幂等）。
+// Close 停掉兜底 ticker、唤醒正在等待的 Next，并释放本 attach 的输入控制权
+// （幂等）。释放只影响 controller，不终止 PTY，也不让旧 attach 抢回控制权。
 func (s *officialTerminalAttachStream) Close() {
 	if s == nil {
 		return
@@ -576,6 +580,17 @@ func (s *officialTerminalAttachStream) Close() {
 	})
 	if s.ticker != nil {
 		s.ticker.Stop()
+	}
+	s.releaseController()
+}
+
+func (s *officialTerminalAttachStream) releaseController() {
+	s.mu.Lock()
+	claimed := s.claimed
+	s.claimed = false
+	s.mu.Unlock()
+	if claimed && s.api != nil {
+		s.api.releaseTerminalController(s.sessionID, s.id, s)
 	}
 }
 
@@ -589,29 +604,50 @@ func (s *officialTerminalAttachStream) Push(raw json.RawMessage) error {
 		Type     string `json:"type"`
 		Sequence *int64 `json:"sequence"`
 		Data     string `json:"data"`
+		Typed    bool   `json:"typed"`
 		Cols     int    `json:"cols"`
 		Rows     int    `json:"rows"`
 	}
 	if err := json.Unmarshal(raw, &frame); err != nil {
 		return fmt.Errorf("%w: uplink 帧不是 JSON 对象：%v", transport.ErrJTOfficialBadParam, err)
 	}
+	if frame.Sequence == nil {
+		return fmt.Errorf("%w: %s 帧需要 sequence（本 attach 内从 1 连续编号）", transport.ErrJTOfficialBadParam, frame.Type)
+	}
+	s.mu.Lock()
+	if *frame.Sequence != s.inputSeq+1 {
+		previous := s.inputSeq
+		s.mu.Unlock()
+		return fmt.Errorf("%w: Terminal input sequence has a gap（上一帧 %d，收到 %d）",
+			transport.ErrJTOfficialBadParam, previous, *frame.Sequence)
+	}
+	s.inputSeq = *frame.Sequence
+	s.mu.Unlock()
+
+	// 只有最新 attach 持有输入权。旧 attach 的输出流保持打开，写入按官方
+	// control-unavailable 语义回 read-only ack，而不是把输出流一并报错关掉。
+	if _, err := s.api.lookup(s.sessionID, s.id, "terminal.input"); err != nil {
+		s.enqueueAck(*frame.Sequence, refusalOf(err))
+		return err
+	}
+	if refusal := s.api.terminalControlRefusal(s.sessionID, s.id, s); refusal != "" {
+		s.enqueueAck(*frame.Sequence, refusal)
+		if refusal == "not-running" {
+			return fmt.Errorf("%w: %s 已不在运行", transport.ErrJTOfficialTerminalGone, s.id)
+		}
+		return nil
+	}
 	switch frame.Type {
 	case "write":
-		if frame.Sequence == nil {
-			return fmt.Errorf("%w: write 帧需要 sequence（客户端已消费到的绝对偏移）", transport.ErrJTOfficialBadParam)
-		}
-		if err := inputOfficialTerminal(s.api, s.sessionID, s.id, frame.Data); err != nil {
+		if _, err := inputOfficialTerminalTyped(s.api, s.sessionID, s.id, frame.Data, frame.Typed); err != nil {
 			s.enqueueAck(*frame.Sequence, refusalOf(err))
 			return err
 		}
-		// ack.sequence 回显**上行帧自己的序号**（官方客户端按
-		// `ack.sequence == acknowledged+1` 逐帧推进），不是输出字节偏移。
+		// typed 导致的 state 已由 InputTyped 在写之前广播；ack 因后排入，
+		// 所以当前 follower 看到的顺序严格是 state → ack。
 		s.enqueueAck(*frame.Sequence, "")
 		return nil
 	case "resize":
-		if frame.Sequence == nil {
-			return fmt.Errorf("%w: resize 帧需要 sequence", transport.ErrJTOfficialBadParam)
-		}
 		if frame.Cols <= 0 || frame.Rows <= 0 {
 			return fmt.Errorf("%w: resize 的 cols/rows 必须是正整数（收到 %dx%d）",
 				transport.ErrJTOfficialBadParam, frame.Cols, frame.Rows)
@@ -647,7 +683,19 @@ func (s *officialTerminalAttachStream) enqueueAck(sequence int64, refusal string
 	s.mu.Unlock()
 }
 
-// takePending 取走一帧待发 ack（没有就返回 nil）。
+// enqueueState 发布这个 follower 自己的 writable 判定。info 是整条终端的
+// 共享元数据；writable 必须按“该 follower 是否为最新 controller”分别计算。
+func (s *officialTerminalAttachStream) enqueueState(info transport.OfficialWebTerminalInfo, writable bool) {
+	raw, err := json.Marshal(transport.OfficialTerminalStateFrame{Type: "state", Info: info, Writable: writable})
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	s.pending = append(s.pending, raw)
+	s.mu.Unlock()
+}
+
+// takePending 取走一帧待发控制帧（没有就返回 nil）。
 func (s *officialTerminalAttachStream) takePending() json.RawMessage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -669,14 +717,26 @@ func (s *officialTerminalAttachStream) Next(ctx context.Context) (json.RawMessag
 		return ack, false, nil
 	}
 	if !s.opened {
+		// 官方 BrowserTerminal.attach：新 follower 成为唯一 controller，旧
+		// follower 仍收输出但立即收到 writable=false 的 state。
+		if err := s.api.claimTerminalController(s.sessionID, s.id, s); err != nil {
+			return nil, false, transport.OfficialJobTerminalStreamFault("terminal.attach", err)
+		}
+		s.mu.Lock()
+		s.claimed = true
+		s.mu.Unlock()
 		snap, err := s.api.TerminalAttach(ctx, s.sessionID, s.id)
 		if err != nil {
 			return nil, false, transport.OfficialJobTerminalStreamFault("terminal.attach", err)
 		}
 		s.offset = snap.Sequence
 		s.opened = true
+		snap.Writable = snap.Writable && s.api.canControlTerminal(s.sessionID, s.id, s)
+		// wire sequence 与 PTY 字节 offset 是两个域。官方客户端要求后续 output
+		// 严格 snapshot.sequence+1；本 attach 从 0 起，字节游标只用于读增量。
+		s.sequence = 0
 		raw, merr := json.Marshal(transport.OfficialTerminalSnapshotFrame{
-			Type: "snapshot", Sequence: snap.Sequence, Screen: snap.Screen,
+			Type: "snapshot", Sequence: s.sequence, Screen: snap.Screen,
 			Info: snap.Info, Writable: snap.Writable,
 		})
 		if merr != nil {
@@ -694,8 +754,9 @@ func (s *officialTerminalAttachStream) Next(ctx context.Context) (json.RawMessag
 		}
 		if out.Output != "" {
 			s.offset = int64(out.Next)
+			s.sequence++
 			raw, merr := json.Marshal(transport.OfficialTerminalOutputFrame{
-				Type: "output", Sequence: int64(out.Next), Data: out.Output,
+				Type: "output", Sequence: s.sequence, Data: out.Output,
 			})
 			if merr != nil {
 				return nil, false, &transport.OfficialStreamFault{
@@ -711,6 +772,7 @@ func (s *officialTerminalAttachStream) Next(ctx context.Context) (json.RawMessag
 				return nil, false, transport.OfficialJobTerminalStreamFault("terminal.attach", ierr)
 			}
 			s.finished = true
+			s.releaseController()
 			raw, merr := json.Marshal(transport.OfficialTerminalStateFrame{
 				Type: "state", Info: info, Writable: false,
 			})
@@ -725,9 +787,11 @@ func (s *officialTerminalAttachStream) Next(ctx context.Context) (json.RawMessag
 		select {
 		case <-ctx.Done():
 			s.finished = true
+			s.releaseController()
 			return nil, true, nil
 		case <-s.closed:
 			s.finished = true
+			s.releaseController()
 			return nil, true, nil
 		case <-s.ticker.C:
 		}
@@ -995,24 +1059,32 @@ func openOfficialTerminalRetainStream(api *officialPTYTerminalAPI, sessionID, id
 // 单次**总量**仍受 officialTerminalMaxInputBytes（environment.maxInputBytes）约束：
 // 分片只改变"怎么写"，不放宽协议声明的上限。
 func inputOfficialTerminal(api *officialPTYTerminalAPI, sessionID, id, data string) error {
+	_, err := inputOfficialTerminalTyped(api, sessionID, id, data, false)
+	return err
+}
+
+func inputOfficialTerminalTyped(api *officialPTYTerminalAPI, sessionID, id, data string, typed bool) (bool, error) {
 	if api == nil {
-		return fmt.Errorf("%w: %s", transport.ErrJTOfficialTerminalGone, id)
+		return false, fmt.Errorf("%w: %s", transport.ErrJTOfficialTerminalGone, id)
 	}
 	if len(data) > officialTerminalMaxInputBytes {
-		return fmt.Errorf("%w: 单次写入 %d 字节超过上限 %d",
+		return false, fmt.Errorf("%w: 单次写入 %d 字节超过上限 %d",
 			transport.ErrJTOfficialBadParam, len(data), officialTerminalMaxInputBytes)
 	}
+	controlChanged := false
 	for len(data) > 0 {
 		n := officialTerminalInputChunkBytes
 		if n > len(data) {
 			n = len(data)
 		}
-		if err := api.Input(sessionID, id, data[:n]); err != nil {
-			return err
+		changed, err := api.InputTyped(sessionID, id, data[:n], typed)
+		if err != nil {
+			return controlChanged, err
 		}
+		controlChanged = controlChanged || changed
 		data = data[n:]
 	}
-	return nil
+	return controlChanged, nil
 }
 
 // lookupTerminalByID 按只有 id 的口径找官方 PTY 终端。

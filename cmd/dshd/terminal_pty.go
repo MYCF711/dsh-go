@@ -13,8 +13,8 @@ package main
 //	官方字段                真来源
 //	info.cols/rows          CreatePseudoConsole 的初始尺寸
 //	attach.screen           有界滚动缓冲的尾部（含 ANSI 原始字节）
-//	attach.sequence         绝对已写字节数（单调）
-//	attach.writable         进程还活着
+//	attach.sequence         每个 attach 内连续的输出帧序号（不是字节数）
+//	attach.writable         进程活着且该 attach 是最新 controller
 //	environment.scrollback  真实保留行数（默认 1000，官方默认值）
 //	info.exitCode           真实进程退出码（不是编的 0）
 //	TerminalInput.resize    ResizePseudoConsole（真的作用在子进程上）
@@ -103,6 +103,10 @@ type officialPTYEntry struct {
 	state    string
 	exitCode *int
 	errMsg   string
+	// origin/control 对应 rc.2 WebTerminalInfo。用户 create 固定 user/user；
+	// typed=true 的真实人员输入按官方语义把 agent 控制权永久交给 user。
+	origin  string
+	control string
 
 	closed   bool
 	retained bool
@@ -111,6 +115,10 @@ type officialPTYEntry struct {
 
 	createdAt time.Time
 	lastUsed  time.Time
+	// controller 是最新 attach（官方单一 writable follower）；attachments 让
+	// 接管/改名/typed 控制权变化能广播给所有仍在观看的连接。
+	controller  *officialTerminalAttachStream
+	attachments map[*officialTerminalAttachStream]struct{}
 
 	// ---- 官方 api-terminal-controller 的四条生命周期预算（见下方 sweep/closeEntry）----
 	idle          bool          // 最近一次 sweep 判定的闲置状态（activityPollIntervalMs）
@@ -562,7 +570,7 @@ func (a *officialPTYTerminalAPI) TerminalCreate(ctx context.Context, sessionID s
 		title: defaultTerminalTitle(shell, id),
 		shell: transport.OfficialTerminalShell{Path: shell.Path, Args: shell.Args, Name: shell.Name},
 		cwd:   cwd, cols: cols, rows: rows,
-		term: term, state: "running",
+		term: term, state: "running", origin: "user", control: "user",
 		createdAt: now, lastUsed: now,
 	}
 	a.mu.Lock()
@@ -688,11 +696,15 @@ func (a *officialPTYTerminalAPI) TerminalRename(ctx context.Context, sessionID, 
 	if title == "" {
 		return fmt.Errorf("%w: title 不能为空", transport.ErrJTOfficialBadParam)
 	}
+	if utf8.RuneCountInString(title) > 120 {
+		return fmt.Errorf("%w: title 最多 120 个字符（官方 terminalTitle）", transport.ErrJTOfficialBadParam)
+	}
 	a.mu.Lock()
 	entry.title = title
 	entry.lastUsed = a.now()
 	a.mu.Unlock()
 	a.persistSession(sessionID)
+	a.broadcastTerminalState(sessionID, id)
 	return nil
 }
 
@@ -717,27 +729,43 @@ func (a *officialPTYTerminalAPI) TerminalRetain(ctx context.Context, sessionID, 
 	return nil
 }
 
-// Input 把一段输入写进真 PTY（官方 attach 的 uplink write）。
+// Input 把一段输入写进真 PTY（非人员手势；对应官方 typed 缺省）。
 func (a *officialPTYTerminalAPI) Input(sessionID, id, data string) error {
+	_, err := a.InputTyped(sessionID, id, data, false)
+	return err
+}
+
+// InputTyped 实现官方 TerminalInput.write.typed：真实人员首次输入会让 agent
+// 终端的控制权永久转为 user。返回 controlChanged 供 attach 先广播 state 再 ack。
+func (a *officialPTYTerminalAPI) InputTyped(sessionID, id, data string, typed bool) (controlChanged bool, err error) {
 	entry, err := a.lookup(sessionID, id, "terminal.input")
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(data) > officialTerminalMaxInputBytes {
-		return fmt.Errorf("%w: 单次写入 %d 字节超过上限 %d",
+		return false, fmt.Errorf("%w: 单次写入 %d 字节超过上限 %d",
 			transport.ErrJTOfficialBadParam, len(data), officialTerminalMaxInputBytes)
 	}
 	a.mu.Lock()
 	term := entry.term
 	entry.lastUsed = a.now()
+	if typed && entry.control == "agent" {
+		entry.control = "user"
+		controlChanged = true
+	}
 	a.mu.Unlock()
 	if term == nil {
-		return fmt.Errorf("%w: %s 已不在运行", transport.ErrJTOfficialTerminalGone, id)
+		return false, fmt.Errorf("%w: %s 已不在运行", transport.ErrJTOfficialTerminalGone, id)
+	}
+	if controlChanged {
+		// 官方在写字节之前发布 control=user，保证后续 agent 输入不能再排在
+		// 人员按键之后；所有 follower（含 HTTP 上行对应的 attach）都收到 state。
+		a.broadcastTerminalState(sessionID, id)
 	}
 	if err := term.Input(data); err != nil {
-		return mapPTYError(err)
+		return false, mapPTYError(err)
 	}
-	return nil
+	return controlChanged, nil
 }
 
 // Output 是增量读（游标是绝对字节偏移，来自真实滚动缓冲）。
@@ -786,6 +814,7 @@ func (a *officialPTYTerminalAPI) Resize(sessionID, id string, cols, rows int) er
 	a.mu.Lock()
 	entry.cols, entry.rows = cols, rows
 	a.mu.Unlock()
+	a.broadcastTerminalState(sessionID, id)
 	return nil
 }
 
@@ -809,6 +838,112 @@ func (a *officialPTYTerminalAPI) lookup(sessionID, id, method string) (*official
 		return nil, fmt.Errorf("%w: %s", transport.ErrJTOfficialTerminalGone, id)
 	}
 	return entry, nil
+}
+
+// claimTerminalController 实现官方「最后一个 attach 取得输入权」。新连接的
+// snapshot 自己携带 writable=true；旧连接收到 state{writable:false} 后只读，
+// 输出流不断开。关闭旧连接不会抢走更新连接的控制权。
+func (a *officialPTYTerminalAPI) claimTerminalController(sessionID, id string, stream *officialTerminalAttachStream) error {
+	entry, err := a.lookup(sessionID, id, "terminal.attach")
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	if entry.attachments == nil {
+		entry.attachments = map[*officialTerminalAttachStream]struct{}{}
+	}
+	var previous []*officialTerminalAttachStream
+	if entry.controller != stream {
+		for old := range entry.attachments {
+			previous = append(previous, old)
+		}
+	}
+	entry.controller = stream
+	entry.attachments[stream] = struct{}{}
+	info := entry.info()
+	a.mu.Unlock()
+	for _, old := range previous {
+		old.enqueueState(info, false)
+	}
+	return nil
+}
+
+func (a *officialPTYTerminalAPI) releaseTerminalController(sessionID, id string, stream *officialTerminalAttachStream) {
+	a.mu.Lock()
+	key := sessionID + "\x00" + id
+	entry := a.entries[key]
+	if entry == nil {
+		// close 会先把身份移进 closedEntries；迟到的 HTTP/mux Close 仍要摘掉
+		// 自己，不能因主 roster 已删除而泄漏 attachment。
+		entry = a.closedEntries[key]
+	}
+	if entry == nil {
+		a.mu.Unlock()
+		return
+	}
+	delete(entry.attachments, stream)
+	changed := entry.controller == stream
+	if changed {
+		entry.controller = nil
+	}
+	info := entry.info()
+	var remaining []*officialTerminalAttachStream
+	if changed {
+		for other := range entry.attachments {
+			remaining = append(remaining, other)
+		}
+	}
+	a.mu.Unlock()
+	if changed {
+		for _, other := range remaining {
+			other.enqueueState(info, false)
+		}
+	}
+}
+
+// terminalControlRefusal 对应官方 requireController：not-running 优先于
+// read-only；最新 attach 且终端仍在运行时才返回空串。
+func (a *officialPTYTerminalAPI) terminalControlRefusal(sessionID, id string, stream *officialTerminalAttachStream) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	entry := a.entries[sessionID+"\x00"+id]
+	if entry == nil || entry.term == nil || entry.state != "running" {
+		return "not-running"
+	}
+	if entry.controller != stream {
+		return "read-only"
+	}
+	return ""
+}
+
+func (a *officialPTYTerminalAPI) canControlTerminal(sessionID, id string, stream *officialTerminalAttachStream) bool {
+	return a.terminalControlRefusal(sessionID, id, stream) == ""
+}
+
+// broadcastTerminalState 把 rename/typed 等真实元数据变化推给所有 follower。
+func (a *officialPTYTerminalAPI) broadcastTerminalState(sessionID, id string) {
+	a.mu.Lock()
+	entry := a.entries[sessionID+"\x00"+id]
+	if entry == nil {
+		a.mu.Unlock()
+		return
+	}
+	info := entry.info()
+	running := entry.state == "running"
+	var targets []struct {
+		stream   *officialTerminalAttachStream
+		writable bool
+	}
+	for stream := range entry.attachments {
+		targets = append(targets, struct {
+			stream   *officialTerminalAttachStream
+			writable bool
+		}{stream: stream, writable: running && stream == entry.controller})
+	}
+	a.mu.Unlock()
+	for _, target := range targets {
+		target.stream.enqueueState(info, target.writable)
+	}
 }
 
 // screenOf 取有界输出尾部与真实序号（已写出的字节数，单调）。
@@ -858,6 +993,8 @@ func (e *officialPTYEntry) info() transport.OfficialWebTerminalInfo {
 		State:    e.state,
 		ExitCode: e.exitCode,
 		Error:    e.errMsg,
+		Origin:   e.origin,
+		Control:  e.control,
 	}
 	if info.Shell.Args == nil {
 		info.Shell.Args = []string{}
@@ -959,7 +1096,7 @@ func (a *officialPTYTerminalAPI) loadLayouts() {
 				id: t.ID, sessionID: layout.SessionID, title: t.Title,
 				shell: transport.OfficialTerminalShell{Path: t.ShellPath, Args: t.ShellArgs, Name: t.ShellName},
 				cwd:   t.Cwd, cols: t.Cols, rows: t.Rows,
-				state: "exited", retained: true, screen: t.Screen,
+				state: "exited", retained: true, screen: t.Screen, origin: "user", control: "user",
 				errMsg:    "宿主重启：PTY 进程已不存在（保留的是布局与屏幕尾部）",
 				createdAt: time.UnixMilli(t.SavedAt), lastUsed: time.UnixMilli(t.SavedAt),
 			}

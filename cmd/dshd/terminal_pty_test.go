@@ -152,6 +152,28 @@ func tailOf(s string, n int) string {
 	return s[len(s)-n:]
 }
 
+func TestPTYTerminalRenameTitleContract(t *testing.T) {
+	cwd := t.TempDir()
+	api, _ := newTestPTYTerminalAPI(t, cwd)
+	ctx := context.Background()
+	if _, err := api.TerminalCreate(ctx, "sess-a", transport.OfficialTerminalCreateRequest{ID: "t1", Cols: 80, Rows: 24}); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.TerminalRename(ctx, "sess-a", "t1", " \t "); !errors.Is(err, transport.ErrJTOfficialBadParam) {
+		t.Fatalf("空白标题必须拒绝：%v", err)
+	}
+	if err := api.TerminalRename(ctx, "sess-a", "t1", strings.Repeat("界", 121)); !errors.Is(err, transport.ErrJTOfficialBadParam) {
+		t.Fatalf("超过官方 120 字符的标题必须拒绝：%v", err)
+	}
+	want := strings.Repeat("界", 120)
+	if err := api.TerminalRename(ctx, "sess-a", "t1", "  "+want+"  "); err != nil {
+		t.Fatalf("trim 后恰好 120 字符应接受：%v", err)
+	}
+	if got := api.entryOf("sess-a", "t1").info().Title; got != want {
+		t.Fatalf("标题应 trim 后原样保存：got=%q", got)
+	}
+}
+
 // TestPTYTerminalCrossSession 证明 A/B 会话互不串（与既有管道实现同一套围栏语义）。
 func TestPTYTerminalCrossSession(t *testing.T) {
 	cwd := t.TempDir()

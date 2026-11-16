@@ -167,9 +167,13 @@ type Options struct {
 	GoalPause  func(sessionID string) error
 	GoalResume func(sessionID string) error
 	// 长连接终端。nil = 这个宿主不给终端（回 501）。
-	TerminalOpen   func(cwd string) (string, error)
-	TerminalInput  func(id, data string) error
-	TerminalOutput func(id string, since int) (TerminalOutput, error)
+	TerminalOpen  func(cwd string) (string, error)
+	TerminalInput func(id, data string) error
+	// TerminalInputScoped 是官方用户终端的 HTTP 上行入口：sessionId 限定归属，
+	// typed 对应 TerminalInput.write.typed（真实人员输入可把 agent 控制权交给用户）。
+	// nil 时只保留旧的按 id 写入；带 sessionId 的请求不会猜一个终端。
+	TerminalInputScoped func(sessionID, id, data string, typed bool) error
+	TerminalOutput      func(id string, since int) (TerminalOutput, error)
 	// FSRead 读一个文件；路径解析、大小上限、越界检查都在宿主那边。
 	FSRead func(path string) (FSContent, error)
 	// FSWrite 写一个文件；宿主注入。
