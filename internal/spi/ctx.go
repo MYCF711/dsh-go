@@ -28,6 +28,7 @@ const (
 	subDispatchKey  ctxKey = 2
 	toolDeadlineKey ctxKey = 3
 	eventSinkKey    ctxKey = 4
+	toolCallIDKey   ctxKey = 5
 	// subagentActivationKey 不在这里：它是服务键（kernel.Key），
 	// 只在装配期由模块相遇，不走每轮 ctx。
 )
@@ -47,6 +48,25 @@ func SessionFrom(ctx context.Context) string {
 	}
 	s, _ := ctx.Value(sessionKey).(string)
 	return s
+}
+
+// WithToolCallID 把模型这次工具调用的稳定 callId 绑到 ctx 上。工具需要把
+// 后续回答/审批重新关联到 durable tool/call 时使用它（例如 plan-review）。
+func WithToolCallID(ctx context.Context, id string) context.Context {
+	if ctx == nil || id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, toolCallIDKey, id)
+}
+
+// ToolCallIDFrom 取这次工具调用的 callId；直接执行 Tool.Exec 的调用方若没
+// 经过 agent.Loop，就必须显式绑定，否则需要该身份的工具会响亮失败。
+func ToolCallIDFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(toolCallIDKey).(string)
+	return id
 }
 
 // RunIDKey 是"这一次 run 的标识"，与 SessionID 分开：

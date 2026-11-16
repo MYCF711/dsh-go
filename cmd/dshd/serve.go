@@ -943,6 +943,7 @@ func cmdServe(args []string) error {
 	// `subagents.interruptByUser`（Team 分派面），两边共享同一份进程内状态。
 	agentAPICore := newAgentOfficialAPICore(agentOfficialDeps{
 		home: *home, goals: goalOverrides, journals: journals, src: src,
+		attachments:    attachments,
 		sandboxPresets: sandboxPresets, sandboxStore: sandboxStore,
 		// 活体注册表是**同一份**：subagents.* 的委派 epoch（subagent/start|end）
 		// 与排轮判据读的是同一张表，不是第二份影子状态。nil 时那些方法明确

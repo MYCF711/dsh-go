@@ -217,13 +217,13 @@
   },
   {
     "name": "exit_plan_mode",
-    "description": "提交方案并退出计划模式。把 markdown 方案正文放进 plan；提交后本轮结束、控制权交回人。",
+    "description": "Present a markdown plan for review. On approval, leave plan mode; otherwise keep planning.",
     "parameters": {
       "type": "object",
       "properties": {
         "plan": {
           "type": "string",
-          "description": "方案正文（markdown）"
+          "description": "The complete plan, as markdown, starting with a # heading that names it."
         }
       },
       "required": [

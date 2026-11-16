@@ -177,6 +177,9 @@ func (l *Loop) execToolCall(ctx context.Context, call llm.ToolCall) (out toolOut
 			out = toolOutcome{panicVal: r}
 		}
 	}()
+	// callId 是模型/会话/UI 共用的调用身份；需要续答的工具（plan-review）
+	// 必须拿到它，不能在结果落盘后再猜一个相关 id。
+	ctx = spi.WithToolCallID(ctx, call.ID)
 	res, err := l.Runner.Run(ctx, call.Function.Name, json.RawMessage(call.Function.Arguments))
 	if err == nil && ctx.Err() != nil {
 		// 取消压过成功（官方 lib/pipeline.js:478-484、toolAbortedResult:927-944：

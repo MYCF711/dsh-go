@@ -152,8 +152,9 @@ func TestExecutesAndDestructiveAlsoBlocked(t *testing.T) {
 	}
 }
 
-// TestExitRestoresWriteTools：exit_plan_mode 之后恢复写权限——否则计划模式成了单向门。
-func TestExitRestoresWriteTools(t *testing.T) {
+// TestExitSubmissionKeepsWriteToolsBlocked：提交方案只是请人审，不是批准。
+// 只有后续 Approve 或 /plan off 才退出；在审批到达前写工具仍必须被拦住。
+func TestExitSubmissionKeepsWriteToolsBlocked(t *testing.T) {
 	writeFake := &fakeTool{name: "fake_write", caps: spi.Caps{Writes: true}}
 	run, _ := newHost(t, writeFake)
 
@@ -167,15 +168,15 @@ func TestExitRestoresWriteTools(t *testing.T) {
 		json.RawMessage(`{"plan":"# 方案\n1. 改 registry\n2. 补测试"}`)); err != nil {
 		t.Fatalf("exit_plan_mode 不该失败: %v", err)
 	}
-	if Active(testSession) {
-		t.Fatal("exit 之后状态必须是 inactive")
+	if !Active(testSession) {
+		t.Fatal("提交待审时状态必须仍是 active；只有 Approve 才退出")
 	}
 	res, err := run.Run(testCtx(), "fake_write", json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("退出计划模式后写类工具必须恢复: %v（Hint %q）", err, res.Hint)
+	if err == nil {
+		t.Fatalf("待审期间写类工具必须仍被拦截: %+v", res)
 	}
-	if writeFake.ran != 1 {
-		t.Fatalf("应该真的跑了一次，实际 %d", writeFake.ran)
+	if writeFake.ran != 0 {
+		t.Fatalf("待审期间写工具不应执行，实际 %d 次", writeFake.ran)
 	}
 }
 
@@ -201,6 +202,37 @@ func TestExitPlanModeStops(t *testing.T) {
 	}
 	if !strings.Contains(res.Text, "第一步") {
 		t.Fatalf("方案正文必须原样交给模型与人，实际 %q", res.Text)
+	}
+	if !Active(testSession) {
+		t.Fatal("Stop 只是停轮待答，不得顺手清 active")
+	}
+	if res.View == nil || !res.View.AwaitingAnswer || len(res.View.Questions) != 1 {
+		t.Fatalf("结果 view 必须带一个待答问题：%+v", res.View)
+	}
+	q := res.View.Questions[0]
+	if q.ID != ReviewID || q.Header != "Plan review" ||
+		q.Question != "Approve this plan and leave plan mode?" || q.Detail != res.Text {
+		t.Fatalf("plan-review 问题形状不符合官方常量：%+v", q)
+	}
+	if len(q.Options) != 2 || q.Options[0].Label != ApproveLabel || q.Options[1].Label != KeepPlanningLabel {
+		t.Fatalf("选项必须是 Approve / Keep planning：%+v", q.Options)
+	}
+	if q.Options[0].Description != "Leave plan mode; the plan is carried out from the next step." ||
+		q.Options[1].Description != "Stay in plan mode; feedback goes back to the model." {
+		t.Fatalf("选项描述必须使用官方原文：%+v", q.Options)
+	}
+	if q.Intent == nil || q.Intent.Kind != "plan-review" || q.Intent.Approve != ApproveLabel ||
+		q.Intent.CallID != testCallID {
+		t.Fatalf("intent 必须绑定真实 callId：%+v", q.Intent)
+	}
+	wire, err := json.Marshal(res.View)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"questions"`, `"awaiting_answer":true`, `"detail":"# 方案\n- 第一步"`, `"callId":"` + testCallID + `"`} {
+		if !strings.Contains(string(wire), want) {
+			t.Fatalf("持久 view 缺少 %s：%s", want, wire)
+		}
 	}
 }
 
@@ -279,7 +311,12 @@ func resetForTest() {
 	state.mu.Unlock()
 }
 
-// testCtx 带上会话 id：闸门按会话判，没会话就等于另一个会话。
-func testCtx() context.Context { return spi.WithSession(context.Background(), testSession) }
+// testCtx 带上会话与真实工具调用 id：闸门按会话判，plan-review 按 callId 续答。
+func testCtx() context.Context {
+	return spi.WithToolCallID(spi.WithSession(context.Background(), testSession), testCallID)
+}
 
-const testSession = "s1"
+const (
+	testSession = "s1"
+	testCallID  = "call-plan-review"
+)

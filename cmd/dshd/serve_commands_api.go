@@ -13,11 +13,11 @@ package main
 // 内置命令注册进去。官方 builtin 是
 // `goal / plan / feedback / compact / permission / export`（见
 // `@deepseek-ai/dsh-commands/lib/types/builtin.js`）；本宿主里
-// `plan`（计划模式）、`permission`（权限预设）、`export`（导出）各自缺一条
-// 真实依赖（见 RESULT 的"未接线"），**不注册它们**——注册一个只会回
-// "未实现"的命令，等于让客户端以为能用。
+// `permission`（权限预设）与 `export`（导出）仍缺真实依赖，**不注册它们**。
+// `plan` 已接上真实状态文件与 durable plan/mode；本轮实现 /plan off，/plan on
+// 及 message steer 会响亮回未实现，不伪造成功。
 //
-// `compact` 原先也在这个名单里；现在它接上了宿主**真实**的压缩路径
+// `compact` 原先也在未接线名单里；现在它接上了宿主**真实**的压缩路径
 // （`compactauto.go` 的 `autoCompact`，与 CLI `dshd session compact --auto`、
 // Transport `session.compact` 同一段代码），所以在这里注册。
 //
@@ -26,14 +26,16 @@ package main
 //	/help                列出当前注册表（真实发现）
 //	/goal                显示本会话的 goal（真实 goal 存储）
 //	/feedback <正文>     记录一条会话反馈（真实 durable 写入）
+//	/plan off            退出计划模式（状态文件 + durable plan/mode）
 //	/compact             压一次会话历史（官方 base 插件 #65，真实压缩路径）
 //
-// 四条都不是"复制 TUI 命令表"：它们的 handler 走的是宿主真实状态。
+// 它们都不是"复制 TUI 命令表"：handler 走的是宿主真实状态。
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +43,7 @@ import (
 	"dshgo/codecs/v4"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
+	planmod "dshgo/modules/tool/plan"
 )
 
 // 宿主内置命令名（不带斜杠，官方字符集是小写）。
@@ -49,6 +52,15 @@ const (
 	hostCommandGoal     = "goal"
 	hostCommandFeedback = "feedback"
 	hostCommandCompact  = "compact"
+	hostCommandPlan     = "plan"
+)
+
+// 官方 @deepseek-ai/dsh-plan-mode 的 /plan 注册形状（src/index.ts:231-278）。
+const (
+	officialPlanDefinitionID       = "@deepseek-ai/dsh-plan-mode"
+	officialPlanDescription        = "Enter or leave plan mode"
+	officialPlanInputHint          = "[off|message]"
+	officialPlanOffWithAttachments = "Attachments cannot accompany /plan off."
 )
 
 // 官方 base 插件 #65 `command-compact` 的身份与文案。
@@ -108,6 +120,7 @@ func newHostCommandRegistry(api *agentOfficialAPI) (*transport.OfficialCommandRe
 		Lifecycle: func(sessionID, eventType string, data any) (int64, error) {
 			return appendCommandLifecycle(api.deps.src, sessionID, eventType, data)
 		},
+		Attachments: api.deps.attachments,
 	})
 
 	if _, err := registry.Register(transport.OfficialCommandDefinition{
@@ -130,9 +143,17 @@ func newHostCommandRegistry(api *agentOfficialAPI) (*transport.OfficialCommandRe
 		return nil, err
 	}
 
-	// /compact：官方 base 插件 #65。definitionId / description 用官方原件里的
-	// 原值（不是自己起的名），客户端才认得出这条就是官方的 /compact；
-	// 也**不声明 input**——官方那条没有 input，声明了反而会接受官方不接受的附件。
+	planAttachments := true
+	if _, err := registry.Register(transport.OfficialCommandDefinition{
+		DefinitionID: officialPlanDefinitionID,
+		Name:         hostCommandPlan,
+		Description:  officialPlanDescription,
+		Input:        &transport.OfficialCommandInput{Hint: officialPlanInputHint, Attachments: &planAttachments},
+		Handler:      api.commandPlan,
+	}); err != nil {
+		return nil, err
+	}
+
 	if _, err := registry.Register(transport.OfficialCommandDefinition{
 		DefinitionID: officialCompactDefinitionID,
 		Name:         hostCommandCompact,
@@ -228,6 +249,68 @@ func (a *agentOfficialAPI) commandFeedback(_ context.Context, inv transport.Offi
 		return transport.OfficialCommandOutcome{Kind: "error", Text: "记录反馈失败：" + code}, nil
 	}
 	return transport.OfficialCommandOutcome{Kind: "success", Text: "已记录这条反馈。"}, nil
+}
+
+// commandPlan 实现官方 /plan off。其它输入属于 /plan on（可能还要 steer
+// message/attachments）；本轮没有假 steer，明确回未实现而不是成功。
+func (a *agentOfficialAPI) commandPlan(_ context.Context, inv transport.OfficialCommandInvocation) (transport.OfficialCommandOutcome, error) {
+	message := strings.TrimSpace(inv.RawInput)
+	if message == "off" && len(inv.Attachments) > 0 {
+		return transport.OfficialCommandOutcome{Kind: "error", Text: officialPlanOffWithAttachments}, nil
+	}
+	if message != "off" {
+		return transport.OfficialCommandOutcome{}, fmt.Errorf(
+			"%w: /plan on 与 /plan <message> 尚未接真实 steer；本轮只实现 /plan off",
+			transport.ErrOfficialNotImplemented)
+	}
+	changed, err := a.commitPlanMode(inv.SessionID, false)
+	if err != nil {
+		return transport.OfficialCommandOutcome{}, err
+	}
+	if !changed {
+		return transport.OfficialCommandOutcome{Kind: "success", Text: "Plan mode is already inactive."}, nil
+	}
+	return transport.OfficialCommandOutcome{Kind: "success", Text: "Plan mode off."}, nil
+}
+
+// commitPlanMode 把工具子进程使用的状态文件与 v4 plan/mode 当成一次迁移。
+// 状态先写、日志后写；日志失败会回滚状态，回滚也失败则两个错误一起上抛。
+// 同值切换是真实 no-op：重复 /plan off 不伪造第二条 plan/mode。
+func (a *agentOfficialAPI) commitPlanMode(sessionID string, active bool) (bool, error) {
+	if a == nil || a.deps.home == "" {
+		return false, fmt.Errorf("计划模式没有真实 home，拒绝写内存替身")
+	}
+	a.planModeMu.Lock()
+	defer a.planModeMu.Unlock()
+	dir := filepath.Join(a.deps.home, "state", "plan")
+	previousState, err := planmod.ActiveAt(dir, sessionID)
+	if err != nil {
+		return false, fmt.Errorf("读取计划模式状态失败: %w", err)
+	}
+	current := previousState
+	if !current {
+		// 打开官方/旧会话时可能只有 durable plan/mode，没有宿主状态文件。
+		// 此时也不能凭“文件不存在”误报 already inactive。
+		events, err := a.agentReadEvents(sessionID)
+		if err != nil {
+			return false, fmt.Errorf("读取计划模式投影失败: %w", err)
+		}
+		current = session.ProjectPlan(events).Active
+	}
+	if current == active {
+		return false, nil
+	}
+	if err := planmod.SetActiveAt(dir, sessionID, active); err != nil {
+		return false, fmt.Errorf("写计划模式状态失败: %w", err)
+	}
+	if _, err := appendCommandLifecycle(a.deps.src, sessionID, "plan/mode", map[string]any{"active": active}); err != nil {
+		rollbackErr := planmod.SetActiveAt(dir, sessionID, previousState)
+		if rollbackErr != nil {
+			return false, fmt.Errorf("追加 plan/mode 失败: %v；状态回滚也失败: %w", err, rollbackErr)
+		}
+		return false, fmt.Errorf("追加 plan/mode 失败，状态已回滚: %w", err)
+	}
+	return true, nil
 }
 
 // commandCompact 跑一次**真实**的手动压缩（官方 base 插件 #65 `command-compact`）。

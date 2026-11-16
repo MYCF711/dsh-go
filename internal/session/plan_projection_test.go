@@ -11,8 +11,8 @@ import (
 //
 // 官方 wire 只有两个位（`src/types.ts:21-24`），但它们的**来源**有四条：
 // `plan/mode` 事件、`/plan` 命令的 run/done 配对、`request/header`（只影响
-// 状态里的 activeAtLastHeader，不上线），以及宿主自己的两个计划模式工具
-// （`enter_plan_mode` / `exit_plan_mode`）的 tool/call + tool/result 配对。
+// 状态里的 activeAtLastHeader，不上线），以及宿主 enter_plan_mode 的
+// tool/call + tool/result 配对。exit_plan_mode 只提交评审，退出只认 plan/mode。
 // 这里逐条钉住：active 什么时候动、pending 什么时候为真、失败为什么不改状态。
 
 func planEvent(t *testing.T, seq int64, kind, data string) v4.Event {
@@ -135,23 +135,55 @@ func TestPlanProjectionFold(t *testing.T) {
 			want: PlanProjection{Active: false, Pending: false},
 		},
 		{
-			// 已在计划模式里提交方案：active 还是 true，但目标已经翻成 false，
-			// 于是 pending 为真、生效目标 = !active = false。这正是"正在离开"。
-			name: "exit_plan_mode 在飞 → pending 且仍 active",
+			// exit 的 call 只是提交评审，不是一次模式切换；pending 也不表示“等人批”。
+			name: "exit_plan_mode 在飞 → 仍 active 且不 pending",
 			events: []v4.Event{
 				planToolsCall(t, 0, "c1", ToolEnterPlanMode),
 				planToolOK(t, 1, "c1"),
 				planToolsCall(t, 2, "c2", ToolExitPlanMode),
 			},
-			want: PlanProjection{Active: true, Pending: true},
+			want: PlanProjection{Active: true, Pending: false},
 		},
 		{
-			name: "exit_plan_mode 落地 → 退出",
+			name: "exit_plan_mode 提交完成 → 仍 active",
 			events: []v4.Event{
 				planToolsCall(t, 0, "c1", ToolEnterPlanMode),
 				planToolOK(t, 1, "c1"),
 				planToolsCall(t, 2, "c2", ToolExitPlanMode),
 				planToolOK(t, 3, "c2"),
+			},
+			want: PlanProjection{Active: true, Pending: false},
+		},
+		{
+			name: "plan review Keep planning 的用户反馈 → 仍 active",
+			events: []v4.Event{
+				planToolsCall(t, 0, "c1", ToolEnterPlanMode),
+				planToolOK(t, 1, "c1"),
+				planToolsCall(t, 2, "c2", ToolExitPlanMode),
+				planToolOK(t, 3, "c2"),
+				planEvent(t, 4, "user/message", `{"content":[{"type":"text","text":"Keep planning"}]}`),
+			},
+			want: PlanProjection{Active: true, Pending: false},
+		},
+		{
+			name: "plan review Approve 的 plan/mode → 退出",
+			events: []v4.Event{
+				planToolsCall(t, 0, "c1", ToolEnterPlanMode),
+				planToolOK(t, 1, "c1"),
+				planToolsCall(t, 2, "c2", ToolExitPlanMode),
+				planToolOK(t, 3, "c2"),
+				planEvent(t, 4, "plan/mode", `{"active":false}`),
+			},
+			want: PlanProjection{Active: false, Pending: false},
+		},
+		{
+			name: "/plan off 的 plan/mode 与 command/done → false 且不 pending",
+			events: []v4.Event{
+				planToolsCall(t, 0, "c1", ToolEnterPlanMode),
+				planToolOK(t, 1, "c1"),
+				planEvent(t, 2, "command/run", `{"name":"plan","args":"off","commandId":"k-off"}`),
+				planEvent(t, 3, "plan/mode", `{"active":false}`),
+				planEvent(t, 4, "command/done", `{"commandId":"k-off","kind":"success"}`),
 			},
 			want: PlanProjection{Active: false, Pending: false},
 		},

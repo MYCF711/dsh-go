@@ -24,8 +24,6 @@ package main
 // timeout 入参。数值是真的，来源不同。
 
 import (
-	"encoding/json"
-	"fmt"
 	"time"
 
 	"dshgo/internal/transport"
@@ -36,34 +34,11 @@ import (
 // 判据与 `agentOpenQuestionCall` 完全同源（同一个 durable 日志、同一条
 // `tool/result`），区别只是这里还要那一帧上的时间。
 func (a *agentOfficialAPI) agentQuestionAskedAt(sessionID, callID string) (time.Time, error) {
-	events, err := a.agentReadEvents(sessionID)
+	question, err := a.agentQuestionCall(sessionID, callID)
 	if err != nil {
 		return time.Time{}, err
 	}
-	calls := indexToolCalls(events)
-	info, isAsk := calls[callID]
-	if !isAsk || info.name != "ask_user_question" {
-		return time.Time{}, fmt.Errorf("%w: 会话 %s 里没有 callId=%s 的 ask_user_question 调用",
-			transport.ErrOfficialBadInput, sessionID, callID)
-	}
-	for _, ev := range events {
-		if ev.Type != "tool/result" {
-			continue
-		}
-		var d struct {
-			Message struct {
-				ToolCallID string `json:"toolCallId"`
-			} `json:"message"`
-		}
-		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			continue
-		}
-		if d.Message.ToolCallID == callID {
-			return time.UnixMilli(ev.Time), nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("%w: callId=%s 还没有 tool/result（问题还没问出来）",
-		transport.ErrOfficialBadInput, callID)
+	return question.askedAt, nil
 }
 
 // ensureQuestionWaits 懒建等待表（宿主对象被复用，表只造一次）。
