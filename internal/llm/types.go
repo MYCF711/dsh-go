@@ -159,6 +159,14 @@ type StreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+// SessionEventAppender 是会话 canonical 日志的最小写口。
+//
+// 定义在 llm 层是为了避免 import cycle：session 已经依赖 llm 的 Message，
+// llm 不能反向 import session。session.Log 天然满足这个接口。
+type SessionEventAppender interface {
+	Append(eventType string, data any) error
+}
+
 // Request 是一条 chat/completions 请求。
 //
 // model / messages / tools / stream 是标准字段，永远按原样发出；StreamOptions /
@@ -184,6 +192,13 @@ type Request struct {
 	// Stop 是停用词序列。空（nil 或 len==0）= 不带这个字段；非空时按给定顺序
 	// 原样发出，不合并、不改写——它就是硬闸，改写等于换了一道闸。
 	Stop []string `json:"stop,omitempty"`
+
+	// 以下三项是请求身份与宿主写口，不是 wire 字段。SessionID/Purpose 供
+	// provider 扩展决定贡献资格；SessionLog 让 accept 在持有 live writer 的
+	// agent/ACP 路径上直接追加 canonical 事件，而不是再抢一次会话写锁。
+	SessionID  string               `json:"-"`
+	Purpose    string               `json:"-"`
+	SessionLog SessionEventAppender `json:"-"`
 }
 
 // Usage 是 token 用量。

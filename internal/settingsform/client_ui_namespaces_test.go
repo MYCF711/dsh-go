@@ -8,9 +8,9 @@ package settingsform
 //   - 每个字段都能写、能读回、能重置，默认值与官方逐字相同；
 //   - 非法值（枚举外 / 越界 / 坏 BCP47 / 类型错 / 未知字段）一律四字段错误，
 //     且一次都不写盘；
-//   - 声明了"开"但本仓没有后端的两个开关（session-log-deepseek.enabled=true /
-//     session-telemetry-otel.mode=FEEDBACK_ONLY）一律 not_implemented（501），
-//     不静默成功；真实生效值（false / DISABLED）能保存；
+//   - session-log-deepseek.enabled=true/false 都能保存；仍无后端的
+//     session-telemetry-otel.mode=FEEDBACK_ONLY 回 not_implemented（501），
+//     不静默成功；真实生效值 DISABLED 能保存；
 //   - transcriptView 的旧值 normal/expanded 读作 detailed、不在选项里、不回写。
 
 import (
@@ -212,13 +212,9 @@ func loadOfficialClientUIEnvelopes(t *testing.T) map[string]any {
 // `volatileForm(Config).toJSON()`（dsh-settings/src/index.ts:338+src/schema.ts:16-60），
 // 夹具 testdata/client-ui-official-envelopes.json 由官方 rc.2 node_modules 的
 // **编译产物**实跑得到（脚本 tmp/GO8-RC2/_ns/dump-official.mjs），所以这条
-// 断言等于"宿主发布的 schema 就是官方发布的 schema"，只有一处已登记的例外：
-//
-//   - `session-log-deepseek.enabled` 的 `meta.default` 官方是 true
-//     （index.ts:60）、本仓是 false（没有 deepseekLlmApiExtensions 上传方，
-//     见 client_ui_schema.go 文件头第 3 条）。例外由
-//     applyKnownClientUIDefaultDivergence 显式施加，并且它先断言"官方夹具里确实
-//     还是 true"——夹具若被人悄悄改成 false，这条会先红，例外不会烂在这儿。
+// 断言等于"宿主发布的 schema 就是官方发布的 schema"。
+// applyKnownClientUIDefaultDivergence 仍先核对官方 session-log 默认值确实为 true；
+// 本仓上传方接通后两边相同，该兼容钩子不再制造差异。
 func TestClientUINamespaceSchemasMatchOfficialDescribeEnvelopes(t *testing.T) {
 	official := loadOfficialClientUIEnvelopes(t)
 	service, _ := clientUIService(t)
@@ -252,12 +248,9 @@ func TestClientUINamespaceSchemasMatchOfficialDescribeEnvelopes(t *testing.T) {
 	}
 }
 
-// applyKnownClientUIDefaultDivergence 只对**已登记的一处**有意差异改夹具副本。
-//
-// 现在只有一处：`session-log-deepseek.enabled` 的 `meta.default`。官方是 true，
-// 本仓是 false——因为官方那个 true 的前提（deepseekLlmApiExtensions wire 上传方）
-// 在本仓不存在，声明 true 就是静默成功。**夹具文件本身不动**（它是官方实跑
-// 产物，改了就成了假证据），差异在比较前显式施加，且先断言官方那边确实还是 true。
+// applyKnownClientUIDefaultDivergence 是历史兼容钩子：先断言官方夹具里的
+// session-log 默认仍是 true，再应用本仓默认值。当前两边都是 true；
+// **夹具文件本身不动**（它是官方实跑产物，改了就成了假证据）。
 func applyKnownClientUIDefaultDivergence(t *testing.T, ns string, envelope any) {
 	t.Helper()
 	if ns != NamespaceSessionLogDeepSeek {
@@ -450,9 +443,7 @@ func TestClientUINamespaceDescribeDefaultsMatchOfficial(t *testing.T) {
 			FieldBusyEnter: DefaultBusyEnter,
 		}, map[string]bool{FieldBusyEnter: true}},
 		// 官方 dsh-session-log-deepseek/src/index.ts:59-61
-		// `enabled: z.boolean().default(true).volatile()`；**本仓默认 false**
-		// （官方那个 true 的前提是 deepseekLlmApiExtensions 上传方，本仓没有该
-		// sink，理由见 client_ui_schema.go 文件头第 3 条）。
+		// `enabled: z.boolean().default(true).volatile()`；上传方由 internal/sessionlog 提供。
 		{NamespaceSessionLogDeepSeek, map[string]any{
 			FieldSessionLogEnabled: DefaultSessionLogEnabled,
 		}, map[string]bool{FieldSessionLogEnabled: true}},
@@ -728,11 +719,9 @@ func TestClientUINamespacesRejectIllegalValues(t *testing.T) {
 // 4b. 声明"开"但没有后端 → not_implemented（501），一个字节都不写
 // ---------------------------------------------------------------------------
 
-// TestClientUINamespacesNotImplementedSwitchesAreLoud 钉住这两个**能力上不做**
+// TestClientUINamespacesNotImplementedSwitchesAreLoud 钉住仍**能力上不做**
 // 的开关不许被静默接受：
 //
-//   - `session-log-deepseek.enabled = true`：本仓没有把增量会话日志挂成
-//     `dsh_session_log` 顶层的上传方（官方 index.ts:44/:196-261）；
 //   - `session-telemetry-otel.mode = FEEDBACK_ONLY`：本仓没有 OTel SDK 的
 //     byte-bounded reporter 与 on-demand coordinator（官方 index.ts:190/:219-222）。
 //
@@ -747,11 +736,6 @@ func TestClientUINamespacesNotImplementedSwitchesAreLoud(t *testing.T) {
 		value    any
 		keywords []string
 	}{
-		{
-			"会话日志开关没有上传方",
-			NamespaceSessionLogDeepSeek, FieldSessionLogEnabled, true,
-			[]string{"dsh_session_log", "deepseekLlmApiExtensions", "delivery-accepted"},
-		},
 		{
 			"会话遥测没有 OTel 后端",
 			NamespaceSessionTelemetryOTel, FieldSessionTelemetryMode, SessionTelemetryModeFeedbackOnly,
@@ -797,15 +781,22 @@ func TestClientUINamespacesNotImplementedSwitchesAreLoud(t *testing.T) {
 		}
 	}
 
-	// 官方 `settings/update` 的合并路径走同一条校验：present=true 也一样 501，
-	// 且不写半个字段。
+	// session-log-deepseek 的上传方已经接通：settings/update 写 true 必须
+	// 真实落盘并读回 true，不再把官方默认值误报成 not_implemented。
 	service, store := clientUIService(t)
 	if _, err := service.Update(NamespaceSessionLogDeepSeek,
-		map[string]any{FieldSessionLogEnabled: true}, nil); AsError(err).Code != "not_implemented" {
-		t.Fatalf("settings/update 路径必须同样 not_implemented，实际 %v", err)
+		map[string]any{FieldSessionLogEnabled: true}, nil); err != nil {
+		t.Fatalf("session-log-deepseek.enabled=true 必须保存成功: %v", err)
 	}
-	if len(store.writes) != 0 {
-		t.Fatalf("settings/update 拒绝后不许写盘：%v", store.writes)
+	if len(store.writes) != 1 {
+		t.Fatalf("enabled=true 必须真的写入 store：%v", store.writes)
+	}
+	updated, err := service.Get(NamespaceSessionLogDeepSeek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Fields[0].Current; got != true {
+		t.Fatalf("enabled=true 写入后 current=%v", got)
 	}
 
 	// 真实生效值必须能保存：enabled=false / mode=DISABLED 都写成功且读回一致。

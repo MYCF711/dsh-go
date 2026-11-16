@@ -400,8 +400,8 @@ func TestOfficialSettingsUpdateFailLoudOnUnknownFieldAndBadType(t *testing.T) {
 }
 
 // TestOfficialSettingsUpdateNotImplementedIs501 钉住官方 settings/update 出口上的
-// **能力缺失**错误：settingsform 的语义校验（session-log-deepseek.enabled=true /
-// session-telemetry-otel.mode=FEEDBACK_ONLY）经 officialSettingsError 翻译后必须
+// **能力缺失**错误：settingsform 的语义校验（session-telemetry-otel.mode=FEEDBACK_ONLY）
+// 经 officialSettingsError 翻译后必须
 // 是 `code=not_implemented` + HTTP 501，而不是自相矛盾的
 // `code=bad_request` + `status=501`。message 要点出缺什么，hint 要给下一步。
 func TestOfficialSettingsUpdateNotImplementedIs501(t *testing.T) {
@@ -423,11 +423,6 @@ func TestOfficialSettingsUpdateNotImplementedIs501(t *testing.T) {
 		patch    map[string]any
 		keywords []string
 	}{
-		{
-			"会话日志开关缺上传方", "session-log-deepseek",
-			map[string]any{"enabled": true},
-			[]string{"dsh_session_log", "deepseekLlmApiExtensions"},
-		},
 		{
 			"会话遥测缺 OTel 后端", "session-telemetry-otel",
 			map[string]any{"mode": "FEEDBACK_ONLY"},
@@ -462,6 +457,16 @@ func TestOfficialSettingsUpdateNotImplementedIs501(t *testing.T) {
 	}
 	if got := officialResult(t, out)["value"].(map[string]any)["enabled"]; got != false {
 		t.Fatalf("写入后 value.enabled=%v，want false", got)
+	}
+	// 上传方已接通：官方默认 true 也必须经同一出口真实保存，而非 501。
+	code, out = callOfficialSettings(t, srv, "settings.update", map[string]any{
+		"ns": "session-log-deepseek", "patch": map[string]any{"enabled": true},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("enabled=true 必须成功，状态 %d：%v", code, out)
+	}
+	if got := officialResult(t, out)["value"].(map[string]any)["enabled"]; got != true {
+		t.Fatalf("写入后 value.enabled=%v，want true", got)
 	}
 }
 

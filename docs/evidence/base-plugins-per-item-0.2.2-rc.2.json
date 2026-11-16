@@ -11,9 +11,9 @@
   },
   "counts": {
     "total": 99,
-    "IMPLEMENTED": 86,
+    "IMPLEMENTED": 87,
     "PARTIAL": 9,
-    "MISSING": 4
+    "MISSING": 3
   },
   "stale_register": {
     "total_stale_entries": 149,
@@ -95,8 +95,8 @@
       "id": "deepseek-llm-api-extensions",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`internal/llm/provider.go:233` `RegisterRequestExtension`、`:273` `PrepareRequestExtensions`、`:217` `requestExtensions`（空 map）",
-      "note": "仍 PARTIAL：dsh_session_log 的所有者随 #8 锁定（partial-rest §1）"
+      "evidence": "`internal/llm/provider.go` 注册/prepare/accept；`cmd/dshd/serve_llm_extensions.go` 与 `internal/sessionlog/deepseek.go` 两类真实字段所有者",
+      "note": "仍 PARTIAL：dsh_session_log 已随 #8 接通；sessionId→standing preset 的独立 Loader 树并集尚无 agentPresets 服务"
     },
     {
       "id": "session",
@@ -106,17 +106,22 @@
     },
     {
       "id": "session-log-deepseek",
-      "status": "MISSING",
+      "status": "IMPLEMENTED",
       "audit_status": "MISSING",
-      "evidence": "grep `dsh_session_log` 生产代码 = **0**（只有 `internal/llm/provider.go:21` 注释与 `internal/llm/provider_test.go:191`）；`internal/session/known_events.go:79` 只登记事件类型；`internal/settingsform/client_ui_schema.go:66` 只读 `enabled` 开关",
+      "evidence": "`internal/sessionlog/deepseek.go`（prepare/acceptedThrough/maxBytes/RegisterExclusion）、`cmd/dshd/serve_session_log.go`（每请求读 enabled/maxBytes 并注册两条 DeepSeek 路由）、`internal/llm/client.go`（2xx 后 SSE 前 accept）；真实 v4 + httptest 覆盖字段、分包、排除、重试、乱序/重启/fork/超限",
       "changes": [
         {
           "from": "DEFERRED",
           "to": "MISSING",
           "source": "audit-4.2"
+        },
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
         }
       ],
-      "note": "结构化不做：settings 命名空间 enabled=true 回 501（missing7 §1）"
+      "note": "字段 owner 与 canonical delivery-accepted 水位已接线；enabled 默认 true、maxBytes 默认 8 MiB"
     },
     {
       "id": "typert",

@@ -46,27 +46,16 @@ import "net/http"
 //
 // 本文件的 envelope 与官方 node_modules 实跑结果逐字段一致
 // （复现脚本：tmp/GO8-RC2/_ns/dump-schema.mjs → _ns/official-envelopes.json）。
-// 唯一例外是下面第 3 条那一个默认值节点（enabled 的 meta.default）。
+// session-log-deepseek.enabled 的官方默认值与真实消费方现已同时接通。
 //
-// # 与官方有意不同的四处（都是"更严 / 更诚实"，并已在报告里登记）
+// # 与官方有意不同的三处（都是"更严 / 更诚实"，并已在报告里登记）
 //
 //  1. `transcriptView` 的官方 schema 是 `.loose()`：坏值在官方会被**静默退回
 //     默认**。本宿主沿用既有 fail-loud 政策（不许静默截断），坏值直接四字段
 //     错误；schema 仍按官方发布 `meta.loose=true`（形状不失真）。
 //  2. 未知字段：官方 object 解析会把额外键原样带过；本宿主拒绝
 //     （`unknown_field`），与 `llm` 命名空间既有行为一致。
-//  3. `session-log-deepseek.enabled` 的默认值是 **false**，官方
-//     `dsh-session-log-deepseek/src/index.ts:60` 是 `z.boolean().default(true)`。
-//     官方那个 `true` 的前提是官方宿主里有 wire 上传方：该插件
-//     `inject: ['deepseekLlmApiExtensions','sessions']`（:44）并
-//     `register('dsh_session_log', {prepare, accept})`（:196-261，accept 在 2xx
-//     后写 `session-log-deepseek/delivery-accepted` 水位），只在官方 DeepSeek
-//     Messages 路由上生效。本仓 `internal/llm` 的 `ResolveProvider` 走的是用户
-//     自配的 OpenAI 兼容端点（默认 magpie 网关），没有这个扩展点，也没有任何
-//     消费 `dsh_session_log` 的生产代码——声明 `true` 而无人消费就是**静默成功**。
-//     因此默认取 `false`（= 本仓真实生效值），并且显式声明 `true` 会被
-//     `not_implemented`（501）拒绝，见 checkSessionLogDeepSeekEnabled。
-//  4. `session-telemetry-otel.mode` 的默认值是 **DISABLED**，官方
+//  3. `session-telemetry-otel.mode` 的默认值是 **DISABLED**，官方
 //     `dsh-session-telemetry-otel/src/index.ts:37/:117` 是 `FEEDBACK_ONLY`。
 //     官方那个默认前提是 OTel SDK 管线：`inject = ['sessions','otel']`（:145）、
 //     `ctx.otel.createSessionLogReporter(...)`（:190）与 on-demand 的
@@ -171,17 +160,9 @@ const (
 	// DefaultBusyEnter 是 submission-settings.ts:19
 	// （DEFAULT_BUSY_ENTER_BEHAVIOR = 'queue'）。
 	DefaultBusyEnter = "queue"
-	// DefaultSessionLogEnabled 是 `session-log-deepseek.enabled` 的**本仓**默认值。
-	//
-	// 与官方不同：官方 `dsh-session-log-deepseek/src/index.ts:60` 是
-	// `z.boolean().default(true)`，前提是官方宿主里存在 wire 上传方
-	// （:44 `inject: ['deepseekLlmApiExtensions','sessions']` +
-	// :196-261 `register('dsh_session_log', {prepare, accept})`，只在官方
-	// DeepSeek Messages 路由上）。本仓没有这个 sink（生产代码里
-	// `grep -rn "dsh_session_log" --include=*.go` 为 0 处消费），声明 true 就是
-	// 静默成功，所以这里的真实生效默认值是 false；显式写 true 由
-	// checkSessionLogDeepSeekEnabled 以 501 not_implemented 拒绝。
-	DefaultSessionLogEnabled = false
+	// DefaultSessionLogEnabled 与官方 index.ts:60 一致。真实上传方是
+	// internal/sessionlog；每次 prepare 重读这个开关，因此默认 true 不再是空声明。
+	DefaultSessionLogEnabled = true
 	// DefaultSessionTelemetryMode 是 `session-telemetry-otel.mode` 的**本仓**默认值。
 	//
 	// 与官方不同：官方 index.ts:37/:117 是 `FEEDBACK_ONLY`，前提是 OTel SDK 的
@@ -769,18 +750,14 @@ func clientUINamespaces() []uiNamespace {
 		},
 		{
 			// 官方 `dsh-session-log-deepseek/src/index.ts:59-61`：
-			// `session-log-deepseek` 声明 `enabled: z.boolean().default(true).volatile()`。
-			// **本仓默认 false**（不是照抄官方）——官方 true 的前提是 wire 上传方，
-			// 本仓没有那个 sink；理由与证据见文件头第 3 条与
-			// DefaultSessionLogEnabled 的注释。`enabled: true` 会被 check 拒绝，
-			// 只有 `false` 能保存成功（那是本仓真实生效值）。
+			// `enabled: z.boolean().default(true).volatile()`。cmd/dshd 的
+			// sessionLogConfigLoader 每次 prepare 重读同一持久命名空间。
 			ns:    NamespaceSessionLogDeepSeek,
 			title: "Session log upload",
 			fields: []uiField{
 				uiBooleanField(FieldSessionLogEnabled, DefaultSessionLogEnabled),
 			},
-			base:  map[string]any{FieldSessionLogEnabled: DefaultSessionLogEnabled},
-			check: checkSessionLogDeepSeekEnabled,
+			base: map[string]any{FieldSessionLogEnabled: DefaultSessionLogEnabled},
 		},
 		{
 			// 官方 `dsh-session-telemetry-otel/src/index.ts:116-122` 的 Config
@@ -818,31 +795,6 @@ func clientUINamespaces() []uiNamespace {
 			},
 			check: checkSessionTelemetryOTelMode,
 		},
-	}
-}
-
-// checkSessionLogDeepSeekEnabled 拒绝 `session-log-deepseek.enabled = true`。
-//
-// 这不是"参数不合法"（值本身合法、也是官方默认），而是**本宿主没有消费方**：
-// 声明 true 只会让界面显示"已上传"，而增量会话日志一个字节都不会出去。四字段
-// 里的 message 要能让人直接看出缺的是哪一块，hint 给可执行的下一步。
-func checkSessionLogDeepSeekEnabled(value map[string]any) error {
-	enabled, ok := value[FieldSessionLogEnabled].(bool)
-	if !ok || !enabled {
-		return nil
-	}
-	return &Error{
-		Code: "not_implemented",
-		Message: "session-log-deepseek.enabled=true 在本宿主不可用：缺的是把增量会话日志作为 " +
-			"`dsh_session_log` 顶层字段挂到官方 DeepSeek 请求上的**上传方**——官方 " +
-			"dsh-session-log-deepseek/src/index.ts:44 `inject: ['deepseekLlmApiExtensions','sessions']`、" +
-			":196-261 `register('dsh_session_log', {prepare, accept})`，accept 在 2xx 后写 " +
-			"`session-log-deepseek/delivery-accepted` 水位；该扩展点只存在于官方 DeepSeek Messages 路由，" +
-			"而本仓 internal/llm 的 ResolveProvider 走的是用户自配的 OpenAI 兼容端点（默认 magpie 网关），" +
-			"没有任何代码消费 dsh_session_log。",
-		Hint:      "保持 enabled=false（本仓默认，也是真实生效值）；确实要上传会话日志时改用官方宿主。",
-		Retryable: false,
-		Status:    http.StatusNotImplemented,
 	}
 }
 

@@ -260,8 +260,8 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	//
 	// 原来的 11 个：model / permission / llm + 官方客户端与插件的 7 个 UI 命名空间
 	// （locale / ui-theme / ui-chat / ui-settings / ui-conversation /
-	// session-log-deepseek / session-telemetry-otel，后两者是本仓"能力上不做但
-	// 结构化拒绝"的开关：声明 true / FEEDBACK_ONLY 会得到 501）+ 官方
+	// session-log-deepseek / session-telemetry-otel；前者已有真实上传方，
+	// 后者的 FEEDBACK_ONLY 仍因没有 OTel 后端得到 501）+ 官方
 	// agent-preset registry 的 selectedDefault。
 	// `llm` 是 0.2.2-rc.2 加的（发布 `providers.<route>.retryPolicy` 节点，
 	// 官方 UI 的"重试条件/次数/等待时间"就是从这里读候选与正下界的）；这些 UI

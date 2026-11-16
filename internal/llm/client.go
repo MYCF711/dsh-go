@@ -191,7 +191,7 @@ func (c *Client) Stream(ctx context.Context, req Request, onEvent func(Event) er
 			}
 			continue
 		}
-		if resp.StatusCode == http.StatusOK {
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 			// 记下被这个端点真正接受过的形状：同一端点的后续请求（包括别的
 			// Client 实例）不必再吃一次 400。
 			rememberCapability(c.BaseURL, req.Model, profile)

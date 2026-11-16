@@ -515,6 +515,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		Stop:        r.sampling.Stop,
 		System:      r.system,
 		SessionID:   sessionID,
+		SessionLog:  logw,
 		MaxSteps:    r.steps,
 		Emit:        sink,
 		// 官方 context.runtimeContext.perStep：每步重投影运行时事实（不重组提示）。

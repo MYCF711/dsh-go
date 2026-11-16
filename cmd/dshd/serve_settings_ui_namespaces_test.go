@@ -8,8 +8,8 @@ package main
 // 这里钉的是"接上之后真的能读能写"：describe 报全、form.set 写进去、
 // form.get 读回来、非法值四字段拒绝、form.reset 回官方默认、
 // transcriptView 旧值读作 detailed 且不回写、重启（新 Store）后值还在；
-// 以及两个**本仓没有后端**的开关（session-log-deepseek.enabled=true /
-// session-telemetry-otel.mode=FEEDBACK_ONLY）在真实 HTTP 面回 501 + 四字段 error。
+// session-log-deepseek.enabled 双向保存；仍无后端的
+// session-telemetry-otel.mode=FEEDBACK_ONLY 在真实 HTTP 面回 501 + 四字段 error。
 
 import (
 	"bytes"
@@ -175,10 +175,8 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 		{"ui-settings", map[string]any{"enabled": true}},
 		// 2026-11-13 补：官方 submission-settings.ts:19 DEFAULT_BUSY_ENTER_BEHAVIOR='queue'。
 		{"ui-conversation", map[string]any{"busyEnter": "queue"}},
-		// 官方 dsh-session-log-deepseek/src/index.ts:60 是 `z.boolean().default(true)`，
-		// 但本仓**没有上传方**（没有 deepseekLlmApiExtensions 扩展点），声明 true
-		// 就是静默成功，所以真实生效默认值是 false（理由见 client_ui_schema.go 头）。
-		{"session-log-deepseek", map[string]any{"enabled": false}},
+		// 官方 dsh-session-log-deepseek/src/index.ts:60；上传方已接 internal/sessionlog。
+		{"session-log-deepseek", map[string]any{"enabled": true}},
 		// 本仓 2026-11-14 新增：官方 dsh-session-telemetry-otel 的开关
 		// （官方 index.ts:116-122 + 部署值 cordis.patch.yml:218-231）。
 		// 默认 mode 是 DISABLED（本仓没有 OTel SDK），FEEDBACK_ONLY 由 501 拒绝。
@@ -373,10 +371,10 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 	}
 }
 
-// TestSettingsFormNotImplementedSwitchesOverHTTP：两个"能力上不做"的开关在真实
+// TestSettingsFormNotImplementedSwitchesOverHTTP：仍"能力上不做"的遥测开关在真实
 // L1 HTTP 面上必须回 **501 + 四字段 error**（code=not_implemented，message 点名
 // 叫出缺什么，hint 非空且可执行，retryable=false），并在 settings.form.set 与
-// settings.mutate 两条路径上一致；而两个**真实生效值**必须保存成功。
+// settings.mutate 两条路径上一致；session-log 与遥测的真实生效值必须保存成功。
 func TestSettingsFormNotImplementedSwitchesOverHTTP(t *testing.T) {
 	home := t.TempDir()
 	store, _, _ := openSettingsStores(t, home, "base-model", "allow")
@@ -387,11 +385,6 @@ func TestSettingsFormNotImplementedSwitchesOverHTTP(t *testing.T) {
 		params   map[string]any
 		keywords []string
 	}{
-		{
-			"会话日志开关缺上传方",
-			map[string]any{"ns": "session-log-deepseek", "path": []string{"enabled"}, "value": true},
-			[]string{"dsh_session_log", "deepseekLlmApiExtensions"},
-		},
 		{
 			"会话遥测缺 OTel 后端",
 			map[string]any{"ns": "session-telemetry-otel", "path": []string{"mode"}, "value": "FEEDBACK_ONLY"},
@@ -434,8 +427,8 @@ func TestSettingsFormNotImplementedSwitchesOverHTTP(t *testing.T) {
 
 	// settings.mutate 与 settings.form.set 必须是同一条翻译（不是只有一条接通）。
 	mutateStatus, mutatePayload := postSettingsL1(t, handler, "settings.mutate", map[string]any{
-		"ns":  "session-log-deepseek",
-		"ops": []map[string]any{{"op": "set", "path": []string{"enabled"}, "value": true}},
+		"ns":  "session-telemetry-otel",
+		"ops": []map[string]any{{"op": "set", "path": []string{"mode"}, "value": "FEEDBACK_ONLY"}},
 	})
 	if mutateStatus != http.StatusNotImplemented {
 		t.Fatalf("settings.mutate 也必须 501，实际 %d：%v", mutateStatus, mutatePayload)
@@ -445,14 +438,14 @@ func TestSettingsFormNotImplementedSwitchesOverHTTP(t *testing.T) {
 		t.Fatalf("settings.mutate 的 code=%v，want not_implemented：%v", mutateErr["code"], mutatePayload)
 	}
 
-	// 三次拒绝之后磁盘上不许留下这半个值。
+	// 两次拒绝之后磁盘上不许留下这半个值。
 	if raw, err := os.ReadFile(filepath.Join(home, "state", "settings-namespaces.json")); err == nil {
 		if bytes.Contains(raw, []byte("session-log-deepseek")) || bytes.Contains(raw, []byte("session-telemetry-otel")) {
 			t.Fatalf("被拒绝的值不许落盘：%s", raw)
 		}
 	}
 
-	// 真实生效值：enabled=false 保存成功，describe 的 default/current 都是 false。
+	// 真实生效值：enabled=false 保存成功；default 仍是官方 true，current 是 false。
 	status, payload := postSettingsL1(t, handler, "settings.form.set", map[string]any{
 		"ns": "session-log-deepseek", "path": []string{"enabled"}, "value": false,
 	})
@@ -466,9 +459,21 @@ func TestSettingsFormNotImplementedSwitchesOverHTTP(t *testing.T) {
 	}
 	section := settingsL1Section(t, described, "session-log-deepseek")
 	for _, key := range []string{"current", "default"} {
-		if got := settingsL1Field(t, section, "enabled")[key]; got != false {
-			t.Fatalf("session-log-deepseek.enabled 的 %s=%v，want false", key, got)
+		want := key == "default"
+		if got := settingsL1Field(t, section, "enabled")[key]; got != want {
+			t.Fatalf("session-log-deepseek.enabled 的 %s=%v，want %t", key, got, want)
 		}
+	}
+	status, payload = postSettingsL1(t, handler, "settings.form.set", map[string]any{
+		"ns": "session-log-deepseek", "path": []string{"enabled"}, "value": true,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("enabled=true 已有真实上传方，必须 200，实际 %d：%v", status, payload)
+	}
+	described = settingsL1Describe(t, handler)
+	section = settingsL1Section(t, described, "session-log-deepseek")
+	if got := settingsL1Field(t, section, "enabled")["current"]; got != true {
+		t.Fatalf("enabled=true 写入后 current=%v", got)
 	}
 
 	// 真实生效值：mode=DISABLED 保存成功，且四字段都在 describe 里。
