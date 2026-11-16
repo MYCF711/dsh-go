@@ -253,19 +253,19 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "internal/account/account.go:903",
+      "site": "internal/account/account.go:929",
       "what": "Watch 的订阅清理观察者",
       "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.subs, ch)+close(ch)；订阅表 s.subs 的每次读写都在 s.mu 下（Watch 入口 869-875、notifyLocked 同锁），每条 ch 只有一个 watcher，close 只可能一次",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/account/account.go:931",
+      "site": "internal/account/account.go:957",
       "what": "WatchUpdates 的推送循环（rc.2 官方 AccountUpdate 流）",
       "sync": "读过：ch 由这条独占并 defer close(ch)；sub.pending 与 s.updates 表的读写全在 s.mu 下（登记 896-899、取帧 915-918、退出 909-911/925-927）；唤醒走 sub.wake（容量 1，只装『有新帧』信号），合并口径见 observeUpdates",
       "verified_at": "2026-11-12"
     },
     {
-      "site": "internal/account/account.go:980",
+      "site": "internal/account/account.go:1006",
       "what": "WatchExpiry 的订阅清理观察者",
       "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.expiry, ch)+close(ch)；发布侧 expireLocked 的 for ch := range s.expiry 是非阻塞 send、同样在 s.mu 下（同一把锁 ⇒ 不会 send on closed）；首帧在起 goroutine 之前就发完了",
       "verified_at": "2026-11-12"

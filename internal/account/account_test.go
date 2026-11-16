@@ -19,6 +19,9 @@ func newLocal(t *testing.T, home string, lease time.Duration) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 必须在 t.TempDir() 清理前停掉定时器：它到点会写 state/，
+	// 和 RemoveAll 撞在一起时 Windows 报 `unlinkat ...\state`。
+	t.Cleanup(s.Close)
 	return s
 }
 
