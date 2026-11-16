@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -29,6 +28,11 @@ const (
 type Executor struct {
 	GitPath string
 	Timeout time.Duration
+	// MaxUntrackedFiles 对应官方 maxUntrackedFiles；零值使用官方默认 100。
+	MaxUntrackedFiles int
+	// TestPaths / InterfacePaths 是官方 Forge 配置的评审分层 glob，先于内置规则。
+	TestPaths      []string
+	InterfacePaths []string
 }
 
 func NewExecutor() *Executor { return &Executor{GitPath: "git", Timeout: defaultGitTimeout} }
@@ -145,6 +149,8 @@ type DiffFile struct {
 	Additions    int     `json:"additions"`
 	Deletions    int     `json:"deletions"`
 	Hunks        []Hunk  `json:"hunks"`
+	Layer        string  `json:"layer"`
+	Digest       string  `json:"digest"`
 }
 
 type LocalDiff struct {
@@ -153,162 +159,23 @@ type LocalDiff struct {
 	Omitted int        `json:"omitted"`
 }
 
-type Scope struct{ Kind string }
-
-// LocalDiff 执行真实 git diff；untracked 文件最后追加，oversized 依 maxDiffBytes。
-func (e *Executor) LocalDiff(ctx context.Context, dir string, scope Scope, maxDiffBytes int) (LocalDiff, error) {
-	root, err := e.Root(ctx, dir)
-	if err != nil {
-		return LocalDiff{}, err
-	}
-	if maxDiffBytes <= 0 {
-		maxDiffBytes = 1 << 20
-	}
-	args := []string{"diff", "--no-color", "--no-ext-diff", "-M", "-U3", "--numstat", "-z"}
-	baseArgs := []string{"diff", "--no-color", "--no-ext-diff", "-M", "-U3"}
-	switch scope.Kind {
-	case "branch":
-		base, err := e.branchBase(ctx, root)
-		if err != nil {
-			return LocalDiff{}, err
-		}
-		args = append(args, base+"...HEAD")
-		baseArgs = append(baseArgs, base+"...HEAD")
-	case "staged":
-		args = append(args, "--cached")
-		baseArgs = append(baseArgs, "--cached")
-	case "unstaged":
-		// default
-	case "uncommitted":
-		args = append(args, "HEAD")
-		baseArgs = append(baseArgs, "HEAD")
-	default:
-		return LocalDiff{}, fmt.Errorf("forge: 未知 diff scope %q", scope.Kind)
-	}
-	numOut, _, err := e.run(ctx, root, args...)
-	if err != nil {
-		return LocalDiff{}, err
-	}
-	stat := parseNumstat(numOut)
-	patchOut, _, err := e.run(ctx, root, baseArgs...)
-	if err != nil {
-		return LocalDiff{}, err
-	}
-	patch := parsePatch(patchOut)
-	files := make([]DiffFile, 0, len(stat))
-	for _, s := range stat {
-		f := DiffFile{Path: s.path, PreviousPath: s.previous, Status: s.status, Binary: s.binary, Additions: s.add, Deletions: s.del}
-		if p, ok := patch[f.Path]; ok {
-			f.Hunks = p
-		}
-		files = append(files, f)
-	}
-	untrackedOut, _, err := e.run(ctx, root, "ls-files", "--others", "--exclude-standard", "-z")
-	if err == nil {
-		for _, name := range splitZ(untrackedOut) {
-			if name == "" {
-				continue
-			}
-			if fi, statErr := statFile(root, name); statErr == nil && fi > int64(maxDiffBytes) {
-				files = append(files, DiffFile{Path: name, Status: "added", Untracked: true, Oversized: true})
-			} else {
-				files = append(files, DiffFile{Path: name, Status: "added", Untracked: true})
-			}
-		}
-	}
-	var basePtr *string
-	if scope.Kind == "branch" {
-		if b, err := e.branchBase(ctx, root); err == nil {
-			basePtr = &b
-		}
-	}
-	return LocalDiff{Base: basePtr, Files: files}, nil
+// CommitRange 是官方 branch scope 的 commits:{from,to}，两端必须是完整对象名。
+type CommitRange struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
-func (e *Executor) branchBase(ctx context.Context, root string) (string, error) {
-	out, _, err := e.run(ctx, root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-	if err == nil && strings.TrimSpace(out) != "" {
-		return strings.TrimSpace(out), nil
-	}
-	short, _, err := e.run(ctx, root, "rev-parse", "--short", "HEAD")
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(short), nil
+// Scope 是官方 ForgeLocalScope。Base / Commits 仅在 branch 范围使用。
+type Scope struct {
+	Kind    string
+	Base    *string
+	Commits *CommitRange
 }
 
-type numstat struct {
-	path, status string
-	previous     *string
-	add, del     int
-	binary       bool
-}
+func splitZ(s string) []string { return strings.Split(s, "\x00") }
 
-func parseNumstat(out string) []numstat {
-	parts := splitZ(out)
-	var res []numstat
-	for i := 0; i < len(parts); i++ {
-		line := parts[i]
-		if line == "" {
-			continue
-		}
-		fields := strings.SplitN(line, "\t", 3)
-		if len(fields) != 3 {
-			continue
-		}
-		n := numstat{path: fields[2]}
-		if fields[0] == "-" || fields[1] == "-" {
-			n.binary = true
-		} else {
-			n.add, _ = strconv.Atoi(fields[0])
-			n.del, _ = strconv.Atoi(fields[1])
-		}
-		n.status = "modified"
-		res = append(res, n)
-	}
-	return res
-}
-
-func parsePatch(out string) map[string][]Hunk {
-	files := map[string][]Hunk{}
-	var current string
-	var h *Hunk
-	for _, line := range strings.Split(out, "\n") {
-		switch {
-		case strings.HasPrefix(line, "diff --git "):
-			current = ""
-			h = nil
-			fields := strings.Fields(line)
-			if len(fields) >= 4 {
-				current = strings.TrimPrefix(fields[3], "b/")
-			}
-		case strings.HasPrefix(line, "+++ b/"):
-			current = strings.TrimPrefix(line, "+++ b/")
-		case strings.HasPrefix(line, "@@"):
-			h = &Hunk{}
-			// @@ -oldStart,oldLines +newStart,newLines @@
-			fmt.Sscanf(line, "@@ -%d,%d +%d,%d @@", &h.OldStart, &h.OldLines, &h.NewStart, &h.NewLines)
-			files[current] = append(files[current], *h)
-		case h != nil && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") || strings.HasPrefix(line, "\\")):
-			h.Lines = append(h.Lines, line)
-			files[current][len(files[current])-1] = *h
-		}
-	}
-	return files
-}
-
-func splitZ(s string) []string { return strings.Split(s, string(rune(0))) }
-
-func statFile(root, name string) (int64, error) {
-	fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(name)))
-	if err != nil {
-		return 0, err
-	}
-	return fi.Size(), nil
-}
-
-// LocalText 返回 scope 下的真实文件文本：staged 用索引，branch 用 HEAD，
-// uncommitted/unstaged 用工作树；路径必须在仓库内。
+// LocalText 返回 scope 下的真实文件文本：staged 用索引，branch 选定提交范围用
+// commits.to，其余（包括完整 branch 范围）读工作树；路径必须在仓库内。
 func (e *Executor) LocalText(ctx context.Context, dir string, scope Scope, path string) (string, error) {
 	root, err := e.Root(ctx, dir)
 	if err != nil {
@@ -323,8 +190,15 @@ func (e *Executor) LocalText(ctx context.Context, dir string, scope Scope, path 
 		out, _, err := e.run(ctx, root, "show", ":"+clean)
 		return out, err
 	case "branch":
-		out, _, err := e.run(ctx, root, "show", "HEAD:"+clean)
-		return out, err
+		if scope.Commits != nil {
+			if !fullCommit(scope.Commits.To) {
+				return "", ErrCommitsMissing
+			}
+			out, _, err := e.run(ctx, root, "show", scope.Commits.To+":"+clean)
+			return out, err
+		}
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(clean)))
+		return string(data), err
 	case "uncommitted", "unstaged":
 		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(clean)))
 		return string(data), err

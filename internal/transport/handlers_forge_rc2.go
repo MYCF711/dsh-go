@@ -323,6 +323,8 @@ const (
 	CodeForgeNotACheckout         = "forgePanel/not-a-checkout"
 	CodeForgeBaseMissing          = "forgePanel/base-missing"
 	CodeForgeNoForkPoint          = "forgePanel/no-fork-point"
+	CodeForgeCommitsMissing       = "forgePanel/commits-missing"
+	CodeForgeCommitsNotLinear     = "forgePanel/commits-not-linear"
 	CodeForgeWorktreesUnavailable = "forgePanel/worktrees-unavailable"
 )
 
