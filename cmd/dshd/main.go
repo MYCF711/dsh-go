@@ -863,10 +863,17 @@ func cmdRun(argv []string) (retErr error) {
 	// 新会话的工作目录与工具根是同一个值（装配期就定死的 workDir，见上面）。
 	// `--home` 是会话根，不是工作目录——两者互不替代。
 	cwd := workDir
-	// 工具表投影（只这一层）：合并 → 收紧 → lazy，见 projectTable。
+	// preset 的真值来自会话覆盖/header（新会话则是选定默认值）。cordis 在
+	// 工具表投影之前裁掉宿主未映射工具；其他 preset 保持原 reg 与请求字节。
+	runMode, err := resolveCmdRunMode(*home, *resumeSession)
+	if err != nil {
+		return err
+	}
+	modeReg := cmdRunModeRegistry(reg, runMode)
+	// 工具表投影（只这一层）：模式可见性 → 合并 → 收紧 → lazy，见 projectTable。
 	// 系统提示里的工具清单也要跟着换——否则模型从提示里看到旧的 17 个名字，
 	// 从 tools 字段看到 4 个，两边对不上。
-	table, mergedRef, lazyRef, warns, err := projectTable(tm, reg)
+	table, mergedRef, lazyRef, warns, err := projectTable(tm, modeReg)
 	if err != nil {
 		return err
 	}
@@ -877,6 +884,7 @@ func cmdRun(argv []string) (retErr error) {
 	if err != nil {
 		return err
 	}
+	sys = systemPromptForMode(sys, runMode, *model)
 	// lazy 的系统提示目录**故意不在这里拼**：它要等装载集回放完（见下面那一段），
 	// 否则上一轮已经装载过的工具会在目录里被重复列一遍。
 	// --session：续一个已经存在的会话，而不是新建。
@@ -1077,7 +1085,7 @@ func cmdRun(argv []string) (retErr error) {
 		return err
 	}
 	guarded := &guardedRunner{
-		inner: runner, reg: reg, ask: askFn,
+		inner: runner, reg: reg, view: cmdRunExecutionView(reg, runMode), ask: askFn,
 		sessionID: sessID, approvals: approval.New(),
 		policyDeniesUnattended: deniesSilently(*policy, isTerminal(os.Stdin)),
 	}

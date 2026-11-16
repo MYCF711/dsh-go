@@ -65,8 +65,10 @@ type acpRunner struct {
 	ctxWindow int
 	// capacity 是这个 runner 固定模型的有效容量；MaxOutput 进入常规请求。
 	capacity llm.ModelCapacity
-	// system 是装配好的系统提示（会作为事件落盘）。
+	// system 是装配好的默认系统提示；cordis 在 Prompt 用过滤后的工具表重组。
 	system string
+	// workspaceBytes 与启动时装配使用同一指令链预算，保证 cordis 重组不丢配置。
+	workspaceBytes int
 	// autoCompact 是自动压缩的 token 阈值（0 = 关闭）。
 	autoCompact int
 	// keepRecent 是自动压缩时**至少**保留的最近消息数（下限）。
@@ -486,6 +488,16 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	// 模型或直接调用方仍能点名隐藏工具，执行入口必须再拒绝一次。
 	mode := r.modeOf(sessionID)
 	view := modes.Filter(r.reg, mode)
+	system := systemPromptForMode(r.system, mode, r.model)
+	if mode.ID == modes.CordisID {
+		// 启动时的 r.system 用全量表装配；cordis 必须用本轮过滤表重建，
+		// 否则 tools 字段已裁掉，提示正文却还在教模型调用隐藏工具。
+		assembled, promptErr := buildSystemPromptWithHome(view, r.model, cwd, r.home, r.workspaceBytes)
+		if promptErr != nil {
+			return "", nil, promptErr
+		}
+		system = systemPromptForMode(assembled, mode, r.model)
+	}
 	r.mu.Lock()
 	sandboxGate := r.sandbox
 	workspace := r.workspace
@@ -513,7 +525,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		// 不设就是 nil/空切片 = 报文里不出现（与 run 同一份解析，见 env_llm.go）。
 		Temperature: r.sampling.Temperature,
 		Stop:        r.sampling.Stop,
-		System:      r.system,
+		System:      system,
 		SessionID:   sessionID,
 		SessionLog:  logw,
 		MaxSteps:    r.steps,
@@ -1065,6 +1077,7 @@ func cmdACP(argv []string) error {
 	acpRunner.reasoning = *reasoning
 	acpRunner.sampling = sampling
 	acpRunner.system = assembled
+	acpRunner.workspaceBytes = *workspaceBytes
 	acpRunner.autoCompact = autoCompact
 	acpRunner.setModelCapacity(llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput})
 	// 压缩策略在装配之后、第一次请求之前定下来：非法配置在这里 fail-loud，
