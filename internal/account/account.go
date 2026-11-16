@@ -647,6 +647,32 @@ func (s *Service) resetTimerLocked() {
 	})
 }
 
+// Close 停掉后台定时器并释放订阅通道。
+//
+// 为什么需要它：resetTimerLocked 用 time.AfterFunc 排了一个**会写盘**的回调
+// （到点 -> expireLocked -> saveLocked -> 在 state/ 下建临时文件再改名）。
+// 那个回调不受调用方控制，生命周期比"最后一次 API 调用"更长。测试里
+// `t.TempDir()` 的清理发生在测试体之后，于是出现真实竞态：
+//
+//	测试体结束 -> TempDir RemoveAll 开始删 state/
+//	                 同时 定时器到点 -> saveLocked 往 state/ 里写
+//	-> RemoveAll 报 `unlinkat ...\state`（Windows 上非空/被占用即失败）
+//
+// 这不是断言问题、也不是产品逻辑问题，是**测试没告诉服务"结束了"**。
+// Close 幂等，可重复调用；调用后定时器不再触发，State/expireLocked 之外
+// 的读写路径不受影响（Close 本身不修改 doc）。
+func (s *Service) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.timer != nil {
+		s.timer.Stop()
+		s.timer = nil
+	}
+	// 只停定时器，**不动** subs/updates/expiry 三张表：
+	// 它们是 map，WatchExpiry/Watch 会往里写；置 nil 会让"Close 之后再订阅"
+	// 直接 panic。订阅者通道本来就由各自的 ctx.Done() 负责关闭，不归 Close 管。
+}
+
 func (s *Service) Profile(ctx context.Context, client Client) (*Profile, error) {
 	s.mu.Lock()
 	doc := s.doc
