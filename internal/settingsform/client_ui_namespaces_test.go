@@ -8,9 +8,8 @@ package settingsform
 //   - 每个字段都能写、能读回、能重置，默认值与官方逐字相同；
 //   - 非法值（枚举外 / 越界 / 坏 BCP47 / 类型错 / 未知字段）一律四字段错误，
 //     且一次都不写盘；
-//   - session-log-deepseek.enabled=true/false 都能保存；仍无后端的
-//     session-telemetry-otel.mode=FEEDBACK_ONLY 回 not_implemented（501），
-//     不静默成功；真实生效值 DISABLED 能保存；
+//   - session-log-deepseek.enabled=true/false 都能保存；session-telemetry-otel
+//     的真实 endpoint + FEEDBACK_ONLY 能保存，坏端点 fail-closed 为 400；
 //   - transcriptView 的旧值 normal/expanded 读作 detailed、不在选项里、不回写。
 
 import (
@@ -20,7 +19,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -716,71 +714,13 @@ func TestClientUINamespacesRejectIllegalValues(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 4b. 声明"开"但没有后端 → not_implemented（501），一个字节都不写
+// 4b. 两个已实现的开关都必须真实保存；遥测配置另验后端与坏端点
 // ---------------------------------------------------------------------------
 
-// TestClientUINamespacesNotImplementedSwitchesAreLoud 钉住仍**能力上不做**
-// 的开关不许被静默接受：
-//
-//   - `session-telemetry-otel.mode = FEEDBACK_ONLY`：本仓没有 OTel SDK 的
-//     byte-bounded reporter 与 on-demand coordinator（官方 index.ts:190/:219-222）。
-//
-// 断言的是**四字段 501**（code/message/hint/retryable 齐全、retryable=false、
-// message 点名叫出缺什么），不是"随便报个错"；同时确认拒绝之后 store 没写、
-// revision 没动、默认值仍是真实生效值。
-func TestClientUINamespacesNotImplementedSwitchesAreLoud(t *testing.T) {
-	cases := []struct {
-		name     string
-		ns       string
-		field    string
-		value    any
-		keywords []string
-	}{
-		{
-			"会话遥测没有 OTel 后端",
-			NamespaceSessionTelemetryOTel, FieldSessionTelemetryMode, SessionTelemetryModeFeedbackOnly,
-			[]string{"OTel", "FEEDBACK_ONLY", "createSessionLogReporter"},
-		},
-	}
-	for _, entry := range cases {
-		service, store := clientUIService(t)
-		revision := int64(0)
-		_, err := service.Mutate(entry.ns, []PathOp{{
-			Op: "set", Path: []string{entry.field}, Value: entry.value,
-		}}, &revision)
-		if err == nil {
-			t.Fatalf("%s：写 %s.%s=%v 必须被拒绝，不许静默接受", entry.name, entry.ns, entry.field, entry.value)
-		}
-		apiErr := AsError(err)
-		if apiErr.Code != "not_implemented" {
-			t.Fatalf("%s：code=%q，want not_implemented（err=%v）", entry.name, apiErr.Code, err)
-		}
-		if apiErr.Status != http.StatusNotImplemented {
-			t.Fatalf("%s：HTTP 状态必须是 501，实际 %d", entry.name, apiErr.Status)
-		}
-		if apiErr.Message == "" || apiErr.Hint == "" {
-			t.Fatalf("%s：四字段错误不允许空 message/hint：%+v", entry.name, apiErr)
-		}
-		if apiErr.Retryable {
-			t.Fatalf("%s：能力缺失不是可重试错误：%+v", entry.name, apiErr)
-		}
-		for _, keyword := range entry.keywords {
-			if !strings.Contains(apiErr.Message, keyword) {
-				t.Fatalf("%s：message 必须点名叫出缺什么，缺关键词 %q：%s", entry.name, keyword, apiErr.Message)
-			}
-		}
-		if len(store.writes) != 0 {
-			t.Fatalf("%s：拒绝的值不许写盘，实际写了 %v", entry.name, store.writes)
-		}
-		section, readErr := service.Get(entry.ns)
-		if readErr != nil {
-			t.Fatalf("%s：拒绝后读取失败 %v", entry.name, readErr)
-		}
-		if section.Revision != 0 {
-			t.Fatalf("%s：拒绝后 revision 必须还是 0，实际 %d", entry.name, section.Revision)
-		}
-	}
-
+// TestClientUINamespacesImplementedSwitchesAreSaved 同时保留两侧的实现回归：
+// session-log-deepseek.enabled=true 真实落盘并读回；session-telemetry-otel 的
+// DISABLED 可保存，真实 FEEDBACK_ONLY 与 fail-closed 端点由下面的专门测试覆盖。
+func TestClientUINamespacesImplementedSwitchesAreSaved(t *testing.T) {
 	// session-log-deepseek 的上传方已经接通：settings/update 写 true 必须
 	// 真实落盘并读回 true，不再把官方默认值误报成 not_implemented。
 	service, store := clientUIService(t)
@@ -826,6 +766,38 @@ func TestClientUINamespacesNotImplementedSwitchesAreLoud(t *testing.T) {
 	}
 	if got := namespaceViewFor(t, described, NamespaceSessionTelemetryOTel).Value[FieldSessionTelemetryMode]; got != SessionTelemetryModeDisabled {
 		t.Fatalf("写 mode=DISABLED 后 value=%v，want %s", got, SessionTelemetryModeDisabled)
+	}
+}
+
+func TestClientUINamespacesSessionTelemetryAcceptsRealBackendConfig(t *testing.T) {
+	t.Setenv("DSHD_TELEMETRY_OTLP_URL", "")
+	t.Setenv("DSH_TELEMETRY_OTLP_URL", "")
+	service, _ := clientUIService(t)
+	result, err := service.Update(NamespaceSessionTelemetryOTel, map[string]any{
+		FieldSessionTelemetryExporterURL: "https://collector.example.com/v1/logs",
+		FieldSessionTelemetryMode:        SessionTelemetryModeFeedbackOnly,
+	}, nil)
+	if err != nil {
+		t.Fatalf("真实后端配置不能再回 501：%v", err)
+	}
+	if result.Section.Revision != 1 {
+		t.Fatalf("revision=%d, want 1", result.Section.Revision)
+	}
+	if result.Namespace.Value[FieldSessionTelemetryMode] != SessionTelemetryModeFeedbackOnly {
+		t.Fatalf("FEEDBACK_ONLY 未读回：%+v", result.Namespace.Value)
+	}
+	badRevision := result.Section.Revision
+	if _, err := service.Update(NamespaceSessionTelemetryOTel, map[string]any{
+		FieldSessionTelemetryExporterURL: "ftp://collector.example.com/v1/logs",
+	}, &badRevision); AsError(err).Code != "invalid_value" || AsError(err).Status != http.StatusBadRequest {
+		t.Fatalf("非法端点必须 fail-closed 为 400 invalid_value：%v", err)
+	}
+
+	emptyService, _ := clientUIService(t)
+	if _, err := emptyService.Update(NamespaceSessionTelemetryOTel, map[string]any{
+		FieldSessionTelemetryMode: SessionTelemetryModeFeedbackOnly,
+	}, nil); AsError(err).Code != "invalid_value" {
+		t.Fatalf("缺 endpoint 不能伪装成可上传配置：%v", err)
 	}
 }
 

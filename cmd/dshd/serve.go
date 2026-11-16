@@ -1073,6 +1073,18 @@ func cmdServe(args []string) error {
 	srv.AttachOfficialOfficePDFAPI(newOfficePDFAPIWith(*home, officeKitProvider))
 	srv.AttachOfficialSpeechAPI(newSpeechAPI())
 	attachActionCardsView(srv, *home)
+	// 官方 base #38：在 HTTP 开始收请求前完成 mode/exporter 校验与装配。
+	// agentAPICore 已持有同一 deps；这里补的是反馈后的授权 coordinator，不是第二条反馈入口。
+	sessionTelemetry, err := openSessionTelemetry(*home, settingsStore, version)
+	if err != nil {
+		return fmt.Errorf("装配 session-telemetry-otel: %w", err)
+	}
+	agentAPICore.deps.telemetry = sessionTelemetry
+	defer func() {
+		if err := sessionTelemetry.Shutdown(); err != nil {
+			fmt.Fprintf(os.Stderr, "session-telemetry-otel: %v\n", err)
+		}
+	}()
 	if err := attachOfficialAnalytics(srv, *home); err != nil {
 		fmt.Fprintf(os.Stderr, "analytics: %v\n", err)
 	}

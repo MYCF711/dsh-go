@@ -440,9 +440,8 @@ func officialSettingsError(err error) error {
 		case "internal":
 			code = "internal"
 		case "not_implemented":
-			// settingsform 的语义校验（session-telemetry-otel.mode=FEEDBACK_ONLY
-			// 这类"本宿主没有后端"）
-			// 返回的就是这个码 + 501；这里原样透出，不许折成参数类 400。
+			// settingsform 对真实能力缺口返回这个码 + 501；这里原样透出，
+			// 不许折成参数类 400。
 			code = "not_implemented"
 		}
 		if status == 0 {

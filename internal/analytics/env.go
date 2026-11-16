@@ -67,6 +67,20 @@ func CollectorURLFromEnv(getenv func(string) string) (value, name string, ok boo
 	return "", "", false
 }
 
+// SessionTelemetryCollectorURLFromEnv 只解析 Session 通道自己的通用端点覆盖。
+// product analytics 专用变量不属于这条通道；本函数只提供 URL，绝不改变 mode。
+func SessionTelemetryCollectorURLFromEnv(getenv func(string) string) (value, name string, ok bool) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	for _, candidate := range []string{envHostTelemetryOTLPURL, EnvTelemetryOTLPURL} {
+		if trimmed := strings.TrimSpace(getenv(candidate)); trimmed != "" {
+			return trimmed, candidate, true
+		}
+	}
+	return "", "", false
+}
+
 // WithEnvCollectorURL 把环境变量端点叠加到策略上（显式配置优先）。
 //
 // 返回的 third 值是"这次生效的 env 名"（没生效时为空），供诊断/日志说清
