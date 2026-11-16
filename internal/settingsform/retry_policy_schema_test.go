@@ -564,6 +564,8 @@ func TestDefaultRegistryKeepsTwoNamespacesAfterRC2(t *testing.T) {
 		"bash-sandbox", "pwsh-sandbox",
 		"subagent", "subagent-model-selection-settings",
 		"web", "web-deepseek-api", "web-search-deepseek",
+		// 官方实验包 cot-translation 的 configForms scope（mount.ts:81）。
+		"cot-translation",
 	}
 	specs := HostRegistry().Specs()
 	if len(specs) != len(want) {

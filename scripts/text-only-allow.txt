@@ -62,7 +62,7 @@ cmd/dshd/history.go:61 | 判据来自 eventText（已拼 text/reasoning/tool-cal
 # modelRunner.historyForModel 的 default 分支：只处理 user 与压缩替身。
 # assistant 在上面单独一支，判据是 assistantHasPayload；user/替身没有思考块，
 # 正文为空确实没有信息可发。
-cmd/dshd/serve_turn.go:310 | 这一支只处理 user/压缩替身（assistant 在上面走 assistantHasPayload）；这两类没有思考块
+cmd/dshd/serve_turn.go:311 | 这一支只处理 user/压缩替身（assistant 在上面走 assistantHasPayload）；这两类没有思考块
 
 # ---- 产物不是消息：诊断/标题，不参与压缩与投影 ----
 
@@ -99,7 +99,7 @@ internal/transport/handlers_session_official.go:1730 | 官方 QUEUE_EDIT_NON_TEX
 cmd/dshd/serve_queue_official.go:274 | 同上（本地入口同判据）：edit 的非 text 块直接报 ErrPlacementInvalid
 
 # 译文接口：空文的译文就是空文（显式写明的语义，不是丢内容）。
-internal/transport/handlers_media_market_official.go:594 | 官方 cotTranslation：空文译空文、不打模型也不算编内容；判的是入参
+internal/transport/handlers_media_market_official.go:618 | 官方 cotTranslation：空文译空文、不打模型也不算编内容；判的是入参
 
 # ---- "有没有内容"的判据在别处；这里只负责拼/取正文 ----
 
@@ -151,7 +151,8 @@ internal/officekit/images.go:368 | planRegions：switch 的操作数是 ready.Do
 # ServeOfficialOfficeKitAPI 的参数抽取闭包：空串 = 客户端没给这个参数（随后 400）。
 internal/transport/handlers_office_kit_rc2.go:150 | ServeOfficialOfficeKitAPI 的 str 闭包：空串 = 客户端没给这个参数（随后 400），判的是入参完整性，不是消息存亡
 # promptContentShape 本身就是官方 hasPromptContent 的投影：非 text 块在下面另算内容。
-internal/transport/server.go:1044 | promptContentShape：函数本身就是官方 hasPromptContent 的投影——非 text 块在下面（1039-1043）直接算内容（attachment/reference），text 分支只额外要求文本非全空白
+internal/transport/server.go:1050 | promptContentShape：函数本身就是官方 hasPromptContent 的投影——非 text 块在下面（1039-1043）直接算内容（attachment/reference），text 分支只额外要求文本非全空白
+internal/transport/server.go:1050 | promptContentShape：函数本身就是官方 hasPromptContent 的投影——非 text 块在下面（1039-1043）直接算内容（attachment/reference），text 分支只额外要求文本非全空白
 
 # ---- workflow 编排面（GO.8 事件面，2026-11-13）----
 #

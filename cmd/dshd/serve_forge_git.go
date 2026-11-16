@@ -11,15 +11,17 @@ import (
 
 	"dshgo/internal/forge"
 	"dshgo/internal/transport"
+	"dshgo/internal/worktree"
 )
 
 type forgeGitAPI struct {
-	exec    *forge.Executor
-	resolve func(sessionID string) (string, error)
+	exec      *forge.Executor
+	resolve   func(sessionID string) (string, error)
+	worktrees *worktree.Service
 }
 
-func newForgeGitAPI(resolve func(string) (string, error)) *forgeGitAPI {
-	return &forgeGitAPI{exec: forge.NewExecutor(), resolve: resolve}
+func newForgeGitAPI(resolve func(string) (string, error), worktrees *worktree.Service) *forgeGitAPI {
+	return &forgeGitAPI{exec: forge.NewExecutor(), resolve: resolve, worktrees: worktrees}
 }
 
 func (a *forgeGitAPI) repoDir(sessionID string) (string, error) {
@@ -60,19 +62,19 @@ func (a *forgeGitAPI) HandleOfficialForgeGit(ctx context.Context, method string,
 		}
 		return info, nil
 	case string(transport.MethodForgePanelLocalDiff):
-		var scope struct{ Kind string }
+		var scope forge.Scope
 		if len(p["scope"]) == 0 || json.Unmarshal(p["scope"], &scope) != nil || scope.Kind == "" {
 			return nil, &transport.ForgeGitError{Status: 400, Code: "bad_request", Message: "scope.kind 必填"}
 		}
 		var maxBytes int
 		_ = json.Unmarshal(p["maxDiffBytes"], &maxBytes)
-		diff, err := a.exec.LocalDiff(ctx, dir, forge.Scope{Kind: scope.Kind}, maxBytes)
+		diff, err := a.exec.LocalDiff(ctx, dir, scope, maxBytes, a.worktreeFork(sessionID))
 		if err != nil {
-			return nil, &transport.ForgeGitError{Status: 422, Code: "git_failed", Message: err.Error()}
+			return nil, forgeGitFailure(err)
 		}
 		return diff, nil
 	case string(transport.MethodForgePanelLocalText):
-		var scope struct{ Kind string }
+		var scope forge.Scope
 		if len(p["scope"]) == 0 || json.Unmarshal(p["scope"], &scope) != nil || scope.Kind == "" {
 			return nil, &transport.ForgeGitError{Status: 400, Code: "bad_request", Message: "scope.kind 必填"}
 		}
@@ -80,14 +82,47 @@ func (a *forgeGitAPI) HandleOfficialForgeGit(ctx context.Context, method string,
 		if path == "" {
 			return nil, &transport.ForgeGitError{Status: 400, Code: "bad_request", Message: "path 必填"}
 		}
-		text, err := a.exec.LocalText(ctx, dir, forge.Scope{Kind: scope.Kind}, path)
+		text, err := a.exec.LocalText(ctx, dir, scope, path)
 		if err != nil {
-			return nil, &transport.ForgeGitError{Status: 422, Code: "git_failed", Message: err.Error()}
+			return nil, forgeGitFailure(err)
 		}
 		return text, nil
 	default:
 		return nil, fmt.Errorf("不是 forgePanel git 方法: %s", method)
 	}
+}
+
+// worktreeFork 与 rc2 面板共用创建事实；Executor.ForkPoint 会再核对当前 root。
+func (a *forgeGitAPI) worktreeFork(sessionID string) *forge.WorktreeFork {
+	if a.worktrees == nil {
+		return nil
+	}
+	state, err := a.worktrees.State(sessionID)
+	if err != nil || state.Status != worktree.StatusCreated || state.Directory == "" {
+		return nil
+	}
+	return &forge.WorktreeFork{Directory: state.Directory, Base: state.Base, BaseCommit: state.BaseCommit}
+}
+
+func forgeGitFailure(err error) error {
+	failure := &transport.ForgeGitError{Status: 422, Code: "git_failed", Message: err.Error()}
+	switch {
+	case errors.Is(err, forge.ErrNoForkPoint):
+		failure.Code = transport.CodeForgeNoForkPoint
+	case errors.Is(err, forge.ErrBaseMissing):
+		failure.Code = transport.CodeForgeBaseMissing
+	case errors.Is(err, forge.ErrCommitsMissing):
+		failure.Code = transport.CodeForgeCommitsMissing
+	case errors.Is(err, forge.ErrCommitsNotLinear):
+		failure.Code = transport.CodeForgeCommitsNotLinear
+	case errors.Is(err, forge.ErrDiffTooLarge):
+		failure.Status, failure.Code = 413, transport.CodeForgeDiffTooLarge
+	case errors.Is(err, forge.ErrNotBranchRef):
+		failure.Status, failure.Code = 400, "bad_request"
+	case errors.Is(err, forge.ErrNotRepository):
+		failure.Status, failure.Code = 400, transport.CodeForgeNotACheckout
+	}
+	return failure
 }
 
 var _ transport.OfficialForgeGitAPI = (*forgeGitAPI)(nil)
