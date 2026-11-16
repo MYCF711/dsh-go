@@ -177,9 +177,9 @@ func TestOfficialJobTerminal_TerminalCreateRunsRealShell(t *testing.T) {
 	if writable, _ := snapshot["writable"].(bool); !writable {
 		t.Fatal("活着的终端 snapshot 必须 writable=true")
 	}
-	// 刚起的终端还没有输出：sequence 允许是 0（"已写字节数"确实为 0）。
-	if seq, ok := snapshot["sequence"].(float64); !ok || seq < 0 {
-		t.Fatalf("snapshot.sequence 必须是真实已写字节数（>=0），拿到 %v", snapshot["sequence"])
+	// 官方 TerminalFrame.sequence 是 attach 内的帧序号，不是 PTY 字节 offset。
+	if seq, ok := snapshot["sequence"].(float64); !ok || seq != 0 {
+		t.Fatalf("新 attach 的 snapshot.sequence 必须从 0 起，拿到 %v", snapshot["sequence"])
 	}
 	if _, has := snapshot["oneShot"]; has {
 		t.Fatalf("snapshot 帧不许带 oneShot（旧残口）：%v", snapshot)
@@ -190,6 +190,7 @@ func TestOfficialJobTerminal_TerminalCreateRunsRealShell(t *testing.T) {
 		t.Fatalf("写终端失败：%v", err)
 	}
 	var sawMarker bool
+	var wantSequence float64 = 1
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) && !sawMarker {
 		frame, done := nextFrame(t, stream, 30*time.Second)
@@ -197,12 +198,13 @@ func TestOfficialJobTerminal_TerminalCreateRunsRealShell(t *testing.T) {
 			t.Fatal("attach 流在收到真实输出之前就结束了")
 		}
 		if frame["type"] == "output" {
+			if seq, _ := frame["sequence"].(float64); seq != wantSequence {
+				t.Fatalf("output.sequence 必须逐帧 +1：want %v，拿到 %v", wantSequence, frame["sequence"])
+			}
+			wantSequence++
 			data, _ := frame["data"].(string)
 			if strings.Contains(data, marker) {
 				sawMarker = true
-				if seq, _ := frame["sequence"].(float64); seq <= 0 {
-					t.Fatalf("output.sequence 必须是真实绝对偏移（>0），拿到 %v", frame["sequence"])
-				}
 			}
 		}
 	}
@@ -947,10 +949,17 @@ func TestOfficialJobTerminal_TerminalAttachUplink(t *testing.T) {
 	if err := up.Push(resizeFrame); err != nil {
 		t.Fatalf("resize 帧被拒绝：%v", err)
 	}
-	if ack, done := nextFrame(t, stream, 15*time.Second); done || ack["type"] != "ack" {
-		t.Fatalf("resize 之后必须先回 ack，拿到 %v", ack)
+	// 官方 BrowserTerminal.consumeInput 在 resize 后先 broadcastState，再回 ack；
+	// state 同时把真实 cols/rows 推给所有 follower。
+	if state, done := nextFrame(t, stream, 15*time.Second); done || state["type"] != "state" {
+		t.Fatalf("resize 之后必须先广播 state，拿到 %v", state)
+	} else if info := state["info"].(map[string]any); info["cols"] != float64(140) || info["rows"] != float64(45) {
+		t.Fatalf("resize state 必须携带真实新尺寸：%v", info)
 	}
-	if err := up.Push(json.RawMessage(`{"type":"write","sequence":1,"data":"stty size\n"}`)); err != nil {
+	if ack, done := nextFrame(t, stream, 15*time.Second); done || ack["type"] != "ack" {
+		t.Fatalf("resize state 之后必须回 ack，拿到 %v", ack)
+	}
+	if err := up.Push(json.RawMessage(`{"type":"write","sequence":3,"data":"stty size\n"}`)); err != nil {
 		t.Fatalf("write 帧被拒绝：%v", err)
 	}
 	deadline = time.Now().Add(30 * time.Second)
@@ -990,6 +999,108 @@ func TestOfficialJobTerminal_TerminalAttachUplink(t *testing.T) {
 	}
 	if refusal, _ := ack["refusal"].(string); refusal != "not-running" {
 		t.Fatalf("已关闭终端的 ack.refusal 必须是 not-running，拿到 %q", refusal)
+	}
+}
+
+func TestOfficialJobTerminal_TerminalAttachLatestControllerOwnsInput(t *testing.T) {
+	cwd := t.TempDir()
+	jt, _ := newTestOfficialService(t, cwd, nil, nil)
+	ctx := context.Background()
+	if _, err := jt.TerminalCreate(ctx, "sess-a", transport.OfficialTerminalCreateRequest{ID: "t1", Cols: 80, Rows: 24}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := jt.OpenTerminalAttach(ctx, "sess-a", "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if frame, done := nextFrame(t, first, 15*time.Second); done || frame["type"] != "snapshot" || frame["writable"] != true {
+		t.Fatalf("首个 attach 应取得输入权：%v", frame)
+	}
+	second, err := jt.OpenTerminalAttach(ctx, "sess-a", "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if frame, done := nextFrame(t, second, 15*time.Second); done || frame["type"] != "snapshot" || frame["writable"] != true {
+		t.Fatalf("最新 attach 应取得输入权：%v", frame)
+	}
+	if state, done := nextFrame(t, first, 15*time.Second); done || state["type"] != "state" || state["writable"] != false {
+		t.Fatalf("旧 attach 必须收到只读 state：%v", state)
+	}
+	firstUp := first.(transport.OfficialTerminalUplink)
+	if err := firstUp.Push(json.RawMessage(`{"type":"write","sequence":1,"data":"echo refused\n"}`)); err != nil {
+		t.Fatalf("read-only 是 ack refusal，不应断开输出流：%v", err)
+	}
+	if ack, done := nextFrame(t, first, 15*time.Second); done || ack["type"] != "ack" || ack["refusal"] != "read-only" {
+		t.Fatalf("旧 controller 的写入必须回 read-only ack：%v", ack)
+	}
+	secondUp := second.(transport.OfficialTerminalUplink)
+	if err := secondUp.Push(json.RawMessage(`{"type":"write","sequence":1,"data":"echo accepted\n"}`)); err != nil {
+		t.Fatalf("最新 controller 写入失败：%v", err)
+	}
+	if ack, done := nextFrame(t, second, 15*time.Second); done || ack["type"] != "ack" || ack["refusal"] != nil {
+		t.Fatalf("最新 controller 的写入必须被接受：%v", ack)
+	}
+	first.Close()
+	if !jt.canControlTerminal("sess-a", "t1", second.(*officialTerminalAttachStream)) {
+		t.Fatal("关闭旧 attach 不得抢走最新 controller 的输入权")
+	}
+}
+
+func TestOfficialJobTerminal_TerminalAttachTypedTransfersControlAndRejectsGap(t *testing.T) {
+	cwd := t.TempDir()
+	jt, _ := newTestOfficialService(t, cwd, nil, nil)
+	ctx := context.Background()
+	if _, err := jt.TerminalCreate(ctx, "sess-a", transport.OfficialTerminalCreateRequest{ID: "t1", Cols: 80, Rows: 24}); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := jt.lookup("sess-a", "t1", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 用户控制面必须也接受 roster 中已有的 agent 终端；这里只改测试条目的
+	// 元数据，不伪造一条 agent 分配路径。
+	entry.origin, entry.control = "agent", "agent"
+	stream, err := jt.OpenTerminalAttach(ctx, "sess-a", "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	up := stream.(transport.OfficialTerminalUplink)
+	if frame, done := nextFrame(t, stream, 15*time.Second); done || frame["type"] != "snapshot" {
+		t.Fatalf("首帧必须是 snapshot：%v", frame)
+	}
+	if err := up.Push(json.RawMessage(`{"type":"write","sequence":2,"data":"echo gap\n","typed":true}`)); !errors.Is(err, transport.ErrJTOfficialBadParam) {
+		t.Fatalf("sequence 跳号必须拒绝，拿到 %v", err)
+	}
+	// 新 attach 重新从 1 开始，避免让失败流继续消费输入。
+	stream.Close()
+	stream, err = jt.OpenTerminalAttach(ctx, "sess-a", "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up = stream.(transport.OfficialTerminalUplink)
+	if _, done := nextFrame(t, stream, 15*time.Second); done {
+		t.Fatal("第二个 attach 缺 snapshot")
+	}
+	if err := up.Push(json.RawMessage(`{"type":"write","sequence":1,"data":"echo typed\n","typed":true}`)); err != nil {
+		t.Fatalf("typed write 失败：%v", err)
+	}
+	state, done := nextFrame(t, stream, 15*time.Second)
+	if done || state["type"] != "state" {
+		t.Fatalf("typed 接管后必须先广播 state：%v", state)
+	}
+	info := state["info"].(map[string]any)
+	if info["control"] != "user" || info["origin"] != "agent" {
+		t.Fatalf("只移交 control，不改 origin：%v", info)
+	}
+	ack, done := nextFrame(t, stream, 15*time.Second)
+	if done || ack["type"] != "ack" || ack["sequence"] != float64(1) {
+		t.Fatalf("state 之后才是 sequence=1 的 ack：%v", ack)
+	}
+	if got := entry.info().Control; got != "user" {
+		t.Fatalf("控制权未持久移交：%q", got)
 	}
 }
 

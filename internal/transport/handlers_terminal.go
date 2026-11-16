@@ -38,13 +38,12 @@ func (s *Server) handleTerminalOpen(w http.ResponseWriter, r *http.Request) {
 
 // handleTerminalInput 是 /api/terminal.input：往终端写一段（原样，含换行）。
 func (s *Server) handleTerminalInput(w http.ResponseWriter, r *http.Request) {
-	if s.opt.TerminalInput == nil {
-		writeJSON(w, http.StatusNotImplemented, errorBody("terminal.input 未接线"))
-		return
-	}
 	var params struct {
-		ID   string `json:"id"`
-		Data string `json:"data"`
+		SessionID string `json:"sessionId"`
+		AgentID   string `json:"agentId"`
+		ID        string `json:"id"`
+		Data      string `json:"data"`
+		Typed     bool   `json:"typed"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "请求体不是 JSON 对象"))
@@ -52,6 +51,26 @@ func (s *Server) handleTerminalInput(w http.ResponseWriter, r *http.Request) {
 	}
 	if params.ID == "" {
 		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "缺 id：往哪个终端写"))
+		return
+	}
+	sessionID := params.SessionID
+	if sessionID == "" {
+		sessionID = params.AgentID
+	}
+	if sessionID != "" {
+		if s.opt.TerminalInputScoped == nil {
+			writeJSON(w, http.StatusNotImplemented, errorBody("terminal.input 的 sessionId/typed 上行未接线"))
+			return
+		}
+		if err := s.opt.TerminalInputScoped(sessionID, params.ID, params.Data, params.Typed); err != nil {
+			writeJSON(w, http.StatusNotFound, errorBodyFor("not_found", err.Error()))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"result": map[string]any{"ok": true}})
+		return
+	}
+	if s.opt.TerminalInput == nil {
+		writeJSON(w, http.StatusNotImplemented, errorBody("terminal.input 未接线"))
 		return
 	}
 	if err := s.opt.TerminalInput(params.ID, params.Data); err != nil {

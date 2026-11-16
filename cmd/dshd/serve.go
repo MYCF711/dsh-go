@@ -777,6 +777,13 @@ func cmdServe(args []string) error {
 			}
 			return t.Input(data)
 		},
+		TerminalInputScoped: func(sessionID, id, data string, typed bool) error {
+			if officialJT == nil {
+				return fmt.Errorf("官方用户终端控制面未接线")
+			}
+			_, err := officialJT.InputTyped(sessionID, id, data, typed)
+			return err
+		},
 		TerminalOutput: func(id string, since int) (transport.TerminalOutput, error) {
 			if officialJT != nil {
 				out, err := officialJT.OutputByID(id, since)

@@ -254,6 +254,7 @@ type Service struct {
 	expiry          map[chan string]struct{}
 	timer           *time.Timer
 	timerAt         int64
+	closed          bool
 
 	// 官方 account 平台的三条预算（见 officialPolicyDefaults）。
 	logoutMaxRetries int
@@ -643,6 +644,9 @@ func (s *Service) resetTimerLocked() {
 	s.timer = time.AfterFunc(d, func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if s.closed {
+			return
+		}
 		_ = s.expireLocked(time.Now())
 	})
 }
@@ -664,6 +668,7 @@ func (s *Service) resetTimerLocked() {
 func (s *Service) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closed = true
 	if s.timer != nil {
 		s.timer.Stop()
 		s.timer = nil

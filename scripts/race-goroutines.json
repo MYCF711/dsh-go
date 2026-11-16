@@ -169,7 +169,7 @@
       "verified_at": "2026-11-13"
     },
     {
-      "site": "cmd/dshd/terminal_pty.go:216",
+      "site": "cmd/dshd/terminal_pty.go:224",
       "what": "sweepLoop：周期性回收闲置 PTY 终端",
       "sync": "读过：终端表在 a 自己的锁下；Close 停止循环",
       "verified_at": "2026-11-09"
@@ -253,19 +253,19 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "internal/account/account.go:929",
+      "site": "internal/account/account.go:934",
       "what": "Watch 的订阅清理观察者",
       "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.subs, ch)+close(ch)；订阅表 s.subs 的每次读写都在 s.mu 下（Watch 入口 869-875、notifyLocked 同锁），每条 ch 只有一个 watcher，close 只可能一次",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/account/account.go:957",
+      "site": "internal/account/account.go:962",
       "what": "WatchUpdates 的推送循环（rc.2 官方 AccountUpdate 流）",
       "sync": "读过：ch 由这条独占并 defer close(ch)；sub.pending 与 s.updates 表的读写全在 s.mu 下（登记 896-899、取帧 915-918、退出 909-911/925-927）；唤醒走 sub.wake（容量 1，只装『有新帧』信号），合并口径见 observeUpdates",
       "verified_at": "2026-11-12"
     },
     {
-      "site": "internal/account/account.go:1006",
+      "site": "internal/account/account.go:1011",
       "what": "WatchExpiry 的订阅清理观察者",
       "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.expiry, ch)+close(ch)；发布侧 expireLocked 的 for ch := range s.expiry 是非阻塞 send、同样在 s.mu 下（同一把锁 ⇒ 不会 send on closed）；首帧在起 goroutine 之前就发完了",
       "verified_at": "2026-11-12"
@@ -469,13 +469,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:329",
+      "site": "internal/transport/server.go:333",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:421",
+      "site": "internal/transport/server.go:425",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
