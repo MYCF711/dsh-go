@@ -51,7 +51,7 @@ func repoFixture(t *testing.T) string {
 
 func TestForgeGitBranchesDiffTextRealRepo(t *testing.T) {
 	dir := repoFixture(t)
-	api := newForgeGitAPI(func(string) (string, error) { return dir, nil })
+	api := newForgeGitAPI(func(string) (string, error) { return dir, nil }, nil)
 	ctx := context.Background()
 	raw := func(s string) []byte { return []byte(s) }
 
@@ -81,10 +81,12 @@ func TestForgeGitBranchesDiffTextRealRepo(t *testing.T) {
 			untracked = &diff.Files[i]
 		}
 	}
-	if modified == nil || modified.Status != "modified" || modified.Additions != 2 || modified.Deletions != 1 || len(modified.Hunks) == 0 {
+	if modified == nil || modified.Status != "modified" || modified.Additions != 2 || modified.Deletions != 1 || len(modified.Hunks) == 0 ||
+		modified.Layer != "implementation" || len(modified.Digest) != 32 {
 		t.Fatalf("modified=%+v", modified)
 	}
-	if untracked == nil || !untracked.Untracked || untracked.Status != "added" {
+	if untracked == nil || !untracked.Untracked || untracked.Status != "added" || untracked.Additions != 1 ||
+		len(untracked.Hunks) != 1 || untracked.Layer != "implementation" || len(untracked.Digest) != 32 {
 		t.Fatalf("untracked=%+v", untracked)
 	}
 
@@ -118,7 +120,7 @@ func TestForgeGitBranchesDiffTextRealRepo(t *testing.T) {
 
 func TestForgeGitNoRepositoryIsStructured(t *testing.T) {
 	dir := t.TempDir()
-	api := newForgeGitAPI(func(string) (string, error) { return dir, nil })
+	api := newForgeGitAPI(func(string) (string, error) { return dir, nil }, nil)
 	_, err := api.HandleOfficialForgeGit(context.Background(), "forgePanel.branches", []byte(`{"sessionId":"s"}`))
 	if err == nil || !strings.Contains(err.Error(), "仓库") {
 		t.Fatalf("无 repo 必须结构化失败，得到 %v", err)

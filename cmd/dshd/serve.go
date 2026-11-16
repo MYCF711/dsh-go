@@ -1040,7 +1040,7 @@ func cmdServe(args []string) error {
 	srv.AttachOfficialForgeChangeRequestAPI(newForgeChangeRequestAPI())
 	srv.AttachOfficialForgeGitAPI(newForgeGitAPI(func(sessionID string) (string, error) {
 		return src.Cwd(sessionID)
-	}))
+	}, worktreeSvc))
 	// rc.2 Forge 面 12 个方法（internal/transport/handlers_forge_rc2.go）。
 	// 第二个参数与 worktree 面板共用**同一个** *worktree.Service 实例（清理状态、
 	// revision 必须同源）；会话目录解析器与上面的 forgePanel git 族同源（src.Cwd）。
