@@ -1,7 +1,7 @@
 package transport
 
 // 官方 `cotTranslation.limits`（@deepseek-ai/dsh-experimental-client-ui-cot-translation
-// 0.2.2-rc.1，app.asar 只读解：lib/typert.host.js:6-18 / :24-45）：
+// 0.2.2-rc.2，src/index.ts:46-53 / lib/typert.host.js:37-51）：
 //
 //	cotTranslation.limits() → {
 //	  maxTextChars: number,
@@ -15,9 +15,9 @@ package transport
 //
 // 真实来源（与 handlers_media_market_official.go 的 translate 共用）：
 //   - maxTextChars = cotTranslationMaxChars（translate 的同一判据，UTF-16 长度）；
-//   - provider = deepseek-official（translate 省略 provider 时的默认网关路径）；
-//   - targetLanguage = auto（官方 "follow the UI language" 的默认值；本仓不
-//     持久化语言偏好，客户端可传具体 BCP 47 覆盖）；
+//   - provider/targetLanguage = `cot-translation` namespace 的当前有效值；生产
+//     serve 与 settings.form.* 共用同一 store，写后下一次 limits/translate 立即生效。
+//     未注入设置服务的旧嵌入方才回退 deepseek-official/auto；
 //   - availableProviders = 仅 deepseek-official / deepseek-account：translate
 //     对 google/bing 明确 501（本仓不代理第三方匿名翻译端点），不能把它们
 //     列成"可用"。
@@ -60,7 +60,7 @@ func (s *Server) ServeOfficialCotTranslationLimitsAPI(w http.ResponseWriter, r *
 		writeOfficialError(w, err)
 		return
 	}
-	result, err := officialCotTranslationLimits(params)
+	result, err := s.officialCotTranslationLimits(params)
 	if err != nil {
 		writeOfficialError(w, err)
 		return
@@ -68,16 +68,48 @@ func (s *Server) ServeOfficialCotTranslationLimitsAPI(w http.ResponseWriter, r *
 	writeJSON(w, http.StatusOK, result)
 }
 
-func officialCotTranslationLimits(p *officialParams) (any, error) {
+func (s *Server) officialCotTranslationLimits(p *officialParams) (any, error) {
 	if err := p.finish(); err != nil {
 		return nil, err
 	}
+	preferences, err := s.cotTranslationPreferences()
+	if err != nil {
+		return nil, err
+	}
 	return OfficialCotTranslationLimits{
-		MaxTextChars: cotTranslationMaxChars,
-		Preferences: OfficialCotTranslationPreferences{
-			Provider:       cotProviderDSOfficial,
-			TargetLanguage: "auto",
-		},
+		MaxTextChars:       cotTranslationMaxChars,
+		Preferences:        preferences,
 		AvailableProviders: []string{cotProviderDSOfficial, cotProviderDSAccount},
 	}, nil
+}
+
+// cotTranslationPreferences 每次请求都读持久 namespace，不在 Server 里再缓存一份。
+// 因此 settings.form.set/reset/mutate 成功后的下一次 limits 就返回新值；读取失败
+// 响亮报错，不拿旧偏好冒充当前事实。
+func (s *Server) cotTranslationPreferences() (OfficialCotTranslationPreferences, error) {
+	fallback := OfficialCotTranslationPreferences{
+		Provider: cotProviderDSOfficial, TargetLanguage: "auto",
+	}
+	if s == nil || s.opt.CotTranslationSettings == nil {
+		return fallback, nil
+	}
+	section, err := s.opt.CotTranslationSettings.Get("cot-translation")
+	if err != nil {
+		return OfficialCotTranslationPreferences{}, officialInternal("读取 cot-translation 设置失败：%s", err)
+	}
+	out := fallback
+	for _, field := range section.Fields {
+		value, ok := field.Current.(string)
+		if !ok {
+			return OfficialCotTranslationPreferences{}, officialInternal(
+				"cot-translation.%s 的当前值不是 string（%T）", field.Name, field.Current)
+		}
+		switch field.Name {
+		case "provider":
+			out.Provider = value
+		case "targetLanguage":
+			out.TargetLanguage = value
+		}
+	}
+	return out, nil
 }

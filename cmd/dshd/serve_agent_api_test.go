@@ -32,6 +32,7 @@ import (
 	"dshgo/internal/session"
 	"dshgo/internal/spi"
 	"dshgo/internal/transport"
+	planmod "dshgo/modules/tool/plan"
 )
 
 // agentAPIFixture 是一套"真实 home + 真实 journal 持久化 + 真实会话来源"的最小宿主。
@@ -77,6 +78,7 @@ func (f *agentAPIFixture) rebuild() {
 	src.goals = goals
 	core := newAgentOfficialAPICore(agentOfficialDeps{
 		home: f.home, goals: goals, journals: journals, src: src,
+		attachments: newAttachmentStore(f.home),
 	})
 	f.journals, f.goals, f.src, f.core = journals, goals, src, core
 	f.api = core.bind()
@@ -471,6 +473,205 @@ func TestAgentOfficialUserQuestionsAnswer(t *testing.T) {
 		Answers: []transport.OfficialQuestionAnswerItem{{ID: "q1", Selected: []string{"B"}}},
 	}); err == nil {
 		t.Fatal("不存在的 callId 竟然被接受了")
+	}
+}
+
+// newPlanReviewSession 造一条真实 enter → exit 待审会话，并把工具子进程会
+// 使用的状态文件也置为 active。view 与生产工具同形，答案路径只认这份 durable 数据。
+func newPlanReviewSession(t *testing.T, f *agentAPIFixture, callID string) string {
+	t.Helper()
+	planBody := "# 实施计划\n- 先补宿主闭环"
+	view, err := json.Marshal(spi.ViewSpec{
+		Kind: spi.ViewCard, Title: "Plan review", Body: planBody,
+		AwaitingAnswer: true,
+		Questions: []spi.UserQuestion{{
+			ID: planmod.ReviewID, Header: "Plan review",
+			Question: "Approve this plan and leave plan mode?", Detail: planBody,
+			Options: []spi.UserQuestionOption{
+				{Label: planmod.ApproveLabel, Description: "Leave plan mode; the plan is carried out from the next step."},
+				{Label: planmod.KeepPlanningLabel, Description: "Stay in plan mode; feedback goes back to the model."},
+			},
+			Intent: &spi.UserQuestionIntent{Kind: "plan-review", Approve: planmod.ApproveLabel, CallID: callID},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := f.newSession("", func(lg *session.Log) {
+		if err := lg.Append("tool/call", session.ToolCallEvent(1, 1, "call-enter", "enter_plan_mode", `{}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := lg.Append("tool/result", session.ToolResultEvent(1, 1, "call-enter", nil, false, "", nil)); err != nil {
+			t.Fatal(err)
+		}
+		args, _ := json.Marshal(map[string]string{"plan": planBody})
+		if err := lg.Append("tool/call", session.ToolCallEvent(1, 1, callID, "exit_plan_mode", string(args))); err != nil {
+			t.Fatal(err)
+		}
+		if err := lg.Append("tool/result", session.ToolResultEventWithView(1, 1, callID,
+			[]spi.Block{{Type: "text", Text: planBody}}, false, "", nil, view)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err := planmod.SetActiveAt(filepath.Join(f.home, "state", "plan"), sessionID, true); err != nil {
+		t.Fatalf("造 active 状态: %v", err)
+	}
+	return sessionID
+}
+
+func planModeFrameCount(t *testing.T, f *agentAPIFixture, sessionID string, active bool) int {
+	t.Helper()
+	events, err := f.core.agentReadEvents(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, ev := range events {
+		if ev.Type != "plan/mode" {
+			continue
+		}
+		var data struct {
+			Active *bool `json:"active"`
+		}
+		if json.Unmarshal(ev.Data, &data) == nil && data.Active != nil && *data.Active == active {
+			count++
+		}
+	}
+	return count
+}
+
+func TestAgentOfficialPlanReviewApproveCommitsOnce(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	sessionID := newPlanReviewSession(t, f, "call-review-approve")
+	var submitted []string
+	f.core.deps.submit = func(_ string, text string) (transport.PromptResult, error) {
+		submitted = append(submitted, text)
+		return transport.PromptResult{Accepted: true, TurnID: "turn-approved"}, nil
+	}
+	answer := transport.OfficialQuestionAnswer{Answers: []transport.OfficialQuestionAnswerItem{{
+		ID: planmod.ReviewID, Selected: []string{planmod.ApproveLabel},
+	}}}
+	open, err := f.api.UserQuestionsAnswer(sessionID, "call-review-approve", answer)
+	if err != nil || !open {
+		t.Fatalf("Approve 应被接受: open=%v err=%v", open, err)
+	}
+	if len(submitted) != 1 || !strings.Contains(submitted[0], planmod.ApproveLabel) {
+		t.Fatalf("Approve 没经既有 submit 投递: %v", submitted)
+	}
+	active, err := planmod.ActiveAt(filepath.Join(f.home, "state", "plan"), sessionID)
+	if err != nil || active {
+		t.Fatalf("Approve 后真实状态应 inactive: active=%v err=%v", active, err)
+	}
+	events, err := f.core.agentReadEvents(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := session.ProjectPlan(events); got != (session.PlanProjection{Active: false, Pending: false}) {
+		t.Fatalf("Approve 后 projection = %+v", got)
+	}
+	if count := planModeFrameCount(t, f, sessionID, false); count != 1 {
+		t.Fatalf("Approve 应只追加一条 plan/mode false，实际 %d", count)
+	}
+	// submit 的 user/message 是异步收尾；进程内结算标记也必须挡住重复点击。
+	open, err = f.api.UserQuestionsAnswer(sessionID, "call-review-approve", answer)
+	if err != nil || open || len(submitted) != 1 {
+		t.Fatalf("重复 Approve 不应再投递: open=%v err=%v submitted=%v", open, err, submitted)
+	}
+	if count := planModeFrameCount(t, f, sessionID, false); count != 1 {
+		t.Fatalf("重复 Approve 不应再写 plan/mode，实际 %d", count)
+	}
+}
+
+func TestAgentOfficialPlanReviewKeepPlanningAndCustomStayActive(t *testing.T) {
+	feedback := "补一轮风险分析"
+	for _, testCase := range []struct {
+		name   string
+		answer transport.OfficialQuestionAnswer
+		want   string
+	}{
+		{name: "Keep planning", answer: transport.OfficialQuestionAnswer{Answers: []transport.OfficialQuestionAnswerItem{{
+			ID: planmod.ReviewID, Selected: []string{planmod.KeepPlanningLabel},
+		}}}, want: planmod.KeepPlanningLabel},
+		{name: "custom", answer: transport.OfficialQuestionAnswer{Answers: []transport.OfficialQuestionAnswerItem{{
+			ID: planmod.ReviewID, Selected: []string{}, Custom: &feedback,
+		}}}, want: feedback},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			f := newAgentAPIFixture(t)
+			sessionID := newPlanReviewSession(t, f, "call-review-keep")
+			var submitted []string
+			f.core.deps.submit = func(_ string, text string) (transport.PromptResult, error) {
+				submitted = append(submitted, text)
+				return transport.PromptResult{Accepted: true}, nil
+			}
+			open, err := f.api.UserQuestionsAnswer(sessionID, "call-review-keep", testCase.answer)
+			if err != nil || !open || len(submitted) != 1 || !strings.Contains(submitted[0], testCase.want) {
+				t.Fatalf("反馈未真实投递: open=%v err=%v submitted=%v", open, err, submitted)
+			}
+			active, err := planmod.ActiveAt(filepath.Join(f.home, "state", "plan"), sessionID)
+			if err != nil || !active {
+				t.Fatalf("Keep planning/custom 必须保持 active: active=%v err=%v", active, err)
+			}
+			if count := planModeFrameCount(t, f, sessionID, false); count != 0 {
+				t.Fatalf("未批准不得写 plan/mode false，实际 %d", count)
+			}
+			events, _ := f.core.agentReadEvents(sessionID)
+			if got := session.ProjectPlan(events); got != (session.PlanProjection{Active: true, Pending: false}) {
+				t.Fatalf("反馈后的 projection = %+v", got)
+			}
+		})
+	}
+}
+
+func TestAgentOfficialPlanReviewRejectsMalformedAnswers(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	sessionID := newPlanReviewSession(t, f, "call-review-invalid")
+	submissions := 0
+	f.core.deps.submit = func(string, string) (transport.PromptResult, error) {
+		submissions++
+		return transport.PromptResult{Accepted: true}, nil
+	}
+	custom := "同时给反馈"
+	cases := []transport.OfficialQuestionAnswer{
+		{Answers: nil},
+		{Answers: []transport.OfficialQuestionAnswerItem{{ID: "other", Selected: []string{planmod.ApproveLabel}}}},
+		{Answers: []transport.OfficialQuestionAnswerItem{{ID: planmod.ReviewID, Selected: []string{"Yes"}}}},
+		{Answers: []transport.OfficialQuestionAnswerItem{{ID: planmod.ReviewID, Selected: []string{planmod.ApproveLabel, planmod.KeepPlanningLabel}}}},
+		{Answers: []transport.OfficialQuestionAnswerItem{{ID: planmod.ReviewID, Selected: []string{planmod.ApproveLabel}, Custom: &custom}}},
+		{Answers: []transport.OfficialQuestionAnswerItem{{ID: planmod.ReviewID, Selected: []string{}}}},
+		{Answers: []transport.OfficialQuestionAnswerItem{
+			{ID: planmod.ReviewID, Selected: []string{planmod.ApproveLabel}},
+			{ID: planmod.ReviewID, Selected: []string{planmod.ApproveLabel}},
+		}},
+	}
+	for i, answer := range cases {
+		open, err := f.api.UserQuestionsAnswer(sessionID, "call-review-invalid", answer)
+		if err == nil || open {
+			t.Fatalf("第 %d 个非法回答被接受: open=%v err=%v", i, open, err)
+		}
+	}
+	if submissions != 0 {
+		t.Fatalf("非法回答不应投递，实际 %d 次", submissions)
+	}
+	active, err := planmod.ActiveAt(filepath.Join(f.home, "state", "plan"), sessionID)
+	if err != nil || !active {
+		t.Fatalf("非法回答不得改变 active: active=%v err=%v", active, err)
+	}
+}
+
+func TestAgentOfficialPlanReviewPersistenceFailureIsLoudAndRollsBack(t *testing.T) {
+	f := newAgentAPIFixture(t)
+	sessionID := newPlanReviewSession(t, f, "call-review-log-failure")
+	dir := filepath.Join(f.home, "state", "plan")
+	// 单独验证状态+日志事务：日志来源缺失时绝不伪成功，且状态回滚为 active。
+	f.core.deps.src = nil
+	changed, err := f.core.commitPlanMode(sessionID, false)
+	if err == nil || changed {
+		t.Fatalf("plan/mode 无法追加时必须响亮失败: changed=%v err=%v", changed, err)
+	}
+	active, readErr := planmod.ActiveAt(dir, sessionID)
+	if readErr != nil || !active {
+		t.Fatalf("日志失败后状态必须回滚 active: active=%v err=%v", active, readErr)
 	}
 }
 

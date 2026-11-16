@@ -41,7 +41,9 @@ import (
 	"dshgo/internal/modes"
 	"dshgo/internal/session"
 	"dshgo/internal/sessiontelemetry"
+	"dshgo/internal/spi"
 	"dshgo/internal/transport"
+	planmod "dshgo/modules/tool/plan"
 )
 
 // agentFeedbackNoteMaxBytes 是一条消息反馈备注的字节上限。
@@ -67,6 +69,9 @@ type agentOfficialDeps struct {
 	goals    *goalOverrideStore
 	journals *transport.Journals
 	src      *sessionSource
+	// attachments 是命令注册表的同一个受控附件库；/plan 官方声明允许附件，
+	// /plan off 在准入后必须回官方专用错误，而不是笼统的“未接附件库”。
+	attachments transport.AttachmentStore
 	// submit 是真实 prompt 入口（userQuestions.answer 把答案当用户消息送进会话）。
 	// 为 nil 时 userQuestions.answer 明确未实现。
 	submit func(sessionID, text string) (transport.PromptResult, error)
@@ -117,6 +122,14 @@ type agentOfficialAPI struct {
 	// questionClaims 记录"哪些 (session,callId) 正被 attachWait 流持有"。
 	// 官方 claim 语义：持有期间宿主不启动超时；关流只释放 claim，不结算问题。
 	questionClaims map[string]struct{}
+	// answeredQuestions 在 submit 已接受、durable user/message 尚在异步收尾的
+	// 窗口里挡住重复点击。重启后的判重仍由 agentOpenQuestionCall 读 v4。
+	answeredQuestions map[string]struct{}
+	// questionAnswerMu 串行化“读 open → 状态/日志 → submit”，否则两个并发
+	// Approve 会都看到 open=true 并重复投递。
+	questionAnswerMu sync.Mutex
+	// planModeMu 串行化 /plan 与 Approve 的状态+日志事务，避免相互覆盖。
+	planModeMu sync.Mutex
 
 	// 下面三项是**真实**能力对象，懒建（第一次用到时装配）：
 	//   commandsRegistry  commands.list / commands.execute 的真注册表
@@ -148,10 +161,11 @@ func newAgentOfficialAPI(deps agentOfficialDeps) transport.OfficialAgentAPI {
 // newAgentOfficialAPICore 造出持有进程内状态的那个对象（测试要拿它看 activation）。
 func newAgentOfficialAPICore(deps agentOfficialDeps) *agentOfficialAPI {
 	return &agentOfficialAPI{
-		deps:           deps,
-		activation:     map[string]string{},
-		goalTimes:      map[string]agentGoalTimes{},
-		questionClaims: map[string]struct{}{},
+		deps:              deps,
+		activation:        map[string]string{},
+		goalTimes:         map[string]agentGoalTimes{},
+		questionClaims:    map[string]struct{}{},
+		answeredQuestions: map[string]struct{}{},
 	}
 }
 
@@ -1079,24 +1093,39 @@ func newAgentOfficialAPIWithTeamRC2(deps agentOfficialDeps) (transport.OfficialA
 // userQuestions.*
 // ---------------------------------------------------------------------------
 
-// agentOpenQuestionCall 判断一个 ask_user_question 调用是否仍然"开着"。
-//
-// 真实依据是 durable 日志：一条 `tool/result` 带着该 callId、工具是
-// ask_user_question、structured 里 awaiting_answer=true；并且它之后**没有**
-// 任何 user/message（本宿主里 ask 结束本轮，人的下一条用户消息就是回答，
-// 也就把这个问题关掉了）。
-func (a *agentOfficialAPI) agentOpenQuestionCall(sessionID, callID string) (bool, error) {
+const (
+	agentQuestionKindAsk        = "ask_user_question"
+	agentQuestionKindPlanReview = "plan-review"
+)
+
+// agentQuestionCallState 是 durable 工具调用投影出的待答问题。ask 与
+// exit_plan_mode 共用这一条通道，不另造 plan-review RPC。
+type agentQuestionCallState struct {
+	kind    string
+	open    bool
+	askedAt time.Time
+}
+
+// agentQuestionCall 从 v4 找出 ask_user_question 或 exit_plan_mode 的真实
+// tool/result，并判断之后是否已有用户回答。plan-review 还必须带合法的持久
+// view；缺 view 或 callId 不匹配都响亮拒绝，不能把任意 exit 调用当成审批。
+func (a *agentOfficialAPI) agentQuestionCall(sessionID, callID string) (agentQuestionCallState, error) {
 	events, err := a.agentReadEvents(sessionID)
 	if err != nil {
-		return false, err
+		return agentQuestionCallState{}, err
 	}
 	calls := indexToolCalls(events)
-	info, isAsk := calls[callID]
-	if !isAsk || info.name != "ask_user_question" {
-		return false, fmt.Errorf("%w: 会话 %s 里没有 callId=%s 的 ask_user_question 调用",
+	info, exists := calls[callID]
+	if !exists || (info.name != agentQuestionKindAsk && info.name != session.ToolExitPlanMode) {
+		return agentQuestionCallState{}, fmt.Errorf("%w: 会话 %s 里没有 callId=%s 的 ask_user_question/exit_plan_mode 调用",
 			transport.ErrOfficialBadInput, sessionID, callID)
 	}
+	kind := agentQuestionKindAsk
+	if info.name == session.ToolExitPlanMode {
+		kind = agentQuestionKindPlanReview
+	}
 	resultIndex := -1
+	var askedAt time.Time
 	for i, ev := range events {
 		if ev.Type != "tool/result" {
 			continue
@@ -1104,26 +1133,83 @@ func (a *agentOfficialAPI) agentOpenQuestionCall(sessionID, callID string) (bool
 		var d struct {
 			Message struct {
 				ToolCallID string `json:"toolCallId"`
+				Source     struct {
+					CallID string `json:"callId"`
+				} `json:"source"`
 			} `json:"message"`
+			View json.RawMessage `json:"view"`
 		}
 		if err := json.Unmarshal(ev.Data, &d); err != nil {
 			continue
 		}
-		if d.Message.ToolCallID == callID {
-			resultIndex = i
+		resultCallID := d.Message.ToolCallID
+		if resultCallID == "" {
+			resultCallID = d.Message.Source.CallID
+		}
+		if resultCallID != callID {
+			continue
+		}
+		if kind == agentQuestionKindPlanReview {
+			if err := validatePersistedPlanReview(d.View, callID); err != nil {
+				return agentQuestionCallState{}, err
+			}
+		}
+		resultIndex = i
+		askedAt = time.UnixMilli(ev.Time)
+		break
+	}
+	if resultIndex < 0 {
+		return agentQuestionCallState{}, fmt.Errorf("%w: callId=%s 还没有 tool/result（问题还没问出来）",
+			transport.ErrOfficialBadInput, callID)
+	}
+	open := true
+	for _, ev := range events[resultIndex+1:] {
+		if ev.Type == "user/message" {
+			open = false
 			break
 		}
 	}
-	if resultIndex < 0 {
-		return false, fmt.Errorf("%w: callId=%s 还没有 tool/result（问题还没问出来）",
-			transport.ErrOfficialBadInput, callID)
+	if a.questionAnswered(sessionID, callID) {
+		open = false
 	}
-	for _, ev := range events[resultIndex+1:] {
-		if ev.Type == "user/message" {
-			return false, nil
-		}
+	return agentQuestionCallState{kind: kind, open: open, askedAt: askedAt}, nil
+}
+
+// agentOpenQuestionCall 是 attachWait 共用的布尔投影；answer 使用上面完整状态。
+func (a *agentOfficialAPI) agentOpenQuestionCall(sessionID, callID string) (bool, error) {
+	question, err := a.agentQuestionCall(sessionID, callID)
+	return question.open, err
+}
+
+func validatePersistedPlanReview(raw json.RawMessage, callID string) error {
+	bad := func(format string, args ...any) error {
+		return fmt.Errorf("%w: %s", transport.ErrOfficialBadInput, fmt.Sprintf(format, args...))
 	}
-	return true, nil
+	if len(raw) == 0 {
+		return bad("callId=%s 的 exit_plan_mode 结果没有持久 plan-review view", callID)
+	}
+	var view spi.ViewSpec
+	if err := json.Unmarshal(raw, &view); err != nil {
+		return bad("callId=%s 的 plan-review view 无法解析: %v", callID, err)
+	}
+	if !view.AwaitingAnswer || len(view.Questions) != 1 {
+		return bad("callId=%s 的结果不是单个待答 plan-review", callID)
+	}
+	q := view.Questions[0]
+	if q.ID != planmod.ReviewID || q.Header != "Plan review" ||
+		q.Question != "Approve this plan and leave plan mode?" || strings.TrimSpace(q.Detail) == "" || q.MultiSelect {
+		return bad("callId=%s 的 plan-review 问题形状不合法", callID)
+	}
+	if len(q.Options) != 2 || q.Options[0].Label != planmod.ApproveLabel ||
+		q.Options[0].Description != "Leave plan mode; the plan is carried out from the next step." ||
+		q.Options[1].Label != planmod.KeepPlanningLabel ||
+		q.Options[1].Description != "Stay in plan mode; feedback goes back to the model." {
+		return bad("callId=%s 的 plan-review 选项不符合官方形状", callID)
+	}
+	if q.Intent == nil || q.Intent.Kind != planmod.ReviewID || q.Intent.Approve != planmod.ApproveLabel || q.Intent.CallID != callID {
+		return bad("callId=%s 的 plan-review intent 与工具调用不匹配", callID)
+	}
+	return nil
 }
 
 // userQuestionsAnswer 把答案作为**真实用户消息**送进会话，并回报问题是否还开着。
@@ -1134,41 +1220,113 @@ func (a *agentOfficialAPI) userQuestionsAnswer(sessionID, callID string, answer 
 	if a.deps.submit == nil {
 		return false, fmt.Errorf("%w: 宿主没有把答案送进会话的 prompt 通道", transport.ErrOfficialNotImplemented)
 	}
-	open, err := a.agentOpenQuestionCall(sessionID, callID)
+	a.questionAnswerMu.Lock()
+	defer a.questionAnswerMu.Unlock()
+	question, err := a.agentQuestionCall(sessionID, callID)
 	if err != nil {
 		return false, err
 	}
-	if !open {
+	if !question.open {
 		// 官方：答案在问题已经关掉之后到达，不投递、回 false（不是错误）。
 		return false, nil
 	}
-	text := agentRenderQuestionAnswer(answer)
+	text := ""
+	if question.kind == agentQuestionKindPlanReview {
+		approved, rendered, err := agentRenderPlanReviewAnswer(answer)
+		if err != nil {
+			return false, err
+		}
+		text = rendered
+		if approved {
+			// 顺序固定：真实清状态 + durable plan/mode 成功后才投递答案。
+			// 任一步失败都上抛；commitPlanMode 会在日志失败时回滚状态。
+			if _, err := a.commitPlanMode(sessionID, false); err != nil {
+				return false, fmt.Errorf("批准 plan-review 时退出计划模式失败: %w", err)
+			}
+		}
+	} else {
+		text = agentRenderQuestionAnswer(answer)
+	}
 	if text == "" {
 		return false, fmt.Errorf("%w: 答案渲染成空串", transport.ErrOfficialBadInput)
 	}
 	if _, err := a.deps.submit(sessionID, text); err != nil {
 		return false, fmt.Errorf("把答案送进会话失败: %w", err)
 	}
+	a.markQuestionAnswered(sessionID, callID)
 	return true, nil
+}
+
+// agentRenderPlanReviewAnswer 校验恰好一个官方 plan-review 回答。
+// Approve 只接受 [Approve] 且 custom 缺席；Keep planning 与自定义反馈都保持 active。
+func agentRenderPlanReviewAnswer(answer transport.OfficialQuestionAnswer) (approved bool, text string, err error) {
+	bad := func(format string, args ...any) (bool, string, error) {
+		return false, "", fmt.Errorf("%w: %s", transport.ErrOfficialBadInput, fmt.Sprintf(format, args...))
+	}
+	if len(answer.Answers) != 1 || answer.Answers[0].ID != planmod.ReviewID {
+		return bad("plan-review 答案必须恰好包含一个 id=%q 的回答", planmod.ReviewID)
+	}
+	item := answer.Answers[0]
+	custom := ""
+	if item.Custom != nil {
+		custom = strings.TrimSpace(*item.Custom)
+	}
+	if len(item.Selected) == 1 && item.Selected[0] == planmod.ApproveLabel {
+		if item.Custom != nil {
+			return bad("Approve 不能同时携带 custom 反馈")
+		}
+		return true, agentRenderQuestionAnswer(answer), nil
+	}
+	if len(item.Selected) == 1 && item.Selected[0] == planmod.KeepPlanningLabel {
+		return false, agentRenderQuestionAnswer(answer), nil
+	}
+	if len(item.Selected) == 0 && item.Custom != nil && custom != "" {
+		return false, agentRenderQuestionAnswer(answer), nil
+	}
+	return bad("plan-review 只接受 Approve、Keep planning 或非空 custom 反馈")
+}
+
+func (a *agentOfficialAPI) questionAnswerKey(sessionID, callID string) string {
+	return sessionID + "\x00" + callID
+}
+
+func (a *agentOfficialAPI) questionAnswered(sessionID, callID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, answered := a.answeredQuestions[a.questionAnswerKey(sessionID, callID)]
+	return answered
+}
+
+func (a *agentOfficialAPI) markQuestionAnswered(sessionID, callID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.answeredQuestions == nil {
+		a.answeredQuestions = map[string]struct{}{}
+	}
+	a.answeredQuestions[a.questionAnswerKey(sessionID, callID)] = struct{}{}
 }
 
 // agentRenderQuestionAnswer 把结构化答案渲染成一条可读的用户消息。
 func agentRenderQuestionAnswer(answer transport.OfficialQuestionAnswer) string {
 	var b strings.Builder
 	for _, item := range answer.Answers {
+		custom := ""
+		if item.Custom != nil {
+			custom = strings.TrimSpace(*item.Custom)
+		}
 		b.WriteString("回答 ")
 		b.WriteString(item.ID)
 		b.WriteString("：")
 		switch {
-		case len(item.Selected) > 0 && strings.TrimSpace(item.Custom) != "":
+		case len(item.Selected) > 0 && custom != "":
 			b.WriteString(strings.Join(item.Selected, "、"))
 			b.WriteString("（补充：")
-			b.WriteString(strings.TrimSpace(item.Custom))
+			b.WriteString(custom)
 			b.WriteString("）")
 		case len(item.Selected) > 0:
 			b.WriteString(strings.Join(item.Selected, "、"))
-		case strings.TrimSpace(item.Custom) != "":
-			b.WriteString(strings.TrimSpace(item.Custom))
+		case custom != "":
+			b.WriteString(custom)
 		default:
 			b.WriteString("（没有选择）")
 		}

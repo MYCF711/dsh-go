@@ -19,13 +19,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/acp.go:1202",
+      "site": "cmd/dshd/acp.go:1215",
       "what": "父进程看门狗收尾：watch.Done() 之后关服务",
       "sync": "读过：只做 close/取消，不写会话文件；与主流程之间靠 context 取消 + 单向 channel",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/acp.go:1202",
+      "site": "cmd/dshd/acp.go:1215",
       "what": "父进程看门狗：watch.Done() 就取消本轮并关 stdin",
       "sync": "读过：只调 cancel() 与 os.Stdin.Close()，两个都幂等；不写共享状态",
       "verified_at": "2026-11-09"
@@ -61,25 +61,25 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:930",
+      "site": "cmd/dshd/main.go:938",
       "what": "run 的看门狗协程：父进程没了就取消本轮 ctx",
       "sync": "读过：只调 cancel()，不碰会话/日志；runCtx 与主 goroutine 共享，取消是幂等的",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:930",
+      "site": "cmd/dshd/main.go:938",
       "what": "serveJobsOut：后台任务通道",
       "sync": "读过：写 stdout 的 @@JOBS@@ 行，写侧有自己的一把锁；读的是 jobs 服务的快照",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:930",
+      "site": "cmd/dshd/main.go:938",
       "what": "父进程看门狗：父没了就取消本轮 ctx",
       "sync": "读过：只调 stopOnParentGone()（cancel 幂等），不碰会话/日志",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:930",
+      "site": "cmd/dshd/main.go:938",
       "what": "serveSteerIPC：steer IPC 接收循环",
       "sync": "读过：收到的请求投进 steerInbox（自己加锁的队列）；runCtx 取消即退",
       "verified_at": "2026-11-09"
@@ -253,19 +253,19 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "internal/account/account.go:929",
+      "site": "internal/account/account.go:934",
       "what": "Watch 的订阅清理观察者",
       "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.subs, ch)+close(ch)；订阅表 s.subs 的每次读写都在 s.mu 下（Watch 入口 869-875、notifyLocked 同锁），每条 ch 只有一个 watcher，close 只可能一次",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/account/account.go:957",
+      "site": "internal/account/account.go:962",
       "what": "WatchUpdates 的推送循环（rc.2 官方 AccountUpdate 流）",
       "sync": "读过：ch 由这条独占并 defer close(ch)；sub.pending 与 s.updates 表的读写全在 s.mu 下（登记 896-899、取帧 915-918、退出 909-911/925-927）；唤醒走 sub.wake（容量 1，只装『有新帧』信号），合并口径见 observeUpdates",
       "verified_at": "2026-11-12"
     },
     {
-      "site": "internal/account/account.go:1006",
+      "site": "internal/account/account.go:1011",
       "what": "WatchExpiry 的订阅清理观察者",
       "sync": "读过：只等 ctx.Done()，然后持 s.mu 做 delete(s.expiry, ch)+close(ch)；发布侧 expireLocked 的 for ch := range s.expiry 是非阻塞 send、同样在 s.mu 下（同一把锁 ⇒ 不会 send on closed）；首帧在起 goroutine 之前就发完了",
       "verified_at": "2026-11-12"
@@ -283,13 +283,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/agent/parallel.go:369",
+      "site": "internal/agent/parallel.go:372",
       "what": "串行车道：等人审批的工具调用顺序执行",
       "sync": "读过：只写 out[i]（每个下标只被这一条 goroutine 写）与读 calls[i]；wg 等它收尾。不碰共享可变状态",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/agent/parallel.go:390",
+      "site": "internal/agent/parallel.go:393",
       "what": "并行车道的固定 worker 池（limit 路）",
       "sync": "读过：从 queue（无缓冲 channel）取下标 i，写 out[i]（下标唯一）、只读 calls；喂队列在调用方做（channel 本身即背压），wg 等全部 worker 退出",
       "verified_at": "2026-11-09"
@@ -469,13 +469,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:327",
+      "site": "internal/transport/server.go:333",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/transport/server.go:419",
+      "site": "internal/transport/server.go:425",
       "what": "每个 WS 连接一条",
       "sync": "读过：Hub 每个入口方法都先 h.mu.Lock（hub.go:60/83/95/115）；连接写序列化在 connSubscriber 自己手里",
       "verified_at": "2026-11-03"

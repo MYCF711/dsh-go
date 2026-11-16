@@ -256,6 +256,36 @@ type ViewSpec struct {
 	Columns []string   `json:"columns,omitempty"`
 	Rows    [][]string `json:"rows,omitempty"`
 	Body    string     `json:"body,omitempty"`
+	// Questions 是一个持久、可续答的官方 user-questions 请求。它随工具结果的
+	// view 落盘，客户端重开会话后仍能恢复同一张问题卡，而不是靠内存等待表。
+	Questions      []UserQuestion `json:"questions,omitempty"`
+	AwaitingAnswer bool           `json:"awaiting_answer,omitempty"`
+}
+
+// UserQuestion 是官方 AskUserQuestionItem 的宿主视图形状。字段名使用线上的
+// camelCase（尤其 multiSelect），不要与工具输入 schema 的 multi_select 混用。
+type UserQuestion struct {
+	ID          string               `json:"id"`
+	Header      string               `json:"header,omitempty"`
+	Question    string               `json:"question"`
+	Detail      string               `json:"detail,omitempty"`
+	Options     []UserQuestionOption `json:"options,omitempty"`
+	MultiSelect bool                 `json:"multiSelect,omitempty"`
+	Intent      *UserQuestionIntent  `json:"intent,omitempty"`
+}
+
+// UserQuestionOption 是问题的一个可选项；回答必须原样回显 Label。
+type UserQuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// UserQuestionIntent 是官方 presentation intent。plan-review 用 callId 把
+// 审批答案重新绑定到 durable 的 exit_plan_mode 调用，避免第二套问题 id。
+type UserQuestionIntent struct {
+	Kind    string `json:"kind"`
+	Approve string `json:"approve,omitempty"`
+	CallID  string `json:"callId,omitempty"`
 }
 
 // Field 是 card 版式的一行键值。

@@ -753,7 +753,9 @@ type OfficialAccepted struct {
 type OfficialQuestionAnswerItem struct {
 	ID       string   `json:"id"`
 	Selected []string `json:"selected"`
-	Custom   string   `json:"custom,omitempty"`
+	// Custom 用指针保留官方“字段缺席”与“明确给了 custom”的区别：
+	// plan-review 的 Approve 只在 custom 缺席时合法。
+	Custom *string `json:"custom,omitempty"`
 }
 
 // OfficialQuestionAnswer 是整批答案（一个问题一项）。

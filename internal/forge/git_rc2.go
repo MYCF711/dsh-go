@@ -17,6 +17,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 )
 
@@ -152,16 +154,41 @@ func (e *Executor) ForkPoint(ctx context.Context, root string, base *string, wor
 		}
 		return strings.TrimSpace(worktree.BaseCommit), label, true, nil
 	}
-	// 否则用远端默认分支的 merge-base（官方 remoteOrder：按 git remote 的列出顺序）。
+	// 否则用远端默认分支的 merge-base。官方 remoteOrder 是 upstream 所在 remote
+	// 第一、origin 第二、其余保持 git remote 顺序，不能按字母序碰巧选基准。
 	remotes, _, err := e.run(ctx, root, "remote")
 	if err != nil {
 		return "", "", false, err
 	}
+	ordered := make([]string, 0)
 	for _, remote := range strings.Split(strings.TrimSpace(remotes), "\n") {
-		remote = strings.TrimSpace(remote)
-		if remote == "" {
-			continue
+		if remote = strings.TrimSpace(remote); remote != "" {
+			ordered = append(ordered, remote)
 		}
+	}
+	tracked := ""
+	if upstream, _, upstreamErr := e.run(ctx, root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"); upstreamErr == nil {
+		upstream = strings.TrimSpace(upstream)
+		for _, remote := range ordered {
+			if strings.HasPrefix(upstream, remote+"/") && len(remote) > len(tracked) {
+				tracked = remote
+			}
+		}
+	}
+	rank := func(remote string) int {
+		switch {
+		case remote == tracked && tracked != "":
+			return 0
+		case remote == "origin":
+			return 1
+		default:
+			return 2
+		}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return rank(ordered[i]) < rank(ordered[j])
+	})
+	for _, remote := range ordered {
 		head, _, headErr := e.run(ctx, root, "symbolic-ref", "--quiet", "--short", "refs/remotes/"+remote+"/HEAD")
 		if headErr != nil {
 			continue
@@ -186,9 +213,9 @@ func (e *Executor) ForkPoint(ctx context.Context, root string, base *string, wor
 func (e *Executor) mergeBase(ctx context.Context, root, a, b string) (string, error) {
 	out, stderr, err := e.run(ctx, root, "merge-base", a, b)
 	if err != nil {
-		// 1 = 没有共同祖先；128 = 找不到对象。前者是"没有 fork point"，
-		// 后者才是错误（官方同样区分 merge.exitCode）。
-		if strings.Contains(err.Error(), "exit status 1") {
+		// 官方允许 0/1/128：1 是没有共同祖先，128 是默认 ref 已失效；
+		// 两者都没有可用 fork point，而不是把整次 localDiff 伪装成 Git 崩溃。
+		if strings.Contains(err.Error(), "exit status 1") || strings.Contains(err.Error(), "exit status 128") {
 			return "", nil
 		}
 		return "", fmt.Errorf("git merge-base 失败: %v: %s", err, strings.TrimSpace(stderr))
@@ -337,7 +364,14 @@ func samePath(a, b string) bool {
 	if ca == "" || cb == "" {
 		return false
 	}
-	return strings.EqualFold(ca, cb)
+	if strings.EqualFold(ca, cb) {
+		return true
+	}
+	// Windows 的会话目录可能带 8.3 短名（ADMINI~1），而 git --show-toplevel
+	// 返回长名；同一目录不能因此被误判成“不是本会话创建的 worktree”。
+	left, leftErr := os.Stat(a)
+	right, rightErr := os.Stat(b)
+	return leftErr == nil && rightErr == nil && os.SameFile(left, right)
 }
 
 // canonicalizePath 把路径统一成 filepath.Clean 之后的可比较形式。

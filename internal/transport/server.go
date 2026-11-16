@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"dshgo/internal/settingsform"
 )
 
 // 界面线的三条铁律，本文件是它们的落点：
@@ -207,6 +209,10 @@ type Options struct {
 	// SettingsFormHandler 是 additive ConfigForm 适配器，同样只在 cookie
 	// 认证成功后调用。它不改 SessionMethods 的 canonical 25。
 	SettingsFormHandler http.Handler
+	// CotTranslationSettings 是 cot-translation namespace 的实时读取口。
+	// nil 只供未接设置面的旧嵌入方保留既有默认；生产 serve 必须注入与
+	// SettingsFormHandler 同 store 的 Service，使写入后下一次 limits/translate 立即生效。
+	CotTranslationSettings *settingsform.Service
 	// ModelCatalogHandler 是 additive models.catalog.* 适配器。它在同一
 	// cookie 门后分派，不改变 canonical models.list 的网关语义。
 	ModelCatalogHandler http.Handler

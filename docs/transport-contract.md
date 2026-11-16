@@ -528,9 +528,20 @@ type PromptContentPart =
   [`cmd/dshd/agent_preset_default.go`](../cmd/dshd/agent_preset_default.go) 的
   `selectedAgentPresetDefault`）：`agentPresets.list.isDefault`、`agentPresetSelect` 的
   未点名回落、`serveCreate` 写进 v4 header 的 `agentPreset`、`run` 的建会话。
+- 内置 `cordis`（GUI Creator / D17）：`agentPresets.list` 由同一 `modes.Builtins()` 名册返回；
+  `agentPresets.read` 的 `content` 是官方 0.2.2-rc.2 `dsh-web-app/presets/cordis.patch.yml:12-140`
+  的完整 entry-list 投影（含 `!!js` 条件声明），不是 `dsh-go/agent-preset` 单行。运行时映射在
+  [`internal/modes/modes.go`](../internal/modes/modes.go)：Windows 只给 `pwsh`、非 Windows 只给
+  `bash`，开放宿主真实存在的 fs/jobs/schedule/goal/plan/delegation/web/skill/present/plugin
+  工具，sandbox 为 `workspace-write`；**不注册、不声明宿主没有的 `cordis_inspect_*`**。
+  ACP 与 `run` 都把官方 persona 的 `{{model}}` 替换为本轮真实模型并置于系统提示首段；
+  其他 preset 不添加这段 persona，`run` 对非 cordis 保留原 registry 与请求字节。
 - 端到端：`TestAgentPresetDefaultSettingsNamespaceEndToEnd`（真 `/api/settings.describe|mutate|
   form.reset` + 真新建会话读 header）、`TestAgentPresetDefaultRejectsUnknownPreset`、
-  `TestAgentPresetFallbackMatchesModesDefault`。
+  `TestAgentPresetFallbackMatchesModesDefault`；cordis 的 roster/read/ACP/run/执行准入与
+  非串扰证据为 `TestAgentPresetsCordisRosterAndOfficialRead`、
+  `TestACPCordisToolFilteringAndPersona`、`TestCmdRunCordisToolFilteringAndPersona`、
+  `TestCmdRunCordisExecutionViewRejectsHiddenTool`、`TestNonCordisRunProjectionKeepsOriginalRegistryAndPrompt`。
 
 ### 15.3 `/api/changes.summary` / `.diff` / `.open`
 
@@ -657,3 +668,23 @@ POST /api/directoryPicker.list            （宿主声明 native 时）
   真 `/api` 路由）下两条组合各跑一遍：native 组合 pick 200 且 browse 两个动词 501 且不落盘；
   browse 组合 list 200（官方五字段）+ createDirectory 200 且**真建目录**、pick 501 且原生服务
   被调用 **0** 次。
+
+## 17. 计划模式投影、plan-review 与 `/plan off`（2026-11-17）
+
+- `session.projections.values.plan` 固定为 `{active,pending}` 两个 boolean。`exit_plan_mode`
+  的 call/result 只提交审阅，**不产生退出选择**；退出真值是 durable `plan/mode{active:false}`。
+- exit 成功结果的 `tool/result.view` 增加 `awaiting_answer:true` 与单个 `questions` 项：
+  `{id:'plan-review',header:'Plan review',question:'Approve this plan and leave plan mode?',detail,
+  options:[Approve,Keep planning],intent:{kind:'plan-review',approve:'Approve',callId}}`。
+  问题字段使用官方 `multiSelect` camelCase；提交后 plan state 仍 active，`Stop=true`。
+- `userQuestions.answer` 同时接受 ask 与 exit 的 callId。plan-review 回答必须恰好一项且
+  id=`plan-review`：`selected:['Approve']` 先真实清状态并追加 `plan/mode`，再经真实 prompt
+  通道投递；`Keep planning` 或非空 custom 保持 active。已回答返回 false，不重复投递。
+- `commands.execute` 的 `/plan off` 删除同一 `<home>/state/plan/<session>.json` 并追加
+  `plan/mode`；带附件返回官方错误 `Attachments cannot accompany /plan off.`。状态写成功而
+  日志失败会回滚，重复 off 不伪造第二条 plan/mode。`/plan on` 未接真实 steer，明确 501。
+- GUI 消费：`Snapshot.Plan` → `dsplan/chip.go` → `commands.execute`；`Message.View.Questions`
+  → `internal/planreview` → `dsquestions/plan_review.go` → `userQuestions.answer`。
+  行为证据：`HOST:cmd/dshd/serve_{agent_api,commands_api}_test.go`、
+  `HOST:internal/{session,transport}/plan_*_test.go`、`UI:internal/planreview/`、
+  `UI:plugins/{dsplan,dsquestions}/` 与 `UI:internal/apiclient/agent_actions_test.go`。

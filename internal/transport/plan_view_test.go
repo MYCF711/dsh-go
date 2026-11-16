@@ -70,12 +70,13 @@ func TestOfficialPlanProjectionWired(t *testing.T) {
 	if len(plan) != 2 {
 		t.Fatalf("plan 字段 = %v，期望恰好 {active, pending}", plan)
 	}
-	// enter_plan_mode 已落地（active=true），exit_plan_mode 还在飞（目标 false）→ pending=true。
+	// enter_plan_mode 已落地；exit_plan_mode 只是提交 plan-review，不是退出选择，
+	// 所以它在飞期间 active=true、pending=false。只有 Approve//plan off 的 plan/mode 才退出。
 	if active, ok := plan["active"].(bool); !ok || !active {
 		t.Fatalf("plan.active = %#v，期望 true（enter_plan_mode 已经落地）", plan["active"])
 	}
-	if pending, ok := plan["pending"].(bool); !ok || !pending {
-		t.Fatalf("plan.pending = %#v，期望 true（exit_plan_mode 的 result 还没写）", plan["pending"])
+	if pending, ok := plan["pending"].(bool); !ok || pending {
+		t.Fatalf("plan.pending = %#v，期望 false（plan-review 提交不是退出选择）", plan["pending"])
 	}
 }
 
@@ -167,8 +168,10 @@ func TestOfficialPlanProjectionLiveDeltaFrame(t *testing.T) {
 	src.append(eventAt(8, "tool/result", `{"turn":2,"step":1,"message":{"role":"tool","source":{"kind":"tool","callId":"p1"},"toolCallId":"p1","content":[],"isError":false,"id":"m1"}}`))
 	waitPlan(true)
 
-	// 退出计划模式：同一对事件反过来。
+	// 提交 plan-review：call/result 不改变 active，也不发退出帧。
 	src.append(eventAt(9, "tool/call", `{"callId":"p2","name":"exit_plan_mode","arguments":"{\"plan\":\"# 方案\"}"}`))
 	src.append(eventAt(10, "tool/result", `{"turn":2,"step":1,"message":{"role":"tool","source":{"kind":"tool","callId":"p2"},"toolCallId":"p2","content":[],"isError":false,"id":"m2"}}`))
+	// 用户批准（或显式 /plan off）才由 durable plan/mode 发出退出增量。
+	src.append(eventAt(11, "plan/mode", `{"active":false}`))
 	waitPlan(false)
 }

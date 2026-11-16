@@ -43,14 +43,15 @@ import (
 //
 //  1. `plan/mode` 是 v4 词汇表成员（`internal/session/known_events.go:74`），读官方
 //     写出来的日志必须认它——否则打开官方会话时计划模式状态整段丢失；
-//  2. 宿主自己的计划模式开关是**两个工具**（`modules/tool/plan/plan.go` 的
-//     `enter_plan_mode` / `exit_plan_mode`），状态落在 `<home>/state/plan/<会话>.json`，
-//     日志里唯一的真实证据就是这两个工具的 `tool/call` + `tool/result` 配对。
+//  2. 宿主的 enter_plan_mode 是真实开关，状态落在 `<home>/state/plan/<会话>.json`，
+//     用 `tool/call` + `tool/result` 配对折出进入；exit_plan_mode 则只提交
+//     plan-review，**不是退出事件**。审批通过或 /plan off 落地后写 `plan/mode`，
+//     只有这条 durable 帧才把 active 折成 false。
 //
-// 第 2 条是本仓的**唯一真值来源**：`tool/call` 把目标状态记进 `running`（于是
-// 调用在飞的那段时间里 `pending` 为真，客户端据此把"生效目标"画成取反后的值——
-// 这正是官方对 `running` 的定义），`tool/result` 无失败落地时才改 `active`
-// （失败则只清掉 `running`，状态不动——与磁盘上那份状态"没写成就不算进"一致）。
+// enter 的 `tool/call` 把目标状态记进 `running`（调用在飞时 pending=true），
+// 无失败的 `tool/result` 才改 active。exit 的 call/result 都不改切换状态：
+// 提交后 active=true,pending=false，Keep planning 也保持这个值；Approve 与
+// /plan off 由后续 plan/mode{active:false} 收敛成 false,false。
 //
 // 这仍然是**纯派生**：从 v4 原始帧折叠，读路径不写盘（R5 红线）。
 
@@ -66,7 +67,7 @@ const (
 const (
 	// ToolEnterPlanMode 进入计划模式。
 	ToolEnterPlanMode = "enter_plan_mode"
-	// ToolExitPlanMode 提交方案并退出计划模式。
+	// ToolExitPlanMode 提交方案供人审批；它自身不改变 active。
 	ToolExitPlanMode = "exit_plan_mode"
 )
 
@@ -321,17 +322,14 @@ func applyPlanEvent(state planUnitState, event v4.Event) planUnitState {
 		return state
 
 	case eventToolCall:
-		// 宿主的真实证据：两个计划模式工具一开始调用就记下目标状态。
+		// enter 是真实切换：调用开始记 running，结果成功才落地。exit 只是
+		// plan-review 提交，不能伪装成 wanted=false；审批/off 的 plan/mode
+		// 才是退出真值。
 		name, callID, ok := planToolCall(event.Data)
-		if !ok {
+		if !ok || name != ToolEnterPlanMode {
 			return state
 		}
-		switch name {
-		case ToolEnterPlanMode:
-			state.Running = &planRunning{CommandID: callID, Wanted: true}
-		case ToolExitPlanMode:
-			state.Running = &planRunning{CommandID: callID, Wanted: false}
-		}
+		state.Running = &planRunning{CommandID: callID, Wanted: true}
 		return state
 
 	case eventToolResult:

@@ -3,11 +3,14 @@
 // PLAN §6 的三条硬规矩：
 //  1. **内置模式只读**（`Builtin = true`）——用户层 patch 命中即报错，不静默覆盖；
 //  2. 工具可见性由模式决定，**模式在一次会话内不变** → 工具表稳定，不击穿前缀缓存；
-//  3. 装卸类工具只在用户自建模式下可见（内置模式一律不给）。
+//  3. 装卸类工具原则上只在用户自建模式下可见；唯一例外是官方 cordis 组合
+//     明确声明的 plugin / plugin_manager，其他内置模式仍不给。
 package modes
 
 import (
 	"fmt"
+	"runtime"
+	"strings"
 
 	"dshgo/internal/sandbox"
 )
@@ -20,6 +23,9 @@ type Mode struct {
 	Builtin     bool   `json:"builtin"`
 	// Tools 是白名单；为空表示"全部可见"。
 	Tools []string `json:"tools,omitempty"`
+	// PromptPrefix 是该模式的 persona 首段；{{model}} 在每次装配时替换成真实模型。
+	// 空 = 不添加 persona，宿主原系统提示逐字节不变。
+	PromptPrefix string `json:"promptPrefix,omitempty"`
 	// Approval 是该模式的审批倾向（空 = 沿用宿主配置）。
 	Approval string `json:"approval,omitempty"`
 	// Sandbox 是该模式对应的真实 runtime sandbox 档位：
@@ -62,6 +68,36 @@ func (m Mode) Allows(tool string) bool {
 // DefaultID 是默认模式。
 const DefaultID = "default"
 
+// CordisID 是官方 Web Creator 选择的 agentPreset。
+const CordisID = "cordis"
+
+// CordisPromptPrefix 逐字对应官方 cordis.patch.yml 的 folded prefix。
+// {{model}} 不是给用户看的占位符：ACP / run 装配时必须换成当轮真实模型。
+const CordisPromptPrefix = "You are a coding agent powered by the {{model}} model. You help the user customize DeepSeek Harness itself."
+
+// PersonaPrefix 把模式里的模型占位符替换成本轮真实模型。
+func (m Mode) PersonaPrefix(model string) string {
+	return strings.ReplaceAll(m.PromptPrefix, "{{model}}", model)
+}
+
+// cordisTools 是官方组合在本宿主真实存在的工具映射。
+// tool-cordis 的 cordis_inspect_* 没有宿主实现，绝不能因为官方 entry-list
+// 声明了它就把它加进运行时白名单。Windows / 非 Windows 的 shell 条件与官方一致。
+func cordisTools() []string {
+	tools := []string{
+		"read", "write", "edit", "glob", "grep",
+		"job_list", "job_output", "job_kill",
+		"schedule_create", "schedule_list", "schedule_view", "schedule_edit",
+		"create_goal", "get_goal", "update_goal", "exit_plan_mode",
+		"subagent", "subagent_fork", "workflow", "ask_user_question", "todo_write",
+		"web_search", "web_fetch", "skill", "present", "plugin", "plugin_manager",
+	}
+	if runtime.GOOS == "windows" {
+		return append(tools, "pwsh")
+	}
+	return append(tools, "bash")
+}
+
 // Builtins 返回编译进二进制的内置模式（只读）。
 func Builtins() []Mode {
 	return []Mode{
@@ -94,6 +130,15 @@ func Builtins() []Mode {
 			Description: "全部工具可用；不虚构路径沙盒，写/执行可越出工作区（仍保留审批与读后写）。",
 			Builtin:     true,
 			Sandbox:     string(sandbox.ModeDangerFullAccess),
+		},
+		{
+			ID:           CordisID,
+			Name:         "Cordis",
+			Description:  "官方 Creator 组合的真实宿主映射：定制 DeepSeek Harness；不含宿主未实现的 cordis_inspect 工具。",
+			Builtin:      true,
+			Tools:        cordisTools(),
+			PromptPrefix: CordisPromptPrefix,
+			Sandbox:      string(sandbox.ModeWorkspaceWrite),
 		},
 	}
 }

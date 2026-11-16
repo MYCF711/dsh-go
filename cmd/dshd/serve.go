@@ -604,8 +604,10 @@ func cmdServe(args []string) error {
 		ConfigPatchHandler:  transport.NewConfigPatchHandler(configTree, nil),
 		Descriptors:         configDescriptors,
 		SettingsFormHandler: newSettingsFormHTTPHandler(settingsStore),
-		ModelCatalogHandler: newModelCatalogHTTPHandler(modelCatalog, settingsStore),
-		Attachments:         attachments,
+		// cotTranslation.limits/translate 与 settings.form.* 读同一份持久 namespace。
+		CotTranslationSettings: settingsform.NewService(settingsStore, settingsform.HostRegistry()),
+		ModelCatalogHandler:    newModelCatalogHTTPHandler(modelCatalog, settingsStore),
+		Attachments:            attachments,
 		// 官方 deliverables 的 /api/changes.summary|diff|open。记录与快照对象由
 		// 每一轮的 `dshd run` 子进程写进 <home>/state/workspace-changes/<sid>/，
 		// 这里只读；没有记录的 seq 回 404（不伪造空摘要）。
@@ -950,6 +952,7 @@ func cmdServe(args []string) error {
 	// `subagents.interruptByUser`（Team 分派面），两边共享同一份进程内状态。
 	agentAPICore := newAgentOfficialAPICore(agentOfficialDeps{
 		home: *home, goals: goalOverrides, journals: journals, src: src,
+		attachments:    attachments,
 		sandboxPresets: sandboxPresets, sandboxStore: sandboxStore,
 		// 活体注册表是**同一份**：subagents.* 的委派 epoch（subagent/start|end）
 		// 与排轮判据读的是同一张表，不是第二份影子状态。nil 时那些方法明确
@@ -1047,7 +1050,7 @@ func cmdServe(args []string) error {
 	srv.AttachOfficialForgeChangeRequestAPI(newForgeChangeRequestAPI())
 	srv.AttachOfficialForgeGitAPI(newForgeGitAPI(func(sessionID string) (string, error) {
 		return src.Cwd(sessionID)
-	}))
+	}, worktreeSvc))
 	// rc.2 Forge 面 12 个方法（internal/transport/handlers_forge_rc2.go）。
 	// 第二个参数与 worktree 面板共用**同一个** *worktree.Service 实例（清理状态、
 	// revision 必须同源）；会话目录解析器与上面的 forgePanel git 族同源（src.Cwd）。

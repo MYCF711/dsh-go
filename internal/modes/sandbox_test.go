@@ -16,6 +16,7 @@ func TestBuiltinSandboxMapping(t *testing.T) {
 		"read-only":          sandbox.ModeReadOnly,
 		"workspace-write":    sandbox.ModeWorkspaceWrite,
 		"danger-full-access": sandbox.ModeDangerFullAccess,
+		CordisID:             sandbox.ModeWorkspaceWrite,
 	}
 	for _, m := range Builtins() {
 		mode, err := m.SandboxMode()

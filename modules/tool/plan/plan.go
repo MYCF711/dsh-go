@@ -3,7 +3,8 @@
 // 它回答一个问题：模型能不能先想清楚、再动手？进入计划模式之后，凡是会改盘、
 // 起进程、或可能造成不可恢复后果的工具**全部被拒**；只读工具照常放行。
 // 方案出完，模型调 exit_plan_mode 提交，Result.Stop 让这一轮停在方案上，
-// 控制权交回人——人没批，模型就不能自己往下动手。
+// 控制权交回人——提交本身不退出；只有人批准（或显式 /plan off）才清状态，
+// 人没批，模型就不能自己往下动手。
 //
 // 为什么闸门挂在总线的 tools/pre-execute，而不是让每个工具自己判断：
 //   - 工具作者不该知道「计划模式」这件事；
@@ -67,17 +68,24 @@ type planState struct {
 func setState(sid string, st planState) error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.dir == "" {
+	return setStateLocked(state.dir, sid, st)
+}
+
+// setStateLocked 写指定状态目录；调用方必须持有 state.mu。显式 dir 是
+// userQuestions.answer 与 /plan 所在的 serve 进程使用的路径——它们不能依赖
+// 另一个 dshd run 子进程装配工具时留下的进程全局 state.dir。
+func setStateLocked(dir, sid string, st planState) error {
+	if dir == "" {
 		if state.mem == nil {
 			state.mem = map[string]planState{}
 		}
 		state.mem[sid] = st
 		return nil
 	}
-	if err := os.MkdirAll(state.dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	p := statePath(sid)
+	p := statePath(dir, sid)
 	if !st.Active {
 		// 退出就是删文件：**不落一个"active=false"的残骸**，
 		// 否则将来读到它的人分不清"没进过"和"进过又退了"。
@@ -93,28 +101,67 @@ func setState(sid string, st planState) error {
 	return os.WriteFile(p, append(raw, '\n'), 0o644)
 }
 
-func statePath(sid string) string {
+func statePath(dir, sid string) string {
 	if sid == "" {
 		sid = "_unknown"
 	}
-	return filepath.Join(state.dir, sid+".json")
+	return filepath.Join(dir, sid+".json")
 }
 
 func loadState(sid string) planState {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.dir == "" {
-		return state.mem[sid]
+	st, _ := loadStateLocked(state.dir, sid)
+	return st
+}
+
+// loadStateLocked 严格读状态；工具闸门的旧入口会按旧契约把读错误当 inactive，
+// 而用户显式切换模式的入口必须拿到错误并响亮失败，不能把损坏状态当“已退出”。
+func loadStateLocked(dir, sid string) (planState, error) {
+	if dir == "" {
+		return state.mem[sid], nil
 	}
-	raw, err := os.ReadFile(statePath(sid))
+	raw, err := os.ReadFile(statePath(dir, sid))
 	if err != nil {
-		return planState{}
+		if os.IsNotExist(err) {
+			return planState{}, nil
+		}
+		return planState{}, err
 	}
 	var st planState
-	if json.Unmarshal(raw, &st) != nil {
-		return planState{}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return planState{}, err
 	}
-	return st
+	return st, nil
+}
+
+// ActiveAt 从指定状态目录严格读取计划模式。它给 serve 进程里的真实命令与
+// 审批闭环使用；与工具子进程读取的是同一份 <home>/state/plan 文件。
+func ActiveAt(dir, sid string) (bool, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	st, err := loadStateLocked(dir, sid)
+	return st.Active, err
+}
+
+// SetActiveAt 在指定状态目录真实切换计划模式。active=true 会保留当前有效
+// 状态的原因/时间；从 inactive 进入时记录新的进入时间。active=false 删除状态文件。
+func SetActiveAt(dir, sid string, active bool) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	st := planState{Active: active}
+	if active {
+		current, err := loadStateLocked(dir, sid)
+		if err != nil {
+			return err
+		}
+		if current.Active {
+			st = current
+		} else {
+			st.At = time.Now().Format(time.RFC3339)
+		}
+	}
+	return setStateLocked(dir, sid, st)
 }
 
 func isActive(sid string) bool { return loadState(sid).Active }
@@ -193,10 +240,18 @@ func (t *enterTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 
 // ---- exit_plan_mode ----
 
+// 官方 plan-review 常量（@deepseek-ai/dsh-plan-mode/src/index.ts:72-84）。
+// 回答与 UI narrowing 都按这些原词匹配，不能用翻译后的展示文案当协议值。
+const (
+	ReviewID          = "plan-review"
+	ApproveLabel      = "Approve"
+	KeepPlanningLabel = "Keep planning"
+)
+
 var exitSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "plan": {"type": "string", "description": "方案正文（markdown）"}
+    "plan": {"type": "string", "description": "The complete plan, as markdown, starting with a # heading that names it."}
   },
   "required": ["plan"],
   "additionalProperties": false
@@ -212,7 +267,9 @@ func (t *exitTool) Name() string            { return "exit_plan_mode" }
 func (t *exitTool) Caps() spi.Caps          { return spi.Caps{} }
 func (t *exitTool) Schema() json.RawMessage { return exitSchema }
 func (t *exitTool) Description() string {
-	return "提交方案并退出计划模式。把 markdown 方案正文放进 plan；提交后本轮结束、控制权交回人。"
+	// 与官方 EXIT_DESCRIPTION（src/index.ts:81-84）同一语义；保持工具表预算
+	// （snapshot_test.go 的 120 字上限），提交≠退出必须写清。
+	return "Present a markdown plan for review. On approval, leave plan mode; otherwise keep planning."
 }
 
 func (t *exitTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error) {
@@ -220,18 +277,44 @@ func (t *exitTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, e
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return spi.Result{Hint: `参数不合法：期望 {"plan": "方案正文（markdown）"}`}, err
 	}
+	sid := spi.SessionFrom(ctx)
+	if !isActive(sid) {
+		return spi.Result{Hint: "先进入计划模式，再用 exit_plan_mode 提交方案"}, fmt.Errorf("exit_plan_mode is only available in plan mode")
+	}
 	body := strings.TrimSpace(a.Plan)
-	if body == "" {
-		return spi.Result{Hint: "plan 不能为空：把方案正文（markdown）整段放进去，人要看的是内容"}, fmt.Errorf("缺 plan")
+	if body == "" || !strings.HasPrefix(body, "#") || len(body) == 1 || (body[1] != ' ' && body[1] != '\t') {
+		return spi.Result{Hint: "plan 必须是以 # 标题开头的完整 markdown 方案"}, fmt.Errorf("exit_plan_mode requires a non-empty markdown plan starting with a # heading")
 	}
-	if err := setState(spi.SessionFrom(ctx), planState{}); err != nil {
-		return spi.Result{Hint: "状态清不掉（看 <home>/state/plan 是否可写）；方案已经给出，但闸门可能还拦着"}, err
+	// 官方是 /^#\s+\S/：# 后可以有多个空白，但标题正文必须非空。
+	heading := strings.TrimLeft(body[1:], " \t\r\n")
+	if heading == "" {
+		return spi.Result{Hint: "plan 的 # 标题不能为空"}, fmt.Errorf("exit_plan_mode requires a non-empty markdown plan starting with a # heading")
 	}
-	// Stop: true 是本工具的意义所在——人还没批，模型不能自己接着动手。
+	callID := spi.ToolCallIDFrom(ctx)
+	if callID == "" {
+		return spi.Result{Hint: "这次 exit_plan_mode 没有 callId，无法建立可续答的 plan-review；请经 agent 工具循环调用"}, fmt.Errorf("exit_plan_mode requires a tool call id for plan review")
+	}
+	questions := []spi.UserQuestion{{
+		ID:       ReviewID,
+		Header:   "Plan review",
+		Question: "Approve this plan and leave plan mode?",
+		Detail:   body,
+		Options: []spi.UserQuestionOption{
+			{Label: ApproveLabel, Description: "Leave plan mode; the plan is carried out from the next step."},
+			{Label: KeepPlanningLabel, Description: "Stay in plan mode; feedback goes back to the model."},
+		},
+		Intent: &spi.UserQuestionIntent{Kind: ReviewID, Approve: ApproveLabel, CallID: callID},
+	}}
+	// 提交只提出问题：状态仍 active，Stop=true 防止模型替人回答。只有
+	// userQuestions.answer 的 Approve 或 /plan off 才清状态并追加 plan/mode。
 	return spi.Result{
 		Summary: "方案已提交，等待批准",
 		Text:    body,
-		Stop:    true,
+		View: &spi.ViewSpec{
+			Kind: spi.ViewCard, Title: "Plan review", Body: body,
+			Questions: questions, AwaitingAnswer: true,
+		},
+		Stop: true,
 	}, nil
 }
 

@@ -288,7 +288,7 @@ official covered by const: 155 of 193
 | 59 | `goal` | IMPLEMENTED | `modules/tool/goal/goal.go:176` | get_goal / create_goal / update_goal，带 revision 乐观锁与会话内唯一目标。 |
 | 60 | `goal-round-driver` | IMPLEMENTED | `cmd/dshd/serve_goal_round.go:77`、`cmd/dshd/serve.go:349` | 真实 turn 正常收工后按 active goal 推进 `roundsStarted`；持久游标 + 启动 `Reconcile` 补漏记（幂等）；**不新建 turn、不排 prompt**（官方会排 `<goal_round>`，已登记差异）。 |
 | 61 | `command-goal` | IMPLEMENTED | `cmd/dshd/serve_commands_api.go:68`、`cmd/dshd/serve_commands_api.go:126` | `/goal` 已注册并读真实 goal 存储，回 phase / 目标 / 轮次 / 上限（旧审计 grep `"/goal"`=0 是漏了不带斜杠的常量）。 |
-| 62 | `plan-mode` | PARTIAL | `modules/tool/plan/plan.go:164` | enter_plan_mode / exit_plan_mode + 闸门（提交后人批）齐全，但 `/plan` 斜杠命令**未注册**（`cmd/dshd/serve_commands_api.go:18` 明说不注册 plan）。 |
+| 62 | `plan-mode` | PARTIAL | `modules/tool/plan/plan.go:277`、`cmd/dshd/serve_commands_api.go:146` | enter_plan_mode / exit_plan_mode + 闸门已接持久 plan-review（Approve 才退出，Keep planning/custom 继续）；`/plan off` 已注册并真实写状态 + durable `plan/mode`。仍 PARTIAL：`/plan on` 与 message/附件 steer 未接，明确 501，不假成功。 |
 | 63 | `token-meter` | IMPLEMENTED | `internal/session/tokens.go:21`、`cmd/dshd/context_usage.go:17` | 服务端实测锚点校准（`Meter.Observe`/`Estimate`）+ `context.usage` 重放读 v4 最近 assistant 真值，不拿启发式伪造 full token-count。 |
 | 64 | `compaction-basic` | IMPLEMENTED | `internal/compact/compact.go:66`、`cmd/dshd/serve.go:587` | 压力阈值触发（`--auto-compact` 默认 40000 token，`main.go:514`），CLI 与 transport `session.compact` 走同一段 `autoCompact`，摘要 + 遮蔽区间落 v4 事件。 |
 
