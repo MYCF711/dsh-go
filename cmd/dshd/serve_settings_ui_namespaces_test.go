@@ -8,8 +8,8 @@ package main
 // 这里钉的是"接上之后真的能读能写"：describe 报全、form.set 写进去、
 // form.get 读回来、非法值四字段拒绝、form.reset 回官方默认、
 // transcriptView 旧值读作 detailed 且不回写、重启（新 Store）后值还在；
-// 以及两个**本仓没有后端**的开关（session-log-deepseek.enabled=true /
-// session-telemetry-otel.mode=FEEDBACK_ONLY）在真实 HTTP 面回 501 + 四字段 error。
+// 以及 session-log-deepseek 的未实现开关回 501；session-telemetry-otel 的真实
+// endpoint + FEEDBACK_ONLY 能保存（后端在 internal/sessiontelemetry）。
 
 import (
 	"bytes"
@@ -181,7 +181,7 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 		{"session-log-deepseek", map[string]any{"enabled": false}},
 		// 本仓 2026-11-14 新增：官方 dsh-session-telemetry-otel 的开关
 		// （官方 index.ts:116-122 + 部署值 cordis.patch.yml:218-231）。
-		// 默认 mode 是 DISABLED（本仓没有 OTel SDK），FEEDBACK_ONLY 由 501 拒绝。
+		// 默认 DISABLED 是 W0 零出网部署差异；显式 endpoint + FEEDBACK_ONLY 可保存。
 		{"session-telemetry-otel", map[string]any{
 			"mode":                  "DISABLED",
 			"exporterURL":           "",
@@ -373,10 +373,9 @@ func TestSettingsFormUIClientNamespacesOverHTTP(t *testing.T) {
 	}
 }
 
-// TestSettingsFormNotImplementedSwitchesOverHTTP：两个"能力上不做"的开关在真实
-// L1 HTTP 面上必须回 **501 + 四字段 error**（code=not_implemented，message 点名
-// 叫出缺什么，hint 非空且可执行，retryable=false），并在 settings.form.set 与
-// settings.mutate 两条路径上一致；而两个**真实生效值**必须保存成功。
+// TestSettingsFormNotImplementedSwitchesOverHTTP：session-log-deepseek 的未实现
+// 开关在真实 L1 HTTP 面必须回 501 + 四字段 error；session-telemetry-otel 的
+// DISABLED 与带完整 endpoint 的 FEEDBACK_ONLY 都是真实可保存配置，不再回 501。
 func TestSettingsFormNotImplementedSwitchesOverHTTP(t *testing.T) {
 	home := t.TempDir()
 	store, _, _ := openSettingsStores(t, home, "base-model", "allow")
@@ -391,11 +390,6 @@ func TestSettingsFormNotImplementedSwitchesOverHTTP(t *testing.T) {
 			"会话日志开关缺上传方",
 			map[string]any{"ns": "session-log-deepseek", "path": []string{"enabled"}, "value": true},
 			[]string{"dsh_session_log", "deepseekLlmApiExtensions"},
-		},
-		{
-			"会话遥测缺 OTel 后端",
-			map[string]any{"ns": "session-telemetry-otel", "path": []string{"mode"}, "value": "FEEDBACK_ONLY"},
-			[]string{"OTel", "FEEDBACK_ONLY", "createSessionLogReporter"},
 		},
 	}
 	for _, entry := range rejections {
@@ -492,6 +486,23 @@ func TestSettingsFormNotImplementedSwitchesOverHTTP(t *testing.T) {
 	}
 	if got := settingsL1Field(t, telemetry, "maxRequestBytes")["default"]; got != float64(4000000) {
 		t.Fatalf("maxRequestBytes 的默认值必须是 4000000，实际 %v", got)
+	}
+	status, payload = postSettingsL1(t, handler, "settings.form.set", map[string]any{
+		"ns": "session-telemetry-otel", "path": []string{"exporterURL"}, "value": "https://collector.example.com/v1/logs",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("配置 exporterURL 必须成功：%d %v", status, payload)
+	}
+	status, payload = postSettingsL1(t, handler, "settings.form.set", map[string]any{
+		"ns": "session-telemetry-otel", "path": []string{"mode"}, "value": "FEEDBACK_ONLY",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("真实后端已接线，FEEDBACK_ONLY 不得再回 501：%d %v", status, payload)
+	}
+	described = settingsL1Describe(t, handler)
+	telemetry = settingsL1Section(t, described, "session-telemetry-otel")
+	if got := settingsL1Field(t, telemetry, "mode")["current"]; got != "FEEDBACK_ONLY" {
+		t.Fatalf("FEEDBACK_ONLY 写入后 current=%v", got)
 	}
 }
 

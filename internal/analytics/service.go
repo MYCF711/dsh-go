@@ -816,11 +816,9 @@ func (s *Service) CreateEventReporter(opts LogChannelOptions) (*EventReporter, e
 // 与普通事件通道**不共享任何请求或队列**（官方 "A Session channel never shares
 // a request or queue with ordinary events"）。
 //
-// 谁消费它：官方是 #38 `session-telemetry-otel`（feedback 授权后的会话记录，
-// FEEDBACK_ONLY 语义）。本仓 #38 仍 MISSING（审计 plugin-face.md 主表 #38），
-// 所以这条通道现在**没有生产消费者**——接口按官方形状提供、并被测试真实调用
-// （一条事件一条 record / 超限拒收 / 字节上限 / shutdown 取消在飞请求）。
-// 这里**不**造一个"没人调用的假 feedback 流"：#38 接上时直接用这两个入口。
+// 谁消费它：官方与本仓都是 #38 `session-telemetry-otel`。生产消费者在
+// internal/sessiontelemetry：只有 canonical 显式反馈才释放未交接前缀；
+// 这里仍不自行采集，也不把 product analytics 的记录混进 Session 通道。
 func (s *Service) CreateSessionLogReporter(opts SessionLogChannelOptions) (*SessionLogReporter, error) {
 	limit := opts.MaxRequestBytes
 	if limit == 0 {

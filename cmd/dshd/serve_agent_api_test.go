@@ -755,6 +755,11 @@ func TestAgentOfficialMessageFeedbackDurable(t *testing.T) {
 		t.Fatalf("put 结果 %+v", put)
 	}
 	version := put.Value.Version
+	canonical := readFeedbackCanonicalEvents(t, f, sessionID)
+	if len(canonical) != 1 || canonical[0].Type != "feedback/message-put" ||
+		!strings.Contains(string(canonical[0].Data), `"rating":"positive"`) {
+		t.Fatalf("rating 创建必须先落 canonical：%+v", canonical)
+	}
 
 	// 版本不匹配 → 业务失败（带 current），不是 500。
 	conflict, err := f.api.MessageFeedbackPut(transport.OfficialMessageFeedbackPutRequest{
@@ -779,6 +784,9 @@ func TestAgentOfficialMessageFeedbackDurable(t *testing.T) {
 	}
 	if !same.OK || same.Value.Version != version {
 		t.Fatalf("相同写入改了版本：%+v", same.Value)
+	}
+	if events := readFeedbackCanonicalEvents(t, f, sessionID); len(events) != 1 {
+		t.Fatalf("no-op/conflict 不应追加 canonical feedback：%+v", events)
 	}
 
 	// 重启后仍然读得到（真实持久化）。
@@ -806,6 +814,11 @@ func TestAgentOfficialMessageFeedbackDurable(t *testing.T) {
 	})
 	if err != nil || !again.OK {
 		t.Fatalf("重复 delete 应该仍然 ok：%+v %v", again, err)
+	}
+	canonical = readFeedbackCanonicalEvents(t, f, sessionID)
+	if len(canonical) != 2 || canonical[1].Type != "feedback/message-delete" ||
+		!strings.Contains(string(canonical[1].Data), `"messageId":"msg-1"`) {
+		t.Fatalf("withdrawal 必须落 canonical 且重复 delete 不追加：%+v", canonical)
 	}
 	// 不存在的会话 → session-not-found（业务失败，不是错误）。
 	missing, err := f.api.MessageFeedbackList("no-such-session")
@@ -837,6 +850,11 @@ func TestAgentOfficialSessionFeedbackRecord(t *testing.T) {
 	if len(doc.Items) != 1 || doc.Items[0].SessionID != sessionID || doc.Items[0].Text != "界面还是有点慢" {
 		t.Fatalf("落盘内容 %+v", doc.Items)
 	}
+	canonical := readFeedbackCanonicalEvents(t, f, sessionID)
+	if len(canonical) != 1 || canonical[0].Type != "feedback/record" ||
+		!strings.Contains(string(canonical[0].Data), `"category":"service-stability"`) {
+		t.Fatalf("文字反馈未落 canonical：%+v", canonical)
+	}
 	missing, err := f.api.SessionFeedbackRecord(transport.OfficialSessionFeedbackRequest{SessionID: "nope"})
 	if err != nil {
 		t.Fatalf("未知会话不该是错误: %v", err)
@@ -844,6 +862,19 @@ func TestAgentOfficialSessionFeedbackRecord(t *testing.T) {
 	if missing.OK || missing.Error == nil || missing.Error.Code != "session-not-found" {
 		t.Fatalf("未知会话结果 %+v", missing)
 	}
+}
+
+func readFeedbackCanonicalEvents(t *testing.T, f *agentAPIFixture, sessionID string) []v4.Event {
+	t.Helper()
+	path, err := f.src.resolve(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := v4.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return log.Events
 }
 
 func strPtr(s string) *string { return &s }

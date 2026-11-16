@@ -40,6 +40,7 @@ import (
 	"dshgo/internal/agent"
 	"dshgo/internal/modes"
 	"dshgo/internal/session"
+	"dshgo/internal/sessiontelemetry"
 	"dshgo/internal/transport"
 )
 
@@ -97,6 +98,9 @@ type agentOfficialDeps struct {
 	// 这里**不**再存一份影子状态；nil = 这次装配没有活体状态（测试夹具），
 	// 此时委派登记明确跳过，绝不编一条边出来。
 	agents *agent.Registry
+	// telemetry 是官方 #38 的反馈授权 coordinator；nil 时仍只记录 canonical
+	// 反馈，不伪造导出。生产由 serve.go 按 settings 装配，DISABLED 下其 reporter 为 nil。
+	telemetry *sessiontelemetry.Coordinator
 }
 
 // agentOfficialAPI 持有进程内（**不持久化**）的 goal activation。
@@ -1771,6 +1775,11 @@ func (a *agentOfficialAPI) messageFeedbackPut(req transport.OfficialMessageFeedb
 	if err := agentWriteDoc(a.agentFeedbackPath(), doc); err != nil {
 		return transport.OfficialMessageFeedbackPutResult{}, fmt.Errorf("%w: 写消息反馈: %v", transport.ErrStatePersistence, err)
 	}
+	if err := a.appendCanonicalFeedback(req.SessionID, "feedback/message-put", map[string]any{
+		"sessionId": req.SessionID, "item": item,
+	}); err != nil {
+		return transport.OfficialMessageFeedbackPutResult{}, err
+	}
 	return transport.OfficialMessageFeedbackPutResult{OK: true, Value: &item}, nil
 }
 
@@ -1820,6 +1829,11 @@ func (a *agentOfficialAPI) messageFeedbackDelete(req transport.OfficialMessageFe
 	}
 	if err := agentWriteDoc(a.agentFeedbackPath(), doc); err != nil {
 		return transport.OfficialMessageFeedbackDeleteResult{}, fmt.Errorf("%w: 写消息反馈: %v", transport.ErrStatePersistence, err)
+	}
+	if err := a.appendCanonicalFeedback(req.SessionID, "feedback/message-delete", map[string]any{
+		"sessionId": req.SessionID, "messageId": req.MessageID,
+	}); err != nil {
+		return transport.OfficialMessageFeedbackDeleteResult{}, err
 	}
 	return transport.OfficialMessageFeedbackDeleteResult{
 		OK: true, Value: &transport.OfficialMessageFeedbackDeleteValue{Absent: true},
@@ -1877,6 +1891,16 @@ func (a *agentOfficialAPI) sessionFeedbackRecord(req transport.OfficialSessionFe
 	})
 	if err := agentWriteDoc(a.agentSessionFeedbackPath(), doc); err != nil {
 		return transport.OfficialSessionFeedbackResult{}, fmt.Errorf("%w: 写会话反馈: %v", transport.ErrStatePersistence, err)
+	}
+	payload := map[string]any{}
+	if text := strings.TrimSpace(req.Text); text != "" {
+		payload["text"] = text
+	}
+	if req.Category != "" {
+		payload["category"] = req.Category
+	}
+	if err := a.appendCanonicalFeedback(req.SessionID, "feedback/record", payload); err != nil {
+		return transport.OfficialSessionFeedbackResult{}, err
 	}
 	return transport.OfficialSessionFeedbackResult{
 		OK: true, Value: &transport.OfficialSessionFeedbackRecorded{Recorded: true},

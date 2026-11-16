@@ -5,7 +5,7 @@
 > | 面 | 总数 | 状态 | 来源 |
 > |---|---|---|---|
 > | **宿主方法** | **223** | **220** IMPLEMENTED / **3** STRUCTURED_UNIMPLEMENTED / **0** MISSING | `docs/evidence/official-desktop-api-methods-0.2.2-rc.2.txt`；逐条核对见 `tmp/GO8-RC2/reports/FULL-gap-audit-2026-11-14.md` |
-> | **base 插件** | **99** | **86** IMPLEMENTED / **9** PARTIAL / **4** MISSING | 同表 §3；逐项表 `docs/evidence/base-plugins-per-item-0.2.2-rc.2.json`（99 条 id + 状态 + 落点）；本行随 PR #24–#30 与工作树 `feat/host-partial5`（未推送）更新 |
+> | **base 插件** | **99** | **87** IMPLEMENTED / **9** PARTIAL / **3** MISSING | 同表 §3；逐项表 `docs/evidence/base-plugins-per-item-0.2.2-rc.2.json`（99 条 id + 状态 + 落点）；本行随 PR #24–#30 与工作树 `feat/host-session-telemetry`（未推送）更新 |
 > | **UI 插件** | **66** | **30** / **19** / **17** | GUI 仓 `docs/official-parity.md`（分母**动态读**官方清单，`parity-count.py --check` 守着） |
 >
 > **`方法面 MISSING = 0` 有机器反证**：223 个方法**全部**被某条分派分支认领，
@@ -23,6 +23,8 @@
 > `drift` 记证据行号漂移；`known_drift` 已清空，那 9 条的去处见 `known_drift_note`）。
 > `scripts/gap-register-counts.py --check` 断言：每个官方 id 都有交代、不许编造 id、
 > 以及**逐项表的状态计数与本表那一行逐数相等**——只守总数守不住单条漂移。
+>
+> **#38 部署差异（feat/host-session-telemetry）**：官方默认 `FEEDBACK_ONLY`；本仓遵循 W0 默认本地零出网，默认 `DISABLED`。用户必须显式改 mode；只配置 `exporterURL` 或 `DSH_TELEMETRY_OTLP_URL` 不激活传输。反馈授权、脱敏 waterfall、完整前缀/后续后缀、fork、重启不自动补传与无 durable outbox 均由 `internal/sessiontelemetry` 实现并有 httptest 证据。
 
 - `task_id`：HS-00 · HOST-BASELINE-RECHECK
 - `owner` / `model`：`qa` / `group/deepseek-v4.1-flash-1017`

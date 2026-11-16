@@ -1,13 +1,18 @@
 package settingsform
 
-import "net/http"
+import (
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+)
 
 // 官方 0.2.2-rc.2 的客户端 UI / 插件设置命名空间：`locale` / `ui-theme` /
 // `ui-chat` / `ui-settings`（设置面板的「语言 / 外观 / 工作细节 / 开发者工具」
 // 行读的就是这 4 个，官方 `settings.general.item` 的 NS+Path）、
 // `ui-conversation` 与 `session-log-deepseek`（2026-11-13 补的两个 general slot），
 // 以及 2026-11-14 新增的 `session-telemetry-otel`（官方
-// dsh-session-telemetry-otel 的开关；本宿主没有 OTel 后端，见下面第 4 条差异）。
+// dsh-session-telemetry-otel 的开关；真实反馈授权导出已接 internal/sessiontelemetry）。
 //
 // # 权威源（随 rc.2 asar 发布的 TypeScript 原件）
 //
@@ -66,14 +71,11 @@ import "net/http"
 //     消费 `dsh_session_log` 的生产代码——声明 `true` 而无人消费就是**静默成功**。
 //     因此默认取 `false`（= 本仓真实生效值），并且显式声明 `true` 会被
 //     `not_implemented`（501）拒绝，见 checkSessionLogDeepSeekEnabled。
-//  4. `session-telemetry-otel.mode` 的默认值是 **DISABLED**，官方
+//  4. 部署差异：`session-telemetry-otel.mode` 的默认值是 **DISABLED**，官方
 //     `dsh-session-telemetry-otel/src/index.ts:37/:117` 是 `FEEDBACK_ONLY`。
-//     官方那个默认前提是 OTel SDK 管线：`inject = ['sessions','otel']`（:145）、
-//     `ctx.otel.createSessionLogReporter(...)`（:190）与 on-demand 的
-//     `SessionTelemetryCoordinator`（:219-222）。本仓没有 OTel SDK，也没有会话
-//     遥测通道（`internal/analytics` 只有端点环境变量），声明 `FEEDBACK_ONLY`
-//     而无人导出同样是静默成功。因此默认取 `DISABLED`（官方该模式下也只 warn、
-//     不导出，见 :156-163），`FEEDBACK_ONLY` 被 `not_implemented`（501）拒绝。
+//     本仓遵循 W0「默认本地零出网」，因此必须显式改 mode 才构造 OTLP 传输；
+//     只配置 URL（含 DSH_TELEMETRY_OTLP_URL）不会激活。显式 FEEDBACK_ONLY 由
+//     internal/sessiontelemetry 的真实 coordinator + reporter 承接，不再回 501。
 
 // 命名空间的名字（官方常量逐字）。
 const (
@@ -183,12 +185,8 @@ const (
 	// checkSessionLogDeepSeekEnabled 以 501 not_implemented 拒绝。
 	DefaultSessionLogEnabled = false
 	// DefaultSessionTelemetryMode 是 `session-telemetry-otel.mode` 的**本仓**默认值。
-	//
-	// 与官方不同：官方 index.ts:37/:117 是 `FEEDBACK_ONLY`，前提是 OTel SDK 的
-	// session-log reporter（:190 `ctx.otel.createSessionLogReporter`）与 on-demand
-	// coordinator（:219-222）。本仓没有 OTel SDK 与会话遥测通道，声明
-	// FEEDBACK_ONLY 无人导出 = 静默成功；官方在 DISABLED 下也只是 warn 不上传
-	// （:156-163），因此本仓默认取那个真实生效值。
+	// 部署差异：官方 index.ts:37/:117 默认 FEEDBACK_ONLY；本仓 W0 默认零出网，
+	// 因此默认 DISABLED，只有用户显式改 mode 才激活真实 reporter。
 	DefaultSessionTelemetryMode = SessionTelemetryModeDisabled
 	// DefaultShutdownTimeoutMillis 是官方部署配置里的
 	// `shutdownTimeoutMillis: 3000`（dsh-base/cordis.patch.yml:222；官方 schema
@@ -497,10 +495,9 @@ type uiNamespace struct {
 	// **只影响 describe/get 的 value 与 section.current，从不写回存储。**
 	normalize func(value map[string]any)
 	// check 是 schema 与字段级校验都表达不了的**语义**判据，在字段校验之后跑
-	// （所以坏类型/坏枚举仍先得到 400，不会被语义分支盖掉）。当前用它的两处都是
-	// "这个开关说了一件本宿主做不到的事"：session-log-deepseek.enabled 与
-	// session-telemetry-otel.mode 的真实上传/导出后端不存在，声明"开"就是
-	// 静默成功，因此返回四字段 not_implemented（501）。返回 nil 表示通过。
+	// （所以坏类型/坏枚举仍先得到 400，不会被语义分支盖掉）。session-log-deepseek
+	// 仍对没有上传方的开关回 501；session-telemetry-otel 只校验真实后端所需的
+	// endpoint，不再把 FEEDBACK_ONLY 当未实现。返回 nil 表示通过。
 	check func(value map[string]any) error
 	// schemaOnly 是 L1 表单表达不了、只进 schema envelope 的字段（数组 / 嵌套对象）。
 	//
@@ -793,9 +790,8 @@ func clientUINamespaces() []uiNamespace {
 			//   - `shutdownTimeoutMillis` / `maxRequestBytes` 用官方部署默认值
 			//     （cordis.patch.yml:222-223），后者的上限就是官方 schema 的
 			//     4,000,000（index.ts:121）。
-			// 本仓没有 OTel SDK 与会话遥测通道，所以 `FEEDBACK_ONLY` 由 check 以
-			// 501 not_implemented 拒绝；`DISABLED` 保存成功（官方该模式下也确实
-			// 只 warn、不导出，index.ts:156-163）。
+			// FEEDBACK_ONLY 由真实 coordinator/reporter 承接；check 只做端点的
+			// fail-closed 配置校验。DISABLED 不读取端点，也不会构造传输。
 			ns:    NamespaceSessionTelemetryOTel,
 			title: "Session telemetry",
 			fields: []uiField{
@@ -846,30 +842,33 @@ func checkSessionLogDeepSeekEnabled(value map[string]any) error {
 	}
 }
 
-// checkSessionTelemetryOTelMode 拒绝 `session-telemetry-otel.mode = FEEDBACK_ONLY`。
-//
-// 同样不是取值问题（官方默认就是它），而是本仓没有导出后端：官方该模式要构造
-// OTel SDK 的 byte-bounded session-log reporter 与 on-demand coordinator
-// （index.ts:145/:190/:219-222），本仓两者都没有，声明 FEEDBACK_ONLY 只会把
-// "已开启会话共享"写进设置而没有任何导出。
+// checkSessionTelemetryOTelMode 对上传模式做 fail-closed 端点校验。
+// DISABLED 与官方一致不读取 exporter；只配 URL 不会改变 mode。
 func checkSessionTelemetryOTelMode(value map[string]any) error {
 	mode, _ := value[FieldSessionTelemetryMode].(string)
 	if mode != SessionTelemetryModeFeedbackOnly {
 		return nil
 	}
-	return &Error{
-		Code: "not_implemented",
-		Message: "session-telemetry-otel.mode=FEEDBACK_ONLY 在本宿主不可用：缺的是 OpenTelemetry SDK 的 " +
-			"byte-bounded session-log reporter（官方 dsh-session-telemetry-otel/src/index.ts:190 " +
-			"`ctx.otel.createSessionLogReporter({...})`，含 :184-186 的 shutdown 期限与 :121 的 " +
-			"maxRequestBytes 字节上界）与 on-demand coordinator（:219-222 " +
-			"`new SessionTelemetryCoordinator(..., {capture:'on-demand', includeHistory:true})`）；" +
-			"官方靠 :145 `inject = ['sessions','otel']` 拿到 otel 服务，本仓没有 OTel SDK，也没有会话遥测通道" +
-			"（internal/analytics 只有端点环境变量）。",
-		Hint:      "保持 mode=DISABLED（本仓默认；官方该模式下也只 warn、不上传）；确实要会话遥测时改用官方宿主。",
-		Retryable: false,
-		Status:    http.StatusNotImplemented,
+	endpoint, _ := value[FieldSessionTelemetryExporterURL].(string)
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		for _, name := range []string{"DSHD_TELEMETRY_OTLP_URL", "DSH_TELEMETRY_OTLP_URL"} {
+			if endpoint = strings.TrimSpace(os.Getenv(name)); endpoint != "" {
+				break
+			}
+		}
 	}
+	parsed, err := url.Parse(endpoint)
+	if endpoint == "" || err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return &Error{
+			Code:      "invalid_value",
+			Message:   "session-telemetry-otel.mode=FEEDBACK_ONLY 需要完整的 http(s) OTLP logs endpoint",
+			Hint:      "设置 exporterURL（例如 https://collector.example.com/v1/logs），或配置 DSH_TELEMETRY_OTLP_URL；仅配置 URL 而保持 DISABLED 不会上传",
+			Retryable: false,
+			Status:    http.StatusBadRequest,
+		}
+	}
+	return nil
 }
 
 // BusyEnterBehaviors 是官方 BUSY_ENTER_BEHAVIORS（submission-settings.ts:13）。

@@ -97,8 +97,8 @@ func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, erro
 		settingsform.NamespaceUIChat, settingsform.NamespaceUISettings,
 		// 2026-11-13 补：官方另两个 general slot 的命名空间。
 		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek,
-		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的命名空间（本仓无 OTel 后端，
-		// mode=FEEDBACK_ONLY 由 settingsform 的语义校验回 501）。
+		// 官方 dsh-session-telemetry-otel 的命名空间；真实后端在
+		// internal/sessiontelemetry，FEEDBACK_ONLY 只校验 endpoint，不再回 501。
 		settingsform.NamespaceSessionTelemetryOTel,
 		// 2026-11-15 补：官方 agent-preset registry 的 selectedDefault（后续会话的
 		// 默认 preset；官方 UI 的"设为默认"写的就是这个命名空间）。

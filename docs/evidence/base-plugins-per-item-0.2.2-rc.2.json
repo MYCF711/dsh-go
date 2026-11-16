@@ -11,9 +11,9 @@
   },
   "counts": {
     "total": 99,
-    "IMPLEMENTED": 86,
+    "IMPLEMENTED": 87,
     "PARTIAL": 9,
-    "MISSING": 4
+    "MISSING": 3
   },
   "stale_register": {
     "total_stale_entries": 149,
@@ -460,17 +460,22 @@
     },
     {
       "id": "session-telemetry-otel",
-      "status": "MISSING",
+      "status": "IMPLEMENTED",
       "audit_status": "MISSING",
-      "evidence": "grep `telemetry` 生产代码只有 `internal/analytics/env.go`（OTLP 端点环境变量）；无会话遥测通道、无 feedback 触发的会话记录导出",
+      "evidence": "internal/sessiontelemetry/coordinator.go（canonical feedback 授权 + 未交接前缀 + waterfall + 进程内游标）；cmd/dshd/serve_session_telemetry.go（生产装配与 canonical append）；httptest collector 覆盖前缀/后缀/withdrawal/fork/DISABLED/重启/脱敏",
       "changes": [
         {
           "from": "DEFERRED",
           "to": "MISSING",
           "source": "audit-4.2"
+        },
+        {
+          "from": "MISSING",
+          "to": "IMPLEMENTED",
+          "source": "post-audit-pr"
         }
       ],
-      "note": "结构化不做：mode=FEEDBACK_ONLY 回 501（missing7 §2）"
+      "note": "复用手写 OTLP/HTTP JSON SessionLogReporter，无 Go SDK；部署差异：本仓默认 DISABLED（W0 零出网），官方默认 FEEDBACK_ONLY；只配 URL 不激活，无 durable outbox"
     },
     {
       "id": "subprocess",
