@@ -8,12 +8,12 @@
 //
 // entryListSchema 的硬判据（dsh-agent-preset-registry/lib/types/definition.js）：
 // 顶层必须是数组；每一行必须是 map，且 `name` 是非空字符串；`group: true` 时
-// `config` 里再嵌一层 entry-list。官方 `!!js` 条件是 Loader 方言，本宿主的
-// preset 是真实工具可见性/审批/沙箱声明，没有表达式节点，所以不伪造 `!!js`。
+// `config` 里再嵌一层 entry-list。官方 `!!js` 条件是 Loader 方言；普通宿主 preset
+// 没有表达式节点，所以不伪造它。内置 cordis 例外：返回官方组合的完整原文投影，
+// 平台与 profile 条件保留为声明，不在这里执行。
 //
-// 本宿主没有"每个 preset 一组独立 Cordis 插件"的装载器；真实组成是
-// tools × approval × sandbox。这里把它声明为**一行宿主 preset 插件**的 config，
-// 既满足官方 entry-list 形状，也不把不存在的插件列表写成成功。
+// 普通预设的真实组成是 tools × approval × sandbox，声明为一行宿主 preset 插件的
+// config；cordis 使用 cordis.go 里的官方 entry-list，绝不拿这一行冒充官方组合。
 package agentpresets
 
 import (
@@ -35,6 +35,9 @@ const PresetPluginName = "dsh-go/agent-preset"
 func Document(mode modes.Mode) (string, error) {
 	if strings.TrimSpace(mode.ID) == "" {
 		return "", fmt.Errorf("agentpresets: preset 缺 id，不能渲染成 entry-list")
+	}
+	if mode.ID == modes.CordisID {
+		return cordisEntryListYAML, nil
 	}
 	var b strings.Builder
 	b.WriteString("- id: ")

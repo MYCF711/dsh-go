@@ -528,9 +528,20 @@ type PromptContentPart =
   [`cmd/dshd/agent_preset_default.go`](../cmd/dshd/agent_preset_default.go) 的
   `selectedAgentPresetDefault`）：`agentPresets.list.isDefault`、`agentPresetSelect` 的
   未点名回落、`serveCreate` 写进 v4 header 的 `agentPreset`、`run` 的建会话。
+- 内置 `cordis`（GUI Creator / D17）：`agentPresets.list` 由同一 `modes.Builtins()` 名册返回；
+  `agentPresets.read` 的 `content` 是官方 0.2.2-rc.2 `dsh-web-app/presets/cordis.patch.yml:12-140`
+  的完整 entry-list 投影（含 `!!js` 条件声明），不是 `dsh-go/agent-preset` 单行。运行时映射在
+  [`internal/modes/modes.go`](../internal/modes/modes.go)：Windows 只给 `pwsh`、非 Windows 只给
+  `bash`，开放宿主真实存在的 fs/jobs/schedule/goal/plan/delegation/web/skill/present/plugin
+  工具，sandbox 为 `workspace-write`；**不注册、不声明宿主没有的 `cordis_inspect_*`**。
+  ACP 与 `run` 都把官方 persona 的 `{{model}}` 替换为本轮真实模型并置于系统提示首段；
+  其他 preset 不添加这段 persona，`run` 对非 cordis 保留原 registry 与请求字节。
 - 端到端：`TestAgentPresetDefaultSettingsNamespaceEndToEnd`（真 `/api/settings.describe|mutate|
   form.reset` + 真新建会话读 header）、`TestAgentPresetDefaultRejectsUnknownPreset`、
-  `TestAgentPresetFallbackMatchesModesDefault`。
+  `TestAgentPresetFallbackMatchesModesDefault`；cordis 的 roster/read/ACP/run/执行准入与
+  非串扰证据为 `TestAgentPresetsCordisRosterAndOfficialRead`、
+  `TestACPCordisToolFilteringAndPersona`、`TestCmdRunCordisToolFilteringAndPersona`、
+  `TestCmdRunCordisExecutionViewRejectsHiddenTool`、`TestNonCordisRunProjectionKeepsOriginalRegistryAndPrompt`。
 
 ### 15.3 `/api/changes.summary` / `.diff` / `.open`
 
