@@ -400,10 +400,8 @@ func TestOfficialSettingsUpdateFailLoudOnUnknownFieldAndBadType(t *testing.T) {
 }
 
 // TestOfficialSettingsUpdateNotImplementedIs501 钉住官方 settings/update 出口上的
-// **能力缺失**错误：settingsform 的语义校验（session-log-deepseek.enabled=true /
-// session-telemetry-otel.mode=FEEDBACK_ONLY）经 officialSettingsError 翻译后必须
-// 是 `code=not_implemented` + HTTP 501，而不是自相矛盾的
-// `code=bad_request` + `status=501`。message 要点出缺什么，hint 要给下一步。
+// session-log-deepseek 能力缺失错误；同函数末尾另验真实遥测后端配置为 200，
+// 防止把 FEEDBACK_ONLY 再误翻成 501。
 func TestOfficialSettingsUpdateNotImplementedIs501(t *testing.T) {
 	// 两个命名空间都**有真实持久段**：这样 501 只可能来自 settingsform 的语义
 	// 校验，而不是"没有落点"这类装配问题的掩护。
@@ -427,11 +425,6 @@ func TestOfficialSettingsUpdateNotImplementedIs501(t *testing.T) {
 			"会话日志开关缺上传方", "session-log-deepseek",
 			map[string]any{"enabled": true},
 			[]string{"dsh_session_log", "deepseekLlmApiExtensions"},
-		},
-		{
-			"会话遥测缺 OTel 后端", "session-telemetry-otel",
-			map[string]any{"mode": "FEEDBACK_ONLY"},
-			[]string{"OTel", "FEEDBACK_ONLY", "createSessionLogReporter"},
 		},
 	}
 	for _, testCase := range cases {
@@ -462,6 +455,17 @@ func TestOfficialSettingsUpdateNotImplementedIs501(t *testing.T) {
 	}
 	if got := officialResult(t, out)["value"].(map[string]any)["enabled"]; got != false {
 		t.Fatalf("写入后 value.enabled=%v，want false", got)
+	}
+	code, out = callOfficialSettings(t, srv, "settings.update", map[string]any{
+		"ns": "session-telemetry-otel", "patch": map[string]any{
+			"exporterURL": "https://collector.example.com/v1/logs", "mode": "FEEDBACK_ONLY",
+		},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("真实遥测后端配置必须 200，不得再回 501：%d %v", code, out)
+	}
+	if got := officialResult(t, out)["value"].(map[string]any)["mode"]; got != "FEEDBACK_ONLY" {
+		t.Fatalf("写入后遥测 mode=%v", got)
 	}
 }
 

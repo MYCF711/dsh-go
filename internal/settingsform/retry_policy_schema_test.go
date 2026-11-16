@@ -540,8 +540,8 @@ func TestDefaultRegistryKeepsTwoNamespacesAfterRC2(t *testing.T) {
 	if len(described.Namespaces) != 2 {
 		t.Fatalf("默认 registry 必须仍是 model/permission 两个：%+v", described.Namespaces)
 	}
-	// HostRegistry = 默认 2 个 + llm + 官方客户端的 6 个 UI 命名空间 + 本仓新增的
-	// session-telemetry-otel（2026-11-14，官方 #38 的开关，本仓没有 OTel 后端）。
+	// HostRegistry = 默认 2 个 + llm + 官方客户端的 6 个 UI 命名空间 +
+	// session-telemetry-otel（官方 #38，真实后端在 internal/sessiontelemetry）。
 	want := []string{
 		"model", "permission", "llm",
 		"locale", "ui-theme", "ui-chat", "ui-settings",
@@ -549,8 +549,8 @@ func TestDefaultRegistryKeepsTwoNamespacesAfterRC2(t *testing.T) {
 		//   ui-conversation.busyEnter       (dsh-client-ui-conversation/submission-settings.ts)
 		//   session-log-deepseek.enabled    (dsh-session-log-deepseek/src/index.ts:59-61)
 		"ui-conversation", "session-log-deepseek",
-		// 本仓 2026-11-14 新增：官方 dsh-session-telemetry-otel 的开关
-		// （官方 index.ts:116-122；mode=FEEDBACK_ONLY 由语义校验回 501）。
+		// 官方 dsh-session-telemetry-otel 的开关（index.ts:116-122）；
+		// FEEDBACK_ONLY 需要真实 endpoint，由语义校验回 400 而非 501。
 		"session-telemetry-otel",
 		// 本仓 2026-11-15 新增：官方 agent-preset registry 的 selectedDefault
 		// （官方 dsh-agent-preset-registry/src/index.ts:52-59,82）。
