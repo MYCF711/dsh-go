@@ -648,7 +648,7 @@ func CanonicalDescriptors() []Descriptor {
 			{Name: "requestId", Kind: ParamString}, {Name: "optionId", Kind: ParamString},
 		}},
 		{Method: MethodSessionCreate, Summary: "新建会话", Source: "canonical", Params: []ParamSpec{
-			{Name: "mode", Kind: ParamString},
+			{Name: "mode", Kind: ParamString}, {Name: "workspaceId", Kind: ParamString},
 		}},
 		{Method: MethodSessionDelete, Summary: "删除会话", Source: "canonical", Params: []ParamSpec{
 			{Name: "id", Kind: ParamString}, {Name: "sessionId", Kind: ParamString},

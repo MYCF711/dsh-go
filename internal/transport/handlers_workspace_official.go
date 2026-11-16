@@ -578,6 +578,9 @@ func (s *Server) ProjectOfficialWorkspaceEvent(sessionID, event string) error {
 type OfficialWorkspaceFault struct {
 	Code    string
 	Message string
+	// Details 是官方 RemoteError 的第三个参数；writeOfficialError 会把它
+	// 平铺到信封顶层 details，不破坏既有四字段 error 对象。
+	Details map[string]any
 }
 
 func (f *OfficialWorkspaceFault) Error() string {
@@ -590,9 +593,15 @@ func (f *OfficialWorkspaceFault) Error() string {
 	return f.Code + ": " + f.Message
 }
 
-// OfficialWorkspaceError 造一条官方错误（宿主侧唯一构造点）。
+// OfficialWorkspaceError 造一条官方错误（宿主侧构造点）。
 func OfficialWorkspaceError(code, format string, args ...any) error {
 	return &OfficialWorkspaceFault{Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
+// OfficialWorkspaceErrorDetails 造一条带官方 details 的错误，例如
+// workspace/not-found 必须带回 {workspaceId}，让客户端无需解析 message。
+func OfficialWorkspaceErrorDetails(code string, details map[string]any, format string, args ...any) error {
+	return &OfficialWorkspaceFault{Code: code, Message: fmt.Sprintf(format, args...), Details: details}
 }
 
 // officialWorkspaceFaultStatus 是官方码 → (HTTP 状态, 四字段 code) 的**唯一**映射表。
@@ -648,7 +657,7 @@ func officialWorkspaceFault(err error) error {
 	var fault *OfficialWorkspaceFault
 	if errors.As(err, &fault) {
 		status, code := officialWorkspaceFaultStatus(fault.Code)
-		return &officialError{status: status, code: code, msg: fault.Error()}
+		return &officialError{status: status, code: code, msg: fault.Error(), details: fault.Details}
 	}
 	// 认不出的错误一律按宿主内部问题报：它绝不能被渲染成成功。
 	return officialInternal("%s", err.Error())

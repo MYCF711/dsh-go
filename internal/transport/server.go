@@ -190,8 +190,12 @@ type Options struct {
 	PendingApprovals func(sessionID string) []ServerFrame
 	// Approve 回一次审批（H13）：requestID 是服务端推给客户端的那个，optionID 是客户端选的。
 	Approve func(requestID, optionID string) error
-	// SetMode 换模式；宿主注入。
+	// Create 按既有 mode 契约建会话；宿主注入。
 	Create func(mode string) (string, error)
+	// CreateInWorkspace 是官方 session.create 的 additive 入口：workspaceId 指向
+	// 宿主 registry 里的真实工作区，会话必须建在该工作区目录并加入其成员列表。
+	// nil 时带 workspaceId 的请求明确回 501，不退回进程 cwd 假建。
+	CreateInWorkspace func(mode, workspaceID string) (string, error)
 	// PluginHandler 是 additive plugin.* 适配器。它只在下面的既有 cookie
 	// 认证成功后调用；nil 时保持闭合分派的 501。handler 自己限定八个方法，
 	// 这里不复制第二份方法表，也不把裸 handler 注册成独立路由。
@@ -1211,9 +1215,34 @@ func (s *Server) handleSessionCancel(w http.ResponseWriter, r *http.Request) {
 // handleSessionCreate 是 /api/session.create：建会话，返回 id。
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Mode string `json:"mode"`
+		Mode        string          `json:"mode"`
+		WorkspaceID *string         `json:"workspaceId"`
+		Cwd         json.RawMessage `json:"cwd"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&in)
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "session.create 参数不是有效 JSON 对象"))
+		return
+	}
+	// 官方 SessionCreateRequest：workspaceId 与 cwd 互斥。用指针/RawMessage
+	// 区分“未提供”和“提供了空值”，空 workspaceId 也必须走 registry 查无此物，
+	// 不能被当成省略后在进程 cwd 建一个会话。
+	if in.WorkspaceID != nil && in.Cwd != nil {
+		writeOfficialError(w, officialBadRequest("gateway/bad-request: session.create accepts workspaceId or cwd, not both"))
+		return
+	}
+	if in.WorkspaceID != nil {
+		if s.opt.CreateInWorkspace == nil {
+			writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented", "session.create 的 workspaceId 入口未接线"))
+			return
+		}
+		id, err := s.opt.CreateInWorkspace(in.Mode, *in.WorkspaceID)
+		if err != nil {
+			writeOfficialError(w, officialWorkspaceFault(err))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"sessionId": id})
+		return
+	}
 	if s.opt.Create == nil {
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 		return
