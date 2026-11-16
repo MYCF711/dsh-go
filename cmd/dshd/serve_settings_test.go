@@ -247,7 +247,7 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	described := postPluginGlue(t, clientA, serverA.base, "settings.describe", map[string]any{}, http.StatusOK)
 	logSettingsEvidence(t, "REAL_DESCRIBE", described)
 	result := described["result"].(map[string]any)
-	// 19 个命名空间 = 原来的 11 个 + 官方 4 条设置页的 8 个（2026-11-15）。
+	// 20 个命名空间 = 原来的 19 个 + 官方 cot-translation configForms scope。
 	//
 	// 为什么多 8 行（**这是官方形状变多，不是判据放宽**）：官方客户端用
 	// `ctx.configForms.whileServed([ns...])` 决定设置页出不出来，宿主不服务
@@ -267,7 +267,7 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	// 官方 UI 的"重试条件/次数/等待时间"就是从这里读候选与正下界的）；这些 UI
 	// 命名空间与它共用同一份 <home>/state/settings-namespaces.json，
 	// 带 revision 乐观锁。
-	if len(result["namespaces"].([]any)) != 19 || len(result["sections"].([]any)) != 19 || len(result["errors"].([]any)) != 0 {
+	if len(result["namespaces"].([]any)) != 20 || len(result["sections"].([]any)) != 20 || len(result["errors"].([]any)) != 0 {
 		t.Fatalf("bad real describe: %+v", result)
 	}
 	llmSection := f2LLMSection(t, result)

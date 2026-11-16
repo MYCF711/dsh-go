@@ -100,6 +100,7 @@ func (s *serveSettingsStore) Read(namespace string) (settingsform.Document, erro
 		// 官方 dsh-session-telemetry-otel 的命名空间；真实后端在
 		// internal/sessiontelemetry，FEEDBACK_ONLY 只校验 endpoint，不再回 501。
 		settingsform.NamespaceSessionTelemetryOTel,
+		settingsform.NamespaceCotTranslation,
 		// 2026-11-15 补：官方 agent-preset registry 的 selectedDefault（后续会话的
 		// 默认 preset；官方 UI 的"设为默认"写的就是这个命名空间）。
 		settingsform.NamespaceAgentPreset,
@@ -171,6 +172,7 @@ func (s *serveSettingsStore) Write(namespace string, user map[string]any, expect
 		settingsform.NamespaceUIConversation, settingsform.NamespaceSessionLogDeepSeek,
 		// 2026-11-14 补：官方 dsh-session-telemetry-otel 的命名空间（见上面 Read 的说明）。
 		settingsform.NamespaceSessionTelemetryOTel,
+		settingsform.NamespaceCotTranslation,
 		// 2026-11-15 补：agent-preset registry（写路径另做"id 真实存在"校验，
 		// 见 agent_preset_default.go；不写进去一个装不起来的默认值）。
 		settingsform.NamespaceAgentPreset,
