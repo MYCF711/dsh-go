@@ -11,8 +11,8 @@
   },
   "counts": {
     "total": 99,
-    "IMPLEMENTED": 88,
-    "PARTIAL": 9,
+    "IMPLEMENTED": 89,
+    "PARTIAL": 8,
     "MISSING": 2
   },
   "stale_register": {
@@ -93,10 +93,10 @@
     },
     {
       "id": "deepseek-llm-api-extensions",
-      "status": "PARTIAL",
-      "audit_status": "PARTIAL",
-      "evidence": "`internal/llm/provider.go` 注册/prepare/accept；`cmd/dshd/serve_llm_extensions.go` 与 `internal/sessionlog/deepseek.go` 两类真实字段所有者",
-      "note": "仍 PARTIAL：dsh_session_log 已随 #8 接通；sessionId→standing preset 的独立 Loader 树并集尚无 agentPresets 服务"
+      "status": "IMPLEMENTED",
+      "audit_status": "IMPLEMENTED",
+      "evidence": "官方契约 = register/prepare/accept 三件事（dsh-deepseek-llm-api-extensions/README.md Service 节）；本仓 RegisterRequestExtension（internal/llm/provider.go:236）+ prepare/2xx accept 已生产接线，两类真实注册者 dsh_plugin_packages 与 dsh_session_log 均进真实请求链。此前记的「standing preset Loader 树并集」经核实**不属于本包契约**——standingPreset 只出现在 dsh/docs/subsystems/skills.md、dsh-agent-tool-presentation、dsh-api-session-controller，与本扩展注册表无关。",
+      "note": "契约已完整实现；standing preset 属 skills/tool-presentation 子系统，不在本包范围"
     },
     {
       "id": "session",
