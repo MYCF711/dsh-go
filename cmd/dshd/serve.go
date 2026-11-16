@@ -594,6 +594,9 @@ func cmdServe(args []string) error {
 	// 实例（两处各造一个服务，行为一致但状态面会分叉）。
 	changesStore := newWorkspaceChangesStore(*home)
 	nativeSvc := native.NewService()
+	// workspaceId 建会话与 workspace.* 必须共用稍后装配的那一份 registry。
+	// 闭包在 Start 前完成晚绑定；请求到来时绝不会看到另一个 registry 实例。
+	var wsHost *officialWorkspaceHost
 	srv, err := transport.NewServer(withOfficialSessionOptions(*home, withSessionOperationOptions(*home, transport.Options{
 		Source: src,
 		// 只把适配器交给 Transport；它们在既有 cookie 认证之后才会被调用。
@@ -911,6 +914,20 @@ func cmdServe(args []string) error {
 		// Create 真建一份 v4 会话，并把创建当时的通用默认物化到既有
 		// session override 键；后续每轮仍由原 runner 读同一存储。
 		Create: createWithSettingsDefaults(create, settingsStore),
+		// 官方 workspaceId 分支：registry 决定 cwd，不能用上面的进程默认 cwd
+		// 冒充；创建后的默认 model/permission 与普通分支走同一套物化逻辑。
+		CreateInWorkspace: func(mode, workspaceID string) (string, error) {
+			if wsHost == nil {
+				return "", transport.OfficialWorkspaceError("workspace/unsupported", "workspace registry 未接线")
+			}
+			return wsHost.createSession(workspaceID, func(cwd string) (string, error) {
+				createAtWorkspace, err := serveCreate(*home, cwd)
+				if err != nil {
+					return "", err
+				}
+				return createWithSettingsDefaults(createAtWorkspace, settingsStore)(mode)
+			})
+		},
 		// 官方 job.*/terminal.*（11 个方法）的路由层。
 		OfficialJobTerminal: officialJT.Handler(),
 	}), prompts, settingsStore))
@@ -965,7 +982,7 @@ func cmdServe(args []string) error {
 		Settings:    settingsform.NewService(settingsStore, settingsform.HostRegistry()),
 		Credentials: transport.NewCatalogCredentialStore(modelCatalog),
 	})
-	wsHost := attachOfficialWorkspace(srv, *home, src, prompts)
+	wsHost = attachOfficialWorkspace(srv, *home, src, prompts)
 	// directoryPicker 互斥组合：启动时**声明**一次，之后两个 browse 动词与 pick
 	// 都按这份声明门控（同时挂两套会被 transport 拒掉，这里当启动失败处理）。
 	pickerFacts := directoryPickerFactsFromEnv(*addr, runtime.GOOS, os.Getenv)

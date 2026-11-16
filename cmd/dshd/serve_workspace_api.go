@@ -577,6 +577,54 @@ func officialSplitLines(content []byte) []string {
 // workspace.* 的真实实现
 // ---------------------------------------------------------------------------
 
+// createSession 实现官方 session.create 的 workspaceId 分支。
+//
+// 先在 registry 里按**精确 id**取工作区路径，再调用宿主真实建会话函数；建完后
+// 走同一份 registry 的写锁把会话放到手动顺序最前（官方 attachSession 语义）。
+// sessionIDsLocked 会按真实 v4 header.cwd 过滤，因此回调若把会话建到别的目录，
+// attach 会响亮失败，不会靠一个返回的 id 伪造工作区归属。
+func (h *officialWorkspaceHost) createSession(workspaceID string, create func(cwd string) (string, error)) (string, error) {
+	var cwd string
+	err := h.withDocument(func() error {
+		rec := h.doc.Workspaces[workspaceID]
+		if rec == nil {
+			return transport.OfficialWorkspaceErrorDetails("workspace/not-found",
+				map[string]any{"workspaceId": workspaceID}, "workspace %q not found", workspaceID)
+		}
+		cwd = rec.Path
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if create == nil {
+		return "", transport.OfficialWorkspaceError("workspace/unsupported", "session.create 的真实建会话能力未接线")
+	}
+	sessionID, err := create(cwd)
+	if err != nil {
+		return "", err
+	}
+	if err := h.withDocumentWrite(func() error {
+		rec := h.doc.Workspaces[workspaceID]
+		if rec == nil {
+			return transport.OfficialWorkspaceError("workspace/not-found", "workspace %q not found", workspaceID)
+		}
+		if !officialContains(h.sessionIDsLocked(rec), sessionID) {
+			return fmt.Errorf("会话 %q 的真实 header.cwd 不属于工作区 %q（%s）", sessionID, workspaceID, rec.Path)
+		}
+		if !officialContains(rec.ManualSessionIDs, sessionID) {
+			rec.ManualSessionIDs = append([]string{sessionID}, rec.ManualSessionIDs...)
+		}
+		rec.UpdatedAtMS = h.now().UnixMilli()
+		return nil
+	}); err != nil {
+		return "", transport.OfficialWorkspaceErrorDetails("session/workspace-attach-failed",
+			map[string]any{"sessionId": sessionID, "workspaceId": workspaceID},
+			"session %q was created but could not attach to workspace %q: %v", sessionID, workspaceID, err)
+	}
+	return sessionID, nil
+}
+
 // workspaceAPI 把真实能力装成 transport 认的那份函数表。
 func (h *officialWorkspaceHost) workspaceAPI() transport.OfficialWorkspaceAPI {
 	return transport.OfficialWorkspaceAPI{
