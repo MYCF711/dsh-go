@@ -64,6 +64,29 @@ func agentPresetKnown(home, id string) bool {
 	return false
 }
 
+// agentPresetAvailableIDs 返回当前名册里的**全部** preset id（内置 ∪ `<home>/modes/*.toml`）。
+//
+// 它只服务一个出口：官方 `agent-preset/not-found` 的 `details.available`
+// （`@deepseek-ai/dsh-agent-preset-registry/src/index.ts:223-225`：
+// `{ agentPreset: wanted, available: [...this.definitions.keys()] }`）。
+// 名册读不出来时只回内置 id —— 这是**错误体里的提示**，不该让一次"请求了
+// 不存在的 preset"升级成一次 registry 读写故障。
+func agentPresetAvailableIDs(home string) []string {
+	builtins := modes.Builtins()
+	out := make([]string, 0, len(builtins)+4)
+	for _, mode := range builtins {
+		out = append(out, mode.ID)
+	}
+	user, err := modes.LoadDir(filepath.Join(home, "modes"))
+	if err != nil {
+		return out
+	}
+	for _, mode := range user {
+		out = append(out, mode.ID)
+	}
+	return out
+}
+
 // validateAgentPresetSelection 是 `agent-preset-registry` 写路径的语义校验。
 //
 // 它只判 schema 表达不了的那一条：声明的 id 必须真实存在。类型/长度由

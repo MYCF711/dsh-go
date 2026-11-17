@@ -619,6 +619,17 @@ func officialWorkspaceFaultStatus(code string) (status int, fourcode string) {
 		return http.StatusNotFound, "not_found"
 	case "workspace/session-active":
 		return http.StatusConflict, "revision_conflict"
+	case "session/workspace-attach-failed":
+		// 会话已经真建出来了，只是挂不进工作区：这是宿主侧失败，不是客户端输入
+		// 问题。官方客户端靠 details.sessionId 把这份"已发布但没挂上"的会话当
+		// Ungrouped 暴露（`manager.ts:855-857` 的 workspaceAttachSessionId），
+		// 所以状态码用 500 internal，但四字段 message 里保留官方码、details 里
+		// 保留那个真实的 sessionId。
+		return http.StatusInternalServerError, "internal"
+	case "session/conflict", "agent-preset/not-found", "agent-preset/conflict":
+		// 改请求（换 sessionId / 换 preset）才能过 → bad_request。与默认分支同一
+		// 结果，显式列出是为了不让以后改默认值时静默改变这三个官方码的语义。
+		return http.StatusBadRequest, "bad_request"
 	case "workspace/unsupported", "not_implemented",
 		"workspace-file/watch-unsupported", "workspace-file/not-watchable":
 		return http.StatusNotImplemented, "not_implemented"

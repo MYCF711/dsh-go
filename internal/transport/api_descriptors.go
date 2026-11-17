@@ -647,8 +647,12 @@ func CanonicalDescriptors() []Descriptor {
 		{Method: MethodSessionApprove, Summary: "回一次审批", Source: "canonical", Params: []ParamSpec{
 			{Name: "requestId", Kind: ParamString}, {Name: "optionId", Kind: ParamString},
 		}},
-		{Method: MethodSessionCreate, Summary: "新建会话", Source: "canonical", Params: []ParamSpec{
+		{Method: MethodSessionCreate, Summary: "新建会话或复用空白会话", Source: "canonical", Params: []ParamSpec{
+			// mode 是旧名字（header.agentPreset）；其余四个是官方 SessionCreateRequest
+			// （types.ts:268-277）的逐字字段名。
 			{Name: "mode", Kind: ParamString}, {Name: "workspaceId", Kind: ParamString},
+			{Name: "cwd", Kind: ParamString}, {Name: "sessionId", Kind: ParamString},
+			{Name: "agentPreset", Kind: ParamString},
 		}},
 		{Method: MethodSessionDelete, Summary: "删除会话", Source: "canonical", Params: []ParamSpec{
 			{Name: "id", Kind: ParamString}, {Name: "sessionId", Kind: ParamString},

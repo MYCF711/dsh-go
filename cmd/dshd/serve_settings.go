@@ -272,24 +272,38 @@ func createWithSettingsDefaults(create func(string) (string, error), settings *s
 		if err != nil {
 			return "", err
 		}
-		model, err := settings.Read(settingsform.NamespaceModel)
-		if err != nil {
-			return "", fmt.Errorf("会话 %s 已创建，但读取默认 model 失败: %w", id, err)
-		}
-		permission, err := settings.Read(settingsform.NamespacePermission)
-		if err != nil {
-			return "", fmt.Errorf("会话 %s 已创建，但读取默认 permission 失败: %w", id, err)
-		}
-		modelValue := effectiveSettingsValue(model, settingsform.FieldDefaultModel)
-		permissionValue := effectiveSettingsValue(permission, settingsform.FieldDefaultPreset)
-		if err := settings.models.Set(id, modelValue); err != nil {
-			return "", fmt.Errorf("会话 %s 已创建，但保存默认 model 失败: %w", id, err)
-		}
-		if err := settings.permissions.Set(id, permissionValue); err != nil {
-			return "", fmt.Errorf("会话 %s 已创建，但保存默认 permission 失败: %w", id, err)
+		if err := applySessionSettingDefaults(settings, id); err != nil {
+			return "", err
 		}
 		return id, nil
 	}
+}
+
+// applySessionSettingDefaults 把"创建当时"的有效默认 model/permission 物化到
+// 这个**新会话**的既有 override 键上（见 docs/transport-contract.md 的
+// `session.create` 段）。它只给新会话用：官方语义是"创建当时的默认值"，
+// 复用一个已存在的会话不 retroactive 改写它的 override。
+//
+// 抽出来是因为官方 `session.create` 的 `sessionId` 分支要用**调用方给的 id**
+// 建会话，走不到 createWithSettingsDefaults 的闭包（那个闭包自己铸 id）。
+func applySessionSettingDefaults(settings *serveSettingsStore, id string) error {
+	model, err := settings.Read(settingsform.NamespaceModel)
+	if err != nil {
+		return fmt.Errorf("会话 %s 已创建，但读取默认 model 失败: %w", id, err)
+	}
+	permission, err := settings.Read(settingsform.NamespacePermission)
+	if err != nil {
+		return fmt.Errorf("会话 %s 已创建，但读取默认 permission 失败: %w", id, err)
+	}
+	modelValue := effectiveSettingsValue(model, settingsform.FieldDefaultModel)
+	permissionValue := effectiveSettingsValue(permission, settingsform.FieldDefaultPreset)
+	if err := settings.models.Set(id, modelValue); err != nil {
+		return fmt.Errorf("会话 %s 已创建，但保存默认 model 失败: %w", id, err)
+	}
+	if err := settings.permissions.Set(id, permissionValue); err != nil {
+		return fmt.Errorf("会话 %s 已创建，但保存默认 permission 失败: %w", id, err)
+	}
+	return nil
 }
 
 func effectiveSettingsValue(doc settingsform.Document, field string) string {
