@@ -45,6 +45,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // 帧标记。与既有通道一样，标记后紧跟 JSON，整帧一行。
@@ -68,6 +69,23 @@ const (
 	// （`dsh-terminal-panel/src/index.ts:34-37`），我们没有那个前提，所以只能像
 	// list/read 一样把这次调用原样转给父进程。
 	BridgeOpOpen = "open"
+
+	// 下面五个是 agent 终端**交互**的桥 op（`dsh-tool-terminal` 那五个工具）。
+	//
+	// 为什么也必须过桥：工具跑在 `dshd run` 子进程里，而真 ConPTY 归 serve 父进程的
+	// `officialPTYTerminalAPI` 所有。官方这五个工具消费的是 `ctx.terminals`
+	// （`dsh-terminal/src/index.ts:224-293` 的 startSend/read/signal/kill/list），
+	// 本宿主对应的就是这里的五个 op。
+	//   agent-list   列这条会话里 agent 自己开的终端（官方 list(owner)）
+	//   agent-send   写一次输入并等就绪/静默/超时/退出（官方 startSend）
+	//   agent-read   回一页有界历史输出（官方 read）
+	//   agent-signal 投信号给前台进程组（官方 signal）
+	//   agent-close  关掉一条终端（官方 kill）
+	BridgeOpAgentList   = "agent-list"
+	BridgeOpAgentSend   = "agent-send"
+	BridgeOpAgentRead   = "agent-read"
+	BridgeOpAgentSignal = "agent-signal"
+	BridgeOpAgentClose  = "agent-close"
 )
 
 // ErrBridgeUnavailable 表示"这个进程里没有父进程 roster 桥"。
@@ -100,6 +118,29 @@ type BridgeRequest struct {
 	PolicyWorkspace string            `json:"policyWorkspaceRoot,omitempty"`
 	PreferredShells []string          `json:"preferredShells,omitempty"`
 	Env             map[string]string `json:"env,omitempty"`
+	// Name 是官方 spawn 请求里的 owner-local 显示名（`dsh-terminal/src/types.ts:29-36`
+	// 的 `name?`）。它**不是**标题：官方注册表把 name 与 title 分开存，`terminal_list`
+	// 回的是 name（`dsh-terminal/src/index.ts:375-386`）。open 时带上，list 才能如实回。
+	Name string `json:"name,omitempty"`
+	// Type 是官方 spawn 请求的后端类型（`dsh-terminal/src/types.ts:28-36` 的 `type`）：
+	// 注册表按它选后端，`terminal_list` 的快照也回它。空 = 宿主默认（shell）。
+	Type string `json:"type,omitempty"`
+
+	// 以下字段只有 agent 终端交互的五个 op 用。
+
+	// Text 是 agent-send 要写进终端的原文（官方 `TerminalSendRequest.text`）。
+	Text string `json:"text,omitempty"`
+	// Submit 决定写完是否补一个回车（官方默认 true，所以必须能区分"没给"与 false）。
+	Submit *bool `json:"submit,omitempty"`
+	// Signal 只有 agent-signal 用，取值见 `terminal.AgentSignalAllowed`。
+	Signal string `json:"signal,omitempty"`
+	// SendOpts / ReadOpts 是官方 terminal-panel 的等待阈值与分页参数。
+	//
+	// 为什么阈值要过桥而不是在父进程再配一份：官方的这些值属于 `dsh-terminal-panel`
+	// 的 config（`terminal-panel/src/config.ts:45-51`），那是**工具包**；本宿主的工具包
+	// 与真终端不同进程，配置也只能有一份，所以随请求带过去（父进程原样使用）。
+	SendOpts *BridgeSendOptions `json:"send,omitempty"`
+	ReadOpts *BridgeReadOptions `json:"read,omitempty"`
 }
 
 // BridgeResponse 是父进程的回答。OK=false 时 Error 一定非空。
@@ -113,6 +154,14 @@ type BridgeResponse struct {
 	Page *BridgeScreenPage `json:"page,omitempty"`
 	// Terminal 只在 open 成功时出现（分配出来的那条 agent 终端）。
 	Terminal *BridgeTerminal `json:"terminal,omitempty"`
+	// AgentTerminals 只在 agent-list 成功时出现。
+	AgentTerminals []BridgeAgentTerminal `json:"agentTerminals,omitempty"`
+	// Send 只在 agent-send 成功时出现。
+	Send *BridgeAgentSend `json:"send,omitempty"`
+	// Pgid 只在 agent-signal 成功时出现（真实收到信号的进程组）。
+	Pgid *int `json:"pgid,omitempty"`
+	// Closed 只在 agent-close 成功时出现：true = 这次关掉了，false = 同一个关闭已在飞。
+	Closed *bool `json:"closed,omitempty"`
 }
 
 // BridgeTerminal 是 `PanelTerminal` 的线上形状（字段名与工具面 Data 一致）。
@@ -181,6 +230,163 @@ func screenPageOf(p *BridgeScreenPage) ScreenPage {
 	}
 }
 
+// BridgeAgentStatus / BridgeAgentTerminal / BridgeAgentSend 是 agent 终端交互的线上形状。
+//
+// 字段与官方一一对应：
+//
+//	kind/exitCode/signal   TerminalSessionStatus（`dsh-terminal/src/types.ts:24-26`）
+//	sessionId/name/type/pid/status  TerminalSessionSnapshot（`:118-130`）
+//	viewport/waitReason/status/truncated  TerminalSendResult（`:66-76`）
+//
+// 为什么 exited 的 exitCode/signal 不带 omitempty：官方 schema 里它们是 exited 分支的
+// **必填**字段（可空），省掉就成了另一种形状（`tool-terminal/src/index.ts:89-92`）。
+type BridgeAgentStatus struct {
+	Kind     string  `json:"kind"`
+	ExitCode *int    `json:"exitCode"`
+	Signal   *string `json:"signal"`
+}
+
+// BridgeAgentTerminal 是 terminal_list 的一行。
+type BridgeAgentTerminal struct {
+	SessionID string            `json:"sessionId"`
+	Name      string            `json:"name,omitempty"`
+	Type      string            `json:"type"`
+	PID       int               `json:"pid,omitempty"`
+	Status    BridgeAgentStatus `json:"status"`
+}
+
+// BridgeAgentSend 是一次 send 的结算。
+type BridgeAgentSend struct {
+	Viewport   string            `json:"viewport"`
+	WaitReason string            `json:"waitReason"`
+	Status     BridgeAgentStatus `json:"status"`
+	Truncated  bool              `json:"truncated"`
+}
+
+// BridgeSendOptions 是官方 terminal-panel 的等待阈值（`terminal-panel/src/config.ts:47-51`）。
+type BridgeSendOptions struct {
+	PromptSilenceMs int `json:"promptSilenceMs"`
+	IdleSilenceMs   int `json:"idleSilenceMs"`
+	ProbeIntervalMs int `json:"probeIntervalMs"`
+	TimeoutMs       int `json:"timeoutMs"`
+	MaxReadBytes    int `json:"maxReadBytes"`
+}
+
+// BridgeReadOptions 是一次回读的分页参数。
+//
+// Offset/Count 用 float64 而不是 int：官方 schema 的类型是 `number`
+// （`tool-terminal/src/index.ts:311-312`），而校验在**后端**（`terminal-panel/src/session.ts:344-345`
+// 的 `Number.isSafeInteger`）。用 int 会让 "1.5" 在解码阶段就被 Go 拒掉，模型收到的
+// 是另一句错误——校验点必须只有一个，且吐官方的原话。
+type BridgeReadOptions struct {
+	Offset       float64 `json:"offset"`
+	Count        float64 `json:"count"`
+	MaxReadBytes int     `json:"maxReadBytes"`
+}
+
+// bridgeAgentStatusOf 把宿主状态投影成线上形状。
+func bridgeAgentStatusOf(st AgentTerminalStatus) BridgeAgentStatus {
+	return BridgeAgentStatus{Kind: st.Kind, ExitCode: st.ExitCode, Signal: st.Signal}
+}
+
+// agentStatusOf 是逆变换。
+func agentStatusOf(st BridgeAgentStatus) AgentTerminalStatus {
+	return AgentTerminalStatus{Kind: st.Kind, ExitCode: st.ExitCode, Signal: st.Signal}
+}
+
+// bridgeAgentTerminalOf 把一条快照投影成线上形状。
+func bridgeAgentTerminalOf(snap AgentTerminalSnapshot) BridgeAgentTerminal {
+	return BridgeAgentTerminal{
+		SessionID: snap.SessionID,
+		Name:      snap.Name,
+		Type:      snap.Type,
+		PID:       snap.PID,
+		Status:    bridgeAgentStatusOf(snap.Status),
+	}
+}
+
+// agentTerminalOf 是逆变换。
+func agentTerminalOf(snap BridgeAgentTerminal) AgentTerminalSnapshot {
+	return AgentTerminalSnapshot{
+		SessionID: snap.SessionID,
+		Name:      snap.Name,
+		Type:      snap.Type,
+		PID:       snap.PID,
+		Status:    agentStatusOf(snap.Status),
+	}
+}
+
+// bridgeAgentSendOf 把一次 send 结算投影成线上形状。
+func bridgeAgentSendOf(res AgentSendResult) *BridgeAgentSend {
+	return &BridgeAgentSend{
+		Viewport:   res.Viewport,
+		WaitReason: res.WaitReason,
+		Status:     bridgeAgentStatusOf(res.Status),
+		Truncated:  res.Truncated,
+	}
+}
+
+// agentSendResultOf 是逆变换。
+func agentSendResultOf(res *BridgeAgentSend) AgentSendResult {
+	return AgentSendResult{
+		Viewport:   res.Viewport,
+		WaitReason: res.WaitReason,
+		Status:     agentStatusOf(res.Status),
+		Truncated:  res.Truncated,
+	}
+}
+
+// agentSendRequestOf 把线上请求换算成宿主调用参数（阈值缺项一律 0，由父进程判非法）。
+func agentSendRequestOf(req BridgeRequest) AgentSendRequest {
+	out := AgentSendRequest{
+		Text:                req.Text,
+		Submit:              req.Submit == nil || *req.Submit,
+		PolicyMode:          req.PolicyMode,
+		PolicyWorkspaceRoot: req.PolicyWorkspace,
+	}
+	if o := req.SendOpts; o != nil {
+		out.PromptSilence = time.Duration(o.PromptSilenceMs) * time.Millisecond
+		out.IdleSilence = time.Duration(o.IdleSilenceMs) * time.Millisecond
+		out.ProbeInterval = time.Duration(o.ProbeIntervalMs) * time.Millisecond
+		out.Timeout = time.Duration(o.TimeoutMs) * time.Millisecond
+		out.MaxReadBytes = o.MaxReadBytes
+	}
+	return out
+}
+
+// agentReadRequestOf 把线上请求换算成宿主调用参数。
+func agentReadRequestOf(req BridgeRequest) (AgentReadRequest, error) {
+	o := req.ReadOpts
+	if o == nil {
+		return AgentReadRequest{}, errors.New("agent-read 请求缺分页参数（read）：协议违约")
+	}
+	out := AgentReadRequest{MaxReadBytes: o.MaxReadBytes}
+	// 官方校验在后端（`terminal-panel/src/session.ts:344-345`）：offset 非负安全整数、
+	// count 正安全整数。这里只做"能不能落成 int"，语义判据留给真实实现（它有官方原话）。
+	offset, ok := safeInt(o.Offset)
+	if !ok {
+		return AgentReadRequest{}, fmt.Errorf("%w: 请求体里的 offset=%v 不能落成整数", errBridgeBadFrame, o.Offset)
+	}
+	count, ok := safeInt(o.Count)
+	if !ok {
+		return AgentReadRequest{}, fmt.Errorf("%w: 请求体里的 count=%v 不能落成整数", errBridgeBadFrame, o.Count)
+	}
+	out.Offset, out.Count = offset, count
+	return out, nil
+}
+
+// errBridgeBadFrame 是"父进程收到一帧不完整请求"的哨兵：它是协议违约，不是
+// 模型参数问题（模型参数由工具层与真实实现各自校验，且吐官方原话）。
+var errBridgeBadFrame = errors.New("终端桥请求帧不完整")
+
+// safeInt 把 JSON number 落成 int；非整数或越界返回 false。
+func safeInt(v float64) (int, bool) {
+	if v != float64(int(v)) {
+		return 0, false
+	}
+	return int(v), true
+}
+
 // maxBridgeReadLines 是 read 请求行数的防御上限。
 //
 // 工具层已经把 lines 校验成正整数；这里的上限只防"对面写了个 1e9"时
@@ -209,6 +415,12 @@ type AgentOpenRequest struct {
 	PreferredShells []string
 	// Env 是追加进子 shell 环境的变量（官方 `env?`）。
 	Env map[string]string
+	// Name 是 owner-local 显示名（官方 spawn 请求的 `name?`，**不是**标题）。
+	// `terminal_list` 回的就是它（`dsh-terminal/src/index.ts:375-386`）；空 = 没给。
+	Name string
+	// Type 是注册表里的后端类型（官方 spawn 请求的 `type`，`dsh-terminal/src/types.ts:28-36`）。
+	// `terminal_list` 的快照要回它；空 = 宿主用自己的默认值（shell）。
+	Type string
 }
 
 // AgentTerminalOpener 是"这一侧能分配 agent 终端"的可选能力。
@@ -314,7 +526,7 @@ func (s *BridgeServer) serve(ctx context.Context, req BridgeRequest) BridgeRespo
 		terminalInfo, err := opener.OpenAgentTerminal(ctx, req.SessionID, AgentOpenRequest{
 			Title: req.Title, Cwd: req.Cwd, Cols: req.Cols, Rows: req.Rows,
 			PolicyMode: req.PolicyMode, PolicyWorkspaceRoot: req.PolicyWorkspace,
-			PreferredShells: req.PreferredShells, Env: req.Env,
+			PreferredShells: req.PreferredShells, Env: req.Env, Name: req.Name, Type: req.Type,
 		})
 		if err != nil {
 			reply.Error = "分配 agent 终端失败: " + err.Error()
@@ -323,8 +535,99 @@ func (s *BridgeServer) serve(ctx context.Context, req BridgeRequest) BridgeRespo
 		wire := BridgeTerminal(terminalInfo)
 		reply.OK = true
 		reply.Terminal = &wire
+	case BridgeOpAgentList, BridgeOpAgentSend, BridgeOpAgentRead, BridgeOpAgentSignal, BridgeOpAgentClose:
+		controls, ok := s.source.(AgentTerminalControls)
+		if !ok {
+			// 数据源没有交互能力：这正是官方 `ctx.terminals` 那五个方法（startSend/read/
+			// signal/kill/list）在本宿主缺位。必须说清，不能回空列表/假 delivered。
+			reply.Error = "这个宿主的终端数据源没有接 agent 终端交互（terminal.AgentTerminalControls）：" +
+				"send/read/signal/close/list 全部不可用，改参数救不了"
+			return reply
+		}
+		reply = serveAgentTerminalOp(ctx, controls, req, reply)
 	default:
-		reply.Error = fmt.Sprintf("未知 op %q（只认 %s / %s / %s）", req.Op, BridgeOpList, BridgeOpRead, BridgeOpOpen)
+		reply.Error = fmt.Sprintf("未知 op %q（只认 %s / %s / %s / %s / %s / %s / %s / %s）",
+			req.Op, BridgeOpList, BridgeOpRead, BridgeOpOpen,
+			BridgeOpAgentList, BridgeOpAgentSend, BridgeOpAgentRead, BridgeOpAgentSignal, BridgeOpAgentClose)
+	}
+	return reply
+}
+
+// serveAgentTerminalOp 是 agent 终端五个 op 的分派（成功时回填各自的载荷）。
+func serveAgentTerminalOp(ctx context.Context, controls AgentTerminalControls, req BridgeRequest, reply BridgeResponse) BridgeResponse {
+	switch req.Op {
+	case BridgeOpAgentList:
+		sessions, err := controls.AgentTerminalList(ctx, req.SessionID)
+		if err != nil {
+			reply.Error = "列 agent 终端失败: " + err.Error()
+			return reply
+		}
+		out := make([]BridgeAgentTerminal, 0, len(sessions))
+		for _, snap := range sessions {
+			out = append(out, bridgeAgentTerminalOf(snap))
+		}
+		reply.OK = true
+		reply.AgentTerminals = out
+	case BridgeOpAgentSend:
+		id := strings.TrimSpace(req.ID)
+		if id == "" {
+			reply.Error = "agent-send 请求缺 id（终端 id 由 terminal_open / terminal_list 给出）"
+			return reply
+		}
+		res, err := controls.AgentTerminalSend(ctx, req.SessionID, id, agentSendRequestOf(req))
+		if err != nil {
+			// 官方这层会拒绝"人已接管"（TAKEN_OVER）、"策略变了"（POLICY_CHANGED）、
+			// "已有在跑的 send"（SEND_ACTIVE）等；原样带回，不翻译成通用失败。
+			reply.Error = err.Error()
+			return reply
+		}
+		reply.OK = true
+		reply.Send = bridgeAgentSendOf(res)
+	case BridgeOpAgentRead:
+		id := strings.TrimSpace(req.ID)
+		if id == "" {
+			reply.Error = "agent-read 请求缺 id（终端 id 由 terminal_open / terminal_list 给出）"
+			return reply
+		}
+		readReq, err := agentReadRequestOf(req)
+		if err != nil {
+			reply.Error = err.Error()
+			return reply
+		}
+		page, err := controls.AgentTerminalRead(ctx, req.SessionID, id, readReq)
+		if err != nil {
+			reply.Error = err.Error()
+			return reply
+		}
+		reply.OK = true
+		wire := bridgeScreenPageOf(page)
+		reply.Page = wire
+	case BridgeOpAgentSignal:
+		id := strings.TrimSpace(req.ID)
+		if id == "" {
+			reply.Error = "agent-signal 请求缺 id（终端 id 由 terminal_open / terminal_list 给出）"
+			return reply
+		}
+		pgid, err := controls.AgentTerminalSignal(ctx, req.SessionID, id, req.Signal)
+		if err != nil {
+			reply.Error = err.Error()
+			return reply
+		}
+		reply.OK = true
+		reply.Pgid = &pgid
+	case BridgeOpAgentClose:
+		id := strings.TrimSpace(req.ID)
+		if id == "" {
+			reply.Error = "agent-close 请求缺 id（终端 id 由 terminal_open / terminal_list 给出）"
+			return reply
+		}
+		closed, err := controls.AgentTerminalClose(ctx, req.SessionID, id)
+		if err != nil {
+			reply.Error = err.Error()
+			return reply
+		}
+		reply.OK = true
+		reply.Closed = &closed
 	}
 	return reply
 }
@@ -376,8 +679,9 @@ func NewBridgeClient(write func(line []byte) error, origin func(ctx context.Cont
 
 // 编译期钉住：子进程这侧也必须满足工具层的接口（含 agent 终端分配）。
 var (
-	_ UserTerminals       = (*BridgeClient)(nil)
-	_ AgentTerminalOpener = (*BridgeClient)(nil)
+	_ UserTerminals         = (*BridgeClient)(nil)
+	_ AgentTerminalOpener   = (*BridgeClient)(nil)
+	_ AgentTerminalControls = (*BridgeClient)(nil)
 )
 
 // Available 报告这个客户端背后有没有父进程桥。
@@ -448,6 +752,7 @@ func (c *BridgeClient) OpenAgentTerminal(ctx context.Context, sessionID string, 
 		Title: req.Title, Cwd: req.Cwd, Cols: req.Cols, Rows: req.Rows,
 		PolicyMode: req.PolicyMode, PolicyWorkspace: req.PolicyWorkspaceRoot,
 		PreferredShells: req.PreferredShells, Env: req.Env,
+		Name: req.Name, Type: req.Type,
 	})
 	if err != nil {
 		return PanelTerminal{}, err
@@ -457,6 +762,93 @@ func (c *BridgeClient) OpenAgentTerminal(ctx context.Context, sessionID string, 
 		return PanelTerminal{}, errors.New("父进程应答缺 terminal（open）：协议违约")
 	}
 	return PanelTerminal(*resp.Terminal), nil
+}
+
+// AgentTerminalList 把"列这条会话里 agent 自己开的终端"转发给父进程。
+func (c *BridgeClient) AgentTerminalList(ctx context.Context, sessionID string) ([]AgentTerminalSnapshot, error) {
+	resp, err := c.call(ctx, BridgeRequest{SessionID: sessionID, Op: BridgeOpAgentList})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AgentTerminalSnapshot, 0, len(resp.AgentTerminals))
+	for _, wire := range resp.AgentTerminals {
+		out = append(out, agentTerminalOf(wire))
+	}
+	return out, nil
+}
+
+// AgentTerminalSend 把一次交互输入转发给父进程，并把它的结算原样带回。
+//
+// 等待发生在**父进程**：那里才有真终端。本客户端只是把官方 terminal-panel 的阈值
+// 一起带过去（见 BridgeSendOptions 的注释）。
+func (c *BridgeClient) AgentTerminalSend(ctx context.Context, sessionID, id string, req AgentSendRequest) (AgentSendResult, error) {
+	submit := req.Submit
+	resp, err := c.call(ctx, BridgeRequest{
+		SessionID: sessionID, Op: BridgeOpAgentSend, ID: id,
+		Text:   req.Text,
+		Submit: &submit,
+		// 策略比较用的就是 open 那三个字段（同一个官方 SandboxExecutionPolicy 语义）。
+		PolicyMode:      req.PolicyMode,
+		PolicyWorkspace: req.PolicyWorkspaceRoot,
+		SendOpts: &BridgeSendOptions{
+			PromptSilenceMs: int(req.PromptSilence / time.Millisecond),
+			IdleSilenceMs:   int(req.IdleSilence / time.Millisecond),
+			ProbeIntervalMs: int(req.ProbeInterval / time.Millisecond),
+			TimeoutMs:       int(req.Timeout / time.Millisecond),
+			MaxReadBytes:    req.MaxReadBytes,
+		},
+	})
+	if err != nil {
+		return AgentSendResult{}, err
+	}
+	if resp.Send == nil {
+		// 父进程说 ok 却没给结算：协议违约，不许当成"没有输出"。
+		return AgentSendResult{}, errors.New("父进程应答缺 send（agent-send）：协议违约")
+	}
+	return agentSendResultOf(resp.Send), nil
+}
+
+// AgentTerminalRead 把一次有界回读转发给父进程。
+func (c *BridgeClient) AgentTerminalRead(ctx context.Context, sessionID, id string, req AgentReadRequest) (ScreenPage, error) {
+	resp, err := c.call(ctx, BridgeRequest{
+		SessionID: sessionID, Op: BridgeOpAgentRead, ID: id,
+		ReadOpts: &BridgeReadOptions{
+			Offset:       float64(req.Offset),
+			Count:        float64(req.Count),
+			MaxReadBytes: req.MaxReadBytes,
+		},
+	})
+	if err != nil {
+		return ScreenPage{}, err
+	}
+	if resp.Page == nil {
+		return ScreenPage{}, fmt.Errorf("父进程应答缺 page（agent-read，终端 %s）：协议违约", id)
+	}
+	return screenPageOf(resp.Page), nil
+}
+
+// AgentTerminalSignal 把一次信号投递转发给父进程，返回真实收到的进程组 id。
+func (c *BridgeClient) AgentTerminalSignal(ctx context.Context, sessionID, id, signal string) (int, error) {
+	resp, err := c.call(ctx, BridgeRequest{SessionID: sessionID, Op: BridgeOpAgentSignal, ID: id, Signal: signal})
+	if err != nil {
+		return 0, err
+	}
+	if resp.Pgid == nil {
+		return 0, fmt.Errorf("父进程应答缺 pgid（agent-signal，终端 %s）：协议违约", id)
+	}
+	return *resp.Pgid, nil
+}
+
+// AgentTerminalClose 转发一次关闭；true = 这次关掉了，false = 同一个关闭已在飞。
+func (c *BridgeClient) AgentTerminalClose(ctx context.Context, sessionID, id string) (bool, error) {
+	resp, err := c.call(ctx, BridgeRequest{SessionID: sessionID, Op: BridgeOpAgentClose, ID: id})
+	if err != nil {
+		return false, err
+	}
+	if resp.Closed == nil {
+		return false, fmt.Errorf("父进程应答缺 closed（agent-close，终端 %s）：协议违约", id)
+	}
+	return *resp.Closed, nil
 }
 
 // SessionOrigin 在**本进程内**回答会话来源（见结构体注释：不走桥）。

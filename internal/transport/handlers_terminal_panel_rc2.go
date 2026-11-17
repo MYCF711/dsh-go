@@ -121,6 +121,10 @@ func (s *UserTerminalSource) OpenAgentTerminal(ctx context.Context, sessionID st
 		Policy:          OfficialSandboxExecutionPolicy{Mode: req.PolicyMode, WorkspaceRoot: req.PolicyWorkspaceRoot},
 		PreferredShells: req.PreferredShells,
 		Env:             req.Env,
+		// 注册表层那两个字段（官方 spawn 请求的 type/name）：官方不是 wire 字段，
+		// 本宿主也没有注册表层，所以随这条分配请求带进去，只用于 terminal_list 的快照。
+		Type: req.Type,
+		Name: req.Name,
 	}
 	if cwd := strings.TrimSpace(req.Cwd); cwd != "" {
 		official.Cwd = &cwd

@@ -324,6 +324,16 @@ func (p *panel) openRequest(sessionID string, args openArgs) (terminal.AgentOpen
 		Cwd:   cwd,
 		Cols:  p.cfg.Cols,
 		Rows:  p.cfg.Rows,
+		// 注册表层的两个字段（官方 spawn 请求的 type/name）：`terminal_list` 的快照要回
+		// 它们。name 用**调用方给的原值**，未给就是空——标题与名字是两件事，不能拿
+		// title（未命名时是 type）冒充 name。
+		Type: p.cfg.BackendType,
+		Name: func() string {
+			if args.Name == nil {
+				return ""
+			}
+			return strings.TrimSpace(*args.Name)
+		}(),
 		// 官方把会话解析出的 SandboxExecutionPolicy 原样带给 openForAgent
 		// （`terminal-panel/src/backend.ts:102`）；档位只认三档字面量。
 		PolicyMode:          mode,
@@ -422,7 +432,14 @@ func readStartup(ctx context.Context, src terminal.UserTerminals, sessionID, id 
 			if page.Text != last {
 				last, lastChange = page.Text, time.Now()
 			}
-			if last != "" && !lastChange.IsZero() && time.Since(lastChange) >= opt.silence {
+			// 官方的"打印过"判据是**渲染后的屏幕**非空（`backend.ts:38-41`：
+			// `printed = read({offset:0,count:MAX,maxBytes}).text !== ''`）：官方 read 走
+			// xterm 缓冲区重放，模式序列/清屏会被渲染成空文本。本宿主是原始字节尾部，
+			// ConPTY 一启动就会吐 `[?9001h…`；把它当成"已经打印"会让 startup 提前
+			// 返回，模型于是拿到一条 shell 还没起来的终端——往里打字会被丢掉
+			// （2026-11-18 整链用例实测：send 的输入完全消失）。所以这里按**可见文本**判。
+			printed := strings.TrimSpace(stripTerminalEscapes(page.Text)) != ""
+			if printed && !lastChange.IsZero() && time.Since(lastChange) >= opt.silence {
 				return boundStartup(last, opt.maxRead)
 			}
 		}
@@ -440,6 +457,59 @@ func readStartup(ctx context.Context, src terminal.UserTerminals, sessionID, id 
 		case <-time.After(wait):
 		}
 	}
+}
+
+// stripTerminalEscapes 去掉 ANSI 转义序列（CSI / OSC / 两字节转义），只留可见字节。
+//
+// 用途只有一个：判断"屏幕上到底有没有可见内容"（官方那句 `printed` 的等价物，
+// 见 readStartup）。**不**用于渲染：正文仍然是原始字节尾部（含 ANSI），
+// 那是 `terminal_read` / `user_terminal_read` 已有的口径（本宿主没有屏幕模型）。
+func stripTerminalEscapes(s string) string {
+	if !strings.ContainsRune(s, 0x1b) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != 0x1b {
+			b.WriteByte(c)
+			continue
+		}
+		if i+1 >= len(s) {
+			break
+		}
+		switch s[i+1] {
+		case '[': // CSI：ESC [ 参数 终止字节（0x40-0x7e）
+			j := i + 2
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+				j++
+			}
+			i = j
+		case ']': // OSC：ESC ] … BEL(0x07) 或 ST(ESC \)
+			j := i + 2
+			for j < len(s) {
+				if s[j] == 0x07 {
+					break
+				}
+				if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
+					j++
+					break
+				}
+				j++
+			}
+			i = j
+		default:
+			// 其余转义：ESC [中间字节 0x20-0x2f]* 终止字节 0x30-0x7e。
+			// 例如 `ESC ( B` 是选字符集的 3 字节序列，不能只吃掉 ESC + 一个字符。
+			j := i + 1
+			for j < len(s) && s[j] >= 0x20 && s[j] <= 0x2f {
+				j++
+			}
+			i = j
+		}
+	}
+	return b.String()
 }
 
 // boundStartup 按 `maxReadBytes` 截启动输出（官方 `read({… maxBytes})`，`backend.ts:69`）。

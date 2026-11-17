@@ -117,6 +117,20 @@ type officialPTYEntry struct {
 	// 只会被调用一次（closeEntry/closeEntryForced 里消费后置 nil）。
 	release func()
 
+	// agentName / agentType 是**注册表层**的两个字段（官方 spawn 请求的 name/type，
+	// `dsh-terminal/src/types.ts:28-36`）：官方不把它们传给 agentLaunch，但
+	// `terminal_list` 的快照要回它们（`dsh-terminal/src/index.ts:375-386`）。
+	// 本宿主没有注册表层，所以随分配请求带进来、只存在条目上（不参与启动）。
+	agentName string
+	agentType string
+	// policyRoot 是启动时解析出的 SandboxExecutionPolicy.workspaceRoot：send 的
+	// POLICY_CHANGED 判据要拿它和会话当前策略比（官方 samePolicy，
+	// `terminal-panel/src/session.ts:48-51`）。
+	policyRoot string
+	// agentSending 表示这条终端上已有一个 agent send 在等（官方注册表的
+	// `record.active`，`dsh-terminal/src/index.ts:226-229`：同一会话只许一个）。
+	agentSending bool
+
 	closed   bool
 	retained bool
 	screen   string
