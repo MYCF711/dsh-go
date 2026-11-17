@@ -209,6 +209,11 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		// 不联网（数据走既有 stdio 帧，不是网络）。见 terminal_bridge.go。
 		"user_terminal_list": {},
 		"user_terminal_read": {},
+		// rc.2 官方 `dsh-tool-terminal` 的 `terminal_open`：**起一条真 shell 进程**
+		// （ConPTY），所以按"起进程"报。它自己不写盘、不联网——终端里敲出来的命令
+		// 由那个 shell 的沙箱档位负责，不由本工具声明（官方 presentCall kind 就是
+		// `execute`，`dsh-tool-terminal/src/index.ts:196-199`）。
+		"terminal_open": {Executes: true},
 		// 记一个倡议：和 ingest 一样建目录写文件，不联网、不起进程。
 		"hindsight_capture_initiative":     {Writes: true},
 		"hindsight_list_knowledge_pages":   {},
@@ -249,6 +254,9 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 var officialVerbatimDescriptions = map[string]string{
 	"user_terminal_list": "官方 tool-catalog.md:1528（298 字，逐字）",
 	"user_terminal_read": "官方 tool-catalog.md:1541（173 字，逐字）",
+	// rc.2 官方 `dsh-tool-terminal` 的 `terminal_open`（155 字，逐字）：
+	// 描述与工具面 schema 都来自官方 catalog 的同一段（`tool-catalog.md:1397-1424`）。
+	"terminal_open": "官方 tool-catalog.md:1399-1400（155 字，逐字）",
 }
 
 // TestEveryToolHasDescription 是模型体验的底线：没有描述的工具模型只能猜什么时候用。

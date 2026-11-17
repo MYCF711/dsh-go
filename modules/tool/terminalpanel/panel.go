@@ -2,6 +2,9 @@ package terminalpanel
 
 // `user_terminal_list` / `user_terminal_read` 的实现。
 //
+// 本包第三个工具 `terminal_open`（agent 侧终端分配）在 `open.go`；两者共用
+// 本文件的 `resolve`（会话身份 + 子代理拒绝），措辞按官方各包的原文分开。
+//
 // 权威（逐字对照，不许"顺手改顺眼"）：
 //   - 模型面参数 schema 与描述：官方文档 `docs/tool-catalog.md` 的
 //     `@deepseek-ai/dsh-terminal-panel` 两段（本仓镜像
@@ -111,7 +114,7 @@ type readResult struct {
 	Truncated  bool   `json:"truncated"`
 }
 
-// panel 是两个工具共享的运行时：配置 + 数据源解析。
+// panel 是三个工具共享的运行时：配置 + 数据源解析。
 type panel struct {
 	cfg Config
 	// scope 是装配时拿到的内核作用域，用于**惰性**解析宿主数据源：
@@ -120,6 +123,53 @@ type panel struct {
 	scope *kernel.Scope
 	// svc 固定数据源（测试/嵌入式装配用）；非 nil 时优先于 scope。
 	svc terminal.UserTerminals
+
+	// startupSilence / startupTimeout / startupPoll 是 `terminal_open` 启动等待的
+	// 三个界（官方 `startupSilenceMs` / `startupTimeoutMs` / 轮询步长）。
+	//
+	// 零值 = 用官方默认值（300ms / 15000ms / 25ms，见 open.go 的 startup()）。
+	// 只给测试留这个口子：真起一条 ConPTY 用例不该被 300ms 的静默窗拖慢，
+	// 但生产必须走官方默认值，所以**不**把它们做成 Config 字段
+	// （官方 panel 的 config 面没有"轮询步长"，本仓不新增配置语义）。
+	startupSilence time.Duration
+	startupTimeout time.Duration
+	startupPoll    time.Duration
+}
+
+// toolFamily 是"同一族工具"在失败路径上的官方措辞。
+//
+// 为什么按族分开而不是共用一份：官方把这些句子写死在**各自的包**里，
+// 而且**确实不一样**——`dsh-tool-terminal` 的 `terminal_open` 说
+// "terminal tools require an initiating agent"（`tool-terminal/src/index.ts:121`），
+// `dsh-terminal-panel` 的两个用户终端工具说
+// "user terminal tools require an initiating agent"（`terminal-panel/src/tools.ts:34`）；
+// 子代理拒绝同理（`backend.ts:15` vs `tools.ts:15`）。共用一份就等于篡改官方原文。
+type toolFamily struct {
+	// noAgent 是"这次调用没有发起代理"的官方原文。
+	noAgent string
+	// refusal 是"子代理不许用这族工具"的官方原文。
+	refusal string
+	// summary / hint 是拒绝结果上的人话（本仓增量，官方只有一句英文）。
+	summary string
+	hint    string
+}
+
+// userTerminalsFamily 是 `user_terminal_list` / `user_terminal_read` 这一族。
+var userTerminalsFamily = toolFamily{
+	noAgent: ERR_INITIATING_AGENT,
+	refusal: SUBAGENT_USER_TERMINALS,
+	summary: "拒绝：子代理不能读用户的终端",
+	hint: "终端属于主会话（用户正看的那个侧栏）；子代理的会话里没有它们。" +
+		"把你需要的信息/要跑的命令交给主代理，由它去读。",
+}
+
+// agentTerminalFamily 是 `terminal_open` 这一族。
+var agentTerminalFamily = toolFamily{
+	noAgent: ERR_OPEN_INITIATING_AGENT,
+	refusal: SUBAGENT_OPEN_TERMINAL,
+	summary: "拒绝：子代理不能开终端",
+	hint: "agent 终端会出现在用户正看的侧栏里，而子代理的会话用户看不到。" +
+		"要跑命令就用 bash，把结论交回主代理。",
 }
 
 // source 解析宿主数据源。
@@ -155,17 +205,22 @@ func (p *panel) callContext(ctx context.Context) (context.Context, context.Cance
 	return context.WithTimeout(ctx, time.Duration(p.cfg.TimeoutMs)*time.Millisecond)
 }
 
-// session 取会话身份、解析数据源，并完成子代理拒绝。
+// session 取会话身份、解析数据源，并完成子代理拒绝（用户终端那一族的措辞）。
 //
 // 返回 (src, sessionID, Result, error)：Result/err 非空表示应当直接把它交出去。
 func (p *panel) session(ctx context.Context) (terminal.UserTerminals, string, string, spi.Result, error) {
+	return p.resolve(ctx, userTerminalsFamily)
+}
+
+// resolve 是 session 的通用形态：措辞由族决定，判据与返回形状完全相同。
+func (p *panel) resolve(ctx context.Context, fam toolFamily) (terminal.UserTerminals, string, string, spi.Result, error) {
 	sessionID := spi.SessionFrom(ctx)
 	if sessionID == "" {
 		res := spi.Result{
 			Summary: "缺会话身份",
 			Hint:    "终端面板工具只能在有会话的轮次里用：这次调用没有带会话 id，是接线问题，改参数救不了。",
 		}.WithErrorInfo(spi.ErrorNameToolContextUnavailable, spi.CodeToolContextUnavailable)
-		return nil, "", "", res, errors.New(ERR_INITIATING_AGENT)
+		return nil, "", "", res, errors.New(fam.noAgent)
 	}
 	src, err := p.source()
 	if err != nil {
@@ -187,20 +242,19 @@ func (p *panel) session(ctx context.Context) (terminal.UserTerminals, string, st
 		return nil, "", "", res, fmt.Errorf("判断会话来源失败: %w", oerr)
 	}
 	if origin == terminal.PanelOriginSubagent {
-		res := refusalResult("subagent")
-		return nil, "", "", res, errors.New(SUBAGENT_USER_TERMINALS)
+		res := refusalResult(fam, "subagent")
+		return nil, "", "", res, errors.New(fam.refusal)
 	}
 	return src, sessionID, origin, spi.Result{}, nil
 }
 
 // refusalResult 造一份子代理拒绝的结果（结构化 + 官方原文 + 下一步）。
-func refusalResult(reason string) spi.Result {
+func refusalResult(fam toolFamily, reason string) spi.Result {
 	return spi.Result{
-		Summary: "拒绝：子代理不能读用户的终端",
-		Data:    refusal{Refused: true, Reason: reason, Message: SUBAGENT_USER_TERMINALS},
-		Text:    SUBAGENT_USER_TERMINALS,
-		Hint: "终端属于主会话（用户正看的那个侧栏）；子代理的会话里没有它们。" +
-			"把你需要的信息/要跑的命令交给主代理，由它去读。",
+		Summary: fam.summary,
+		Data:    refusal{Refused: true, Reason: reason, Message: fam.refusal},
+		Text:    fam.refusal,
+		Hint:    fam.hint,
 	}
 }
 

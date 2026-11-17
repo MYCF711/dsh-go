@@ -34,3 +34,4 @@
 | `E7-office-wiring.md` | task-21 | Office 接线（真 dshd serve 出 21379 B PDF） |
 | `E8-terminal-bridge.md` | task-22 | 父→子 roster 桥（真 PTY 11/11 + disabled 3/3） |
 | `E9-liveshare-addsessions.md` | task-23 | `liveshareShares.addSessions`（真 relay + 真 serve 冒烟） |
+| `A5-agent-terminal-tool.md` | 续派（GUI #54 调用方） | `terminal_open` 接上 `openForAgent`：真 ConPTY 产出 `origin=agent`；confined 档官方原文拒绝 |
