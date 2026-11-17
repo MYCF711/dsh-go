@@ -286,12 +286,13 @@ type BridgeReadOptions struct {
 
 // bridgeAgentStatusOf 把宿主状态投影成线上形状。
 func bridgeAgentStatusOf(st AgentTerminalStatus) BridgeAgentStatus {
-	return BridgeAgentStatus{Kind: st.Kind, ExitCode: st.ExitCode, Signal: st.Signal}
+	// 两边字段同名同序，用转换而不是逐字段字面量（staticcheck S1016）。
+	return BridgeAgentStatus(st)
 }
 
 // agentStatusOf 是逆变换。
 func agentStatusOf(st BridgeAgentStatus) AgentTerminalStatus {
-	return AgentTerminalStatus{Kind: st.Kind, ExitCode: st.ExitCode, Signal: st.Signal}
+	return AgentTerminalStatus(st)
 }
 
 // bridgeAgentTerminalOf 把一条快照投影成线上形状。

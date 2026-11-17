@@ -157,3 +157,4 @@ internal/transport/server.go:1107 | promptContentShape：函数本身就是官�
 #
 # 这里的 text 不是"会话消息正文"，是脚本操作表里 `op` 字段的类型断言结果。
 modules/tool/workflow/orchestrate.go:160 | execute：text 是操作表项 `op` 字段的字符串断言（不是消息正文）；空/非字符串 = 操作非法 → SCRIPT_PARSE 响亮失败，不投影任何消息
+internal/terminal/agenttools.go:232 | AgentScreenLines 的空判是切行前置守卫：官方 pageLines 对空屏幕回 0 行，而 Go 的 Split 对空串会给 1 个空元素，所以先判空是正确行为，不是「按 text 判消息有没有内容」。依据 dsh-api-terminal-controller/lib/index.js:194-220。
