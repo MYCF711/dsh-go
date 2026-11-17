@@ -24,13 +24,17 @@ package terminal
 //	                                    ↑
 //	                     UserTerminals（本文件的接口）
 //	                     ↑                          ↑
-//	         user_terminal_* 工具              （尚无 agent 终端创建路径）
+//	         user_terminal_* 工具          agent 终端分配（openForAgent/agentLaunch）
 //
-// # 本宿主当前的事实（A2 报告 §0 与 `internal/transport/aligned()` 同源）
+// # 本宿主当前的事实
 //
-// 没有 `openForAgent` / `agentLaunch` 对应的 agent 终端分配路径，所以 roster 里
-// `origin`/`control` 恒为 `user`；这里的 `Control` 字段照样逐条透传，等将来真的有了
-// agent 终端车道，工具侧的筛选一行都不用改（筛选判据是值，不是"当前事实"）。
+// agent 终端车道**已接**：契约在 `internal/transport/handlers_job_terminal_agent.go`
+// （`OfficialAgentTerminals`，官方面 `openForAgent`/`agentLaunch`），实现在
+// `cmd/dshd/terminal_pty_agent.go`，产物同样是 `officialPTYTerminalAPI` 的 entry，
+// 所以 roster 里会出现 `origin="agent"` / `control="agent"` / `sandboxMode=<mode>`
+// 的行，而被用户首次 `typed` 输入接管后又变回 `control="user"`。
+// 这里的 `Control` 字段照样逐条透传，工具侧的筛选一行都不用改
+// （筛选判据是值，不是"当前事实"）。
 
 import (
 	"context"

@@ -60,6 +60,14 @@ const (
 const (
 	BridgeOpList = "list"
 	BridgeOpRead = "read"
+	// BridgeOpOpen 是官方 `openForAgent`（agent 终端分配）的桥 op。
+	//
+	// 为什么它必须走桥：本宿主的工具跑在 `dshd run` 子进程里，而终端控制器
+	// （`serve` 的 `officialPTYTerminalAPI`）在父进程。官方是同一个进程里的
+	// `ctx.terminals.registerBackend({open: … openForAgent …})`
+	// （`dsh-terminal-panel/src/index.ts:34-37`），我们没有那个前提，所以只能像
+	// list/read 一样把这次调用原样转给父进程。
+	BridgeOpOpen = "open"
 )
 
 // ErrBridgeUnavailable 表示"这个进程里没有父进程 roster 桥"。
@@ -81,6 +89,17 @@ type BridgeRequest struct {
 	ID string `json:"id,omitempty"`
 	// Lines 只有 read 用：最新多少行（0 = 由数据源决定，工具层保证为正）。
 	Lines int `json:"lines,omitempty"`
+
+	// 以下字段只有 open 用，逐条对应官方 `AgentTerminalRequest`
+	// （`dsh-api-terminal-controller/src/agent.ts:23-39`）。
+	Title           string            `json:"title,omitempty"`
+	Cwd             string            `json:"cwd,omitempty"`
+	Cols            int               `json:"cols,omitempty"`
+	Rows            int               `json:"rows,omitempty"`
+	PolicyMode      string            `json:"policyMode,omitempty"`
+	PolicyWorkspace string            `json:"policyWorkspaceRoot,omitempty"`
+	PreferredShells []string          `json:"preferredShells,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
 }
 
 // BridgeResponse 是父进程的回答。OK=false 时 Error 一定非空。
@@ -92,6 +111,8 @@ type BridgeResponse struct {
 	Terminals []BridgeTerminal `json:"terminals,omitempty"`
 	// Page 只在 read 成功时出现。
 	Page *BridgeScreenPage `json:"page,omitempty"`
+	// Terminal 只在 open 成功时出现（分配出来的那条 agent 终端）。
+	Terminal *BridgeTerminal `json:"terminal,omitempty"`
 }
 
 // BridgeTerminal 是 `PanelTerminal` 的线上形状（字段名与工具面 Data 一致）。
@@ -165,6 +186,38 @@ func screenPageOf(p *BridgeScreenPage) ScreenPage {
 // 工具层已经把 lines 校验成正整数；这里的上限只防"对面写了个 1e9"时
 // 让分页逻辑去遍历一个没意义的数字（屏幕实际行数仍然决定结果）。
 const maxBridgeReadLines = 100_000
+
+// AgentOpenRequest 是 `open` op 的参数，字段与官方 `AgentTerminalRequest` 同名同义
+// （`dsh-api-terminal-controller/src/agent.ts:23-39`）。
+//
+// 为什么在本包再声明一份而不是复用 transport 的类型：`internal/transport` 依赖本包
+// （PID/roster 的类型在那里），反向 import 就是环。字段名保持一致，换算点只有一处
+// （`transport.UserTerminalSource.OpenAgentTerminal`）。
+type AgentOpenRequest struct {
+	// Title 是 1–120 字符的标签页标题（官方去首尾空白后判）。
+	Title string
+	// Cwd 是绝对初始目录；空 = 会话工作目录。
+	Cwd string
+	// Cols / Rows 是初始窗口尺寸。
+	Cols int
+	Rows int
+	// PolicyMode 是官方 SandboxMode（read-only | workspace-write | danger-full-access）。
+	PolicyMode string
+	// PolicyWorkspaceRoot 是官方 SandboxExecutionPolicy.workspaceRoot。
+	PolicyWorkspaceRoot string
+	// PreferredShells 是按顺序尝试的 shell 名（官方 findShell 语义：忽略大小写与 .exe）。
+	PreferredShells []string
+	// Env 是追加进子 shell 环境的变量（官方 `env?`）。
+	Env map[string]string
+}
+
+// AgentTerminalOpener 是"这一侧能分配 agent 终端"的可选能力。
+//
+// 数据源实现了它，桥的 `open` 才可用；没实现 → 明确失败（缺的正是官方
+// `openForAgent` 那条分配路径），**不**退化成"建一条 user 终端再谎报 agent"。
+type AgentTerminalOpener interface {
+	OpenAgentTerminal(ctx context.Context, sessionID string, req AgentOpenRequest) (PanelTerminal, error)
+}
 
 // BridgeServer 是**持有真 roster 的那一侧**（serve 父进程）。
 //
@@ -250,8 +303,28 @@ func (s *BridgeServer) serve(ctx context.Context, req BridgeRequest) BridgeRespo
 		}
 		reply.OK = true
 		reply.Page = bridgeScreenPageOf(page)
+	case BridgeOpOpen:
+		opener, ok := s.source.(AgentTerminalOpener)
+		if !ok {
+			// 数据源没有分配能力：这正是官方 `openForAgent` 那条路径缺位，
+			// 必须说清（工具会把这句原样报给模型），不能回一条假终端。
+			reply.Error = "这个宿主的终端数据源没有接 agent 终端分配（openForAgent/agentLaunch）：改参数救不了"
+			return reply
+		}
+		terminalInfo, err := opener.OpenAgentTerminal(ctx, req.SessionID, AgentOpenRequest{
+			Title: req.Title, Cwd: req.Cwd, Cols: req.Cols, Rows: req.Rows,
+			PolicyMode: req.PolicyMode, PolicyWorkspaceRoot: req.PolicyWorkspace,
+			PreferredShells: req.PreferredShells, Env: req.Env,
+		})
+		if err != nil {
+			reply.Error = "分配 agent 终端失败: " + err.Error()
+			return reply
+		}
+		wire := BridgeTerminal(terminalInfo)
+		reply.OK = true
+		reply.Terminal = &wire
 	default:
-		reply.Error = fmt.Sprintf("未知 op %q（只认 %s / %s）", req.Op, BridgeOpList, BridgeOpRead)
+		reply.Error = fmt.Sprintf("未知 op %q（只认 %s / %s / %s）", req.Op, BridgeOpList, BridgeOpRead, BridgeOpOpen)
 	}
 	return reply
 }
@@ -301,8 +374,11 @@ func NewBridgeClient(write func(line []byte) error, origin func(ctx context.Cont
 	return &BridgeClient{write: write, origin: origin}
 }
 
-// 编译期钉住：子进程这侧也必须满足工具层的接口。
-var _ UserTerminals = (*BridgeClient)(nil)
+// 编译期钉住：子进程这侧也必须满足工具层的接口（含 agent 终端分配）。
+var (
+	_ UserTerminals       = (*BridgeClient)(nil)
+	_ AgentTerminalOpener = (*BridgeClient)(nil)
+)
 
 // Available 报告这个客户端背后有没有父进程桥。
 func (c *BridgeClient) Available() bool { return c != nil && c.write != nil }
@@ -360,6 +436,27 @@ func (c *BridgeClient) ReadUserScreen(ctx context.Context, sessionID, id string,
 		return ScreenPage{}, fmt.Errorf("父进程应答缺 page（终端 %s）：协议违约", id)
 	}
 	return screenPageOf(resp.Page), nil
+}
+
+// OpenAgentTerminal 把"分配一条 agent 终端"转发给父进程（官方 `openForAgent`）。
+//
+// 父进程没有分配能力时，错误原样带回来（见 BridgeServer 的 open 分支：它会给一句
+// 说明"这个宿主的数据源没接 openForAgent"，而不是回一条假终端）。
+func (c *BridgeClient) OpenAgentTerminal(ctx context.Context, sessionID string, req AgentOpenRequest) (PanelTerminal, error) {
+	resp, err := c.call(ctx, BridgeRequest{
+		SessionID: sessionID, Op: BridgeOpOpen,
+		Title: req.Title, Cwd: req.Cwd, Cols: req.Cols, Rows: req.Rows,
+		PolicyMode: req.PolicyMode, PolicyWorkspace: req.PolicyWorkspaceRoot,
+		PreferredShells: req.PreferredShells, Env: req.Env,
+	})
+	if err != nil {
+		return PanelTerminal{}, err
+	}
+	if resp.Terminal == nil {
+		// 父进程说 ok 却没给终端：协议违约，不许当成"分配成功但没信息"。
+		return PanelTerminal{}, errors.New("父进程应答缺 terminal（open）：协议违约")
+	}
+	return PanelTerminal(*resp.Terminal), nil
 }
 
 // SessionOrigin 在**本进程内**回答会话来源（见结构体注释：不走桥）。

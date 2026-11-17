@@ -256,13 +256,18 @@ type OfficialWebTerminalInfo struct {
 
 // aligned 补齐 rc.2 的必填字段并给出官方默认值。
 //
-// 默认值的**事实依据**：本宿主目前只有用户终端——`terminal.create` 的官方语义是
-// "Allocate a user shell ... without Agent sandbox or approval restrictions"
-// （`lib/index.js:1179` 的 JSDoc），`terminal.open` 也是人开的；本仓没有
-// `openForAgent`/`agentLaunch` 对应的 agent 终端分配路径（官方 `lib/index.js:1474`
-// 那条 origin:"agent" 分支在本宿主不存在）。所以 origin=user、control=user 是
-// **当前事实**，不是编的默认值。将来若接入 agent 终端，宿主只要显式填这两个字段
-// 即可；这里的补齐只填空值，绝不覆盖已有值。
+// 默认值的**事实依据**：走到这里的空 origin/control 只有**用户终端**——
+// `terminal.create` 的官方语义是 "Allocate a user shell ... without Agent
+// sandbox or approval restrictions"（`lib/index.js:1179` 的 JSDoc），
+// `terminal.open` 也是人开的。所以 origin=user、control=user 是**当前事实**，
+// 不是编的默认值。
+//
+// agent 终端**不走这条兜底**：`openForAgent`/`agentLaunch` 的分配路径已经落地
+// （契约 `handlers_job_terminal_agent.go`，实现 `cmd/dshd/terminal_pty_agent.go`），
+// 它在建 entry 时就显式写 origin=agent / control=agent / sandboxMode=policy.mode
+// （官方 `lib/index.js:1463-1477`），`OpenAgentTerminal` 还会回查这三个字段
+// 是否真的是 agent 形状。这里的补齐只填空值，绝不覆盖已有值，也**不**替任何
+// 终端编 sandboxMode（官方：user 终端省略该字段）。
 func (i OfficialWebTerminalInfo) aligned() OfficialWebTerminalInfo {
 	if i.Origin == "" {
 		i.Origin = OfficialTerminalOriginUser
@@ -291,8 +296,28 @@ const (
 // officialTerminalStateValues 是 rc.2 的 state 取值集合（顺序与 zod 一致）。
 var officialTerminalStateValues = []string{"running", "failed", "exited"}
 
-// officialTerminalSandboxModes 是 rc.2 的 sandboxMode 取值集合。
-var officialTerminalSandboxModes = []string{"read-only", "workspace-write", "danger-full-access"}
+// 官方 `SandboxMode` 的三个取值（`@deepseek-ai/dsh-sandbox/src/index.ts:38`：
+// `export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'`）。
+//
+// 它们是**唯一**出处：`sandboxMode` 的枚举校验、agent 终端 confine 的判据
+// （`cmd/dshd/terminal_pty_agent.go`，官方 `lib/index.js:1524`）都从这里取，
+// 不再各写一份字面量。
+const (
+	// OfficialSandboxModeReadOnly 对应官方 `read-only`。
+	OfficialSandboxModeReadOnly = "read-only"
+	// OfficialSandboxModeWorkspaceWrite 对应官方 `workspace-write`。
+	OfficialSandboxModeWorkspaceWrite = "workspace-write"
+	// OfficialSandboxModeDangerFullAccess 对应官方 `danger-full-access`
+	// （confine 的唯一免包装档，`lib/index.js:1524`）。
+	OfficialSandboxModeDangerFullAccess = "danger-full-access"
+)
+
+// officialTerminalSandboxModes 是 rc.2 的 sandboxMode 取值集合（顺序与 zod 一致）。
+var officialTerminalSandboxModes = []string{
+	OfficialSandboxModeReadOnly,
+	OfficialSandboxModeWorkspaceWrite,
+	OfficialSandboxModeDangerFullAccess,
+}
 
 // MarshalJSON 在 wire 边界补齐 rc.2 必填字段（origin/control、shell.args）。
 //
@@ -680,6 +705,14 @@ func writeJTOfficialVoid(w http.ResponseWriter) {
 // 状态码映射就是语义：400 改参数、403 换会话、404 换 id、409 别重试、
 // 501 换方法、500 可以重试。
 func writeJTOfficialError(w http.ResponseWriter, method string, err error) {
+	// agent 终端的官方 code 优先（`terminal/limit-reached` / `terminal/unavailable` /
+	// `user-control` / `not-running`）：这些是**官方机器码**，客户端按它分支，
+	// 折叠成 bad_request/internal 会让"容量到顶"被当成"参数写错"。
+	var agentErr *OfficialAgentTerminalError
+	if errors.As(err, &agentErr) {
+		writeJSON(w, agentErr.HTTPStatus(), errorBodyFor(agentErr.WireCode(), method+"："+err.Error()))
+		return
+	}
 	// 官方 JobError 码优先（见 officialJobErrorSurface 的三条要求）：先于 sentinel
 	// 分支，避免"更精确的分类被泛化成 internal"。
 	if code, ok := jobs.CodeOf(err); ok {
@@ -1151,8 +1184,12 @@ func (h *officialUplinkHeadStream) Push(value json.RawMessage) error {
 // （`dsh-api-terminal-controller/lib/index.js:612`：
 // `if (command.typed === true && this.info.control === "agent") { … control: "user" }`）。
 //
-// 本宿主没有 agent 终端（没有 openForAgent/agentLaunch 路径），所以 control
-// 恒为 user —— 接管是**已达成状态**，没有状态可迁。这里因此只做形状校验：
+// 本宿主现在**有** agent 终端（`openForAgent`/`agentLaunch` 的分配路径，见
+// `handlers_job_terminal_agent.go` 与 `cmd/dshd/terminal_pty_agent.go`；typed 也已经
+// 全链路透传：`handlers_terminal.go` 的 `TerminalInputScoped(…, typed)` →
+// `officialPTYTerminalAPI.InputTyped`）。所以这里的形状校验之上还有一个**语义**义务：
+// typed=true 只对 control==="agent" 的终端才是一次真实接管，其它情况按官方
+// （`lib/index.js:612`）是幂等的无操作，宿主不该因此报错。
 //
 //   - 合法（bool）：放行，**不**静默丢字段，也不假装迁移；
 //   - 非法（字符串/数字等）：400 拒绝，因为把 typed 写错的客户端一定也在

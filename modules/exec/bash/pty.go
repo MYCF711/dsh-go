@@ -47,6 +47,13 @@ type PTYOptions struct {
 	ScrollbackRows int
 	// ScrollbackBytes 是内存安全硬顶（0 = 1 MiB）。
 	ScrollbackBytes int
+	// Env 是 shell 子进程的**完整**环境（nil = 继承宿主进程环境）。
+	//
+	// 只有官方 agent 终端（`openForAgent`/`agentLaunch`）会传它：那条路径要给
+	// 子 shell 算一份带 `DSH_SESSION_ID` 的环境（官方
+	// `dsh-api-terminal-controller/lib/index.js:1456-1461`）。本字段原样透传给
+	// `terminal.Config.Env`，本层不解释、不合并、不默认。
+	Env []string
 }
 
 // defaultPTYArgs 让 shell 不读 profile/rc：
@@ -91,6 +98,7 @@ func (s *Service) OpenPTY(opts PTYOptions) (*Terminal, error) {
 		Rows:            opts.Rows,
 		ScrollbackRows:  opts.ScrollbackRows,
 		ScrollbackBytes: opts.ScrollbackBytes,
+		Env:             opts.Env,
 	})
 	if err != nil {
 		return nil, err
