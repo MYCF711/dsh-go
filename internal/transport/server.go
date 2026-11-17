@@ -202,6 +202,13 @@ type Options struct {
 	// 宿主 registry 里的真实工作区，会话必须建在该工作区目录并加入其成员列表。
 	// nil 时带 workspaceId 的请求明确回 501，不退回进程 cwd 假建。
 	CreateInWorkspace func(mode, workspaceID string) (string, error)
+	// CreateOfficial 是官方 `session.create` 的**完整**入口（四个官方字段全收）。
+	// 非 nil 时优先于上面的 Create / CreateInWorkspace：它们两个只覆盖旧 `mode`
+	// 与 workspaceId 两条路，给不了 cwd / sessionId 复用 / agentPreset。
+	//
+	// nil 时保持旧行为，但官方字段里除 workspaceId 之外一律响亮 501 —— 绝不
+	// "收下 cwd 却按进程 cwd 建会话"（那是静默建到错误目录）。
+	CreateOfficial func(req OfficialSessionCreateRequest) (OfficialSessionCreateResult, error)
 	// PluginHandler 是 additive plugin.* 适配器。它只在下面的既有 cookie
 	// 认证成功后调用；nil 时保持闭合分派的 501。handler 自己限定八个方法，
 	// 这里不复制第二份方法表，也不把裸 handler 注册成独立路由。
@@ -239,6 +246,52 @@ type Options struct {
 	// 所以既不改 canonical 方法表，也不与任何 typert 方法重名。
 	// 全部 nil 时三条路由回 501 并说清"没有 workspace/changes 记录源"。
 	Changes ChangesAPI
+}
+
+// OfficialSessionCreateRequest 是官方 `session.create` 的裸参数（Options.CreateOfficial
+// 的入参）。它不是 canonical 25 的方法签名——那些 handler 收的是各自的匿名 struct；
+// 这个类型只用来把四个官方字段**成组**交给宿主，不复制第二份方法表。
+//
+// 官方原件（rc.2 解包树，逐字）：
+//
+//	@deepseek-ai/dsh-api-session-controller/src/types.ts:268-277
+//	  interface SessionCreateRequest {
+//	    readonly workspaceId?: WorkspaceId  // Workspace the Session joins; exclusive with `cwd`.
+//	    readonly cwd?: string               // Directory the Session owns when no Workspace is named.
+//	    readonly sessionId?: SessionId      // Blank Session to reuse …
+//	    readonly agentPreset?: string       // Preset the Session runs …
+//	  }
+//
+// 三个可选字段用指针：官方判据是 `!== undefined`（`commands.ts:121`、`manager.ts:498-504`），
+// 不看真值，所以"给了空串"与"没给"是两件事，不能用 string 的零值糊在一起。
+type OfficialSessionCreateRequest struct {
+	// WorkspaceID 是官方 `workspaceId`：会话加入的工作区；与 Cwd 互斥。
+	WorkspaceID *string
+	// Cwd 是官方 `cwd`：没有工作区时会话自己拥有的目录。
+	Cwd *string
+	// SessionID 是官方 `sessionId`：复用这个空白会话，或把它当作新会话的身份。
+	SessionID *string
+	// AgentPreset 是官方 `agentPreset`：会话运行的 preset。
+	AgentPreset *string
+	// Mode 是既有 `mode` 的旧名字（就是 v4 header.agentPreset）。官方没有这个字段，
+	// 保留只为**不删既有能力**：老客户端只发 mode，行为必须一字不变。
+	Mode string
+}
+
+// OfficialSessionCreateResult 是官方 `SessionCreateValue`。
+//
+// 官方原件：
+//
+//	@deepseek-ai/dsh-api-session-controller/src/types.ts:279-284
+//	  interface SessionCreateValue {
+//	    readonly sessionId: SessionId      // The created or reused Session, which may differ from the requested `sessionId`.
+//	    readonly agentPreset?: string      // Preset the Session runs, when the deployment composes a preset roster.
+//	  }
+//
+// AgentPreset 为空串表示响应里**不出现**该键（官方"只有组合了 preset 名册才带"）。
+type OfficialSessionCreateResult struct {
+	SessionID   string
+	AgentPreset string
 }
 
 // Server 是界面线的宿主入口。
@@ -1222,22 +1275,74 @@ func (s *Server) handleSessionCancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"cancelled": true})
 }
 
-// handleSessionCreate 是 /api/session.create：建会话，返回 id。
+// handleSessionCreate 是 /api/session.create：建会话或复用空白会话，返回 id。
+//
+// 官方契约（rc.2 解包树，逐条）：
+//
+//	@deepseek-ai/dsh-api-session-controller/src/types.ts:268-284
+//	  SessionCreateRequest{workspaceId?,cwd?,sessionId?,agentPreset?}
+//	  SessionCreateValue  {sessionId, agentPreset?}
+//	.../src/commands.ts:121-123
+//	  workspaceId 与 cwd 同时给 = `gateway/bad-request` "session.create accepts workspaceId or cwd, not both"
+//	.../src/client/sessions/manager.ts:498-504
+//	  客户端只发其一：`workspaceId !== undefined` 时发 {workspaceId, ...shared}，否则发 {cwd?, ...shared}
+//
+// 所以四个官方字段都收；`workspaceId` 与 `cwd` 同时给，与官方一样报错，
+// **不替客户端挑一个**（挑了就与官方宿主行为不同，客户端会以为请求成立）。
+// 既有 `mode` 仍收：它就是 v4 header.agentPreset 的旧名字，老客户端行为不变。
 func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Mode        string          `json:"mode"`
-		WorkspaceID *string         `json:"workspaceId"`
-		Cwd         json.RawMessage `json:"cwd"`
+		Mode        string  `json:"mode"`
+		WorkspaceID *string `json:"workspaceId"`
+		Cwd         *string `json:"cwd"`
+		SessionID   *string `json:"sessionId"`
+		AgentPreset *string `json:"agentPreset"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorBodyFor("bad_request", "session.create 参数不是有效 JSON 对象"))
 		return
 	}
-	// 官方 SessionCreateRequest：workspaceId 与 cwd 互斥。用指针/RawMessage
+	// 官方 SessionCreateRequest：workspaceId 与 cwd 互斥。用指针
 	// 区分“未提供”和“提供了空值”，空 workspaceId 也必须走 registry 查无此物，
 	// 不能被当成省略后在进程 cwd 建一个会话。
 	if in.WorkspaceID != nil && in.Cwd != nil {
 		writeOfficialError(w, officialBadRequest("gateway/bad-request: session.create accepts workspaceId or cwd, not both"))
+		return
+	}
+	if s.opt.CreateOfficial != nil {
+		res, err := s.opt.CreateOfficial(OfficialSessionCreateRequest{
+			WorkspaceID: in.WorkspaceID,
+			Cwd:         in.Cwd,
+			SessionID:   in.SessionID,
+			AgentPreset: in.AgentPreset,
+			Mode:        in.Mode,
+		})
+		if err != nil {
+			writeOfficialError(w, officialWorkspaceFault(err))
+			return
+		}
+		if res.SessionID == "" {
+			// 成功但没有会话 id = 宿主 bug。回一个空 id 会让客户端拿 "" 去
+			// session.load，最后以"会话不存在"出现——错误现场就丢了。
+			writeJSON(w, http.StatusInternalServerError,
+				errorBodyFor("internal", "session.create 的成功结果里没有 sessionId"))
+			return
+		}
+		out := map[string]any{"sessionId": res.SessionID}
+		// 官方 SessionCreateValue.agentPreset 是可选键：宿主不知道就**不出现在响应里**，
+		// 不回空串（空串会被客户端当成一个真实 preset 名）。
+		if res.AgentPreset != "" {
+			out["agentPreset"] = res.AgentPreset
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	// 没接官方入口时：四个官方字段里只有 workspaceId 有旧实现（CreateInWorkspace）。
+	// 其余三个（cwd/sessionId/agentPreset）必须响亮 501 —— 旧 Create 只会按进程 cwd
+	// 建一个新会话，那等于"收下 cwd、建到别处"的静默错误。
+	if in.Cwd != nil || in.SessionID != nil || in.AgentPreset != nil {
+		writeJSON(w, http.StatusNotImplemented, errorBodyFor("not_implemented",
+			"session.create 的官方字段（cwd/sessionId/agentPreset）入口未接线"))
 		return
 	}
 	if in.WorkspaceID != nil {

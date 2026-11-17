@@ -937,6 +937,22 @@ func cmdServe(args []string) error {
 				return createWithSettingsDefaults(createAtWorkspace, settingsStore)(mode)
 			})
 		},
+		// 官方 session.create 的完整入口：四个官方字段（workspaceId/cwd/sessionId/
+		// agentPreset）都收，组合规则与错误形状照 rc.2（见
+		// serve_session_create_official.go 的头注）。非 nil 时它优先于上面的
+		// Create / CreateInWorkspace，那两个保留给只发旧 mode 的客户端。
+		//
+		// wsHost 在 attachOfficialWorkspace 之前是 nil，所以这里存**取值函数**：
+		// 请求发生在装配完成之后，那时它已经是真实的 registry 宿主。
+		CreateOfficial: (func() *officialSessionCreator {
+			creator := &officialSessionCreator{
+				home:     *home,
+				src:      src,
+				settings: settingsStore,
+			}
+			creator.workspace = func() *officialWorkspaceHost { return wsHost }
+			return creator
+		})().create,
 		// 官方 job.*/terminal.*（11 个方法）的路由层。
 		OfficialJobTerminal: officialJT.Handler(),
 	}), prompts, settingsStore))

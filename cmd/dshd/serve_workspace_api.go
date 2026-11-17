@@ -584,16 +584,7 @@ func officialSplitLines(content []byte) []string {
 // sessionIDsLocked 会按真实 v4 header.cwd 过滤，因此回调若把会话建到别的目录，
 // attach 会响亮失败，不会靠一个返回的 id 伪造工作区归属。
 func (h *officialWorkspaceHost) createSession(workspaceID string, create func(cwd string) (string, error)) (string, error) {
-	var cwd string
-	err := h.withDocument(func() error {
-		rec := h.doc.Workspaces[workspaceID]
-		if rec == nil {
-			return transport.OfficialWorkspaceErrorDetails("workspace/not-found",
-				map[string]any{"workspaceId": workspaceID}, "workspace %q not found", workspaceID)
-		}
-		cwd = rec.Path
-		return nil
-	})
+	cwd, err := h.workspacePath(workspaceID)
 	if err != nil {
 		return "", err
 	}
@@ -604,6 +595,40 @@ func (h *officialWorkspaceHost) createSession(workspaceID string, create func(cw
 	if err != nil {
 		return "", err
 	}
+	if err := h.attachSession(workspaceID, sessionID); err != nil {
+		return "", err
+	}
+	return sessionID, nil
+}
+
+// workspacePath 按**精确 workspaceId**取 registry 里的真实目录。
+//
+// 查不到就是 `workspace/not-found` + `details.workspaceId`（官方原件：
+// `@deepseek-ai/dsh-api-session-controller/src/commands.ts:125-132`），
+// 绝不回落进程 cwd —— 那会把会话建到一个用户没选过的目录。
+func (h *officialWorkspaceHost) workspacePath(workspaceID string) (string, error) {
+	var cwd string
+	err := h.withDocument(func() error {
+		rec := h.doc.Workspaces[workspaceID]
+		if rec == nil {
+			return transport.OfficialWorkspaceErrorDetails("workspace/not-found",
+				map[string]any{"workspaceId": workspaceID}, "workspace %q not found", workspaceID)
+		}
+		cwd = rec.Path
+		return nil
+	})
+	return cwd, err
+}
+
+// attachSession 是官方 `workspace.attachSession` 的宿主实现：把会话 prepend 到
+// 手动顺序最前，并**复核**它的真实 header.cwd 属于该工作区。
+//
+// 失败形状照官方（`commands.ts:146-157`）：`session/workspace-attach-failed`，
+// details 里带 `{sessionId, workspaceId}`。客户端靠 details.sessionId 把
+// "已发布但没挂上"的会话当 Ungrouped 暴露（`manager.ts:855-857`
+// `workspaceAttachSessionId`：`error.code === 'session/workspace-attach-failed'`
+// 时取 `error.details.sessionId`），所以那个 id **必须**出现在错误体里。
+func (h *officialWorkspaceHost) attachSession(workspaceID, sessionID string) error {
 	if err := h.withDocumentWrite(func() error {
 		rec := h.doc.Workspaces[workspaceID]
 		if rec == nil {
@@ -618,11 +643,45 @@ func (h *officialWorkspaceHost) createSession(workspaceID string, create func(cw
 		rec.UpdatedAtMS = h.now().UnixMilli()
 		return nil
 	}); err != nil {
-		return "", transport.OfficialWorkspaceErrorDetails("session/workspace-attach-failed",
+		return transport.OfficialWorkspaceErrorDetails("session/workspace-attach-failed",
 			map[string]any{"sessionId": sessionID, "workspaceId": workspaceID},
 			"session %q was created but could not attach to workspace %q: %v", sessionID, workspaceID, err)
 	}
-	return sessionID, nil
+	return nil
+}
+
+// sessionReusable 是官方 `create` 传给 agent 层的 `reusable` 谓词
+// （`@deepseek-ai/dsh-api-session-controller/src/commands.ts:140-141`）：
+//
+//	reusable: sessionId => !archivedSessionIds.includes(sessionId)
+//	  && (workspace === undefined || workspace.sessionIds.includes(sessionId))
+//
+// 两个条件缺一不可：归档的会话不参与任何分组（官方 "Hide one known Session
+// from Workspace grouping surfaces"），不属于这个工作区的会话也不能被它复用。
+// 读 registry 走只读锁；查不到工作区仍回 `workspace/not-found`（调用方已经
+// 解析过路径，这里是同一个判据的第二道保险）。
+func (h *officialWorkspaceHost) sessionReusable(workspaceID, sessionID string) (bool, error) {
+	reusable := false
+	err := h.withDocument(func() error {
+		// 归档的会话不参与任何分组（官方 "Hide one known Session from Workspace
+		// grouping surfaces"），所以任何 workspace（含"没有 workspace"）都不可复用。
+		if officialContains(h.doc.ArchivedSessionIDs, sessionID) {
+			return nil
+		}
+		if workspaceID == "" {
+			// 官方 `workspace === undefined` 时只判归档这一条。
+			reusable = true
+			return nil
+		}
+		rec := h.doc.Workspaces[workspaceID]
+		if rec == nil {
+			return transport.OfficialWorkspaceErrorDetails("workspace/not-found",
+				map[string]any{"workspaceId": workspaceID}, "workspace %q not found", workspaceID)
+		}
+		reusable = officialContains(h.sessionIDsLocked(rec), sessionID)
+		return nil
+	})
+	return reusable, err
 }
 
 // workspaceAPI 把真实能力装成 transport 认的那份函数表。

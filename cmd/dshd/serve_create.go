@@ -62,15 +62,47 @@ func serveCreate(home, cwd string) (func(mode string) (string, error), error) {
 		if err != nil {
 			return "", err
 		}
-		lg, err := session.CreateSession(home, cwd, id, preset)
-		if err != nil {
-			return "", err
-		}
-		// 先关再返回：Close 会刷盘并放掉写锁。不关的话紧接着的 session.load
-		// 可能读到还没落完的帧（表现为"刚建的会话是空的"）。
-		if err := lg.Close(); err != nil {
+		if err := serveCreateWithID(home, cwd, id, preset); err != nil {
 			return "", err
 		}
 		return id, nil
 	}, nil
+}
+
+// serveCreateWithID 用**给定 id** 落一份 v4 会话。
+//
+// 为什么要把"铸 id"与"落盘"拆开：官方 `sessionId` 有两种用法
+// （`@deepseek-ai/dsh-api-session-controller/src/commands.ts:135-142` 与
+// `.../src/agent.ts:229-233` / `:350`）：
+//
+//   - 这个名字下没有已存会话 → 用**这个名字本身**建新会话
+//     （"the identity of a new Session when none is stored under it"）；
+//   - 有已存会话但不能复用 → 另铸新 id，结果与请求的 id 不同
+//     （"The created or reused Session, which may differ from the requested `sessionId`"）。
+//
+// 旧的 serveCreate 把两件事焊在闭包里，只能铸新 id。这里只负责落盘，
+// preset 必须是**已解析好的具体值**：空串会让 header 的 preset 列留空，界面与
+// resume 都恢复不到东西（与 serveCreate 闭包里的注释同一条理由）。
+//
+// 已存在同一路径时直接拒绝：v4.Create 是 O_TRUNC，写下去会把那份会话清空。
+func serveCreateWithID(home, cwd, id, preset string) error {
+	if id == "" {
+		return fmt.Errorf("建会话需要 session id")
+	}
+	path, err := session.SessionPath(home, v4.NormalizeCwd(cwd), id)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		// 调用方保证"这个名字下没有已存会话"才该走到这里；真撞上了就是上层 bug，
+		// 宁可响亮失败，也不拿 O_TRUNC 覆盖一份真会话。
+		return fmt.Errorf("会话 %q 已存在于 %s，拒绝覆盖", id, path)
+	}
+	lg, err := session.CreateSession(home, v4.NormalizeCwd(cwd), id, preset)
+	if err != nil {
+		return err
+	}
+	// 先关再返回：Close 会刷盘并放掉写锁。不关的话紧接着的 session.load
+	// 可能读到还没落完的帧（表现为"刚建的会话是空的"）。
+	return lg.Close()
 }

@@ -688,3 +688,48 @@ POST /api/directoryPicker.list            （宿主声明 native 时）
   行为证据：`HOST:cmd/dshd/serve_{agent_api,commands_api}_test.go`、
   `HOST:internal/{session,transport}/plan_*_test.go`、`UI:internal/planreview/`、
   `UI:plugins/{dsplan,dsquestions}/` 与 `UI:internal/apiclient/agent_actions_test.go`。
+
+## 18. 官方 `session.create` 的四个字段与复用语义（2026-11-17，additive）
+
+宿主 `session.create` 从"只解 `mode`"扩成官方 `SessionCreateRequest`，**旧 `mode` 契约一字不动**
+（能力下限：只许比官方多）。官方原件：`@deepseek-ai/dsh-api-session-controller`
+（rc.2 解包树）的 `src/types.ts:268-284`、`src/commands.ts:120-160`、
+`src/client/sessions/manager.ts:484-529,855-857`、`src/agent.ts:229-233,331-364,403-412`。
+
+| 裸参数 | 官方语义 | 本宿主落点 |
+|---|---|---|
+| `workspaceId?` | 会话加入的工作区；与 `cwd` **互斥** | registry 按精确 id 取 `rec.Path` 作 cwd；查无此物 = `workspace/not-found {workspaceId}` |
+| `cwd?` | 没有工作区时会话自己拥有的目录 | `header.cwd`（旧实现在这里只做互斥检查、忽略 cwd，本轮修掉） |
+| `sessionId?` | 复用空白会话；这个名字下没存过就用它建新会话 | 存过且"未归档 + 是该工作区成员 + 没有任何 `turn/start`" → 复用；不能复用 → 另铸新 id（结果 id 可能与请求不同）；`cwd` 不符 = `session/conflict {sessionId,requestedCwd,existingCwd}`；空串 = `gateway/bad-request` |
+| `agentPreset?` | 会话运行的 preset | 解析成 v4 `header.agentPreset`；显式点名的未知 id = `agent-preset/not-found {agentPreset,available}` |
+| `mode`（旧） | 旧名字，就是 header 的 preset | 官方字段优先，其次 `mode`，都没有用 `selectedDefault ?? default` |
+
+组合规则逐字照官方：客户端侧 `workspaceId !== undefined` 时**连 cwd 都不发**（`manager.ts:502-504`）；
+宿主侧两个都给 = `gateway/bad-request`（`commands.ts:121-123`），**不替客户端挑一个**。
+
+成功结果只有 `{sessionId, agentPreset?}`（`types.ts:279-284`）：`agentPreset` 是可选键，
+宿主不知道时**不出现**，不回空串。
+
+**错误形状（客户端据此把"已发布未挂上"的会话当 Ungrouped 暴露）**：
+
+- `session/workspace-attach-failed` + `details {sessionId, workspaceId}`（`commands.ts:146-157`）。
+  `details.sessionId` 是**真的已经建出来**的那份会话；`manager.ts:855-857` 的
+  `workspaceAttachSessionId` 只认 `code === 'session/workspace-attach-failed'` 时取它。
+  本仓四字段 `code` 是闭合集合，所以官方码留在 `message` 前缀（`session/workspace-attach-failed: …`），
+  HTTP 状态 `500 internal`（宿主侧失败，不是输入问题）。
+- `session/conflict` / `agent-preset/not-found` / `agent-preset/conflict` 都是 `400 bad_request`
+  （客户端改请求才能过），官方码同样在 message 前缀，details 平铺在信封顶层 `details`。
+
+**一处有意的差异（响亮，不静默）**：官方复用时会改写会话 preset（`agent.ts:403-412` 追加
+`agent-preset/selected`，preset 活在投影里）。本仓 preset 活在 **append-only 的 v4 header** 里，
+runner 也读 header，所以"复用 + 显式点名不同 preset"回官方 `agent-preset/conflict`
+`{sessionId, requestedPreset}`；未点名时保持 header 里的真实 preset 并如实回在结果里。
+
+**未接 `Options.CreateOfficial` 时**：`cwd` / `sessionId` / `agentPreset` 一律 `501 not_implemented`
+（旧 `Create` 只会按进程 cwd 建会话，收下 cwd 却建到别处比报错糟得多）；`workspaceId` 仍走
+既有 `CreateInWorkspace`，`mode` 仍走既有 `Create`。
+
+证据：`HOST:internal/transport/session_create_official_test.go`（四字段透传、互斥、结果形状、
+`details.sessionId`、坏类型、旧 mode）、`HOST:cmd/dshd/serve_session_create_official_test.go`
+（真 v4 日志：空白复用 / 开过 turn 另铸 id / 预分配 id / cwd 冲突 / agentPreset 进 header /
+未知 preset / 归档不复用 / attach 失败 details）。
