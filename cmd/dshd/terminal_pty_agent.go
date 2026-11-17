@@ -191,8 +191,13 @@ func (a *officialPTYTerminalAPI) TerminalOpenForAgent(ctx context.Context, sessi
 		origin:      transport.OfficialTerminalOriginAgent,
 		control:     transport.OfficialTerminalControlAgent,
 		sandboxMode: req.Policy.Mode,
-		release:     release,
-		createdAt:   now, lastUsed: now,
+		// 注册表层两个字段 + 启动策略根：terminal_list 的快照与 send 的
+		// POLICY_CHANGED 判据要用（见 officialPTYEntry 的注释）。
+		agentName:  req.Name,
+		agentType:  req.Type,
+		policyRoot: req.Policy.WorkspaceRoot,
+		release:    release,
+		createdAt:  now, lastUsed: now,
 	}
 	a.mu.Lock()
 	a.entries[entry.key()] = entry

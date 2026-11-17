@@ -69,6 +69,23 @@ type Config struct {
 	// Environment 是追加进终端子 shell 的变量（官方默认 PAGER/GIT_PAGER = cat；
 	// 不放这两个，`git log` 之类的程序会在分页器里停住）。
 	Environment map[string]string
+
+	// ---- 以下三个是官方 terminal-panel 的 **send 等待阈值**（`config.ts:47-49`）----
+	//
+	// 它们不属于"分配请求"，而是 `PanelSend` 判定何时把控制权还给模型的那三条线
+	// （`terminal-panel/src/session.ts:248-292`）：静默到 promptSilenceMs 就探测前台、
+	// 能写就回 stdin_read；静默到 idleSilenceMs 回 inferred_idle；总时长到 timeoutMs
+	// 回 timeout。官方顺序校验：prompt <= idle <= timeout（`config.ts:59-68`）。
+	//
+	// 本宿主把这几个值随 send 请求过桥（`internal/terminal/AgentSendRequest`），
+	// 真终端那一侧原样使用——配置只有这一份，不在父进程再复制一遍。
+
+	// PromptSilenceMs 是"输出静默多久算 shell 可能回到提示符"（官方默认 300）。
+	PromptSilenceMs int
+	// IdleSilenceMs 是"输出静默多久算推断空闲"（官方默认 3000）。
+	IdleSilenceMs int
+	// ProbeIntervalMs 是两次前台探测之间的最小间隔（官方默认 1000）。
+	ProbeIntervalMs int
 }
 
 // DefaultConfig 是官方默认部署的配置（字段与官方 config.ts 的默认值一致）。
@@ -82,6 +99,9 @@ func DefaultConfig() Config {
 		Rows:              40,
 		PreferredShells:   nil,
 		Environment:       map[string]string{"PAGER": "cat", "GIT_PAGER": "cat"},
+		PromptSilenceMs:   300,
+		IdleSilenceMs:     3_000,
+		ProbeIntervalMs:   1_000,
 	}
 }
 
@@ -106,6 +126,20 @@ func (c Config) validate() error {
 	if c.Rows < 1 {
 		return fmt.Errorf("rows 不能小于 1（官方 min 1，拿到 %d）；装配请从 terminalpanel.DefaultConfig() 出发", c.Rows)
 	}
+	// 官方 validateConfig（`config.ts:59-68`）：三条顺序约束。写反的后果不是"慢一点"，
+	// 而是某档 waitReason 永远出不来（例如 prompt > idle 时 stdin_read 被 inferred_idle 抢走）。
+	if c.PromptSilenceMs < 1 || c.IdleSilenceMs < 1 || c.ProbeIntervalMs < 1 {
+		return fmt.Errorf("promptSilenceMs / idleSilenceMs / probeIntervalMs 都必须是正整数（官方 min 1，拿到 %d/%d/%d）",
+			c.PromptSilenceMs, c.IdleSilenceMs, c.ProbeIntervalMs)
+	}
+	if c.PromptSilenceMs > c.IdleSilenceMs {
+		return fmt.Errorf("promptSilenceMs(%d) 不能大于 idleSilenceMs(%d)（官方 config.ts:60-62）",
+			c.PromptSilenceMs, c.IdleSilenceMs)
+	}
+	if c.IdleSilenceMs > c.TimeoutMs {
+		return fmt.Errorf("idleSilenceMs(%d) 不能大于 timeoutMs(%d)（官方 config.ts:63-65）",
+			c.IdleSilenceMs, c.TimeoutMs)
+	}
 	return nil
 }
 
@@ -125,6 +159,11 @@ const (
 	EnvMaxReadBytes = "DSHD_TERMINAL_PANEL_MAX_READ_BYTES"
 	// EnvTimeoutMs 是 `timeoutMs`（单次宿主调用的上限，毫秒）。
 	EnvTimeoutMs = "DSHD_TERMINAL_PANEL_TIMEOUT_MS"
+	// EnvPromptSilenceMs / EnvIdleSilenceMs / EnvProbeIntervalMs 是 send 的三条阈值
+	// （官方 `promptSilenceMs` / `idleSilenceMs` / `probeIntervalMs`）。
+	EnvPromptSilenceMs = "DSHD_TERMINAL_PANEL_PROMPT_SILENCE_MS"
+	EnvIdleSilenceMs   = "DSHD_TERMINAL_PANEL_IDLE_SILENCE_MS"
+	EnvProbeIntervalMs = "DSHD_TERMINAL_PANEL_PROBE_INTERVAL_MS"
 )
 
 // ConfigFromEnv 从宿主环境变量解析三个官方配置项：没设置的项用官方默认值。
@@ -156,6 +195,24 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("%s=%q 不是整数", EnvTimeoutMs, raw)
 		}
 		cfg.TimeoutMs = v
+	}
+	for _, item := range []struct {
+		env string
+		dst *int
+	}{
+		{EnvPromptSilenceMs, &cfg.PromptSilenceMs},
+		{EnvIdleSilenceMs, &cfg.IdleSilenceMs},
+		{EnvProbeIntervalMs, &cfg.ProbeIntervalMs},
+	} {
+		raw := strings.TrimSpace(getenv(item.env))
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s=%q 不是整数", item.env, raw)
+		}
+		*item.dst = v // 边界与顺序仍由 validate 在 Register 时判
 	}
 	return cfg, nil
 }

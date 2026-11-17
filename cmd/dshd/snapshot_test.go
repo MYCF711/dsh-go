@@ -214,6 +214,18 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		// 由那个 shell 的沙箱档位负责，不由本工具声明（官方 presentCall kind 就是
 		// `execute`，`dsh-tool-terminal/src/index.ts:196-199`）。
 		"terminal_open": {Executes: true},
+		// rc.2 官方 `dsh-tool-terminal` 的**交互五件套**（同一包的另外五个工具）：
+		//   send  驱动一条活着的 shell 执行命令（官方后台分支 presentCall kind=execute，
+		//         `dsh-tool-terminal/src/index.ts:293`），所以按"起进程"报；
+		//   read / list 只读有界滚动缓冲与 roster，全空；
+		//   signal 能终止前台进程（官方 kind=execute，`:361`），close 拆终端 + 终止进程树
+		//         （官方 kind=delete，`:392`）——两者按"可能造成不可恢复的后果"报 Destructive，
+		//         与 `job_kill` 同一判据。
+		"terminal_send":   {Executes: true},
+		"terminal_read":   {},
+		"terminal_list":   {},
+		"terminal_signal": {Destructive: true},
+		"terminal_close":  {Destructive: true},
 		// 记一个倡议：和 ingest 一样建目录写文件，不联网、不起进程。
 		"hindsight_capture_initiative":     {Writes: true},
 		"hindsight_list_knowledge_pages":   {},
@@ -257,6 +269,9 @@ var officialVerbatimDescriptions = map[string]string{
 	// rc.2 官方 `dsh-tool-terminal` 的 `terminal_open`（155 字，逐字）：
 	// 描述与工具面 schema 都来自官方 catalog 的同一段（`tool-catalog.md:1397-1424`）。
 	"terminal_open": "官方 tool-catalog.md:1399-1400（155 字，逐字）",
+	// rc.2 官方 `dsh-tool-terminal` 的 `terminal_send`（152 字，逐字；官方在
+	// `enableRunInBackground:false` 分支下就是这一句，见 modules/tool/terminalpanel/interact.go 的文件头）。
+	"terminal_send": "官方 tool-catalog.md:1459-1460（152 字，逐字）",
 }
 
 // TestEveryToolHasDescription 是模型体验的底线：没有描述的工具模型只能猜什么时候用。

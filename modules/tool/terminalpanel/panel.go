@@ -213,7 +213,24 @@ func (p *panel) session(ctx context.Context) (terminal.UserTerminals, string, st
 }
 
 // resolve 是 session 的通用形态：措辞由族决定，判据与返回形状完全相同。
+//
+// 它在 identity 之上再加一道**子代理拒绝**（官方 `tools.ts:40-52` 与 `backend.ts:100`）：
+// 用户终端工具与终端分配工具都不许子代理用。五个**交互**工具不吃这一刀——官方对它们
+// 是 owner 维度（list 空、其余 FOREIGN_SESSION），见 interact.go 的文件头。
 func (p *panel) resolve(ctx context.Context, fam toolFamily) (terminal.UserTerminals, string, string, spi.Result, error) {
+	src, sessionID, origin, fail, err := p.identity(ctx, fam)
+	if err != nil {
+		return nil, "", "", fail, err
+	}
+	if origin == terminal.PanelOriginSubagent {
+		res := refusalResult(fam, "subagent")
+		return nil, "", "", res, errors.New(fam.refusal)
+	}
+	return src, sessionID, origin, spi.Result{}, nil
+}
+
+// identity 是 resolve 去掉"子代理拒绝"的那一半：会话身份 + 数据源 + 会话来源。
+func (p *panel) identity(ctx context.Context, fam toolFamily) (terminal.UserTerminals, string, string, spi.Result, error) {
 	sessionID := spi.SessionFrom(ctx)
 	if sessionID == "" {
 		res := spi.Result{
@@ -240,10 +257,6 @@ func (p *panel) resolve(ctx context.Context, fam toolFamily) (terminal.UserTermi
 			Hint:    "宿主判断不了这次调用属于哪个会话类型；先确认会话仍存在，再重试。",
 		}
 		return nil, "", "", res, fmt.Errorf("判断会话来源失败: %w", oerr)
-	}
-	if origin == terminal.PanelOriginSubagent {
-		res := refusalResult(fam, "subagent")
-		return nil, "", "", res, errors.New(fam.refusal)
 	}
 	return src, sessionID, origin, spi.Result{}, nil
 }

@@ -101,6 +101,17 @@ type OfficialAgentTerminalRequest struct {
 	Policy          OfficialSandboxExecutionPolicy `json:"policy"`
 	PreferredShells []string                       `json:"preferredShells"`
 	Env             map[string]string              `json:"env,omitempty"`
+
+	// Type / Name 是**注册表层**的那两个字段（官方 `TerminalSpawnRequest.type/name`，
+	// `dsh-terminal/src/types.ts:28-36`），官方不把它们传给 agentLaunch。
+	//
+	// 本宿主没有注册表层（id 由分配时生成、没有 pty-N 计数器），但 `terminal_list`
+	// 的快照要回 `type` 与 `name`（`dsh-terminal/src/index.ts:375-386`）。所以把它俩
+	// 随同一个分配请求带进来、只存在宿主的条目上——不新增 wire 字段，也不假装它们
+	// 参与启动（官方启动用的仍是 shell/argv/env，与这两个值无关）。
+	// 空串 = 这次分配没带（`terminal_open` 没给 name 时 name 就是空）。
+	Type string `json:"-"`
+	Name string `json:"-"`
 }
 
 // OfficialAgentTerminalError 是一条被拒绝的 agent 终端操作（官方 `AgentTerminalError`
