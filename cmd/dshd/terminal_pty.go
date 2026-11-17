@@ -107,6 +107,15 @@ type officialPTYEntry struct {
 	// typed=true 的真实人员输入按官方语义把 agent 控制权永久交给 user。
 	origin  string
 	control string
+	// sandboxMode 是**仅 agent 终端有**的 rc.2 字段（官方 WebTerminalInfo：
+	// "Sandbox mode an agent terminal started under; user terminals … omit it"）。
+	// 用户终端恒为空串 → 序列化时省略；agent 终端 = 官方 request.policy.mode
+	// （`dsh-api-terminal-controller/lib/index.js:1476`）。
+	sandboxMode string
+	// release 是终端进程结束后要做的收尾（官方 TerminalLaunch.release，
+	// `lib/index.js:1466`：posix + workspace-write 才有，删 agent 的 HISTFILE）。
+	// 只会被调用一次（closeEntry/closeEntryForced 里消费后置 nil）。
+	release func()
 
 	closed   bool
 	retained bool
@@ -153,6 +162,16 @@ type officialPTYTerminalAPI struct {
 	// maxTerminals 是每会话同时存活的终端上限（官方 terminal.maxTerminals）。
 	// 构造函数里落 officialTerminalMaxTerminals；用例可以调小以免真起 8 条 PTY。
 	maxTerminals int
+	// maxAgentTerminals 是每会话**agent 控制**的存活终端上限，独立于 maxTerminals：
+	// 官方 terminal.maxAgentTerminals（默认 4，`lib/index.js:1113`），判据是
+	// `origin=agent && control=agent && state=running` 的条数（`:1219-1222`）。
+	maxAgentTerminals int
+	// confiner 是 argv 级沙箱 provider 的注入点（官方 `agent.ctx.get("sandbox")`，
+	// `lib/index.js:1525-1529`）。生产装配**留空**：本仓 internal/sandbox 只有
+	// 策略闸门、没有 OS 级 argv 包装器，装不上就不许假装 confined
+	// （`cmd/dshd/terminal_pty_agent.go` 的 confineAgentArgv 会响亮失败）。
+	// 接上真正的包装器后给这里赋值即可，agentLaunch 的语义一行都不用改。
+	confiner officialSandboxConfiner
 
 	// ---- 官方 api-terminal-controller 的四条生命周期预算 ----
 	// disposeGrace      官方 terminal.disposeGraceMs（默认 1000）：销毁前给 shell 的宽限
@@ -200,21 +219,22 @@ func newOfficialPTYTerminalAPIWith(home string, svc *bash.Service, cwdOf func(st
 		scrollbackRows = 1000
 	}
 	a := &officialPTYTerminalAPI{
-		home:           home,
-		bash:           svc,
-		cwdOf:          cwdOf,
-		stateDir:       filepath.Join(home, "state", "terminals-pty"),
-		scrollbackRows: scrollbackRows,
-		entries:        map[string]*officialPTYEntry{},
-		closedIDs:      map[string]bool{},
-		now:            time.Now,
-		maxTerminals:   officialTerminalMaxTerminals,
-		disposeGrace:   officialTerminalDisposeGrace,
-		cleanupRetry:   officialTerminalCleanupRetry,
-		activityPoll:   officialTerminalActivityPoll,
-		unattendedTTL:  officialTerminalUnattendedTimeout,
-		closedEntries:  map[string]*officialPTYEntry{},
-		sweepStop:      make(chan struct{}),
+		home:              home,
+		bash:              svc,
+		cwdOf:             cwdOf,
+		stateDir:          filepath.Join(home, "state", "terminals-pty"),
+		scrollbackRows:    scrollbackRows,
+		entries:           map[string]*officialPTYEntry{},
+		closedIDs:         map[string]bool{},
+		now:               time.Now,
+		maxTerminals:      officialTerminalMaxTerminals,
+		maxAgentTerminals: officialAgentTerminalMaxAgentTerminals,
+		disposeGrace:      officialTerminalDisposeGrace,
+		cleanupRetry:      officialTerminalCleanupRetry,
+		activityPoll:      officialTerminalActivityPoll,
+		unattendedTTL:     officialTerminalUnattendedTimeout,
+		closedEntries:     map[string]*officialPTYEntry{},
+		sweepStop:         make(chan struct{}),
 	}
 	if err := os.MkdirAll(a.stateDir, 0o755); err != nil {
 		return nil, fmt.Errorf("建 PTY 终端状态目录失败: %w", err)
@@ -297,6 +317,24 @@ func (a *officialPTYTerminalAPI) closeEntry(entry *officialPTYEntry) {
 	}
 	entry.cleanupPending = false
 	entry.state = "exited"
+	a.runRelease(entry)
+}
+
+// runRelease 执行 entry 的 launch 收尾（官方 TerminalLaunch.release，`lib/index.js:1466`）。
+//
+// 语义：**进程结束之后**才做（官方的 release 绑在 shell 生命周期上）；只做一次，
+// 失败不改变终端状态（官方也只记日志——history 文件里只有这条已结束 shell 的历史）。
+func (a *officialPTYTerminalAPI) runRelease(entry *officialPTYEntry) {
+	if entry == nil {
+		return
+	}
+	a.mu.Lock()
+	release := entry.release
+	entry.release = nil
+	a.mu.Unlock()
+	if release != nil {
+		release()
+	}
 }
 
 // closeEntryForced 是进程退出路径：一刀切，不宽限。
@@ -317,6 +355,7 @@ func (a *officialPTYTerminalAPI) closeEntryForced(entry *officialPTYEntry) {
 	}
 	entry.cleanupPending = false
 	entry.state = "exited"
+	a.runRelease(entry)
 }
 
 // termExited 报这条 PTY 会话的进程是否已经退出（宽限轮询的判据）。
@@ -995,6 +1034,8 @@ func (e *officialPTYEntry) info() transport.OfficialWebTerminalInfo {
 		Error:    e.errMsg,
 		Origin:   e.origin,
 		Control:  e.control,
+		// 空串 = 用户终端，序列化时被 omitempty 省掉（官方语义如此）。
+		SandboxMode: e.sandboxMode,
 	}
 	if info.Shell.Args == nil {
 		info.Shell.Args = []string{}
@@ -1034,6 +1075,7 @@ func (a *officialPTYTerminalAPI) persistSession(sessionID string) {
 			ID: e.id, Title: e.title,
 			ShellPath: e.shell.Path, ShellName: e.shell.Name, ShellArgs: e.shell.Args,
 			Cwd: e.cwd, Cols: e.cols, Rows: e.rows,
+			Origin: e.origin, SandboxMode: e.sandboxMode,
 			Retained: true, Screen: e.screen, SavedAt: a.now().UnixMilli(),
 		})
 	}
@@ -1092,11 +1134,23 @@ func (a *officialPTYTerminalAPI) loadLayouts() {
 			if !t.Retained || !validJobActionPart(t.ID) {
 				continue
 			}
+			// origin/sandboxMode 按落盘值恢复（老文件没有这两项 → user）；
+			// control 一律 user：进程都不在了，控制权确实已经回到人手里——"谁建的"
+			// （origin）和"谁在控制"（control）在这里必须分开说。
+			origin := t.Origin
+			if origin == "" {
+				origin = transport.OfficialTerminalOriginUser
+			}
+			sandboxMode := t.SandboxMode
+			if origin != transport.OfficialTerminalOriginAgent {
+				sandboxMode = "" // 官方：user 终端省略 sandboxMode
+			}
 			entry := &officialPTYEntry{
 				id: t.ID, sessionID: layout.SessionID, title: t.Title,
 				shell: transport.OfficialTerminalShell{Path: t.ShellPath, Args: t.ShellArgs, Name: t.ShellName},
 				cwd:   t.Cwd, cols: t.Cols, rows: t.Rows,
-				state: "exited", retained: true, screen: t.Screen, origin: "user", control: "user",
+				state: "exited", retained: true, screen: t.Screen,
+				origin: origin, control: transport.OfficialTerminalControlUser, sandboxMode: sandboxMode,
 				errMsg:    "宿主重启：PTY 进程已不存在（保留的是布局与屏幕尾部）",
 				createdAt: time.UnixMilli(t.SavedAt), lastUsed: time.UnixMilli(t.SavedAt),
 			}

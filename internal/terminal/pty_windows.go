@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -185,15 +186,31 @@ func openPlatform(cfg Config) (platformProcess, error) {
 	// 界面上就是永远没有提示符、敲 `exit` 也退不掉。
 	startup.StartupInfo.Flags = windows.STARTF_USESTDHANDLES
 	startup.ProcThreadAttributeList = attrs.List()
+	// envBlock 是子进程环境；cfg.Env==nil 时保持 NULL = 继承宿主环境（既有行为）。
+	// CreateProcess 拿走的是**这份内存**的指针，所以 block 必须活到调用返回
+	// （下面的 envBlock 变量在整个函数体内都在作用域，不会被提前回收）。
+	var envBlock []uint16
+	var envPtr *uint16
+	if cfg.Env != nil {
+		envBlock, err = buildEnvironmentBlock(cfg.Env)
+		if err != nil {
+			releaseConsole()
+			return fail("%w: 构造子进程环境: %v", ErrStart, err)
+		}
+		envPtr = &envBlock[0]
+	}
 	var pi windows.ProcessInformation
 	if err := windows.CreateProcess(
 		appPtr, cmdPtr, nil, nil, false,
-		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT, nil, cwdPtr,
+		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT, envPtr, cwdPtr,
 		&startup.StartupInfo, &pi,
 	); err != nil {
 		releaseConsole()
 		return fail("%w: CreateProcess(%s): %v", ErrStart, cfg.Path, err)
 	}
+	// CreateProcess 只拿走指针；块必须在调用期间保持存活（编译器可以认为
+	// `&envBlock[0]` 之后再没人读它而提前回收）。
+	runtime.KeepAlive(envBlock)
 
 	// 进程树归属：Job Object + KILL_ON_JOB_CLOSE。
 	// 任何一步失败都要先收掉刚起的进程，不能留孤儿。

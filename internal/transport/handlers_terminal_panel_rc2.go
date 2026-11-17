@@ -28,6 +28,8 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"dshgo/internal/terminal"
 )
@@ -63,8 +65,11 @@ func NewUserTerminalSource(roster UserTerminalRoster, origin func(ctx context.Co
 	return &UserTerminalSource{roster: roster, origin: origin}
 }
 
-// 编译期钉住：适配器必须满足工具层的接口。
-var _ terminal.UserTerminals = (*UserTerminalSource)(nil)
+// 编译期钉住：适配器必须满足工具层的接口（含 agent 终端分配）。
+var (
+	_ terminal.UserTerminals       = (*UserTerminalSource)(nil)
+	_ terminal.AgentTerminalOpener = (*UserTerminalSource)(nil)
+)
 
 // ListUserTerminals 列这条会话的全部终端，字段换算见文件头。
 func (s *UserTerminalSource) ListUserTerminals(ctx context.Context, sessionID string) ([]terminal.PanelTerminal, error) {
@@ -91,6 +96,48 @@ func (s *UserTerminalSource) ListUserTerminals(ctx context.Context, sessionID st
 		})
 	}
 	return out, nil
+}
+
+// OpenAgentTerminal 是官方 `openForAgent` 经工具侧那一层适配后的入口。
+//
+// 数据源（roster）必须同时实现 `OfficialAgentTerminals`（生产中就是
+// `cmd/dshd/terminal_pty.go` 的 PTY 服务面）；没实现就**响亮失败**，
+// 绝不让"没有分配路径"变成"建一条 user 终端冒充 agent 终端"。
+func (s *UserTerminalSource) OpenAgentTerminal(ctx context.Context, sessionID string, req terminal.AgentOpenRequest) (terminal.PanelTerminal, error) {
+	if s == nil || s.roster == nil {
+		return terminal.PanelTerminal{}, errors.New("终端数据源没有 roster（接线缺失）")
+	}
+	capability, ok := s.roster.(OfficialAgentTerminals)
+	if !ok {
+		return terminal.PanelTerminal{}, fmt.Errorf(
+			"%w: 这个宿主的终端服务面没有 openForAgent/agentLaunch 对应的 agent 终端分配路径",
+			ErrJTOfficialUnsupported)
+	}
+	// 参数换算只有这一处：`terminal.AgentOpenRequest` → 官方 `AgentTerminalRequest`。
+	official := OfficialAgentTerminalRequest{
+		Title:           req.Title,
+		Cols:            req.Cols,
+		Rows:            req.Rows,
+		Policy:          OfficialSandboxExecutionPolicy{Mode: req.PolicyMode, WorkspaceRoot: req.PolicyWorkspaceRoot},
+		PreferredShells: req.PreferredShells,
+		Env:             req.Env,
+	}
+	if cwd := strings.TrimSpace(req.Cwd); cwd != "" {
+		official.Cwd = &cwd
+	}
+	info, err := openOfficialAgentTerminal(ctx, capability, sessionID, official)
+	if err != nil {
+		return terminal.PanelTerminal{}, err
+	}
+	return terminal.PanelTerminal{
+		ID:       info.ID,
+		Title:    info.Title,
+		Cwd:      info.Cwd,
+		Control:  info.Control,
+		State:    info.State,
+		Running:  panelRunning(info.State),
+		ExitCode: info.ExitCode,
+	}, nil
 }
 
 // ReadUserScreen 读一条终端的渲染屏幕最新 lines 行。

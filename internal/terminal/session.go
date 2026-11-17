@@ -26,6 +26,16 @@ type Config struct {
 	ScrollbackRows int
 	// ScrollbackBytes 是内存安全硬顶（字节）；0 = 默认 1 MiB，负数 = 非法。
 	ScrollbackBytes int
+	// Env 是子进程的**完整**环境（`KEY=VALUE` 列表）；nil = 继承宿主进程环境。
+	//
+	// 为什么是"完整"而不是"追加"：官方 agent 终端的环境是
+	// `{...request.env, DSH_SESSION_ID, HISTFILE?}`（`dsh-api-terminal-controller/
+	// lib/index.js:1456-1461`）——一份**算好的**环境，不是补丁。把"继承"隐藏在这一层
+	// 会让调用方无法表达"这个变量必须不存在"（例如 confined POSIX 的
+	// `HISTFILE=""`，那是一条要传下去的空值，不是"没设"）。
+	//
+	// 非 nil 时调用方负责把需要继承的父环境自己并进来（`os.Environ()` + 覆盖项）。
+	Env []string
 }
 
 // platformProcess 是平台相关的 PTY 句柄。

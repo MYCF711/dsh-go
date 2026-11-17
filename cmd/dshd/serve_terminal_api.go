@@ -1450,6 +1450,14 @@ type persistedTerminalIdentity struct {
 	Cols      int      `json:"cols"`
 	Rows      int      `json:"rows"`
 	Retained  bool     `json:"retained"`
+	// Origin / SandboxMode 是 rc.2 的 `WebTerminalInfo.origin` / `sandboxMode`。
+	//
+	// 为什么落盘：宿主重启后进程早没了，但"这条终端当初是 agent 开的、按哪一档
+	// 起的"仍是事实。不落盘的话恢复出来的占位行会被 `aligned()` 补成 origin=user，
+	// 界面上就是"agent 终端重启后变用户终端"的假历史。control 不落盘（见 loadLayouts：
+	// 进程都不在了，控制权确实已经回到人手里）。
+	Origin      string `json:"origin,omitempty"`
+	SandboxMode string `json:"sandboxMode,omitempty"`
 	// Screen 只在 Retained 时写（有界尾部）：这是 retain 的真实产物。
 	Screen  string `json:"screen,omitempty"`
 	SavedAt int64  `json:"savedAt"`
