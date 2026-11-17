@@ -20,7 +20,12 @@ import (
 // 定时器被停掉，租约到点后 state 文件的内容与 mtime 都不再变化。
 func TestCloseStopsExpiryTimer(t *testing.T) {
 	home := t.TempDir()
-	s := newLocal(t, home, 40*time.Millisecond)
+	// 租约必须远大于「快照 -> Close」这段窗口。
+	// 原来是 40ms：CI 负载高时快照与 Close 之间可能就超过 40ms，
+	// 定时器于是**在快照之后、Close 之前**写了一次盘，after != before，
+	// 测试就报「Close 之后定时器仍在写盘」——其实 Close 是对的，是窗口太窄。
+	// 2026-11-17 这条在 CI 上连续拦掉两个 PR，本地跑不出来。
+	s := newLocal(t, home, 500*time.Millisecond)
 	if _, err := s.StartSignIn(context.Background(), StartOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +37,7 @@ func TestCloseStopsExpiryTimer(t *testing.T) {
 	s.Close()
 
 	// 等到远超租约的时刻。若 Close 没停掉定时器，这里会看到 state/ 被改写。
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(1200 * time.Millisecond)
 
 	if after := snapshotTree(t, stateDir); after != before {
 		t.Fatalf("Close 之后定时器仍在写盘：before=%q after=%q", before, after)

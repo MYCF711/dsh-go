@@ -1,6 +1,12 @@
 package terminalpanel
 
-// 模块装配：把两个只读工具注册进工具目录。
+// 模块装配：三个终端工具进工具目录。
+//
+//	terminal_open                      agent 开一条 origin=agent 的终端（open.go）
+//	user_terminal_list/read            读用户控制的两条只读工具（panel.go）
+//
+// `terminal_open` 属于官方另一个包（`@deepseek-ai/dsh-tool-terminal`），
+// 它**不**受本包 `readUserTerminals` 管辖；理由写在 Register 里。
 //
 // # 为什么不在这里 Inject 终端数据源
 //
@@ -39,14 +45,24 @@ func Module(cfg Config) kernel.Module {
 			}
 			// 官方：readUserTerminals=false 时两个工具都**不注册**（removes both）。
 			// 注册成"永远报错"比不注册更糟：模型会反复试一个不存在的能力。
-			if !cfg.ReadUserTerminals {
-				return nil
-			}
 			reg, err := kernel.Inject(s, spi.ToolsKey)
 			if err != nil {
 				return err
 			}
 			p := &panel{cfg: cfg, scope: s}
+			// `terminal_open` **总是注册**：它属于官方 `@deepseek-ai/dsh-tool-terminal`
+			// （`tool-catalog.md:36`），不受 `readUserTerminals` 管辖——那个开关只管
+			// 官方 `dsh-terminal-panel` 的两个用户终端工具（`terminal-panel/src/index.ts:39`）。
+			// 把它也一起关掉会让"agent 开终端"这条链在 readUserTerminals:false 的
+			// 部署里静默消失，那不是官方语义。
+			if err := reg.Register(p.openTool()); err != nil {
+				return fmt.Errorf("注册 %s 失败: %w", p.openTool().Name(), err)
+			}
+			// 官方：readUserTerminals=false 时两个用户终端工具都**不注册**（removes both）。
+			// 注册成"永远报错"比不注册更糟：模型会反复试一个不存在的能力。
+			if !cfg.ReadUserTerminals {
+				return nil
+			}
 			for _, tool := range []spi.Tool{p.listTool(), p.readTool()} {
 				if err := reg.Register(tool); err != nil {
 					return fmt.Errorf("注册 %s 失败: %w", tool.Name(), err)
@@ -57,6 +73,7 @@ func Module(cfg Config) kernel.Module {
 	}
 }
 
-// listTool / readTool 造两个工具（`panel` 的构造点集中在 module 与测试里）。
+// listTool / readTool / openTool 造三个工具（`panel` 的构造点集中在 module 与测试里）。
 func (p *panel) listTool() *userTerminalList { return &userTerminalList{p: p} }
 func (p *panel) readTool() *userTerminalRead { return &userTerminalRead{p: p} }
+func (p *panel) openTool() *terminalOpen     { return &terminalOpen{p: p} }

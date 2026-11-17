@@ -5,6 +5,7 @@ package terminalpanel
 // 已经关掉了，实际上它们还在表里）。
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -23,7 +24,9 @@ func TestConfigFromEnvDefaultsWhenUnset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("没有环境变量时不该报错: %v", err)
 	}
-	if cfg != DefaultConfig() {
+	// Config 现在带 PreferredShells（切片）与 Environment（map），struct 不再可比较，
+	// 所以逐字段比——判据与原来一样严：每一个字段都必须等于官方默认值。
+	if !reflect.DeepEqual(cfg, DefaultConfig()) {
 		t.Fatalf("没设置时必须与官方默认值一致: %+v", cfg)
 	}
 	if _, err := ConfigFromEnv(nil); err != nil {

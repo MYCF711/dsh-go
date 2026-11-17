@@ -1434,6 +1434,34 @@
     }
   },
   {
+    "name": "terminal_open",
+    "description": "Create a persistent, owner-isolated terminal session from a registered backend type. Use this for shell or REPL state that must survive across tool calls.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Registered terminal backend type, usually \"shell\"."
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional owner-local display name such as \"main\" or \"gdb\"."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Initial working directory, relative to the Session current directory when not absolute."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "caps": {
+      "executes": true
+    }
+  },
+  {
     "name": "todo_write",
     "description": "记录或更新任务清单（整份替换）。多步骤工作时用它把计划摆出来、让人看得见进度。",
     "parameters": {

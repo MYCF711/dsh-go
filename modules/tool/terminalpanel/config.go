@@ -1,13 +1,17 @@
 package terminalpanel
 
-// 本包的配置面：与官方 `dsh-terminal-panel` 的同名三个字段对齐（其余字段属于
-// 终端后端 `PanelTerminalBackend`，本包不实现后端，只实现两个只读工具）。
+// 本包的配置面：与官方 `dsh-terminal-panel/src/config.ts` 的字段同名同默认值。
 //
-// 官方字段与默认值（`terminal-panel/src/config.ts:50-52`）：
+// 官方字段与默认值（`config.ts:40-52`）：
 //
+//	backendType        "shell"        （终端后端类型；`terminal_open` 的 type 只认它）
+//	cols / rows        160 / 40       （新终端初始尺寸，cols≥2、rows≥1）
+//	preferredShells    []             （按名字优先挑 shell；空 = 环境默认）
+//	environment        PAGER/GIT_PAGER = cat
 //	timeoutMs          30000          （官方是 terminal_send 的上限；本包套在宿主调用上）
 //	maxReadBytes       256 * 1024     （一次读取结果（含位置/截断标记）的 UTF-8 字节上限）
-//	readUserTerminals  true           （false = 两个工具**都不存在**）
+//	readUserTerminals  true           （false = 两个**用户终端**工具都不存在；
+//	                                   `terminal_open` 不属于这个开关）
 //
 // # 为什么 ReadUserTerminals 是 bool 而不是"默认 true 的三态"
 //
@@ -37,32 +41,70 @@ const ModuleID = "tool-terminalpanel"
 type Config struct {
 	// ReadUserTerminals 决定是否注册 `user_terminal_list` / `user_terminal_read`。
 	// false 时两个工具都不注册（官方："readUserTerminals: false removes both"）。
+	//
+	// 它**不**管 `terminal_open`：那个工具属于官方另一个包 `@deepseek-ai/dsh-tool-terminal`
+	// （`tool-catalog.md:36`），`terminal-panel/src/index.ts:39` 只在 readUserTerminals
+	// 为真时才注册那两个用户工具，与终端分配无关。
 	ReadUserTerminals bool
 	// MaxReadBytes 是一次读取结果的 UTF-8 字节上限（含位置行与截断标记）。
 	MaxReadBytes int
-	// TimeoutMs 是单次宿主调用（列 roster / 读屏幕）的上限，毫秒。
+	// TimeoutMs 是单次宿主调用（列 roster / 读屏幕 / 分配终端）的上限，毫秒。
 	TimeoutMs int
+
+	// ---- 以下四个字段是官方 terminal-panel 的"分配请求"配置 ----
+	//
+	// 它们不是本包新增的语义：官方 `PanelTerminalBackend.spawn` 就是把
+	// `config.cols/rows/preferredShells/environment` 直接塞进 `AgentTerminalRequest`
+	// （`terminal-panel/src/backend.ts:103-111`）。取值与边界照 `config.ts:40-44`。
+
+	// BackendType 是终端注册表的后端类型（官方默认 `shell`；
+	// `terminal_open` 的 `type` 参数只认它，见 `dsh-terminal/src/index.ts:140-141`）。
+	BackendType string
+	// Cols / Rows 是新终端的初始尺寸（官方默认 160×40，边界 cols≥2、rows≥1；
+	// `dimensions` 越界是**报错**不是截断，`lib/index.js:1541`）。
+	Cols int
+	Rows int
+	// PreferredShells 是按名字优先挑 shell 的顺序（官方默认空 = 环境默认 shell）。
+	PreferredShells []string
+	// Environment 是追加进终端子 shell 的变量（官方默认 PAGER/GIT_PAGER = cat；
+	// 不放这两个，`git log` 之类的程序会在分页器里停住）。
+	Environment map[string]string
 }
 
-// DefaultConfig 是官方默认部署的配置（三个字段与官方 config.ts 默认值一致）。
+// DefaultConfig 是官方默认部署的配置（字段与官方 config.ts 的默认值一致）。
 func DefaultConfig() Config {
 	return Config{
 		ReadUserTerminals: true,
 		MaxReadBytes:      terminal.DefaultPanelReadBytes,
 		TimeoutMs:         30_000,
+		BackendType:       "shell",
+		Cols:              160,
+		Rows:              40,
+		PreferredShells:   nil,
+		Environment:       map[string]string{"PAGER": "cat", "GIT_PAGER": "cat"},
 	}
 }
 
 // validate 校验配置；非法值在 Register 时响亮失败（不许静默退化成默认值）。
 //
 // 边界逐条照官方 schemastery：`maxReadBytes` 最小 64（`config.ts:51`），
-// `timeoutMs` 最小 1（`config.ts:50`）。
+// `timeoutMs` 最小 1（`config.ts:50`）；`backendType` 非空、`cols` ≥ 2、`rows` ≥ 1
+// （`config.ts:40-42`，与官方 `dimensions` 的下限同源，`lib/index.js:1541`）。
 func (c Config) validate() error {
 	if c.TimeoutMs < 1 {
 		return fmt.Errorf("timeoutMs 必须是正整数（官方 min 1，拿到 %d）；装配请从 terminalpanel.DefaultConfig() 出发", c.TimeoutMs)
 	}
 	if c.MaxReadBytes < 64 {
 		return fmt.Errorf("maxReadBytes 不能小于 64（官方 min 64，拿到 %d）；装配请从 terminalpanel.DefaultConfig() 出发", c.MaxReadBytes)
+	}
+	if strings.TrimSpace(c.BackendType) == "" {
+		return fmt.Errorf("backendType 不能为空（官方 min 1 字符）；装配请从 terminalpanel.DefaultConfig() 出发")
+	}
+	if c.Cols < 2 {
+		return fmt.Errorf("cols 不能小于 2（官方 min 2，拿到 %d）；装配请从 terminalpanel.DefaultConfig() 出发", c.Cols)
+	}
+	if c.Rows < 1 {
+		return fmt.Errorf("rows 不能小于 1（官方 min 1，拿到 %d）；装配请从 terminalpanel.DefaultConfig() 出发", c.Rows)
 	}
 	return nil
 }
