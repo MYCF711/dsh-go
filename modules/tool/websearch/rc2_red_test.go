@@ -10,8 +10,8 @@ package websearch
 //     rc.2 `dsh-tool-web/src/search.ts:20` `WEB_SEARCH_MAX_RESULTS = 10`、
 //     `:23` `WEB_SEARCH_MAX_QUERIES = 10`，并成为配置默认值（`src/index.ts:61-62`）；
 //     rc.1 编译产物同位置是 8 / 4（`official-rc1/.../dsh-tool-web/lib/index.js:26,28`）。
-//  2. 基础组合的搜索 provider 从 `deepseek-official` 改成 `deepseek-search-api`。
-//     rc.2 `dsh-base/cordis.patch.yml:487`；rc.1 `:470`。
+//  2. 基础组合的搜索 provider：rc.1 `deepseek-official`（`:470`）→ rc.2 `deepseek-search-api`
+//     （`:487`）→ **rc.5 删除固定值**（`:488-491`，改按模型路由选）。
 //  3. 60s 搜索预算是**组合级**的：rc.2 同一段注释写「This composition gives
 //     web_search 60s whichever provider serves it」（`cordis.patch.yml:479-480`），
 //     rc.1 的注释是「this shipped DeepSeek route gets 60s」（rc.1 `:454-466`）——
@@ -106,11 +106,13 @@ func TestRC2ReturnsTenSources(t *testing.T) {
 	}
 }
 
-// 官方 rc.2 基础组合钉的搜索 provider 是 deepseek-search-api（rc.1 是 deepseek-official）。
-func TestRC2BaseBundleSearchProvider(t *testing.T) {
-	if baseBundleSearchProvider != "deepseek-search-api" {
-		t.Fatalf("rc.2 基础组合的 searchProvider 是 deepseek-search-api（cordis.patch.yml:487）；当前 %q",
-			baseBundleSearchProvider)
+// 官方 rc.5 删掉了基础组合的 `searchProvider`（rc.2 曾在 `cordis.patch.yml:487` 写
+// `deepseek-search-api`），改由 `dsh-web` 按模型路由选。本包不再有"基线默认 provider"
+// 常量：默认值只在执行期由 `internal/spi/search_route.go` 的路由判据给出。
+func TestRC5BaseBundleComposesNoSearchProvider(t *testing.T) {
+	if BaseBundleProviderDefaults.Search != "" {
+		t.Fatalf("rc.5 基础组合不固定搜索 provider（cordis.patch.yml:488-491）；当前 %q",
+			BaseBundleProviderDefaults.Search)
 	}
 }
 

@@ -192,8 +192,9 @@ func TestDeepSeekUnavailableWithoutKey(t *testing.T) {
 	}
 }
 
-// 环境装配：rc.2 的两个 DeepSeek API provider 注册进来，基线默认 provider 真正生效，
-// 而"只有 SearxNG"的部署仍然能用（不硬钉不可用的默认值）。
+// 环境装配：rc.5 的两个 DeepSeek API provider 注册进来，搜索 provider **不固定**
+// （rc.5 删掉了基础组合的 `searchProvider`），改按会话模型路由选；"只有 SearxNG"
+// 的部署仍然能用（不硬钉不可用的默认值）。
 func TestNewWebProvidersFromEnv(t *testing.T) {
 	env := map[string]string{
 		"DEEPSEEK_API_KEY":      "k",
@@ -214,16 +215,32 @@ func TestNewWebProvidersFromEnv(t *testing.T) {
 	if !seam.SearchReady() {
 		t.Fatal("有 key 时搜索应该就绪")
 	}
-	// rc.2 基线默认 provider（deepseek-search-api）可用时直接生效（cordis.patch.yml:487）。
-	if seam.SearchPin() != BaseBundleSearchProviderID {
-		t.Fatalf("有凭据时该钉 rc.2 基线默认 %q；实际 %q", BaseBundleSearchProviderID, seam.SearchPin())
+	// rc.5：基础组合**不固定**搜索 provider（`cordis.patch.yml:488-491` 只剩 fetchProvider）。
+	if got := seam.SearchPin(); got != "" {
+		t.Fatalf("rc.5 基础组合不固定搜索 provider；当前仍钉死 %q", got)
 	}
+	// 没有模型请求（路由空）→ 官方 OTHER_ROUTE_SEARCH_PROVIDER（`dsh-web/src/index.ts:67`）。
 	selected, err := seam.SelectSearch()
 	if err != nil || selected.ID() != DeepSeekSearchAPIProviderID {
-		t.Fatalf("应选中 DeepSeek Search API: %v %v", err, selected)
+		t.Fatalf("没有模型路由时该选 deepseek-search-api: %v %v", err, selected)
 	}
 
-	// rc.2 基线默认可用 → 即使 SearxNG 也配了也不会 ambiguous（官方基础组合就是这么钉的）。
+	// DeepSeek 模型路由 → 官方 DEEPSEEK_ROUTE_SEARCH_PROVIDER（`:58,64`）。
+	for _, route := range []string{"deepseek-official", "deepseek-account"} {
+		env["DSHD_WEB_LLM_PROVIDER"] = route
+		seam, err = NewWebProvidersFromEnv(getenv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected, err = seam.SelectSearch()
+		if err != nil || selected.ID() != DeepSeekProviderID {
+			t.Fatalf("模型路由 %q 上该选 deepseek-official: %v %v", route, err, selected)
+		}
+	}
+	env["DSHD_WEB_LLM_PROVIDER"] = ""
+
+	// 路由优先项可用 → 即使 SearxNG 也配了也不会 ambiguous（官方 resolveProvider
+	// 先找 preferred，`dsh-web/src/index.ts:317-319`）。
 	env["DSHD_SEARCH_URL"] = "http://127.0.0.1:1/search?q={query}"
 	seam, err = NewWebProvidersFromEnv(getenv)
 	if err != nil {
@@ -231,7 +248,7 @@ func TestNewWebProvidersFromEnv(t *testing.T) {
 	}
 	selected, err = seam.SelectSearch()
 	if err != nil || selected.ID() != DeepSeekSearchAPIProviderID {
-		t.Fatalf("基线默认优先于自动选择: %v %v", err, selected)
+		t.Fatalf("路由优先项优先于自动选择: %v %v", err, selected)
 	}
 
 	// 钉死 searxng → 选它。
@@ -259,8 +276,8 @@ func TestNewWebProvidersFromEnv(t *testing.T) {
 		t.Fatalf("没有 DeepSeek 凭据时该自动选中唯一的 SearxNG: %v %v", err, selected)
 	}
 
-	// 抓取侧：有 DeepSeek 凭据时钉 rc.2 基线默认 http（官方 cordis.patch.yml:488），
-	// 否则会与 deepseek-fetch-api 撞成 WEB_PROVIDER_AMBIGUOUS。
+	// 抓取侧：rc.5 仍固定 http（官方 cordis.patch.yml:491），否则会与
+	// deepseek-fetch-api 撞成 WEB_PROVIDER_AMBIGUOUS。
 	withKey := map[string]string{"DEEPSEEK_API_KEY": "k"}
 	seam, err = NewWebProvidersFromEnv(func(name string) string { return withKey[name] })
 	if err != nil {

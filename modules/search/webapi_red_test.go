@@ -64,11 +64,19 @@ func TestRC2DeepSeekAPIProviderIDs(t *testing.T) {
 		t.Fatalf("默认值必须照官方：count=10（search.ts:19）、rps=5（search.ts:22）；实际 %d/%d",
 			DeepSeekDefaultCount, DeepSeekSearchRequestsPerSecond)
 	}
-	if BaseBundleSearchProviderID != DeepSeekSearchAPIProviderID {
-		t.Fatalf("rc.2 基础组合 searchProvider 就是 deepseek-search-api（cordis.patch.yml:487）")
+	// rc.5 删掉了基础组合的 `searchProvider`（`cordis.patch.yml:488-491` 只剩 fetch）：
+	// 搜索默认改按模型路由选，判据与两个 id 的单源在 `internal/spi/search_route.go`
+	// （官方 `dsh-web/src/index.ts:58,64,67`）。
+	if spi.DeepSeekRouteSearchProviderID != DeepSeekProviderID {
+		t.Fatalf("DeepSeek 路由优先的 provider 必须是注册键 deepseek-official（index.ts:64）；实际 %q",
+			spi.DeepSeekRouteSearchProviderID)
+	}
+	if spi.OtherRouteSearchProviderID != DeepSeekSearchAPIProviderID {
+		t.Fatalf("其它路由优先的 provider 必须是 deepseek-search-api（index.ts:67）；实际 %q",
+			spi.OtherRouteSearchProviderID)
 	}
 	if BaseBundleFetchProviderID != "http" {
-		t.Fatalf("rc.2 基础组合 fetchProvider 是 http（cordis.patch.yml:488）；实际 %q", BaseBundleFetchProviderID)
+		t.Fatalf("rc.5 基础组合 fetchProvider 是 http（cordis.patch.yml:491）；实际 %q", BaseBundleFetchProviderID)
 	}
 }
 
@@ -86,8 +94,9 @@ func TestRC2RegistersDeepSeekAPIProviders(t *testing.T) {
 	}
 }
 
-// 默认 provider 真生效：有 DeepSeek 凭据且未钉死时，选中的就是 rc.2 基线默认。
-func TestRC2DefaultSearchProviderTakesEffect(t *testing.T) {
+// 默认 provider 真生效：rc.5 起"默认"由会话模型路由决定（未钉死时）。
+func TestRC5DefaultSearchProviderFollowsRoute(t *testing.T) {
+	// 没有模型请求 → OTHER_ROUTE_SEARCH_PROVIDER（dsh-web/src/index.ts:67）。
 	seam, err := NewWebProvidersFromEnv(staticEnv(map[string]string{"DEEPSEEK_API_KEY": "sk-test"}))
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +106,22 @@ func TestRC2DefaultSearchProviderTakesEffect(t *testing.T) {
 		t.Fatalf("默认 provider 必须可直接选中: %v", err)
 	}
 	if selected.ID() != DeepSeekSearchAPIProviderID {
-		t.Fatalf("rc.2 默认搜索 provider 该是 %s；实际 %s", DeepSeekSearchAPIProviderID, selected.ID())
+		t.Fatalf("没有模型路由时该是 %s；实际 %s", DeepSeekSearchAPIProviderID, selected.ID())
+	}
+	// DeepSeek 模型路由 → DEEPSEEK_ROUTE_SEARCH_PROVIDER（dsh-web/src/index.ts:64）。
+	deepSeekRoute, err := NewWebProvidersFromEnv(staticEnv(map[string]string{
+		"DEEPSEEK_API_KEY":      "sk-test",
+		"DSHD_WEB_LLM_PROVIDER": "deepseek-official",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err = deepSeekRoute.SelectSearch()
+	if err != nil {
+		t.Fatalf("DeepSeek 路由上默认 provider 必须可直接选中: %v", err)
+	}
+	if selected.ID() != DeepSeekProviderID {
+		t.Fatalf("DeepSeek 路由上该是 %s；实际 %s", DeepSeekProviderID, selected.ID())
 	}
 	// 没有凭据时**不硬钉**：退回既有自动选择语义（否则搜索会从"不可用"变成"配置缺失"）。
 	empty, err := NewWebProvidersFromEnv(staticEnv(nil))

@@ -7,12 +7,24 @@
 //
 // 注册的 provider（id 与官方完全一致）：
 //
-// 注册的 provider（id 与官方完全一致）：
-//
-//	deepseek-search-api   DeepSeek Search API（官方 rc.2 基础组合默认 searchProvider）
+//	deepseek-search-api   DeepSeek Search API（rc.5 起「其它路由」的默认选择）
 //	deepseek-fetch-api    DeepSeek Fetch API（页面 Markdown）
 //	searxng               SearxNG 风格端点（自建）
-//	deepseek-official     DeepSeek 原生 web_search（Anthropic Messages 上的 server tool）
+//	deepseek-official     DeepSeek 原生 web_search（Anthropic Messages 上的 server tool；
+//	                      rc.5 起「DeepSeek 模型路由」的默认选择）
+//
+// 默认搜索 provider 不是固定的（rc.5 起）：基础组合不再配 `searchProvider`
+// （rc.5 `dsh-base/cordis.patch.yml:488-491` 的 `web` 行只剩 `fetchProvider: http`，
+// rc.2 `:487` 的 `searchProvider: deepseek-search-api` 被删除），改由 `dsh-web` 按
+// **会话所在的模型路由**动态选（`dsh-web/src/index.ts:229-241`）：
+//
+//	DeepSeek 模型路由（deepseek-official / deepseek-account） → deepseek-official
+//	其它任何路由 / 没有模型请求                              → deepseek-search-api
+//
+// 判据与常量在 `internal/spi/search_route.go`（逐条照官方 `:58,64,67`）；本包的
+// 职责只是把 `DSHD_WEB_LLM_PROVIDER`（官方 `session.requestContext().provider` 的
+// 宿主载体）装进接缝的路由读取器。用户显式钉死（`DSHD_WEB_SEARCH_PROVIDER` /
+// 官方 `DSH_WEB_SEARCH_PROVIDER`）仍然优先于路由规则（官方 `:230`）。
 //
 // 配置方式（环境变量；官方同名变量 `DSH_WEB_SEARCH_PROVIDER` / `DSH_WEB_FETCH_PROVIDER` 也认）：
 //
@@ -117,20 +129,20 @@ func (c scopeCredentials) ResolveCredential(ref string) (string, bool) {
 
 // NewWebProvidersFromEnv 按环境装配默认 provider 集合（**不问**宿主凭据库）。
 //
-// 生产（Module）与测试走**同一份**代码：provider 集合、钉死规则、可用性判定
-// 都不是测试专用的仿造品；带凭据库的那条生产路径是 newWebProvidersFromEnv。
+// 生产（Module）与测试走**同一份**代码：provider 集合、钉死规则、可用性判定与
+// 路由读取都不是测试专用的仿造品；带凭据库的那条生产路径是 newWebProvidersFromEnv。
 //
-// 默认 provider 的规则（官方 rc.2 基础组合 `cordis.patch.yml:487-488`）：
-//   - 环境钉死优先（`DSHD_WEB_SEARCH_PROVIDER` / 官方同名变量）；
-//   - 未钉死且 rc.2 基线默认 provider **当下可用** → 钉它
-//     （`deepseek-search-api` / `http`），这就是"默认值真正生效"；
-//   - 未钉死且基线默认不可用 → 保持空 pin，退回既有"自动选择唯一可用"语义。
+// 默认 provider 的规则（官方 rc.5 基础组合 `cordis.patch.yml:488-491`）：
+//   - **搜索不固定**：环境钉死（`DSHD_WEB_SEARCH_PROVIDER` / 官方同名变量）优先；
+//     未钉死时不再按"基线默认可用就钉它"——rc.5 删掉了那行 `searchProvider`，
+//     执行期按会话模型路由选（`DSHD_WEB_LLM_PROVIDER` → DeepSeek 路由用
+//     `deepseek-official`，其余用 `deepseek-search-api`，见 `spi.PreferredSearchProviderForRoute`）；
+//   - **抓取仍固定 `http`**：rc.5 的 `web` 行保留 `fetchProvider: http`，未钉死且
+//     `deepseek-fetch-api` 可用时钉 `http`，否则两路同时可用会 `WEB_PROVIDER_AMBIGUOUS`。
 //
-// 为什么不无条件钉：官方的基线默认是配在 cordis 配置里的，而 DeepSeek 那两条
-// 模型路由（账号/API-key）在官方宿主里会解析出凭据。本宿主还没有这两条路由插件，
-// Search/Fetch API 的凭据只能来自 `DEEPSEEK_API_KEY`（进程环境或宿主独立凭据库）；
-// 无条件钉死会让"只配了 SearxNG"的部署从"能用"退化成
-// `WEB_PROVIDER_CONFIGURED_UNAVAILABLE`。有凭据时（正常部署）默认值与官方完全一致。
+// 为什么不给搜索也钉一个：rc.5 的语义就是"按路由选"，钉死会让 DeepSeek 路由上的
+// 会话被强制走按次计费的 Search API（官方注释明确选 `deepseek-official` 是因为
+// DeepSeek 不对 Messages 搜索按次收费）。
 func NewWebProvidersFromEnv(getenv func(string) string) (*spi.WebProviders, error) {
 	return newWebProvidersFromEnv(getenv, nil)
 }
@@ -145,17 +157,18 @@ func newWebProvidersFromEnv(getenv func(string) string, credentials spi.Credenti
 	fetchAPI := newDeepSeekFetchAPIFromEnv(getenv, credentials)
 
 	searchPin := spi.WebSearchPinFromEnv(getenv)
-	if searchPin == "" && searchAPI.Available() {
-		searchPin = BaseBundleSearchProviderID
-	}
 	fetchPin := spi.WebFetchPinFromEnv(getenv)
 	if fetchPin == "" && fetchAPI.Available() {
-		// 基线默认 fetchProvider 是匿名 http（官方 `cordis.patch.yml:488`）。
+		// 基线默认 fetchProvider 是匿名 http（rc.5 `cordis.patch.yml:491`，rc.2 同值在 `:488`）。
 		// 不钉的话 `http` 与 `deepseek-fetch-api` 会同时可用 → WEB_PROVIDER_AMBIGUOUS。
 		fetchPin = BaseBundleFetchProviderID
 	}
 
 	seam := spi.NewWebProviders(searchPin, fetchPin)
+	// rc.5：搜索 provider 按会话模型路由选（官方 `dsh-web/src/index.ts:229-241`）。
+	// 路由值现读同一份 getenv 接缝：每次选择都重新读，设置改了下一搜就生效
+	// （官方 `request.llmProvider` 也是每次 `search()` 现取的）。
+	seam.SetSearchRoute(func() string { return WebLLMProviderFromEnv(getenv) })
 	if err := seam.RegisterSearch(&SearxNG{Endpoint: getenv("DSHD_SEARCH_URL")}); err != nil {
 		return nil, err
 	}

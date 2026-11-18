@@ -39,11 +39,14 @@ func fakeWebProviders() OfficialWebProviderList {
 		},
 		Fetch: []OfficialWebProviderInfo{{ID: "http", Available: available(true)}},
 		Resolution: &OfficialWebProviderResolution{
-			Search: OfficialWebProviderSelection{Configured: "", Source: "auto", Selected: "deepseek-search-api"},
-			Fetch:  OfficialWebProviderSelection{Configured: "http", Source: "env", Selected: "http"},
+			Search: OfficialWebProviderSelection{
+				Configured: "", Source: "auto", Selected: "deepseek-search-api",
+				LLMProvider: "deepseek-account", Preferred: "deepseek-official",
+			},
+			Fetch: OfficialWebProviderSelection{Configured: "http", Source: "env", Selected: "http"},
 		},
 		Baseline: &OfficialWebProviderBaseline{
-			Search: "deepseek-search-api", SearchRegistered: true,
+			Search: "", SearchRegistered: false,
 			Fetch: "http", FetchRegistered: true,
 		},
 		Limits: &OfficialWebSearchLimits{MaxQueries: 10, MaxResults: 10, SummaryMaxChars: 800, SearchTimeoutMS: 60000},
@@ -102,8 +105,14 @@ func TestOfficialWebListProvidersShape(t *testing.T) {
 	if result.Search[0]["available"] != true || result.Search[0]["default"] != true {
 		t.Fatalf("available/default 必须透出: %+v", result.Search[0])
 	}
-	if result.Resolution["search"] == nil || result.Baseline["search"] != "deepseek-search-api" {
-		t.Fatalf("resolution/baseline 必须透出: %+v %+v", result.Resolution, result.Baseline)
+	if result.Resolution["search"] == nil || result.Baseline["search"] != "" {
+		t.Fatalf("resolution/baseline 必须透出（rc.5 搜索基线为空）: %+v %+v",
+			result.Resolution, result.Baseline)
+	}
+	searchResolution, _ := result.Resolution["search"].(map[string]any)
+	if searchResolution["llmProvider"] != "deepseek-account" ||
+		searchResolution["preferred"] != "deepseek-official" {
+		t.Fatalf("rc.5 的模型路由与优先 provider 必须透出: %+v", searchResolution)
 	}
 	if result.Limits["maxQueries"] != float64(10) || result.Limits["maxResults"] != float64(10) {
 		t.Fatalf("limits 必须透出 rc.2 的 10/10: %+v", result.Limits)

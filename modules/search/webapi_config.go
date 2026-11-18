@@ -31,11 +31,16 @@ const (
 	// DeepSeekFetchAPIProviderID 是 Fetch API provider 的注册键（官方 `fetch.ts:13`）。
 	DeepSeekFetchAPIProviderID = "deepseek-fetch-api"
 
-	// BaseBundleSearchProviderID 是官方基础组合钉死的 searchProvider
-	// （rc.2 `dsh-base/cordis.patch.yml:487`；rc.1 在 `:470` 是 deepseek-official）。
-	BaseBundleSearchProviderID = DeepSeekSearchAPIProviderID
+	// 基础组合固定的搜索 provider：**没有**。
+	//
+	// rc.5 删掉了 `dsh-base/cordis.patch.yml` 里那行 `searchProvider: deepseek-search-api`
+	// （rc.2 `:487`），改由 `dsh-web` 按会话模型路由动态选（rc.5 同一文件的 `web` 行
+	// `:488-491` 只剩 `fetchProvider: http`）。
+	// 判据与两个 provider id 都在 `internal/spi/search_route.go`（官方
+	// `dsh-web/src/index.ts:58,64,67,229-241,305-328`），本包不再钉死搜索 provider。
+
 	// BaseBundleFetchProviderID 是官方基础组合钉死的 fetchProvider
-	// （rc.2 `dsh-base/cordis.patch.yml:488` = `http`，与 rc.1 `:471` 相同）。
+	// （rc.5 `dsh-base/cordis.patch.yml:491` = `http`，rc.2 `:488` 相同；rc.5 只删了搜索那行）。
 	BaseBundleFetchProviderID = "http"
 
 	// DeepSeekWebAPIBaseURL 是官方 Search/Fetch API 默认 base，**含** `/v1/tools` 前缀，
@@ -145,7 +150,7 @@ func WebAPISettingsFromEnv(getenv func(string) string) WebAPISettings {
 		SearchAPIKeyEnv:      strings.TrimSpace(getenv(envWebSearchAPIKeyEnv)),
 		FetchBaseURL:         strings.TrimSpace(getenv(envWebFetchAPIBaseURL)),
 		FetchAPIKeyEnv:       strings.TrimSpace(getenv(envWebFetchAPIKeyEnv)),
-		LLMProvider:          strings.TrimSpace(getenv(envWebLLMProvider)),
+		LLMProvider:          WebLLMProviderFromEnv(getenv),
 	}
 	if count, ok := parseBoundedInt(getenv(envWebSearchCount), 1, searchCountMax); ok {
 		settings.Count = count
@@ -161,6 +166,24 @@ func WebAPISettingsFromEnv(getenv func(string) string) WebAPISettings {
 	settings.SearchBilling = parseBilling(getenv(envWebSearchBilling), BillingAuto)
 	settings.FetchBilling = parseBilling(getenv(envWebFetchBilling), BillingAuto)
 	return settings
+}
+
+// WebLLMProviderFromEnv 读"这一轮对话的模型路由 id"。
+//
+// 官方来源是 `session.requestContext().provider`（`dsh-tool-web/src/search.ts:409`
+// 把它作为 `web.search()` 的 `request.llmProvider`）；宿主把它作为接缝传进来——
+// 环境变量 `DSHD_WEB_LLM_PROVIDER`（本仓既有接缝，与 billing 判定共用；生产默认空 =
+// 会话外/没有模型请求，此时按官方语义走 OTHER_ROUTE_SEARCH_PROVIDER）。
+//
+// 同一个值有两个消费方，必须只有一份解析：
+//   - `dsh-web-deepseek-api` 的 billing（auto 规则：official/account/other）；
+//   - rc.5 的搜索 provider 路由选择（`internal/spi/search_route.go`，官方
+//     `dsh-web/src/index.ts:229-241`）。
+func WebLLMProviderFromEnv(getenv func(string) string) string {
+	if getenv == nil {
+		return ""
+	}
+	return strings.TrimSpace(getenv(envWebLLMProvider))
 }
 
 // parseBoundedInt 读一个区间内的整数；空/非法/越界都回答 false（调用方回落默认）。

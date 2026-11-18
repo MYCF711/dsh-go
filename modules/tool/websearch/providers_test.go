@@ -71,10 +71,14 @@ func TestRC2CatalogDerivesFromRealComposition(t *testing.T) {
 		t.Fatal("配了 DEEPSEEK_API_KEY 时 deepseek-fetch-api 必须报可用")
 	}
 
-	// rc.2 基线默认 provider 有凭据时真生效：未钉死 → 选中的就是 deepseek-search-api。
-	if catalog.SearchSelection.Source != "baseline" ||
-		catalog.SearchSelection.Selected != search.BaseBundleSearchProviderID {
+	// rc.5：基础组合不固定搜索 provider，未钉死时按模型路由选。这里没有模型请求
+	// （DSHD_WEB_LLM_PROVIDER 未配）→ 官方 OTHER_ROUTE_SEARCH_PROVIDER（index.ts:67）。
+	if catalog.SearchSelection.Source != "auto" ||
+		catalog.SearchSelection.Selected != spi.OtherRouteSearchProviderID {
 		t.Fatalf("选择结果不对: %+v", catalog.SearchSelection)
+	}
+	if catalog.SearchSelection.LLMProvider != "" || catalog.SearchSelection.Preferred != spi.OtherRouteSearchProviderID {
+		t.Fatalf("没有模型请求时该报空路由 + 其它路由优先项: %+v", catalog.SearchSelection)
 	}
 	if !entryOf(catalog.Search, "deepseek-search-api").Selected {
 		t.Fatalf("Selected 标记不对: %+v", catalog.Search)
@@ -83,12 +87,12 @@ func TestRC2CatalogDerivesFromRealComposition(t *testing.T) {
 		t.Fatalf("只有选中的那个能带 Selected: %+v", catalog.Search)
 	}
 	if !entryOf(catalog.Search, "deepseek-search-api").Default {
-		t.Fatalf("基线默认 provider 要标 Default: %+v", catalog.Search)
+		t.Fatalf("其它路由的默认 provider 要标 Default: %+v", catalog.Search)
 	}
 
-	// rc.2 基线默认 provider 与"本宿主是否已注册"必须分开报——现在两个都注册了。
-	if catalog.Baseline.Search != "deepseek-search-api" || !catalog.Baseline.SearchRegistered {
-		t.Fatalf("baseline.search 该是已注册的 deepseek-search-api；实际 %+v", catalog.Baseline)
+	// rc.5：基础组合只固定抓取（http）；搜索不固定，所以 Baseline.Search 为空。
+	if catalog.Baseline.Search != "" || catalog.Baseline.SearchRegistered {
+		t.Fatalf("rc.5 不固定搜索 provider，baseline.search 该为空；实际 %+v", catalog.Baseline)
 	}
 	if catalog.Baseline.Fetch != "http" || !catalog.Baseline.FetchRegistered {
 		t.Fatalf("baseline.fetch 该是已注册的 http；实际 %+v", catalog.Baseline)
@@ -238,24 +242,28 @@ func hasConfigured(rows []CredentialState, name string, want bool) bool {
 	return false
 }
 
-// rc.2 两个默认 provider 的字面量只允许有一个真源：官方 `cordis.patch.yml:487-488`。
-// 这里钉住"websearch 的常量 == modules/search 的常量 == webfetch 的 http id"，
-// 任何一侧改字面量都会在这里红。
-func TestRC2BaseBundleDefaultsHaveSingleSource(t *testing.T) {
-	if baseBundleSearchProvider != search.BaseBundleSearchProviderID {
-		t.Fatalf("websearch.baseBundleSearchProvider=%q 与 search.BaseBundleSearchProviderID=%q 不一致",
-			baseBundleSearchProvider, search.BaseBundleSearchProviderID)
+// rc.5 基础组合的字面量只允许有一个真源：
+//   - 搜索**不固定**（`dsh-base/cordis.patch.yml:488-491` 只剩 fetchProvider）；
+//   - 路由优先的两个 id 来自官方 `dsh-web/src/index.ts:64,67`（`internal/spi/search_route.go`）；
+//   - 抓取固定 `http`（组合与 webfetch 的 id 必须同一个）。
+func TestRC5BaseBundleDefaultsHaveSingleSource(t *testing.T) {
+	if BaseBundleProviderDefaults.Search != "" {
+		t.Fatalf("rc.5 基础组合不固定搜索 provider；当前 %q", BaseBundleProviderDefaults.Search)
 	}
-	if baseBundleSearchProvider != "deepseek-search-api" {
-		t.Fatalf("rc.2 基础组合 searchProvider 必须是 deepseek-search-api；实际 %q", baseBundleSearchProvider)
+	if spi.DeepSeekRouteSearchProviderID != "deepseek-official" ||
+		spi.OtherRouteSearchProviderID != "deepseek-search-api" {
+		t.Fatalf("路由优先 provider 必须照官方（index.ts:64,67）；实际 %q/%q",
+			spi.DeepSeekRouteSearchProviderID, spi.OtherRouteSearchProviderID)
 	}
-	if search.BaseBundleFetchProviderID != webfetch.HTTPProviderID {
-		t.Fatalf("search.BaseBundleFetchProviderID=%q 与 webfetch.HTTPProviderID=%q 不一致",
-			search.BaseBundleFetchProviderID, webfetch.HTTPProviderID)
+	if search.BaseBundleFetchProviderID != webfetch.HTTPProviderID ||
+		BaseBundleProviderDefaults.Fetch != webfetch.HTTPProviderID {
+		t.Fatalf("抓取固定 http 必须单一真源：search=%q websearch=%q webfetch=%q",
+			search.BaseBundleFetchProviderID, BaseBundleProviderDefaults.Fetch, webfetch.HTTPProviderID)
 	}
 }
 
-// 两个新 provider 必须在 `web.listProviders` 的清单里，且默认标记落在 rc.2 基线上。
+// 两个新 provider 必须在 `web.listProviders` 的清单里；没有模型请求时默认标记
+// 落在其它路由优先项（deepseek-search-api，rc.5 `dsh-web/src/index.ts:67`）上。
 func TestRC2NewProvidersAppearInCatalog(t *testing.T) {
 	catalog, err := DescribeCatalog(envMap(map[string]string{"DEEPSEEK_API_KEY": "sk-test"}))
 	if err != nil {
@@ -271,7 +279,7 @@ func TestRC2NewProvidersAppearInCatalog(t *testing.T) {
 	if entryOf(catalog.Fetch, search.DeepSeekFetchAPIProviderID).ID == "" {
 		t.Fatalf("deepseek-fetch-api 必须在清单里: %+v", catalog.Fetch)
 	}
-	// 官方基础组合默认抓取是 http（`cordis.patch.yml:488`），因此它是 Default+Selected。
+	// rc.5 基础组合仍固定抓取 http（`cordis.patch.yml:491`），因此它是 Default+Selected。
 	httpEntry := entryOf(catalog.Fetch, webfetch.HTTPProviderID)
 	if !httpEntry.Default || !httpEntry.Selected {
 		t.Fatalf("基线默认抓取必须是 http: %+v", catalog.Fetch)
