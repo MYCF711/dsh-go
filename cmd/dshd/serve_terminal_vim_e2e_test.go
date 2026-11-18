@@ -32,6 +32,19 @@ func TestTerminalVimRendersAsRealScreen(t *testing.T) {
 		t.Fatalf("create 失败：%v", err)
 	}
 
+	// 先探 vim 是否可用。这台 runner 上若没装 vim，本测试**应 SKIP 而不是 FAIL** ——
+	// 它验的是「我们的 VT 链路把 TUI 画对了」，不是「CI 装了 vim」。
+	// （2026-11-19 踩过：CI 上等了 30s、~ 出现 0 次，红得没有任何信息量。）
+	if err := h.jt.Input("sess-vim", "tv", "command -v vim >/dev/null 2>&1 && echo HAVEVIM || echo NOVIM\n"); err != nil {
+		t.Fatalf("探测 vim 失败：%v", err)
+	}
+	switch probe := waitForAny(t, h, "sess-vim", "tv", []string{"HAVEVIM", "NOVIM"}, 20*time.Second); {
+	case strings.Contains(probe, "NOVIM"):
+		t.Skip("这台机器没有 vim，端到端 TUI 验证跳过（不是产品问题）")
+	case !strings.Contains(probe, "HAVEVIM"):
+		t.Fatalf("vim 探测无结论：%q", probe)
+	}
+
 	// -u NONE 关用户配置、-N 打开 nocompatible，使屏幕形状确定。
 	// 先 echo 再进 vim：ConPTY 处理首帧期间可能吞掉紧随其后的输入字节
 	// （与 modules/exec/bash/pty_test.go 的既有教训一致）。
@@ -138,5 +151,27 @@ func waitForTildeRows(t *testing.T, h *terminalResizeHarness, sessionID, id stri
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("等不到 %d 行 ~（最后只数到 %d 处）：%q", min, seen, last)
+	return last
+}
+
+// waitForAny 轮询 attach 快照直到出现 markers 里任意一个，返回当时的整屏。
+func waitForAny(t *testing.T, h *terminalResizeHarness, sessionID, id string, markers []string, d time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	var last string
+	for time.Now().Before(deadline) {
+		snap, err := h.jt.officialPTYTerminalAPI.TerminalAttach(context.Background(), sessionID, id)
+		if err != nil {
+			t.Fatalf("attach 失败：%v", err)
+		}
+		last = snap.Screen
+		for _, m := range markers {
+			if strings.Contains(last, m) {
+				return last
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("等不到 %v 中任何一个（最后 screen=%q）", markers, last)
 	return last
 }
