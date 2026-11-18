@@ -1,6 +1,6 @@
 # 已知缺陷：chat-import 导入的会话**续不了聊**（2026-11-19 发现）
 
-> 状态：**未修**。登记时间 2026-11-19，由端到端验证（`r5-verify-import`）实测发现，Lead 复核。
+> 状态：**已修并端到端验证**（2026-11-19，PR dsh-go#74）。登记时间 2026-11-19，由端到端验证（`r5-verify-import`）实测发现，Lead 复核。
 > 影响面：`dsh-go#71` + `dsh-ui#168` 刚合入的 chat-import 功能，**最核心的用途（导入历史后接着聊）当前不可用**。
 
 ## 1. 现象（实测，不是推断）
@@ -122,3 +122,31 @@ if (defaultPreset === CUSTOM_PRESET) {
 - 上一轮的端到端验证产出：宿主 95/95、9 个边界变体全对、GUI 真机链 PASS（`dsh-ui#169`）
 - **这条例外没有推翻那些结论**：导入本身是对的（事件逐条对、标题进读索引、错误码全对），坏的是**导入之后的续聊**
 - 同类 fail-loud 设计见 `docs/sandbox-policy.md`——那条设计原则是「不假装隔离」，本条要改也必须守住它：**不许为了让续聊能跑而把沙箱降级成静默放行**
+
+
+## 9. 修复与真模型复验（2026-11-19，PR dsh-go#74）
+
+**修法**：`sandboxPresetIDForSession` 的「两处都空 → fail-loud」分支改成
+`defaultPresetForComposedMode()` —— 按 `sandbox.BoundaryFromEnv` **同一个判据**
+取组合默认档，反查 `modes.Builtins()` 里 `Sandbox` 相同的预置档；**查不到才 fail-loud**
+（对应官方 `CUSTOM_PRESET` 那条）。`agentPreset` 不再充当沙箱档位的兜底来源。
+
+**安全边界没被放宽**（两条测试钉住）：
+
+| 测试 | 断言 |
+|---|---|
+| `TestSandboxMissingPresetFallsBackToComposedDefault` | 空 preset → `workspace-write`，不报错 |
+| `TestSandboxComposedDefaultRespectsNarrowerCeiling` | 进程上限 `read-only` → 推出 **`read-only`** |
+
+**真模型端到端复验**（用修复后的二进制，在**修复前失败的那个 home 与会话**上重跑）：
+
+```console
+$ dshd run --home <home-2152963513> --session 1c8e82a5-… --prompt "继续"
+…（模型正常作答，承接导入的 Go 版本发布话题）
+stats: tool_calls=8 input=88484 output=3085
+```
+
+会话 v4 日志由 **912 字节**（仅 seed）增长到 **400,825 字节**（真实对话），
+journal 里**没有新增** `turn/error` —— 修复前那条 `缺失 sandbox 策略上下文` 不再出现。
+
+即：**「导入历史后接着聊」这条主路径现在真的通了**，不是只过了单测。
