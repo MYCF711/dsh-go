@@ -153,7 +153,7 @@ func (w *parentLogWriter) emit(ev agent.Event) error {
 		if ev.Assistant == nil {
 			return nil
 		}
-		blocks := assistantBlocksFrom(ev.Assistant.Content, ev.Assistant.Reasoning, ev.Assistant.ToolCalls)
+		blocks := session.AssistantBlocks(ev.Assistant.Content, ev.Assistant.Reasoning, ev.Assistant.ToolCalls)
 		return w.lg.Append("assistant/message",
 			session.AssistantMessageEvent(w.turn, ev.Step, blocks, ev.Assistant.Finish, nil))
 	case agent.EventToolResult:

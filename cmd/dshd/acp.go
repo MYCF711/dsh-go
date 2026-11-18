@@ -422,7 +422,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 			// 每一环都对，只是源里没写，读回来等于那轮模型没想过任何事。
 			// 思考正文取自 `a.Reasoning`：它就是 `llm.Response.Reasoning`，也即
 			// 事件流里那些 `agent.EventReasoning` 增量拼起来的那段（同一次快照的两面）。
-			blocks := assistantBlocksFrom(a.Content, a.Reasoning, a.ToolCalls)
+			blocks := session.AssistantBlocks(a.Content, a.Reasoning, a.ToolCalls)
 			// v4 usage 与 run 那条路**同一份**投影（assistantUsageFrom）：键名、
 			// input 是否含缓存命中、什么时候不写键，都只有一处判断。
 			usage := assistantUsageFrom(a.Usage)

@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/session"
 )
 
 // ImportedModelSource 是每条导入 assistant 消息上记的 provider/model
@@ -426,13 +427,13 @@ func (b *logBuilder) userMessage(message Message) map[string]any {
 	content := make([]any, 0, len(attachments)+1)
 	if strings.TrimSpace(text) != "" {
 		content = append(content, attachments...)
-		content = append(content, map[string]any{"type": "text", "text": text})
+		content = append(content, session.TextBlock(text))
 	} else if len(attachments) > 0 {
 		content = append(content, attachments...)
 	} else {
 		// 一个字都没有的用户消息也留一个空 text 块：这一行仍会渲染，
 		// 而 DeepSeek 的请求装配会像对待任何空用户消息那样把它丢掉。
-		content = append(content, map[string]any{"type": "text", "text": ""})
+		content = append(content, session.TextBlock(""))
 	}
 	return map[string]any{
 		"id":      b.id(),
@@ -491,12 +492,12 @@ func (b *logBuilder) replySteps(reply Message) ([]replyStep, *string) {
 		switch fragment.Type {
 		case "THINK":
 			if fragment.Content != "" {
-				appendContent(map[string]any{"type": "reasoning", "text": fragment.Content})
+				appendContent(session.ReasoningBlock(fragment.Content))
 			}
 			current.elapsedMS += int64(fragment.ElapsedSecs*1000 + 0.5)
 		case "RESPONSE":
 			if fragment.Content != "" {
-				appendContent(map[string]any{"type": "text", "text": fragment.Content})
+				appendContent(session.TextBlock(fragment.Content))
 			}
 		case "TOOL_SEARCH":
 			// 还没跑完的搜索不完整，重放为空。
@@ -514,7 +515,7 @@ func (b *logBuilder) replySteps(reply Message) ([]replyStep, *string) {
 			appendCall(b.openCall(fragment, *fragment.URL), fragment.StageID)
 		case "READ_LINK":
 			if text := linkLines(fragment.LinkResults); text != "" {
-				appendContent(map[string]any{"type": "text", "text": text})
+				appendContent(session.TextBlock(text))
 			}
 		case "TEMPLATE_RESPONSE":
 			if template == nil {
@@ -548,7 +549,7 @@ func (b *logBuilder) searchCall(fragment Fragment) (pendingCall, bool) {
 	if fragment.Status == "FAILED" {
 		return pendingCall{
 			block:   block,
-			result:  []any{map[string]any{"type": "text", "text": "Error: the export records this search as failed."}},
+			result:  []any{session.TextBlock("Error: the export records this search as failed.")},
 			isError: true,
 		}, true
 	}
@@ -572,7 +573,7 @@ func (b *logBuilder) searchCall(fragment Fragment) (pendingCall, bool) {
 	meta := map[string]any{"sources": sources, "truncated": false}
 	return pendingCall{
 		block:  block,
-		result: []any{map[string]any{"type": "text", "text": formatSearchOutput(sources)}},
+		result: []any{session.TextBlock(formatSearchOutput(sources))},
 		meta:   meta,
 	}, true
 }
@@ -589,7 +590,7 @@ func (b *logBuilder) openCall(fragment Fragment, url string) pendingCall {
 	if fragment.Status != "FINISHED" {
 		return pendingCall{
 			block:   block,
-			result:  []any{map[string]any{"type": "text", "text": "Error: the page could not be opened."}},
+			result:  []any{session.TextBlock("Error: the page could not be opened.")},
 			isError: true,
 		}
 	}
@@ -601,7 +602,7 @@ func (b *logBuilder) openCall(fragment Fragment, url string) pendingCall {
 	text, truncated := formatFetchOutput(url, 200, body)
 	return pendingCall{
 		block:  block,
-		result: []any{map[string]any{"type": "text", "text": text}},
+		result: []any{session.TextBlock(text)},
 		meta: map[string]any{
 			"url":        url,
 			"statusCode": 200,

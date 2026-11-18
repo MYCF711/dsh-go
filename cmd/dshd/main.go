@@ -1256,7 +1256,7 @@ func cmdRun(argv []string) (retErr error) {
 				// 删过名叫 description 的参数）。所以思考**不另攒**，直接取 a.Reasoning
 				// （= llm.Response.Reasoning，也即事件流里 EventReasoning 拼起来的那段），
 				// 与 ACP 写盘 sink 同源。
-				blocks := assistantBlocksFrom(a.Content, a.Reasoning, a.ToolCalls)
+				blocks := session.AssistantBlocks(a.Content, a.Reasoning, a.ToolCalls)
 				// usage 的键名与「input 要不要减掉缓存命中」只在一处判断：
 				// assistantUsageFrom（run / acp 共用）。写在这里的第二次复制
 				// 就是下一次两处各错一次的来源。
