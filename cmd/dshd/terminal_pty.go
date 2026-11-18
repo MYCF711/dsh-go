@@ -12,7 +12,7 @@ package main
 //
 //	官方字段                真来源
 //	info.cols/rows          CreatePseudoConsole 的初始尺寸
-//	attach.screen           有界滚动缓冲的尾部（含 ANSI 原始字节）
+//	attach.screen           屏幕模型的重放字节流（官方 `serialize()` 口径，可见屏）
 //	attach.sequence         每个 attach 内连续的输出帧序号（不是字节数）
 //	attach.writable         进程活着且该 attach 是最新 controller
 //	environment.scrollback  真实保留行数（默认 1000，官方默认值）
@@ -999,7 +999,12 @@ func (a *officialPTYTerminalAPI) broadcastTerminalState(sessionID, id string) {
 	}
 }
 
-// screenOf 取有界输出尾部与真实序号（已写出的字节数，单调）。
+// screenOf 取**屏幕重放流**与真实序号（已写出的字节数，单调）。
+//
+// 官方 attach 的 `screen` 是 `serializer.serialize()`（可见屏的重放字节流，
+// `dsh-api-terminal-controller/src/terminal.ts:104`、`src/terminal.ts:55-56` 的
+// SerializeAddon 默认 `scrollback:0`），**不是**原始输出尾部：GUI 把它写进自己的
+// xterm 就得到与宿主一致的屏幕，不需要自己重放整段历史。
 func (a *officialPTYTerminalAPI) screenOf(entry *officialPTYEntry) (string, int64, bool) {
 	a.mu.Lock()
 	term := entry.term
@@ -1013,7 +1018,8 @@ func (a *officialPTYTerminalAPI) screenOf(entry *officialPTYEntry) (string, int6
 	if pty == nil {
 		return entry.screen, entry.sequence, true
 	}
-	text, total := pty.Tail(officialTerminalMaxScreenBytes)
+	text := pty.ScreenSnapshot(officialTerminalMaxScreenBytes)
+	total := pty.Total()
 	dead := pty.Exited()
 	code, hasCode := pty.ExitCode()
 	a.mu.Lock()

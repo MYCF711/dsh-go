@@ -64,6 +64,7 @@ type platformProcess interface {
 type Session struct {
 	cfg  Config
 	sb   *Scrollback
+	scr  *Screen
 	proc platformProcess
 
 	done      chan struct{}
@@ -101,9 +102,15 @@ func Open(cfg Config) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	scr, err := NewScreen(cfg.Cols, cfg.Rows, cfg.ScrollbackRows)
+	if err != nil {
+		_ = proc.Close()
+		return nil, err
+	}
 	s := &Session{
 		cfg:  cfg,
 		sb:   NewScrollback(cfg.ScrollbackRows, cfg.ScrollbackBytes),
+		scr:  scr,
 		proc: proc,
 		done: make(chan struct{}),
 	}
@@ -127,13 +134,19 @@ func (s *Session) waitLoop() {
 	close(s.done)
 }
 
-// pump 是唯一的读循环：把伪终端输出搬进有界滚动缓冲，直到 EOF。
+// pump 是唯一的读循环：把伪终端输出搬进有界滚动缓冲与**屏幕模型**，直到 EOF。
+//
+// 两路喂的是同一股字节：滚动缓冲给"按字节游标取增量"的调用方（`Output`/`Since`），
+// 屏幕模型给"我看到了什么"的调用方（`read`、attach 快照）。两路都不能寄望对方：
+// 屏幕是有界格子的，滚动缓冲是字节的，各有各的淘汰口径。
 func (s *Session) pump() {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := s.proc.Read(buf)
 		if n > 0 {
 			s.sb.Write(buf[:n])
+			// 屏幕模型已经 Close 只可能发生在 Close 之后，那时读泵也在收工；忽略即可。
+			_ = s.scr.Write(buf[:n])
 		}
 		if err != nil {
 			return
@@ -177,8 +190,40 @@ func (s *Session) Output(since int64) (data []byte, next int64, dead bool) {
 	return data, next, s.Exited()
 }
 
-// Tail 返回屏幕尾部快照（官方 attach 的 screen）与当前总游标。
+// Tail 返回**滚动缓冲尾部字节**与当前总游标。
+//
+// 注意它**不是**屏幕（官方 attach 的 `screen` 是 `serialize()` 的重放流，见
+// `Screen.Snapshot`）：要"屏幕"就调 `ScreenSnapshot` / `ScreenLines`。
 func (s *Session) Tail(maxBytes int) (string, int64) { return s.sb.Tail(maxBytes) }
+
+// Screen 返回屏幕模型（只读用途；nil = 会话没有屏幕模型）。
+func (s *Session) Screen() *Screen {
+	if s == nil {
+		return nil
+	}
+	return s.scr
+}
+
+// ScreenLines 返回官方 `renderLines(buffer, 0, lastContentRow+1)` 的逻辑行。
+//
+// 这是 `terminal_read` 的真值来源：屏幕已经被字节流**应用**过，所以光标定位
+// （`vim`）与回车重画（进度条）读出来是屏上的样子，不是写入顺序的碎片。
+func (s *Session) ScreenLines() []string {
+	if s == nil || s.scr == nil {
+		return nil
+	}
+	return s.scr.Lines()
+}
+
+// ScreenSnapshot 返回官方 `serialize()` 的等价物（可见屏重放字节流）。
+//
+// maxBytes<=0 表示不限。
+func (s *Session) ScreenSnapshot(maxBytes int) string {
+	if s == nil || s.scr == nil {
+		return ""
+	}
+	return s.scr.Snapshot(maxBytes)
+}
 
 // Resize 改子进程窗口尺寸（真的走 ResizePseudoConsole）。
 func (s *Session) Resize(cols, rows int) error {
@@ -197,6 +242,10 @@ func (s *Session) Resize(cols, rows int) error {
 	s.mu.Lock()
 	s.cfg.Cols, s.cfg.Rows = cols, rows
 	s.mu.Unlock()
+	// 屏幕模型跟着改网格（x/vt 不重排折行，见 vtscreen.go 差异 2）。
+	if err := s.scr.Resize(cols, rows); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -237,6 +286,7 @@ func (s *Session) Close() error {
 		case <-s.done:
 		case <-time.After(closeGrace):
 		}
+		_ = s.scr.Close()
 	})
 	return s.closeErr
 }

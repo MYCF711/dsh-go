@@ -158,11 +158,13 @@ func NewestBytes(s string, maxBytes int) (string, bool) {
 //
 // # 为什么输入是原始尾部而不是"屏幕"
 //
-// 官方 `readScreen` 走的是终端控制器的**屏幕模型**（重放光标/清屏序列后的结果）。
-// 本宿主没有屏幕模型：PTY 侧只有有界滚动缓冲（`internal/terminal/scrollback.go`），
-// `terminal.attach` 的 `screen` 就是它的尾部字节。所以这里按换行切行、剥掉行尾 `\r`
-// （PTY 的换行是 CRLF），**不**重放 `\r`/清屏——那需要一份真正的屏幕模型，属于
-// "没实现就说没有"，不在这里假装。
+// 这条是 `user_terminal_read`（`dsh-terminal-panel` 自己那套渲染）的口径，本任务
+// **没有**改它：它要的是"最近 N 行输出文本"，按换行切行、剥掉行尾 `\r`（PTY 的
+// 换行是 CRLF），不重放 `\r`/清屏。
+//
+// 与之相对，**agent 的 `terminal_read` 走屏幕模型**（`Screen.Lines`，见
+// `vtscreen.go`）：官方 `readScreen` 读的是 xterm 缓冲区，`vim`/进度条必须按屏幕
+// 读才有意义。两套口径各自对自己的消费方负责，不要拿这一份去替换那一份。
 //
 // 字节上限的淘汰顺序：先按**整行**淘汰最旧的（这样 LineBegin 仍是真实行号），
 // 若最新那一行本身就超过上限，才截字节（此时行号不动，Truncated 置位）。

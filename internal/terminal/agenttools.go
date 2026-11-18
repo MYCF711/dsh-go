@@ -70,11 +70,13 @@ package terminal
 //
 // # 本宿主的三处如实差异（不是新语义，是缺了官方的前提）
 //
-//  1. **没有屏幕模型**。官方 read 走 xterm 缓冲区重放后的逻辑行（`pageLines`，
-//     dsh-api-terminal-controller/lib/index.js:194-220），本宿主只有有界滚动缓冲
-//     （`internal/terminal/scrollback.go`），所以按换行切行、不重放 `\r`/清屏。
-//     这与 `user_terminal_read` 已有的差异同源（`internal/terminal/panel.go` 的
-//     `NewestLinesPage` 注释），不是这里新开的口子。
+//  1. **屏幕模型是 `x/vt` 而不是 `@xterm/headless`**（见 `vtscreen.go`）。官方 read
+//     走 xterm 缓冲区重放后的逻辑行（`renderLines` + `pageLines`，
+//     `dsh-api-terminal-controller/src/screen.ts:35-49`、`:57-77`），本宿主现在
+//     走同一条取法（`Screen.Lines`），**不再是**按换行切原始输出。
+//     剩下的差异只有"折行标记靠推断"与"resize 不重排"，逐条写在 `vtscreen.go`
+//     文件头；这与 `user_terminal_read`（`internal/terminal/panel.go` 的
+//     `NewestLinesPage`）无关，那是另一套口径。
 //  2. **没有前台进程探针**。官方 `inspectForeground` 在 Windows 上就是用 shell pid
 //     当伪进程组（见上），本宿主直接按同一取值语义处理：pgid = shell pid、不等待
 //     输入未知。于是 `waitsForInput` 在 Windows 上恒真——这与官方 Windows 实现一致。
@@ -212,7 +214,8 @@ type AgentTerminalControls interface {
 	AgentTerminalList(ctx context.Context, sessionID string) ([]AgentTerminalSnapshot, error)
 	// AgentTerminalSend 写一次输入并等到就绪/静默/超时/退出（官方 `startSend`）。
 	AgentTerminalSend(ctx context.Context, sessionID, id string, req AgentSendRequest) (AgentSendResult, error)
-	// AgentTerminalRead 回一页有界的历史输出（官方 `read`）。
+	// AgentTerminalRead 回一页**屏幕行**（官方 `read` → `readScreen` → `pageLines`）。
+	// 读的是屏幕模型（`Screen.Lines`），不是原始输出字节。
 	AgentTerminalRead(ctx context.Context, sessionID, id string, req AgentReadRequest) (ScreenPage, error)
 	// AgentTerminalSignal 把信号投给前台进程组，返回真实收到的进程组 id
 	// （官方 `signal` → `TerminalSignalResult.targetPgid`）。
@@ -222,10 +225,11 @@ type AgentTerminalControls interface {
 	AgentTerminalClose(ctx context.Context, sessionID, id string) (bool, error)
 }
 
-// AgentScreenLines 把有界滚动缓冲的文本切成逻辑行。
+// AgentScreenLines 把**原始输出文本**按换行切成行（不做屏幕重放）。
 //
-// 与官方 `renderLines` 的差别只有"没有屏幕模型"（见文件头差异 1）：这里按换行切、
-// 去掉 PTY 的 CRLF 与末尾空行。空文本 → 0 行（不是 1 个空行）。
+// 这条路径只留给"手上只有字节、没有屏幕模型"的调用方（例如已落盘的历史文本）。
+// `terminal_read` **不走它**：那条路走屏幕模型（`Screen.Lines`），否则 `\r` 重画
+// 与光标定位读不出来（见 `vtscreen.go` 文件头）。空文本 → 0 行（不是 1 个空行）。
 func AgentScreenLines(screen string) []string {
 	text := strings.ReplaceAll(screen, "\r\n", "\n")
 	text = strings.TrimSuffix(text, "\n")
@@ -235,8 +239,11 @@ func AgentScreenLines(screen string) []string {
 	return strings.Split(text, "\n")
 }
 
-// AgentScreenPage 是官方 `pageLines`（`dsh-api-terminal-controller/lib/index.js:194-220`）
+// AgentScreenPage 是官方 `pageLines`（`dsh-api-terminal-controller/src/screen.ts:57-77`）
 // 的逐条移植：newest-relative 分页 + 字节上限。
+//
+// 入参是**逻辑行**（官方 `renderLines` 的输出，本宿主 = `Screen.Lines()`），
+// 不是原始文本：官方分页也是对屏幕行分页，不关心这些行是怎么来的。
 //
 // 三条容易写错的细节，全部照官方：
 //
@@ -248,8 +255,7 @@ func AgentScreenLines(screen string) []string {
 // `tailWithin` 在官方按 grapheme 簇截（`screen.ts:86-97`，用 Intl.Segmenter）；
 // 本仓没有 grapheme 分段器，按 UTF-8 rune 边界截（不自造依赖），差别只在
 // 组合字符/ZWJ 序列上可能出现半簇——这条差异写在这里，不假装逐字节一致。
-func AgentScreenPage(screen string, offset, count, maxBytes int) ScreenPage {
-	lines := AgentScreenLines(screen)
+func AgentScreenPage(lines []string, offset, count, maxBytes int) ScreenPage {
 	total := len(lines)
 
 	end := total - offset
