@@ -370,13 +370,33 @@ type OfficialSubagentCatalogEntry struct {
 
 // OfficialSubagentIdentity 是官方 `subagent` 投影（子会话自己的身份）。
 //
-// seq 是 `subagent/spawn` 帧在**该子会话自己日志**里的 seq；label 本宿主没有
-// durable 创建标签，整个省略（官方 optional）。
+// 官方形状（rc.2 `dsh-api-session-controller/lib/typert.host.js:493-501`）是
+// `{mode,label,seq}` 两个 mode 分支（one-shot / continuable）；seq 是
+// `subagent/spawn` 帧在**该子会话自己日志**里的 seq；label 本宿主没有 durable
+// 创建标签 → 空串（官方 continuable 分支必填，故不能省略这个键）。
+//
+// **另外两段是官方会话地址的段，不是官方 `subagent` 投影的键**：
+// 官方 `SubagentAddress` 是 `{kind:"subagent", parentSessionId, childSessionId,
+// mode}`（rc.2 `dsh-api-session-controller/lib/typert.host.js:320-324`，客户端
+// 拼五段计划地址时逐字用它：rc.2 `dsh-client-ui-plan/src/client/plan.ts:58-62`）。
+// 官方客户端是从**父会话的 `subagentCatalog`** 或**列表行的
+// `origin:"subagent"` + `parentSessionId`** 反推父 id 的
+// （rc.2 `.../lib/types/client/sessions/manager.js:83-104`），官方投影本身不带父 id。
+//
+// 本宿主把这两段作为**扩展字段**随身份一起给出：值不是编的，`subagent/spawn`
+// 帧本来就同时写了 `childSessionId` 与 `parentSessionId`
+// （`internal/agent/child_session.go`），原先折叠时被丢弃，导致消费方拿不到
+// 拼五段地址所需的父会话 id。字段名/闭集全部取自官方 `SubagentAddress`，
+// 官方三键 `mode/label/seq` 原样保留（既有消费方只解这三键，多键会被忽略）。
 type OfficialSubagentIdentity struct {
 	Mode string `json:"mode"`
 	// continuable 身份的 label 在官方 schema 里必填；本宿主 descriptor 无标签 → 空串。
 	Label string `json:"label"`
 	Seq   int64  `json:"seq"`
+	// ParentSessionID / ChildSessionID 是官方 `SubagentAddress` 的两段
+	// （父会话 id 与子会话 id），来自 durable `subagent/spawn` 的同名载荷。
+	ParentSessionID string `json:"parentSessionId"`
+	ChildSessionID  string `json:"childSessionId"`
 }
 
 // OfficialSubagentTiming 是官方 `subagentTiming` 投影。
@@ -1091,7 +1111,13 @@ func officialSubagentIdentity(events []DurableEvent, sessionID string) (Official
 		}
 		// 本宿主真实创建的子代理都是**可续问**的（internal/agent.ChildSpawn 的
 		// 唯一调用方是 subagents.prompt/可续问委派），没有 one-shot/external 的来源。
-		return OfficialSubagentIdentity{Mode: "continuable", Seq: ev.Seq}, ev.Seq, true
+		// 父子两段是同一帧的真值，直接透传（官方 `SubagentAddress` 的闭集字段）。
+		return OfficialSubagentIdentity{
+			Mode:            "continuable",
+			Seq:             ev.Seq,
+			ParentSessionID: data.ParentSessionID,
+			ChildSessionID:  data.ChildSessionID,
+		}, ev.Seq, true
 	}
 	return OfficialSubagentIdentity{}, 0, false
 }

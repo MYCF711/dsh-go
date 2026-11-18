@@ -736,6 +736,11 @@ func TestOfficialSessionProjectionsSubagentIdentity(t *testing.T) {
 	if label, has := identity["label"]; !has || label != "" {
 		t.Fatalf("continuable 身份的 label 必填（本宿主是空串）：%v", identity)
 	}
+	// 官方 `SubagentAddress` 的父子两段（rc.2 typert.host.js:320-324）：
+	// 值必须逐字等于 durable `subagent/spawn` 帧里的真值，不能是空串或猜的。
+	if identity["parentSessionId"] != "parent" || identity["childSessionId"] != "kid" {
+		t.Fatalf("subagent 身份必须带官方地址的父子两段：%v", identity)
+	}
 	timing, ok := values["subagentTiming"].(map[string]any)
 	if !ok {
 		t.Fatalf("subagentTiming 必须有真值：%v", values)
@@ -754,6 +759,177 @@ func TestOfficialSessionProjectionsSubagentIdentity(t *testing.T) {
 	values = unwrapResult(t, postOfficial(t, s.handleSessionProjections, `{"sessionId":"other"}`).Body.Bytes())["values"].(map[string]any)
 	if _, has := values["subagent"]; has {
 		t.Fatalf("别的会话不能继承这个身份：%v", values)
+	}
+}
+
+// catalogProjectionSource 在 fake 源上补齐 OfficialProjectionHost，
+// 让父会话的 `subagentCatalog` 走官方客户端 `sessions.subagentAddress` 的
+// **第一条推导路径**（rc.2 `.../lib/types/client/sessions/manager.js:83-104`：
+// 先查父会话投影里的目录条目，再退到列表行的 origin/parentSessionId）。
+type catalogProjectionSource struct{ *fakeOfficialSource }
+
+func (c *catalogProjectionSource) ModelSelection(string) (*OfficialModelSelection, *OfficialModelSelection, error) {
+	return nil, nil, nil
+}
+
+func (c *catalogProjectionSource) AgentPreset(string) (*string, error) { return nil, nil }
+
+func (c *catalogProjectionSource) SubagentCatalog(parentSessionID string) ([]OfficialSubagentCatalogEntry, error) {
+	if parentSessionID != "parent" {
+		return nil, nil
+	}
+	return []OfficialSubagentCatalogEntry{{ID: "kid", CreatedAt: 1000, Mode: "continuable", Label: ""}}, nil
+}
+
+// projectOfficial 打一次 session.projections 并取 values。
+func projectOfficial(t *testing.T, s *Server, sessionID string) map[string]any {
+	t.Helper()
+	rec := postOfficial(t, s.handleSessionProjections, `{"sessionId":"`+sessionID+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session.projections(%s) status=%d body=%s", sessionID, rec.Code, rec.Body.String())
+	}
+	return unwrapResult(t, rec.Body.Bytes())["values"].(map[string]any)
+}
+
+// fivePartPlanAddress 是官方 `planAddress` 的 subagent 分支
+// （rc.2 `dsh-client-ui-plan/src/client/plan.ts:58-62`）：
+//
+//	dsh-resource://plan/subagent/<父会话 id>/<子会话 id>/<mode>/<callId>
+func fivePartPlanAddress(parent, child, mode, callID string) string {
+	return "dsh-resource://plan/subagent/" + parent + "/" + child + "/" + mode + "/" + callID
+}
+
+// assertOfficialPlanAddress 按官方 `parsePlanAddress`（rc.2 plan.ts:71-87）逐条校验：
+// 前缀/段数 2 或 5/无查询串与 fragment/每段非空/5 段时 parts[0]=="subagent"
+// 且 parts[3] 属于官方三值闭集。
+func assertOfficialPlanAddress(t *testing.T, address string) []string {
+	t.Helper()
+	const prefix = "dsh-resource://plan/"
+	if !strings.HasPrefix(address, prefix) {
+		t.Fatalf("官方计划地址前缀不对：%q", address)
+	}
+	rest := strings.TrimPrefix(address, prefix)
+	if rest == "" || strings.ContainsAny(rest, "?#") {
+		t.Fatalf("官方计划地址不得为空/含查询串或 fragment：%q", address)
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 && len(parts) != 5 {
+		t.Fatalf("官方计划地址只认 2 段或 5 段，得到 %d 段：%q", len(parts), address)
+	}
+	for _, part := range parts {
+		if part == "" {
+			t.Fatalf("官方计划地址的段不得为空：%q", address)
+		}
+	}
+	if len(parts) == 5 {
+		if parts[0] != "subagent" {
+			t.Fatalf("五段地址第一段必须是 subagent：%q", address)
+		}
+		switch parts[3] {
+		case "one-shot", "continuable", "unknown":
+		default:
+			t.Fatalf("五段地址的 mode 不在官方闭集里：%q", address)
+		}
+	}
+	return parts
+}
+
+// TestOfficialSubagentProjectionYieldsFivePartPlanAddress 钉住「从**真实投影**
+// 能拼出官方 subagent 五段计划地址」。
+//
+// 两条官方生产路径都必须产出同一个地址：
+//
+//	① 子会话自己的 `subagent` 投影（官方 `SubagentAddress` 的父子两段 + mode）
+//	   + 真实 tool/call 帧的 callId；
+//	② 父会话的 `subagentCatalog`（官方客户端 `subagentAddress` 的第一条推导路径）。
+//
+// 全程不写死期望值：父子 id、mode、callId 都来自 fixture 里真实的 durable 帧，
+// 只有最后那条字面地址串用于对照（它就是两条路径共同推导出的结果）。
+func TestOfficialSubagentProjectionYieldsFivePartPlanAddress(t *testing.T) {
+	events := []DurableEvent{
+		{Type: "subagent/spawn", Seq: 0, Time: 1000, Data: json.RawMessage(
+			`{"childSessionId":"kid","parentSessionId":"parent","spawnedAt":1000}`)},
+		{Type: "tool/call", Seq: 1, Time: 1200, Data: json.RawMessage(
+			`{"turn":1,"step":1,"callId":"call-1","name":"exit_plan_mode","arguments":"{\"plan\":\"# 方案\\n\"}"}`)},
+	}
+	src := &catalogProjectionSource{fakeOfficialSource: &fakeOfficialSource{events: events, logEnd: 1}}
+	s := newTestServer(t, Options{Source: src})
+
+	// callId 从真实 tool/call 帧里取（官方 plan 的五段最后一段就是它）。
+	var callID string
+	for _, ev := range events {
+		if ev.Type != "tool/call" {
+			continue
+		}
+		var payload struct {
+			CallID string `json:"callId"`
+		}
+		if json.Unmarshal(ev.Data, &payload) == nil {
+			callID = payload.CallID
+		}
+	}
+	if callID == "" {
+		t.Fatal("fixture 里没有可用的 tool/call callId")
+	}
+
+	// ① 子会话自己的 `subagent` 投影。
+	identity, ok := projectOfficial(t, s, "kid")["subagent"].(map[string]any)
+	if !ok {
+		t.Fatal("子会话必须有 subagent 投影")
+	}
+	parent, _ := identity["parentSessionId"].(string)
+	child, _ := identity["childSessionId"].(string)
+	mode, _ := identity["mode"].(string)
+	if parent == "" || child == "" || mode == "" {
+		t.Fatalf("官方 SubagentAddress 的三段不得为空：%v", identity)
+	}
+	fromChild := fivePartPlanAddress(parent, child, mode, callID)
+
+	// ② 父会话的 `subagentCatalog`（官方客户端的第一条推导路径）。
+	entries, ok := projectOfficial(t, s, "parent")["subagentCatalog"].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("父会话的 subagentCatalog 必须有唯一子代理：%v", entries)
+	}
+	entry := entries[0].(map[string]any)
+	entryID, _ := entry["id"].(string)
+	entryMode, _ := entry["mode"].(string)
+	fromCatalog := fivePartPlanAddress("parent", entryID, entryMode, callID)
+
+	if fromChild != fromCatalog {
+		t.Fatalf("两条官方生产路径拼出的地址必须一致：child=%q catalog=%q", fromChild, fromCatalog)
+	}
+	// 五段就是官方那条字面串：父/子/mode 都来自 durable 帧的真值。
+	const want = "dsh-resource://plan/subagent/parent/kid/continuable/call-1"
+	if fromChild != want {
+		t.Fatalf("从真实投影拼出的五段地址 = %q，want %q", fromChild, want)
+	}
+	parts := assertOfficialPlanAddress(t, fromChild)
+	if parts[1] != "parent" || parts[2] != "kid" || parts[3] != "continuable" || parts[4] != callID {
+		t.Fatalf("五段逐段错位：%v", parts)
+	}
+}
+
+// TestOfficialSubagentProjectionKeepsLegacyThreeFieldDecode 钉住「既有消费方不破」：
+// 消费方（GUI `internal/apiclient/projections.go` 的 SubagentIdentity）只解
+// 官方三键 mode/label/seq，多出来的官方地址两段必须被忽略而不是让解码失败。
+func TestOfficialSubagentProjectionKeepsLegacyThreeFieldDecode(t *testing.T) {
+	raw, err := json.Marshal(OfficialSubagentIdentity{
+		Mode: "continuable", Label: "", Seq: 0,
+		ParentSessionID: "parent", ChildSessionID: "kid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy struct {
+		Mode  string `json:"mode"`
+		Label string `json:"label"`
+		Seq   *int64 `json:"seq"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatalf("旧三键解码器必须能忽略新字段：%v（raw=%s）", err, raw)
+	}
+	if legacy.Mode != "continuable" || legacy.Label != "" || legacy.Seq == nil || *legacy.Seq != 0 {
+		t.Fatalf("旧三键解码结果不对：%+v（raw=%s）", legacy, raw)
 	}
 }
 
