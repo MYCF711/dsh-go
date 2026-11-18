@@ -74,6 +74,20 @@
 | S3 | `dsh-deepseek-chat-import`：导出上传路由 + ZIP 解析 + 写成 v4 Session + `limits` 服务面 | 宿主 + GUI | S1 无依赖，可并行 |
 | S4 | 基线文档与证据文件切到 rc.5（`docs/evidence/*-0.2.2-rc.5.txt`） | 文档 | S1–S3 完成情况 |
 
+### 实际状态（2026-11-19 回填）
+
+| # | 状态 | 落地 |
+|---|---|---|
+| S1 | **已合入** | dsh-go#70 —— 判据是 **provider 路由 id**（不是模型名前缀、不是 catalog `owned_by`），`AgentTerminalControls` 那套同形的 seam 路由读取器在 `internal/spi/search_route.go` |
+| S2 | **已合入** | dsh-ui#168 —— `sidebar.session.action` 座位（官方 sprite `upload-outline`，未手画） |
+| S3 | **已合入** | dsh-go#71（宿主：`internal/chatimport` 2511 行 + 上传路由 + 真 v4 落盘）+ dsh-ui#168（客户端）；端到端见 dsh-ui#169 |
+| S4 | **部分完成** | `AGENTS.md` 入口指针已切（dsh-go#72）；`docs/evidence/*-0.2.2-rc.5.txt` **没有生成** —— 见下 |
+
+**S4 为什么只做了一半**：rc.2 的那三份 evidence 文件（`official-{desktop-api-methods,base-plugins,ui-plugins}-0.2.2-rc.2.txt`）
+当时是怎么从 asar 里抽出来的，仓内**没有对应的生成脚本**。rc.5 的方法声明散在
+各包 `lib/index.js` 的装饰器里，本次尝试过几条路径都没能可靠地逐条重建，
+所以**没有拿一个半成品冒充证据文件** —— 相关数字在 §6 已如实标为未知。
+
 ## 6. 未取证项（如实标注）
 
 - **桌面 API 方法总数未重算**：rc.2 基线是 223 条（`docs/evidence/official-desktop-api-methods-0.2.2-rc.2.txt`）。rc.5 的方法声明散在 `lib/index.js` 的装饰器里，本次没有可靠地逐条重建 —— **不拿这次没算出来的数字当结论**，S3 落地时用新包的服务面顺带把它补上。
