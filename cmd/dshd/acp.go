@@ -516,7 +516,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		Events:    newSessionEventSink(logw),
 		Chat:      llm.New(r.base, os.Getenv("DSHD_LLM_KEY")),
 		Tools:     view,
-		Runner:    runner,
+		Runner:    agentModelRunner{inner: runner, model: r.model},
 		Project:   session.ProjectResult,
 		Model:     r.model,
 		Capacity:  r.capacity,
@@ -1840,9 +1840,20 @@ func (r *acpRunner) ensureSession(sessionID, cwd string) (*session.Log, error) {
 		}
 		return l, err
 	}
+	// 官方 `agent/created`（dsh-tool-subagent/src/model-selection-settings.ts:54-76）：
+	// ACP 的会话创建同样是"新顶层会话"，授权必须在第一次模型请求之前落盘。
+	// 设置先校验、再建会话（设置非法时不留半份会话）。
+	selection, err := subagentModelSelectionFromSettings(r.home)
+	if err != nil {
+		return nil, err
+	}
 	l, err := session.CreateSession(r.home, cwd, sessionID, r.modeOf(sessionID).ID)
 	if err != nil {
 		return nil, fmt.Errorf("建会话失败: %w", err)
+	}
+	if perr := appendSubagentModelSelectionPolicyOnCreate(l, selection); perr != nil {
+		l.Close()
+		return nil, perr
 	}
 	logSessionStart(r.home, sessionID, l.Path, cwd, r.modeOf(sessionID).ID)
 	// 系统提示作为**耐久事件**落盘：DSH 退休 request/header.header.system 后的做法，

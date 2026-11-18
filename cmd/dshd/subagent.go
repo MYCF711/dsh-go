@@ -88,6 +88,14 @@ func (s *subRunner) runSub(ctx context.Context, req spi.SubagentRequest, options
 		return spi.SubagentResult{}, fmt.Errorf("prompt 为空")
 	}
 
+	// 显式模型选择（官方 provider/model/reasoning_effort）：授权与路由解析在
+	// 拿并发槽**之前**做完——授权被拒的委派不该先占一个孩子的坑位。
+	// 未显式选择时这一步只返回父路由（不读目录、不读策略，零行为变化）。
+	route, err := s.resolveChildRoute(ctx, req)
+	if err != nil {
+		return spi.SubagentResult{}, err
+	}
+
 	// 官方 subagent.maxActiveSubagents：真正在跑的孩子的上限（默认 8）。
 	// 拿不到槽就**等**，拿不到且 ctx 被取消就当场收工——不先把活全跑起来。
 	if release, err := s.gate.acquire(ctx); err != nil {
@@ -160,20 +168,32 @@ func (s *subRunner) runSub(ctx context.Context, req spi.SubagentRequest, options
 	// 不只靠 depth 判断。
 	reg := noSubagent{inner: s.tools}
 
+	// 子代理这一步的实际路由（默认 = 父路由；显式选择 = 已校验过的目标路由）。
+	// 工具调用的 ctx 上要带**这个**模型：`list_subagent_models` 在没有 durable
+	// 策略时只列调用方父路由（官方 list-models.ts:50-56），嵌套子代理的父路由
+	// 是它自己的目标路由，不是外层进程的模型。
+	childRunner := s.runner
+	if childRunner != nil {
+		childRunner = agentModelRunner{inner: childRunner, model: route.model}
+	}
 	loop := &agent.Loop{
 		// Events 故意留空：子代理的子会话在**委派结束之后**才物化
 		// （continuation 里才 CreateSession），执行期间没有可写的会话日志。
 		// 硬造一个写入端会写出两段互不相认的 seq；正确的做法是等子会话造好之后
 		// 再回放，那是独立的活儿（见报告"缺口"）。
-		Chat:   s.chat,
+		Chat:   route.chat,
 		Tools:  reg,
-		Runner: s.runner,
+		Runner: childRunner,
 		// 投影必须和主代理**用同一个**。少了它，工具结果只剩 Summary，
 		// 子代理看不到正文 → 以为没读到 → 一遍遍重试，最后撞满步数。
 		Project:  session.ProjectResult,
-		Model:    s.model,
+		Model:    route.model,
 		System:   subSystemPrompt,
 		MaxSteps: s.maxSteps,
+		// 推理档：显式选择时用所选路由的目标档（省略 = 空 = 不发，官方
+		// "显式 undefined 同时清掉继承的父 effort"）；未显式选择时保持原样
+		//（此前子代理本就不继承父档，行为不变）。
+		Reasoning: route.reasoning,
 		// 采样面沿用父进程的显式配置（nil/空 = 不发，与主代理一致）。
 		Temperature: s.temperature,
 		Stop:        s.stop,

@@ -362,12 +362,16 @@ var cwdSchema = storage.Nullable(storage.SchemaFunc(func(value any) error {
 	return nil
 }))
 
-// DefaultProjectionRegistry 返回宿主真实注册的七台投影单元。
+// DefaultProjectionRegistry 返回宿主真实注册的八台投影单元。
 //
-// 为什么只有七个：其余官方键（modelSelection / todos / inbox / actionCards /
+// 为什么只有八个：其余官方键（modelSelection / todos / inbox / actionCards /
 // agentPreset / subagent / imageLimits / subagentCatalog / subagentTiming）
 // 在本宿主要么没有事件来源、要么事件字段不足（例如 `model/selection` 没有
 // 官方 `ModelSelection.provider`），注册一个推不出真值的单元就是伪造。
+//
+// 例外是 `subagentModelSelectionPolicy`：官方把它声明为 host-only 投影
+// （没有 wire view），而本仓真的会写 `subagent/model-selection-policy`，
+// 所以按"有真实事件来源"入册；View 为 nil，不上线。
 //
 // `plan` 之所以在册而别的官方键不在：它有真实事件来源——`plan/mode` 是 v4 词汇
 // 表成员（读官方会话日志时要认），而宿主自己的两个计划模式工具
@@ -426,6 +430,15 @@ func DefaultProjectionRegistry() *ProjectionRegistry {
 		// 宿主两个计划模式工具的 `tool/call` / `tool/result` 配对，见
 		// plan_projection.go。客户端的输入框 `runMode` 与计划模式控件只认这个键。
 		PlanUnit(),
+		// 官方 `subagentModelSelectionPolicy`（stateVersion 1，
+		// `@deepseek-ai/dsh-tool-subagent` 的 model-selection-state.ts:33-47）：
+		// 本会话被授权的子代理路由清单。事件来源是 durable
+		// `subagent/model-selection-policy`（宿主在建会话时按用户设置写、
+		// 子会话从父会话继承），见 subagent_model_selection.go。
+		//
+		// 官方这份是 **host-only** 投影（没有 wire view），所以 View 为 nil：
+		// 授权判定直接读这条折叠，不往 session.projections 发明官方没有的字段。
+		SubagentModelSelectionUnit(),
 	)
 	if err != nil {
 		// 这些单元是写死的常量；走到这里说明代码坏了，启动即失败。

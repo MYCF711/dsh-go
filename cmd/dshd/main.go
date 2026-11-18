@@ -199,6 +199,10 @@ func builtinModules(wd, home string, maxChars, maxInlineTokens int, sub *subProv
 		terminalpanel.ModuleFromEnv(os.Getenv),
 		subagentModule(sub),
 		subagenttool.Module(),
+		// 官方 `dsh-tool-subagent` 的 `list_subagent_models`（modelDiscovery）：
+		// rc.2 shipped standard preset 显式开启（`dsh-web-app/presets/standard.patch.yml:105`）。
+		// 它只读模型目录与会话日志，参数/输出形状逐条对 official `list-models.ts`。
+		subagentModelsModule(home),
 		subagentfork.Module(seedForCtx(home)),
 		skill.Module(filepath.Join(home, "skills")),
 		hindsight.Module(home),
@@ -894,7 +898,22 @@ func cmdRun(argv []string) (retErr error) {
 	var logw *session.Log
 	if sessID == "" {
 		sessID = "session-" + session.NewID()
-		logw, err = session.CreateSession(*home, cwd, sessID, selectedAgentPresetDefault(*home))
+		// 官方 `agent/created`（dsh-tool-subagent/src/model-selection-settings.ts:54-76）：
+		// 新顶层会话在第一次模型请求之前写下 durable 授权；设置关闭 = 一个字节都不写，
+		// 于是显式选择只能点名父路由。设置先校验（enabled 但清单为空必须当场失败），
+		// 再建会话——反过来会留下一份没有授权记录的空会话。
+		var selection subagentModelSelectionSettings
+		selection, err = subagentModelSelectionFromSettings(*home)
+		if err == nil {
+			logw, err = session.CreateSession(*home, cwd, sessID, selectedAgentPresetDefault(*home))
+		}
+		if err == nil {
+			if perr := appendSubagentModelSelectionPolicyOnCreate(logw, selection); perr != nil {
+				logw.Close()
+				logw = nil
+				err = perr
+			}
+		}
 	} else {
 		var path string
 		path, err = session.ResolvePath(*home, cwd, sessID)
@@ -1174,7 +1193,7 @@ func cmdRun(argv []string) (retErr error) {
 		// 官方 context.runtimeContext.perStep：每步重投影运行时事实（不重组提示）。
 		RuntimeContext: runtimeContextProvider(*runtimeContextOn, sessID),
 		Tools:          table,
-		Runner:         loopRunner,
+		Runner:         agentModelRunner{inner: loopRunner, model: *model},
 		Project:        session.ProjectResult,
 		Model:          *model,
 		System:         sys,

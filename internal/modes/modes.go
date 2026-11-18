@@ -90,6 +90,9 @@ func cordisTools() []string {
 		"schedule_create", "schedule_list", "schedule_view", "schedule_edit",
 		"create_goal", "get_goal", "update_goal", "exit_plan_mode",
 		"subagent", "subagent_fork", "workflow", "ask_user_question", "todo_write",
+		// 官方 cordis preset 的 tool-subagent 同时显式开了 modelDiscovery
+		// （dsh-web-app/presets/cordis.patch.yml:95-101），所以发现工具在组合里。
+		"list_subagent_models",
 		"web_search", "web_fetch", "skill", "present", "plugin", "plugin_manager",
 	}
 	if runtime.GOOS == "windows" {

@@ -78,6 +78,24 @@ type SubagentRequest struct {
 	//
 	// 非空即意味着 Continuable 语义：没有 durable 子会话就没有可指向的地址。
 	AgentID string
+
+	// Provider / Model / ReasoningEffort 是官方 `subagent` 工具的三个显式选择字段
+	// （dsh-tool-subagent/src/index.ts:246-259，仅在 modelSelection=true 时发布；
+	// rc.2 shipped standard preset 就是 true，`dsh-web-app/presets/standard.patch.yml:104`）。
+	//
+	// **为什么是指针**：官方判据是"字段是否出现"（`hasDelegationModelRequest`，
+	// model-selection.ts:76-80），出现空串与没出现是**两种**错误
+	// （`child LLM `provider` must be non-empty` vs 与 model 成对的要求）。
+	// 用值类型的话 `""` 与省略不可区分，那条官方错误就永远发不出来。
+	//
+	// 授权与路由解析只在 subRunner（宿主）做，工具层只透传：
+	// 官方同样是 tool → requestedAgentOptions → assertAllowedModelSelection。
+	Provider *string
+	// Model 是 provider 拥有的精确模型 id；与 Provider 必须成对出现。
+	Model *string
+	// ReasoningEffort 是推理档 id；必须与 Provider+Model 一起出现，省略 =
+	// 用所选模型自己的默认档（官方原文见 index.ts:257）。
+	ReasoningEffort *string
 }
 
 // SubagentResult 是子代理交回来的东西：**只要结果，不要中间步骤**。

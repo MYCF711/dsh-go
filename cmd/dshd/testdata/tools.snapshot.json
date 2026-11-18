@@ -547,6 +547,25 @@
     "caps": {}
   },
   {
+    "name": "list_subagent_models",
+    "description": "Inspect the routes available for explicit subagent model selection. No arguments: authorized providers. `provider`: that provider's authorized models. `provider` + `model`: that model and its reasoning efforts. Query when choosing an explicit child route or reasoning effort. Omit optional fields rather than sending empty strings.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Registered LLM provider id."
+        },
+        "model": {
+          "type": "string",
+          "description": "Exact model id; requires provider."
+        }
+      },
+      "additionalProperties": false
+    },
+    "caps": {}
+  },
+  {
     "name": "load_workspace_dependencies",
     "description": "查 Python/Node/pnpm 路径与 numpy/pandas/openpyxl/docx/pptx/Pillow/lxml 版本（会起子进程，deny 策略下会被拒）",
     "parameters": {
@@ -1229,6 +1248,18 @@
         "prompt": {
           "type": "string",
           "description": "完整、自包含的任务；子代理看不到本会话的历史"
+        },
+        "provider": {
+          "type": "string",
+          "description": "子代理的 LLM provider id；必须与 model 一起给"
+        },
+        "model": {
+          "type": "string",
+          "description": "该 provider 下的模型 id；必须与 provider 一起给"
+        },
+        "reasoning_effort": {
+          "type": "string",
+          "description": "推理强度 id；必须与 provider、model 一起给。省略 = 用所选模型自己的默认档，即使它与父路由相同"
         }
       },
       "required": [

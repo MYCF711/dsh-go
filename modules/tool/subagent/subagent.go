@@ -24,7 +24,10 @@ var schema = json.RawMessage(`{
     "cwd": {"type": "string", "description": "子代理的初始工作目录；相对路径按当前目录算，省略表示继承"},
     "description": {"type": "string", "description": "3-5 个词的短描述，给人看"},
     "id": {"type": "string", "description": "稳定的 agent 名字（可选）。给了它，宿主就按官方规则派生/复用一条可续问的子会话（名字-session-随机 uuid），下一轮可以用同一个名字指回这个子代理；省略 = 匿名委派，跑完就散"},
-    "prompt": {"type": "string", "description": "完整、自包含的任务；子代理看不到本会话的历史"}
+    "prompt": {"type": "string", "description": "完整、自包含的任务；子代理看不到本会话的历史"},
+    "provider": {"type": "string", "description": "子代理的 LLM provider id；必须与 model 一起给"},
+    "model": {"type": "string", "description": "该 provider 下的模型 id；必须与 provider 一起给"},
+    "reasoning_effort": {"type": "string", "description": "推理强度 id；必须与 provider、model 一起给。省略 = 用所选模型自己的默认档，即使它与父路由相同"}
   },
   "required": ["description", "prompt"],
   "additionalProperties": false
@@ -57,6 +60,16 @@ type args struct {
 	// spawn** 产生。工具层不透传，模型就永远发起不了可续问委派——那个方法
 	// 在真机上只能是 no_such_session。
 	Continuable bool `json:"continuable"`
+	// Provider / Model / ReasoningEffort 是官方三个显式选择字段
+	// （dsh-tool-subagent/src/index.ts:246-259）。**指针**是为了保住官方判据：
+	// "出现空串"与"没出现"是两种不同的错误（model-selection.ts:107-118），
+	// 值类型会把它们压成同一种。
+	//
+	// 工具层只透传，不做授权判断：官方也在 tool → requestedAgentOptions →
+	// assertAllowedModelSelection 里判，宿主（subRunner）才拿得到会话授权。
+	Provider        *string `json:"provider"`
+	Model           *string `json:"model"`
+	ReasoningEffort *string `json:"reasoning_effort"`
 }
 
 type data struct {
@@ -91,6 +104,11 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		Continuable: a.Continuable,
 		// 具名委派：宿主据此派生 `${id}-session-<uuid>` 并把地址记进盘上。
 		AgentID: strings.TrimSpace(a.ID),
+		// 显式模型选择：三格原样透传（nil = 模型没给这个键）。
+		// 授权校验、provider/model 成对、推理档解析都在宿主；这里不猜。
+		Provider:        a.Provider,
+		Model:           a.Model,
+		ReasoningEffort: a.ReasoningEffort,
 	})
 	if err != nil {
 		return spi.Result{Hint: "子代理没跑成：先看它卡在哪——任务是否自包含、有没有它够不着的文件；也可以自己直接做"},
