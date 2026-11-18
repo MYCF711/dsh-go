@@ -95,7 +95,7 @@ internal/transport/handlers_agent_official.go:1451 | 官方 SubagentPrompt 的 c
 internal/transport/handlers_agent_official.go:1452 | 官方 request.content[i].text 空串要 400（官方请求校验），判的是"参数合法吗"，不是"消息存不存在"
 
 # 官方 QUEUE_EDIT_NON_TEXT：queue 的 edit 只接受 text 块，别的类型要 400。
-internal/transport/handlers_session_official.go:1730 | 官方 QUEUE_EDIT_NON_TEXT：edit 的非 text 块是**协议错误**，要 400 而不是静默过滤
+internal/transport/handlers_session_official.go:1756 | 官方 QUEUE_EDIT_NON_TEXT：edit 的非 text 块是**协议错误**，要 400 而不是静默过滤
 cmd/dshd/serve_queue_official.go:274 | 同上（本地入口同判据）：edit 的非 text 块直接报 ErrPlacementInvalid
 
 # 译文接口：空文的译文就是空文（显式写明的语义，不是丢内容）。
