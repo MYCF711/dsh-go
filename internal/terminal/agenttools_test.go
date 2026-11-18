@@ -2,9 +2,9 @@ package terminal
 
 // agent 终端交互契约的判据用例（`internal/terminal/agenttools.go`）。
 //
-// 权威：官方 `pageLines`（`dsh-api-terminal-controller/lib/index.js:194-220`）与
+// 权威：官方 `pageLines`（`dsh-api-terminal-controller/src/screen.ts:57-77`）与
 // TS 定义（`src/types.ts:83-93`、`src/screen.ts:86-97`）。这里的期望值都是照着那段
-// JS 逐行推出来的，不是"跑一遍看结果"抄的。
+// 代码逐行推出来的，不是"跑一遍看结果"抄的。
 
 import (
 	"testing"
@@ -75,7 +75,7 @@ func TestAgentScreenPageMatchesOfficialPageLines(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			page := AgentScreenPage(tc.screen, tc.offset, tc.count, tc.maxBytes)
+			page := AgentScreenPage(AgentScreenLines(tc.screen), tc.offset, tc.count, tc.maxBytes)
 			if page.Text != tc.wantText {
 				t.Fatalf("text = %q，期望 %q", page.Text, tc.wantText)
 			}

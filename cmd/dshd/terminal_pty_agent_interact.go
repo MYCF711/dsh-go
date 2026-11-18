@@ -431,16 +431,24 @@ func (a *officialPTYTerminalAPI) AgentTerminalRead(ctx context.Context, sessionI
 	}
 	a.mu.Lock()
 	term := entry.term
-	stale := entry.screen
+	snapshot := entry.screen
+	cols := entry.cols
+	rows := entry.rows
 	a.mu.Unlock()
-	screen := stale
+	var lines []string
 	if term != nil {
 		if pty := term.PTY(); pty != nil {
-			// maxBytes<=0 = 要整段（滚动缓冲本身有界：默认 1000 行 / 1 MiB）。
-			screen, _ = pty.Tail(0)
+			// 屏幕模型：官方 `renderLines(buffer, 0, lastContentRow+1)`
+			// （`dsh-api-terminal-controller/src/terminal.ts:276-280`）。
+			lines = pty.ScreenLines()
 		}
 	}
-	return terminal.AgentScreenPage(screen, req.Offset, req.Count, req.MaxReadBytes), nil
+	if lines == nil && snapshot != "" {
+		// 终端已经没了 / 宿主重启后恢复：手上只剩 attach 用的重放字节流，
+		// 重放回屏幕再取行（官方在控制器里保存的是活缓冲区，这里保存的是它的等价物）。
+		lines = terminal.ScreenFromSnapshot(snapshot, cols, rows)
+	}
+	return terminal.AgentScreenPage(lines, req.Offset, req.Count, req.MaxReadBytes), nil
 }
 
 // AgentTerminalSignal 是官方 `ctx.terminals.signal(owner, id, signal)`

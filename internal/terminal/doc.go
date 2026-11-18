@@ -7,7 +7,9 @@
 //
 //   - 子进程的 stdin 不是 tty，`isatty` 为假，行编辑/补全/`stty` 全部不工作；
 //   - 没有窗口尺寸，`resize` 无处可去（没有 SIGWINCH / 没有控制台缓冲）；
-//   - 输出没有屏幕模型，也没有滚动缓冲，`screen` 只能是"原始字节尾部"；
+//   - 没有终端语义，也就没有屏幕模型可言：光标定位、清屏、交替屏这些"重画整屏"
+//     的序列没人解释，读出来只能是"原始字节尾部"（本包的真 PTY 会把这些字节喂给
+//     `Screen`，见 `vtscreen.go`）；
 //   - 没有会话/作业控制，Ctrl-C 之类的中断字符不是终端语义。
 //
 // 所以本包只做真东西：ConPTY（`CreatePseudoConsole` + `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
