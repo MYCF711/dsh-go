@@ -51,8 +51,33 @@ dshd run --session <id>   ->  退出码 1，同一句错误
 
 **推论（明确标为推论，不是结论）**：把「preset 为空」当成**硬失败**，是**我们宿主自己加的约束**，官方没有这条。若成立，这属于 parity 缺陷，改法是让沙箱策略在 preset 为空时按官方的方式解析，而不是 fail-loud。
 
-**还差最后一块拼图**：官方那个「调用方」到底从哪拿 mode（会话设置？全局配置？审批档？）——
-这一层没查到之前，**仍然不凭推论改产品**。
+**最后一块拼图已找到（2026-11-19 续查）**：官方把「沙箱档位」放在**独立的服务**里，
+和 agent preset **不是一个东西**——
+
+- 官方包 **`dsh-permission-presets`**（`src/index.ts:20-45`）是独立服务：
+  自带 `PermissionCatalog` / `PermissionSelection` / `PresetOption`，
+  选择落成一条 **durable、log-only** 的会话事件，然后调
+  `setSandboxMode`（来自 `dsh-sandbox-policy`）与 `setApprovalPolicy`（来自 `dsh-user-approval`）
+- `dsh-sandbox-policy` 才是持有并设置 mode 的地方；`dsh-sandbox` 只把 `mode` 当入参带
+
+**所以这是一个 parity 缺陷，不是取舍**：我们宿主把沙箱档位的来源读成了 `agentPreset`，
+而官方用的是 `permissionPresets` 那份自己的选择（带默认档）。
+
+## 6. 本仓的偏差位置（精确到函数）
+
+`cmd/dshd/serve_sandbox_policy.go` 的 `sandboxPresetIDForSession` 依次取：
+
+1. `state/session-preset.json` 的显式选择（**本仓自有机制，非官方**）
+2. 否则读 v4 `header.AgentPreset`
+3. 两处都空 → **fail-loud**
+
+第 2 步就是把 agent preset 当成沙箱档位来源——官方没有这层对应关系。
+导入的会话两处都空，于是必然落到第 3 步。
+
+**修法方向（parity，不需用户裁定）**：沙箱档位从 `permissionPresets` 的选择解析，
+没有选择时用官方默认档；`agentPreset` 不再充当沙箱档位的兜底来源。
+**但这条要动沙箱解析链，必须先把官方 `permissionPresets` 的默认档与事件形状逐行核完再动手**——
+`docs/sandbox-policy.md` 的「不假装隔离」原则要求改完仍然 fail-loud 在**该失败**的地方。
 
 **但这一步没有查到官方确切的分支**，所以不凭推论改产品：那个分支怎么走要嘛继续在官方源码里逐层找，要嘛由用户裁定导入历史归哪个 preset。两者都不适合猜。
 
