@@ -418,3 +418,53 @@ func TestSandboxPresetSelectClearsStaleOverride(t *testing.T) {
 		t.Fatal("未知 preset 必须 fail-loud")
 	}
 }
+
+// 导入的历史会话没有记录过档位：preset 覆盖与 header.agentPreset 都是空。
+//
+// 官方这里不失败 —— dsh-permission-presets/src/index.ts:218-226 先
+// `derive(EMPTY_KNOBS)` 从组合默认值得出 inferredDefault，只有「组合默认值
+// 匹配不上任何预置档」才抛错。本仓的组合默认值由 sandbox.BoundaryFromEnv 给
+// （环境无 DSHD_SANDBOX_MODE 时回落 workspace-write），所以这里必须解析出
+// workspace-write 那档，而不是拒绝跑回合。
+func TestSandboxMissingPresetFallsBackToComposedDefault(t *testing.T) {
+	home := t.TempDir()
+	reg := newSandboxTestRegistry(t)
+	store := mustSandboxStore(t, home)
+	// 空 preset = 与 chat-import 建出来的会话同形（internal/session/import.go:34）。
+	id := createSandboxSession(t, home, "")
+
+	src, err := resolveSandboxModeForSession(home, id, reg, store)
+	if err != nil {
+		t.Fatalf("没有记录档位的会话必须按组合默认档解析，不能 fail-loud：%v", err)
+	}
+	if src.PresetID == "" {
+		t.Fatalf("推出来的 preset id 不能为空：%+v", src)
+	}
+	if src.Effective != sandbox.ModeWorkspaceWrite {
+		t.Fatalf("组合默认档应是 workspace-write，实际 %q", src.Effective)
+	}
+	if src.PresetMode != src.Effective {
+		t.Fatalf("preset 档位与最终档位应一致（这是「没选过」不是「被收窄」）：%+v", src)
+	}
+}
+
+// 组合默认档被进程上限收窄时，不能因为「默认档是 workspace-write」就放宽。
+func TestSandboxComposedDefaultRespectsNarrowerCeiling(t *testing.T) {
+	t.Setenv(sandbox.EnvMode, string(sandbox.ModeReadOnly))
+
+	presetID, err := defaultPresetForComposedMode()
+	if err != nil {
+		t.Fatalf("read-only 上限应当有对应预置档：%v", err)
+	}
+	mode, err := modes.Resolve(presetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := mode.SandboxMode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != sandbox.ModeReadOnly {
+		t.Fatalf("进程上限 read-only 时推出的默认档必须是 read-only，实际 %q（这是放宽，属安全回归）", got)
+	}
+}

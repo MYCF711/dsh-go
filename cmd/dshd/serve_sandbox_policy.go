@@ -193,8 +193,42 @@ func sandboxPresetIDForSession(home, sessionID string) (string, error) {
 	if preset := strings.TrimSpace(header.AgentPreset); preset != "" {
 		return preset, nil
 	}
-	return "", fmt.Errorf("%w: 会话 %s 的 preset 覆盖与 header.agentPreset 都是空的",
-		sandbox.ErrMissingContext, sessionID)
+	// 两处都空 = 这个会话从没记录过档位（导入的历史会话就是这种）。
+	//
+	// 官方这里**不失败**：dsh-permission-presets/src/index.ts:218-226 先用
+	// `derive(EMPTY_KNOBS)` 从**进程组合出来的 sandbox / approval 默认值**推一个
+	// `inferredDefault`，只有「组合默认值匹配不上任何预置档」时才抛错
+	// （文案是 `composed sandbox and approval defaults match no preset`）——
+	// 那是「配置不自洽」的失败，不是「这个会话缺记录」的失败。
+	//
+	// 本仓的组合默认值由 sandbox.BoundaryFromEnv 给：环境里没有 DSHD_SANDBOX_MODE 时
+	// 回落 workspace-write。所以这里按同一个判据推默认档，而不是拒绝跑回合。
+	//
+	// **不放松安全边界**：推出的档必须与进程上限同档；环境把上限收窄到 read-only 时，
+	// 不会因为"默认档是 workspace-write"就放宽（见下方的严格匹配 + 无匹配即失败）。
+	return defaultPresetForComposedMode()
+}
+
+// defaultPresetForComposedMode 按「进程组合默认档」推一个预置档 id。
+//
+// 对应官方 `derive(EMPTY_KNOBS)`：用组合默认值反查预置表。
+// 查不到 = 配置不自洽 -> fail-loud（与官方 `CUSTOM_PRESET` 那条抛错同义）。
+func defaultPresetForComposedMode() (string, error) {
+	composed := sandbox.ModeWorkspaceWrite
+	if raw := strings.TrimSpace(os.Getenv(sandbox.EnvMode)); raw != "" {
+		parsed, err := sandbox.ParseMode(raw)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", sandbox.EnvMode, err)
+		}
+		composed = parsed
+	}
+	for _, builtin := range modes.Builtins() {
+		if builtin.Sandbox == string(composed) {
+			return builtin.ID, nil
+		}
+	}
+	return "", fmt.Errorf("%w: 组合默认档 %q 匹配不上任何预置档（对应官方 composed sandbox and approval defaults match no preset）",
+		sandbox.ErrMissingContext, composed)
 }
 
 // sandboxModeSource 是一次解析的完整证据：preset 是什么、覆盖是什么、最终档位是什么。
