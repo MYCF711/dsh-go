@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"dshgo/codecs/v4"
+	"dshgo/internal/llm"
 	"dshgo/internal/spi"
 )
 
@@ -28,6 +29,17 @@ type Log struct {
 
 // CreateSession 在 <home>/sessions/<projectKey>/<sessionId>/ 下新建会话文件。
 func CreateSession(home, cwd, id, agentPreset string) (*Log, error) {
+	return createSession(home, cwd, id, agentPreset, time.Now().UnixMilli())
+}
+
+// createSession 是 CreateSession 的实际实现，创建时间由调用方给。
+//
+// 单独拆出来的原因只有一条：**导入历史**（`chatimport`）的 header.createdAt
+// 必须是导出里第一条事件的时间，而不是"现在"。官方导入路径同样显式传
+// `createdAt`（`dsh-deepseek-chat-import/src/importer.ts:562` 的
+// `{version, id, createdAt: conversion.createdAt, cwd, isSeeded: false}`），
+// 于是导入的会话在侧栏里按它原本发生的时间排序，而不是全挤在导入那一刻。
+func createSession(home, cwd, id, agentPreset string, createdAtMS int64) (*Log, error) {
 	if id == "" {
 		return nil, fmt.Errorf("session id 不能为空")
 	}
@@ -47,7 +59,7 @@ func CreateSession(home, cwd, id, agentPreset string) (*Log, error) {
 		Type:            "session",
 		Version:         4,
 		ID:              id,
-		CreatedAt:       time.Now().UnixMilli(),
+		CreatedAt:       createdAtMS,
 		Cwd:             cwd,
 		IsSeeded:        false,
 		DelegationDepth: 0,
@@ -312,4 +324,71 @@ func TurnEndData(turn int, kind, detail string) map[string]any {
 		}
 	}
 	return map[string]any{"turn": turn, "reason": r}
+}
+
+// AssistantBlocks 是「一次回答 → v4 content 块」的**唯一一份**铺块逻辑：
+// 思考 → 正文 → 调用。serve、ACP 的写盘 sink、以及 chat-import 的转写都调它。
+//
+// 参数取三样零件而不是 *llm.Response，是因为 ACP 那条路手里只有
+// `agent.AssistantTurn`（同一个模型的同一份产物，只是它在 agent 层的形状）。
+// 为它写第二份铺块，就是单点实现登记表要消灭的那种"两处各自维护、迟早漂"。
+//
+// 为什么思考块放正文之前：折叠出来就是"先想了什么、再回答什么"；顺序反了，
+// 读日志的人会以为模型先说了话又倒回去想。
+//
+// 2026-11-18 从 cmd/dshd/serve_turn.go 搬到这里：它原来在 `package main` 里，
+// 库代码（internal/chatimport）**根本 import 不到**，于是只能手写块 map ——
+// 而单点实现守卫正确地禁止了手写。单点放在够不着的地方，等于逼人写第二份。
+func AssistantBlocks(text, reasoning string, toolCalls []llm.ToolCall) []map[string]any {
+	blocks := make([]map[string]any, 0, 2+len(toolCalls))
+	if strings.TrimSpace(reasoning) != "" {
+		blocks = append(blocks, ReasoningBlock(reasoning))
+	}
+	if strings.TrimSpace(text) != "" {
+		blocks = append(blocks, TextBlock(text))
+	}
+	for _, tc := range toolCalls {
+		blocks = append(blocks, ToolCallBlock(tc.ID, tc.Function.Name, tc.Function.Arguments))
+	}
+	return blocks
+}
+
+// ContentBuilder 按**调用顺序**累积一次回答的内容块。
+//
+// 为什么还要它（明明已经有 AssistantBlocks）：AssistantBlocks 表达的是固定顺序
+// 「思考 → 正文 → 调用」，而 chat-import 拿到的是导出文件里**已经排好序的 fragment
+// 列表**（THINK / RESPONSE / TOOL_SEARCH / TOOL_OPEN 交错），顺序由数据决定，
+// 不能重排。两者是同一件事（一次回答铺成哪些块）的两种输入形状，
+// 所以**仍然只有 internal/session 这一个包**知道块长什么样 ——
+// 调用方只说"我这一块是什么"，不自己拼 map。
+type ContentBuilder struct {
+	blocks []map[string]any
+}
+
+// Reasoning 追加一个思考块。
+func (b *ContentBuilder) Reasoning(text string) {
+	b.blocks = append(b.blocks, ReasoningBlock(text))
+}
+
+// Text 追加一个正文块。
+func (b *ContentBuilder) Text(text string) {
+	b.blocks = append(b.blocks, TextBlock(text))
+}
+
+// ToolCall 追加一个工具调用块。
+func (b *ContentBuilder) ToolCall(id, name, arguments string) {
+	b.blocks = append(b.blocks, ToolCallBlock(id, name, arguments))
+}
+
+// Blocks 返回累积结果（空时返回 nil，避免把 nil 当"有内容"）。
+func (b *ContentBuilder) Blocks() []map[string]any {
+	if len(b.blocks) == 0 {
+		return nil
+	}
+	return b.blocks
+}
+
+// ToolResult 是工具结果的 content 形状。调用方只给文本，不自己拼 `[]any{map…}`。
+func ToolResult(text string) []any {
+	return []any{TextBlock(text)}
 }

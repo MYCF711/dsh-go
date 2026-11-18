@@ -241,6 +241,14 @@ type Options struct {
 	SideQuery    func(ctx context.Context, sessionID, requestID, prompt string, onText func(string) error) (string, error)
 	SideCancel   func(sessionID, requestID string) error
 	SideClose    func(sessionID string) error
+	// ChatImport 是官方 rc.5 新增包 `dsh-deepseek-chat-import` 的宿主面：
+	// `POST /api/deepseek-chat-import/archive`（裸字节上传 + NDJSON 进度流）
+	// 与 `deepseekChatImport/limits`（交上传前要检查的上限）。
+	//
+	// 与 Changes 同一类：上传路由按**路径**接住、不走 /api/<method> 分派，
+	// 所以既不改 canonical 方法表，也不与任何 typert 方法重名。
+	// nil 时上传路由与 limits 都回结构化 501（不伪造上限、不假装导入成功）。
+	ChatImport *ChatImportAPI
 	// Changes 是官方 deliverables 三条变更路由（`/api/changes.summary|diff|open`）
 	// 的宿主实现。它们是**按路径**接住的文档相对路由，不走 /api/<method> 分派，
 	// 所以既不改 canonical 方法表，也不与任何 typert 方法重名。
@@ -305,6 +313,16 @@ type Server struct {
 	cookies map[string]struct{} // 已发放的有效会话 cookie
 	srv     *http.Server
 	url     string
+
+	// chatImportSlot/chatImportActive 是 DeepSeek 聊天导入的**唯一槽位**
+	// （官方 `DeepseekChatImportService.claim()`，src/index.ts:120-131：
+	// 一次只有一个导入在跑，第二个请求得到 `busy`）。
+	//
+	// 放在 Server 上而不是宿主实现里：官方服务与路由是同一个对象；本仓
+	// transport 是唯一能看到"这条路由正在跑"的层，放这里才不会出现两个导入
+	// 同时往同一份 home 里写会话。
+	chatImportSlot   sync.Mutex
+	chatImportActive bool
 }
 
 // NewServer 造一个还没开始监听的服务，并生成一次性 launch token。
@@ -424,6 +442,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 相对路由，不是 POST /api/<method>；必须在这里接住，否则会被下面的
 		// 前缀分支当"未知方法"吞掉。
 		s.serveChangesRoute(w, r)
+	case r.URL.Path == ChatImportUploadRoute:
+		// 官方把这条路由注册成"裸字节上传 + NDJSON 流"的 exact Fetch 路由
+		// （src/index.ts:93-96），不是 `POST /api/<method>`。必须在 `/api/`
+		// 前缀分支之前接住，否则会被当成未知方法吞掉。
+		s.serveChatImportUpload(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/"):
 		s.handleAPI(w, r)
 	default:
@@ -543,6 +566,14 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	// 失败调用由上面的 defer 统一打 status，避免把正常轮询误读成报错。
 	if apiTraceEnabled() {
 		fmt.Fprintf(os.Stderr, "transport: /api/%s\n", name)
+	}
+
+	// 官方 rc.5 `deepseekChatImport/limits`（dsh-deepseek-chat-import 的 typert
+	// Remote 方法）。名字里带 `/`，进到这里的 name 就是 `deepseekChatImport/limits`
+	// （`/api/` 前缀已剥掉）。必须早于描述符校验与族前缀分支：它不属于任何既有族。
+	if Method(name) == MethodChatImportLimits {
+		s.serveChatImportLimits(w, r)
+		return
 	}
 
 	// typert 描述符校验（HS-14）：只对**已注册**的方法生效。

@@ -36,7 +36,7 @@
 
 # 2026-11-04 事故 2：三份铺块逻辑（run / serve / acp 各一份），ACP 那份不写思考块，
 # 那轮想过什么从日志里整轮消失，而 history / fork / load 三处读路径全是对的。
-铺块顺序 | cmd/dshd/serve_turn.go:assistantBlocksFrom | assistant-block-layout | 「一次回答铺成哪些块、什么顺序、什么条件才铺」只有一处：思考 → 正文 → 调用。第二个写盘路径自己铺一份时，它漏的那一种块不会报错，只会静默不落盘 | second=internal/session/fork.go:copyNode
+铺块顺序 | internal/session/log.go:AssistantBlocks | assistant-block-layout | 「一次回答铺成哪些块、什么顺序、什么条件才铺」只有一处：思考 → 正文 → 调用。第二个写盘路径自己铺一份时，它漏的那一种块不会报错，只会静默不落盘 | second=internal/session/fork.go:copyNode
 
 # 2026-11-04 事故 1：CompactSchema 与 stripDescriptions 都"见 description 键就删"，
 # 各删错一次，一共删掉 8 个名叫 description 的参数（5 个还在 required 里）。

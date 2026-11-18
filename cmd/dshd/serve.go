@@ -616,6 +616,10 @@ func cmdServe(args []string) error {
 			Diff:    changesStore.Diff,
 			Open:    changesOpenOnDesktop(changesStore, nativeSvc),
 		},
+		// 官方 rc.5 `dsh-deepseek-chat-import`：`POST /api/deepseek-chat-import/archive`
+		// （裸 ZIP 上传 + NDJSON 进度流）与 `deepseekChatImport/limits`。
+		// wsHost 在这一行之后才 attach，所以传**取值函数**：请求到来时它已就绪。
+		ChatImport: newChatImportHost(*home, src, func() *officialWorkspaceHost { return wsHost }).api(),
 		// 官方 0.2.2 wire（M1）：默认关，DSHD_OFFICIAL_WIRE=1 才挂载。
 		// 返回 nil 时 transport 一个字节都不变（见 Options.HandlerWrap）。
 		// 静态前端必须在**最外层**：GET /?token= 要先到前端，再到 wire。
