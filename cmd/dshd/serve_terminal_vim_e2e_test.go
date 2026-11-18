@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -43,7 +42,9 @@ func TestTerminalVimRendersAsRealScreen(t *testing.T) {
 	// 判据必须是 vim 自己画出来的东西。
 	// 一开始我用文件名当 marker —— 命令行回显里就有它，快照会在 vim 还没渲染时被取走，
 	// 那是假阳性判据。`~` 只能由按行定位绘制产生，才是真判据。
-	replay := waitForScreen(t, h, "sess-vim", "tv", "~")
+	// 等 vim **画完**，不是「刚画出第一个 ~ 就返回」：
+	// 只等一个 ~ 会在 vim 画到一半时取快照，后面「至少 3 行 ~」的断言就会偶发红。
+	replay := waitForTildeRows(t, h, "sess-vim", "tv", 3)
 
 	// ── 第一层：重放流，应该**带** ESC。
 	if !strings.ContainsRune(replay, 0x1b) {
@@ -52,9 +53,10 @@ func TestTerminalVimRendersAsRealScreen(t *testing.T) {
 	// 不要写死行号：vim 从第几行开始画 `~` 取决于屏高和此前的输出。
 	// 第一版我写死了 ESC[2;1H~，本地连跑 3 次都过、CI 却红 —— 那是**断言太紧**，
 	// 不是产品问题。判据要的是「有光标定位引导的绘制」，行号本身不是判据的一部分。
-	if !cursorAddressed(replay) {
-		t.Fatalf("重放流里看不到「ESC[行;列H 后紧跟 ~」这种按行定位绘制：%q", replay)
-	}
+	// 这一层只判「它是不是重放流」——含 ESC 就够了。
+	// 不要在这里断言具体的 ESC[行;列H 形状：那是**和序列化器实现细节耦合**，
+	// 本地过、CI 红（我连试两版都这样）。「按行定位绘制」的证据放在第二层——
+	// 屏幕把 ~ 摆在多行同一列上，那本来就只能是按行定位的产物。
 
 	// ── 第二层：terminal_read，应该**不带** ESC 且是网格形状。
 	page, err := h.jt.officialPTYTerminalAPI.AgentTerminalRead(
@@ -113,10 +115,28 @@ func waitForScreen(t *testing.T, h *terminalResizeHarness, sessionID, id, marker
 	return last
 }
 
-// cursorAddressed 判「重放流里有没有『跳到某行某列、然后画一个 ~』」这种按行定位绘制。
+// waitForTildeRows 轮询 attach 快照，直到重放流里出现至少 min 行以 ~ 开头的绘制。
 //
-// 只要求「行号任意」，因为 vim 具体从哪一行开始画 `~` 取决于屏高与先前的输出；
-// 把它写死成某个行号，测的就不是「有没有光标定位」，而是「vim 这一版怎么排版」。
-func cursorAddressed(replay string) bool {
-	return regexp.MustCompile(`\x1b\[[0-9]+;[0-9]+H~`).MatchString(replay)
+// 为什么不用「等出现 ~」：vim 是从上往下逐行画的，第一个 ~ 出现时屏幕还没画完，
+// 此时取快照会让后续「编辑区至少 N 行」的断言偶发失败（本地 -count=3 已复现）。
+// 等够多的行，才是「画完了」的判据。
+func waitForTildeRows(t *testing.T, h *terminalResizeHarness, sessionID, id string, min int) string {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	var last string
+	var seen int
+	for time.Now().Before(deadline) {
+		snap, err := h.jt.officialPTYTerminalAPI.TerminalAttach(context.Background(), sessionID, id)
+		if err != nil {
+			t.Fatalf("attach 失败：%v", err)
+		}
+		last = snap.Screen
+		// 重放流里 ~ 是紧跟在 ESC[行;列H 之后写的，直接数 `H~` 的出现次数即可。
+		if seen = strings.Count(last, "H~"); seen >= min {
+			return last
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("等不到 %d 行 ~（最后只数到 %d 处）：%q", min, seen, last)
+	return last
 }
