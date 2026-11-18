@@ -160,6 +160,8 @@ host-only (const, not official): 50      # 50 这个数仍然准确
 official covered by const: 155 of 193
 ```
 
+> **2026-11-19 口径变化**：新增 `terminal.resize`（additive HTTP 回落投影）后为 **206 = 155 官方 + 51 宿主独有**；上面 205/50 是 11-14 那次盘点的结果，差值就是这一条新方法。
+
 - "宿主 58" → 实际 **205 个常量**（155 官方 + 50 宿主独有）
 - "缺 145" → 实际**连路由都没有的只有 38 个**（37 个落 `server.go:595 default` 的通用 501，1 个 `settings.openSettingsDocument` → 404）；**再加上"路由到了但 handler 直接 501"的 56 个，没有真实实现的是 94 个**（§3.2 按代码判定，不按探测类别判定）
 - "同名重合 8" → 现在 **155 个官方方法有同名常量**；官方 `settings` 族是 5 个（`describe`/`mutate`/`update`/`replace`/`openSettingsDocument`），其中 `mutate` 与 `update`/`replace` 并存（不是改名，见 `handlers_settings_official.go:67`）
@@ -345,8 +347,10 @@ mcp.list/reconnect/toggle, models.catalog.list/reorder/set-active/test/upsert, m
 schedule.clear/delete, session.approve/color.get/color.set/compact/delete/goal.get/goal.pause/
 goal.resume/history/load/rewind.apply/rewind.preview/setEffort/setGoal/setModel/setPermission/
 transcript.page, settings.form.describe/get/reset/set, side.cancel/close/query,
-terminal.input/open/output, workspace.init/list
+terminal.input/open/output/resize, workspace.init/list
 ```
+
+- **2026-11-19 增补**：本单新增 `terminal.resize`（`MethodTerminalResize`，additive HTTP 回落投影，官方 8 个 terminal 方法里没有它），故清单项数与常量总数各 +1（**206 = 155 官方 + 51 宿主独有**）；上面的 205/50 是 2026-11-14 盘点口径，不含本次新增。
 
 - 分族（193）：session 25、forgePanel 20、pluginManager 15、dynamicCordisRunner 12、liveshareShares 12、account 11、workspace 11、schedule 9、terminal 8、goals 7、speech 6、workspaceFiles 5、settings 5、pluginMarket 4、agentPresets 3、credentials 3、directoryPicker 3、job 3、llm 3、messageFeedback 3、productAnalytics 3、commands 2、cotTranslation 2、officeToPdf 2、subagents 2、userQuestions 2、actionCards 1、fileReferences 1、fileUploads 1、permissionPresets 1、pluginInventory 1、pluginRecommendations 1、pluginRegistryProbe 1、remoteAccess 1、sessionFeedback 1、sessionReferenceResolver 1、skills 1、toolResults 1。
 
@@ -541,7 +545,7 @@ terminal.input/open/output, workspace.init/list
 | `speech.transcribe` | OFFICIAL_UNSUPPORTED | server.go:441 → handlers_media_market_official.go:119 | handlers_media_market_official.go:462；:481 officialNotImplemented | VAL400 | 没有 ASR 模型、音频解码、VAD、推理管线；绝不返回编造的转写文本 |
 | `subagents.interruptByParent` | IMPLEMENTED | `internal/transport/server.go:421` → `handlers_agent_official.go:87` | `cmd/dshd/serve_agent_api.go:808` | VAL400 | REAL：`childRegistry().InterruptByParent` 按父授权中断子会话真实轮次 |
 | `subagents.prompt` | IMPLEMENTED | `internal/transport/server.go:421` → `handlers_agent_official.go:87` | `cmd/dshd/serve_agent_api.go:799` | VAL400 | REAL：`childRegistry().Prompt` 真投子会话 inbox；未登记子会话 → `no_such_session`，父 id 不匹配 → 403 |
-| `terminal.attach` | **IMPLEMENTED** | `internal/transport/server.go:449` → `handlers_job_terminal_official.go:304` | `cmd/dshd/serve_terminal_api.go:520` | STREAM200 | **T67 复核为 IMPLEMENTED**：官方 L2 的 `RemoteStream<TerminalFrame, TerminalInput>` 由 mux 流承担——`MethodTerminalAttach`（`:75`）在 `:91` 流方法表内；I05 已接线 `wrapOfficialMuxUplinkStream`，**上行 write/resize 有 ack**（真实进程证据见 `tmp/GO2-TEAM/I05/RESULT.md` §5）；`TestOfficialTerminalAttachStreamsSnapshotOutputState` PASS。**残留**：L1 HTTP 面只回首帧 snapshot。 |
+| `terminal.attach` | **IMPLEMENTED** | `internal/transport/server.go:449` → `handlers_job_terminal_official.go:304` | `cmd/dshd/serve_terminal_api.go:520` | STREAM200 | **T67 复核为 IMPLEMENTED**：官方 L2 的 `RemoteStream<TerminalFrame, TerminalInput>` 由 mux 流承担——`MethodTerminalAttach`（`:75`）在 `:91` 流方法表内；I05 已接线 `wrapOfficialMuxUplinkStream`，**上行 write/resize 有 ack**（真实进程证据见 `tmp/GO2-TEAM/I05/RESULT.md` §5）；`TestOfficialTerminalAttachStreamsSnapshotOutputState` PASS。**残留**：L1 HTTP 面只回首帧 snapshot。**2026-11-19 增补**：`terminal.resize` 的 **HTTP 回落投影已补**（`POST /api/terminal.resize` → `serveTerminalResizeHook` → `officialPTYTerminalAPI.Resize`，校验照官方 cols∈[2,500]/rows∈[1,200]，真 PTY 证据 `TestTerminalResizeHTTPProjectionResizesRealPTY`）——**但这只是 HTTP 这一面的回落，officialwire mux 客户端仍未实现，mux 上行 resize 不能据此声称完成**。 |
 | `terminal.close` | IMPLEMENTED | `internal/transport/server.go:449` → `handlers_job_terminal_official.go:304` | `cmd/dshd/serve_terminal_api.go:596` | VAL400 | REAL：`closeEntry` 回收真实进程树并落终态；重复 close 成功（官方语义） |
 | `terminal.create` | IMPLEMENTED | `internal/transport/server.go:449` → `handlers_job_terminal_official.go:304` | `cmd/dshd/serve_terminal_api.go:491` | VAL400 | REAL：`a.bash.OpenTerminal(cwd)` 起真终端，幂等（同 id 同参数回同一条），参数不同即 400 |
 | `terminal.environment` | IMPLEMENTED | `internal/transport/server.go:449` → `handlers_job_terminal_official.go:304` | `cmd/dshd/serve_terminal_api.go:625` | VAL400 | REAL：每个上限都有代码强制点（`MaxInputBytes` 在 `Input` 里真拦）；`Scrollback:0` 是如实值（无 PTY） |

@@ -176,6 +176,12 @@ type Options struct {
 	// nil 时只保留旧的按 id 写入；带 sessionId 的请求不会猜一个终端。
 	TerminalInputScoped func(sessionID, id, data string, typed bool) error
 	TerminalOutput      func(id string, since int) (TerminalOutput, error)
+	// TerminalResize 是 `terminal.resize` 的 HTTP 回落入口：官方 uplink 的 resize
+	// 只在 mux 面（官方 attach 帧机的 `{type:'resize'…}`），没有这条投影界面就改不了
+	// PTY 尺寸。**官方档位（cols∈[2,maxCols]、rows∈[1,maxRows]）由接线方按官方口径
+	// 校验并返回 ErrJTOfficialBadParam**；本层只管结构（session/id 必填、尺寸为正整数），
+	// 不在这里另立一套档位。
+	TerminalResize func(sessionID, id string, cols, rows int) error
 	// FSRead 读一个文件；路径解析、大小上限、越界检查都在宿主那边。
 	FSRead func(path string) (FSContent, error)
 	// FSWrite 写一个文件；宿主注入。
@@ -900,6 +906,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleTerminalInput(w, r)
 	case MethodTerminalOutput:
 		s.handleTerminalOutput(w, r)
+	case MethodTerminalResize:
+		s.handleTerminalResize(w, r)
 	case MethodFSRead:
 		s.handleFSRead(w, r)
 	case MethodFSWrite:
