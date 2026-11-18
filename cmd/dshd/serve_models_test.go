@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,25 +145,71 @@ func logModelCatalogEvidence(t *testing.T, label string, envelope map[string]any
 	t.Logf("%s %s", label, raw)
 }
 
-func waitModelCatalogTurn(t *testing.T, client *http.Client, base, sessionID string) {
+// modelCatalogOutcomes 按 journal 顺序取结局帧（turn/done 与 turn/error）。
+//
+// 会话日志是 append-only，所以"第 N 个结局帧之后的结局帧"就是"第 N+1 次 prompt 的结局"。
+func modelCatalogOutcomes(frames []any) []map[string]any {
+	out := make([]map[string]any, 0, 4)
+	for _, raw := range frames {
+		frame, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch frame["type"] {
+		case "turn/done", "turn/error":
+			out = append(out, frame)
+		}
+	}
+	return out
+}
+
+func modelCatalogHistoryFrames(t *testing.T, client *http.Client, base, sessionID string) []any {
 	t.Helper()
-	// realChainWait 是 cmd/dshd 真进程用例的统一等待预算（见 realchain_wait_test.go）。
-	// 这里原来是唯一漏改的 15s 字面量：3701b1a 把 15 处短预算收敛到 realChainWait，
-	// 但漏了本函数；CI 2 核 + -race 下同一用例实测慢 2.4 倍，15s 必然间歇性不够。
-	deadline := time.Now().Add(realChainWait)
+	history := postPluginGlue(t, client, base, "session.history",
+		map[string]any{"id": sessionID, "sinceSeq": 0, "limit": 1000}, http.StatusOK)
+	frames, ok := modelCatalogResult(t, history)["frames"].([]any)
+	if !ok {
+		t.Fatalf("session.history 没有 frames: %+v", history)
+	}
+	return frames
+}
+
+// modelCatalogOutcomeBaseline 返回"现在"有几个结局帧。发 prompt **之前**取一次，
+// 之后拿它当水位——这是本用例唯一能区分"这一轮收工了"和"前面某一轮早就收工了"的东西。
+func modelCatalogOutcomeBaseline(t *testing.T, client *http.Client, base, sessionID string) int {
+	t.Helper()
+	return len(modelCatalogOutcomes(modelCatalogHistoryFrames(t, client, base, sessionID)))
+}
+
+// waitModelCatalogOutcome 等**这一次 prompt** 的结局帧落进 journal。
+//
+// 判据从"history 里出现任意 turn/done"改成"结局帧数越过 baseline"，原因是一个真实
+// 的判据 bug（task-86，2026-11-19；与 `TestTerminalAgentOpsOverBridgeOnRealPTY` 的
+// ConPTY 就绪判据同一类）：
+//
+//	原来 `waitModelCatalogTurn` 扫全量 history，见到**任意一条** turn/done 就 return。
+//	本用例重启宿主后还会对 oldSession 再发一次 prompt——那时 history 里已经躺着两轮
+//	更早的 turn/done，于是这个"等待"立刻返回：**这一轮到底有没有跑完、有没有报错，
+//	用例根本没看**。慢机红不了、真错也绿不了，属于"判据比行为宽"。
+//
+// 现在：只有结局帧数越过 baseline 才算收工；且只检查**新出现**的结局帧里有没有
+// turn/error（旧轮次的错误不该冤枉这一轮）。超时返回 error 而不是直接 Fatal，
+// 这样"判据本身有没有效力"可以被下面的回归用例单独钉住。
+func waitModelCatalogOutcome(t *testing.T, client *http.Client, base, sessionID string, baseline int, wait time.Duration) error {
+	t.Helper()
+	deadline := time.Now().Add(wait)
 	attempts := 0
 	for {
 		attempts++
-		history := postPluginGlue(t, client, base, "session.history", map[string]any{"id": sessionID, "sinceSeq": 0, "limit": 1000}, http.StatusOK)
-		frames := modelCatalogResult(t, history)["frames"].([]any)
-		for _, raw := range frames {
-			frame := raw.(map[string]any)
+		frames := modelCatalogHistoryFrames(t, client, base, sessionID)
+		outcomes := modelCatalogOutcomes(frames)
+		for _, frame := range outcomes[min(baseline, len(outcomes)):] {
 			if frame["type"] == "turn/error" {
-				t.Fatalf("turn failed: %+v", frame)
+				return fmt.Errorf("turn failed: %+v", frame)
 			}
-			if frame["type"] == "turn/done" {
-				return
-			}
+		}
+		if len(outcomes) > baseline {
+			return nil
 		}
 		if time.Now().After(deadline) {
 			types := make([]string, 0, len(frames))
@@ -171,10 +218,17 @@ func waitModelCatalogTurn(t *testing.T, client *http.Client, base, sessionID str
 					types = append(types, fmt.Sprint(frame["type"]))
 				}
 			}
-			t.Fatalf("turn/done timeout after %s (%d polls) session=%s frameTypes=%v frames=%+v",
-				realChainWait, attempts, sessionID, types, frames)
+			return fmt.Errorf("turn/done timeout after %s (%d polls) session=%s outcomes=%d want>%d frameTypes=%v frames=%+v",
+				wait, attempts, sessionID, len(outcomes), baseline, types, frames)
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func waitModelCatalogTurn(t *testing.T, client *http.Client, base, sessionID string, baseline int) {
+	t.Helper()
+	if err := waitModelCatalogOutcome(t, client, base, sessionID, baseline, realChainWait); err != nil {
+		t.Fatalf("%v", err)
 	}
 }
 
@@ -327,6 +381,7 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 		session string
 		model   string
 	}{{oldSession, "group/deepseek-v4.1-flash-1017"}, {newSession, "model-a"}} {
+		baseline := modelCatalogOutcomeBaseline(t, clientA, serverA.base, expected.session)
 		postPluginGlue(t, clientA, serverA.base, "session.prompt", map[string]any{"id": expected.session, "text": "prove active model"}, http.StatusOK)
 		select {
 		case got := <-seenModels:
@@ -337,7 +392,7 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 		case <-time.After(realChainWait):
 			t.Fatalf("model request timeout session=%s stderr=%s", expected.session, serverA.stderr.String())
 		}
-		waitModelCatalogTurn(t, clientA, serverA.base, expected.session)
+		waitModelCatalogTurn(t, clientA, serverA.base, expected.session, baseline)
 	}
 
 	serverA.stop()
@@ -354,6 +409,7 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 		session string
 		model   string
 	}{{oldSession, "group/deepseek-v4.1-flash-1017"}, {reopenedSession, "model-a"}} {
+		baseline := modelCatalogOutcomeBaseline(t, clientA, serverA.base, expected.session)
 		postPluginGlue(t, clientA, serverA.base, "session.prompt", map[string]any{"id": expected.session, "text": "prove reopened active model"}, http.StatusOK)
 		select {
 		case got := <-seenModels:
@@ -364,7 +420,7 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 		case <-time.After(realChainWait):
 			t.Fatalf("reopened model request timeout session=%s stderr=%s", expected.session, serverA.stderr.String())
 		}
-		waitModelCatalogTurn(t, clientA, serverA.base, expected.session)
+		waitModelCatalogTurn(t, clientA, serverA.base, expected.session, baseline)
 	}
 	finalB := modelCatalogResult(t, postPluginGlue(t, clientB, serverB.base, "models.catalog.list", map[string]any{}, http.StatusOK))
 	if finalB["revision"] != float64(0) || len(finalB["models"].([]any)) != 0 || finalB["active"].(map[string]any)["id"] != "group/deepseek-v4.1-flash-1017" {
@@ -450,4 +506,49 @@ func TestModelCatalogSetActiveReachesLoopRunnerWithoutRetroactiveRewrite(t *test
 		t.Fatalf("reopened loop model=%q", model)
 	}
 	t.Log("MODEL_CATALOG_LOOP_SUMMARY OK=3 FAIL=0")
+}
+
+// TestModelCatalogOutcomeWaiterIgnoresStaleTurnDone 钉住 waitModelCatalogOutcome 的判据：
+// **"history 里有 turn/done" 不等于"这一次 prompt 收工了"**。
+//
+// 这是 task-86 里那条真实判据 bug 的回归用例：旧实现在重启宿主后再 prompt 同一会话时，
+// 因为 history 里已有上一轮的 turn/done 而**立刻返回**，于是这一轮跑没跑完、有没有报错
+// 全都没被看见。三条断言分别对应：不许提前返回 / 收工了必须返回 / 报错了必须报出来。
+func TestModelCatalogOutcomeWaiterIgnoresStaleTurnDone(t *testing.T) {
+	var mu sync.Mutex
+	var frames []any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		snapshot := append([]any(nil), frames...)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{"frames": snapshot}})
+	}))
+	t.Cleanup(server.Close)
+	client := server.Client()
+	push := func(frame map[string]any) {
+		mu.Lock()
+		frames = append(frames, frame)
+		mu.Unlock()
+	}
+
+	// ① 只有**上一轮**的 turn/done：本轮还没收工，必须判超时（而不是当成收工）。
+	push(map[string]any{"type": "turn/start", "data": map[string]any{"turn": float64(1)}})
+	push(map[string]any{"type": "turn/done", "data": map[string]any{"turn": float64(1)}})
+	if err := waitModelCatalogOutcome(t, client, server.URL, "sess-1", 1, 300*time.Millisecond); err == nil {
+		t.Fatal("把上一轮的 turn/done 当成了这一轮收工：判据比行为宽，慢机和真错都会绿")
+	}
+
+	// ② 这一轮真的收工了 ⇒ 必须返回。
+	push(map[string]any{"type": "turn/done", "data": map[string]any{"turn": float64(2)}})
+	if err := waitModelCatalogOutcome(t, client, server.URL, "sess-1", 1, 2*time.Second); err != nil {
+		t.Fatalf("这一轮已收工却报超时: %v", err)
+	}
+
+	// ③ 这一轮**失败**了 ⇒ 必须报 turn failed（不能被后面的帧盖掉）。
+	push(map[string]any{"type": "turn/error", "data": map[string]any{"turn": float64(3), "message": "boom"}})
+	err := waitModelCatalogOutcome(t, client, server.URL, "sess-1", 2, 2*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "turn failed") {
+		t.Fatalf("这一轮的 turn/error 必须报出来，实得 %v", err)
+	}
 }

@@ -74,18 +74,21 @@ func TestOutputPageWaitsForOutputAndDone(t *testing.T) {
 	requireBash(t)
 	svc := newSvc(t)
 	id := startTestJob(t, svc, `sleep 0.1; printf ok`)
+	// 判据是"**没有等满等待窗**"，不是"这台机器在 1.5s 内跑完"。
+	// 等待窗 2s → 30s、阈值 1.5s → 5s：两个数一起放大，判据的区分力不变
+	// （真的等满窗口 ⇒ 30s 远大于 5s，照样红），但对满载机器留出噪声余量。
 	start := time.Now()
-	page, err := svc.OutputPage(id, 0, 4, 2*time.Second)
+	page, err := svc.OutputPage(id, 0, 4, 30*time.Second)
 	if err != nil || page.Output != "ok" || page.NextCursor != 2 {
 		t.Fatalf("等待输出失败: %+v, %v", page, err)
 	}
 	// 新输出和结束哨兵可以分两次到；第二页必须一直等到真实 done。
-	ended, err := svc.OutputPage(id, page.NextCursor, 4, 2*time.Second)
+	ended, err := svc.OutputPage(id, page.NextCursor, 4, 30*time.Second)
 	if err != nil || !ended.Done || ended.ExitCode != 0 || ended.Total != 2 || ended.NextCursor != 2 {
 		t.Fatalf("等待 done 失败: %+v, %v", ended, err)
 	}
-	if time.Since(start) > 1500*time.Millisecond {
-		t.Fatalf("结束后不应继续等满 wait: %s", time.Since(start))
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("结束后不应继续等满 wait: %s", elapsed)
 	}
 }
 
@@ -304,6 +307,12 @@ func record(dir, mode string) {
 func main() {
  if len(os.Args) != 3 { panic("mode dir required") }
  mode, dir := os.Args[1], os.Args[2]
+ // DSHBASH_HELPER_DELAY_MS 是**故障注入**旋钮，默认 0（不设 = 与以前逐字节一致）：
+ // 用它模拟"2 核 CI runner 上这个 helper 要好几秒才变得可观察"。
+ // 有了它，realProcWait 的修复可以被**确定性地**验：同样的延迟下，旧预算红、新预算绿。
+ if ms, err := strconv.Atoi(os.Getenv("DSHBASH_HELPER_DELAY_MS")); err == nil && ms > 0 {
+  time.Sleep(time.Duration(ms) * time.Millisecond)
+ }
  if mode == "parent" {
   c := exec.Command(os.Args[0], "child", dir)
   if err := c.Start(); err != nil { panic(err) }
@@ -340,10 +349,30 @@ type recordedPID struct {
 	name     string
 }
 
+// realProcWait 是本包**真进程**用例的统一等待预算：等"某个真进程出现了/消失了"。
+//
+// # 为什么需要它（task-86，2026-11-19）
+//
+// 这里原本是写死的 `5 * time.Second`：本机 16 核上一直够用，于是看起来没问题。
+// 但 CI runner 只有 2 核，还套着 `-race`，测试自己又要 `go build` 一个 helper 再起 bash
+// 子进程；未修改的树上实测就红过：
+//
+//	--- FAIL: TestRealHelperProcessTreeStopAndDispose/stop (5.06s)
+//	    process_tree_test.go:391: 等待 helper parent PID/身份超时
+//
+// 5.06s —— 正好是预算用完的那一刻，也就是"机器比预算慢"而不是"产品没把进程起来"。
+// 这与 `cmd/dshd` 的 `realChainWait` 是同一类问题：**超时是环境容差，不是行为契约**。
+//
+// # 它不降低任何断言强度
+//
+// 事件没发生照样 fail-closed（进程没起来 / 没退出都还是红），只是给慢机器更多时间；
+// 每个用例的**内容**断言一条都没动。要调就调这一处，别再散写字面量。
+const realProcWait = 60 * time.Second
+
 func recordHelperPID(t *testing.T, dir, name string) recordedPID {
 	t.Helper()
 	path := filepath.Join(dir, name+".pid")
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(realProcWait)
 	for {
 		if b, err := os.ReadFile(path); err == nil {
 			pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
@@ -357,7 +386,11 @@ func recordHelperPID(t *testing.T, dir, name string) recordedPID {
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("等待 helper %s PID/身份超时", name)
+			// 失败时把"卡在哪一步"说清楚：是 pid 文件根本没出现（helper 没起来），
+			// 还是文件在但进程身份查不到（起来了但立刻没了）。
+			_, statErr := os.Stat(path)
+			t.Fatalf("等待 helper %s PID/身份超时（预算 %v，pid 文件 %s：%v）",
+				name, realProcWait, path, statErr)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -365,7 +398,7 @@ func recordHelperPID(t *testing.T, dir, name string) recordedPID {
 
 func waitOwnedProcessExit(t *testing.T, r recordedPID) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(realProcWait)
 	for {
 		current, err := queryProcessIdentity(r.pid)
 		if err != nil || !current.Active || current.CreationID != r.identity.CreationID {
@@ -373,7 +406,7 @@ func waitOwnedProcessExit(t *testing.T, r recordedPID) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("归属进程仍存活: name=%s pid=%d current=%+v", r.name, r.pid, current)
+			t.Fatalf("归属进程仍存活（等了 %v）: name=%s pid=%d current=%+v", realProcWait, r.name, r.pid, current)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

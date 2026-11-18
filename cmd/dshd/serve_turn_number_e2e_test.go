@@ -266,7 +266,12 @@ func TestServeNumericTurnIsSessionScopedAcrossPromptsRestartAndSessions(t *testi
 
 	// ⑤ 宿主重启后再发一次：继续递增（3 -> 4），不是回到 1。
 	//    这是"不能只靠内存计数器"的判据：轮次只能从 append-only 的 v4 日志恢复。
-	waitTitleSettled(t, client, server.base, sidB) // 别在标题写手持锁时 kill（见该函数注释）
+	// **两个会话都要等**：kick 的是同一个宿主进程，而 A 在 ① 里发过 3 次 prompt、B 发过
+	// 1 次，两边的自动标题写手都可能还在跑。只等 B，等于赌"A 的标题早写完了"——满载时
+	// 赌输就是重启后 A 的第一次 prompt 撞上残留写锁（判据只覆盖了一部分写者，
+	// 与 ConPTY 把 `ESC[?9001h` 当成"有输出"是同一类错：就绪判据看得太窄）。
+	waitTitleSettled(t, client, server.base, sidA) // 别在标题写手持锁时 kill（见该函数注释）
+	waitTitleSettled(t, client, server.base, sidB)
 	server.stop()
 	server = start()
 	client = connectPluginGlueServer(t, server)
