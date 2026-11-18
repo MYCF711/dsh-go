@@ -83,9 +83,15 @@ func TestValidation(t *testing.T) {
 // 见 `internal/spi/subagent.go` 的 SubagentRequest.Seed）。它在 spawn 路径上
 // 恒为 nil，所以这里就是 `"Seed":null`——**不是**把断言放宽成"包含某几段"，
 // 而是把新增字段写进同一份 golden：除了它以外一个字节都不许变。
+//
+// 2026-11-18（子代理模型选择）：末尾多了 `"Provider":null,"Model":null,
+// "ReasoningEffort":null`——同样是**显式契约变更**：官方 `subagent` 工具在
+// modelSelection=true（rc.2 shipped standard preset）时发布三个可选字段，
+// 未出现时必须保持 nil（官方判据是"字段是否出现"）。除新增三格外一个字节都不许变。
 const requestGolden = `{"Prompt":"自包含的任务描述","Description":"查一件事",` +
 	`"Cwd":"","InheritSession":"","Inherit":"","Seed":null,` +
-	`"Continuable":false,"ChildSessionID":"","ParentSessionID":"","AgentID":""}`
+	`"Continuable":false,"ChildSessionID":"","ParentSessionID":"","AgentID":"",` +
+	`"Provider":null,"Model":null,"ReasoningEffort":null}`
 
 // TestContinuableOmittedKeepsRequestShapeByteForByte 钉住默认关闭。
 //
@@ -180,5 +186,39 @@ func TestChildFailurePropagates(t *testing.T) {
 	}
 	if !strings.Contains(res.Hint, "自己直接做") {
 		t.Fatalf("Hint 要给退路: %q", res.Hint)
+	}
+}
+
+// 官方三个显式选择字段：schema 必须发布；给了就原样透传到宿主（工具不做授权判断）。
+func TestModelSelectionFieldsPassThrough(t *testing.T) {
+	var schemaDoc struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &schemaDoc); err != nil {
+		t.Fatalf("schema 不是合法 JSON: %v", err)
+	}
+	for _, name := range []string{"provider", "model", "reasoning_effort"} {
+		if _, ok := schemaDoc.Properties[name]; !ok {
+			t.Fatalf("schema 缺少官方字段 %q（modelSelection=true 时必须发布）", name)
+		}
+	}
+	svc := &fakeRunner{res: spi.SubagentResult{Text: "好", Steps: 1}}
+	tool := &Tool{svc: svc}
+	if _, err := tool.Exec(context.Background(), json.RawMessage(
+		`{"description":"查一件事","prompt":"自包含的任务描述","provider":"gateway","model":"m1","reasoning_effort":"high"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if svc.got.Provider == nil || *svc.got.Provider != "gateway" ||
+		svc.got.Model == nil || *svc.got.Model != "m1" ||
+		svc.got.ReasoningEffort == nil || *svc.got.ReasoningEffort != "high" {
+		t.Fatalf("三个字段没透传: %#v", svc.got)
+	}
+	// 省略时保持 nil：官方判据是"字段是否出现"，nil 与空串是两种错误。
+	if _, err := tool.Exec(context.Background(),
+		json.RawMessage(`{"description":"查一件事","prompt":"自包含的任务描述"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if svc.got.Provider != nil || svc.got.Model != nil || svc.got.ReasoningEffort != nil {
+		t.Fatalf("省略时必须保持 nil: %#v", svc.got)
 	}
 }

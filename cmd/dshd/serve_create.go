@@ -98,9 +98,21 @@ func serveCreateWithID(home, cwd, id, preset string) error {
 		// 宁可响亮失败，也不拿 O_TRUNC 覆盖一份真会话。
 		return fmt.Errorf("会话 %q 已存在于 %s，拒绝覆盖", id, path)
 	}
+	// 官方 `agent/created`（dsh-tool-subagent/src/model-selection-settings.ts:54-76）：
+	// GUI 的 session.create 就是"新顶层会话"的唯一创建点，授权必须在第一次模型请求
+	// 之前写进这份日志。设置先校验、再建会话：反过来会在设置非法（enabled 但清单为空）
+	// 时留下一份没有授权记录的空会话。
+	selection, err := subagentModelSelectionFromSettings(home)
+	if err != nil {
+		return err
+	}
 	lg, err := session.CreateSession(home, v4.NormalizeCwd(cwd), id, preset)
 	if err != nil {
 		return err
+	}
+	if perr := appendSubagentModelSelectionPolicyOnCreate(lg, selection); perr != nil {
+		lg.Close()
+		return perr
 	}
 	// 先关再返回：Close 会刷盘并放掉写锁。不关的话紧接着的 session.load
 	// 可能读到还没落完的帧（表现为"刚建的会话是空的"）。

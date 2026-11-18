@@ -172,6 +172,9 @@ func TestWriteToolsDeclareCaps(t *testing.T) {
 		// 派子代理：用的是同一张工具表与同一个审批守卫，能力不放大。
 		// 它自己不算"写盘/起进程/联网"，那些由被派出去的工具各自声明。
 		"subagent": {},
+		// 官方 dsh-tool-subagent 的 `list_subagent_models`：只读模型目录与本会话
+		// durable 授权，不写盘、不起进程、不联网。
+		"list_subagent_models": {},
 		// 编排工具自己不写盘、不起进程：真正干活的是子调用，
 		// 而子调用走的是同一套受管通道（审批、闸门、spill 全都还在）。
 		"workflow": {},
@@ -272,6 +275,9 @@ var officialVerbatimDescriptions = map[string]string{
 	// rc.2 官方 `dsh-tool-terminal` 的 `terminal_send`（152 字，逐字；官方在
 	// `enableRunInBackground:false` 分支下就是这一句，见 modules/tool/terminalpanel/interact.go 的文件头）。
 	"terminal_send": "官方 tool-catalog.md:1459-1460（152 字，逐字）",
+	// 官方 `dsh-tool-subagent` 的 `list_subagent_models`（官方原文 469 字，逐字；
+	// `dsh-tool-subagent/src/list-models.ts:111-115`）。
+	"list_subagent_models": "官方 list-models.ts:111-115（逐字）",
 }
 
 // TestEveryToolHasDescription 是模型体验的底线：没有描述的工具模型只能猜什么时候用。

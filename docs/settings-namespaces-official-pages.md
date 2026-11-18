@@ -72,16 +72,29 @@
    `timeoutMs` 接到 ctx 超时会把长命令在 120s 掐掉；`maxOutputBytes` 接到 retention
    会把 1MiB 运行窗口改成 64KB。所以两条字段**可读写、有官方默认值、能往返，但不改变
    行为**。
-2. **`subagent-model-selection-settings` 没有消费方（两个字段都是）。**
-   官方语义是"新会话按模型路由授权子代理"：`agent/created` 时把允许的
-   `provider/model` 写成会话投影 `subagent/model-selection-policy`，模型之后可在委派
-   时点名路由。本仓委派是同步 `subRunner`，子代理固定用父进程的同一个模型
-   （`cmd/dshd/subagent.go` 的 `model string`，工具 schema 里没有 provider/model 参数），
-   也没有"按会话授权路由"的投影通道。`enabled` 默认 **false**（与官方 shipped 组合
-   一致：官方就是默认关闭），写 true 会真的存进去，但不会有行为改变。
-   `allowedModels` 是**对象数组**，L1 的 `sections[].fields` 只有三种标量，所以它只发
-   schema（官方 envelope 有它）、语义校验按官方 `assertAllowedModelRoutes` 做
-   （非空 provider/model、路由不重复），但不出现在 sections 投影里。
+2. **`subagent-model-selection-settings`（2026-11-18 已闭合，四部分全部落宿主）。**
+   官方语义是"新会话按模型路由授权子代理"，四部分与落点：
+   - **消费方**（`dsh-tool-subagent/src/model-selection-settings.ts:54-76`）→
+     `cmd/dshd/subagent_model_selection.go`：读设置（严格：文档损坏/形状不对/
+     `enabled` 但清单为空都响亮失败），在**新顶层会话**创建时写 durable
+     `subagent/model-selection-policy`（serve 的 `session.create`、`dshd run`
+     新会话、ACP 三个创建点），子会话由
+     `internal/agent/child_session.go` 从父会话继承；
+   - **投影**（`model-selection-state.ts:33-47`，host-only、无 wire view）→
+     `internal/session/subagent_model_selection.go` 的 `SubagentModelSelectionUnit`
+     已注册进 `DefaultProjectionRegistry`（key `subagentModelSelectionPolicy`、
+     stateVersion 1、只认第一条策略事件）；
+   - **委派校验**（`model-selection.ts:100-150`）→ `cmd/dshd/subagent_route.go`：
+     provider/model 成对、空串、`reasoning_effort` 依赖两字段、无策略时只能点名
+     父路由、有策略时精确匹配清单，错误文案逐字官方；`subRunner` 按解析后的路由
+     建客户端/换模型/带推理档，不再是"固定父模型"；
+   - **发现工具**（`list-models.ts:100-135`）→ `cmd/dshd/subagent_models_tool.go`
+     的 `list_subagent_models`（参数/输出/错误分支按官方，provider 身份 = 目录
+     `owned_by` 缺省 `gateway`）。
+   `allowedModels` 是对象数组，L1 的 `sections[].fields` 只有三种标量，所以它只发
+   schema、不出现在 sections 投影里（官方 envelope 有它）；语义校验
+   （`assertAllowedModelRoutes`：非空 provider/model、路由不重复）仍在写路径与读路径
+   各跑一次。
 3. **`web-search-deepseek.apiKey` / `apiKeyEnv` 没有真正的凭据解析器。**
    官方按 credential-ref 名字去凭据服务取值；本仓
    `modules/search/deepseek.go` 固定读 `DEEPSEEK_API_KEY` / `DSHD_SEARCH_API_KEY`

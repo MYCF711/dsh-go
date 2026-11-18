@@ -29,6 +29,10 @@ const (
 	toolDeadlineKey ctxKey = 3
 	eventSinkKey    ctxKey = 4
 	toolCallIDKey   ctxKey = 5
+	// agentModelKey 是"当前这一步的调用方 agent 实际使用的模型 id"：
+	// 子代理模型选择的授权判定（父路由）与 `list_subagent_models` 的
+	// "没有 durable 策略时只能点名父路由"都只认它。
+	agentModelKey ctxKey = 6
 	// subagentActivationKey 不在这里：它是服务键（kernel.Key），
 	// 只在装配期由模块相遇，不走每轮 ctx。
 )
@@ -180,5 +184,31 @@ func EventSinkFrom(ctx context.Context) EventSink {
 		return nil
 	}
 	s, _ := ctx.Value(eventSinkKey).(EventSink)
+	return s
+}
+
+// WithAgentModel 把"正在执行这一步的 agent 实际用的模型 id"绑到 ctx 上。
+//
+// 为什么需要它：官方 `list_subagent_models` 在会话没有 durable 授权策略时，
+// 把可选路由**限制在调用方父路由**（dsh-tool-subagent/src/list-models.ts:50-56
+// 的 `parentAgentOptionsForDelegation(exec.agent)`）。本仓的工具只拿 ctx，
+// 拿不到「父 agent 的 options」；而 `dshd run` 的进程模型（每轮一个新进程）
+// 是那份 options 的真实来源。宿主在装配两个入口（run / acp）时把当轮模型
+// 绑一次；子代理再派子代理时由 subRunner 按**解析后的子路由**换掉这一格
+// （否则嵌套在子会话里的发现工具会报父路由的模型）。
+func WithAgentModel(ctx context.Context, model string) context.Context {
+	if ctx == nil || model == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, agentModelKey, model)
+}
+
+// AgentModelFrom 取当前 agent 模型；没有就返回空串（调用方必须响亮失败，
+// 不许猜一个模型去当父路由）。
+func AgentModelFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	s, _ := ctx.Value(agentModelKey).(string)
 	return s
 }

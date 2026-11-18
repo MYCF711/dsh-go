@@ -340,6 +340,14 @@ func (s ChildSpawn) Spawn(opts ChildSpawnOptions) (ChildRecord, error) {
 		frame["agentId"] = agentID
 	}
 	appendErr := lg.Append(EventChildSpawn, frame)
+	// 官方 `agent/created` 的子会话分支（dsh-tool-subagent/src/model-selection-settings.ts:64-69）：
+	// 子代理的授权面**继承父会话的 durable 授权**（父会话没有这条策略就不写，
+	// 于是子代理的显式选择只能点名它自己的父路由）。写在父子帧之后、catalog/种子之前：
+	// 帧永远是这份日志的第一条事实（既有读者按它认父子关系），授权紧随其后、
+	// 在这次委派产生任何对话内容之前。
+	if appendErr == nil {
+		appendErr = session.InheritSubagentModelSelectionPolicy(lg, home, parent)
+	}
 	// rc.2：官方 `subagent/catalog` v3（带 `name`）——前置不兼容已由 Lead 裁决
 	// （见 `internal/session/subagent_catalog.go` 的常量块注释）。
 	//

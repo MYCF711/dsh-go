@@ -29,6 +29,7 @@ func TestCordisBuiltinRuntimeContract(t *testing.T) {
 		"schedule_create", "schedule_list", "schedule_view", "schedule_edit",
 		"create_goal", "get_goal", "update_goal", "exit_plan_mode",
 		"subagent", "subagent_fork", "workflow", "ask_user_question", "todo_write",
+		"list_subagent_models",
 		"web_search", "web_fetch", "skill", "present", "plugin", "plugin_manager",
 	}
 	if runtime.GOOS == "windows" {

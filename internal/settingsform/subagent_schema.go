@@ -52,21 +52,22 @@ package settingsform
 //     `subagentGate`（cmd/dshd/subagent_gate.go:31-37 的官方默认 8）。
 //   - `subagent.maxDepth` → cmd/dshd/subagent.go 的 `maxDepth`（原为硬编码 1，
 //     正好等于官方默认值）。
-//   - `subagent-model-selection-settings` → **本仓没有消费方**（登记缺口，见下）。
+//   - `subagent-model-selection-settings` → **四部分全部落地（2026-11-18）**：
+//     消费方 `cmd/dshd/subagent_model_selection.go`（新顶层会话创建时把授权写成
+//     durable `subagent/model-selection-policy`，子会话继承父会话）；投影
+//     `internal/session/subagent_model_selection.go` 的 `SubagentModelSelectionUnit`
+//     （官方 host-only 投影，无 wire view）；委派校验 `cmd/dshd/subagent_route.go`
+//     （provider/model 成对、白名单、错误文案逐字官方，`subRunner` 按解析后的
+//     路由换模型/客户端/推理档）；发现工具 `cmd/dshd/subagent_models_tool.go`
+//     的 `list_subagent_models`。
 //
-// # 缺口（如实登记，不造假的消费者）
-//
-// `subagent-model-selection-settings` 的官方语义是"新会话可以**按模型路由**授权
-// 子代理"：`dsh-tool-subagent/src/model-selection-settings.ts` 在
-// `agent/created` 时把允许的 `provider/model` 路由写成会话投影
-// `subagent/model-selection-policy`，模型之后就能在委派时点名 `provider`+`model`。
-// 本仓的委派是**同步**的 `subRunner`，子代理固定用父进程的同一个模型
-// （cmd/dshd/subagent.go:33 `model string`，工具 schema 里根本没有 provider/model
-// 参数），也没有"按会话授权路由"的投影通道。所以这一条**只做可读写 + 官方默认值
-// （enabled 默认 false，与官方 shipped 组合一致）+ 往返一致**，写进去的值会被下一次
-// describe 读回来，但不会有任何行为改变——这是缺口本身，不是静默成功被藏起来：
-// 缺口同时登记进 docs/host-stable-gap-register 与交付报告。
-
+// `enabled` 默认 false（与官方 shipped 组合一致：`dsh-base/cordis.patch.yml`
+// 的 tool-subagent 没有开 modelSelection；rc.2 的 web standard/cordis preset
+// 才显式开）。写 true 会在**新会话**上真实生效；已存在的会话没有 durable
+// 策略，显式选择只能点名父路由——这也是官方语义（策略在 agent 创建时写）。
+// `allowedModels` 是对象数组，L1 的 sections 表单装不下（FieldSpec 只有三种
+// 标量），所以只发 schema、不出现在 sections 投影里；写路径与读路径都按官方
+// `assertAllowedModelRoutes` 校验（非空 provider/model、路由不重复）。
 const (
 	// NamespaceSubagent 是官方委派插件的设置命名空间（逐字）。
 	NamespaceSubagent = "subagent"

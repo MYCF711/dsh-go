@@ -306,6 +306,9 @@ func TestProjectionRestoreFloor(t *testing.T) {
 			"active": false, "wanted": nil, "running": nil,
 			"activeAtLastHeader": nil, "entered": false,
 		}},
+		// 官方 subagentModelSelectionPolicy（stateVersion 1，host-only）：
+		// 没有 durable 授权时状态就是 null（官方 init `() => null`）。
+		ProjectionKeySubagentModelSelectionPolicy: {Ver: 1, Seq: 2, Val: nil},
 	}
 	// 最低可用 watermark = 2 → 尾部读从 2 开始（那一格是锚点：Restore 会
 	// 把它当已折叠事件跳过，但它证明日志还延伸到这里）。
@@ -406,6 +409,10 @@ func TestProjectionUnitsAreOfficialShapes(t *testing.T) {
 	// 本版新增 plan（官方 stateVersion 4）：plan/mode 事件是 v4 词汇表成员，
 	// 加上宿主两个计划模式工具 enter_plan_mode / exit_plan_mode 的
 	// tool/call + tool/result 配对，是宿主能折出真值的键。
+	// 再新增 subagentModelSelectionPolicy（官方 stateVersion 1，
+	// dsh-tool-subagent/src/model-selection-state.ts:33-47）：它是**host-only**
+	// 投影（没有 wire view），事件来源是宿主真的会写的 durable
+	// `subagent/model-selection-policy`。
 	want := []string{
 		ProjectionKeySessionListMetadata,
 		ProjectionKeyTitle,
@@ -414,6 +421,7 @@ func TestProjectionUnitsAreOfficialShapes(t *testing.T) {
 		ProjectionKeySessionStats,
 		ProjectionKeyTokenUsage,
 		ProjectionKeyPlan,
+		ProjectionKeySubagentModelSelectionPolicy,
 	}
 	if len(keys) != len(want) {
 		t.Fatalf("units = %v，期望 %v", keys, want)
