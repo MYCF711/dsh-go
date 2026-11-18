@@ -805,7 +805,12 @@ func cmdServe(args []string) error {
 			out, next, dead := t.Output(since)
 			return transport.TerminalOutput{Output: string(out), Next: next, Dead: dead}, nil
 		},
-		Addr: *addr,
+		// terminal.resize：官方 uplink 的 resize 只在 mux 面（见
+		// handlers_job_terminal_official.go:1300），本宿主没有 mux 客户端，
+		// 所以和 terminal.input 一样在 HTTP 侧补一条回落投影。校验与真实执行
+		// 都在 serveTerminalResizeHook 里（测试与这里共用同一份接线）。
+		TerminalResize: serveTerminalResizeHook(officialJT),
+		Addr:           *addr,
 		// H14：把序号域交给 server——WS 推送与 session.history 必须读同一份，
 		// 否则客户端补洞时补到的是另一个 seq 域的数据。
 		Journals: journals,

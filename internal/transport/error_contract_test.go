@@ -245,6 +245,9 @@ func failingOptions(j *Journals) Options {
 		TerminalOutput: func(id string, since int) (TerminalOutput, error) {
 			return TerminalOutput{}, errors.New("这个终端已经关了")
 		},
+		TerminalResize: func(sessionID, id string, cols, rows int) error {
+			return errors.New("这个终端已经关了")
+		},
 		FSRead: func(path string) (FSContent, error) {
 			if path == "/" {
 				return FSContent{}, hostErr
@@ -339,6 +342,7 @@ func TestEveryHTTPErrorHasFourFieldEnvelope(t *testing.T) {
 		{"schedule.clear 存储失败", "", "/api/schedule.clear", `{}`},
 		{"terminal.input 终端不存在", "", "/api/terminal.input", `{"id":"nope","data":"ls"}`},
 		{"terminal.output 终端不存在", "", "/api/terminal.output", `{"id":"nope"}`},
+		{"terminal.resize 终端不存在", "", "/api/terminal.resize", `{"sessionId":"scan-session","id":"nope","cols":80,"rows":24}`},
 		{"config.set values 为空", "", "/api/config.set", `{"values":{}}`},
 	}
 

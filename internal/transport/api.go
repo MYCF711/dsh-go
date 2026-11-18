@@ -85,10 +85,21 @@ const (
 	MethodTerminalOpen      Method = "terminal.open"
 	MethodTerminalInput     Method = "terminal.input"
 	MethodTerminalOutput    Method = "terminal.output"
-	MethodFSRead            Method = "fs.read"
-	MethodFSWrite           Method = "fs.write"
-	MethodConfigGet         Method = "config.get"
-	MethodConfigSet         Method = "config.set"
+	// MethodTerminalResize 是 `terminal.input` 那条 HTTP 回落投影的**同型补全**。
+	//
+	// 官方 uplink 的 write 与 resize **都不在 HTTP 面**（原文见
+	// `handlers_job_terminal_official.go:1300`）：官方客户端走 L2 mux 的 attach 帧机，
+	// resize 是 `{type:'resize', sequence, cols, rows}`。本宿主**没有** officialwire
+	// mux 客户端（那是另一整块 wire），所以 resize 和 write 一样在 HTTP 侧补一条
+	// 回落投影，让界面在没有 mux 时也能改 PTY 尺寸。
+	//
+	// 它是 additive 扩展，**不进入 canonical 25**；也不要因为有了它就把
+	// 「mux 上行已完成」写成事实——这条投影只覆盖 HTTP 这一面。
+	MethodTerminalResize Method = "terminal.resize"
+	MethodFSRead         Method = "fs.read"
+	MethodFSWrite        Method = "fs.write"
+	MethodConfigGet      Method = "config.get"
+	MethodConfigSet      Method = "config.set"
 	// 官方 ConfigForm 的 describe/mutate 与宿主显式表单入口都是 additive
 	// 扩展，绝不加入 SessionMethods 的 canonical 25。
 	MethodSettingsDescribe     Method = "settings.describe"
@@ -109,6 +120,15 @@ const (
 	MethodAttachmentPut Method = "attachment.put"
 	MethodAttachmentGet Method = "attachment.get"
 )
+
+// TerminalResizeMethods 是 `terminal.resize` 的独立 additive 扩展面。
+//
+// 为什么不并进 SessionMethods：canonical 25 的方法集、顺序与快照都被
+// `testdata/api.snapshot.json` 钉住，加一条就等于宣布"官方那 25 条变了"。
+// resize 是对既有 `terminal.input` 回落投影的补全，只新增，不改既有面。
+func TerminalResizeMethods() []Method {
+	return []Method{MethodTerminalResize}
+}
 
 // AttachmentMethods 是本地附件的独立扩展面，绝不加入 canonical 25。
 func AttachmentMethods() []Method {
