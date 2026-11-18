@@ -28,6 +28,17 @@ type Log struct {
 
 // CreateSession 在 <home>/sessions/<projectKey>/<sessionId>/ 下新建会话文件。
 func CreateSession(home, cwd, id, agentPreset string) (*Log, error) {
+	return createSession(home, cwd, id, agentPreset, time.Now().UnixMilli())
+}
+
+// createSession 是 CreateSession 的实际实现，创建时间由调用方给。
+//
+// 单独拆出来的原因只有一条：**导入历史**（`chatimport`）的 header.createdAt
+// 必须是导出里第一条事件的时间，而不是"现在"。官方导入路径同样显式传
+// `createdAt`（`dsh-deepseek-chat-import/src/importer.ts:562` 的
+// `{version, id, createdAt: conversion.createdAt, cwd, isSeeded: false}`），
+// 于是导入的会话在侧栏里按它原本发生的时间排序，而不是全挤在导入那一刻。
+func createSession(home, cwd, id, agentPreset string, createdAtMS int64) (*Log, error) {
 	if id == "" {
 		return nil, fmt.Errorf("session id 不能为空")
 	}
@@ -47,7 +58,7 @@ func CreateSession(home, cwd, id, agentPreset string) (*Log, error) {
 		Type:            "session",
 		Version:         4,
 		ID:              id,
-		CreatedAt:       time.Now().UnixMilli(),
+		CreatedAt:       createdAtMS,
 		Cwd:             cwd,
 		IsSeeded:        false,
 		DelegationDepth: 0,
