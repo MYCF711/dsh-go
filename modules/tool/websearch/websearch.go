@@ -46,16 +46,14 @@ const (
 	//
 	// rc.2 起它是**组合级**的：同一段注释从 rc.1 的「this shipped DeepSeek route
 	// gets 60s」改成「This composition gives web_search 60s whichever provider
-	// serves it」（rc.2 `cordis.patch.yml:479-480`，rc.1 在 `:454-466`）。
+	// serves it」（rc.2 `cordis.patch.yml:479-480`，rc.1 在 `:454-466`；rc.5 未变）。
 	// 官方 provider-neutral 的工具默认仍是 30000ms（`dsh-tool-web/src/index.ts:53,65`），
 	// 那是"只装 tool-web、不套基础组合"的场景，用 Tool.Budget 显式表达。
 	baseBundleSearchBudget = 60 * time.Second
 
-	// baseBundleSearchProvider 是基础组合钉死的搜索 provider id。
-	// rc.2 改成 `deepseek-search-api`（rc.2 `cordis.patch.yml:487`）；rc.1 是
-	// `deepseek-official`（rc.1 `:470`）。60s 预算已不再按它判定，这个常量保留给
-	// `web.listProviders` 报"基线默认 provider"与诊断措辞用。
-	baseBundleSearchProvider = "deepseek-search-api"
+	// 基础组合**不固定**搜索 provider（rc.5 删掉了 `searchProvider` 那行；判据与两个
+	// provider id 在 `internal/spi/search_route.go`）。本包因此没有"基线默认 provider"
+	// 这个常量：未配置时由接缝按会话模型路由选（`spi.WebProviders.SetSearchRoute`）。
 
 	// defaultSummaryMaxChars 是官方 `tool.web.searchSummaryMaxChars` 默认值：
 	// **每个来源**的摘要上限，省略号算在 800 里面。

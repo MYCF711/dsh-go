@@ -40,19 +40,39 @@ func TestOfficialShape(t *testing.T) {
 		}
 	}
 	if list.Limits == nil || list.Limits.MaxQueries != 10 || list.Limits.MaxResults != 10 {
-		t.Fatalf("limits 必须是 rc.2 生效值 10/10: %+v", list.Limits)
+		t.Fatalf("limits 必须是生效值 10/10（rc.2 起、rc.5 未变）: %+v", list.Limits)
 	}
 	if list.Limits.SearchTimeoutMS != 60000 {
 		t.Fatalf("基础组合预算该是 60000ms；实际 %d", list.Limits.SearchTimeoutMS)
 	}
-	if list.Baseline == nil || list.Baseline.Search != "deepseek-search-api" || !list.Baseline.SearchRegistered {
-		t.Fatalf("baseline 必须报 rc.2 默认且已注册: %+v", list.Baseline)
+	if list.Baseline == nil || list.Baseline.Search != "" || list.Baseline.SearchRegistered {
+		t.Fatalf("rc.5 基础组合不固定搜索 provider，baseline.search 必须为空: %+v", list.Baseline)
+	}
+	if list.Baseline.Fetch != "http" || !list.Baseline.FetchRegistered {
+		t.Fatalf("rc.5 抓取侧仍固定 http: %+v", list.Baseline)
 	}
 	if list.Resolution == nil || list.Resolution.Search.Selected != "deepseek-search-api" {
-		t.Fatalf("resolution 必须报真实选择（rc.2 默认真生效）: %+v", list.Resolution)
+		t.Fatalf("没有模型请求时该选 deepseek-search-api: %+v", list.Resolution)
 	}
-	if list.Resolution.Search.Source != "baseline" {
-		t.Fatalf("默认来源该是 rc.2 基础组合（baseline）: %+v", list.Resolution.Search)
+	if list.Resolution.Search.Source != "auto" {
+		t.Fatalf("未钉死时来源是 auto（按模型路由选，rc.5）: %+v", list.Resolution.Search)
+	}
+	if list.Resolution.Search.LLMProvider != "" ||
+		list.Resolution.Search.Preferred != "deepseek-search-api" {
+		t.Fatalf("没有模型请求：路由为空、优先项是 deepseek-search-api: %+v", list.Resolution.Search)
+	}
+	// rc.5：DeepSeek 模型路由上优先项与选中都翻成 deepseek-official。
+	deepSeekRoute, err := ProviderAPI(envMap(map[string]string{
+		"DEEPSEEK_API_KEY":      "sk-test",
+		"DSHD_WEB_LLM_PROVIDER": "deepseek-account",
+	})).ListOfficialWebProviders(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deepSeekRoute.Resolution.Search.LLMProvider != "deepseek-account" ||
+		deepSeekRoute.Resolution.Search.Preferred != "deepseek-official" ||
+		deepSeekRoute.Resolution.Search.Selected != "deepseek-official" {
+		t.Fatalf("DeepSeek 路由上该报 deepseek-official: %+v", deepSeekRoute.Resolution.Search)
 	}
 	if len(list.Credentials) == 0 {
 		t.Fatal("credentials 必须列出真实配置状态")
@@ -171,8 +191,9 @@ func TestOfficialFromCatalog(t *testing.T) {
 	}
 }
 
-// web.listProviders 的真实投影（E2 报告取证）：两个 rc.2 DeepSeek API provider 必须
-// 出现在清单里，且默认/选中落在官方基础组合的默认值上（cordis.patch.yml:487-488）。
+// web.listProviders 的真实投影（E2 报告取证；rc.5 更新）：两个 DeepSeek API provider
+// 必须出现在清单里，且默认/选中按 rc.5 的模型路由规则给出（没有模型请求 →
+// deepseek-search-api；抓取仍固定 http，cordis.patch.yml:488-491）。
 func TestOfficialListProvidersEvidence(t *testing.T) {
 	env := map[string]string{"DEEPSEEK_API_KEY": "sk-test"}
 	list, err := ProviderAPI(func(name string) string { return env[name] }).
@@ -199,10 +220,16 @@ func TestOfficialListProvidersEvidence(t *testing.T) {
 	if strings.Join(fetchIDs, ",") != "deepseek-fetch-api,http" {
 		t.Fatalf("抓取清单不对: %v", fetchIDs)
 	}
-	if !list.Baseline.SearchRegistered || !list.Baseline.FetchRegistered {
-		t.Fatalf("两个基线默认 provider 都必须已注册: %+v", list.Baseline)
+	if list.Baseline.Search != "" || list.Baseline.SearchRegistered {
+		t.Fatalf("rc.5 搜索侧没有基线默认 provider: %+v", list.Baseline)
+	}
+	if list.Baseline.Fetch != "http" || !list.Baseline.FetchRegistered {
+		t.Fatalf("抓取侧固定 http 必须已注册: %+v", list.Baseline)
 	}
 	if list.Resolution.Search.Selected != "deepseek-search-api" || list.Resolution.Fetch.Selected != "http" {
-		t.Fatalf("默认 provider 必须真生效: %+v", list.Resolution)
+		t.Fatalf("默认 provider 必须真生效（rc.5 无模型请求 → search-api）: %+v", list.Resolution)
+	}
+	if list.Resolution.Search.Preferred != "deepseek-search-api" {
+		t.Fatalf("rc.5 优先项必须透出: %+v", list.Resolution.Search)
 	}
 }

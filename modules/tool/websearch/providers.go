@@ -10,14 +10,15 @@ package websearch
 // 构造函数与注册表达式，因此投影与真值同源；任何一侧改了装配，这里跟着变，
 // 不存在"两套清单互相漂"的问题（`TestRC2CatalogDerivesFromRealComposition` 钉住）。
 //
-// 官方契约（只读）：
-//   - `dsh-web/src/index.ts:146-157` `listProviders(): WebProviderList`
-//   - `dsh-web/src/types.ts:196-217` `WebProviderInfo` / `WebProviderList`
-//   - `dsh-web/src/index.ts:246-252` 没声明的 title/description **缺席**
-//   - `dsh-web/src/index.ts:274-297` 选择规则与 `WEB_PROVIDER_*` 错误码
+// 官方契约（只读，rc.5 解包）：
+//   - `dsh-web/src/index.ts:168-180` `listProviders(): WebProviderList`
+//   - `dsh-web/src/types.ts:179-197` `WebProviderInfo` / `WebProviderList`
+//   - `dsh-web/src/index.ts:275-282` 没声明的 title/description **缺席**
+//   - `dsh-web/src/index.ts:229-241` 按模型路由的搜索 provider 选择（rc.5）
+//   - `dsh-web/src/index.ts:305-328` 选择规则与 `WEB_PROVIDER_*` 错误码
 //   - `dsh-web/src/index.ts:100-101` `DSH_WEB_SEARCH_PROVIDER` / `DSH_WEB_FETCH_PROVIDER`
-//   - rc.2 基础组合默认 `searchProvider: deepseek-search-api` / `fetchProvider: http`
-//     （`dsh-base/cordis.patch.yml:487-488`；rc.1 在 `:470-471`，搜索是 deepseek-official）
+//   - rc.5 基础组合只固定 `fetchProvider: http`（`dsh-base/cordis.patch.yml:488-491`）；
+//     搜索 provider 不再固定（rc.2 `:487` 的 `searchProvider: deepseek-search-api` 已删除）
 
 import (
 	"strings"
@@ -28,16 +29,21 @@ import (
 	"dshgo/modules/tool/webfetch"
 )
 
-// ProviderDefaults 是一个组合给两个能力钉的默认 provider id。
+// ProviderDefaults 是一个组合给两个能力固定的 provider id。
 type ProviderDefaults struct {
+	// Search 为空 = 组合**不固定**搜索 provider（rc.5）。
 	Search string
 	Fetch  string
 }
 
-// RC2ProviderDefaults 是官方 0.2.2-rc.2 基础组合的默认 provider
-// （`dsh-base/cordis.patch.yml:487-488`）。rc.1 是 Search=deepseek-official（`:470`）。
-var RC2ProviderDefaults = ProviderDefaults{
-	Search: baseBundleSearchProvider,
+// BaseBundleProviderDefaults 是官方 0.2.2-rc.5 基础组合固定的 provider
+// （rc.5 `dsh-base/cordis.patch.yml:488-491`：`web` 行只剩 `fetchProvider: http`）。
+//
+// rc.2 在 `:487` 还有 `searchProvider: deepseek-search-api`；rc.5 删掉了它，
+// 改由 `dsh-web` 按模型路由选（判据见 `internal/spi/search_route.go`）。所以这里的
+// Search 是**空**——不是"没查到"，而是官方现在真的不固定。
+var BaseBundleProviderDefaults = ProviderDefaults{
+	Search: "",
 	Fetch:  webfetch.HTTPProviderID,
 }
 
@@ -51,7 +57,8 @@ type CatalogEntry struct {
 	Description string
 	// Available 是 provider 自己 `Available()` 的回答（真实运行态）。
 	Available bool
-	// Default 表示它就是当前配置钉死（或基线默认生效）的 provider。
+	// Default 表示它就是**当前默认**：配置钉死的那一个；未钉死时是该模型路由下
+	// 优先的 provider（rc.5 `dsh-web/src/index.ts:229-241`）。
 	Default bool
 	// Selected 表示执行期解析当前会选中的那个 provider。
 	Selected bool
@@ -69,9 +76,20 @@ type CapabilityState struct {
 	ErrorCode string
 	// Error 是选择失败的可读说明。
 	Error string
+
+	// LLMProvider 是这次解析使用的模型路由 id（官方 `request.llmProvider`）。
+	// 空 = 没有模型请求（官方语义下走 OTHER_ROUTE_SEARCH_PROVIDER）。
+	LLMProvider string
+	// Preferred 是该路由下**优先**的 provider id（rc.5 规则；与 Selected 不同：
+	// 优先项不可用时 Selected 会退回唯一可用，这里仍报优先项）。
+	Preferred string
 }
 
-// Baseline 报告 rc.2 基线默认 provider 以及本宿主是否注册了它。
+// Baseline 报告**基础组合固定了哪些 provider**以及本宿主是否注册了它。
+//
+// rc.5 起基础组合只固定抓取 provider（`fetchProvider: http`，
+// `dsh-base/cordis.patch.yml:488-491`）；搜索不固定，`Search` 因此为空——
+// 默认搜索 provider 改由模型路由决定（`CapabilityState.LLMProvider/Preferred`）。
 type Baseline struct {
 	Search           string
 	SearchRegistered bool
@@ -191,17 +209,22 @@ func DescribeCatalogOf(web *spi.WebProviders, getenv func(string) string) Catalo
 		web = spi.NewWebProviders("", "")
 	}
 	tool := &Tool{Getenv: getenv}
+	// 路由取接缝上装的读取器（官方 `request.llmProvider`）：serve 进程里它来自
+	// 同一份 getenv（`DSHD_WEB_LLM_PROVIDER`），空 = 没有模型请求。
+	searchPin := web.SearchPin()
+	route := web.SearchRoute()
+	preferred := spi.PreferredSearchProviderForRoute(route)
 	catalog := Catalog{
 		Search: entriesOf(web.SearchProviderStatuses()),
 		Fetch:  entriesOf(web.FetchProviderStatuses()),
-		SearchSelection: selectionOf(web.SearchPin(), searchPinSource(web.SearchPin(), getenv), func() (string, error) {
-			provider, err := web.SelectSearch()
+		SearchSelection: selectionOf(searchPin, searchPinSource(searchPin, getenv), route, preferred, func() (string, error) {
+			provider, err := web.SelectSearchForRoute(route)
 			if err != nil {
 				return "", err
 			}
 			return provider.ID(), nil
 		}),
-		FetchSelection: selectionOf(web.FetchPin(), fetchPinSource(web.FetchPin(), getenv), func() (string, error) {
+		FetchSelection: selectionOf(web.FetchPin(), fetchPinSource(web.FetchPin(), getenv), "", "", func() (string, error) {
 			provider, err := web.SelectFetch()
 			if err != nil {
 				return "", err
@@ -217,19 +240,20 @@ func DescribeCatalogOf(web *spi.WebProviders, getenv func(string) string) Catalo
 		Credentials: credentialsOf(getenv),
 	}
 	catalog.Baseline = Baseline{
-		Search:           RC2ProviderDefaults.Search,
-		SearchRegistered: hasID(catalog.Search, RC2ProviderDefaults.Search),
-		Fetch:            RC2ProviderDefaults.Fetch,
-		FetchRegistered:  hasID(catalog.Fetch, RC2ProviderDefaults.Fetch),
+		Search:           BaseBundleProviderDefaults.Search,
+		SearchRegistered: hasID(catalog.Search, BaseBundleProviderDefaults.Search),
+		Fetch:            BaseBundleProviderDefaults.Fetch,
+		FetchRegistered:  hasID(catalog.Fetch, BaseBundleProviderDefaults.Fetch),
 	}
-	// "当前默认"= 钉死的那个；没钉死时 = rc.2 基线默认（且本宿主确实注册了它）。
+	// "当前默认"= 钉死的那个；没钉死时 = **该模型路由下优先的 provider**（rc.5）。
+	// 注意 Preferred 与 Selected 不同：优先项不可用时 Selected 会退回唯一可用。
 	for i := range catalog.Search {
 		entry := &catalog.Search[i]
 		switch {
 		case catalog.SearchSelection.Configured != "":
 			entry.Default = entry.ID == catalog.SearchSelection.Configured
 		default:
-			entry.Default = entry.ID == catalog.Baseline.Search
+			entry.Default = entry.ID == preferred
 		}
 		entry.Selected = entry.ID == catalog.SearchSelection.Selected
 	}
@@ -255,8 +279,10 @@ func entriesOf(statuses []spi.ProviderStatus) []CatalogEntry {
 }
 
 // selectionOf 跑一次官方的执行期选择规则，把结果（或结构化失败码）投影出来。
-func selectionOf(configured, source string, resolve func() (string, error)) CapabilityState {
-	state := CapabilityState{Configured: configured, Source: source}
+//
+// route/preferred 只对搜索有意义（rc.5 按模型路由选）；抓取传空串。
+func selectionOf(configured, source, route, preferred string, resolve func() (string, error)) CapabilityState {
+	state := CapabilityState{Configured: configured, Source: source, LLMProvider: route, Preferred: preferred}
 	selected, err := resolve()
 	if err != nil {
 		state.ErrorCode = spi.WebErrorCode(err)
@@ -267,20 +293,16 @@ func selectionOf(configured, source string, resolve func() (string, error)) Capa
 	return state
 }
 
-// searchPinSource 说明钉死的 id 从哪来：环境变量、rc.2 基础组合默认，还是直接改的配置。
+// searchPinSource 说明钉死的 id 从哪来。
 //
-// `baseline` 是 rc.2 新增的第四种来源：`modules/search` 在**没被环境钉死**、且
-// 基础组合默认 provider（`deepseek-search-api`）当下可用时会把它作为默认 pin，
-// 所以 rc.2 的默认值真生效、且不是用户配置（官方把它配在 `cordis.patch.yml:487`）。
+// rc.5 起没有 `baseline` 这一种：基础组合不固定搜索 provider，未钉死时按模型路由选
+// （`auto`）。之前的 rc.2 实现会在有凭据时把 `deepseek-search-api` 当成基线默认 pin。
 func searchPinSource(pin string, getenv func(string) string) string {
 	if pin == "" {
 		return "auto"
 	}
 	if spi.WebSearchPinFromEnv(getenv) == pin {
 		return "env"
-	}
-	if pin == search.BaseBundleSearchProviderID {
-		return "baseline"
 	}
 	return "config"
 }

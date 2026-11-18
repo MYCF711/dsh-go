@@ -174,10 +174,20 @@ type WebProviders struct {
 	fetch    map[string]FetchProvider
 	searchID string
 	fetchID  string
+	// searchRoute 是"这一轮搜索服务的模型请求走哪条路由"的读取器（官方
+	// `request.llmProvider`，`dsh-web/src/types.ts:41-46`）。
+	//
+	// 为什么是函数而不是装配期快照：官方每次 `search()` 都**现读**路由与配置
+	// （`dsh-web/src/index.ts:229-241` 的 `config.searchProvider.get()` + `request.llmProvider`），
+	// 设置改了下一搜就生效、不需要重装服务。宿主对应的是每轮一个 `dshd run` 进程，
+	// 读取器读的是**同一份** getenv 接缝（与 provider 配置同一个读取器），所以语义一致。
+	//
+	// nil = 没有模型请求（`resolveProvider` 走 OTHER_ROUTE_SEARCH_PROVIDER）。
+	searchRoute func() string
 }
 
 // NewWebProviders 造一个空接缝；searchPin/fetchPin 是配置里钉死的 provider id
-// （空 = 未钉死，自动选择唯一的可用 provider）。
+// （空 = 未钉死，按配置/路由/唯一可用选择）。
 func NewWebProviders(searchPin, fetchPin string) *WebProviders {
 	return &WebProviders{
 		search:   map[string]SearchProvider{},
@@ -185,6 +195,37 @@ func NewWebProviders(searchPin, fetchPin string) *WebProviders {
 		searchID: strings.TrimSpace(searchPin),
 		fetchID:  strings.TrimSpace(fetchPin),
 	}
+}
+
+// SetSearchRoute 装上"当前模型路由"的读取器（官方 `request.llmProvider` 的宿主载体）。
+//
+// 谁装：`modules/search` 装配时装一次，读取器读同一份 getenv 的 `DSHD_WEB_LLM_PROVIDER`
+// （与 `dsh-web-deepseek-api` 的 billing 判定同一个值，见 modules/search/webapi_config.go）。
+// 传 nil 或不装 = 永远"没有模型请求"，选择退回官方 OTHER_ROUTE_SEARCH_PROVIDER。
+func (w *WebProviders) SetSearchRoute(route func() string) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.searchRoute = route
+}
+
+// SearchRoute 取当前模型路由 id（现读，不缓存）。
+//
+// 官方 `request.llmProvider` 是每次 `search()` 的入参；宿主把它收在接缝上，因为
+// 工具只拿得到 ctx、拿不到"这一轮 agent 的 options"（与 `spi.WithAgentModel` 同理）。
+func (w *WebProviders) SearchRoute() string {
+	if w == nil {
+		return ""
+	}
+	w.mu.RLock()
+	route := w.searchRoute
+	w.mu.RUnlock()
+	if route == nil {
+		return ""
+	}
+	return strings.TrimSpace(route())
 }
 
 // RegisterSearch 注册搜索 provider；重复 id 是错误。
@@ -250,7 +291,22 @@ func (w *WebProviders) Fetch(ctx context.Context, target string) (FetchResult, e
 }
 
 // SelectSearch 按官方规则选搜索 provider（执行期解析，永不依赖注册顺序）。
+//
+// 路由取接缝上装的那个（`SetSearchRoute`），即官方 `request.llmProvider` 的宿主载体；
+// 没装 = 没有模型请求（官方语义：走 OTHER_ROUTE_SEARCH_PROVIDER）。
 func (w *WebProviders) SelectSearch() (SearchProvider, error) {
+	return w.SelectSearchForRoute(w.SearchRoute())
+}
+
+// SelectSearchForRoute 按官方 `selectSearchProvider` + `resolveProvider` 选搜索 provider。
+//
+// 官方顺序（`dsh-web/src/index.ts:229-241`、`:305-328`）：
+//  1. 配置钉死的 id：没注册 → WEB_PROVIDER_CONFIGURED_MISSING；不可用 → CONFIGURED_UNAVAILABLE；
+//  2. 未钉死：该路由 preferred 的 provider（`PreferredSearchProviderForRoute`），
+//     **已注册且可用**才生效（官方 `usable.find`，`:318`）；
+//  3. 否则恰好一个可用 → 它；
+//  4. 0 个可用 → WEB_PROVIDER_UNAVAILABLE；多个可用 → WEB_PROVIDER_AMBIGUOUS。
+func (w *WebProviders) SelectSearchForRoute(route string) (SearchProvider, error) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	if w.searchID != "" {
@@ -265,10 +321,18 @@ func (w *WebProviders) SelectSearch() (SearchProvider, error) {
 		}
 		return provider, nil
 	}
-	var usable []SearchProvider
+	usable := make([]SearchProvider, 0, len(w.search))
 	for _, provider := range w.search {
 		if provider.Available() {
 			usable = append(usable, provider)
+		}
+	}
+	// 官方 `usable.find(provider => provider.id === selection.preferredId)`（`:318`）：
+	// 优先项**不改变可用性判定**，不可用时退回下面的唯一可用/报错，绝不硬塞。
+	preferredID := PreferredSearchProviderForRoute(route)
+	for _, provider := range usable {
+		if provider.ID() == preferredID {
+			return provider, nil
 		}
 	}
 	if len(usable) == 0 {

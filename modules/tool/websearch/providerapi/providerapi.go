@@ -46,6 +46,9 @@ func (p providerAPI) ListOfficialWebProviders(_ context.Context) (transport.Offi
 //
 // `search` / `fetch` 用官方形状；`resolution` / `baseline` / `limits` / `credentials`
 // 是宿主附加（官方 `WebProviderList` 只有两个数组），JSON 里 omitempty。
+//
+// rc.5：`resolution.search` 还带 `llmProvider` / `preferred`（按模型路由选的判据），
+// `baseline.search` 为空（基础组合不再固定搜索 provider）。
 func Official(catalog websearch.Catalog) transport.OfficialWebProviderList {
 	return transport.OfficialWebProviderList{
 		Search: entries(catalog.Search),
@@ -91,11 +94,13 @@ func entries(rows []websearch.CatalogEntry) []transport.OfficialWebProviderInfo 
 
 func selection(state websearch.CapabilityState) transport.OfficialWebProviderSelection {
 	return transport.OfficialWebProviderSelection{
-		Configured: state.Configured,
-		Source:     state.Source,
-		Selected:   state.Selected,
-		ErrorCode:  state.ErrorCode,
-		Error:      state.Error,
+		Configured:  state.Configured,
+		Source:      state.Source,
+		Selected:    state.Selected,
+		ErrorCode:   state.ErrorCode,
+		Error:       state.Error,
+		LLMProvider: state.LLMProvider,
+		Preferred:   state.Preferred,
 	}
 }
 

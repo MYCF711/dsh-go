@@ -1,6 +1,6 @@
 package transport
 
-// 官方 0.2.2-rc.2 的 `web.listProviders`（包 `dsh-web`）wire 入口。
+// 官方 0.2.2 的 `web.listProviders`（包 `dsh-web`）wire 入口（基线 rc.5）。
 //
 // 契约逐条对应官方源码（只读）：
 //   - 方法名 `web/listProviders`，**无参数**（`parameters: []`）——
@@ -8,13 +8,21 @@ package transport
 //   - 结果 `{search: [{id,title?,description?}], fetch: [...]}`，每条按能力分组、
 //     "detached `{ id, title, description }` entries per capability, in registration
 //     order"；且**可用性不过滤清单**（"Availability does not filter the lists"）——
-//     `dsh-web/src/index.ts:146-157`、`src/types.ts:196-217`。
+//     `dsh-web/src/index.ts:168-180`、`src/types.ts:179-197`。
 //   - provider 没声明 title/description 时字段**缺席**（不是空串）——
-//     `dsh-web/src/index.ts:246-252` 的 `providerInfo()`。
+//     `dsh-web/src/index.ts:275-282` 的 `providerInfo()`。
+//
+// 官方 `listProviders` **本身与路由无关**（它只列已注册的 provider，不做选择），
+// rc.5 的"按模型路由选搜索 provider"只改变宿主附加的 `resolution` / `default` /
+// `selected` / `baseline` 投影：
+//   - `resolution.search.llmProvider` / `preferred` 报这次投影用的路由与优先 provider
+//     （官方判据 `dsh-web/src/index.ts:229-241`）；
+//   - `baseline.search` 为空：rc.5 基础组合不再固定 searchProvider
+//     （`dsh-base/cordis.patch.yml:488-491`）。
 //
 // 宿主附加字段（官方没有；"能力下限：只能更多不能更少"要求把运行态说清楚）：
 // 每条 provider 的 `available` / `default` / `selected`，顶层 `resolution`
-// （当前选择结果与失败码）、`baseline`（rc.2 基线默认 provider 及其是否已注册）、
+// （当前选择结果与失败码）、`baseline`（基础组合固定了哪些 provider）、
 // `limits`（web_search 的生效上限）。
 //
 // 真值由宿主注入（`OfficialWebProviderAPI`）：本文件只做官方形状与严格无参校验，
@@ -68,6 +76,11 @@ type OfficialWebProviderSelection struct {
 	ErrorCode string `json:"errorCode,omitempty"`
 	// Error 是选择失败的可读说明。
 	Error string `json:"error,omitempty"`
+	// LLMProvider 是本次投影使用的模型路由 id（官方 `request.llmProvider`；
+	// rc.5 起 search 用它选 provider）。空 = 没有模型请求。
+	LLMProvider string `json:"llmProvider,omitempty"`
+	// Preferred 是该路由下优先的 provider id（rc.5 规则；可用性不足时与 Selected 分叉）。
+	Preferred string `json:"preferred,omitempty"`
 }
 
 // OfficialWebProviderResolution 是两个能力各自的当前选择结果。
@@ -76,11 +89,15 @@ type OfficialWebProviderResolution struct {
 	Fetch  OfficialWebProviderSelection `json:"fetch"`
 }
 
-// OfficialWebProviderBaseline 报告 rc.2 基础组合的默认 provider 与本宿主是否已注册它。
+// OfficialWebProviderBaseline 报告**基础组合固定了哪些 provider**与本宿主是否已注册它。
 //
-// 为什么把"基线"和"当前默认"分开：官方基础组合钉的是 `deepseek-search-api`
-// （rc.2 `dsh-base/cordis.patch.yml:487`），但本宿主不一定实现了那个 provider。
-// 把"基线要求什么"和"本宿主真的有什么"混成一个字段，界面就只能撒谎。
+// 为什么把"基线"和"当前默认"分开：组合固定的是组合的事实，本宿主不一定实现了那个
+// provider；把两者混成一个字段，界面就只能撒谎。
+//
+// rc.5 起搜索侧没有基线默认：`dsh-base/cordis.patch.yml:488-491` 的 `web` 行只剩
+// `fetchProvider: http`（rc.2 `:487` 的 `searchProvider: deepseek-search-api` 已删除），
+// 所以 `search` 为空、`searchRegistered` 无意义时为 false；当前默认改由
+// `resolution.search` 的 `llmProvider` / `preferred` / `selected` 表达。
 type OfficialWebProviderBaseline struct {
 	Search           string `json:"search"`
 	SearchRegistered bool   `json:"searchRegistered"`

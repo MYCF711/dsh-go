@@ -277,9 +277,9 @@ func TestCredentialsModuleRunsBeforeSearch(t *testing.T) {
 	}
 }
 
-// 只把 key 存进凭据库（环境全空）→ **默认路径**必须就绪，并选中 rc.2 基线默认
-// 的 deepseek-search-api。这是"界面存了 key 就能搜"在默认配置下的形态：
-// 不钉 provider，靠的完全是凭据库。
+// 只把 key 存进凭据库（环境全空）→ **默认路径**必须就绪。rc.5 未钉死搜索 provider，
+// 没有模型请求时按官方 OTHER_ROUTE_SEARCH_PROVIDER 选中 deepseek-search-api。
+// 这是"界面存了 key 就能搜"在默认配置下的形态：不钉 provider，靠的完全是凭据库。
 func TestSearchDefaultProviderUsesStoredCredential(t *testing.T) {
 	clearSearchCredentials(t)
 	const storedKey = "stored-only-default-path-key"
@@ -299,7 +299,7 @@ func TestSearchDefaultProviderUsesStoredCredential(t *testing.T) {
 	}
 }
 
-// 同一条链路的反证：凭据只在环境里时也要能选中基线默认 provider。
+// 同一条链路的反证：凭据只在环境里时也要能选中默认 provider（rc.5 无路由 → search-api）。
 func TestSearchDefaultProviderUsesEnvironmentCredential(t *testing.T) {
 	clearSearchCredentials(t)
 	home := t.TempDir() // 空凭据库
