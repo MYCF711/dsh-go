@@ -464,18 +464,36 @@ func (b *logBuilder) replySteps(reply Message) ([]replyStep, *string) {
 	steps := make([]replyStep, 0, 2)
 	var template *string
 	current := replyStep{}
+	// 内容块一律经 session.ContentBuilder：块长什么样只有 internal/session 一个包知道，
+	// 这里只说「这一块是思考/正文/调用」，顺序由导出数据决定、不重排。
+	content := &session.ContentBuilder{}
 	pushStep := func() {
+		if blocks := content.Blocks(); len(blocks) > 0 {
+			current.content = make([]any, len(blocks))
+			for i, block := range blocks {
+				current.content[i] = block
+			}
+		}
 		if len(current.content) == 0 && len(current.calls) == 0 {
 			return
 		}
 		steps = append(steps, current)
 		current = replyStep{}
+		content = &session.ContentBuilder{}
 	}
-	appendContent := func(block any) {
+	// 两个具名入口而不是 (kind, text) 的字符串分派：块种类只有 session 那边定义，
+	// 这里再写一次 "reasoning" 这种字面量，就是把判别规则复制了第二份。
+	appendReasoning := func(text string) {
 		if len(current.calls) > 0 {
 			pushStep()
 		}
-		current.content = append(current.content, block)
+		content.Reasoning(text)
+	}
+	appendText := func(text string) {
+		if len(current.calls) > 0 {
+			pushStep()
+		}
+		content.Text(text)
 	}
 	appendCall := func(call pendingCall, stage *int64) {
 		if stage != nil {
@@ -492,12 +510,12 @@ func (b *logBuilder) replySteps(reply Message) ([]replyStep, *string) {
 		switch fragment.Type {
 		case "THINK":
 			if fragment.Content != "" {
-				appendContent(session.ReasoningBlock(fragment.Content))
+				appendReasoning(fragment.Content)
 			}
 			current.elapsedMS += int64(fragment.ElapsedSecs*1000 + 0.5)
 		case "RESPONSE":
 			if fragment.Content != "" {
-				appendContent(session.TextBlock(fragment.Content))
+				appendText(fragment.Content)
 			}
 		case "TOOL_SEARCH":
 			// 还没跑完的搜索不完整，重放为空。
@@ -515,7 +533,7 @@ func (b *logBuilder) replySteps(reply Message) ([]replyStep, *string) {
 			appendCall(b.openCall(fragment, *fragment.URL), fragment.StageID)
 		case "READ_LINK":
 			if text := linkLines(fragment.LinkResults); text != "" {
-				appendContent(session.TextBlock(text))
+				appendText(text)
 			}
 		case "TEMPLATE_RESPONSE":
 			if template == nil {
@@ -539,17 +557,12 @@ func (b *logBuilder) searchCall(fragment Fragment) (pendingCall, bool) {
 			queries = append(queries, query)
 		}
 	}
-	block := map[string]any{
-		"type":      "tool-call",
-		"id":        b.id(),
-		"name":      "web_search",
-		"arguments": mustJSON(map[string]any{"queries": queries}),
-	}
+	block := session.ToolCallBlock(b.id(), "web_search", mustJSON(map[string]any{"queries": queries}))
 	// 导出把"搜索失败"和"搜到零条"分开记。
 	if fragment.Status == "FAILED" {
 		return pendingCall{
 			block:   block,
-			result:  []any{session.TextBlock("Error: the export records this search as failed.")},
+			result:  session.ToolResult("Error: the export records this search as failed."),
 			isError: true,
 		}, true
 	}
@@ -573,7 +586,7 @@ func (b *logBuilder) searchCall(fragment Fragment) (pendingCall, bool) {
 	meta := map[string]any{"sources": sources, "truncated": false}
 	return pendingCall{
 		block:  block,
-		result: []any{session.TextBlock(formatSearchOutput(sources))},
+		result: session.ToolResult(formatSearchOutput(sources)),
 		meta:   meta,
 	}, true
 }
@@ -581,16 +594,11 @@ func (b *logBuilder) searchCall(fragment Fragment) (pendingCall, bool) {
 // openCall 把一条 TOOL_OPEN 转成 web_fetch 调用（官方 `openCall`，
 // conversation.ts:467-484）。
 func (b *logBuilder) openCall(fragment Fragment, url string) pendingCall {
-	block := map[string]any{
-		"type":      "tool-call",
-		"id":        b.id(),
-		"name":      "web_fetch",
-		"arguments": mustJSON(map[string]any{"url": url}),
-	}
+	block := session.ToolCallBlock(b.id(), "web_fetch", mustJSON(map[string]any{"url": url}))
 	if fragment.Status != "FINISHED" {
 		return pendingCall{
 			block:   block,
-			result:  []any{session.TextBlock("Error: the page could not be opened.")},
+			result:  session.ToolResult("Error: the page could not be opened."),
 			isError: true,
 		}
 	}
@@ -602,7 +610,7 @@ func (b *logBuilder) openCall(fragment Fragment, url string) pendingCall {
 	text, truncated := formatFetchOutput(url, 200, body)
 	return pendingCall{
 		block:  block,
-		result: []any{session.TextBlock(text)},
+		result: session.ToolResult(text),
 		meta: map[string]any{
 			"url":        url,
 			"statusCode": 200,

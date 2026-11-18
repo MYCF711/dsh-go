@@ -352,3 +352,43 @@ func AssistantBlocks(text, reasoning string, toolCalls []llm.ToolCall) []map[str
 	}
 	return blocks
 }
+
+// ContentBuilder 按**调用顺序**累积一次回答的内容块。
+//
+// 为什么还要它（明明已经有 AssistantBlocks）：AssistantBlocks 表达的是固定顺序
+// 「思考 → 正文 → 调用」，而 chat-import 拿到的是导出文件里**已经排好序的 fragment
+// 列表**（THINK / RESPONSE / TOOL_SEARCH / TOOL_OPEN 交错），顺序由数据决定，
+// 不能重排。两者是同一件事（一次回答铺成哪些块）的两种输入形状，
+// 所以**仍然只有 internal/session 这一个包**知道块长什么样 ——
+// 调用方只说"我这一块是什么"，不自己拼 map。
+type ContentBuilder struct {
+	blocks []map[string]any
+}
+
+// Reasoning 追加一个思考块。
+func (b *ContentBuilder) Reasoning(text string) {
+	b.blocks = append(b.blocks, ReasoningBlock(text))
+}
+
+// Text 追加一个正文块。
+func (b *ContentBuilder) Text(text string) {
+	b.blocks = append(b.blocks, TextBlock(text))
+}
+
+// ToolCall 追加一个工具调用块。
+func (b *ContentBuilder) ToolCall(id, name, arguments string) {
+	b.blocks = append(b.blocks, ToolCallBlock(id, name, arguments))
+}
+
+// Blocks 返回累积结果（空时返回 nil，避免把 nil 当"有内容"）。
+func (b *ContentBuilder) Blocks() []map[string]any {
+	if len(b.blocks) == 0 {
+		return nil
+	}
+	return b.blocks
+}
+
+// ToolResult 是工具结果的 content 形状。调用方只给文本，不自己拼 `[]any{map…}`。
+func ToolResult(text string) []any {
+	return []any{TextBlock(text)}
+}
