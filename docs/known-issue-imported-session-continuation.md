@@ -42,7 +42,17 @@ dshd run --session <id>   ->  退出码 1，同一句错误
 - 官方 **`dsh-sandbox/src` 里没有任何 `agentPreset` 引用** —— 官方沙箱策略**不读 preset**
 - 在 `dsh-agent-preset-registry/src`、`dsh-agent-default-model/src` 里**没有** `defaultPreset` / `fallbackPreset` / `preset ?? 'default'` 这类兜底
 
-**推论（明确标为推论，不是结论）**：把「preset 为空」当成**硬失败**，很可能是**我们宿主自己的实现选择**，不是官方行为。若成立，这属于 parity 缺陷，改法是让沙箱策略在 preset 为空时按官方的方式解析，而不是 fail-loud。
+2026-11-19 追加两条（把推论往前推了一步）：
+
+- 官方 `dsh-agent/src/index.ts:86` 的 `meta.agentPreset` 是**可选**的（`readonly agentPreset?: string`）
+  -> **没有 preset 的会话在官方是合法状态**，官方不会因此拒绝建会话或拒绝跑回合
+- 官方 `dsh-sandbox/src/index.ts:49-50` 的 `SandboxPolicy` 把 `mode` 当**入参**带着；
+  该包里没有任何从 preset 推导 mode 的逻辑 -> **官方是"调用方决定 mode"，不是"preset 决定 mode"**
+
+**推论（明确标为推论，不是结论）**：把「preset 为空」当成**硬失败**，是**我们宿主自己加的约束**，官方没有这条。若成立，这属于 parity 缺陷，改法是让沙箱策略在 preset 为空时按官方的方式解析，而不是 fail-loud。
+
+**还差最后一块拼图**：官方那个「调用方」到底从哪拿 mode（会话设置？全局配置？审批档？）——
+这一层没查到之前，**仍然不凭推论改产品**。
 
 **但这一步没有查到官方确切的分支**，所以不凭推论改产品：那个分支怎么走要嘛继续在官方源码里逐层找，要嘛由用户裁定导入历史归哪个 preset。两者都不适合猜。
 
