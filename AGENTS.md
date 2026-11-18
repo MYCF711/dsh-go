@@ -1,11 +1,18 @@
 # AGENTS.md · DSH-GO
 
-> Go 重写 DSH 宿主；上游基线 **`0.2.2-rc.2`**（rc.1 基线作为历史对照保留），当前版本读源码与 `CHANGELOG.md`。
+> Go 重写 DSH 宿主；上游基线 **`0.2.2-rc.5`**（rc.2 / rc.1 基线作为历史对照保留），当前版本读源码与 `CHANGELOG.md`。
 > 原目标：低占用、高性能、可替换能力、还原 DSH 使用体验并接管真实工作。界面在独立 `../dsh-ui` 用 Go+Viva；Web 仅可关闭过渡件。
 
 ## 0. 每次开工按此顺序
 
-0. **官方基线已是 `0.2.2-rc.2`（用户 2026-11-12 指令）**：先读 [`docs/official-baseline-0.2.2-rc.2.md`](docs/official-baseline-0.2.2-rc.2.md) —— rc.1→rc.2 的硬数字（方法 193→**223**、base 插件 97→**99**、包 +13/−7、`hostProtocolVersion` 仍 4）、新增/删除方法逐条、官方 19 条升级指南索引；机器可核证据在 `docs/evidence/official-{desktop-api-methods,base-plugins,ui-plugins}-0.2.2-rc.2.txt` 与 `docs/evidence/official-method-contract-delta-0.2.2-rc.2.md`。**不要再用 rc.1 的 193/97 口径下结论。**
+0. **官方基线已是 `0.2.2-rc.5`（用户 2026-11-18 指令「官方宿主更新了，宿主同步更新」）**：先读 [`docs/official-baseline-0.2.2-rc.5.md`](docs/official-baseline-0.2.2-rc.5.md)。
+   rc.2 → rc.5 的硬数字：**包 337→338（+1，零删除）**、**UI 插槽 91→92（+1，零删除）**、`dsh-base/cordis.patch.yml` **功能行差异 1 处**。三条真实变更：
+   - 新包 **`dsh-deepseek-chat-import`**（导入官网导出的聊天记录成 Session）
+   - 新插槽 **`sidebar.session.action`**（唯一消费方就是上面那个新包）
+   - **`searchProvider` 不再固定**，改为按会话模型路由选（DeepSeek 路由 → `deepseek-official`，其它 → `deepseek-search-api`）
+   **判变更要看契约面，不看包内容哈希** —— rc.5 里 328/337 个包哈希都变了，但那是每次 rc 重建 bundle 的版本串变化，不是语义变更。
+   rc.2 的旧口径（方法 223、base 插件 99、包 +13/−7）作为历史对照仍可查 [`docs/official-baseline-0.2.2-rc.2.md`](docs/official-baseline-0.2.2-rc.2.md)，**不要再用它下当前结论**。
+   **rc.5 的桌面 API 方法总数尚未重算**（方法声明散在 `lib/index.js` 装饰器里，没有可靠地逐条重建）—— 这个数字当前是未知，不要拿 rc.2 的 223 冒充 rc.5。
 
 
 0. **接手先读交接（2026-11-09 归档）**：GO.2 宿主与 TUI2GO 当前现场、已完成门、已闭合阻断与边界，全在 [`docs/handoff-go2-tui2go-2026-11-09.md`](docs/handoff-go2-tui2go-2026-11-09.md)。**宿主 HS-17/HS-18 已 GO=1；TUI2GO 最终 `PLAY-FINAL-INPUT-AUDIT` 已 GO=1（2026-11-09 04:52 两档 20/20，证据 `tmp/GO2-TEAM/PLAY-FINAL-INPUT-AUDIT/`）**——发布/push 仍需用户当次明确授权，且 `TUI-GO.lnk` 要由用户在可见桌面人工确认一次。TUI 选型/GUI 融合/Viva 升级线另见 [`docs/handoff-2026-11-09.md`](docs/handoff-2026-11-09.md)。
