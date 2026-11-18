@@ -447,9 +447,12 @@ func TestProviderRoutingRealDSHDLoopABAndRestart(t *testing.T) {
 	}
 	prompt := func(sessionID, label, model string) {
 		t.Helper()
+		// 水位要在发 prompt **之前**取：重启后对同一会话再发一次时，history 里已躺着
+		// 上一轮的 turn/done，不加水位就等于没等（判据见 waitModelCatalogOutcome）。
+		baseline := modelCatalogOutcomeBaseline(t, client, server.base, sessionID)
 		postPluginGlue(t, client, server.base, "session.prompt", map[string]any{"id": sessionID, "text": "prove " + label}, http.StatusOK)
 		expectRequest(label, model)
-		waitModelCatalogTurn(t, client, server.base, sessionID)
+		waitModelCatalogTurn(t, client, server.base, sessionID, baseline)
 	}
 	prompt(oldSession, "legacy", "group/deepseek-v4.1-flash-1017")
 	prompt(sessionA, "A", "model-a")
@@ -468,6 +471,8 @@ func TestProviderRoutingRealDSHDLoopABAndRestart(t *testing.T) {
 
 	concurrentA := modelCatalogResult(t, postPluginGlue(t, client, server.base, "session.create", map[string]any{}, http.StatusOK))["sessionId"].(string)
 	concurrentB := modelCatalogResult(t, postPluginGlue(t, client, server.base, "session.create", map[string]any{}, http.StatusOK))["sessionId"].(string)
+	baselineA := modelCatalogOutcomeBaseline(t, client, server.base, concurrentA)
+	baselineB := modelCatalogOutcomeBaseline(t, client, server.base, concurrentB)
 	postPluginGlue(t, client, server.base, "session.setModel", map[string]any{"id": concurrentA, "model": "model-a"}, http.StatusOK)
 	postPluginGlue(t, client, server.base, "session.prompt", map[string]any{"id": concurrentA, "text": "concurrent provider A"}, http.StatusOK)
 	postPluginGlue(t, client, server.base, "session.prompt", map[string]any{"id": concurrentB, "text": "concurrent provider B"}, http.StatusOK)
@@ -486,7 +491,7 @@ func TestProviderRoutingRealDSHDLoopABAndRestart(t *testing.T) {
 			t.Fatalf("concurrent provider timeout: seen=%v stderr=%s", seenConcurrent, server.stderr.String())
 		}
 	}
-	waitModelCatalogTurn(t, client, server.base, concurrentA)
-	waitModelCatalogTurn(t, client, server.base, concurrentB)
+	waitModelCatalogTurn(t, client, server.base, concurrentA, baselineA)
+	waitModelCatalogTurn(t, client, server.base, concurrentB, baselineB)
 	t.Log("PROVIDER_REAL_LOOP_AB_RESTART_SUMMARY OK=7 FAIL=0")
 }
