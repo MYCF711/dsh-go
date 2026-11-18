@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -48,8 +49,11 @@ func TestTerminalVimRendersAsRealScreen(t *testing.T) {
 	if !strings.ContainsRune(replay, 0x1b) {
 		t.Fatalf("attach 快照的重放流里没有 ESC，说明它不是 serialize 等价物：%q", replay)
 	}
-	if !strings.Contains(replay, "\x1b[2;1H~") {
-		t.Fatalf("重放流里看不到 vim 的光标定位绘制（应由 ESC[行;列H 引导）：%q", replay)
+	// 不要写死行号：vim 从第几行开始画 `~` 取决于屏高和此前的输出。
+	// 第一版我写死了 ESC[2;1H~，本地连跑 3 次都过、CI 却红 —— 那是**断言太紧**，
+	// 不是产品问题。判据要的是「有光标定位引导的绘制」，行号本身不是判据的一部分。
+	if !cursorAddressed(replay) {
+		t.Fatalf("重放流里看不到「ESC[行;列H 后紧跟 ~」这种按行定位绘制：%q", replay)
 	}
 
 	// ── 第二层：terminal_read，应该**不带** ESC 且是网格形状。
@@ -107,4 +111,12 @@ func waitForScreen(t *testing.T, h *terminalResizeHarness, sessionID, id, marker
 	}
 	t.Fatalf("等不到屏幕上出现 %q（最后 screen=%q）", marker, last)
 	return last
+}
+
+// cursorAddressed 判「重放流里有没有『跳到某行某列、然后画一个 ~』」这种按行定位绘制。
+//
+// 只要求「行号任意」，因为 vim 具体从哪一行开始画 `~` 取决于屏高与先前的输出；
+// 把它写死成某个行号，测的就不是「有没有光标定位」，而是「vim 这一版怎么排版」。
+func cursorAddressed(replay string) bool {
+	return regexp.MustCompile(`\x1b\[[0-9]+;[0-9]+H~`).MatchString(replay)
 }
