@@ -74,10 +74,37 @@ dshd run --session <id>   ->  退出码 1，同一句错误
 第 2 步就是把 agent preset 当成沙箱档位来源——官方没有这层对应关系。
 导入的会话两处都空，于是必然落到第 3 步。
 
-**修法方向（parity，不需用户裁定）**：沙箱档位从 `permissionPresets` 的选择解析，
-没有选择时用官方默认档；`agentPreset` 不再充当沙箱档位的兜底来源。
-**但这条要动沙箱解析链，必须先把官方 `permissionPresets` 的默认档与事件形状逐行核完再动手**——
-`docs/sandbox-policy.md` 的「不假装隔离」原则要求改完仍然 fail-loud 在**该失败**的地方。
+## 7. 官方默认档怎么来（诊断完成，2026-11-19）
+
+`dsh-permission-presets/src/index.ts:218-226`：
+
+```js
+const inferredDefault = this.derive(EMPTY_KNOBS)
+const defaultPreset = config.defaultPreset.get() ?? inferredDefault
+if (defaultPreset === CUSTOM_PRESET) {
+  throw new Error('permission: composed sandbox and approval defaults match no preset; configure defaultPreset explicitly')
+}
+```
+
+**官方不会因为「这个会话没记录过档位」而失败**：它先用 `derive(EMPTY_KNOBS)` 从
+**进程组合出来的 sandbox / approval 默认值**推一个 `inferredDefault`，
+配置里没显式指定 `defaultPreset` 就用它。只有在「组合默认值匹配不上任何预置档」时
+才抛错，且错误文案明确要求显式配置 —— **这是"配置不自洽"的失败，不是"会话缺记录"的失败。**
+
+另有两条硬约束（同文件 `:209-217`）：`custom` / `auto` 是保留名不许当表项；
+`ctx.shell.sandboxMode` 为 undefined 时直接抛「mounted bash executor does not confine」。
+
+## 8. 修法（方向已闭合，尚未实现）
+
+把 `sandboxPresetIDForSession` 的第 3 步从「两处都空 → fail-loud」改成
+**先用本仓组合默认值推一个默认档**（对应官方 `derive(EMPTY_KNOBS)`），
+只有推出来的结果匹配不上任何预置档时才 fail-loud（对应官方那条 `CUSTOM_PRESET` 抛错）。
+`agentPreset` 不再充当沙箱档位的兜底来源。
+
+**为什么这次仍不动手**：这要改沙箱解析链，动之前必须先把本仓「组合默认值」到底由谁给
+（`DSHD_SANDBOX_MODE`？profile？还是 `internal/sandbox` 的缺省）逐处核清，
+否则改出来的"默认档"是自造的。`docs/sandbox-policy.md` 的「不假装隔离」原则要求：
+改完之后**该失败的地方仍然要失败** —— fail-loud 要搬家，不能消失。
 
 **但这一步没有查到官方确切的分支**，所以不凭推论改产品：那个分支怎么走要嘛继续在官方源码里逐层找，要嘛由用户裁定导入历史归哪个 preset。两者都不适合猜。
 
