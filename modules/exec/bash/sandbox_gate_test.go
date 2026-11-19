@@ -82,7 +82,7 @@ func TestSandboxNeedsApprovalDoesNotStartProcess(t *testing.T) {
 	for _, background := range []bool{false, true} {
 		res, err := tool.Exec(ctxWithSession("session-ww"), sessionArgs(t,
 			"printf ran > '"+strings.ReplaceAll(marker, `\`, "/")+"'",
-			map[string]any{"sandbox_permissions": "danger-full-access", "run_in_background": background}))
+			map[string]any{"sandbox_permissions": "danger-full-access", "justification": "需要写工作区外的构建产物", "run_in_background": background}))
 		if !errors.Is(err, sandbox.ErrNeedsApproval) {
 			t.Fatalf("background=%v 未审批升级应 needs-approval，得到 %v", background, err)
 		}
@@ -135,7 +135,7 @@ func TestSandboxApprovedOneShotOnlyAppliesToThatCall(t *testing.T) {
 	approvedCtx := sandbox.WithCallID(sandbox.WithEscalation(ctx, pending.Approval.Decide(true)), pending.CallID)
 
 	if _, err := tool.Exec(approvedCtx, sessionArgs(t, fullFirst,
-		map[string]any{"sandbox_permissions": "danger-full-access"})); err != nil {
+		map[string]any{"sandbox_permissions": "danger-full-access", "justification": "需要写工作区外的构建产物"})); err != nil {
 		t.Fatalf("已批准的一次性升级应执行: %v", err)
 	}
 	if _, statErr := os.Stat(first); statErr != nil {
@@ -144,7 +144,7 @@ func TestSandboxApprovedOneShotOnlyAppliesToThatCall(t *testing.T) {
 
 	// 后续调用（没有审批）不得继承上一次的批准。
 	_, err = tool.Exec(ctx, sessionArgs(t, command+strings.ReplaceAll(second, `\`, "/")+"'",
-		map[string]any{"sandbox_permissions": "danger-full-access"}))
+		map[string]any{"sandbox_permissions": "danger-full-access", "justification": "需要写工作区外的构建产物"}))
 	if !errors.Is(err, sandbox.ErrNeedsApproval) {
 		t.Fatalf("后续调用必须重新审批，得到 %v", err)
 	}
@@ -155,7 +155,7 @@ func TestSandboxApprovedOneShotOnlyAppliesToThatCall(t *testing.T) {
 	// 同一份批准套到**另一条命令**上：绑定不一致，必须拒绝且零进程。
 	drifted := filepath.Join(outside, "drifted.txt")
 	_, err = tool.Exec(approvedCtx, sessionArgs(t, command+strings.ReplaceAll(drifted, `\`, "/")+"'",
-		map[string]any{"sandbox_permissions": "danger-full-access"}))
+		map[string]any{"sandbox_permissions": "danger-full-access", "justification": "需要写工作区外的构建产物"}))
 	if !errors.Is(err, sandbox.ErrApprovalBinding) {
 		t.Fatalf("批准漂到另一条命令必须 ErrApprovalBinding，得到 %v", err)
 	}
@@ -193,7 +193,7 @@ func TestSandboxUnwiredToolRefusesEscalation(t *testing.T) {
 
 	_, err := tool.Exec(ctxWithSession("session-x"), sessionArgs(t,
 		"printf ran > '"+strings.ReplaceAll(marker, `\`, "/")+"'",
-		map[string]any{"sandbox_permissions": "danger-full-access"}))
+		map[string]any{"sandbox_permissions": "danger-full-access", "justification": "需要写工作区外的构建产物"}))
 	if !errors.Is(err, sandbox.ErrPolicyUnwired) {
 		t.Fatalf("未接线时显式升级必须 fail-loud，得到 %v", err)
 	}
@@ -237,5 +237,66 @@ func TestSandboxWorkspaceWriteAllowsInsideCommand(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(ws, "inside.txt")); statErr != nil {
 		t.Fatalf("命令没有真正执行: %v", statErr)
+	}
+}
+
+// 官方 validateEscalationArgs（`dsh-sandbox/src/escalation.ts:88-98`）在 bash 族同样生效：
+// 请求与理由必须成对，理由必须是非空句子——判定先于任何进程动作。
+func TestSandboxEscalationRequiresPairedJustification(t *testing.T) {
+	ws := t.TempDir()
+	svc := NewService(ws)
+	defer svc.Close()
+	tool := toolFor(gateFor(t, sandbox.ModeWorkspaceWrite, ws), svc)
+	cases := []struct {
+		name  string
+		extra map[string]any
+		want  string
+	}{
+		{"缺理由", map[string]any{"sandbox_permissions": "danger-full-access"},
+			"invalid escalation: sandbox_permissions requires a justification"},
+		{"孤理由", map[string]any{"justification": "因为要装依赖"},
+			"invalid escalation: justification is only valid together with sandbox_permissions"},
+		{"空理由", map[string]any{"sandbox_permissions": "danger-full-access", "justification": "   "},
+			"invalid justification: expected a non-empty sentence"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := tool.Exec(ctxWithSession("session-pair"), sessionArgs(t, "pwd", c.extra))
+			var escalation *sandbox.EscalationError
+			if !errors.As(err, &escalation) || escalation.Code != sandbox.EscalationInvalidArgument {
+				t.Fatalf("want SANDBOX_ESCALATION_INVALID_ARGUMENT，得到 %v", err)
+			}
+			if err.Error() != c.want || res.Hint != c.want {
+				t.Fatalf("message/Hint = %q / %q, want %q", err.Error(), res.Hint, c.want)
+			}
+		})
+	}
+	if got := len(svc.jobs); got != 0 {
+		t.Fatalf("畸形升级请求留下了 %d 个 job", got)
+	}
+}
+
+// 两个工具族共享同一组官方标记行（`escalation.ts:108-123`）。
+func TestSandboxMarkersAreOfficial(t *testing.T) {
+	ws := t.TempDir()
+	svc := NewService(ws)
+	defer svc.Close()
+	ro := toolFor(gateFor(t, sandbox.ModeReadOnly, ws), svc)
+	res, err := ro.Exec(ctxWithSession("session-mk"), sessionArgs(t, "pwd", nil))
+	if !errors.Is(err, sandbox.ErrDenied) {
+		t.Fatalf("read-only 必须拒绝，得到 %v", err)
+	}
+	if !strings.Contains(res.Hint, "[sandbox: file access denied under read-only mode]") {
+		t.Fatalf("拒绝 Hint 缺官方 marker：%q", res.Hint)
+	}
+
+	ww := toolFor(gateFor(t, sandbox.ModeWorkspaceWrite, ws), svc)
+	res, err = ww.Exec(ctxWithSession("session-mk2"), sessionArgs(t, "pwd",
+		map[string]any{"sandbox_permissions": "danger-full-access", "justification": "需要工作区外的产物"}))
+	if !errors.Is(err, sandbox.ErrNeedsApproval) {
+		t.Fatalf("want needs-approval，得到 %v", err)
+	}
+	if !strings.Contains(res.Hint, "[sandbox: escalation available — retry this exact command once with sandbox_permissions") {
+		t.Fatalf("待审批 Hint 缺官方提示行：%q", res.Hint)
 	}
 }

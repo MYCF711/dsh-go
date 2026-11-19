@@ -38,8 +38,10 @@ import (
 // 两条与官方的差异都是"只加不减"（能力下限规则，见 AGENTS.md）：
 //   - `timeout_seconds` 是我们的旧参数，保留为**兼容别名**；同时给时以官方名
 //     `timeoutMs` 为准（官方名优先，见 resolveTimeout）。
-//   - `sandbox_permissions` 是本仓的 per-call 沙箱请求，官方 pwsh 工具没有
-//     （官方把它放在 bash 那一侧），删掉会让三档沙箱在这条路上失效。
+//   - `sandbox_permissions` + `justification` 是官方 pwsh 工具**本来就有**的一对
+//     （`@deepseek-ai/dsh-tool-pwsh/src/index.ts:432-440`，官方在 pwsh 这一侧同样
+//     广告升级阶梯；旧注释"官方把它放在 bash 那一侧"是错的），描述逐字取官方
+//     `sandboxPermissionsDescription('command')`。
 var schema = json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -49,7 +51,8 @@ var schema = json.RawMessage(`{
     "workdir": {"type": "string", "description": "可选：工作目录（相对当前工作目录），默认当前目录"},
     "run_in_background": {"type": "boolean", "description": "立刻转后台并返回 job_id，不等命令结束（长任务用这个）：用 job_output 取输出、job_kill 终止"},
     "timeout_seconds": {"type": "integer", "description": "已废弃：旧版超时秒数；与 timeoutMs 同时给时以 timeoutMs 为准"},
-    "sandbox_permissions": {"type": "string", "enum": ["workspace-write", "danger-full-access"], "description": "可选：仅本次调用的 sandbox 请求。danger-full-access 需要先经审批；不会改变会话档位"}
+    "sandbox_permissions": {"type": "string", "enum": ["workspace-write", "danger-full-access"], "description": "The narrowest wider sandbox mode for a one-shot retry of the exact command the sandbox just denied; the retry asks the user for approval."},
+    "justification": {"type": "string", "description": "Required with sandbox_permissions: one sentence for the user explaining why this exact command needs the wider access. Use the language of the user’s current request."}
   },
   "required": ["description", "command"],
   "additionalProperties": false
@@ -200,6 +203,8 @@ type args struct {
 	RunInBackground    bool    `json:"run_in_background"`
 	TimeoutSeconds     int     `json:"timeout_seconds"` // 旧别名，官方名优先
 	SandboxPermissions string  `json:"sandbox_permissions"`
+	// Justification 是官方 `justification`：与 sandbox_permissions 成对，一句给用户看的理由。
+	Justification *string `json:"justification"`
 }
 
 type data struct {
@@ -299,12 +304,17 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	if err != nil {
 		return spi.Result{Hint: `sandbox_permissions 只能是 workspace-write 或 danger-full-access（或省略）`}, err
 	}
+	// 官方 validateEscalationArgs（`dsh-sandbox/src/escalation.ts:88-98`）：请求与理由
+	// 必须成对，理由必须是非空句子。仍然在起进程之前判。
+	if err := sandbox.ValidateEscalationArgs(permission, a.Justification); err != nil {
+		return spi.Result{Hint: err.Error()}, err
+	}
 	// 策略判定必须发生在 resolveShell/exec.Command 之前：deny/needs-approval 时零进程。
 	if err := t.authorize(ctx, cmdline, dir, permission); err != nil {
 		return spi.Result{
 			Summary: "沙箱策略拒绝，命令未执行",
 			Data:    map[string]any{"sandbox": t.lastDecision},
-			Hint:    sandboxHint(err),
+			Hint:    sandboxHint(err, t.lastDecision),
 		}, err
 	}
 
@@ -434,12 +444,26 @@ func (t *Tool) authorize(ctx context.Context, command, workdir string, permissio
 	return d.Error()
 }
 
-func sandboxHint(err error) string {
+// sandboxHint 把策略结论翻成模型能照做的下一步。拒绝/待审批时带**官方标记**
+// （`dsh-sandbox/src/escalation.ts:108-123`）。
+func sandboxHint(err error, decision *sandbox.Decision) string {
+	var escalation *sandbox.EscalationError
 	switch {
+	case errors.As(err, &escalation):
+		return escalation.Error()
 	case errors.Is(err, sandbox.ErrNeedsApproval):
-		return "这次调用请求了 danger-full-access，但审批还没完成；让用户批准这次调用后重试，或改成工作区内的操作"
+		return "这次调用请求了更宽的 sandbox 档位，但审批还没完成；让用户批准这次调用后重试，或改成工作区内的操作" +
+			sandbox.EscalationHintMarker("command")
 	case errors.Is(err, sandbox.ErrDenied):
-		return "当前会话 sandbox 档位拒绝这条命令；把命令限制在工作区 cwd 内，或让用户显式切到 danger-full-access 档"
+		if decision != nil && decision.Reason == sandbox.ReasonEscalationDenied {
+			return sandbox.EscalationRejectedMessage(decision.RequestedPermission, "command")
+		}
+		mode := sandbox.ModeReadOnly
+		if decision != nil && decision.EffectiveMode != "" {
+			mode = decision.EffectiveMode
+		}
+		return "当前会话 sandbox 档位拒绝这条命令；把命令限制在工作区 cwd 内，或让用户显式切到更宽档位" +
+			sandbox.SandboxDenialMarker(mode)
 	case errors.Is(err, sandbox.ErrPolicyUnwired):
 		return "宿主没有把 sandbox 策略接进本进程；去掉 sandbox_permissions 参数，或让宿主设置 DSHD_SANDBOX_MODE"
 	case errors.Is(err, sandbox.ErrMissingContext):

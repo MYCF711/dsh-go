@@ -51,7 +51,6 @@ const (
 	ReasonDangerFullAccess        Reason = "danger-full-access"
 	ReasonReadOnlyWrite           Reason = "read-only-write-denied"
 	ReasonReadOnlyExecute         Reason = "read-only-execute-denied"
-	ReasonReadOnlyEscalation      Reason = "read-only-escalation-denied"
 	ReasonExtraReadOnly           Reason = "extra-read-root-is-read-only"
 	ReasonHomeReadOnly            Reason = "home-is-read-only"
 	ReasonOutsideWorkspace        Reason = "outside-workspace-write"
@@ -236,23 +235,26 @@ func (p *Policy) evaluate(call Call, operation Operation, rawPath, subject strin
 		Enforcement:               EnforcementPolicyOnlyNoOSIsolation,
 	}
 
-	// read-only 是硬上限：任何显式权限请求都不能放大它。
-	if p.mode == ModeReadOnly && call.SandboxPermissions != "" {
-		d.Action, d.Reason = ActionDeny, ReasonReadOnlyEscalation
-		return d, nil
-	}
-	if call.Escalation != nil && (p.mode != ModeWorkspaceWrite || call.SandboxPermissions != PermissionDangerFullAccess) {
-		return Decision{}, fmt.Errorf("%w: 只有 workspace-write 的 danger-full-access 请求可携带升级审批", ErrApprovalBinding)
-	}
-
-	if p.mode == ModeWorkspaceWrite && call.SandboxPermissions == PermissionDangerFullAccess {
+	// 升级走官方 WIDER_MODES 阶梯（escalation.ts:64-67、212-220）：
+	// 只有**严格更宽**的档位可以被单次调用请求；重复本次有效档位不是升级
+	// （不需要审批，也不是错误）；其余方向（更窄、同档以外的非法目标）fail-loud。
+	// read-only 不是硬上限——官方阶梯明确允许 read-only 升到 workspace-write 或
+	// danger-full-access，且必须经真实审批，未获批不得执行。
+	effective := p.mode
+	if call.SandboxPermissions != "" && Mode(call.SandboxPermissions) != p.mode {
+		if !StrictlyWider(p.mode, Mode(call.SandboxPermissions)) {
+			return Decision{}, &EscalationError{
+				Code:    EscalationInvalidArgument,
+				Message: EscalationNotWiderMessage(call.SandboxPermissions, p.mode),
+			}
+		}
 		if call.Escalation == nil {
 			d.Action, d.Reason = ActionNeedsApproval, ReasonEscalationRequired
 			d.EscalationEligible = true
 			d.Approval = &ApprovalRequest{
 				Kind: ApprovalKindSandboxUpgrade, OneShot: true,
 				SessionID: call.SessionID, CallID: call.CallID, Subject: subject,
-				Permission: PermissionDangerFullAccess, Operation: operation,
+				Permission: call.SandboxPermissions, Operation: operation,
 				Path: canonical, Reason: ReasonEscalationRequired,
 			}
 			return d, nil
@@ -264,12 +266,15 @@ func (p *Policy) evaluate(call Call, operation Operation, rawPath, subject strin
 			d.Action, d.Reason = ActionDeny, ReasonEscalationDenied
 			return d, nil
 		}
-		d.Action, d.Reason = ActionAllow, ReasonDangerFullAccess
-		d.EffectiveMode = ModeDangerFullAccess
-		return d, nil
+		// 获批的档位只作用于这一次调用：EffectiveMode 是本次真正的判定档位，
+		// d.Mode 仍是会话档位。
+		effective = Mode(call.SandboxPermissions)
+	} else if call.Escalation != nil {
+		return Decision{}, fmt.Errorf("%w: 只有严格更宽的一次性请求可携带升级审批", ErrApprovalBinding)
 	}
+	d.EffectiveMode = effective
 
-	switch p.mode {
+	switch effective {
 	case ModeDangerFullAccess:
 		// danger-full-access 只解除本策略的路径边界；既有工具审批仍原样保留。
 		d.Action, d.Reason = ActionAllow, ReasonDangerFullAccess
@@ -278,9 +283,12 @@ func (p *Policy) evaluate(call Call, operation Operation, rawPath, subject strin
 		switch operation {
 		case OperationWrite:
 			d.Action, d.Reason = ActionDeny, ReasonReadOnlyWrite
+			// 官方只要组合会设限就广告升级阶梯：read-only 的拒绝同样带入口。
+			d.EscalationEligible = true
 			return d, nil
 		case OperationExecute:
 			d.Action, d.Reason = ActionDeny, ReasonReadOnlyExecute
+			d.EscalationEligible = true
 			return d, nil
 		}
 	}
@@ -305,7 +313,7 @@ func (p *Policy) evaluate(call Call, operation Operation, rawPath, subject strin
 			d.Action, d.Reason = ActionAllow, ReasonHomeRead
 		default:
 			d.Action, d.Reason = ActionDeny, ReasonOutsideRead
-			d.EscalationEligible = p.mode == ModeWorkspaceWrite
+			d.EscalationEligible = effective != ModeDangerFullAccess
 		}
 	case OperationWrite:
 		switch class {
@@ -326,14 +334,14 @@ func (p *Policy) evaluate(call Call, operation Operation, rawPath, subject strin
 			d.Action, d.Reason = ActionDeny, ReasonOutsideWorkspace
 		}
 		if d.Action == ActionDeny {
-			d.EscalationEligible = p.mode == ModeWorkspaceWrite
+			d.EscalationEligible = effective != ModeDangerFullAccess
 		}
 	case OperationExecute:
 		if class == pathWorkspace {
 			d.Action, d.Reason = ActionAllow, ReasonWorkspaceCommand
 		} else {
 			d.Action, d.Reason = ActionDeny, ReasonCommandOutsideWorkspace
-			d.EscalationEligible = p.mode == ModeWorkspaceWrite
+			d.EscalationEligible = effective != ModeDangerFullAccess
 		}
 	}
 	return d, nil
@@ -346,7 +354,7 @@ func validateEscalation(got *EscalationApproval, call Call, operation Operation,
 	a := got.ApprovalRequest
 	if a.Kind != ApprovalKindSandboxUpgrade || !a.OneShot ||
 		a.SessionID != call.SessionID || a.CallID != call.CallID ||
-		a.Permission != PermissionDangerFullAccess || a.Operation != operation ||
+		a.Permission != call.SandboxPermissions || a.Operation != operation ||
 		a.Path != canonical || a.Subject != subject || a.Reason != ReasonEscalationRequired {
 		return fmt.Errorf("%w: session/call/permission/operation/path/subject 必须与原审批需求完全一致", ErrApprovalBinding)
 	}

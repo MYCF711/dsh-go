@@ -492,7 +492,7 @@
       "id": "sandbox",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`internal/sandbox/runtime.go:233` `NewGate`、`:122` `NewBoundary`、`:157` `CheckWrite`、`:321` `SetSessionMode`",
+      "evidence": "`internal/sandbox/policy.go` `New`/`evaluate` 三档、`internal/sandbox/escalation.go`（官方 `dsh-sandbox/src/escalation.ts` 逐字移植：四个错误码 / `WIDER_MODES` 阶梯 / 配对校验 / 官方标记）、`internal/sandbox/runtime.go` `NewGate`/`NewBoundary`/`CheckWrite`/`SetSessionMode`",
       "changes": [
         {
           "from": "DEFERRED",
@@ -500,13 +500,13 @@
           "source": "audit-4.1"
         }
       ],
-      "note": "拍板不做 Windows ACL partial 隔离（partial19 §3.1）"
+      "note": "2026-11-19 重判：官方 `id: sandbox` 绑的是 `dsh-sandbox-local`（真 Windows ACL 受限令牌 runner，`src/index.ts:184/554`），本仓只有策略层 + 路径边界，缺 runner；官方 runner 会往工作区目录树写驻留 ACL/Low 标签（`README.zh.md:130-131`），属需用户拍板的独立单。见 `docs/sandbox-trio-official-shape.md`、register §4.6"
     },
     {
       "id": "sandbox-policy",
       "status": "IMPLEMENTED",
       "audit_status": "IMPLEMENTED",
-      "evidence": "`internal/sandbox/policy.go:123` `New`、`:197` `evaluate`、`:273` 三档；`cmd/dshd/serve_sandbox_policy.go:213` `resolveSandboxModeForSession`、`:299` `sandboxSetPermission`；`cmd/dshd/serve_permission_override.go`",
+      "evidence": "`internal/sandbox/policy.go` `New`/`evaluate`（三档 + 官方 WIDER_MODES 阶梯 + 每调用一次性审批绑定）、`cmd/dshd/serve_sandbox_policy.go` `resolveSandboxModeForSession`/`sandboxSetPermission`/`sandboxChildEnv`、`cmd/dshd/serve_permission_override.go`",
       "drift": {
         "source": "audit-4.1",
         "note": "旧 path:line 已过期，状态未变"
@@ -516,7 +516,7 @@
       "id": "bash-sandbox",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`modules/exec/bash/sandbox_scope.go:21` `SandboxCall`、`modules/exec/bash/tools.go:117` `sandbox.GateFromEnv`",
+      "evidence": "`modules/exec/bash/sandbox_scope.go` `SandboxCall`（准入层配对校验）、`modules/exec/bash/tools.go` `sandbox.GateFromEnv` + `justification` schema + 官方拒绝/升级标记行；`internal/sandbox/escalation.go`",
       "changes": [
         {
           "from": "OFFICIAL_UNSUPPORTED",
@@ -524,13 +524,13 @@
           "source": "audit-4.1"
         }
       ],
-      "note": "官方 Windows 上该行自 disabled；本仓有策略闸门（相对官方是多），partial19 §2 判『不该补』"
+      "note": "官方 `cordis.patch.yml:251` 在 win32 `disabled: true`（同批 `:283` 连 tool-bash 也 disabled），本仓形状与官方一致；本仓额外还跑三档策略闸门 + 官方 escalation 契约（多，不少）"
     },
     {
       "id": "pwsh-sandbox",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`modules/tool/pwsh/pwsh.go:52` `sandbox_permissions` schema、`:222` `ParsePermission`、`:315` `authorize`",
+      "evidence": "`modules/tool/pwsh/pwsh.go` 官方 `sandbox_permissions`+`justification` schema、`ParsePermission`、`authorize`（拒绝前零进程）；`modules/tool/pwsh/sandbox_scope.go` 准入层配对；`internal/sandbox/escalation.go`",
       "changes": [
         {
           "from": "DEFERRED",
@@ -538,7 +538,7 @@
           "source": "audit-4.1"
         }
       ],
-      "note": "同 #40：拍板不做 partial 隔离（partial19 §3.1）"
+      "note": "官方 `cordis.patch.yml:257` 在 win32 **启用**，且是唯一把每条 pwsh 命令送进 ACL runner 的执行器（`dsh-pwsh-sandbox/src/index.ts:4-5/194-196`）；本仓有策略闸门 + escalation 契约，缺 runner（同 #40）"
     },
     {
       "id": "approval",
