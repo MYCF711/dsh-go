@@ -2,7 +2,7 @@
 
 > 基线：`af4a49a2817592d7affb99bb3a16c7e03214ba1c` + 任务开始时共享工作树（含 W49/W50/W56/W58/W59/W61）。未 commit/push，未启动 GUI。
 >
-> 范围：持久模型目录的 list/upsert/reorder/test/set-active 五个 additive HTTP 方法，以及 active model id 到 W61 新会话默认、两个 runner 与重开的闭环。不是官方整个设置中心或 UI 已完成声明。
+> 范围：持久模型目录的 list/upsert/reorder/replace/test/set-active 六个 additive HTTP 方法，以及 active model id 到 W61 新会话默认、两个 runner 与重开的闭环。不是官方整个设置中心或 UI 已完成声明。
 
 ## 1. 官方 gap 与既有真值核对
 
@@ -14,7 +14,7 @@
 - 本任务前 canonical `models.list` 是 `internal/transport/handlers_jobs.go` 的网关转发：只回 `{id,owned_by}`，由 `llm.Client.ListModels` 请求 `GET /v1/models`。它是 canonical 25 之一，本任务**没有改它的方法、参数或结果**。
 - W61 的默认模型唯一存储已经是 `state/session-model.json`：`\u0000settingsFormDefault` 保存默认覆盖，`\u0000settingsFormRevision` 保存乐观锁；`session.create` 把创建时有效值物化到该会话原有 override，`modelOverrideLoopRunner` 与 `modelRunner` 每轮都经 `resolveServeModel` 读取。
 
-因此新增方法命名为 `models.catalog.list/upsert/reorder/test/set-active`，独立 snapshot/golden；active 不写入 catalog 文件，不制造第二份默认模型真值。
+因此新增方法命名为 `models.catalog.list/upsert/reorder/replace/test/set-active`，独立 snapshot/golden；active 不写入 catalog 文件，不制造第二份默认模型真值。
 
 ## 2. HTTP 契约
 
@@ -25,12 +25,13 @@
 | `models.catalog.list` | `{}` | `{revision,models,credentials,active}` |
 | `models.catalog.upsert` | `{model,credential?,expectedRevision?}` | 写后的 CatalogView |
 | `models.catalog.reorder` | `{ids,expectedRevision?}` | 写后的 CatalogView |
+| `models.catalog.replace` | `{models,expectedRevision?}` | 写后的 CatalogView（整份数组写入） |
 | `models.catalog.test` | `{id,baseURL?,api?,credential?}` | `{id,ok,model?,latencyMs}` |
 | `models.catalog.set-active` | `{id,expectedRevision?}` | `{activeModel,activeRevision,revision}` |
 
 `CatalogView`：
 
-- `revision` 是目录持久乐观锁；upsert/reorder 的 `expectedRevision` fence 此值。
+- `revision` 是目录持久乐观锁；upsert/reorder/replace 的 `expectedRevision` fence 此值。
 - `models` 是有序 raw JSON object 数组，完整字段与 object key 顺序随存储 round-trip。
 - `credentials` 以 `apiKeyEnv` 为键，只含 `{configured,writable}`；stored credential 或同名环境变量存在时 configured=true，literal 永不下发。
 - `active={id,revision}` 是 W61 当前有效默认及其 revision 的只读投影，不是第二份存储。
@@ -39,10 +40,10 @@
 
 机器夹具：
 
-- `internal/transport/testdata/model-catalog.snapshot.json`：五方法、参数、类型、存储、错误码；Transport 测试同时断言 canonical 快照仍恰 25 个方法。
-- `internal/transport/testdata/model-catalog-golden.json`：真实 dshd 执行的 6 个接受步骤与 13 个拒绝步骤；另外真实执行 wrong credential 与空目录两条拒绝，共 15 条。
+- `internal/transport/testdata/model-catalog.snapshot.json`：六方法、参数、类型、存储、错误码；Transport 测试同时断言 canonical 快照仍恰 25 个方法。
+- `internal/transport/testdata/model-catalog-golden.json`：真实 dshd 执行的 7 个接受步骤与 17 个拒绝步骤；另外真实执行 wrong credential 与空目录两条拒绝，共 19 条。其中"整数组 replace"一步同时证明删除、换序与新增，并在宿主重开后仍是落盘真值。
 
-夹具 SHA-256：snapshot `ab147c122483bf643edd1ec540dc02fd84e431fea590fdc60914d30c62c3d326`；golden `748889921857ee09644d5a95c9fc00b3cfa1359987105bbc1109855ecfd95c6d`。
+夹具 SHA-256：snapshot `f74ea5a0c64c20c1e9dbf2a9a3b35e8b8409482dd82fd6055d72860bbc666f86`；golden `cc1591e31a0ae831233784c8657c1a80a1917801c82e176054f21dad4aaa52b4`（task-96 追加 `models.catalog.replace` 后重算；旧值 `ab147c12…`/`74888992…` 是五方法时代的）。
 
 ## 3. 持久化与完整字段 round-trip
 
@@ -77,11 +78,21 @@
 
 `ids` 必须是非空且与当前目录完全相同的 id 排列：不多、不少、不重复。实现只移动 raw `json.RawMessage` slice，不 unmarshal/rebuild 模型行；测试逐行比较 reorder 前后 raw bytes，并在重开后再次比较。
 
+### replace
+
+`models` 是**整份新数组**：一次提交即可表达删除、排序、新增（这正是官方编辑器的落盘语义——`DeepSeekModelsEditor.tsx:157-160` 的行删除是本地 `splice`，写盘走 `settings.mutate` 整份 `models` 数组，`operations.ts:86-91`）。因此宿主不自造 `models.catalog.delete`：官方没有按 id 删的接口。
+
+- 每一行仍逐条走 `upsert` 同一套字段守卫（`id`/`name`/`api`/`baseURL`/`apiKeyEnv`/token 数/`input`/`reasoningEfforts`/`retryPolicy`），重复 id → 409 `duplicate_id`，秘密混入 model → 400 `invalid_field`，空 id → 400 `invalid_id`；**所有行都在首次写盘之前验证完**，第 2 行坏则第 1 行也不会落盘。
+- 可选字段显式 `null` 仍是"删除该字段"（与 `upsert` 同规则）；未知字段与对象 key 顺序保序 round-trip。
+- `models=[]` 合法：删到空是编辑器可达状态，空目录仍可 `list`，`reorder` 仍 fail-loud（409 `empty_catalog`）。
+- 写入后 `credentials` 孤儿清理**与 `upsert` 同一份判据**（`pruneOrphanCredentials`）：被删掉的模型所引用的 ref 若既无模型引用、也不在 `standaloneCredentials` 里，就清掉；用户显式写的游离 ref 与仍被引用的 ref 都不动。
+- 与 `reorder` 互不放松：`reorder` 仍要求目录内 id 的非空全排列且不重建 raw 行。
+
 ### revision、写失败与损坏
 
-upsert/reorder 在同一把 store 锁内检查 revision、构造完整下一状态并原子写盘；冲突或写盘失败不推进 revision、不改内存。启动读盘发现损坏、重复 id、非法字段时，list/upsert/reorder/test/set-active 全部失败，原文件不被空目录覆盖。
+upsert/reorder/replace 在同一把 store 锁内检查 revision、构造完整下一状态并原子写盘；冲突或写盘失败不推进 revision、不改内存。启动读盘发现损坏、重复 id、非法字段时，list/upsert/reorder/test/set-active 全部失败，原文件不被空目录覆盖。
 
-空目录是合法的初始状态：list 返回 `models=[]`，首次 upsert 可新增；空目录 reorder 返回 409 `empty_catalog`，test/set-active 因 id 不存在失败。非空目录收到 `ids=[]` 返回 400 `empty_order`。
+空目录是合法的初始状态：list 返回 `models=[]`，首次 upsert 可新增，`replace` 也可直接写入（包括写回 `[]`）；空目录 reorder 返回 409 `empty_catalog`，test/set-active 因 id 不存在失败。非空目录收到 `ids=[]` 返回 400 `empty_order`。
 
 ## 4. test 只报告真实本地结果
 

@@ -339,11 +339,12 @@ official covered by const: 155 of 193
 
 - **官方分母：193**（不是 153）。取证方式见 §1 RED-1。
 - 宿主 Transport 方法常量：**205** = 155 官方 + **50 宿主独有**（`session.load/history/approve/rewind.*`、`settings.form.*`、`terminal.open/input/output`、`mcp.*`、`side.*`、`models.catalog.*` 等，TUI/兼容面，**不得改名删除**）。
+- **2026-11-19（task-96）**：新增 `models.catalog.replace`（additive 整数组写入，契约见 [`docs/transport-contract.md`](transport-contract.md) §3B），宿主独有清单再 +1。本行 205/50 与第 163 行那条 206/51 都是各自盘点时的快照口径，不随每次 additive 重算；`api.go` 的常量集合才是当前真相。
 - 50 个宿主独有方法清单（`file:line` 全在 `internal/transport/api.go` 与 `context_mcp_sidequery.go`）：
 
 ```text
 attachment.get/put, config.get/set, context.usage, fs.read/write, jobs.list/output/stop,
-mcp.list/reconnect/toggle, models.catalog.list/reorder/set-active/test/upsert, models.list,
+mcp.list/reconnect/toggle, models.catalog.list/reorder/replace/set-active/test/upsert, models.list,
 schedule.clear/delete, session.approve/color.get/color.set/compact/delete/goal.get/goal.pause/
 goal.resume/history/load/rewind.apply/rewind.preview/setEffort/setGoal/setModel/setPermission/
 transcript.page, settings.form.describe/get/reset/set, side.cancel/close/query,

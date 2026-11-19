@@ -716,3 +716,225 @@ func TestModelCatalogRejectsBadCredentialDocument(t *testing.T) {
 		t.Fatalf("错误串泄漏了值：%v", err)
 	}
 }
+
+// TestModelCatalogReplaceRewritesWholeArrayWithFences 钉住 replace 的语义：
+// **整份数组写入**（删除 / 排序 / 新增一次表达）+ 同一套 revision 栅栏。
+//
+// 为什么是 replace 而不是 delete：官方编辑器的行删除是本地 splice + 整份
+// `models` 数组落盘（`DeepSeekModelsEditor.tsx:157-160` → `operations.ts:86-91`），
+// 官方没有按 id 删的接口；宿主不自造一条。
+func TestModelCatalogReplaceRewritesWholeArrayWithFences(t *testing.T) {
+	home := t.TempDir()
+	store := OpenModelCatalog(home)
+
+	// 1) 空目录上用整数组写入建立两行：与 upsert 一样，模型对象本身仍逐条校验。
+	first := []json.RawMessage{
+		json.RawMessage(`{"id":"model-a","name":"Alpha","api":"openai-completions","baseURL":"https://api.example.com","futureField":{"z":1,"a":[true,null,"keep"]}}`),
+		json.RawMessage(`{"id":"model-b","name":"Beta"}`),
+	}
+	view, err := store.Replace(first, catalogRevision(0))
+	if err != nil {
+		t.Fatalf("replace 建目录: %v", err)
+	}
+	if view.Revision != 1 {
+		t.Fatalf("revision=%d，期望 1", view.Revision)
+	}
+	assertCatalogOrder(t, view, "model-a", "model-b")
+
+	// 2) 一次提交同时表达三件事：删 model-a、保留 model-b 并换顺序、新增 model-c。
+	second := []json.RawMessage{
+		json.RawMessage(`{"id":"model-b","name":"Beta Two"}`),
+		json.RawMessage(`{"id":"model-c","name":"Gamma"}`),
+	}
+	view, err = store.Replace(second, catalogRevision(1))
+	if err != nil {
+		t.Fatalf("replace 删/排/增: %v", err)
+	}
+	if view.Revision != 2 {
+		t.Fatalf("replace 后 revision=%d，期望 2", view.Revision)
+	}
+	assertCatalogOrder(t, view, "model-b", "model-c")
+	if strings.Contains(string(view.Models[0]), `"model-a"`) {
+		t.Fatalf("被删的行还在: %s", view.Models[0])
+	}
+
+	// 3) 陈旧 revision 一个字都不写：既不覆盖新数组，也不推进 revision。
+	stale := []json.RawMessage{json.RawMessage(`{"id":"model-z"}`)}
+	if _, err := store.Replace(stale, catalogRevision(0)); ModelCatalogErrorCode(err) != "revision_conflict" {
+		t.Fatalf("陈旧 replace error=%v code=%s", err, ModelCatalogErrorCode(err))
+	}
+	unchanged, err := store.List()
+	if err != nil || unchanged.Revision != 2 {
+		t.Fatalf("冲突后 revision=%d err=%v", unchanged.Revision, err)
+	}
+	assertCatalogOrder(t, unchanged, "model-b", "model-c")
+
+	// 4) 重复 id / 坏行（第 2 行）整体拒绝：合法的那一行也不许先写进去。
+	if _, err := store.Replace([]json.RawMessage{
+		json.RawMessage(`{"id":"model-b"}`), json.RawMessage(`{"id":"model-b"}`),
+	}, catalogRevision(2)); ModelCatalogErrorCode(err) != "duplicate_id" {
+		t.Fatalf("重复 id error=%v code=%s", err, ModelCatalogErrorCode(err))
+	}
+	if _, err := store.Replace([]json.RawMessage{
+		json.RawMessage(`{"id":"model-ok"}`), json.RawMessage(`{"id":"model-bad","contextWindow":0}`),
+	}, catalogRevision(2)); ModelCatalogErrorCode(err) != "invalid_field" {
+		t.Fatalf("坏行 error=%v code=%s", err, ModelCatalogErrorCode(err))
+	}
+	if _, err := store.Replace([]json.RawMessage{
+		json.RawMessage(`{"id":"model-ok"}`), json.RawMessage(`{"id":""}`),
+	}, catalogRevision(2)); ModelCatalogErrorCode(err) != "invalid_id" {
+		t.Fatalf("空 id error=%v code=%s", err, ModelCatalogErrorCode(err))
+	}
+	// 秘密不许混进 model 行（与 upsert 同一条拒绝）。
+	if _, err := store.Replace([]json.RawMessage{
+		json.RawMessage(`{"id":"model-ok","apiKey":"not-returned"}`),
+	}, catalogRevision(2)); ModelCatalogErrorCode(err) != "invalid_field" {
+		t.Fatalf("model 内秘密 error=%v code=%s", err, ModelCatalogErrorCode(err))
+	}
+	afterRejects, err := store.List()
+	if err != nil || afterRejects.Revision != 2 {
+		t.Fatalf("被拒写入改了 revision: %d err=%v", afterRejects.Revision, err)
+	}
+	assertCatalogOrder(t, afterRejects, "model-b", "model-c")
+
+	// 5) 可选字段显式 null = 删除该字段（与 upsert 同规则）；未知字段与 key 顺序保序。
+	view, err = store.Replace([]json.RawMessage{
+		json.RawMessage(`{"id":"model-d","name":null,"owned_by":"local","futureField":{"keep":true},"futureScalar":7}`),
+	}, catalogRevision(2))
+	if err != nil {
+		t.Fatalf("replace null 字段: %v", err)
+	}
+	if view.Revision != 3 {
+		t.Fatalf("revision=%d，期望 3", view.Revision)
+	}
+	rewritten := string(view.Models[0])
+	if strings.Contains(rewritten, `"name"`) {
+		t.Fatalf("name:null 没被删除: %s", rewritten)
+	}
+	for _, fragment := range []string{`"owned_by":"local"`, `"futureField":{"keep":true}`, `"futureScalar":7`} {
+		if !strings.Contains(rewritten, fragment) {
+			t.Fatalf("整数组写入丢了 %s: %s", fragment, rewritten)
+		}
+	}
+	if strings.Index(rewritten, `"owned_by"`) > strings.Index(rewritten, `"futureField"`) {
+		t.Fatalf("未知字段顺序被重排: %s", rewritten)
+	}
+
+	// 6) replace 没有放松 reorder：非全排列仍按既有约束拒绝。
+	if _, err := store.Reorder([]string{"model-d", "model-b"}, catalogRevision(3)); ModelCatalogErrorCode(err) != "bad_request" {
+		t.Fatalf("reorder 被放宽了: error=%v code=%s", err, ModelCatalogErrorCode(err))
+	}
+
+	// 7) models=[] 是合法目标（删到空）；空目录仍可 list，reorder 仍 fail-loud。
+	view, err = store.Replace([]json.RawMessage{}, catalogRevision(3))
+	if err != nil {
+		t.Fatalf("replace 清空: %v", err)
+	}
+	if view.Revision != 4 || len(view.Models) != 0 {
+		t.Fatalf("清空后 view=%+v", view)
+	}
+	if _, err := store.Reorder([]string{}, catalogRevision(4)); ModelCatalogErrorCode(err) != "empty_catalog" {
+		t.Fatalf("清空后 reorder error=%v code=%s", err, ModelCatalogErrorCode(err))
+	}
+
+	// 8) 重开一份目录读到的是落盘真值（不是内存假库）。
+	reopened := OpenModelCatalog(home)
+	persisted, err := reopened.List()
+	if err != nil || persisted.Revision != 4 || len(persisted.Models) != 0 {
+		t.Fatalf("重开后 view=%+v err=%v", persisted, err)
+	}
+}
+
+// TestModelCatalogReplacePrunesOrphansLikeUpsert 钉住"写入后 credentials 孤儿
+// 清理沿用 Upsert 规则"：被整数组删掉的模型所引用的 ref 成为孤儿并清掉；
+// 用户显式写进来的游离 ref（StandaloneCredentials）与仍被引用的 ref 都不许动。
+func TestModelCatalogReplacePrunesOrphansLikeUpsert(t *testing.T) {
+	home := t.TempDir()
+	store := OpenModelCatalog(home)
+
+	const (
+		keyA    = "REPLACE_KEY_A"
+		keyB    = "REPLACE_KEY_B"
+		secretA = "replace-secret-a-51c3"
+		secretB = "replace-secret-b-77d9"
+		free    = "REPLACE_FREE_REF"
+		freeVal = "replace-free-secret-2ab8"
+	)
+	modelA := json.RawMessage(`{"id":"model-a","api":"openai-completions","baseURL":"https://api.example.com","apiKeyEnv":"` + keyA + `"}`)
+	secretAValue := secretA
+	if _, err := store.Upsert(modelA, &secretAValue, catalogRevision(0)); err != nil {
+		t.Fatalf("upsert A: %v", err)
+	}
+	if _, err := store.SetCredential(free, freeVal, catalogRevision(1)); err != nil {
+		t.Fatalf("SetCredential 游离值: %v", err)
+	}
+
+	// 1) 整数组写入换掉所有模型：A 的 ref 失去全部引用 → 按 upsert 规则清掉。
+	models := []json.RawMessage{json.RawMessage(`{"id":"model-b","api":"openai-completions","baseURL":"https://api.example.com","apiKeyEnv":"` + keyB + `"}`)}
+	view, err := store.Replace(models, catalogRevision(2))
+	if err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	if _, ok := view.Credentials[keyA]; ok {
+		t.Fatalf("孤儿 ref %s 没被清掉：%+v", keyA, view.Credentials)
+	}
+	if status, ok := view.Credentials[keyB]; !ok || status.Configured {
+		t.Fatalf("新引用 %s 不该有值：%+v", keyB, view.Credentials)
+	}
+	if status, ok := view.Credentials[free]; !ok || !status.Configured {
+		t.Fatalf("整数组写入清掉了用户显式写的游离凭据：%+v", view.Credentials)
+	}
+	if raw := readCatalogFile(t, home); strings.Contains(raw, secretA) {
+		t.Fatalf("被删模型引用的凭据值仍留在磁盘：%s", raw)
+	}
+
+	// 2) 仍被引用的 ref 不许动：写回 A 那个 ref 并保留它。
+	if _, err := store.SetCredential(keyB, secretB, catalogRevision(3)); err != nil {
+		t.Fatalf("SetCredential B: %v", err)
+	}
+	kept := []json.RawMessage{json.RawMessage(`{"id":"model-b","api":"openai-completions","baseURL":"https://api.example.com","apiKeyEnv":"` + keyB + `"}`)}
+	view, err = store.Replace(kept, catalogRevision(4))
+	if err != nil {
+		t.Fatalf("replace 保留引用: %v", err)
+	}
+	if status, ok := view.Credentials[keyB]; !ok || !status.Configured {
+		t.Fatalf("仍被引用的 ref 被当成孤儿清掉了：%+v", view.Credentials)
+	}
+	if status, ok := view.Credentials[free]; !ok || !status.Configured {
+		t.Fatalf("游离凭据被清掉了：%+v", view.Credentials)
+	}
+
+	// 3) 视图永不回值：任何一次 replace 的响应都不许带 secret。
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leaked := range []string{secretA, secretB, freeVal} {
+		if strings.Contains(string(encoded), leaked) {
+			t.Fatalf("replace 视图回显了凭据：%s", encoded)
+		}
+	}
+}
+
+// TestModelCatalogReplaceFailedFlushKeepsOldValue 钉住原子写：
+// 落盘失败时内存与磁盘都保持旧数组与旧 revision，绝不半写。
+func TestModelCatalogReplaceFailedFlushKeepsOldValue(t *testing.T) {
+	home := t.TempDir()
+	store := OpenModelCatalog(home)
+	valid := json.RawMessage(`{"id":"model-a","name":"before"}`)
+	if _, err := store.Replace([]json.RawMessage{valid}, catalogRevision(0)); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(home, "blocked-target-replace")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store.path = blocked
+	if _, err := store.Replace([]json.RawMessage{json.RawMessage(`{"id":"model-b"}`)}, catalogRevision(1)); ModelCatalogErrorCode(err) != "internal" {
+		t.Fatalf("落盘失败 error=%v code=%s", err, ModelCatalogErrorCode(err))
+	}
+	view, err := store.List()
+	if err != nil || view.Revision != 1 || len(view.Models) != 1 || string(view.Models[0]) != string(valid) {
+		t.Fatalf("落盘失败后内存被改了: view=%+v err=%v", view, err)
+	}
+}

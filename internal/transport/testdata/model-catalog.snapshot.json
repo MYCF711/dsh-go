@@ -5,6 +5,7 @@
     { "name": "models.catalog.list", "params": [], "result": "CatalogView" },
     { "name": "models.catalog.upsert", "params": ["model", "credential?", "expectedRevision?"], "result": "CatalogView" },
     { "name": "models.catalog.reorder", "params": ["ids", "expectedRevision?"], "result": "CatalogView" },
+    { "name": "models.catalog.replace", "params": ["models", "expectedRevision?"], "result": "CatalogView" },
     { "name": "models.catalog.test", "params": ["id", "baseURL?", "api?", "credential?"], "result": "TestResult" },
     { "name": "models.catalog.set-active", "params": ["id", "expectedRevision?"], "result": "ActiveResult" }
   ],
@@ -26,8 +27,9 @@
   "validation": {
     "supportedAPI": "openai-completions",
     "modelFields": "official fields plus preserved unknown fields; apiKey/credential/secret/token are forbidden in model objects",
-    "emptyCatalog": "list returns models=[]; reorder/test/set-active fail loudly",
-    "reorder": "nonempty exact ID permutation; model raw objects are not rebuilt"
+    "emptyCatalog": "list returns models=[]; reorder/test/set-active fail loudly; replace may write models=[]",
+    "reorder": "nonempty exact ID permutation; model raw objects are not rebuilt",
+    "replace": "whole models array (official settings.mutate semantics: delete/reorder/add in one commit); each row keeps the model-field guards; models=[] clears the catalog"
   },
   "errors": {
     "bad_request": 400,

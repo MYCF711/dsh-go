@@ -51,7 +51,7 @@ func readModelCatalogGolden(t *testing.T) modelCatalogGolden {
 	if err := json.Unmarshal(raw, &golden); err != nil {
 		t.Fatal(err)
 	}
-	if golden.Schema != "dshgo.model-catalog.golden@1" || len(golden.Accepted) != 6 || len(golden.Rejected) < 13 {
+	if golden.Schema != "dshgo.model-catalog.golden@1" || len(golden.Accepted) != 7 || len(golden.Rejected) < 17 {
 		t.Fatalf("bad model catalog golden: schema=%q accepted=%d rejected=%d", golden.Schema, len(golden.Accepted), len(golden.Rejected))
 	}
 	return golden
@@ -344,11 +344,11 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 		t.Fatalf("W61 default after set-active=%+v", settings)
 	}
 	afterRejected := modelCatalogResult(t, postPluginGlue(t, clientA, serverA.base, "models.catalog.list", map[string]any{}, http.StatusOK))
-	if afterRejected["revision"] != float64(4) {
+	if afterRejected["revision"] != float64(5) {
 		t.Fatalf("rejected writes changed revision: %+v", afterRejected)
 	}
-	assertModelCatalogOrder(t, afterRejected, []string{"model-b", "model-a"})
-	modelA := afterRejected["models"].([]any)[1].(map[string]any)
+	assertModelCatalogOrder(t, afterRejected, []string{"model-a", "model-c"})
+	modelA := afterRejected["models"].([]any)[0].(map[string]any)
 	if modelA["name"] != "Alpha Two" || modelA["futureScalar"] != float64(42) || modelA["futureField"] == nil || modelA["reasoningEfforts"] == nil || modelA["baseURL"] != gateway.URL+"/v1" {
 		t.Fatalf("full fields did not round trip: %+v", modelA)
 	}
@@ -399,10 +399,10 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 	serverA = startPluginGlueServer(t, exe, homeA, decoy)
 	clientA = connectPluginGlueServer(t, serverA)
 	reopened := modelCatalogResult(t, postPluginGlue(t, clientA, serverA.base, "models.catalog.list", map[string]any{}, http.StatusOK))
-	if reopened["revision"] != float64(4) || reopened["active"].(map[string]any)["id"] != "model-a" || reopened["active"].(map[string]any)["revision"] != float64(1) {
+	if reopened["revision"] != float64(5) || reopened["active"].(map[string]any)["id"] != "model-a" || reopened["active"].(map[string]any)["revision"] != float64(1) {
 		t.Fatalf("reopened catalog=%+v", reopened)
 	}
-	assertModelCatalogOrder(t, reopened, []string{"model-b", "model-a"})
+	assertModelCatalogOrder(t, reopened, []string{"model-a", "model-c"})
 	evidence.log(t, "MODEL_CATALOG_REOPENED", map[string]any{"result": reopened})
 	reopenedSession := modelCatalogResult(t, postPluginGlue(t, clientA, serverA.base, "session.create", map[string]any{}, http.StatusOK))["sessionId"].(string)
 	for _, expected := range []struct {
@@ -426,8 +426,8 @@ func TestModelCatalogRealDSHDAuthenticatedGoldenABRestartAndRuntime(t *testing.T
 	if finalB["revision"] != float64(0) || len(finalB["models"].([]any)) != 0 || finalB["active"].(map[string]any)["id"] != "group/deepseek-v4.1-flash-1017" {
 		t.Fatalf("home B changed: %+v", finalB)
 	}
-	t.Log("MODEL_CATALOG_GOLDEN_SUMMARY OK=6 FAIL=0")
-	t.Log("MODEL_CATALOG_REJECT_SUMMARY OK=15 FAIL=0")
+	t.Log("MODEL_CATALOG_GOLDEN_SUMMARY OK=7 FAIL=0")
+	t.Log("MODEL_CATALOG_REJECT_SUMMARY OK=19 FAIL=0")
 	t.Log("MODEL_CATALOG_RUNTIME_SUMMARY OK=4 FAIL=0")
 }
 
@@ -550,5 +550,83 @@ func TestModelCatalogOutcomeWaiterIgnoresStaleTurnDone(t *testing.T) {
 	err := waitModelCatalogOutcome(t, client, server.URL, "sess-1", 2, 2*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "turn failed") {
 		t.Fatalf("这一轮的 turn/error 必须报出来，实得 %v", err)
+	}
+}
+
+// TestModelCatalogReplaceTransportGuards 钉住 `models.catalog.replace` 的
+// Transport 面：裸参数、严格白名单、`params` 包装拒绝、可选键省略而非 null，
+// 以及 revision 乐观锁与重复 id 的既有错误码。
+func TestModelCatalogReplaceTransportGuards(t *testing.T) {
+	home := t.TempDir()
+	settings, _, _ := openSettingsStores(t, home, "base-model", "allow")
+	catalog := llm.OpenModelCatalog(home)
+	server := httptest.NewServer(newModelCatalogHTTPHandler(catalog, settings))
+	t.Cleanup(server.Close)
+	post := func(body string, want int) map[string]any {
+		t.Helper()
+		resp, err := http.Post(server.URL+"/api/models.catalog.replace", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("%s status=%d want=%d body=%s", body, resp.StatusCode, want, raw)
+		}
+		var envelope map[string]any
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatalf("%s envelope: %v (%s)", body, err, raw)
+		}
+		return envelope
+	}
+	assertError := func(body string, want int, code string) {
+		t.Helper()
+		envelope := post(body, want)
+		errField, ok := envelope["error"].(map[string]any)
+		if !ok || errField["code"] != code || errField["hint"] == "" || errField["retryable"] == nil {
+			t.Fatalf("%s error 四字段=%+v", body, envelope["error"])
+		}
+	}
+
+	// 参数守卫：缺数组 / null / params 包装 / 未知键 / 类型错 / expectedRevision=null。
+	assertError(`{}`, http.StatusBadRequest, "bad_request")
+	assertError(`{"models":null}`, http.StatusBadRequest, "bad_request")
+	assertError(`{"params":{"models":[]}}`, http.StatusBadRequest, "bad_request")
+	assertError(`{"models":[],"extra":true}`, http.StatusBadRequest, "bad_request")
+	assertError(`{"models":"not-an-array"}`, http.StatusBadRequest, "bad_request")
+	assertError(`{"models":[{"id":"model-a"}],"expectedRevision":null}`, http.StatusBadRequest, "bad_request")
+	// 被拒的写入不许留下任何目录或 revision。
+	if view, err := catalog.List(); err != nil || view.Revision != 0 || len(view.Models) != 0 {
+		t.Fatalf("被拒参数写了目录: %+v err=%v", view, err)
+	}
+
+	// 成功：整数组写入（含未知字段与 apiKeyEnv 引用）。
+	envelope := post(`{"models":[{"id":"model-a","name":"Alpha","futureField":{"z":1}},{"id":"model-b"}],"expectedRevision":0}`, http.StatusOK)
+	result := modelCatalogResult(t, envelope)
+	if result["revision"] != float64(1) {
+		t.Fatalf("revision=%v，期望 1", result["revision"])
+	}
+	assertModelCatalogOrder(t, result, []string{"model-a", "model-b"})
+	if _, ok := result["active"].(map[string]any); !ok {
+		t.Fatalf("replace 的结果不是完整 CatalogView: %+v", result)
+	}
+
+	// 陈旧 revision：409 且不覆盖。
+	assertError(`{"models":[{"id":"model-z"}],"expectedRevision":0}`, http.StatusConflict, "revision_conflict")
+	afterConflict := modelCatalogResult(t, post(`{"models":[{"id":"model-a"},{"id":"model-b"}],"expectedRevision":1}`, http.StatusOK))
+	if afterConflict["revision"] != float64(2) {
+		t.Fatalf("重新提交后 revision=%v，期望 2", afterConflict["revision"])
+	}
+	assertModelCatalogOrder(t, afterConflict, []string{"model-a", "model-b"})
+
+	// 重复 id 与坏行：既有错误码，且都在写入前失败。
+	assertError(`{"models":[{"id":"model-a"},{"id":"model-a"}],"expectedRevision":2}`, http.StatusConflict, "duplicate_id")
+	assertError(`{"models":[{"id":""}],"expectedRevision":2}`, http.StatusBadRequest, "invalid_id")
+	assertError(`{"models":[{"id":"model-a","apiKey":"not-returned"}],"expectedRevision":2}`, http.StatusBadRequest, "invalid_field")
+
+	// models=[] 是合法目标：删到空 + revision 推进；空目录仍可 list。
+	cleared := modelCatalogResult(t, post(`{"models":[],"expectedRevision":2}`, http.StatusOK))
+	if cleared["revision"] != float64(3) || len(cleared["models"].([]any)) != 0 {
+		t.Fatalf("清空后 view=%+v", cleared)
 	}
 }

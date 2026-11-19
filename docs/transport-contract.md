@@ -209,17 +209,20 @@ W48 先完成管理器与适配器，W50 已把真实 dshd CLI 与 serve 主分�
 
 ## 3B. HOST-MODEL-CATALOG 模型目录扩展（2026-11-05，additive）
 
-本节只新增 `models.catalog.*` 五个方法，不改 canonical 25；尤其既有 `models.list` 仍是网关 OpenAI `GET /v1/models` 的 `{id,owned_by}` 投影，不 repurposed 成持久目录。独立机器夹具为 `internal/transport/testdata/model-catalog.snapshot.json` 与 `model-catalog-golden.json`；完整字段、存储和实证见 [`docs/model-catalog.md`](model-catalog.md)。官方依据是 0.2.2-rc.1 `ui-settings-models`：模型行保留 `id/name/contextWindow/maxTokens/input/reasoningEfforts` 及未识别字段，provider profile 使用 `api/baseURL/apiKeyEnv/models`，credential 只回 configured/writable。
+本节新增 `models.catalog.*` 六个方法，不改 canonical 25；尤其既有 `models.list` 仍是网关 OpenAI `GET /v1/models` 的 `{id,owned_by}` 投影，不 repurposed 成持久目录。独立机器夹具为 `internal/transport/testdata/model-catalog.snapshot.json` 与 `model-catalog-golden.json`；完整字段、存储和实证见 [`docs/model-catalog.md`](model-catalog.md)。官方依据是 0.2.2-rc.1 `ui-settings-models`：模型行保留 `id/name/contextWindow/maxTokens/input/reasoningEfforts` 及未识别字段，provider profile 使用 `api/baseURL/apiKeyEnv/models`，credential 只回 configured/writable。
 
 | method | HTTP 裸参数 | 成功 result |
 |---|---|---|
 | `models.catalog.list` | `{}` | `{revision,models,credentials,active}`；`active={id,revision}` 从 W61 同一默认模型存储投影 |
 | `models.catalog.upsert` | `{model,credential?,expectedRevision?}` | 写后的 CatalogView；同 id 部分更新保留未提交字段与未知字段，新 id 追加 |
 | `models.catalog.reorder` | `{ids,expectedRevision?}` | 写后的 CatalogView；ids 必须是非空精确排列，raw model 对象不重建 |
+| `models.catalog.replace` | `{models,expectedRevision?}` | 写后的 CatalogView；整份 `models` 数组一次写入（官方 `settings.mutate` 同形），删除/排序/新增都走这一条，`models=[]` 表示清空 |
 | `models.catalog.test` | `{id,baseURL?,api?,credential?}` | `{id,ok,model?,latencyMs}`；只由真实 OpenAI 兼容 chat/completions 响应产生 ok |
 | `models.catalog.set-active` | `{id,expectedRevision?}` | `{activeModel,activeRevision,revision}`；expectedRevision  fence 的是 W61 model 默认 revision |
 
-目录存 `state/model-catalog.json`，含 version/revision/有序 raw models/credentials；credential 只在同一原子写中保存，list/upsert/reorder/test 响应绝不回传 literal。模型未知字段与对象键顺序保序 round-trip，已存 raw 行 reorder 不改写。空目录可以 list/首次 upsert，但 reorder/test/set-active 必须 fail-loud；坏/重复 id、缺失或多余 order id、非法已知字段、秘密混入 model、损坏 JSON、revision 冲突均返回四字段错误且不改存储。
+目录存 `state/model-catalog.json`，含 version/revision/有序 raw models/credentials；credential 只在同一原子写中保存，list/upsert/reorder/replace/test 响应绝不回传 literal。模型未知字段与对象键顺序保序 round-trip，已存 raw 行 reorder 不改写。空目录可以 list/首次 upsert，但 reorder/test/set-active 必须 fail-loud；坏/重复 id、缺失或多余 order id、非法已知字段、秘密混入 model、损坏 JSON、revision 冲突均返回四字段错误且不改存储。
+
+`replace` 与 `reorder` 是两条不同语义、互不放松：`reorder` 仍要求目录内 id 的全排列且绝不重建 raw 行，`replace` 是整份新数组（因此允许增删、换序与 `models=[]`），每一行仍逐条走与 `upsert` 相同的字段守卫与去重。`replace` **不是** `delete` 的替代命名：官方编辑器的行删除本身就是本地 `splice` + 整份 `models` 数组落盘（`DeepSeekModelsEditor.tsx:157-160` → `operations.ts:86-91`），官方没有按 id 删的接口，宿主也不自造。宿主侧只提供契约；GUI（`../dsh-ui` 的 `dssettings` 模型目录编辑器）随后把删除钮从"禁用态 + 说明"改成真按钮，用一次 `replace` 提交删除/排序/新增，命中区断言归 GUI 侧任务。
 
 `set-active` 不写第二个 active 值，只通过 W61 `settingsFormDefault/settingsFormRevision` 更新 `state/session-model.json`。创建当时物化到 session override 的既有语义不变，因此新会话下一轮与重开读取 active，旧会话不 retroactive 改写。W75 已把 active catalog 条目的 `baseURL/api/apiKeyEnv` 与 stored credential 每轮接入直接 modelRunner 和 loopRunner；无 provider 配置的普通 model id 才回退 `DSHD_LLM_BASE/DSHD_LLM_KEY`，credential 不进 argv、不写全局环境，真实 A/B/重开/redaction 证据见 [`docs/model-provider-routing.md`](model-provider-routing.md)。HTTP 全部先过现有 cookie 认证，未认证 401。
 

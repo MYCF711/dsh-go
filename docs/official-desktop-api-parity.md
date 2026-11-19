@@ -577,6 +577,7 @@
 - `mcp.toggle`
 - `models.catalog.list`
 - `models.catalog.reorder`
+- `models.catalog.replace`
 - `models.catalog.test`
 - `models.catalog.upsert`
 - `models.list`
