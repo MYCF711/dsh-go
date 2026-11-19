@@ -198,5 +198,53 @@
     "new": "\tif err := error(nil); err != nil {",
     "pkg": "./modules/tool/pwsh",
     "test": "TestSandboxEscalationRequiresPairedJustification"
+  },
+  {
+    "name": "pmgit-inspect-bundle-not-null",
+    "file": "internal/transport/handlers_pluginmanager_official.go",
+    "old": "Status: \"accepted\", Kind: \"git\",\n\t\tBundle:   json.RawMessage(\"null\"),",
+    "new": "Status: \"accepted\", Kind: \"git\",\n\t\tBundle:   json.RawMessage(\"false\"),",
+    "pkg": "./internal/pluginmgr/official",
+    "test": "TestGitInspectAcceptedOnlyCarriesForm"
+  },
+  {
+    "name": "pmgit-install-records-cache-path",
+    "file": "internal/pluginmgr/manager.go",
+    "old": "func recordedSource(recorded, absolute string) string {\n\tif trimmed := strings.TrimSpace(recorded); trimmed != \"\" {",
+    "new": "func recordedSource(recorded, absolute string) string {\n\tif trimmed := strings.TrimSpace(recorded); trimmed != \"\" && false {",
+    "pkg": "./internal/pluginmgr/official",
+    "test": "TestGitInstallRecordsSpecNotCachePath"
+  },
+  {
+    "name": "pmgit-install-ignores-path-subdir",
+    "file": "internal/pluginmgr/official/git_fetch.go",
+    "old": "\tif location.Path != \"\" {",
+    "new": "\tif false {",
+    "pkg": "./internal/pluginmgr/official",
+    "test": "TestGitInstallSubdirectorySpec"
+  },
+  {
+    "name": "pmgit-update-skips-origin-check",
+    "file": "internal/pluginmgr/official/adapter.go",
+    "old": "\torigin, _ := pluginmgr.PinnedGitOrigin(state.Source)\n\tif target != origin {",
+    "new": "\torigin, _ := pluginmgr.PinnedGitOrigin(state.Source)\n\tif target != origin && false {",
+    "pkg": "./internal/pluginmgr/official",
+    "test": "TestGitUpdateRefusesBadTargets"
+  },
+  {
+    "name": "pmgit-update-forgets-spec",
+    "file": "internal/pluginmgr/official/adapter.go",
+    "old": "\tinfo, err := a.manager.UpdateFrom(p.Name, local, *p.Spec)",
+    "new": "\tinfo, err := a.manager.Update(p.Name, local)",
+    "pkg": "./internal/pluginmgr/official",
+    "test": "TestGitUpdateBundleToNewCommit"
+  },
+  {
+    "name": "pmgit-stale-checkout-reused",
+    "file": "internal/pluginmgr/official/git_adapter.go",
+    "old": "\tif _, err := os.Stat(dst); err == nil {\n\t\tif location.Commit != \"\" {",
+    "new": "\tif _, err := os.Stat(dst); err == nil {\n\t\tif location.Commit == \"\" {",
+    "pkg": "./internal/pluginmgr/official",
+    "test": "TestGitInstallUnppinnedSpecRefetchesHead"
   }
 ]

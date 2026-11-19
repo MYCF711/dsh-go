@@ -25,8 +25,10 @@ var errInstallCancelled = errors.New("安装已被取消")
 
 // InstallOptions 是官方 installBundle/updateBundle 里**本仓能兑现**的那部分选项。
 //
-// 不能兑现的（registry、approvedBuilds）由适配器在调用前就拒成 501：
-// 静默忽略等于假装装了一个带 npm 构建脚本的包。
+// 真兑现不了的在调用前就被适配器拒成结构化失败（不是静默忽略）：`approvedBuilds`
+// （本仓插件包没有 package.json 构建脚本，未执行任何构建，如实回一条 warning）。
+// registry/tarball/git 三种下载形态由适配器先落到本地目录再进这里，所以它们的
+// 安装走的是**同一条**作业/事务。
 type InstallOptions struct {
 	// RequestID 命名这次安装；空串表示不登记作业（也就不能 wait/cancel）。
 	RequestID string
@@ -138,12 +140,19 @@ func (j *InstallJob) finish(outcome InstallOutcome) {
 // 重复的 RequestID 一律拒绝：两次安装共用同一个进度/取消句柄，会让
 // cancelInstall 停错作业。
 func (m *Manager) StartInstall(source string, opts InstallOptions) (*InstallJob, error) {
+	return m.StartInstallFrom(source, "", opts)
+}
+
+// StartInstallFrom 与 StartInstall 相同，但把 recorded 记成 state.json 里的来源
+// （见 Manager.InstallFrom：registry/tarball/git 的包体在本地缓存里，而
+// `BundleInfo.source` 必须是安装 spec）。
+func (m *Manager) StartInstallFrom(source, recorded string, opts InstallOptions) (*InstallJob, error) {
 	job, err := m.registerJob(opts.RequestID)
 	if err != nil {
 		return nil, err
 	}
 	go func() {
-		outcome := m.runInstallJob(job.control, source, opts.Enable, opts.RequestID)
+		outcome := m.runInstallJobFrom(job.control, source, recorded, opts.Enable, opts.RequestID)
 		m.finishJob(opts.RequestID, job, outcome)
 	}()
 	return job, nil
@@ -259,10 +268,15 @@ func (m *Manager) finishJob(requestID string, job *InstallJob, outcome InstallOu
 var finishJobPublishedHook atomic.Pointer[func(requestID string)]
 
 func (m *Manager) runInstallJob(control *installControl, source string, enable bool, target string) InstallOutcome {
+	return m.runInstallJobFrom(control, source, "", enable, target)
+}
+
+// runInstallJobFrom 是 runInstallJob 的唯一实现（recorded 见 StartInstallFrom）。
+func (m *Manager) runInstallJobFrom(control *installControl, source, recorded string, enable bool, target string) InstallOutcome {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	outcome := InstallOutcome{Application: "applied", Stage: "install", Target: target}
-	info, err := m.installLocked(source, enable, control)
+	info, err := m.installLockedFrom(source, recorded, enable, control)
 	if err != nil {
 		return installFailure(outcome, err)
 	}

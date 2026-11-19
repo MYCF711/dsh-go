@@ -333,11 +333,31 @@ func TestUpdateBundleGitRowRequiresPinnedSameOrigin(t *testing.T) {
 	})
 	assertUpdateRefusal(t, result, "invalid-spec", "1.0.0")
 
-	// 5) 同仓库 + 新版本通过契约校验之后：本仓没有 git 获取器，
-	//    必须如实回四字段 501（点名叫缺 git），且不许改任何状态。
-	f.fourField(t, "pluginManager.updateBundle", map[string]any{
-		"name": "acme.git", "version": "2.0.0", "spec": "github:acme/widget#abcabcabcabcabcabcabcabcabcabcabcabcabca",
-	}, http.StatusNotImplemented, "not_implemented")
+	// 5) 同仓库 + 新版本通过契约校验之后：按官方 planGitUpdate 真的会去取
+	//    那个 commit。这里用**本机仓库**钉住"取不到 → 结构化 failed，
+	//    不冒充成功、不改状态"（2026-11-20 修订，task-121：git 更新已实现，
+	//    原先的 501 断言随之失效；不联网——远端是 git+file:// 本机仓库，
+	//    钉住的 commit 不存在）。
+	repo := newGitRepo(t)
+	installedCommit := repo.commitPackage(t, "", "acme.git", "1.0.0")
+	absentCommit := "abcabcabcabcabcabcabcabcabcabcabcabcabca"
+	f = newUpdateFixture(t, t.TempDir())
+	if result := f.result(t, "pluginManager.installBundle", map[string]any{
+		"spec": repo.spec(installedCommit, ""),
+	}); result["application"] != "applied" {
+		t.Fatalf("前置安装没成功：%v", result)
+	}
+	result = f.result(t, "pluginManager.updateBundle", map[string]any{
+		"name": "acme.git", "version": "2.0.0",
+		"options": map[string]any{"spec": repo.spec(absentCommit, "")},
+	})
+	if result["step"] != "check" {
+		t.Fatalf("取不到目标 commit 的更新 step 应为 check：%v", result)
+	}
+	target, _ := result["result"].(map[string]any)
+	if target == nil || target["application"] != "failed" {
+		t.Fatalf("取不到目标 commit 必须是结构化 failed：%v", result)
+	}
 	if state, _, err := f.manager.Bundle("acme.git"); err != nil {
 		t.Fatalf("Bundle: %v", err)
 	} else if state.Version != "1.0.0" {

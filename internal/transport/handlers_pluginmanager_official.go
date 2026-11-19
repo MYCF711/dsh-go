@@ -33,12 +33,18 @@ package transport
 //   - `waitForInstall` 官方的 `ChangeResult | null` 在本仓写成
 //     `{"active":false}`：本仓 `/api` 出口不允许 `{"result":null}`（会把 null
 //     变成 500），`active` 是客户端可判定、且不会伪装成"有载荷"的写法。
-//   - 需要 registry / pnpm / git / tarball 的能力（inspect 的三种非本地规格、
-//     listVersions 的 registry 查询、installBundle 的构建审批与 registry 选项）
-//     一律 501 并点名缺哪个能力。rc.2 的 git 更新（`updateBundle` 的
-//     `options.spec`）分两段：**契约校验**（完整 commit、同仓库目录、版本必须
-//     更新）按官方 planGitUpdate 逐条实现并回 `invalid-spec`；校验通过后需要
-//     git 获取器 checkout 那个 commit，本仓没有，于是 501 并点名缺 git。
+//   - **四种 spec 形态都有真实现**（2026-11-20 task-121 补齐 git）：path 读目录、
+//     registry/tarball 走 HTTP 下载、git 走本机 `git fetch`（`internal/pluginmgr/
+//     official/git_fetch.go`）。四种形态在协议层是同一份形状：`inspect` 的
+//     accepted 分支、`installBundle` 的 ChangeResult、`updateBundle` 的
+//     PluginUpdateResult 都只有一份定义，不为来源分叉。
+//     rc.2 的 git 更新（`updateBundle` 的 `options.spec`）分两段：**契约校验**
+//     （完整 commit、同仓库目录、版本必须更新）按官方 planGitUpdate 逐条实现
+//     并回 `invalid-spec`；校验通过后真取那个 commit 再走更新事务。
+//   - 仍然做不到的（在**当前宿主**上没有真实支撑）才回四字段 501：pnpm 构建
+//     审批（本仓包没有 package.json 构建脚本）、registry 多源 failover、
+//     git 的 SSH 传输回退与主机连通预检。这些缺口逐条登记在
+//     `docs/host-stable-gap-register.md` 的 pluginManager.* 行里。
 //
 // 真实状态、持久化、A/B 隔离与取消回滚由 `internal/pluginmgr/official` 的
 // 适配器测试覆盖；本文件用假宿主钉住协议。
@@ -812,6 +818,35 @@ func OfficialInspectionAccepted(kind, name, version string, bundle bool) Officia
 	return OfficialPluginSpecInspection{
 		Status: "accepted", Kind: kind, Name: name, Version: version,
 		Bundle: raw, Registry: json.RawMessage("null"),
+	}
+}
+
+// OfficialInspectionAcceptedGit 造 **git/tarball 形态**的 accepted 分支。
+//
+// 与 `OfficialInspectionAccepted` 的差别只有一处，而这一处是官方契约原文
+// （`dsh-plugin-manager/src/types.ts:243-262` 的 `PluginSpecInspection` 注释
+// 「the registry's answer for a name, a directory's manifest for a path, and
+// **only the form** for a git or tarball spec, whose package is known once pnpm
+// has fetched it」）：
+//   - `name` / `version` / `description` **都不出现**（包里是什么要取下来才知道，
+//     猜一个就是假数据）；
+//   - `bundle` 是 **null**，不是 false —— null 的意思是"这个形态说不出有没有
+//     patch"，false 的意思是"确定没有"。客户端对两者的下一步不同。
+//
+// `registry` 是"装这个 spec 时第一个会问的源"（本仓取配置首源；没配置就是
+// null——官方在没有 pnpm 配置可读时同样回 null）。
+func OfficialInspectionAcceptedGit(host, registry string) OfficialPluginSpecInspection {
+	encoded := json.RawMessage("null")
+	if strings.TrimSpace(registry) != "" {
+		if raw, err := json.Marshal(registry); err == nil {
+			encoded = raw
+		}
+	}
+	return OfficialPluginSpecInspection{
+		Status: "accepted", Kind: "git",
+		Bundle:   json.RawMessage("null"),
+		Registry: encoded,
+		Host:     host,
 	}
 }
 

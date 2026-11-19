@@ -5,6 +5,15 @@
 > 行号均以这两份**实际文件**为准（`grep -n` 逐条核对过，不是凭印象）。
 > 宿主路径相对仓库根；门禁在 `git archive HEAD` 副本上跑（AGENTS §5），共享树只跑定向测试。
 > 版本号未动（`0.2.2-rc.2-gobeta.1`）；未 commit / 未 push。
+>
+> **2026-11-20 更正（task-121）**：本文 §0.4 与 §8.1 写的"本仓没有 git 获取器 → 501"已不再成立。
+> git 形态已真实现（`internal/pluginmgr/official/git_fetch.go` 的 `FetchGitPackage` 用本机 `git fetch
+> --depth 1 <origin> <commit>` + checkout；`git_adapter.go` 的 `materializeGitSpec` 落到缓存目录；三条方法都走
+> 同一条 Manager 事务）。AGENTS R6 的原文是"不嵌 JS 运行时 / 不 fork-vendor dsc / 不用 mvdan 执行命令"，
+> 与"调用本机 git 取一个仓库"不是一回事——本仓既有 `repository_cache.go`、`internal/forge`、
+> `cmd/dshd/workspace_changes_git.go` 也都在调 git。当前缺口以 `docs/host-stable-gap-register.md` 的
+> `pluginManager.*` 三行为准（git 子操作已补；remaining：registry 多源 failover / git SSH 回退 /
+> git 主机连通预检 / pnpm 构建审批）。
 
 ## 0. 结论摘要
 

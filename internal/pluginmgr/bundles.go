@@ -17,6 +17,18 @@ import (
 // 它含 `/`，但绝不是相对路径——不先认出来，registry 规格会被误判成本地目录。
 var scopedPackagePattern = regexp.MustCompile(`^@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*(@[^\s]+)?$`)
 
+// hostedRepositoryURLPattern 是官方 `HOSTED_REPOSITORY_URL`
+// （`dsh-plugin-manager/src/install-spec.ts:22`）：
+//
+//	`^https?://[^/]+/[^/]+/[^/#]+(?:\.git)?(?:#.*)?$`
+//
+// 它把"托管仓库 URL"（`https://host/owner/repo`）划进 git 形态——与
+// `github:owner/repo` 是同一种东西的另一种写法。**刻意只认 https**：
+// 本仓的 tarball 下载走 http，把 http 也划进 git 会让 `http://host/pkg.tgz`
+// 这类地址先被判成 git 再被 tarball 判据兜回来，判据顺序就变得难读；
+// 需要 http 仓库时写 `git+http://…`（`GIT_URL` 明认那个前缀）。
+var hostedRepositoryURLPattern = regexp.MustCompile(`^https://[^/]+/[^/]+/[^/#]+(?:\.git)?(?:#.*)?$`)
+
 // BundleState 是一个已安装包的真实投影（含保留版本与每版来源）。
 //
 // 官方把一个**包**叫 bundle；本仓可安装单元就是 `dsh.local-plugin@1` 包，
@@ -181,7 +193,15 @@ func SourceKind(spec string) string {
 		strings.HasPrefix(trimmed, "github:"), strings.HasPrefix(trimmed, "gitlab:"),
 		strings.HasSuffix(trimmed, ".git"):
 		return "git"
-	case strings.HasPrefix(trimmed, "http://"), strings.HasPrefix(trimmed, "https://"):
+	case strings.HasPrefix(trimmed, "https://"):
+		// `.git` 后缀在上面已经被判成 git；这里剩下的是托管仓库 URL。
+		// 官方 `HOSTED_REPOSITORY_URL`（install-spec.ts:22）也是 https 形态：
+		// `https://<host>/<owner>/<repo>`，不带 `.git` 结尾。
+		if hostedRepositoryURLPattern.MatchString(trimmed) {
+			return "git"
+		}
+		fallthrough
+	case strings.HasPrefix(trimmed, "http://"):
 		if strings.HasSuffix(trimmed, ".tgz") || strings.HasSuffix(trimmed, ".tar.gz") ||
 			strings.HasSuffix(trimmed, ".tar") {
 			return "tarball"
@@ -189,6 +209,12 @@ func SourceKind(spec string) string {
 		return "registry"
 	case strings.HasSuffix(trimmed, ".tgz") || strings.HasSuffix(trimmed, ".tar.gz"):
 		return "tarball"
+	// `file://` / `file:` / `link:` 是**本地路径**（官方 parseInstallSpec 先判
+	// 这个前缀，再判 git）。没有这一条时 `file:///…/repo#<commit>` 会被
+	// SourceIsLocalPath 的"含斜杠"兜底判成 path，于是 git spec 被当成目录读。
+	case strings.HasPrefix(strings.ToLower(trimmed), "file:"),
+		strings.HasPrefix(strings.ToLower(trimmed), "link:"):
+		return "path"
 	case SourceIsLocalPath(trimmed):
 		return "path"
 	default:
