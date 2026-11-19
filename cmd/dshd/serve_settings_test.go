@@ -476,7 +476,12 @@ func TestSettingsFormRealDSHDAuthenticatedGoldenABRestartReset(t *testing.T) {
 	case <-time.After(realChainWait):
 		t.Fatalf("model request not received; serve stderr=%s", modelServer.stderr.String())
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	// 等真链路把 turn 跑完，所以用 realChainWait —— 和本包 context_usage_real /
+	// jobs_natural_exit / acp_load_reasoning 的取法一致。这里原来是写死的 15s：
+	// 本地 6~11s 能过，CI 上 -race 与 101 个包并行时不够，同一测试在 #86/#87/#89
+	// 三次都红在 "turn/done not received"，而单跑与整轮复跑都绿。前面的
+	// model 请求已经等了 realChainWait，turn 完成却只给 15s，不是同一个口径。
+	deadline := time.Now().Add(realChainWait)
 	for {
 		history := postPluginGlue(t, modelClient, modelServer.base, "session.history", map[string]any{"id": runtimeSession, "sinceSeq": 0, "limit": 100}, http.StatusOK)
 		frames := history["result"].(map[string]any)["frames"].([]any)
