@@ -52,7 +52,7 @@ internal/session/compact.go:Compact | 判"摘要是不是空的"只看 text 块�
 # ACP session/load 的正文 chunk：思考块在紧邻的上一个循环里已按
 # session.ReasoningBlocksBySeq 逐块 emit（顺序 思考→正文→调用，与 fork/serve 一致）。
 # 正文为空只表示"这条没有正文 chunk"，不决定消息是否消失。
-cmd/dshd/acp.go:1628 | 思考块在上一循环已按 ReasoningBlocksBySeq emit（tool/call 走 ACP 自己的调用事件）；正文空只表示没有正文 chunk，不决定消息存亡
+cmd/dshd/acp.go:1653 | 思考块在上一循环已按 ReasoningBlocksBySeq emit（tool/call 走 ACP 自己的调用事件）；正文空只表示没有正文 chunk，不决定消息存亡
 
 # history_search 的检索过滤：判据来自 eventText，而 eventText 已经把
 # text / reasoning / tool-call 三样拼起来。text 为空 = 三样都没有，确实搜不到东西。
@@ -158,3 +158,10 @@ internal/transport/server.go:1146 | promptContentShape：函数本身就是官�
 # 这里的 text 不是"会话消息正文"，是脚本操作表里 `op` 字段的类型断言结果。
 modules/tool/workflow/orchestrate.go:160 | execute：text 是操作表项 `op` 字段的字符串断言（不是消息正文）；空/非字符串 = 操作非法 → SCRIPT_PARSE 响亮失败，不投影任何消息
 internal/terminal/agenttools.go:236 | AgentScreenLines 的空判是切行前置守卫：官方 pageLines 对空屏幕回 0 行，而 Go 的 Split 对空串会给 1 个空元素，所以先判空是正确行为，不是「按 text 判消息有没有内容」。依据 dsh-api-terminal-controller/src/screen.ts:57-77。
+
+# durable 指令帧的**读回**：只拼我们自己按官方 createUserMessage 形状写下的载荷。
+# 官方 content 是 `[{type:'text', text}]`（src/state.ts:85-102，FrameEventOf 逐字照抄），
+# 所以多块/reasoning/tool-call 在这里**不存在**；这不是"投影任意消息"，也不决定消息存亡——
+# 要不要落这一帧由 Compose 的 alreadySupplied 与预算判（与 text 是否为空无关）。
+# 重放侧的判据是 source.kind，不是 text 有没有内容（FrameFromData）。
+internal/ainstr/durable.go:joinTextBlocks | 只读回我们自己按官方 createUserMessage 形状写下的 content（单 text 块）；不投影任意消息、不决定存亡，帧的准入靠 source.kind

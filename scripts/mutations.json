@@ -246,5 +246,77 @@
     "new": "\tif _, err := os.Stat(dst); err == nil {\n\t\tif location.Commit == \"\" {",
     "pkg": "./internal/pluginmgr/official",
     "test": "TestGitInstallUnppinnedSpecRefetchesHead"
+  },
+  {
+    "name": "ainstr-baseline-identity-ignores-cwd-depth",
+    "file": "internal/ainstr/ainstr.go",
+    "old": "\t\tif r, err := filepath.Rel(cwd, projectRoot); err == nil {\n\t\t\trel = filepath.ToSlash(r)",
+    "new": "\t\tif r, err := filepath.Rel(projectRoot, projectRoot); err == nil {\n\t\t\trel = filepath.ToSlash(r)",
+    "pkg": "./internal/ainstr",
+    "test": "TestIdentityMatchesOfficialKeyOrder"
+  },
+  {
+    "name": "ainstr-touch-accepts-failed-calls",
+    "file": "internal/ainstr/runner.go",
+    "old": "\tif success {\n\t\tif path, ok := FilePathFromToolCall(toolName, arguments); ok {",
+    "new": "\tif true {\n\t\tif path, ok := FilePathFromToolCall(toolName, arguments); ok {",
+    "pkg": "./internal/ainstr",
+    "test": "TestToolTouchesOnlySuccessfulFileTools"
+  },
+  {
+    "name": "ainstr-reconcile-keeps-unavailable-as-remove",
+    "file": "internal/ainstr/ainstr.go",
+    "old": "\tif failReadGroup != nil && failReadGroup(scope) {\n\t\treturn Probed{Kind: ProbeUnavailable, Absolute: absolute, Display: display}",
+    "new": "\tif failReadGroup != nil && failReadGroup(scope) {\n\t\treturn Probed{Kind: ProbeAbsent, Absolute: absolute, Display: display}",
+    "pkg": "./internal/ainstr",
+    "test": "TestReconcileRollsBackGroupOnUnavailable"
+  },
+  {
+    "name": "ainstr-dedup-uses-exact-content",
+    "file": "internal/ainstr/ainstr.go",
+    "old": "func TrimmedDigest(content string) string {\n\treturn Digest(strings.TrimSpace(content))",
+    "new": "func TrimmedDigest(content string) string {\n\treturn Digest(content)",
+    "pkg": "./internal/ainstr",
+    "test": "TestDigestIsSha1OfExactAndTrimmedContent"
+  },
+  {
+    "name": "ainstr-step-boundary-projects-immediately",
+    "file": "internal/ainstr/runner.go",
+    "old": "\tr.pending = append(r.pending, path)\n\tif !r.stepOpen {",
+    "new": "\tr.pending = append(r.pending, path)\n\tif true {",
+    "pkg": "./internal/ainstr",
+    "test": "TestStepBoundaryDefersTouches"
+  },
+  {
+    "name": "prompt-chain-merge-uses-single-budget",
+    "file": "internal/prompt/instructions_chains.go",
+    "old": "\tif options.MaxBytes <= 0 || len(userGlobal) == 0 || len(project) == 0 ||\n\t\t(len(whole.Omitted) == 0 && len(whole.Truncated) == 0) {",
+    "new": "\tif true {",
+    "pkg": "./internal/prompt",
+    "test": "TestRenderInstructionChainsBothChainsFitIndividually"
+  },
+  {
+    "name": "prompt-chain-merge-forgets-truncated-text",
+    "file": "internal/prompt/instructions_chains.go",
+    "old": "\tfor _, chain := range chains {\n\t\tfor p, text := range chain.Texts {\n\t\t\ttextOf[p] = text\n\t\t}\n\t}",
+    "new": "\tif false {\n\t\tfor _, chain := range chains {\n\t\t\tfor p, text := range chain.Texts {\n\t\t\t\ttextOf[p] = text\n\t\t\t}\n\t\t}\n\t}",
+    "pkg": "./internal/prompt",
+    "test": "TestRenderInstructionChainsDropsBroadestPerChain"
+  },
+  {
+    "name": "runwiring-baseline-not-durable",
+    "file": "cmd/dshd/agent_instructions_wiring.go",
+    "old": "\tevent := ainstr.FrameEventOf(frame)\n\treturn logw.Append(event.Type, event.Data)",
+    "new": "\t_ = ainstr.FrameEventOf(frame)\n\treturn nil",
+    "pkg": "./cmd/dshd",
+    "test": "TestAIInstrBaselineWritesDurableUserMessage"
+  },
+  {
+    "name": "runwiring-failed-touch-projects",
+    "file": "cmd/dshd/agent_instructions_wiring.go",
+    "old": "\tif a == nil || !success {\n\t\treturn\n\t}",
+    "new": "\tif a == nil {\n\t\treturn\n\t}",
+    "pkg": "./cmd/dshd",
+    "test": "TestAIInstrFailedToolDoesNotTouch"
   }
 ]

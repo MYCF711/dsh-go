@@ -206,6 +206,11 @@ type Loop struct {
 	// nil = 不提供（子代理的循环就是这样：它的子会话在委派**结束之后**才物化，
 	// 执行期间没有可写的日志，硬造一个会写出两段互不相认的 seq）。
 	Events spi.EventSink
+	// OnToolCallSettled 可选：每次工具调用结算后回调（成功与失败都进）。
+	// 它是官方 `tools/result` 监听在宿主循环里的落点（`agent-instructions`
+	// 用它追踪"模型碰过哪些文件"，见 tool_touch.go）。nil = 不观测；
+	// 并行工具执行时会在 worker goroutine 上调用，实现方自己同步。
+	OnToolCallSettled OnToolCallSettled
 	// PreStep 可选：每一步模型请求**发出之前**调用（官方 0.2.2 #78
 	// `session-checkpoint-policy` 的 `agent/pre-step` 钩子）。
 	//
