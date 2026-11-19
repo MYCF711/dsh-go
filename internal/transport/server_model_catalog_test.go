@@ -15,8 +15,8 @@ func TestModelCatalogHandlerMountedAfterCookieAuthentication(t *testing.T) {
 	if got := len(SessionMethods()); got != 25 {
 		t.Fatalf("canonical methods changed: %d", got)
 	}
-	if got := len(ModelCatalogMethods()); got != 5 {
-		t.Fatalf("model catalog methods=%d, want 5", got)
+	if got := len(ModelCatalogMethods()); got != 6 {
+		t.Fatalf("model catalog methods=%d, want 6", got)
 	}
 	var calls atomic.Int32
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,8 +66,8 @@ func TestModelCatalogHandlerMountedAfterCookieAuthentication(t *testing.T) {
 			t.Fatalf("%s status=%d body=%s", method, resp.StatusCode, body)
 		}
 	}
-	if calls.Load() != 5 {
-		t.Fatalf("handler calls=%d, want 5", calls.Load())
+	if calls.Load() != 6 {
+		t.Fatalf("handler calls=%d, want 6", calls.Load())
 	}
 }
 

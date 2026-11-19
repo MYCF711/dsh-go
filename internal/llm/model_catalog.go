@@ -485,24 +485,7 @@ func (s *ModelCatalogStore) Upsert(model json.RawMessage, credential *string, ex
 			next.Credentials[info.APIKeyEnv] = value
 		}
 	}
-	used := map[string]bool{}
-	for _, rawModel := range next.Models {
-		modelInfo, _ := inspectCatalogModel(rawModel)
-		if modelInfo.APIKeyEnv != "" {
-			used[modelInfo.APIKeyEnv] = true
-		}
-	}
-	// 孤儿清理只清"既没有模型引用、也不是用户显式写进来的游离 ref"。后者由
-	// StandaloneCredentials 保护：那是凭据存储自己的槽位，与模型生命周期无关。
-	standalone := make(map[string]bool, len(next.StandaloneCredentials))
-	for _, ref := range next.StandaloneCredentials {
-		standalone[ref] = true
-	}
-	for ref := range next.Credentials {
-		if !used[ref] && !standalone[ref] {
-			delete(next.Credentials, ref)
-		}
-	}
+	pruneOrphanCredentials(&next)
 	if err := s.commitLocked(next); err != nil {
 		return ModelCatalogView{}, err
 	}
@@ -550,6 +533,98 @@ func (s *ModelCatalogStore) Reorder(ids []string, expectedRevision *int64) (Mode
 		}
 		next.Models[i] = append(json.RawMessage(nil), models[index]...)
 	}
+	if err := s.commitLocked(next); err != nil {
+		return ModelCatalogView{}, err
+	}
+	return s.viewLocked(), nil
+}
+
+// pruneOrphanCredentials 是 upsert 与 replace 共用的孤儿清理：只清"既没有
+// 模型引用、也不是用户显式写进来的游离 ref"。后者由 StandaloneCredentials
+// 保护：那是凭据存储自己的槽位，与模型生命周期无关。
+//
+// 两条整表写入路径共用这一份判据，避免"删除语义下漏清 / 清除过多"各自漂移
+// （scripts/single-source.py 抓的就是这个形状）。
+func pruneOrphanCredentials(next *modelCatalogDocument) {
+	used := map[string]bool{}
+	for _, rawModel := range next.Models {
+		modelInfo, _ := inspectCatalogModel(rawModel)
+		if modelInfo.APIKeyEnv != "" {
+			used[modelInfo.APIKeyEnv] = true
+		}
+	}
+	standalone := make(map[string]bool, len(next.StandaloneCredentials))
+	for _, ref := range next.StandaloneCredentials {
+		standalone[ref] = true
+	}
+	for ref := range next.Credentials {
+		if !used[ref] && !standalone[ref] {
+			delete(next.Credentials, ref)
+		}
+	}
+}
+
+// normalizeCatalogModel 把"调用方送来的一行 model"规整成落盘形状：解析 →
+// 官方字段校验 → 去掉可选字段的显式 null → 按原 key 顺序重建 raw。
+//
+// Upsert 走的是"合并已存行"那条路，Replace 没有已存行可合并，所以规整是它
+// 唯一的一步；校验判据仍复用 validateCatalogFields，不另写一份。
+func normalizeCatalogModel(raw json.RawMessage) (json.RawMessage, catalogModelInfo, error) {
+	fields, err := parseCatalogObject(raw)
+	if err != nil {
+		return nil, catalogModelInfo{}, err
+	}
+	info, err := validateCatalogFields(fields)
+	if err != nil {
+		return nil, catalogModelInfo{}, err
+	}
+	normalized, err := marshalCatalogObject(stripNullableCatalogNulls(fields))
+	if err != nil {
+		return nil, catalogModelInfo{}, modelCatalogError("internal", "序列化模型失败: %v", err)
+	}
+	return normalized, info, nil
+}
+
+// Replace 用一次整数组写入表达**删除 / 排序 / 新增**。
+//
+// 这就是官方编辑器的真实落盘语义：`DeepSeekModelsEditor.tsx:157-160` 的行删除
+// 是本地数组 splice，真正写盘走 `settings.mutate` 整份 `models` 数组
+// （`operations.ts:86-91`）。所以这里不自造 `models.catalog.delete`：官方没有
+// 按 id 删的接口，宿主也不发明一条。
+//
+// 与 Reorder 的关系是**两条不同语义，互不放松**：Reorder 仍要求目录内 id 的
+// 全排列、且绝不重建 raw 对象；Replace 是整份新数组，因此允许任意增删、任意
+// 顺序，也允许 models=[]（删到空是官方编辑器可达的真实状态，空目录本身
+// 合法——见 load() 的 models=[] 分支）。
+//
+// 写入仍是同一套栅栏与同一份原子写：revision 不匹配 → revision_conflict 且一个
+// 字节都不写；先验证全部行再动盘，任何坏行都在首次写入之前失败。
+func (s *ModelCatalogStore) Replace(models []json.RawMessage, expectedRevision *int64) (ModelCatalogView, error) {
+	incoming := make([]json.RawMessage, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for i, raw := range models {
+		normalized, info, err := normalizeCatalogModel(raw)
+		if err != nil {
+			return ModelCatalogView{}, modelCatalogError(ModelCatalogErrorCode(err), "models 第 %d 行无效: %v", i+1, err)
+		}
+		if _, duplicate := seen[info.ID]; duplicate {
+			return ModelCatalogView{}, modelCatalogError("duplicate_id", "models 含重复 id %q", info.ID)
+		}
+		seen[info.ID] = struct{}{}
+		incoming[i] = normalized
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loadErr != nil {
+		return ModelCatalogView{}, s.loadErr
+	}
+	if err := checkCatalogRevision(s.doc, expectedRevision); err != nil {
+		return ModelCatalogView{}, err
+	}
+	next := cloneCatalogDocument(s.documentLocked())
+	next.Models = incoming
+	pruneOrphanCredentials(&next)
 	if err := s.commitLocked(next); err != nil {
 		return ModelCatalogView{}, err
 	}

@@ -13,22 +13,24 @@ import (
 	"dshgo/internal/settingsform"
 )
 
-// modelCatalogParams 是五个方法的裸参数并集；每个方法另有严格白名单。
+// modelCatalogParams 是六个方法的裸参数并集；每个方法另有严格白名单。
 // credential 只能写入/测试，绝不出现在任何 result 中。
 type modelCatalogParams struct {
-	Model            json.RawMessage `json:"model,omitempty"`
-	Credential       *string         `json:"credential,omitempty"`
-	ExpectedRevision *int64          `json:"expectedRevision,omitempty"`
-	IDs              *[]string       `json:"ids,omitempty"`
-	ID               string          `json:"id,omitempty"`
-	BaseURL          *string         `json:"baseURL,omitempty"`
-	API              *string         `json:"api,omitempty"`
+	Model            json.RawMessage    `json:"model,omitempty"`
+	Credential       *string            `json:"credential,omitempty"`
+	ExpectedRevision *int64             `json:"expectedRevision,omitempty"`
+	IDs              *[]string          `json:"ids,omitempty"`
+	Models           *[]json.RawMessage `json:"models,omitempty"`
+	ID               string             `json:"id,omitempty"`
+	BaseURL          *string            `json:"baseURL,omitempty"`
+	API              *string            `json:"api,omitempty"`
 }
 
 var modelCatalogMethodParams = map[string][]string{
 	"models.catalog.list":       {},
 	"models.catalog.upsert":     {"model", "credential", "expectedRevision"},
 	"models.catalog.reorder":    {"ids", "expectedRevision"},
+	"models.catalog.replace":    {"models", "expectedRevision"},
 	"models.catalog.test":       {"id", "baseURL", "api", "credential"},
 	"models.catalog.set-active": {"id", "expectedRevision"},
 }
@@ -108,6 +110,24 @@ func newModelCatalogHTTPHandler(catalog *llm.ModelCatalogStore, settings *serveS
 				return
 			}
 			view, err := catalog.Reorder(*params.IDs, params.ExpectedRevision)
+			if err != nil {
+				writeModelCatalogError(w, err)
+				return
+			}
+			result, err := makeModelCatalogListResult(view, settings)
+			if err != nil {
+				writeModelCatalogError(w, err)
+				return
+			}
+			writeSettingsFormJSON(w, http.StatusOK, settingsEnvelope{Result: result})
+		case "models.catalog.replace":
+			// models=[] 是合法目标（删到空是官方编辑器可达状态）；缺字段或
+			// models=null 在 decode 阶段就被拒，这里只兜"没有数组"。
+			if params.Models == nil {
+				writeModelCatalogError(w, modelCatalogAPIError("bad_request", "models.catalog.replace 缺 models 数组"))
+				return
+			}
+			view, err := catalog.Replace(*params.Models, params.ExpectedRevision)
 			if err != nil {
 				writeModelCatalogError(w, err)
 				return
@@ -240,7 +260,7 @@ func decodeModelCatalogParams(r *http.Request, method string, allowed []string, 
 		if !whitelist[key] {
 			return modelCatalogAPIError("bad_request", method+" 不接受参数 "+key)
 		}
-		if (key == "credential" || key == "baseURL" || key == "api" || key == "ids" || key == "expectedRevision") && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		if (key == "credential" || key == "baseURL" || key == "api" || key == "ids" || key == "models" || key == "expectedRevision") && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return modelCatalogAPIError("bad_request", method+" 的 "+key+" 不能为 null；可省略字段表示未提供")
 		}
 	}

@@ -113,6 +113,7 @@ const (
 	MethodModelCatalogList      Method = "models.catalog.list"
 	MethodModelCatalogUpsert    Method = "models.catalog.upsert"
 	MethodModelCatalogReorder   Method = "models.catalog.reorder"
+	MethodModelCatalogReplace   Method = "models.catalog.replace"
 	MethodModelCatalogTest      Method = "models.catalog.test"
 	MethodModelCatalogSetActive Method = "models.catalog.set-active"
 	// 本地附件是独立 additive 扩展；用户显式给出的 path 就是本次读取授权。
@@ -145,7 +146,7 @@ func TaskActionMethods() []Method {
 func ModelCatalogMethods() []Method {
 	return []Method{
 		MethodModelCatalogList, MethodModelCatalogUpsert, MethodModelCatalogReorder,
-		MethodModelCatalogTest, MethodModelCatalogSetActive,
+		MethodModelCatalogReplace, MethodModelCatalogTest, MethodModelCatalogSetActive,
 	}
 }
 
