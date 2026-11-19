@@ -489,26 +489,40 @@ func (a *accountOfficialAPI) signOut(
 // llm.discoverModels
 // ---------------------------------------------------------------------------
 
-// discoverModels 真实探测 `GET <baseURL>/models` 并回官方形状。
+// discoverModels 按草稿声明的协议真实探测模型列表，并回官方形状
+// `{id, name?, contextWindow?, maxTokens?, inputModalities?}`。
 //
-// 本仓**没有 provider 注册表**（官方那个 `settingsNs` 指向的"已注册的
-// discovery"本仓不存在），所以 baseURL 必须由调用方给：缺了就 fail-loud，
-// 不拿进程默认端点顶上（那会问错服务，还把别人的模型列表画出来）。
+// # 三个入参各管什么（官方 `dsh-llm/lib/typert.host.js` 的 zod 说明）
+//
+//   - `baseURL`：要问的端点。没给时先从 provider 路由的 catalog 声明里推；
+//     都推不出来就 fail-loud，**不**拿进程默认端点顶上（那会问错服务，
+//     还把别人的模型列表画出来）。
+//   - `api`：端点说的是哪种 wire 协议。它决定**列表端点、鉴权头、响应形状**
+//     （见 `internal/llm/discover_protocols.go` 的官方逐条搬运）；空串 =
+//     没声明 → 按 `openai-completions` 问（官方 `discovery.ts:293`）。
+//     集合外协议回官方 `DISCOVERY_UNSUPPORTED` 语义：那是"这个协议没有可读
+//     的列表"，不能偷偷按 OpenAI 的形状去问（会把协议问题报成凭据问题）。
+//   - `apiKey`：只用于这一次探测的一次性凭据（官方 "the harness never stores it"）。
+//
+// # 为什么 unsupported 走 400
+//
+// 本仓四字段 code 是**闭合集合**，不因官方码族生长；官方 `DISCOVERY_UNSUPPORTED`
+// 原样写进 message 前缀，HTTP 状态取 400（客户端改输入就能过：换协议或手填模型），
+// 与 `OfficialAgentFault` / `OfficialWorkspaceFault` 同一条判据。
 func (a *accountOfficialAPI) discoverModels(
 	ctx context.Context, _ string, req transport.OfficialModelDiscoveryRequest,
 ) ([]transport.OfficialDiscoveredModel, error) {
+	protocol, err := llm.NormalizeDiscoveryProtocol(req.API)
+	if err != nil {
+		return nil, fmt.Errorf("%w: DISCOVERY_UNSUPPORTED: %v", transport.ErrOfficialBadInput, err)
+	}
 	baseURL := strings.TrimSpace(req.BaseURL)
 	if baseURL == "" && strings.TrimSpace(req.Provider) != "" {
-		models, err := llm.DiscoverModelsForProvider(ctx, a.deps.catalog, req.Provider, req.APIKey)
+		models, err := llm.DiscoverModelsForProviderProtocol(ctx, a.deps.catalog, req.Provider, protocol, req.APIKey)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", transport.ErrStatePersistence, err)
 		}
-		out := make([]transport.OfficialDiscoveredModel, 0, len(models))
-		for _, m := range models {
-			out = append(out, transport.OfficialDiscoveredModel{ID: m.ID, Name: m.Name,
-				ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens, InputModalities: m.InputModalities})
-		}
-		return out, nil
+		return officialDiscoveredModels(models), nil
 	}
 	if baseURL == "" {
 		return nil, fmt.Errorf(
@@ -517,13 +531,18 @@ func (a *accountOfficialAPI) discoverModels(
 			transport.ErrOfficialBadInput)
 	}
 	client := llm.New(baseURL, req.APIKey)
-	models, err := client.DiscoverModels(ctx)
+	models, err := client.DiscoverModelsProtocol(ctx, protocol)
 	if err != nil {
 		// 端点探测失败是**上游**的问题（不是我们的参数错）：按 internal 报，
 		// 并保留原文（已由 llm 侧脱敏一次性凭据）。
 		return nil, fmt.Errorf("%w: llm.discoverModels 探测 %s 失败: %v",
 			transport.ErrStatePersistence, baseURL, err)
 	}
+	return officialDiscoveredModels(models), nil
+}
+
+// officialDiscoveredModels 把 llm 的发现结果翻成官方 wire 形状（字段名逐字对齐）。
+func officialDiscoveredModels(models []llm.DiscoveredModel) []transport.OfficialDiscoveredModel {
 	out := make([]transport.OfficialDiscoveredModel, 0, len(models))
 	for _, model := range models {
 		out = append(out, transport.OfficialDiscoveredModel{
@@ -534,5 +553,5 @@ func (a *accountOfficialAPI) discoverModels(
 			InputModalities: model.InputModalities,
 		})
 	}
-	return out, nil
+	return out
 }
