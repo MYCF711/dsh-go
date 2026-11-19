@@ -1086,3 +1086,48 @@ officeToPdf **未装 LibreOffice 实测**；directoryPicker 原生目录框**人
 计数自检：补齐 2 条（#70/#73），半补齐 1 条（#53 的第二根），维持 PARTIAL 3 条（#53/#54/#6）。
 门禁：`python scripts/gap-register-counts.py --check` PASS（逐项表与结论行逐数相等，
 `changes` 只追加、`audit-4.1`/`audit-4.2` 历史一条未丢）。
+
+-----
+
+## §TASK-99 · `#41 settings-models` 的 probe 缺口定性（2026-11-19）
+
+工作树 `feat/models-probe`（**未 commit / 未 push**）。**本单不改产品代码**：查清后判定为
+「宿主已有等价能力，GUI 未接线」。live 探针：`tmp/GO8-RC5/_probe/probe_discover.py`（脚本）
+与 `tmp/GO8-RC5/_probe/probe.log`（原始输出）——真实 `dshd serve`（临时 home、`--addr 127.0.0.1:0`）
+＋ 假 OpenAI 兼容端点，`/connect` 换 cookie 后打 7 个用例。
+
+### 官方 probe 链路（按钮 → 宿主方法）
+
+| 站 | file:line | 事实 |
+|---|---|---|
+| 按钮 | `ui-settings-models/src/client/ModelListEditor.tsx:335-346` | 「获取可用模型」；`disabled=busy\|\|!askable\|\|probeBlocked`；`askable` 见 `:310`（有 provider 或有 baseURL 才可问） |
+| 取数 | `ModelListEditor.tsx:211-234` | `operations.discoverModels(probe.settingsNs,{provider?,baseURL?,api?,apiKey?})`；refused 只存 message，`found.length===0` 报 `fetchEmpty`，候选去重后进 picker |
+| 继承目录 | `ModelListEditor.tsx:164-176` | 已装 provider 时**只给 provider**（无 endpoint、官方声明免网络）再问一遍，供 model 行 `input` 默认值 |
+| 操作层 | `ui-settings-models/src/client/operations.ts:92-96` | `ctx.remote.llm.discoverModels(settingsNs, request)`；ok → `{kind:'found',models}`，否则 `{kind:'refused',message}` |
+| probe 组装 | `ProviderEditor.tsx:299-307`（:634 下发）、`CustomProviderCard.tsx:311-317` | `settingsNs` + 当前表单的 `provider/baseURL/api/apiKey`（未存盘的一次性 key） |
+| 官方契约 | `@deepseek-ai/dsh-api-remotes/lib/client.js:12878-12896`（`dsh-llm/lib/typert.host.js`，`implementation: remoteDiscoverModels`） | 入参 `settingsNs:string` + `request{provider?,baseURL?,api?,apiKey?}`（全可选）；结果 `ModelDiscovery[]{id, name?, contextWindow?:number, maxTokens?:number, inputModalities?:('text'\|'image')[]}`，absent = unknown |
+
+### 本仓宿主现状（实测，不读注释）
+
+| 用例 | 实测 | 结论 |
+|---|---|---|
+| `{settingsNs:"llm",request:{baseURL:<fake>/v1,apiKey:"one-shot"}}` | **200**；真发 1 次 `GET <baseURL>/models`（`Authorization: Bearer one-shot`）；回 `[{"id":"probe-alpha","name":"Probe Alpha","contextWindow":200000,"maxTokens":8192,"inputModalities":["text","image"]},{"id":"probe-beta"}]` | probe 按钮主路径**已实现**，字段与官方 zod 逐字对齐（未知字段不出现） |
+| 只给 `{provider:"openai-completions"}`（空 catalog、无 `DSHD_LLM_BASE`） | 500 `internal`：`llm: provider 没有可用端点…请显式给 request.baseURL` | provider-only 子操作**仍缺**（官方语义＝适配器自带注册表作答、免网络）；且错误桶也错（结构化 4xx 才对，现在是 `ErrStatePersistence`→internal） |
+| `{settingsNs:"llm"}`（无 request） | 400 `bad_request`（`serve_account_api.go:513-518`） | fail-loud，与官方一致 |
+| 无 `settingsNs` | 400 `bad_request`（`handlers_account_official.go:1364-1366`） | 同官方 required |
+| `llm.listProviders` / `llm.listConfigurableProviders` | **200** 真值（3 个 provider + nativeAuth/settingsPath） | §2.2 第 464/465 行的 `DEFERRED`/501 登记**已漂移** |
+| `models.catalog.test`（空目录） | 404 `not_found` | 语义是**一次真实推理**（`{id,ok,model,latencyMs}`），**不是**列端点模型 → 不构成等价物 |
+
+- 落点：wire `internal/transport/handlers_account_official.go:1326-1391`（官方形状解码；id 非空与 `inputModalities` 枚举校验 `:1379-1389`）；实现 `cmd/dshd/serve_account_api.go:497-538`；探测 `internal/llm/discover.go:113`（15s 墙钟、正文 512B、凭据脱敏）；provider 回退 `internal/llm/provider_registry.go:133`。
+- **与「本地零出网」不冲突**：那条裁定（本文第 27 行 #38、`docs/go5-env-notes.md:20-36`）针对 `productAnalytics`/OTLP **遥测上报**；probe 问的是用户自己填的 provider 端点，属模型出口，与既有 `ListModels`/`models.catalog.test` 同类。凭据一次性（只出现在本次请求头，`internal/llm/discover.go:106-107`），TTL 缓存键只留 sha256 前缀（`internal/llm/discover_cache.go:82-88`），实测整轮只发 **1** 次网络请求。
+
+### 判定与更正
+
+**判定：宿主已有等价能力 → `#41` 的 probe 一项是 GUI 没接，本单只报告。** 依据：`dsh-ui` 仓
+`internal/apiclient` **没有** `llm.discoverModels` 客户端方法（唯一命中是
+`model_catalog_editor.go:156` 的注释，明确说 `models.catalog.test` 不是它），
+`plugins/dssettings` 只有 i18n 串 `fetchModels`（`official_models_catalog.go:523`）——无按钮、无调用点。
+
+顺带更正本表两处陈旧登记（**只在本文追加，不重写历史行**）：§2.2 第 463 行把实现写成
+`serve_account_api.go:310`，实为 `:497-538`；「只给 provider → 400 bad_input」实为 **500 internal**。
+第 464/465 行状态实为 IMPLEMENTED（live 200），未在本单改判（改判要同步逐项表与计数，另一单）。
