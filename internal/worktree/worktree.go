@@ -384,7 +384,14 @@ type Service struct {
 type sessionState struct {
 	mu      sync.Mutex
 	attempt *attempt
-	waiters map[chan struct{}]struct{}
+	// progress 是**活着**的创建/恢复进度（官方 ForgePanelState 的 creation /
+	// restoration 两个字段的唯一真值来源）。
+	//
+	// 为什么不从日志折叠：日志里只有落盘过的步骤快照（`running` 记录），
+	// 一次创建在"建分支"阶段还没有任何记录，而这段时间正是官方要报
+	// phase=prepare 的时候；恢复同理。所以进度用进程内状态，日志只留历史。
+	progress *Progress
+	waiters  map[chan struct{}]struct{}
 }
 
 type attempt struct {
@@ -392,6 +399,30 @@ type attempt struct {
 	done   chan struct{}
 	branch string
 }
+
+// Progress 是一次**正在运行**的创建或恢复的进度（官方 panel state 用）。
+type Progress struct {
+	// Kind 取官方 `waiting`/字段词：`creation` 或 `restoration`。
+	Kind string
+	// Phase 取官方 `ForgeWorktreeCreation.phase` 的两个词：`prepare`（校验并
+	// 建分支 / 重新登记 checkout）或 `checkout`（写文件）。
+	Phase string
+	// Branch 是这次尝试要建/要恢复的分支。
+	Branch string
+	// From 是请求的 base 分支，null = 用源 checkout 的 HEAD。
+	From *string
+	// Held 表示有消息正在 inbox hold 里等它（官方 creation.held）。
+	Held bool
+}
+
+// 官方 phase 词（typert.host.js:1974 "prepare ... then checkout"）。
+const (
+	ProgressPhasePrepare  = "prepare"
+	ProgressPhaseCheckout = "checkout"
+	// 官方 kind 词（typert.host.js:1990 `'creation' | 'restoration'`）。
+	ProgressKindCreation    = "creation"
+	ProgressKindRestoration = "restoration"
+)
 
 // NewService 造一个 worktree 服务。
 func NewService(store Store, git Git) *Service {
@@ -433,6 +464,79 @@ func (s *Service) State(sessionID string) (State, error) {
 	}
 	return stateOf(snapshot), nil
 }
+
+// Snapshot 返回会话日志的**原始**折叠结果。
+//
+// 与 State 的区别：State 把各种记录压成一个 Status/Step/Reason 视图，而官方
+// ForgePanelState 需要 Requested / Withdrawn / TurnStarted / Failure.Step /
+// Created.BaseCommit 这些原值来分别决定 request / created / failure / editable
+// 四个子对象。压平的信息不够重建它们，所以这里直接给折叠结果。
+func (s *Service) Snapshot(sessionID string) (Snapshot, error) {
+	return s.store.Load(sessionID)
+}
+
+// Progress 返回该会话**此刻**正在运行的创建或恢复。
+//
+// ok=false 表示没有在跑（官方 creation/restoration 为 null）。Held 是从
+// sessionState.waiters 现读的：有消息卡在 inbox hold 里就是 true —— 这与官方
+// creation.held 的定义一致（"a creation at the first step serves a message the
+// Session already holds" 的那种预步骤创建 held=false，因为消息没在等）。
+func (s *Service) Progress(sessionID string) (Progress, bool) {
+	state := s.sessionState(sessionID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.progress == nil {
+		return Progress{}, false
+	}
+	out := *state.progress
+	out.Held = len(state.waiters) > 0
+	return out, true
+}
+
+// setProgress 登记一次正在运行的创建/恢复。
+func (s *Service) setProgress(sessionID string, progress Progress) {
+	state := s.sessionState(sessionID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	copied := progress
+	state.progress = &copied
+}
+
+// setProgressPhase 推进阶段（prepare → checkout）；没有在跑的进度就什么都不做。
+func (s *Service) setProgressPhase(sessionID, phase string) {
+	state := s.sessionState(sessionID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.progress != nil {
+		state.progress.Phase = phase
+	}
+}
+
+// clearProgress 结束一次创建/恢复。
+func (s *Service) clearProgress(sessionID string) {
+	state := s.sessionState(sessionID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.progress = nil
+}
+
+// OfficialBase 把内部 base 表示翻成官方 `from`。
+//
+// 内部用空串或字面量 "HEAD" 表示"从源 checkout 的 HEAD 起"，官方
+// `ForgeWorktreeRequest.from` / `ForgeSessionWorktree.from` 的写法是 **null**
+// （typert.host.js:1974 "Base branch, or null for HEAD"）。这个转换只能有一处，
+// 否则请求位与创建位会给出互相矛盾的 from。
+func OfficialBase(base string) *string {
+	trimmed := strings.TrimSpace(base)
+	if trimmed == "" || trimmed == "HEAD" {
+		return nil
+	}
+	v := trimmed
+	return &v
+}
+
+// baseOf 是本包内部的旧名（保留以免调用点语义漂移）。
+func baseOf(base string) *string { return OfficialBase(base) }
 
 func stateOf(snapshot Snapshot) State {
 	state := State{
@@ -904,12 +1008,19 @@ func (s *Service) create(ctx context.Context, sessionID string, record Record) e
 		return newError(CodeNotWaiting, 409, "worktree 正在创建")
 	}
 	state.attempt = current
+	state.progress = &Progress{
+		Kind:   ProgressKindCreation,
+		Phase:  ProgressPhasePrepare,
+		Branch: record.Branch,
+		From:   baseOf(record.Base),
+	}
 	state.mu.Unlock()
 	defer func() {
 		state.mu.Lock()
 		if state.attempt == current {
 			state.attempt = nil
 		}
+		state.progress = nil
 		state.mu.Unlock()
 		close(current.done)
 	}()
@@ -978,6 +1089,8 @@ func (s *Service) createWorktree(ctx context.Context, sessionID string, record R
 	}); err != nil {
 		return "", err
 	}
+	// 分支建好、开始写文件：官方 phase 从 prepare 进到 checkout。
+	s.setProgressPhase(sessionID, ProgressPhaseCheckout)
 	if _, err := s.git.Run(ctx, record.Directory, "reset", "--hard", commit); err != nil {
 		return "", &stepError{step: "checking-out-files", err: err}
 	}
@@ -997,6 +1110,15 @@ func (s *Service) restore(ctx context.Context, sessionID string, snapshot Snapsh
 	if snapshot.Created != nil {
 		baseCommit = snapshot.Created.BaseCommit
 	}
+	// 官方把恢复也作为一项运行中的进度发布（`restoration`，phase 同样是
+	// prepare → checkout）：先重新登记 checkout（必要时建分支），再写文件。
+	s.setProgress(sessionID, Progress{
+		Kind:   ProgressKindRestoration,
+		Phase:  ProgressPhasePrepare,
+		Branch: branch,
+		From:   baseOf(snapshot.Base),
+	})
+	defer s.clearProgress(sessionID)
 	// 目录可能在上一次失败里留下半成品：先清干净再建（不能靠 add -f 硬来）。
 	if _, err := os.Lstat(directory); err == nil {
 		if err := s.cleanupStaleWorktree(ctx, root, directory); err != nil {
@@ -1017,6 +1139,8 @@ func (s *Service) restore(ctx context.Context, sessionID string, snapshot Snapsh
 	if _, pruneErr := s.git.Run(ctx, root, "worktree", "prune"); pruneErr != nil {
 		return newError(CodeRestoreFailed, 500, "清理缺失的 worktree 注册失败：%v", pruneErr)
 	}
+	// 登记完成、要开始写文件了：官方 phase 进到 checkout。
+	s.setProgressPhase(sessionID, ProgressPhaseCheckout)
 	var err error
 	if branchExists {
 		_, err = s.git.Run(ctx, root, "worktree", "add", directory, branch)
