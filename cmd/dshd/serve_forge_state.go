@@ -28,14 +28,27 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"dshgo/internal/forge"
+	"dshgo/internal/sandbox"
 	"dshgo/internal/transport"
 	"dshgo/internal/worktree"
+)
+
+// 官方 `ForgeWorktreeBlocker` 的三个词（`dsh-experimental-client-ui-forge/src/
+// types.ts:80-87`），**逐字**，不许改名、不许加词。官方 zod 的取值面是
+// `null | 'read-only' | 'not-git' | 'outside-writable-root'`
+// （同包 `lib/typert.host.js:516`）—— 所以这个枚举**没有**第四个词，
+// 也没有"未知/失败"这种取值：拿不到事实时官方填 null。
+const (
+	forgeBlockerNotGit              = "not-git"
+	forgeBlockerOutsideWritableRoot = "outside-writable-root"
+	forgeBlockerReadOnly            = "read-only"
 )
 
 // forgePanelHost 把存储装成 Transport 认的那份函数表。
@@ -49,8 +62,16 @@ type forgePanelHost struct {
 	worktrees *worktree.Service
 	// cwd 解析会话的有效工作目录（官方 state.directory）。
 	cwd func(sessionID string) (string, error)
-	// git 是只读的 git 探针（checkout 的 root/branch/commit 三项事实）。
-	git worktree.ExecGit
+	// git 是只读的 git 探针（checkout 的 root/branch/commit/commonDir 事实）。
+	git worktree.Git
+
+	// mode 解析会话的真实 sandbox 档位（官方 `sandboxPolicy.resolve({session})`，
+	// `panel.ts:321`）。为 nil = 这次装配没有档位真值来源，`worktree.blocker`
+	// 保持官方允许的 null（绝不用"默认档"冒充）。
+	mode func(sessionID string) (sandbox.Mode, error)
+	// workspaceRoot 返回策略的可写根（官方 `policy.workspaceRoot`，`panel.ts:324`）。
+	// 为 nil 时同上：保持 null。
+	workspaceRoot func() (string, error)
 
 	// states 是面板状态缓存：follow 每帧都要一次完整状态，而一次状态要读整个
 	// 会话 v4 日志。没有缓存时一个打开的 panel 会每秒重读几十 MB。
@@ -86,12 +107,27 @@ const (
 	forgePanelWaitSlice = 500 * time.Millisecond
 )
 
+// forgePanelOptions 是 newForgePanelHost 的接线面。
+//
+// 四个字段都可以留空：留空的那一项在面板状态里就是官方的 null / false，
+// 而不是"猜一个值"。生产接线在 serve.go。
+type forgePanelOptions struct {
+	// Worktrees 是 worktree 生命周期服务（`worktree.editable` 的第一条前提）。
+	Worktrees *worktree.Service
+	// Cwd 解析会话工作目录（官方 `state.directory`）。
+	Cwd func(sessionID string) (string, error)
+	// Mode 解析会话真实 sandbox 档位（官方 `sandboxPolicy.resolve({session})`）。
+	Mode func(sessionID string) (sandbox.Mode, error)
+	// WorkspaceRoot 返回策略可写根（官方 `policy.workspaceRoot`）。
+	WorkspaceRoot func() (string, error)
+}
+
 // newForgePanelHost 造一个宿主。home 为空时返回 nil（调用方据此不接线）。
 //
-// worktrees / resolveCwd 都可以为 nil：为 nil 时面板状态里那部分就是官方的
-// null / false，而不是假数据。生产接线在 serve.go 传入同一份 worktree 服务与
-// sessionSource.Cwd（与 forgePanel git 族、worktree 面板同源）。
-func newForgePanelHost(home string, worktrees *worktree.Service, resolveCwd func(string) (string, error)) (*forgePanelHost, error) {
+// opts 里的服务都可以为 nil：为 nil 时面板状态里那部分就是官方的 null / false，
+// 而不是假数据。生产接线在 serve.go 传入同一份 worktree 服务、同一份 sandbox
+// 档位解析器（serve_sandbox_policy.go）与与 run 子进程同源的策略根。
+func newForgePanelHost(home string, opts forgePanelOptions) (*forgePanelHost, error) {
 	home = strings.TrimSpace(home)
 	if home == "" {
 		return nil, fmt.Errorf("forge: home 为空，不能开绑定存储")
@@ -104,14 +140,16 @@ func newForgePanelHost(home string, worktrees *worktree.Service, resolveCwd func
 		store.SetProvider(&forge.HTTPProvider{Token: token})
 	}
 	return &forgePanelHost{
-		store:     store,
-		worktrees: worktrees,
-		cwd:       resolveCwd,
-		git:       worktree.ExecGit{Timeout: 10 * time.Second},
-		states:    map[string]cachedPanelState{},
-		checkouts: map[string]cachedCheckout{},
-		ttl:       forgePanelTTL,
-		waiters:   map[chan struct{}]struct{}{},
+		store:         store,
+		worktrees:     opts.Worktrees,
+		cwd:           opts.Cwd,
+		git:           worktree.ExecGit{Timeout: 10 * time.Second},
+		mode:          opts.Mode,
+		workspaceRoot: opts.WorkspaceRoot,
+		states:        map[string]cachedPanelState{},
+		checkouts:     map[string]cachedCheckout{},
+		ttl:           forgePanelTTL,
+		waiters:       map[chan struct{}]struct{}{},
 	}, nil
 }
 
@@ -220,7 +258,7 @@ func (h *forgePanelHost) state(ctx context.Context, sessionID string) (transport
 		Directory:      directory,
 		Checkout:       transport.OfficialForgeCheckoutNone(),
 		ChangeRequests: h.changeRequests(sessionID),
-		Worktree:       h.worktreeState(sessionID, directory),
+		Worktree:       h.worktreeState(ctx, sessionID, directory),
 	}
 	if directory != "" {
 		if checkout, ok := h.checkoutState(ctx, directory, state.Worktree.Created); ok {
@@ -233,8 +271,14 @@ func (h *forgePanelHost) state(ctx context.Context, sessionID string) (transport
 }
 
 // worktreeState 组装官方 `ForgePanelWorktree` 九个子字段。
-func (h *forgePanelHost) worktreeState(sessionID, directory string) transport.OfficialForgePanelWorktree {
-	out := transport.OfficialForgePanelWorktree{}
+func (h *forgePanelHost) worktreeState(ctx context.Context, sessionID, directory string) transport.OfficialForgePanelWorktree {
+	// blocker 先算：官方的 `blocker` 与 worktree 服务在不在、创建进度如何**无关**
+	// （`panel.ts:295` 的 `this.blocker` 在 inspectOnce 里就算好了，`editable`
+	// 才看 `ctx.get('worktrees')`，`panel.ts:221`）。所以这里要在两个早退之前填，
+	// 否则"没挂服务"会顺带把 blocker 也抹成 null。
+	out := transport.OfficialForgePanelWorktree{
+		Blocker: h.blockerOf(ctx, sessionID, directory),
+	}
 	if h.worktrees == nil {
 		// 没有 worktree 服务：官方 editable 的第一条前提就不成立。
 		return out
@@ -359,16 +403,32 @@ func (h *forgePanelHost) checkoutState(ctx context.Context, directory string, cr
 	}, true
 }
 
-// checkoutFacts 是官方 ForgeCheckout 在本地能确认的三项事实。
+// checkoutFacts 是官方 ForgeCheckout 在本地能确认的事实。
 type checkoutFacts struct {
 	isCheckout bool
-	root       string
-	branch     string
-	commit     string
+	// notCheckout 表示 git **明确**说"这里不是 checkout"（官方 `git.ts:106`
+	// 的 NOT_A_CHECKOUT：`not a git repository|must be run in a work tree`）。
+	// 它与"git 跑不起来"是两件事：前者官方回 undefined（→ blocker `not-git`），
+	// 后者官方 throw（→ blocker 保持 null）。
+	notCheckout bool
+	root        string
+	// commonDir 是 `git rev-parse --path-format=absolute --git-common-dir`
+	// （官方 `git.ts:114`）。blocker 的第三条探测要看它是否也在可写根之内。
+	commonDir string
+	branch    string
+	commit    string
 }
 
 // checkoutFacts 读一次 git（带 3s 缓存）：面板每帧都要它，而 git 是子进程。
 func (h *forgePanelHost) checkoutFacts(ctx context.Context, directory string) checkoutFacts {
+	directory = strings.TrimSpace(directory)
+	if directory == "" {
+		// 没有工作目录：**不探**。`cmd.Dir = ""` 会让 git 跑在宿主进程自己的
+		// cwd 上，那是另一个目录的事实。这里与 `worktree.Service.repoInfo`
+		// 同一判据（`worktree.go:1192`："会话没有工作目录，无法确定源
+		// checkout"）= 不是 checkout。
+		return checkoutFacts{notCheckout: true}
+	}
 	h.mu.Lock()
 	if cached, ok := h.checkouts[directory]; ok && time.Since(cached.at) < 3*time.Second {
 		h.mu.Unlock()
@@ -386,12 +446,131 @@ func (h *forgePanelHost) checkoutFacts(ctx context.Context, directory string) ch
 		if commit, cerr := h.git.Run(ctx, directory, "rev-parse", "HEAD"); cerr == nil {
 			facts.commit = strings.TrimSpace(commit)
 		}
+		// 公共 .git 目录取不到 = 官方那里是 throw（blocker null），这里留空由
+		// blockerOf 转成 null，绝不拿 checkout.root 顶替。
+		if common, werr := h.git.Run(ctx, directory, "rev-parse", "--path-format=absolute", "--git-common-dir"); werr == nil {
+			facts.commonDir = strings.TrimSpace(common)
+		}
+	} else {
+		facts.notCheckout = forgeNotACheckout(err)
 	}
 
 	h.mu.Lock()
 	h.checkouts[directory] = cachedCheckout{facts: facts, at: time.Now()}
 	h.mu.Unlock()
 	return facts
+}
+
+// forgeNotACheckout 是官方 `git.ts:79` 的 NOT_A_CHECKOUT 判据复刻
+// （`/not a git repository|must be run in a work tree/i`）。
+//
+// 为什么要分：官方 `git.ts:105-107` 只有命中这条才 `return undefined`
+// （→ blocker `not-git`），其它失败（git 没装、超时、权限）一律 throw，
+// 面板的 blocker 因此停在 null。把两者混起来会造出一个**假的** not-git。
+func forgeNotACheckout(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not a git repository") ||
+		strings.Contains(message, "must be run in a work tree")
+}
+
+// blockerOf 实现官方 `panel.ts:319-326` 的三条探测，负责
+// `ForgePanelWorktree.blocker`（枚举全集见 `types.ts:80-87`）。
+//
+// # 判定顺序（照官方代码，不是按"严重程度"排）
+//
+//  1. **`not-git` 先于一切。** 官方在 `panel.ts:274-277` 就定了它：`inspectCheckout`
+//     返回 undefined 时直接 `blocker = 'not-git'`，`blockerOf` 那一次根本不调用。
+//     所以"不是 checkout"压过档位判断 —— 一个 read-only 的非 git 目录，官方给
+//     `not-git`，不给 `read-only`。
+//  2. **档位两条排在路径探测之前**，且命中即 return（`panel.ts:322-323`）：
+//     `danger-full-access` → null；`read-only` → `read-only`。两条互斥（官方
+//     `policy.mode` 是单值枚举），所以它们之间没有"谁先"的问题；有意义的顺序是
+//     "档位先于路径"。
+//  3. **只有剩下的档位（`workspace-write`）才比路径**（`panel.ts:324-325`）：
+//     `within(root, checkout.root) && within(root, commonDir)` 全真 → null，
+//     否则 `outside-writable-root`。两个 `within` 是**与**：checkout 根在根内、
+//     而公共 .git 在根外（linked worktree 的典型形态）同样是 blocked。
+//
+// # 失败面
+//
+// 官方任何一步 throw（`sandboxPolicy.resolve`、`fs.resolve`、git 非"不是仓库"的
+// 失败）都落到 `inspectOnce` 的 catch：`checkout` 变 failed，而 `blocker` 停在
+// `panel.ts:269` 初始化的 **null**（`types.ts:142-143` 的文案也这么写：
+// "null when it can ... before the first inspection, and after a failed one"）。
+// 所以这里拿不到事实时一律 null，绝不填一个"看起来对"的枚举。
+func (h *forgePanelHost) blockerOf(ctx context.Context, sessionID, directory string) *string {
+	facts := h.checkoutFacts(ctx, directory)
+	if !facts.isCheckout {
+		if facts.notCheckout {
+			return forgeStringPtr(forgeBlockerNotGit)
+		}
+		// git 失败：官方是 throw → blocker null。
+		return nil
+	}
+	if h.mode == nil || h.workspaceRoot == nil {
+		// 这次装配没有档位/策略根真值来源：保持 null，不按"默认档"猜。
+		return nil
+	}
+	mode, err := h.mode(sessionID)
+	if err != nil {
+		return nil
+	}
+	switch mode {
+	case sandbox.ModeDangerFullAccess:
+		return nil
+	case sandbox.ModeReadOnly:
+		return forgeStringPtr(forgeBlockerReadOnly)
+	}
+	rootPath, err := h.workspaceRoot()
+	if err != nil || strings.TrimSpace(rootPath) == "" {
+		return nil
+	}
+	if strings.TrimSpace(facts.root) == "" || strings.TrimSpace(facts.commonDir) == "" {
+		return nil
+	}
+	root := forgeCanonicalDir(rootPath)
+	if officialPathWithin(root, forgeCanonicalDir(facts.root)) &&
+		officialPathWithin(root, forgeCanonicalDir(facts.commonDir)) {
+		return nil
+	}
+	return forgeStringPtr(forgeBlockerOutsideWritableRoot)
+}
+
+// forgeCanonicalDir 把路径规范成可比较的绝对长路径。
+//
+// 等价于官方 `inspectCheckout` 里 `ctx.fs.processPath(await ctx.fs.resolve(...))`
+// 那一层：它既绝对化也把 Windows 的 8.3 短名（`ADMINI~1`）解析成长名——不解析
+// 就会把同一个目录判成两个，凭空造出 `outside-writable-root`。
+//
+// 细节：EvalSymlinks 只对**存在**的路径有效。所以遇到还没建出来的路径时逐级回退
+// 到第一个存在的祖先再解析、把剩下的相对段接回去；否则 `C:\Users\…\Temp` 被解析成
+// 长名、而它下面还没建的 `…\Temp\repo` 停在短名，两条就不是"包含"关系了。
+func forgeCanonicalDir(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		// 空串交给调用方判"不知道"：不要让 officialCanonicalPath 把 "" 变成进程 cwd。
+		return ""
+	}
+	canonical := officialCanonicalPath(path)
+	if resolved, err := filepath.EvalSymlinks(canonical); err == nil {
+		return filepath.Clean(resolved)
+	}
+	parent := filepath.Dir(canonical)
+	if parent == canonical {
+		return canonical
+	}
+	resolvedParent := forgeCanonicalDir(parent)
+	if resolvedParent == "" {
+		return canonical
+	}
+	rest, err := filepath.Rel(parent, canonical)
+	if err != nil {
+		return canonical
+	}
+	return filepath.Join(resolvedParent, rest)
 }
 
 // cachedState 读面板状态缓存（follow 每帧一次，避免重复折叠会话日志）。

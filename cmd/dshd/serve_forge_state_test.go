@@ -20,7 +20,7 @@ import (
 
 func newForgeHostForTest(t *testing.T, home string) *forgePanelHost {
 	t.Helper()
-	h, err := newForgePanelHost(home, nil, nil)
+	h, err := newForgePanelHost(home, forgePanelOptions{})
 	if err != nil {
 		t.Fatalf("newForgePanelHost: %v", err)
 	}
@@ -230,7 +230,10 @@ func TestForgePanelWorktreeCardsFollowRealState(t *testing.T) {
 		resetBegun: make(chan struct{}),
 	}
 	svc := worktree.NewService(store, git)
-	h, err := newForgePanelHost(t.TempDir(), svc, func(string) (string, error) { return store.cwd, nil })
+	h, err := newForgePanelHost(t.TempDir(), forgePanelOptions{
+		Worktrees: svc,
+		Cwd:       func(string) (string, error) { return store.cwd, nil },
+	})
 	if err != nil {
 		t.Fatalf("newForgePanelHost: %v", err)
 	}
@@ -268,7 +271,10 @@ func TestForgePanelWorktreeCardsFollowRealState(t *testing.T) {
 		resetBegun: make(chan struct{}),
 	}
 	freshSvc := worktree.NewService(freshStore, freshGit)
-	fresh, err := newForgePanelHost(t.TempDir(), freshSvc, func(string) (string, error) { return freshStore.cwd, nil })
+	fresh, err := newForgePanelHost(t.TempDir(), forgePanelOptions{
+		Worktrees: freshSvc,
+		Cwd:       func(string) (string, error) { return freshStore.cwd, nil },
+	})
 	if err != nil {
 		t.Fatalf("newForgePanelHost: %v", err)
 	}
