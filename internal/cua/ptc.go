@@ -134,8 +134,11 @@ func isTrue(value any) bool {
 // 这一族"没有 PTC 运行时"的说法必须点名三件事，缺一件客户端就只能读到含糊的
 // "暂不支持"，无法判断是"等宿主接线"还是"永远不会有"：
 //
-//	(a) 被 `AGENTS.md` §1 红线 **R6「不嵌 JS 运行时」**（`AGENTS.md:56`）拦住——
-//	    是**设计约束**，不是"暂未实现"；
+//	(a) **R6 的准确词面**是"不**嵌** JS 运行时"（`AGENTS.md:56`）。**2026-11-19 更正**：
+//	    这条**不构成**"PTC 永远不做"——本仓 PTC 已按既有裁定"Go 核心 + 外部受管 node"
+//	    落地（`internal/ptc`、`internal/ptc/nodeprovider`、`modules/tool/runcode`，
+//	    `DSHD_PTC=1` 才挂；依据见 `docs/host-stable-gap-register.md` §HOST-PTC）。
+//	    这里剩下的**不是** R6，而是下面两条：
 //	(b) 缺的具体模块：官方的 `@deepseek-ai/dsh-ptc-runtime-node`（#74，Node 专属实现：
 //	    `evaluators/vm-script.ts:3` 用 `node:vm` 的 createContext/Script、
 //	    `evaluators/async-function.ts:3` 用 `node:vm` 的 compileFunction、
@@ -152,8 +155,14 @@ const (
 	ptcRuntimeNodeModule = "@deepseek-ai/dsh-ptc-runtime-node"
 	// ptcToolExecutorModule 是官方 #94 的包名（生成式 SDK + run_code 工具面）。
 	ptcToolExecutorModule = "@deepseek-ai/dsh-tool-executor-ptc"
-	// ptcR6Blocker 是"被哪条边界拦住的"这一句的唯一起点。
-	ptcR6Blocker = "被 AGENTS.md §1 红线 R6「不嵌 JS 运行时」拦住（设计约束，不是“暂未实现”）"
+	// ptcR6Blocker 是"R6 到底管什么"这一句的唯一起点。
+	//
+	// 2026-11-19 更正：旧文案写"被 R6 拦住（不是暂未实现）"，把"不许嵌引擎"读成了
+	// "不许起受管子进程"——那是过度外推，本仓 PTC 正好走外部受管 node。
+	ptcR6Blocker = "R6 管的是「不嵌 JS 运行时」（AGENTS.md:56 的设计约束）：本仓 PTC 已按 Go 核心 + 外部受管 node 落地，不再被这条挡住"
+	// ptcProfileGap 是这条 501 现在真正的原因：读的是 profile 条目与 retainsState。
+	ptcProfileGap = "cuaAccess 这两个字段读的是 Cordis profile 的 ptc-runtime 条目与 ptcRuntime.retainsState：" +
+		"本仓 provider 是 per-call、不保留状态，也没有 profile 写入通道，因此 persistent/writable 仍为 false"
 	// ptcOfficialDefaultNote 是官方默认形状（file:line 可核）。
 	ptcOfficialDefaultNote = "官方默认也没有这条工具面（dsh-base/cordis.patch.yml:521 `disabled: true`）"
 )
@@ -164,7 +173,7 @@ const ptcCapableWhen = ptcR6Blocker +
 	"（#74，Node VM/worker/REPL 评估器：`evaluators/vm-script.ts:3` 与 `evaluators/async-function.ts:3` 用 node:vm、" +
 	"`evaluators/repl.ts:2` 用 node:repl）与 " + ptcToolExecutorModule +
 	"（#94，生成式 SDK + run_code 工具面）：两者都要在宿主里嵌/起 JS 运行时，R6 下不在本仓可做范围；" +
-	ptcOfficialDefaultNote + "，所以本仓的形状与官方默认一致"
+	ptcProfileGap + "；" + ptcOfficialDefaultNote + "，所以默认形状与官方一致"
 
 // DescribePTC 是给报告/诊断用的一句话（不含运行时行为）。
 func DescribePTC(cfg PTCConfiguration) string {
@@ -174,6 +183,6 @@ func DescribePTC(cfg PTCConfiguration) string {
 	if cfg.Writable {
 		return "PTC 运行时未保留状态，但条目可写"
 	}
-	return fmt.Sprintf("PTC 运行时未装配（条目 %q 不存在）：%s，缺 %s（#74）与 %s（#94）",
+	return fmt.Sprintf("PTC profile 条目未装配（条目 %q 不存在）：%s；官方那条条目挂 %s（#74）与 %s（#94）",
 		cfg.EntryID, ptcR6Blocker, ptcRuntimeNodeModule, ptcToolExecutorModule)
 }

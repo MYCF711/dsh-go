@@ -5,7 +5,7 @@
 > | 面 | 总数 | 状态 | 来源 |
 > |---|---|---|---|
 > | **宿主方法** | **223** | **220** IMPLEMENTED / **3** STRUCTURED_UNIMPLEMENTED / **0** MISSING | `docs/evidence/official-desktop-api-methods-0.2.2-rc.2.txt`；逐条核对见 `tmp/GO8-RC2/reports/FULL-gap-audit-2026-11-14.md` |
-> | **base 插件** | **99** | **89** IMPLEMENTED / **8** PARTIAL / **2** MISSING | 同表 §3；逐项表 `docs/evidence/base-plugins-per-item-0.2.2-rc.2.json`（99 条 id + 状态 + 落点）；本行随 PR #24–#30、#54 与 `feat/host-session-log`（PR #55）更新 |
+> | **base 插件** | **99** | **89** IMPLEMENTED / **10** PARTIAL / **0** MISSING | 同表 §3；逐项表 `docs/evidence/base-plugins-per-item-0.2.2-rc.2.json`（99 条 id + 状态 + 落点）；本行随 PR #24–#30、#54、`feat/host-session-log`（PR #55）与 `feat/ptc-runtime`（PTC 三件，见 §HOST-PTC）更新 |
 > | **UI 插件** | **66** | **30** / **19** / **17** | GUI 仓 `docs/official-parity.md`（分母**动态读**官方清单，`parity-count.py --check` 守着） |
 >
 > **`方法面 MISSING = 0` 有机器反证**：223 个方法**全部**被某条分派分支认领，
@@ -305,8 +305,8 @@ official covered by const: 155 of 193
 | 69 | `tool-subagent-control` | PARTIAL | `modules/tool/team/team.go:26`；`modules/tool/team/spawn.go:211` | 有 `send_message`/`wait_agent`/`list_agents`/`interrupt_agent` 四个工具，但都基于**文件信箱 + 名单标记**；同步委派没有运行句柄，无法对在跑的子代理做 list/cancel/wait。 |
 | 70 | `tool-subagent` | IMPLEMENTED | `modules/tool/subagent/subagent.go:34`；`cmd/dshd/subagent_route.go`；`cmd/dshd/subagent_models_tool.go` | 工具名 `subagent`、schema 带 `continuable` 透传；**2026-11-18 补齐官方模型选择四部分**：设置消费方 `cmd/dshd/subagent_model_selection.go`（新顶层会话写 durable `subagent/model-selection-policy`、子会话继承、设置非法/文档损坏/`enabled` 无路由全部响亮失败）、host-only 投影 `internal/session/subagent_model_selection.go`（key/stateVersion/只认第一条按官方）、委派校验 `cmd/dshd/subagent_route.go`（provider/model 成对、空串、effort 依赖两字段、无策略只许父路由、有策略精确匹配，错误文案逐字官方；`subRunner` 按解析路由换客户端/模型/推理档）、发现工具 `list_subagent_models`（参数/输出/错误分支按 `list-models.ts`）。测试 `modules/tool/subagent/subagent_test.go` + `cmd/dshd/subagent_{model_selection,models_tool}_test.go` + `internal/session/subagent_model_selection_test.go`。形态差异同 #66（同步委派）。 |
 | 71 | `tool-subagent-fork` | IMPLEMENTED | `modules/tool/subagentfork/subagentfork.go:40/91/148`；`cmd/dshd/main.go:187` | 与 #68 同一实现的两个出口：工具层一次取数拿到 `Seed{Text,Events}`，结构化事件经 `internal/spi/subagent.go:40` 的 `SubagentRequest.Seed` 传到 `ChildSpawn`；`spawn` 路径形状逐字节不变（`Seed` 恒 nil，golden 已含该字段）。**已有独立测试**（原“无独立测试文件”已消除）：`cmd/dshd/subagent_seed_fork_test.go` + `modules/tool/subagent/subagent_test.go`。 |
-| 72 | `ptc-runtime` | DO_NOT_IMPLEMENT | `AGENTS.md:39`；`modules/tool/workflow/workflow.go:9` | R6 原文「不嵌 JS 运行时、不 fork/vendor dsc、不用 mvdan 执行命令」；`grep -rniw ptc internal cmd modules codecs` 生产代码仅 1 条注释（`cmd/dshd-bridge/main.go:269`），`run_code` = 0。 |
-| 73 | `workflow-ptc` | PARTIAL | `modules/tool/workflow/workflow.go:40`；`modules/tool/workflow/workflow.go:9` | 脚本是宿主自定义的 **JSON 步骤表**，不是 PTC 运行时；无官方 `agent()` 钩子、无并发扇出（`foreach` 串行）。R6 决定了 JS 形态不会来。 |
+| 72 | `ptc-runtime` | PARTIAL | `internal/ptc/runtime.go:49/85/133`；`internal/ptc/identifiers.go:21/55/79/114`；`internal/ptc/nodeprovider/provider.go:151/222/214`；`internal/ptc/nodeprovider/run.go:19` | **2026-11-19 改判**（原 DO_NOT_IMPLEMENT 是过度外推，见 §HOST-PTC）：这个包本身是**纯契约**——官方 `src/index.ts` 只有抽象类与三组保留名、`src/types.ts` 只有类型，Go 侧照抄零 JS；执行走**外部受管 node**（与 dynamicCordisRunner / `internal/cordis/extern` 同形，宿主不解释 JS）。仍 PARTIAL：只做 per-call（`vm-script`/`persistent-in-memory` 在 `New` 里明确拒绝）；无文件 confinement。 |
+| 73 | `workflow-ptc` | PARTIAL | `internal/workflow/engine.go:130/258/356/405/224/237/34`；`modules/tool/workflow/orchestrate.go:107` | 原生引擎已覆盖六类钩子与上限（agent/parallel/pipeline/phase/log + `MaxConcurrentAgents` 0/1000/4096），`Parallel` 是**真并发**（受并发闸），不再是"foreach 串行"。残余缺口只剩一条：官方脚本是 JS（`node:vm` 的 script/repl 形态），本仓 provider 只实现 per-call 的 function-body，所以脚本形态仍是声明式 JSON 步骤表。 |
 | 74 | `tool-workflow` | IMPLEMENTED | `modules/tool/workflow/workflow.go:45`；`modules/tool/workflow/workflow.go:87` | 工具名 `workflow`、参数名 `script`/`meta` 与官方对齐，子调用走受管 `spi.SubDispatch`（`internal/spi/ctx.go:62`）；测试 `modules/tool/workflow/workflow_test.go`。脚本语言不同见 #73。 |
 | 75 | `timeout-policy` | IMPLEMENTED | `modules/tools/pipeline.go:366`；`modules/tools/pipeline.go:90` | 统一 per-call deadline 已在流水线层落地：`executeWithDeadline` 用 goroutine + 缓冲 channel，超时返回结构化 `*ToolTimeoutError`（`:327`），`DSHD_TOOL_TIMEOUT_SECS` 可配、负值关闭；测试 `modules/tools/pipeline_test.go`。 |
 | 76 | `spill-local` | IMPLEMENTED | `modules/tools/pipeline.go:512`；`cmd/dshd/main.go:98` | 超阈值结果外置成 artifact + 指针，`SpillDir` 落 `<home>/artifacts`（FS 已放行，Hint 可读）；测试 `cmd/dshd/spill_roundtrip_test.go`、`modules/tools/pipeline_test.go`。 |
@@ -325,7 +325,7 @@ official covered by const: 155 of 193
 | 89 | `mcp-resources` | DEFERRED | `cmd/dshd/mcp.go:345`；`cmd/dshd/mcp.go:325` | MCP 客户端只做到 `initialize` + `tools/list`（且工具只计数不注册进工具表）；`resources/list`、`resources/read`、`prompts/*` 一条没有（`grep resources cmd/dshd/mcp.go` = 0）。 |
 | 90 | `tools` | IMPLEMENTED | `modules/tools/registry.go:36`；`modules/tools/pipeline.go:186` | 工具目录（注册/查找/枚举，重名 fail-loud）+ 唯一执行入口；测试 `modules/tools/registry_test.go`、`modules/tools/pipeline_test.go`。 |
 | 91 | `tool-executor-native` | IMPLEMENTED | `modules/tools/pipeline.go:186` | pre-execute（waterfall 可 veto）→ 参数 JSON 校验 → execute（带统一 deadline）→ 序列化 → spill → post-execute → 广播；测试 `modules/tools/pipeline_test.go`。唯一形态，不可切换 executor。 |
-| 92 | `tool-executor-ptc` | DO_NOT_IMPLEMENT | `AGENTS.md:39`；`docs/official-plugins-022-map.md:6` | R6 不嵌 JS 运行时；且该插件官方默认 disabled（同文件第 6 行原文点名）。宿主无代码执行器：`grep run_code = 0`。 |
+| 92 | `tool-executor-ptc` | PARTIAL | `modules/tool/runcode/runcode.go:214/287`；`modules/tool/runcode/scheduler.go:113`；`cmd/dshd/main.go:227`（`DSHD_PTC=1` 才挂） | **2026-11-19**：`run_code` 工具面真实存在（官方工具名与字段 code/description/timeoutMs；输出 `logs`+`result`；`CODE_RUN_FAILED`/`ABORTED` 身份；额度 = floor(timeoutMs/60000×maxSubCallsPerMinute) 的**总额度**、被拒那一次不派发并终止程序；`maxParallelSubCalls` 并发闸；子调用走 `spi.SubDispatch`）。仍 PARTIAL：不做执行器替换、无 system prompt 的 SDK 段、无 `ptc-dispatch` 事件、图片子结果与 `reset(agent)` 未接。官方默认也是 `disabled: true`（`dsh-base/cordis.patch.yml:523`），本仓默认关、显式开。 |
 | 93 | `system-prompt` | PARTIAL | `internal/prompt/prompt.go:49`；`internal/prompt/prompt.go:182` | 有 `Provider` 接口 + 确定性 `Assemble`（同输入同字节、空段消失、外部内容有界截断）；但段落是 `Default()` 里的**编译期固定组合**，无 section 注册表/声明式 order/persona/toolOrder 占位。测试 `internal/prompt/prompt_test.go`。 |
 | 94 | `agent-loop` | IMPLEMENTED | `internal/agent/loop.go:205` | turn/step 双循环 + steer + 参数预检（`ValidateToolCallArguments`）；测试 `internal/agent/loop_test.go`、`internal/agent/loop_steer_test.go`。 |
 | 95 | `fs-sandbox` | PARTIAL | `modules/fs/local/local.go:104`；`internal/sandbox/fs.go:15` | FS 侧已生产接线：`BoundaryFromEnv` → `Boundary.CheckWrite`（read-only / workspace-write / danger-full-access 三档，符号链接解析后判断）；但 `Policy.EvaluateFS` 的 allow/needs-approval 决策**没有生产调用方**（只有 `*_test.go`），FS 侧的一次性 `sandbox_permissions` 升级未接（命令侧已接，`modules/exec/bash/tools.go:240`、`modules/tool/pwsh/pwsh.go:250`）。 |
@@ -1061,6 +1061,8 @@ officeToPdf **未装 LibreOffice 实测**；directoryPicker 原生目录框**人
 | 不该补 | 1 | `bash-sandbox`（官方自己在 win32 上 `disabled:true`，同批 `tool-bash` 也 disabled——本仓在同一平台上的形状与官方一致，且本仓仍跑三档策略闸门） |
 | 不适用 | 1 | `agent`（rc.1 遗留判定；PR #24 已在 `cmd/dshd/serve.go:493` 传 `Emit`，`cmd/dshd/agent_events_wiring_test.go` 钉住） |
 
+> **2026-11-19 更正（§HOST-PTC）**：上表「R6 不做 | workflow-ptc」这一条的依据是「插件的唯一内容是 JS 运行时」——**这句只对 `dsh-workflow-ptc` 的宿主侧引擎成立，对 `dsh-ptc-runtime` 不成立**。`ptc-runtime` 是纯契约包（无执行代码），执行由 provider 走外部受管 node 完成，R6 的词面（不**嵌**引擎）没有被子进程方案触碰。因此 `ptc-runtime` / `tool-executor-ptc` 已从 MISSING 改判 PARTIAL，见 §HOST-PTC。历史行保留不改写。
+
 计数自检：12 + 1 + 4 + 1 + 1 = 19。
 
 其中仍然 `PARTIAL` 的 5 条，#4/#6/#37/#53/#77 的残余缺口逐条写在上面各行与配套报告 §5，
@@ -1131,3 +1133,51 @@ officeToPdf **未装 LibreOffice 实测**；directoryPicker 原生目录框**人
 顺带更正本表两处陈旧登记（**只在本文追加，不重写历史行**）：§2.2 第 463 行把实现写成
 `serve_account_api.go:310`，实为 `:497-538`；「只给 provider → 400 bad_input」实为 **500 internal**。
 第 464/465 行状态实为 IMPLEMENTED（live 200），未在本单改判（改判要同步逐项表与计数，另一单）。
+
+
+-----
+
+## §HOST-PTC · PTC 三件（`ptc-runtime` / `tool-executor-ptc` / `workflow-ptc`，2026-11-19）
+
+工作树 `feat/ptc-runtime`（**未 commit / 未 push**）。官方基线 `0.2.2-rc.2`，源码对照用解包树
+`tmp/GO8-RC5/official-rc5/dsh/node_modules/@deepseek-ai/`（与 rc.2 同文件同职责）。
+
+### 先判定可实现性（这一节的结论改了三条旧登记）
+
+旧登记用一句话把三件都判成"R6 不做"：**"PTC 本质是让模型写 JS 调工具"**。这句是**过度外推**：
+
+| 官方包 | 它到底是什么（`file:line`） | R6 判定 |
+|---|---|---|
+| `dsh-ptc-runtime` | **纯契约缝**：`src/index.ts:105-167` 只有抽象类 `PtcRuntime` 与三组保留名集合（`:43`/`:58`/`:67`/`:79`），`src/types.ts` 只有类型（`PtcRunRequest:76`、`PtcRunSpec:113`、`PtcRunResult:156`、`PtcRunFailure:146`）。**零执行代码、零 JS 引擎**。 | **可做**（Go 契约 + 校验，不含引擎） |
+| `dsh-ptc-runtime-node` | 真正的执行后端：`src/evaluators/vm-script.ts` 用 `node:vm`、`src/worker.ts` 是**受管 node 进程**。官方 base 组合把它挂在 `id: ptc-runtime` 上（`dsh-base/cordis.patch.yml:407-408`）。 | **部分可做**：per-call（function-body）走**外部受管 node**；`vm-script`/`persistent-in-memory` 要 `node:vm` 的保留环境，未做并**明确拒绝** |
+| `dsh-tool-executor-ptc` | 生成式 SDK + `run_code` 工具面 + 子调用调度与额度（`src/ptc.ts`、`src/ptc-calls.ts`、`src/errors.ts`）。官方默认 `disabled: true`（`dsh-base/cordis.patch.yml:523`）。 | **可做**（工具面/额度/scheduler 全在宿主侧） |
+| `dsh-workflow-ptc` | JS 工作流脚本跑在 PTC node 进程里，六类钩子由 guest 适配器提供（`src/runtime.ts`、`src/guest-source.ts`、`src/host.ts`）。 | **部分可做**：钩子语义本仓已用 Go 原生引擎实现；JS **脚本形态**仍缺（依赖 `vm-script`） |
+
+**R6 的准确词面**（`AGENTS.md:56`）：不**嵌** JS 运行时、不 fork/vendor dsc、不用 mvdan 执行命令。
+"宿主起一个受管 node 子进程、把 JS 当数据文件交给它跑"不是嵌引擎——这正是既有裁定
+`dynamicCordisRunner`（Go 核心 + 外部受管 Node 双轨）与 `internal/cordis/extern` 已经落地的形状。
+**真正被 R6 挡住的是把引擎链接进宿主二进制。**
+
+### 本单做了什么
+
+- **缝**：`internal/ptc/`（types/identifiers/runtime/validate）—— 字段名与保留名集合逐字照官方；
+  `Runtime` 是官方抽象类的 Go 形状，`ResolveTimeout` 复刻 `timeoutMs?: number|null` 三态，
+  `ResolveSandbox` 守住"没有 confinement 就拒绝显式档位"。
+- **provider**：`internal/ptc/nodeprovider/` —— 按次起停的受管 node：帧式控制通道（stdin/stdout 一行一帧）、
+  绑定调用回宿主的 RPC、`timeout`/`abort` 都**收整棵进程树**（Windows Job Object）、
+  输出/单帧/V8 老年代三重上限、八种失败 kind 逐条归类。JS 只在 `worker.go` 里作为**文本常量**写出到临时目录。
+- **工具面**：`modules/tool/runcode/` —— `run_code`（官方名字与 schema 字段）、`ToolsCallError`→`ToolCallError`
+  类型契约、按 timeoutMs 折算的**总额度**（超限那一次不派发并终止程序）、`maxParallelSubCalls` 并发闸、
+  子调用走 `spi.SubDispatch` 受管通道、`CODE_RUN_FAILED`/`ABORTED` 身份。默认**不挂**，`DSHD_PTC=1` 才挂。
+
+### 门禁
+
+`go build ./...` / `go vet ./...` / `go test ./... -count=1` 全绿；`gofmt -l` 为空；
+`python scripts/single-source.py`、`python scripts/gap-register-counts.py --check` PASS。
+变异测试：5 处定点破坏（保留名检查、timeout 封顶、worker 非有限数检查、超时归类、重复 global）全部被抓红。
+
+### 仍缺（不回填成 IMPLEMENTED）
+
+`vm-script`/`persistent-in-memory` 形态、文件 confinement、执行器替换（PTC 取代 native）、
+system prompt 的 `tools:sdk`/`tools:ptc-only` 段、`ptc-dispatch` 事件、图片型子结果的 deferred user-message、
+`reset(agent)`、沙盒升级审批与 `justification`。这九项都写在上表"仍 PARTIAL"里，不当作已实现。

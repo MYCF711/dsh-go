@@ -47,6 +47,7 @@ import (
 	"dshgo/modules/tool/read"
 	"dshgo/modules/tool/readimage"
 	"dshgo/modules/tool/repohere"
+	"dshgo/modules/tool/runcode"
 	schedule "dshgo/modules/tool/schedule"
 	"dshgo/modules/tool/skill"
 	subagenttool "dshgo/modules/tool/subagent"
@@ -137,7 +138,7 @@ func builtinModules(wd, home string, maxChars, maxInlineTokens int, sub *subProv
 	if err := skill.Bootstrap(filepath.Join(home, "skills")); err != nil {
 		fmt.Fprintf(os.Stderr, "skill 自举失败（%v）；skill 工具仍可用，但目录可能不存在\n", err)
 	}
-	return []kernel.Module{
+	mods := []kernel.Module{
 		// 默认实现也是插件（A3）：它们与第三方插件走同一个 Register(scope)。
 		tools.Module(toolsOptions(home, maxChars, maxInlineTokens)),
 		// 官方 base 插件 #46：受管 `DSH_*` 环境注册表。装在这里（shell 工具之前）只是
@@ -216,6 +217,17 @@ func builtinModules(wd, home string, maxChars, maxInlineTokens int, sub *subProv
 		// （此前只数字数、从不注册）。漏掉 dsh.toml 的白名单条目会让它被静默跳过。
 		tools.MCPModule(home),
 	}
+	// PTC（programmatic tool calling）：`run_code` 工具 + 外部受管 node 运行时。
+	//
+	// 默认**不挂**：官方 base 组合里这条也是 `disabled: true`（`dsh-base/cordis.patch.yml:523`），
+	// 而且这个 provider 没有文件 confinement（程序里的 node fs 按进程权限生效，
+	// 不是按会话档位）。所以"允许模型写程序来调工具"必须由人显式决定：
+	// `DSHD_PTC=1` 才挂，且挂上之后与原生工具**并列**（不做执行器替换，
+	// 见 modules/tool/runcode 的包注释与缺口登记）。
+	if os.Getenv(runcode.OptInEnv) == "1" {
+		mods = append(mods, runcode.Module())
+	}
+	return mods
 }
 
 func main() {
