@@ -331,7 +331,7 @@
       "id": "llm-pi-ai",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`internal/llm/provider.go:133` `providerAdapters`（内置 `openai-completions` + `deepseek-completions`）、`:139` `RegisterProviderAdapter`、`:158` `LookupProviderAdapter`；`internal/llm/provider_registry.go:68` `ListProviders`、`:79` `ListConfigurableProviders`",
+      "evidence": "`internal/llm/provider.go:133` `providerAdapters`（内置 `openai-completions` + `deepseek-completions`）、`:139` `RegisterProviderAdapter`、`:158` `LookupProviderAdapter`；`internal/llm/provider_registry.go:68` `ListProviders`、`:79` `ListConfigurableProviders`、`:133` `DiscoverModelsForProvider`（provider→端点→真实发现）",
       "changes": [
         {
           "from": "DO_NOT_IMPLEMENT",
@@ -339,7 +339,7 @@
           "source": "audit-4.1"
         }
       ],
-      "note": "拍板不扩四协议（partial19 §3.2）"
+      "note": "官方**出厂就是 dormant**（`dsh-base/cordis.patch.yml:128-136`：「mounted dormant: zero routes … until a `llm-pi-ai:` settings section supplies provider profiles」，rc.1 解包树同行号复核）——即默认装配下官方也没有额外 provider 路由。本仓注册面/配置面/发现面都在，缺的是 pi-ai 自带的另外三种协议适配器（`catalog.ts` 987 行是 pi-ai SDK 的 provider 目录生成件，`provider-data.generated.ts` 52 行）。**用户 2026-11-15 拍板不扩四协议**（`docs/handoff-2026-11-15.md:53`）。结论：默认装配不比官方少，形态差异保留（见 §HOST-PARTIAL10）。"
     },
     {
       "id": "session-persistence-jsonl",
@@ -358,7 +358,7 @@
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
       "evidence": "`internal/session/query.go:130` `SearchSessions`、`:53` `EncodeQueryCursor`、`:22` 自述 `Engine` 恒为 `scan`；`go.mod` 无 sqlite 依赖",
-      "note": "拍板不做倒排/FTS5（partial19 §3.3）"
+      "note": "官方**出厂就是关闭检索**：`dsh-base/cordis.patch.yml:157-161` `path: ':memory:'` + `openAt: never`，注释（`:145-156`）写明 search 一律 `SESSION_QUERY_SEARCH_DISABLED`、SQLite 从不打开。本仓 scan 档在默认装配下**比官方更强**（`docs/parameter-register.md:544` 已记），缺 FTS5 是形态差异。**用户 2026-11-15 拍板不引入 SQLite**（`docs/handoff-2026-11-15.md:53`）。见 §HOST-PARTIAL10。"
     },
     {
       "id": "working-directory",
@@ -625,8 +625,8 @@
       "id": "skill",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`modules/tool/skill/skill.go:558` `roots`、`:154` `collect`；`cmd/dshd/serve_agent_api_skills.go:295` `agentSkillRoots`、`:361` `scanAgentSkillRoots`",
-      "note": "仍 PARTIAL：host + per-scope 分层（partial-rest §3）"
+      "evidence": "`modules/tool/skill/skill.go:558` `roots`、`:154` `collect`；`cmd/dshd/serve_agent_api_skills.go:295` `agentSkillRoots`、`:361` `scanAgentSkillRoots`；provider 注册面 `modules/tool/skill/registry.go`（`registerProvider`/`register`）",
+      "note": "仍 PARTIAL：官方是**分层注册表**（`dsh-skill/src/index.ts:346-365`（`SkillRegistry.layers = new ScopedLayers(...)`）/ `:440-441`（`register` 用 `scopeOf(this.ctx)` 定层）：host 全局层 + 每个 `ScopeKey` 一层，读时合并 global + 观看 scope 链），本仓没有 scope/preset 插件装配（`grep -rn \"ScopeKey|ScopedLayers\" --include=*.go` 只命中 `modules/tool/skill/registry.go:51` 的注释，0 生产实现），宿主 preset 是 tools×approval×sandbox（`internal/modes`），**不装载插件** → 没有第二个 layer 的生产者；建一个没有生产者的层就是空壳。重新评估条件见 `docs/base-plugins-partial-rest-official-shape.md` §7.3。见 §HOST-PARTIAL10。"
     },
     {
       "id": "skill-filesystem",

@@ -120,7 +120,7 @@ internal/agent/side_query.go:43 | side query 的流回调：只消费正文增�
 # ---- 非"内容块"：同名/同形状的误报，写清它判的到底是什么 ----
 
 # input modalities 是模型能力词表（text/image/audio…），不是一条消息的内容块。
-internal/llm/discover.go:266 | normalizeInputModalities：这是模型 input 词表（text/image…），与消息块无关
+internal/llm/discover.go:264 | normalizeInputModalities：这是模型 input 词表（text/image…），与消息块无关
 # cron 字段名恰好叫 text。
 internal/schedule/cron.go:108 | parseCronField：参数名 text 是 cron 字段字符串，判空是配置校验
 # GitHub 文件正文的 base64 解码：空 content 表示"这个字段没给"，与消息投影无关。
