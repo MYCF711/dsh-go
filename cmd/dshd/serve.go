@@ -26,6 +26,7 @@ import (
 	"dshgo/internal/native"
 	"dshgo/internal/officekit"
 	"dshgo/internal/pluginmgr"
+	"dshgo/internal/sandbox"
 	"dshgo/internal/session"
 	"dshgo/internal/settingsform"
 	"dshgo/internal/transport"
@@ -1086,8 +1087,24 @@ func cmdServe(args []string) error {
 	// follow 发的是官方 ForgePanelState（每帧一个完整状态），其中的
 	// `worktree.editable` 与 `worktree.creation` 读的就是这里的 worktreeSvc 与
 	// src.Cwd —— 与 worktree 面板、forgePanel git 族**同一份**实例，不另建账本。
-	if forgeHost, ferr := newForgePanelHost(*home, worktreeSvc, func(sessionID string) (string, error) {
-		return src.Cwd(sessionID)
+	//
+	// `worktree.blocker` 的三个真值来源也都接上（官方 panel.ts:319-326）：
+	//   - 档位 = serve_sandbox_policy.go 的同一份 preset + 覆盖解析器
+	//     （官方 `sandboxPolicy.resolve({session})`）；
+	//   - 策略根 = 本进程 cwd，也就是 run 子进程拿到的 DSHD_SANDBOX_WORKSPACE
+	//     （serve_tools.go 的 sandboxChildRoots(wd, …)，wd 就是 os.Getwd()）——
+	//     与子进程 FS/bash 真正判定的可写根**同源**，不是另算一个；
+	//   - checkout 事实（root / git-common-dir）走 forgePanelHost 自己的 git 探针。
+	if forgeHost, ferr := newForgePanelHost(*home, forgePanelOptions{
+		Worktrees: worktreeSvc,
+		Cwd: func(sessionID string) (string, error) {
+			return src.Cwd(sessionID)
+		},
+		Mode: func(sessionID string) (sandbox.Mode, error) {
+			resolved, merr := resolveSandboxModeForSession(*home, sessionID, sandboxPresets, sandboxStore)
+			return resolved.Effective, merr
+		},
+		WorkspaceRoot: os.Getwd,
 	}); ferr == nil && forgeHost != nil {
 		srv.AttachOfficialForgePanelAPI(forgeHost.api())
 	}
