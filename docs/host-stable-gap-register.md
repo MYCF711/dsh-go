@@ -208,6 +208,10 @@ official covered by const: 155 of 193
 > 与旧结论（DONE 37 / PARTIAL 32 / MISSING 28）逐格对照：旧 28 个 MISSING 里 **9 个已 IMPLEMENTED、3 个 PARTIAL、1 个 OFFICIAL_UNSUPPORTED、3 个 DO_NOT_IMPLEMENT、12 个 DEFERRED**；
 > 旧 32 个 PARTIAL 里 **8 个升到 IMPLEMENTED**；旧 37 个 DONE 里 34 个保持、3 个降为 PARTIAL（口径变严，不是退步）。
 > 因此"实缺"= `DEFERRED 13 + OFFICIAL_UNSUPPORTED 1 + DO_NOT_IMPLEMENT 4 = 18`，其中 4 个 DNI 是 R6 定死的、1 个 UNSUP 是上游 win32 自己 disabled。
+>
+> **2026-11-20 更正（§HOST-PARTIAL10）**：上表是 rc.1 快照。其中 `#26 llm-pi-ai`（原 DO_NOT_IMPLEMENT）与
+> `#54 skill`（原 IMPLEMENTED）两行的状态已在 §2.3/§2.4 就地改标并留原判；本表数字**没有**跟着改，
+> 因为它是那一轮盘点的记录。当前口径看文件顶部结论表 + `docs/evidence/base-plugins-per-item-0.2.2-rc.2.json`。
 
 ### 2.2 分域（A 运行时装配 #1-16 / B 持久化与模型 #17-32 / C 执行与安全 #33-48 / D 工具与命令 #49-64 / E 派生与压缩 #65-80 / F 工具-web-执行器 #81-97）
 
@@ -249,7 +253,7 @@ official covered by const: 155 of 193
 | 23 | `authorization` | IMPLEMENTED | `internal/authorization/registry.go`；`internal/transport/handlers_authorization_rc2.go`；`cmd/dshd/serve_authorization_flows.go` | 通用 flow 注册表：`registerFlow`/`begin`/`cancel`/`list`/`describe` + 官方四个错误码（NO_FLOW/ALREADY_IN_FLIGHT/NOT_COMMITTED/UNKNOWN_METHOD）+ **commit 必须被观察到**（没 Commit 不报 authorized）+ 人拒绝=cancelled（不是错误）+ notice/prompt 只到发起方。wire 面 5 条方法（`authorization.begin` 用 NDJSON 推 notice/prompt/outcome，`authorization.answer` 回填；官方无 RPC，因为其 surface 在进程内）。生产流：真实自托管 OIDC device-code 登录包成 `account/oidc`。测试 registry 9 条 + wire 8 条 + cmd 端到端 6 条（真 OIDC 端点、notice 带端点返回的 user_code、answer=done 后真换 token 且凭据落盘、取消时 token 端点零调用）。 |
 | 24 | `deepseek-account` | PARTIAL | `cmd/dshd/serve_account_api.go:107`、`internal/transport/handlers_account_official.go:508` | 10 个 account 组方法只绑了 4 个真实现（getUnnotifiedBonuses / ackBonusNotified / signOut / discoverModels），其余 6 个（getProfile、getBalance、startSignIn、cancelSignIn、productAnalytics.report、actionCards.act）回官方形状的四字段 501——没有官方账号服务、浏览器登录与 code 交换。 |
 | 25 | `credentials` | IMPLEMENTED | `internal/llm/model_catalog.go:499`、`internal/llm/model_catalog.go:523` | 独立凭据存储：describe 只回 configured/source/writable（**从不回值**、ref 非法整批拒），set/unset 带 revision 栅栏 + 临时文件 rename 原子提交，未被任何 catalog 模型引用的 standalone ref 也能存；解析优先级 stored > `apiKeyEnv` 同名环境变量（`model_catalog.go:684`）。 |
-| 26 | `llm-pi-ai` | DO_NOT_IMPLEMENT | `PLAN.md:643`、`internal/llm/model_catalog.go:1030` | PLAN 硬规则："长期仍不做多 provider"；宿主只承认 `openai-completions` 一条协议（`api:"anthropic-messages"` 直接判 invalid_field，`internal/llm/model_catalog_test.go:156` 就是那条负例），没有 pi-ai 的多协议适配器注册表。 |
+| 26 | `llm-pi-ai` | **PARTIAL**（2026-11-20 更正，见 §HOST-PARTIAL10；原判 DO_NOT_IMPLEMENT） | `PLAN.md:643`、`internal/llm/model_catalog.go:1030` | PLAN 硬规则："长期仍不做多 provider"；宿主只承认 `openai-completions` 一条协议（`api:"anthropic-messages"` 直接判 invalid_field，`internal/llm/model_catalog_test.go:156` 就是那条负例），没有 pi-ai 的多协议适配器注册表。 |
 | 27 | `session-persistence-jsonl` | IMPLEMENTED | `codecs/v4/frame.go:31`、`codecs/v4/write.go:131` | 真实 v4 JSONL 持久化：多独立 zstd 帧拼接、首帧只装 header 且必须一行、只开 checksum 不设 level、追加不重写已提交帧；带 `read_test.go`/`write_test.go`/`incremental_test.go`/`path_test.go`/`twowriters_test.go`。 |
 | 28 | `attachment-local` | IMPLEMENTED | `cmd/dshd/attachments.go:124`、`cmd/dshd/attachments.go:493` | 本地附件 store：Put/Get/ResolveBlocks（file 与 session 两种 referenceType），含 MIME 嗅探、PNG/GIF/WebP 结构校验、像素预算、随机 id 与"显示名只当叶子名、从不作路径"的清洗；`cmd/dshd/attachments_test.go`。 |
 | 29 | `session-query-sqlite` | PARTIAL | `cmd/dshd/history.go:40`、`internal/transport/handlers_session_official.go:1003` | 有 `session.search` 与历史检索能力，但实现是**子串线性扫描**：`go.mod` 无 sqlite 依赖、`grep -iE "sqlite\ |
@@ -282,7 +286,7 @@ official covered by const: 155 of 193
 | 51 | `tool-fs` | IMPLEMENTED | `modules/tool/read/read.go:38`、`modules/tool/write/write.go:31` | read / read_image / write / edit 四件齐全（`modules/tool/edit/edit.go:34`）。 |
 | 52 | `tool-fs-search` | IMPLEMENTED | `modules/tool/glob/glob.go:42`、`modules/tool/grep/grep.go:52` | glob / grep 两件齐全，均带包内测试。 |
 | 53 | `agent-instructions` | PARTIAL | `internal/prompt/instructions.go`；装配 `cmd/dshd/acp.go:1247` | 官方 project root→cwd broad→specific 链**已补齐并默认开**（`DSHD_INSTRUCTION_CHAIN=0` 关）：`.git` 定根、`AGENTS.md`/`CLAUDE.md` + `*.local.md` 候选、组内 trim 去重（跨组不去重）、超 `maxSourceBytes` 整文件丢、三级预算退化（丢宽的→截断最具体的→compact intro→只有通知）、`</system-reminder>` 转义、cwd 变更重载。仍 PARTIAL：fs 操作后的嵌套发现与 change/removal 通知（官方 durable 投影）未做；用户全局双根链只实现一个点。测试 `internal/prompt/instructions_chain_test.go` 14 条。 |
-| 54 | `skill` | IMPLEMENTED | `modules/tool/skill/registry.go`；`modules/tool/skill/filesystem.go`；`cmd/dshd/serve_agent_api_skills.go:305` | provider 注册面补齐：`registerProvider`/`register`（`runtime` 保留名、同层重名报错、first-wins + 警告、返回按注册作用域生效的 `Invalidate`）、`{modelInvocable,userInvocable}` 四组合、合并键 rank→providerOrder→localOrder、载入后校验名字不一致即失效缓存、provider 失败记日志+跳过+标 incomplete。`skill` 工具与 `skills.list` 都读注册表合并结果；自带文件系统 provider。仍只实现全局层（无 preset 分层）。测试 `registry_test.go` 8 条 + `cmd/dshd/serve_agent_api_skills_registry_test.go` 5 条。 |
+| 54 | `skill` | **PARTIAL**（2026-11-20 更正，见 §HOST-PARTIAL10；原判 IMPLEMENTED） | `modules/tool/skill/registry.go`；`modules/tool/skill/filesystem.go`；`cmd/dshd/serve_agent_api_skills.go:305` | provider 注册面补齐：`registerProvider`/`register`（`runtime` 保留名、同层重名报错、first-wins + 警告、返回按注册作用域生效的 `Invalidate`）、`{modelInvocable,userInvocable}` 四组合、合并键 rank→providerOrder→localOrder、载入后校验名字不一致即失效缓存、provider 失败记日志+跳过+标 incomplete。`skill` 工具与 `skills.list` 都读注册表合并结果；自带文件系统 provider。仍只实现全局层（无 preset 分层）。测试 `registry_test.go` 8 条 + `cmd/dshd/serve_agent_api_skills_registry_test.go` 5 条。 |
 | 55 | `skill-filesystem` | IMPLEMENTED | `modules/tool/skill/skill.go:166`、`cmd/dshd/serve_agent_api.go:1167` | 多根（`<home>/skills` + `DSHD_SKILLS_EXTRA` 分号分隔，先到先得）+ frontmatter 解析（description / when_to_use）。 |
 | 56 | `tool-skill` | IMPLEMENTED | `modules/tool/skill/skill.go:43` | 不给 name = 列清单（名字 + 一句话说明），给 name = 取 SKILL.md 全文（32KB 截断且显式标注）。 |
 | 57 | `commands` | IMPLEMENTED | `internal/transport/handlers_commands_official.go:111`、`cmd/dshd/serve_commands_api.go:58` | 真注册表：Register/List/Find/Execute + 生命周期写 v4（`command/run`、`command/done`）+ 附件准入；`commands.list/execute` 走它。 |
@@ -367,6 +371,12 @@ terminal.input/open/output/resize, workspace.init/list
 | UNVERIFIED | 0 | 0.0% |
 | 合计 | 193 | 100% |
 
+> **2026-11-20 更正（§HOST-PARTIAL10）**：本表是 rc.1 快照。`agentPresets.read` / `workspaceFiles.changes`
+> 两行已在 §3.3 就地由 PARTIAL 改标 IMPLEMENTED（旧判据逐条证伪），`llm.discoverModels` 补了协议分支后改标
+> IMPLEMENTED，`pluginManager.{inspect,installBundle,updateBundle}` 的说明改为「registry/tarball 已实现，
+> 只剩 git 形态」。本表数字不跟着改（历史记录）。当前口径看文件顶部结论表（223 = 220 + 3 + 0，
+> 那 3 条是默认 `Local` provider 下的账号通知三件套，见 `tmp/GO8-RC2/reports/FULL-gap-audit-2026-11-14.md` §1.2）。
+
 ### 3.3 全表（193 行，按官方命名空间排序）
 
 > 证据读法：`路由`＝`/api/<method>` 被谁认领的位置；`实现`＝真正干活的 handler / 校验分支；`探测`＝本次对 HEAD 二进制实跑 `POST /api/<method>` 的响应类别（`VAL400` 入参校验命中、`OK200` 真值、`STUB501` 结构化未实现、`NOROUTE` 404）。
@@ -391,7 +401,7 @@ terminal.input/open/output/resize, workspace.init/list
 | `account.watchExpiry` | OFFICIAL_UNSUPPORTED | 不在 handlers_account_official.go:140 → server.go:595 default | server.go:596 通用 501 | STUB501 | 同上（凭据到期观察流）；探针 EXC、重探 401，结论由代码静态判定 |
 | `actionCards.act` | DEFERRED | server.go:437 → handlers_account_official.go:140 | handlers_account_official.go:845；:876 officialNotImplemented（ActionCardAct==nil） | VAL400 | 缺 action card 运行时：propose_action 工具 + kind 注册表 + 卡片会话投影，本地可做未做 |
 | IMPLEMENTED（T18RR） | cmd/dshd/serve_agent_api.go:979 | agentOfficialAPI.agentPresetsList（T04） | OK200 | T17R 真实 probe=OK200；T18RR 修正 status/probe | STUB：无路由。宿主已有真实 `agentPresetRoster()`（`serve_agent_api.go:926`，内置 + `<home>/modes/*.toml`），缺的只是 `list` 这一条路由 |
-| `agentPresets.read` | PARTIAL | `internal/transport/server.go:421` → `handlers_agent_official.go:87` | `cmd/dshd/serve_agent_api.go:944` | VAL400 | PARTIAL：id 真查内置 + 磁盘 TOML 名册；但 **`content` 给的是 TOML / 内置声明，官方要求的是"子插件 entry-list YAML"**（代码 `:941-942` 自登记差异） |
+| `agentPresets.read` | IMPLEMENTED | `internal/transport/server.go:421` → `handlers_agent_official.go:87` | `cmd/dshd/serve_agent_api.go:195`（`AgentPresetRead: a.agentPresetReadYAML`）→ `cmd/dshd/serve_agent_presets_yaml.go:31` → `internal/agentpresets/yaml.go:35` | VAL400 | **2026-11-20 更正（§HOST-PARTIAL10）**：旧登记说 `content` 是 TOML，那是**已下线**的 `agentPresetRead`（`serve_agent_api.go:944`，只剩测试在用）。生产 wire 走 entry-list YAML 投影：普通 preset = 一行宿主声明（id/name/description/builtin/tools/approval/sandbox 逐字段），`cordis` = 官方组合原文投影（`internal/agentpresets/cordis.go:9`）；官方同一操作 = `dump(preset.plugins, {schema: entryListSchema})`（`dsh-agent-preset-registry/src/index.ts:242`），顶层列表 + 每行 `name` 非空字符串的形状逐条对齐。 |
 | `agentPresets.select` | IMPLEMENTED | `internal/transport/server.go:421` → `handlers_agent_official.go:87` | `cmd/dshd/serve_agent_api.go:1087` | VAL400 | REAL：preset 必须存在于真实名册，选择写 `state/session-preset.json` 并返回实际生效 id |
 | `commands.execute` | IMPLEMENTED | server.go:421 → handlers_agent_official.go:87 | handlers_agent_official.go:1200 → serve_agent_api.go:757 → 注册表 Execute（handlers_commands_official.go:251） | VAL400 | 追加 command/run + command/done 生命周期帧；语法/名字不解析回空 result（官方 undefined） |
 | `commands.list` | IMPLEMENTED | server.go:421 → handlers_agent_official.go:87 | handlers_agent_official.go:1179 → serve_agent_api.go:742 → cmd/dshd/serve_commands_api.go:58 真注册表 | VAL400 | 返回真实注册的 /help /goal /feedback（name 升序） |
@@ -461,7 +471,7 @@ terminal.input/open/output/resize, workspace.init/list
 | `liveshareShares.testPublish` | OFFICIAL_UNSUPPORTED | server.go:445 → handlers_forge_liveshare_official.go:168 | ServeOfficialForgeLiveshare:499 / :517-519；spec :456 | VAL400 | 需 relay（注册 throwaway share 验证本机发布权）；无 relay 时"能发布"只能编 |
 | `liveshareShares.testRelay` | OFFICIAL_UNSUPPORTED | 不在 handlers_forge_liveshare_official.go:168 的 27 个里 → server.go:595 default | server.go:596 通用 501 | STUB501 | 同族：relay 连通性探测 |
 | `liveshareShares.updatePermissions` | OFFICIAL_UNSUPPORTED | server.go:445 → handlers_forge_liveshare_official.go:168 | ServeOfficialForgeLiveshare:499 / :517-519；spec :463 | VAL400 | 需 relay 权限写回（tier/allowsFork/ttlMinutes）；本仓没有分享层 |
-| `llm.discoverModels` | PARTIAL | server.go:437 → handlers_account_official.go:140 | handlers_account_official.go:725；实现 cmd/dshd/serve_account_api.go:310 | VAL400 | 缺子操作：只支持显式 request.baseURL 的真实 `GET <baseURL>/models` 探测；只给 provider 时本仓无 provider 注册表 → 400 bad_input（serve_account_api.go:313-326） |
+| `llm.discoverModels` | IMPLEMENTED | server.go:437 → handlers_account_official.go:140 | handlers_account_official.go:1326；实现 `cmd/dshd/serve_account_api.go:512` → `internal/llm/discover.go:127` / `internal/llm/discover_protocols.go:88-283`；provider 分支 `internal/llm/provider_registry.go:133`/:146 | VAL400 | **2026-11-20 更正（§HOST-PARTIAL10）**：provider 注册表**存在**（`provider_registry.go:68`/`:79`），旧登记的「无注册表 → 400」不成立。而且这条**真有残余缺口并被本单补掉**：`request.api` 以前读进来就丢（草稿声明 `anthropic-messages` 被按 OpenAI 形状问）。现在四种可列协议逐条照官方：`openai-completions`/`openai-responses` → `{base}/models`、`google-generative-ai` → `{base}/models?pageSize=1000`、`anthropic-messages` → `{root}/v1/models?limit=1000`（`dsh-llm-pi-ai/src/discovery.ts:117-121`），鉴权头三种（`:325-335`），响应两种形态（`data` 数组 / `models` 对象 / Gemini `models` 数组，`:187-273`），集合外协议回官方 `DISCOVERY_UNSUPPORTED` 语义且**零请求**（`:302-307`）。 |
 | `llm.listConfigurableProviders` | DEFERRED | 不在 handlers_account_official.go:140 → server.go:595 default | server.go:596 通用 501 | STUB501 | 可配置 provider 需要 provider 设置 schema 注册表，本地可建未建 |
 | `llm.listProviders` | DEFERRED | 不在 handlers_account_official.go:140 → server.go:595 default | server.go:596 通用 501 | STUB501 | provider 列表本地可定义（internal/llm 只有单网关 + 模型目录），无 handler 未做 |
 | `messageFeedback.delete` | IMPLEMENTED | server.go:421 → handlers_agent_official.go:87 | handlers_agent_official.go:1737 → serve_agent_api.go:1531 | VAL400 | 真删；absent 显式区分"本来就没有"与"删掉了" |
@@ -472,8 +482,8 @@ terminal.input/open/output/resize, workspace.init/list
 | `permissionPresets.catalog` | DEFERRED | 不在任何 IsOfficial*Method → server.go:595 default | server.go:596 通用 501 | STUB501 | 三档预设本地已有硬编码白名单（handlers_jobs.go:398 read-only/workspace-write/danger-full-access），编目可做未做 |
 | `pluginInventory.list` | DEFERRED | 不在任何 IsOfficial*Method → server.go:595 default | server.go:596 通用 501 | STUB501 | 宿主插件清单本地已有（internal/pluginmgr/manager.go:119 Manager.List），未接方法 |
 | `pluginManager.cancelInstall` | IMPLEMENTED | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:1091 → internal/pluginmgr/official/adapter.go:351 | VAL400 | 真取消安装作业（只在事务检查点生效，收工后 state.json 与 packages/ 回原样） |
-| `pluginManager.inspect` | PARTIAL | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:767 → adapter.go:77；:80 registryUnsupported / :84 formUnsupported（kind!=path） | VAL400 | 缺子操作：只支持本地目录包（kind=path）；registry/npm/git/tarball 规格一律 501 |
-| `pluginManager.installBundle` | PARTIAL | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:829 → adapter.go:126；:128 :133 :137 三种 501 | VAL400 | 缺子操作：本地目录包真装（journal + staging rename + 回滚）；registry 与 approvedBuilds（pnpm 构建审批）501 |
+| `pluginManager.inspect` | PARTIAL | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:767 → `internal/pluginmgr/official/adapter.go:90`（`:103` registry/tarball 真解析） | VAL400 | **2026-11-20 更正（§HOST-PARTIAL10）**：旧登记「只支持 path、registry/npm/git/tarball 一律 501」**是错的**。registry + tarball 已真实实现（`adapter.go:103-118` → `materializeRegistrySpec`，registry 客户端 `internal/pluginmgr/registry.go`，多源回退 `adapter.go:280-300`）。**仍缺的只有 git 形态**：`adapter.go:119` 的 default 分支把 git spec 当 `not-a-package` 拒（官方 `dsh-plugin-manager/src/install-spec.ts` 认 git+commit 形态）。 |
+| `pluginManager.installBundle` | PARTIAL | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:829 → `internal/pluginmgr/official/adapter.go:298`（`:308` registry/tarball 先下载再走同一事务） | VAL400 | **2026-11-20 更正（§HOST-PARTIAL10）**：旧登记「registry 501」不成立——registry/tarball spec 先 `materializeRegistrySpec` 落到本地缓存，再走与 path 相同的安装事务（journal + staging rename + 回滚，`StartInstall`）。**仍缺两条**：① git 形态 → `adapter.go:315` `formUnsupported` 结构化 501；② `approvedBuilds`（官方 pnpm 构建脚本审批）只回 warning 不执行构建（包内没有 package.json 构建脚本）。 |
 | IMPLEMENTED（T18RR） | cmd/dshd/serve_pluginmanager_official.go | handler 已接线（T18R 状态 + T18RR probe） | OK200 | T17R 真实 probe=OK200；T18RR 修正 status/probe | 已安装 bundle 清单本地已有（internal/pluginmgr/bundles.go:38 Manager.Bundles），未接方法；探针 EXC、重探 401 |
 | IMPLEMENTED（T18RR） | cmd/dshd/serve_pluginmanager_official.go | handler 已接线（T18R 状态 + T18RR probe） | OK200 | T17R 真实 probe=OK200；T18RR 修正 status/probe | 官方结果必带 fiberPhase（Loader fiber 状态），要有 Cordis JS 加载器才有真值；AGENTS.md R6 不嵌 JS 运行时（见存疑 3） |
 | `pluginManager.listVersionExemptions` | IMPLEMENTED | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:1006 → adapter.go:298（读 compatibility.json） | OK200 | 与 setVersionExemption 同一份文件；nil 归一成 {}/[]；探针 OK200 |
@@ -484,7 +494,7 @@ terminal.input/open/output/resize, workspace.init/list
 | `pluginManager.setBundleEnabled` | IMPLEMENTED | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:925 → adapter.go:241 | VAL400 | 真写持久化启用位；已等值时 changed=false |
 | `pluginManager.setPluginEnabled` | IMPLEMENTED | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:925（nameKey=id）→ adapter.go:241 | VAL400 | 本仓一包一插件，两个官方方法写同一位（同一 id 空间） |
 | `pluginManager.setVersionExemption` | IMPLEMENTED | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:953 → adapter.go:279 | VAL400 | 真写 compatibility.json 并被 install/update 兼容性闸门消费；enabled 时强制 acceptRisk=true |
-| `pluginManager.updateBundle` | PARTIAL | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:870 → adapter.go:164；:166 :191 两种 501 | VAL400 | 缺子操作：只有目标版本已在本机 store 才能真切版；下载新版本需 registry/pnpm → 501 |
+| `pluginManager.updateBundle` | PARTIAL | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:870 → `internal/pluginmgr/official/adapter.go:355`（`:390` 从同一 registry 解析目标版本） | VAL400 | **2026-11-20 更正（§HOST-PARTIAL10）**：旧登记「下载新版本需 registry → 501」不成立——从 registry/tarball 装的包按 `name@version` 回同一源解析并真切版（`:388-410`），版本一致性有断言。**仍缺 git 更新**：契约校验逐条照官方（版本必须更新、`options.spec` 必须钉完整 commit 且同仓库目录，`:467-495`），校验通过后因**没有 git 获取器**回四字段 501（`:494`）。 |
 | `pluginManager.waitForInstall` | IMPLEMENTED | server.go:417 → handlers_pluginmanager_official.go:92 | handlers_pluginmanager_official.go:1073 → adapter.go:341 | VAL400 | 真作业等待；没有该 requestId 回 {active:false}（官方 null 的等价写法） |
 | `pluginMarket.listIndexes` | OFFICIAL_UNSUPPORTED | 不在 handlers_media_market_official.go:119 的 21 个里 → server.go:595 default | server.go:596 通用 501 | STUB501 | 同族：读已配置索引源，前提是索引源存储存在（不存在） |
 | `pluginMarket.readEntryDetail` | OFFICIAL_UNSUPPORTED | server.go:441 → handlers_media_market_official.go:119 | handlers_media_market_official.go:760；:790 officialNotImplemented | VAL400 | 没有市场索引，也没有 npm 文件 CDN / Git 提交读取器 |
@@ -568,7 +578,7 @@ terminal.input/open/output/resize, workspace.init/list
 | `workspace.rename` | IMPLEMENTED | `internal/transport/server.go:425` → `handlers_workspace_official.go:93` | `cmd/dshd/serve_workspace_api.go:608` | VAL400 | REAL：改 registry 记录并落盘，重名报 `workspace/name-conflict` |
 | `workspace.unarchiveSession` | IMPLEMENTED | `internal/transport/server.go:425` → `handlers_workspace_official.go:93` | `cmd/dshd/serve_workspace_api.go:809` | VAL400 | REAL：从归档集摘除并落盘 |
 | `workspace.unpinSession` | IMPLEMENTED | `internal/transport/server.go:425` → `handlers_workspace_official.go:93` | `cmd/dshd/serve_workspace_api.go:755` | VAL400 | REAL：从 `PinnedSessionIDs` 摘除并落盘 |
-| `workspaceFiles.changes` | PARTIAL | `internal/transport/server.go:425` → `handlers_workspace_official.go:100` → `official_stream_face.go:275` | `internal/transport/official_stream_sources.go:112` | VAL400 | PARTIAL：普通文件走真实 stat 版本轮询（ready + change 帧）；**目录目标未实现**，回 501 `workspace-file/watch-unsupported`（`official_stream_sources.go:155-159`），且用轮询替代内核 fs watch（延迟一个轮询间隔，代码 `:14-16` 自登记） |
+| `workspaceFiles.changes` | IMPLEMENTED | `internal/transport/server.go:425` → `handlers_workspace_official.go:100` → `official_stream_face.go:275` | `internal/transport/official_stream_sources.go:112`（帧机）/:162（faultOf） | VAL400 | **2026-11-20 更正（§HOST-PARTIAL10）**：旧登记「目录目标未实现、回 501 watch-unsupported」**已不成立**——目录目标走真实 stat 令牌（`FilesStat` 目录分支），`faultOf` 里**没有 501 分支**（`:160-176` 只对 symlink/设备节点回官方 400 `watch-unsupported`），测试 `internal/transport/handlers_workspace_official_test.go:896-960`、`cmd/dshd/serve_workspace_api_test.go:843`。官方对目录也是 `fs.watch(target)` 后重 stat **目录自身**并发 `{absolutePath: 目录, version}`（`dsh-api-workspace-files/src/changes.ts:79-108`），形状一致；差异只剩**轮询 vs 内核通知**（延迟一个间隔，`:14-16` 自登记），不是缺子操作。 |
 | `workspaceFiles.list` | IMPLEMENTED | `internal/transport/server.go:425` → `handlers_workspace_official.go:93` | `cmd/dshd/serve_workspace_api.go:905` | VAL400 | REAL：`os.ReadDir` 真列目录，symlink 按 Stat 跟随，超上限置 `truncated` |
 | `workspaceFiles.read` | IMPLEMENTED | `internal/transport/server.go:425` → `handlers_workspace_official.go:93` | `cmd/dshd/serve_workspace_api.go:956` | VAL400 | REAL：`os.ReadFile` 真读，offset 从 1 起、`eof` 语义与官方一致 |
 | `workspaceFiles.readBytes` | IMPLEMENTED | `internal/transport/server.go:425` → `handlers_workspace_official.go:93` | `cmd/dshd/serve_workspace_api.go:1063` | VAL400 | REAL：`Seek` + `io.ReadFull` 真读字节窗口，`data` 用 base64 并标 `encoding` |
@@ -1181,3 +1191,88 @@ officeToPdf **未装 LibreOffice 实测**；directoryPicker 原生目录框**人
 `vm-script`/`persistent-in-memory` 形态、文件 confinement、执行器替换（PTC 取代 native）、
 system prompt 的 `tools:sdk`/`tools:ptc-only` 段、`ptc-dispatch` 事件、图片型子结果的 deferred user-message、
 `reset(agent)`、沙盒升级审批与 `justification`。这九项都写在上表"仍 PARTIAL"里，不当作已实现。
+
+-----
+
+## §HOST-PARTIAL10 · 剩余 10 条「非主题」PARTIAL 逐条收口（2026-11-20）
+
+工作树 `feat/host-partial`（**未 commit / 未 push**）。官方对照用解包树
+`tmp/GO8-RC5/official-rc5/dsh/node_modules/@deepseek-ai/`；两处关键装配事实
+（pi-ai dormant、session-query-sqlite `openAt: never`）另在 rc.1 解包树
+`tmp/GO3-PARAMS/_official/dsh-base/cordis.patch.yml` 同一批行号逐字复核——
+**跨 rc.1/rc.5 未变**，所以不是新版本才有的行为。
+
+### 0. 一句话
+
+**10 条里只有 1 条是真缺口**（`llm.discoverModels` 的 `request.api`，本单补掉），
+其余 9 条要么本来就是官方同形，要么**被登记写坏了**：6 条断言里 5 条与代码不符
+（目录 watch 501 / registry 一律 501 / 无 provider 注册表 / content 是 TOML /
+skill=IMPLEMENTED），1 条与官方出厂装配不符（pi-ai 不是"不做"而是"官方默认 dormant"）。
+这是本会话第 6 次同一个形状：把「不好做」写成「做不了」，然后传好几轮。
+
+### 1. 逐条判定
+
+| 项 | 判定 | 依据（`file:line`） | 本单动作 |
+|---|---|---|---|
+| 插件 `llm-pi-ai` | **官方同形（默认 dormant）+ 不该做** | 官方出厂 `dsh-base/cordis.patch.yml:128-136`：「mounted dormant: zero routes (and no extra models in the picker) until a `llm-pi-ai:` settings section supplies provider profiles」。即官方默认装配**也没有**额外 provider 路由。本仓注册面真有：`internal/llm/provider.go:133/:139/:158`、`internal/llm/provider_registry.go:68/:79/:133` | 不改代码；登记更正（md §2.3 的 `#26 llm-pi-ai` 行原写 DO_NOT_IMPLEMENT「PLAN 硬规则不做多 provider」，与 per-item 的 PARTIAL 冲突，已改标并留原判） |
+| 插件 `session-query-sqlite` | **官方同形（出厂检索关闭）+ 不该做** | 官方出厂 `dsh-base/cordis.patch.yml:157-161`：`path: ':memory:'` + `openAt: never`，注释 `:145-156`：「search calls fail with SESSION_QUERY_SEARCH_DISABLED and SQLite is never opened」。本仓 `internal/session/query.go:130` 的 scan 档比官方出厂**更强**（`docs/parameter-register.md:544`） | 不改代码；登记补官方行号（原来只写"无 sqlite 依赖"，没说官方出厂本来就是关闭的） |
+| 插件 `agent-instructions` | **真缺口（本单未补，规模已量化）** | 官方 `dsh-agent-instructions/src/index.ts:5`：「tool touches project nested, changed, and removed instructions into the inbox」；`:100-260` compose/syncInbox（durable inbox 投影 + 版本缓存 + touchedPaths 对账 + 中断安全）；全包 2,114 行（files.ts 602 / render.ts 513 / state.ts 456） | 不动代码；把官方行号与规模写进登记（原来只有一句"未做"） |
+| 插件 `skill` | **不该做（无第二个 layer 的生产者）** | 官方分层是 `dsh-skill/src/index.ts:346-365`（`SkillRegistry.layers = new ScopedLayers(...)`）与 `:440-441`（`register` 里 `scopeOf(this.ctx)`）：host 全局层 + 每个 `ScopeKey` 一层，读时合并 global + 观看 scope 链。本仓 `grep -rn "ScopeKey\|ScopedLayers" --include=*.go` 只命中 `modules/tool/skill/registry.go:51` 的**注释**（0 生产实现），宿主 preset 是 tools×approval×sandbox（`internal/modes`），**不装载插件** → 没有第二个 layer 可分层 | 不改代码；登记更正（md §2.4 的 `#54 skill` 行原写 IMPLEMENTED，已改标并留原判） |
+| 方法 `agentPresets.read` | **已实现（登记写错）** | 生产 wire：`cmd/dshd/serve_agent_api.go:195` → `cmd/dshd/serve_agent_presets_yaml.go:31` → `internal/agentpresets/yaml.go:35`；官方同一操作 `dsh-agent-preset-registry/src/index.ts:242` `dump(plugins, {schema: entryListSchema})` | 改 §3.3 该行 → IMPLEMENTED（evidence 换成 YAML 投影那条链） |
+| 方法 `llm.discoverModels` | **真缺口 → 本单补齐** | 旧版 `request.api` 读进来就丢（`internal/transport/handlers_account_official.go:1330` 解析后无人用）；官方 `dsh-llm-pi-ai/src/discovery.ts:38-49 / 117-121 / 187-273 / 302-307` | 补代码 + 两层测试 + 4 处变异 |
+| 方法 `pluginManager.inspect` | **registry/tarball 已实现；仍缺 git 形态** | registry/tarball 真解析 `internal/pluginmgr/official/adapter.go:103-118`、registry 客户端 `internal/pluginmgr/registry.go`、多源回退 `adapter.go:280-300`；git spec 仍被当 `not-a-package` 拒（`:119`） | 不改代码；改 §3.3 说明（"一律 501"是错的） |
+| 方法 `pluginManager.installBundle` | **registry/tarball 已实现；仍缺 git + 构建审批** | `adapter.go:308-315`（registry 先下载再走同一事务；git → `formUnsupported` 501）；`approvedBuilds` 只回 warning（`:302-305`） | 不改代码；改 §3.3 说明 |
+| 方法 `pluginManager.updateBundle` | **registry/tarball 已实现；仍缺 git 更新** | `adapter.go:388-410`（回同一 registry 解析并真切版）；git 契约校验完整（`:467-495`）但最后一步没有 git 获取器 → 501（`:494`） | 不改代码；改 §3.3 说明 |
+| 方法 `workspaceFiles.changes` | **已是官方同形** | 目录目标走真实 stat 令牌，`faultOf` 无 501 分支（`internal/transport/official_stream_sources.go:160-176`），测试 `internal/transport/handlers_workspace_official_test.go:896-960`、`cmd/dshd/serve_workspace_api_test.go:843`；官方对目录同样 `fs.watch(target)` 后重 stat 目录自身并发 `{absolutePath, version}`（`dsh-api-workspace-files/src/changes.ts:79-108`） | 改 §3.3 该行 → IMPLEMENTED（差异只剩轮询延迟，已自登记） |
+
+### 2. 六处登记写错的地方（逐条对账）
+
+| 旧登记写的 | 实际（本单实测） |
+|---|---|
+| `workspaceFiles.changes`「**目录目标未实现**，回 501 `workspace-file/watch-unsupported`」 | 目录目标支持（`official_stream_sources.go:112` 帧机 + `:160-176` 无 501 分支），两条测试真跑目录令牌变化 |
+| `pluginManager.*`「registry/npm/git/tarball 规格**一律 501**」「只支持本地目录包」 | registry + tarball 真实现（下载→本地缓存→同一安装事务），`listVersions`/`registries` 都问真源；**只有 git 形态**还 501 |
+| `llm.discoverModels`「只给 provider 时本仓**无 provider 注册表** → 400」 | 注册表存在（`provider_registry.go:68/:79`，`DiscoverModelsForProvider` 从 catalog 解析端点）；真正的缺口是 `request.api` 被丢弃 |
+| `agentPresets.read`「`content` 给的是 **TOML**」 | 生产 wire 是 entry-list YAML 投影（旧 TOML 方法只剩测试在用） |
+| md §2.3 `#26 llm-pi-ai` = **DO_NOT_IMPLEMENT**（「PLAN 硬规则不做多 provider」） | 官方出厂 dormant（零路由），本仓注册面存在；per-item 早已是 PARTIAL，两处自相矛盾 |
+| md §2.4 `#54 skill` = **IMPLEMENTED** | per-item 是 PARTIAL；官方分层要 `ScopedLayers`，本仓无 scope 生产者 |
+
+### 3. 补的那一条：`llm.discoverModels` 的协议分支
+
+官方入参四个字段（`dsh-llm/lib/typert.host.js:10-14`）：`provider?` / `baseURL?` / `api?` / `apiKey?`。
+本仓三个都在用，唯独 `api` 被读进来丢掉——于是草稿声明 `anthropic-messages` 时会按
+OpenAI 的形状去问 `{base}/models`，把"协议不对"报成"端点/凭据有问题"。
+
+- `internal/llm/discover_protocols.go`（新）：`NormalizeDiscoveryProtocol`（空 → `openai-completions`，
+  官方 `discovery.ts:293`；集合外 → `ErrDiscoverProtocolUnsupported` = 官方 `DISCOVERY_UNSUPPORTED`）、
+  `discoveryListingEndpoint`（三种端点拼法，`:117-121`）、`applyDiscoveryAuth`（三种鉴权头，`:325-335`）、
+  `parseOpenAIListing`（`data` 数组或 `models` 对象，`:187-232`）、`parseGeminiListing`（`models` 数组 +
+  跳过无 `generateContent` 的条目 + 去 `models/` 前缀，`:245-273`）。
+- `internal/llm/discover.go:127` `DiscoverModelsProtocol`（原 `DiscoverModels` 变成它的 OpenAI 特例，
+  既有调用方零改动）；`internal/llm/provider_registry.go:146` `DiscoverModelsForProviderProtocol`。
+- 宿主接线 `cmd/dshd/serve_account_api.go:512`：`request.api` 进入协议、集合外回
+  400 + message 前缀 `DISCOVERY_UNSUPPORTED`（四字段 code 是闭合集合，官方码按既有先例写进 message；
+  客户端改输入就能过，所以 400 而不是 500）。
+
+**有意保留的一处差异**：官方 `readListing` 的名字链末尾有 `?? id` 回落，本仓保留"没给就是不知道"
+（空串）。理由：官方结果 schema 里 `name` 是 optional，客户端必须能处理缺席；拿 id 冒充 name 会让
+"端点没起名字"在界面上看不出来。既有 `internal/llm/discover_test.go:78` 就钉着这条判据，不放宽。
+
+**测试与变异**：
+
+- `internal/llm/discover_protocols_test.go` 新增 9 条（协议认/拒、三种端点、Anthropic 双头、
+  Gemini 跳 embedding + 去前缀、responses 复用 OpenAI 端点、不支持零请求、`models` 对象形态、
+  Gemini 缺数组/空数组两个方向）。
+- `cmd/dshd/serve_account_discover_test.go` 新增 4 条（`request.api` 真透传、不支持 → 400 +
+  `DISCOVERY_UNSUPPORTED` + 零请求、Google 协议端到端、缺 baseURL 结构化失败）。此前
+  `cmd/dshd` 的 discover 接线**一条测试都没有**。
+- 变异 4 处全部被抓红：①鉴权忽略协议（Anthropic/Gemini 两条头测试红）；②Anthropic 端点不掉 `/v1`
+  （端点表两条红）；③未知协议静默当 OpenAI（4 条红）；④**宿主接线丢 `request.api`**（3 条红，
+  这正是原来的 bug）。
+
+### 4. 仍缺（不回填成 IMPLEMENTED）
+
+`agent-instructions` 的 fs 触碰后嵌套发现 + change/removal 批次（要 durable 事件 + 跨轮状态 +
+resume reconcile）、`skill` 的 preset 级 scope 分层（无生产者）、`pluginManager` 三方法的 **git 形态**
+（要 git 获取器）、`llm-pi-ai` 的另外三条协议适配器（用户 2026-11-15 已拍板不扩）、
+`session-query-sqlite` 的 FTS5（用户已拍板不引入 SQLite）、`agent-instructions` 用户全局链的官方
+reminder 帧形状（会翻生产提示词字节，属改判据）。这六项都保持 PARTIAL/写明依据，不当作已实现。

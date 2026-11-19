@@ -27,7 +27,6 @@ package llm
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,6 +72,11 @@ const discoverDefaultUserAgent = "dshd (dsh-go)"
 type discoverEntry struct {
 	ID   string `json:"id"`
 	Name string `json:"name,omitempty"`
+	// 官方 `readListing` 的 name 有三个候选：`name` / `display_name` / `displayName`
+	// （discovery.ts:214）。两个下划线/驼峰写法在 Go 里**不是**同一个键
+	// （`json` 的匹配只忽略大小写，不忽略下划线），所以各留一格，取值时按序挑。
+	DisplayNameSnake string `json:"display_name,omitempty"`
+	DisplayNameCamel string `json:"displayName,omitempty"`
 
 	ContextWindow    float64 `json:"context_window,omitempty"`
 	ContextLength    float64 `json:"context_length,omitempty"`
@@ -111,10 +115,24 @@ type discoverEntry struct {
 // 缓存本身是**按 (端点, 凭据) 隔离**的：一个 token 看见的模型不会被另一个 token
 // 复用；命中时一次网络请求都不发。
 func (c *Client) DiscoverModels(ctx context.Context) ([]DiscoveredModel, error) {
+	return c.DiscoverModelsProtocol(ctx, ProviderAPIOpenAICompletions)
+}
+
+// DiscoverModelsProtocol 按**wire 协议**问端点有哪些模型。
+//
+// 协议决定三件事（见 discover_protocols.go 的官方逐条搬运）：列表端点、
+// 鉴权头、响应形状。`api` 为空 = 没声明 → 按 `openai-completions` 问
+// （官方 `discovery.ts:293`）；集合外协议回 `ErrDiscoverProtocolUnsupported`
+// 对应官方 `DISCOVERY_UNSUPPORTED`，不偷偷按 OpenAI 的形状去问。
+func (c *Client) DiscoverModelsProtocol(ctx context.Context, api string) ([]DiscoveredModel, error) {
 	if c == nil {
 		return nil, fmt.Errorf("模型发现需要一条 client（nil）")
 	}
-	endpoint, err := discoverEndpoint(c.BaseURL)
+	protocol, err := NormalizeDiscoveryProtocol(api)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, err := discoveryListingEndpoint(c.BaseURL, protocol)
 	if err != nil {
 		return nil, err
 	}
@@ -140,9 +158,7 @@ func (c *Client) DiscoverModels(ctx context.Context) ([]DiscoveredModel, error) 
 		ua = discoverDefaultUserAgent
 	}
 	req.Header.Set("User-Agent", ua)
-	if c.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
+	applyDiscoveryAuth(req, protocol, c.APIKey)
 
 	httpClient := c.HTTP
 	if httpClient == nil {
@@ -159,34 +175,16 @@ func (c *Client) DiscoverModels(ctx context.Context) ([]DiscoveredModel, error) 
 			endpoint, resp.StatusCode, RedactCredential(string(body), c.APIKey))
 	}
 
-	// 用指针接 `data`，把两种"空"分开（和 ListModels 同一条理由）：
-	//   data: []    = 端点好好的，一个模型都没挂
-	//   data: null / 没有 data = 响应形状不对（打到了别的服务）
-	var doc struct {
-		Data *[]discoverEntry `json:"data"`
+	// 响应形状按协议分派：OpenAI 系 `data` 数组 / `models` 对象；Gemini `models` 数组。
+	// 两种"空"要分开：形状不对（打到了别的服务）响亮报错，真·空列表回空切片。
+	var out []DiscoveredModel
+	if protocol == ProviderAPIGoogleGenerativeAI {
+		out, err = parseGeminiListing(resp.Body, endpoint)
+	} else {
+		out, err = parseOpenAIListing(resp.Body, endpoint)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return nil, fmt.Errorf("%s 的响应不是合法 JSON: %w", endpoint, err)
-	}
-	if doc.Data == nil {
-		return nil, fmt.Errorf("%s 的响应里没有 data 数组（这不是「没有模型」，"+
-			"是响应形状不对）：确认它是 OpenAI 兼容端点（GET /models）", endpoint)
-	}
-
-	out := make([]DiscoveredModel, 0, len(*doc.Data))
-	for i, entry := range *doc.Data {
-		if strings.TrimSpace(entry.ID) == "" {
-			// 官方结果里 id 是**必填**：拿不到 id 就没法代表这一条。
-			// 静默丢掉会让用户以为"这个模型不存在"，所以响亮报错。
-			return nil, fmt.Errorf("%s 的第 %d 条模型没有 id（官方契约 id 必填）", endpoint, i)
-		}
-		out = append(out, DiscoveredModel{
-			ID:              entry.ID,
-			Name:            entry.Name,
-			ContextWindow:   firstPositive(entry.ContextWindow, entry.ContextLength, entry.MaxContextTokens, architectureContextLength(entry)),
-			MaxTokens:       firstPositive(entry.MaxTokens, entry.MaxOutputTokens, topProviderMaxCompletionTokens(entry)),
-			InputModalities: normalizeInputModalities(entry.InputModalities, entry.Modalities, architectureInputModalities(entry)),
-		})
+	if err != nil {
+		return nil, err
 	}
 	rememberDiscoveredModels(cacheKey, out, maxAge, time.Now())
 	return out, nil
