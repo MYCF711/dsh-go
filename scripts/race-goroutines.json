@@ -19,13 +19,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/acp.go:1215",
+      "site": "cmd/dshd/acp.go:1240",
       "what": "父进程看门狗收尾：watch.Done() 之后关服务",
       "sync": "读过：只做 close/取消，不写会话文件；与主流程之间靠 context 取消 + 单向 channel",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/acp.go:1215",
+      "site": "cmd/dshd/acp.go:1240",
       "what": "父进程看门狗：watch.Done() 就取消本轮并关 stdin",
       "sync": "读过：只调 cancel() 与 os.Stdin.Close()，两个都幂等；不写共享状态",
       "verified_at": "2026-11-09"
@@ -283,13 +283,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "internal/agent/parallel.go:372",
+      "site": "internal/agent/parallel.go:377",
       "what": "串行车道：等人审批的工具调用顺序执行",
       "sync": "读过：只写 out[i]（每个下标只被这一条 goroutine 写）与读 calls[i]；wg 等它收尾。不碰共享可变状态",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/agent/parallel.go:393",
+      "site": "internal/agent/parallel.go:398",
       "what": "并行车道的固定 worker 池（limit 路）",
       "sync": "读过：从 queue（无缓冲 channel）取下标 i，写 out[i]（下标唯一）、只读 calls；喂队列在调用方做（channel 本身即背压），wg 等全部 worker 退出",
       "verified_at": "2026-11-09"
@@ -547,7 +547,7 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "modules/exec/bash/tools.go:267",
+      "site": "modules/exec/bash/tools.go:276",
       "what": "后台任务启动",
       "sync": "同 session.go，走同一把 s.mu",
       "verified_at": "2026-11-03"

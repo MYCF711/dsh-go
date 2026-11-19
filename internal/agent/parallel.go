@@ -288,6 +288,11 @@ func (l *Loop) runToolBatch(ctx context.Context, turn, step int, calls []llm.Too
 
 	// 2) 执行：并发上限 + 审批闸门（这一段会乱序完成）。
 	outcomes := l.executeToolCalls(ctx, calls, limit)
+	// 2b) 观测：整批结算后的 touch 通知（官方 `tools/result` 的宿主落点）。
+	// 放在结算之后、事件与消息落定之前：官方 `tools/result` 监听拿到的就是
+	// "这一批结果已经确定"的状态，而投影（compose）本身要等 step 边界
+	// （`src/index.ts:304-328`），所以这里的顺序与官方一致。
+	l.notifyToolTouches(calls, outcomes)
 
 	// 3) 结算：严格按模型给的顺序落 messages 与 tool/result。
 	msgs := make([]llm.Message, 0, len(calls)+len(calls)/4)
