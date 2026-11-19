@@ -119,6 +119,11 @@ type acpRunner struct {
 	// additionalDirs 是每会话的 additionalDirectories（canonical，只读）。
 	additionalDirs map[string][]string
 
+	// aiInstr 是官方 #53 `agent-instructions` 的 durable 投影器（每会话一份）。
+	// nil = 链被 `DSHD_INSTRUCTION_CHAIN=0` 关掉（报文回到改动前的形状）。
+	aiInstrMu sync.Mutex
+	aiInstr   map[string]*aiInstrRunner
+
 	mu    sync.Mutex
 	logs  map[string]*session.Log
 	turns map[string]int
@@ -135,6 +140,7 @@ func newACPRunner(reg spi.ToolRegistry, runner spi.Runner, base, model, home str
 		used: map[string]int{}, meter: map[string]*session.Meter{}, keepRecent: defaultACPKeepRecent,
 		retry:     retry,
 		approvals: approval.New(), sessionModes: map[string]string{}, modeID: modes.DefaultID,
+		aiInstr:         map[string]*aiInstrRunner{},
 		sandboxSessions: map[string]sandbox.Mode{}, additionalDirs: map[string][]string{},
 	}
 	// 默认策略与官方逐值相同；cmdACP 会用 flag/env 再覆盖一次（见 compactPolicy）。
@@ -396,6 +402,15 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	if err := logw.Append("user/message", session.UserMessage(user)); err != nil {
 		return "", nil, err
 	}
+	// 官方 #53 `agent-instructions` durable 基线：用户消息之后、**耐久 checkpoint 之前**
+	// （侧车按"请求前缀"记身份，锚点必须覆盖真实请求）。每会话一份投影器；
+	// 默认不挂载（`DSHD_INSTRUCTION_DURABLE=1` 才开，理由见 aiInstrDurableEnabled）。
+	aiInstr := r.aiInstrFor(sessionID)
+	aiInstrText, aiErr := aiInstr.Baseline(logw, cwd)
+	if aiErr != nil {
+		return "", nil, aiErr
+	}
+
 	if err := captureRewindCheckpointForLog(r.home, logw); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 	}
@@ -454,6 +469,9 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 					return err
 				}
 			}
+		case agent.EventStepEnd:
+			// #53：step 边界是官方 `projectTouch` 的提交点（index.ts:322-328）。
+			aiInstr.OnStepEnd(logw, cwd)
 		case agent.EventToolCall:
 			lastCallSeq = logw.Seq()
 			if err := logw.Append("tool/call",
@@ -535,9 +553,10 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		// 官方 0.2.2 #78 `agent/pre-step`：每一步模型请求之前先让请求前缀耐久。
 		// ACP 的 v4 不落 step/start，所以每一步的锚点就是该步请求前的事件数；
 		// 第一步与 prompt 侧车同锚点（幂等命中）。
-		PreStep: worktreePreStep(newWorktreeService(newSessionSource(r.home, "")), sessionID, func(context.Context, int) error {
+		PreStep: aiInstr.PreStep(worktreePreStep(newWorktreeService(newSessionSource(r.home, "")), sessionID, func(context.Context, int) error {
 			return writeDurableCheckpointForSession(r.home, sessionID, nil)
-		}),
+		})),
+		OnToolCallSettled: aiInstr.OnToolCallSettled,
 	}
 
 	// hist 必须在压缩**之后**取：autoCompactNow 会把 r.hist 换成压缩后的历史，
@@ -553,8 +572,14 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	// 只在"这一轮还没往日志里落任何事件"时重放：落了 assistant/message 再重跑，
 	// 同一个 step 会被记两遍，读回来就是重复历史。startSeq 是这条判据的锚点
 	// （user/message 已经在下面之前写好了，所以它是"模型这一轮产出"的水位）。
+	// 官方把上下文折进**本步**的消息批次（index.ts:351-355）：本轮请求必须看得见
+	// 基线正文，不能等下一轮从日志重放（那时模型已经先答了一轮没读到指令的话）。
+	hist = append(hist, llm.Message{Role: "user", Content: text})
+	if aiInstrText != "" {
+		hist = append(hist, llm.Message{Role: "user", Content: aiInstrText})
+	}
 	startSeq := logw.Seq()
-	next, err := loop.Run(ctx, turn, append(hist, llm.Message{Role: "user", Content: text}))
+	next, err := loop.Run(ctx, turn, hist)
 	for attempt := 0; err != nil && attempt < r.compactPolicy().MaxOverflowRetries && compact.IsContextOverflow(err); attempt++ {
 		if logw.Seq() != startSeq {
 			fmt.Fprintf(os.Stderr, "上下文溢出，但这一轮已经落了事件（seq %d→%d）：不重放，避免重复历史\n",

@@ -1091,6 +1091,17 @@ func cmdRun(argv []string) (retErr error) {
 	if err != nil {
 		return err
 	}
+	// 官方 `agent-instructions`（#53）的 durable 投影器：一个 run 进程 = 一个会话一份。
+	// 默认不挂载（`DSHD_INSTRUCTION_DURABLE=1` 才开，理由见 aiInstrDurableEnabled）。
+	aiInstr := newAIInstrRunner(*home)
+	// 基线写在**耐久 checkpoint 之前**：侧车按"请求前缀"记身份
+	// （`TestCheckpointCLIRunSurvivesKill` 钉着"请求前最后一帧是 user/message"），
+	// 先写基线，锚点才与真实请求一致。
+	aiInstrText, err := aiInstr.Baseline(logw, cwd)
+	if err != nil {
+		return err
+	}
+
 	if err := captureRewindCheckpointForLog(*home, logw); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 	}
@@ -1213,9 +1224,13 @@ func cmdRun(argv []string) (retErr error) {
 		SessionLog:     logw,
 		// 官方 0.2.2 #78 `agent/pre-step`：每一步模型请求之前先让请求前缀耐久。
 		// 第一步与 prompt 侧车同锚点（幂等命中），第二步起各自落一份。
-		PreStep: worktreePreStep(newWorktreeService(newSessionSource(*home, "")), sessID, func(ctx context.Context, step int) error {
+		// #53 durable 层在 checkpoint 成功之后标记 step 开始（touch 只攒不投，
+		// 官方 `projectTouch` 的 step-open 分支）。
+		PreStep: aiInstr.PreStep(worktreePreStep(newWorktreeService(newSessionSource(*home, "")), sessID, func(ctx context.Context, step int) error {
 			return writeDurableCheckpointForSession(*home, sessID, nil)
-		}),
+		})),
+		// #53：read/write/edit 成功的触碰记进本会话的指令投影器（官方 tools/result）。
+		OnToolCallSettled: aiInstr.OnToolCallSettled,
 		// 这里显式关掉循环自带的压表：表在 cmdRun 里已经被 tightenTable 投影过一遍。
 		// 两条路都调用 internal/schema 里同一条判断（区分"注解"与"名叫 description 的参数"），
 		// 但 tightenSchema 还会额外删冗余骨架；同时开会把后一遍的骨架删除覆盖掉，
@@ -1252,7 +1267,13 @@ func cmdRun(argv []string) (retErr error) {
 					"text": e.Text, "model": *model,
 				})
 			case agent.EventStepEnd:
-				return logw.Append("step/end", map[string]any{"turn": e.Turn, "step": e.Step})
+				if err := logw.Append("step/end", map[string]any{"turn": e.Turn, "step": e.Step}); err != nil {
+					return err
+				}
+				// #53：step 边界是官方 `projectTouch` 的**提交点**（index.ts:322-328）：
+				// 这一步碰过的文件在这里一次性投影，下一步的请求才看得见新指令。
+				aiInstr.OnStepEnd(logw, cwd)
+				return nil
 			case agent.EventUserMsg:
 				if e.User == nil {
 					return fmt.Errorf("steer user/message 缺持久数据")
@@ -1353,6 +1374,11 @@ func cmdRun(argv []string) (retErr error) {
 		runMessage = llm.Message{Role: "user", Parts: runParts}
 	}
 	hist := append(append([]llm.Message(nil), baseHist...), runMessage)
+	// 官方把上下文折进**本步**的消息批次（index.ts:351-355）：本轮请求必须看得见它，
+	// 不能等下一轮从日志重放（那时模型已经"先答了一轮没读到指令的话"）。
+	if aiInstrText != "" {
+		hist = append(hist, llm.Message{Role: "user", Content: aiInstrText})
+	}
 	// turn 传的是**会话级**编号（见上面 `session.NextTurn(back)`）：这一步里
 	// 所有 v4 事件（step/*、tool/call、tool/result、assistant/message）都带它，
 	// 写死 1 会让第二轮起的工具事件全落到第一轮名下。
