@@ -105,6 +105,12 @@ type Options struct {
 	PromptContinuation func(sessionID, sourceKind, placement string) (PromptResult, error)
 	// Attachments 提供授权读取与受控字节存储；nil 时两个 additive 方法回 501。
 	Attachments AttachmentStore
+	// UIState 提供界面状态的原样读写（官方 Electron `Local Storage` 的等价物）；
+	// nil 时三个 additive 方法回 501 并说清未接线。
+	//
+	// 它**不是**设置通道：settings.mutate 有 revision 栅栏，界面点击会把 revision
+	// 推着走，用户那时保存设置就 revision_conflict。
+	UIState UIStateStore
 	// OfficialJobTerminal 是官方 job.*/terminal.* 11 个方法的路由层（0.2.2 对齐）。
 	// nil 时这些方法回 501 并说清未接线；既有 jobs.*/terminal.* 方法不受影响。
 	OfficialJobTerminal *OfficialJobTerminal
@@ -916,6 +922,12 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleConfigGet(w, r)
 	case MethodConfigSet:
 		s.handleConfigSet(w, r)
+	case MethodUIStateGet:
+		s.handleUIStateGet(w, r)
+	case MethodUIStateSet:
+		s.handleUIStateSet(w, r)
+	case MethodUIStateDelete:
+		s.handleUIStateDelete(w, r)
 	default:
 		// 先有界读完并关闭请求体，再写 501：handler 不读 body 就写响应时，Go 在
 		// 连接收尾可能直接关 socket，客户端还在发 body 时会看到 RST/abort

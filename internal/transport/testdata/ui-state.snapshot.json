@@ -1,0 +1,21 @@
+{
+  "canonicalMethodsUnchanged": 25,
+  "methods": {
+    "uiState.get": {
+      "params": ["key"],
+      "result": ["found", "value?"]
+    },
+    "uiState.set": {
+      "params": ["key", "value"],
+      "result": ["key", "bytes"]
+    },
+    "uiState.delete": {
+      "params": ["key"],
+      "result": ["deleted"]
+    }
+  },
+  "keyRule": "官方 localStorage 键名逐字使用（如 dsh.sidebar-browser.v1.session-<uuid>、dsh.user-questions.drafts.v1）；宿主只做文件名安全校验，不解释语义",
+  "valueRule": "原样 JSON 字节，宿主不解释、不改写，读回逐字节相同；空值与显式 null 一律 400（清状态用 uiState.delete）",
+  "notA": "这不是 settings 通道：settings.mutate 带 revision 栅栏，界面点击推进 revision 会让用户保存设置时 revision_conflict",
+  "error": ["code", "message", "hint", "retryable"]
+}

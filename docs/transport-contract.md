@@ -736,3 +736,34 @@ runner 也读 header，所以"复用 + 显式点名不同 preset"回官方 `agen
 `details.sessionId`、坏类型、旧 mode）、`HOST:cmd/dshd/serve_session_create_official_test.go`
 （真 v4 日志：空白复用 / 开过 turn 另铸 id / 预分配 id / cwd 冲突 / agentPreset 进 header /
 未知 preset / 归档不复用 / attach 失败 details）。
+
+## 19. 界面状态 `uiState.get/set/delete`（2026-11-20，additive）
+
+官方 GUI 把一批**纯前端记忆**放在 Electron 的 `Local Storage`（leveldb）里。官方包里能直接
+读到的两处是 `dsh-client-ui-sidebar-browser/lib/client.js:1695` 的 `persist: "dsh.sidebar-browser.v1"`
+与 `dsh-client-ui-user-questions/lib/client.js:439` 的 `persist: "dsh.user-questions.drafts.v1"`
+（都是客户端 store 的命名空间）；forge 的已读标记另有整套形状（`viewed-files.ts:11,14,19,53` 的
+`PREFIX='dsh.forge-viewed.v1'`、`MAX_SOURCES=20`、键 `` `${PREFIX}.${JSON.stringify(session)}` ``、
+值 `Record<source,{at,files}>`）。本仓没有 Electron 容器，所以宿主给一条同语义的窄通道。
+
+- `uiState.get{key}` → `{found:true, value:<原样 JSON>}` 或 `{found:false}`。
+  **没存过不是错误**（官方 `getItem` 也回 null），所以是 200 而不是 404。
+- `uiState.set{key, value}` → `{key, bytes}`。整份覆盖、last-write-wins；空值与显式 `null`
+  一律 400（清状态用 `delete`，两条路各自一个语义）。
+- `uiState.delete{key}` → `{deleted}`（false = 本来就没有，不是错误）。
+
+三条都**不进入 canonical 25**，也**不是设置通道**：`settings.mutate` 带 revision 栅栏，界面每点一次
+「已读」都会推进 revision，用户这时保存设置就会 `revision_conflict`。这是正确性问题，不是风格问题。
+
+落点：`<home>/state/ui-state/<key>.json`（一个 key 一个文件，原样字节，临时文件 + fsync + rename，
+目录 0700 / 文件 0600）。key 只做**文件名安全校验**，宿主不解释语义：`[A-Za-z0-9._-]`、
+长度 ≤ 200、不许以 `.` 开头、不许 `.`/`..` —— 后三条是文件系统安全边界，不是官方数值。
+单份值另有 1 MiB 的宿主安全上界（同样不是官方数值，官方那些状态都是几十 KB 级）。
+
+实现：`HOST:internal/transport/handlers_ui_state.go`（三个 handler，`ErrUIStateBadKey` → 400）、
+`HOST:cmd/dshd/serve_ui_state.go`（`uiStateStore` 与 serve/测试共用的 `withUIStateOptions`）。
+证据：`HOST:internal/transport/handlers_ui_state_test.go`（转发/结构校验/501/错误码）、
+`HOST:cmd/dshd/serve_ui_state_test.go`（真 HTTP + 临时 home + 磁盘字节 + 重启仍在 + 非法 key 不落盘）、
+`HOST:internal/transport/testdata/ui-state.snapshot.json`（canonical 仍是 25）。
+界面侧消费见 `dsh-ui` 的 `internal/apiclient/uistate.go`、`pluginapi/uistate.go` 与
+`plugins/dsforge/viewed_store.go`（键名与值形状逐字照官方 `viewed-files.ts`）。
