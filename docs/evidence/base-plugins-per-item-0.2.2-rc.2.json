@@ -821,8 +821,8 @@
       "id": "ptc-runtime",
       "status": "PARTIAL",
       "audit_status": "MISSING",
-      "evidence": "缝：`internal/ptc/runtime.go:49` `Runtime`（官方 `PtcRuntime` 抽象类的 Go 形状）、`:85` `ResolveTimeout` 三态、`:133` `ResolveSandbox`；词汇与校验：`internal/ptc/identifiers.go:21` `PortableReservedWords`（ECMAScript∪Python 逐字）、`:55` `ReservedBindingGlobals`、`:79` `ValidateGlobalName`、`:114` `ValidateBindings`；provider：`internal/ptc/nodeprovider/provider.go:151` `New`（per-call 之外**装配期就拒**）、`:222` `Resolve`、`:214` `SandboxMode`（无 confinement 报 false）、`internal/ptc/nodeprovider/run.go:19` `Run`、`internal/ptc/nodeprovider/runner.go:258/458` 超时/取消/cancel 收整棵进程树、`internal/ptc/nodeprovider/worker.go:11` 外部 node 的 worker **文本**（宿主不解释 JS）；测试 `internal/ptc/{identifiers,runtime}_test.go` + `internal/ptc/nodeprovider/provider_test.go`（22 条，真 node 往返）",
-      "note": "2026-11-19 改判（原登记 DO_NOT_IMPLEMENT 是**过度外推**）：R6 的词面是「不嵌 JS 运行时」，不是「不许有 PTC」。官方这个包本身就是纯契约（`src/index.ts` 只有抽象类与三组保留名、`src/types.ts` 只有类型），Go 侧照抄零 JS；执行走外部受管 node（与既有裁定 dynamicCordisRunner、`internal/cordis/extern` 同形）。仍 PARTIAL 的部分：`executionMode` 只做 per-call，`vm-script`/`persistent-in-memory` 在 `New` 里明确拒绝；没有文件 confinement（`SandboxMode()` 报 false、显式档位请求被拒），因此未登记任何沙盒等价物。",
+      "evidence": "缝：`internal/ptc/runtime.go:49` `Runtime`（官方 `PtcRuntime` 抽象类的 Go 形状）、`:85` `ResolveTimeout` 三态、`:133` `ResolveSandbox`；词汇与校验：`internal/ptc/identifiers.go:21` `PortableReservedWords`（ECMAScript∪Python 逐字）、`:55` `ReservedBindingGlobals`、`:79` `ValidateGlobalName`、`:114` `ValidateBindings`；provider：`internal/ptc/nodeprovider/provider.go:226` `New`（`persistent-in-memory` **装配期就拒**）、`:356` `Resolve`、`:348` `SandboxMode`（无 confinement 报 false）、`:286` `ProgramFormat`（vm-script→script）、`internal/ptc/nodeprovider/run.go:36` `Run`、`internal/ptc/nodeprovider/runner.go:313` `execute`/`:519` `terminate` 超时/取消/cancel 收整棵进程树、`internal/ptc/nodeprovider/worker.go:25` 外部 node 的 worker **文本**（宿主不解释 JS）；`internal/ptc/nodeprovider/retained.go:59` `acquireRetained`（按 owner 常驻）/`:89` `dropRetained`；`internal/ptc/nodeprovider/runner.go:313` `execute`（`format`/`retainsState` 进帧）；见 `docs/ptc-vm-script.md`；测试 `internal/ptc/{identifiers,runtime}_test.go` + `internal/ptc/nodeprovider/provider_test.go`（22 条，真 node 往返）",
+      "note": "2026-11-19 改判（原登记 DO_NOT_IMPLEMENT 是**过度外推**）：R6 的词面是「不嵌 JS 运行时」，不是「不许有 PTC」。官方这个包本身就是纯契约（`src/index.ts` 只有抽象类与三组保留名、`src/types.ts` 只有类型），Go 侧照抄零 JS；执行走外部受管 node（与既有裁定 dynamicCordisRunner、`internal/cordis/extern` 同形）。2026-11-20：**已补 `vm-script`**（`node:vm` Script 求值 + `scriptPersistence` 按 owner 常驻/`Release`/同 owner 单飞；隔离层级如实见 `docs/ptc-vm-script.md`，不称沙箱）。仍 PARTIAL：`persistent-in-memory`（Node REPL）未做（装配期拒绝）；顶层 `await` lowering（官方 `evaluators/vm-script-await.ts` 的 acorn 依赖）未移植；没有文件 confinement（`SandboxMode()` 报 false、显式档位请求被拒），因此未登记任何沙盒等价物。",
       "changes": [
         {
           "from": "MISSING",
@@ -836,7 +836,7 @@
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
       "evidence": "原生引擎：`internal/workflow/engine.go:130` `Start`、`:258` `Agent`、`:356` `Parallel`（**真并发**，受 `MaxConcurrentAgents` 闸）、`:405` `Pipeline`（逐 item 无 barrier）、`:224` `Phase`、`:237` `Log`、`:34` `DefaultLimits`（0/1000/4096 逐条官方）；工具：`modules/tool/workflow/orchestrate.go:107` `workflow.New`；provider 现在可用：`internal/ptc/nodeprovider/`",
-      "note": "仍 PARTIAL，但残余缺口已收窄成**一条**：官方脚本是 JS（`node:vm` 的 script/repl 形态，`src/runtime.ts:1-40` + `src/guest-source.ts`），本仓 provider 只实现 per-call 的 function-body，`vm-script`/`persistent-in-memory` 在 `New` 里明确拒绝——所以 JS 脚本形态**仍然没有**，本仓的 `workflow` 工具脚本仍是声明式 JSON 步骤表；六类钩子语义（agent/parallel/pipeline/phase/log + 上限、致命 vs 普通失败、取消）由 Go 原生引擎逐条实现并有测试。"
+      "note": "仍 PARTIAL，但残余缺口已收窄：官方脚本是 JS（`node:vm` 的 script/repl 形态，`src/runtime.ts:1-40` + `src/guest-source.ts`），本仓 provider 现在**已有 `script` 形态**（vm-script，2026-11-20；官方 `src/host.ts:293` 交来的 `(async () => …)()` 形状可直接跑，见 `docs/ptc-vm-script.md`），但 `workflow` 工具尚未把 JS 脚本接到这条 provider 上——当前脚本仍是声明式 JSON 步骤表；六类钩子语义（agent/parallel/pipeline/phase/log + 上限、致命 vs 普通失败、取消）由 Go 原生引擎逐条实现并有测试。"
     },
     {
       "id": "tool-workflow",
@@ -1017,7 +1017,7 @@
       "status": "PARTIAL",
       "audit_status": "MISSING",
       "evidence": "`modules/tool/runcode/runcode.go:214` `Exec`、`:287` `allowanceFor`（官方 floor(timeoutMs/60000×perMinute)）、`modules/tool/runcode/scheduler.go:113` `call`（先计数后派发 + ToolCallError 类型契约 + fail-closed 并发分类）、`modules/tool/runcode/runcode.go:63` `OptInEnv`、`cmd/dshd/main.go:227` 装配开关（`DSHD_PTC=1`）；测试 `modules/tool/runcode/runcode_test.go`（含真 node 的额度耗尽/取消/工具失败可 catch）",
-      "note": "2026-11-19：`run_code` 工具面已真实存在（工具名/schema 字段 code/description/timeoutMs、`logs`+`result` 输出形状、`CODE_RUN_FAILED`/`ABORTED` 身份、按 timeoutMs 折算的总额度、`maxParallelSubCalls` 并发闸、子调用走 `spi.SubDispatch` 受管通道）。仍 PARTIAL：**不做执行器替换**（官方 enabled 时取代 tool-executor-native，本仓是与原生工具并列的加法）、没有 system prompt 的 `tools:sdk`/`tools:ptc-only` 段、不发 `ptc-dispatch` 事件、图片型子结果不转 deferred user-message、`reset(agent)` 与 sandbox 升级审批未接。",
+      "note": "2026-11-19：`run_code` 工具面已真实存在（工具名/schema 字段 code/description/timeoutMs、`logs`+`result` 输出形状、`CODE_RUN_FAILED`/`ABORTED` 身份、按 timeoutMs 折算的总额度、`maxParallelSubCalls` 并发闸、子调用走 `spi.SubDispatch` 受管通道）。仍 PARTIAL：**不做执行器替换**（官方 enabled 时取代 tool-executor-native，本仓是与原生工具并列的加法）、没有 system prompt 的 `tools:sdk`/`tools:ptc-only` 段、不发 `ptc-dispatch` 事件、图片型子结果不转 deferred user-message、`reset(agent)` 与 sandbox 升级审批未接。 **2026-11-20**：provider 已有 `script` 形态（vm-script，见 `docs/ptc-vm-script.md`），但 `run_code` 仍固定 per-call（`modules/tool/runcode/runcode.go:199` 用 `DefaultConfig()`），未接线到 vm-script。",
       "changes": [
         {
           "from": "MISSING",
