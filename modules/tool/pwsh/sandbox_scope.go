@@ -29,6 +29,11 @@ func (t *Tool) SandboxCall(raw json.RawMessage) (spi.SandboxCall, error) {
 	if err != nil {
 		return spi.SandboxCall{}, err
 	}
+	// 准入层就要判"请求与理由成对"（官方 `validateEscalationArgs`）：否则宿主会先弹
+	// 一次不该弹的审批，等进到工具里才发现这次请求畸形。
+	if err := sandbox.ValidateEscalationArgs(permission, a.Justification); err != nil {
+		return spi.SandboxCall{}, err
+	}
 	cwd := strings.TrimSpace(a.Workdir)
 	if cwd == "" {
 		wd, err := os.Getwd()

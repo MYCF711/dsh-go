@@ -141,7 +141,8 @@ var shellSchema = json.RawMessage(`{
     "description": {"type": "string", "description": "这段命令干什么，5-10 个字，给用户看的（例如「列出当前目录」）"},
     "idle_seconds": {"type": "integer", "minimum": 1, "maximum": 900, "description": "多久无输出转后台，默认 600"},
     "run_in_background": {"type": "boolean", "description": "立刻转后台并返回 job_id，不等命令结束（长任务用这个，别去调小 idle_seconds）"},
-    "sandbox_permissions": {"type": "string", "enum": ["workspace-write", "danger-full-access"], "description": "可选：仅本次调用的 sandbox 请求。danger-full-access 需要先经审批；不会改变会话档位"}
+    "sandbox_permissions": {"type": "string", "enum": ["workspace-write", "danger-full-access"], "description": "The narrowest wider sandbox mode for a one-shot retry of the exact command the sandbox just denied; the retry asks the user for approval."},
+    "justification": {"type": "string", "description": "Required with sandbox_permissions: one sentence for the user explaining why this exact command needs the wider access. Use the language of the user’s current request."}
   },
   "required": ["command", "description"],
   "additionalProperties": false
@@ -167,6 +168,9 @@ type shellArgs struct {
 	IdleSeconds        int    `json:"idle_seconds"`
 	RunInBackground    bool   `json:"run_in_background"`
 	SandboxPermissions string `json:"sandbox_permissions"`
+	// Justification 是官方 `justification`（`dsh-tool-bash`）：与
+	// sandbox_permissions 成对出现，一句给用户看的理由。指针区分"缺席"与"空串"。
+	Justification *string `json:"justification"`
 }
 
 type shellData struct {
@@ -189,6 +193,11 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 	if err != nil {
 		return spi.Result{Hint: `sandbox_permissions 只能是 workspace-write 或 danger-full-access（或省略）`}, err
 	}
+	// 官方 validateEscalationArgs（`dsh-sandbox/src/escalation.ts:88-98`）：请求与理由
+	// 必须成对，理由必须是非空句子。仍然在起进程之前判。
+	if err := sandbox.ValidateEscalationArgs(permission, a.Justification); err != nil {
+		return spi.Result{Hint: err.Error()}, err
+	}
 	// 策略先于一切进程动作：deny / needs-approval 在这里就返回，
 	// svc.Run/RunBackground 不会被调用，因此不会启动 shell、不会留下 job。
 	decision, err := t.authorize(ctx, a.Command, permission)
@@ -199,7 +208,7 @@ func (t *shellTool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, 
 		} else {
 			out.Summary = "沙箱策略拒绝，命令未执行"
 		}
-		out.Hint = sandboxHint(err)
+		out.Hint = sandboxHint(err, decision)
 		return out, err
 	}
 
@@ -354,12 +363,27 @@ func sandboxResult(d *sandbox.Decision) any {
 	return map[string]any{"sandbox": d}
 }
 
-func sandboxHint(err error) string {
+// sandboxHint 把策略结论翻成模型能照做的下一步。拒绝/待审批时带**官方标记**
+// （`dsh-sandbox/src/escalation.ts:108-123`）：两个工具族共享同一行，模型不用背工具描述。
+func sandboxHint(err error, decision *sandbox.Decision) string {
+	var escalation *sandbox.EscalationError
 	switch {
+	case errors.As(err, &escalation):
+		// 阶梯违规（不够宽）或升级字段没有成对：文案就是官方那句，模型改请求即可。
+		return escalation.Error()
 	case errors.Is(err, sandbox.ErrNeedsApproval):
-		return "这次调用请求了 danger-full-access，但审批还没完成；让用户批准这次调用后重试，或改成工作区内的操作"
+		return "这次调用请求了更宽的 sandbox 档位，但审批还没完成；让用户批准这次调用后重试，或改成工作区内的操作" +
+			sandbox.EscalationHintMarker("command")
 	case errors.Is(err, sandbox.ErrDenied):
-		return "当前会话 sandbox 档位拒绝这条命令；把命令限制在工作区 cwd 内，或让用户显式切到 danger-full-access 档"
+		if decision != nil && decision.Reason == sandbox.ReasonEscalationDenied {
+			return sandbox.EscalationRejectedMessage(decision.RequestedPermission, "command")
+		}
+		mode := sandbox.ModeReadOnly
+		if decision != nil && decision.EffectiveMode != "" {
+			mode = decision.EffectiveMode
+		}
+		return "当前会话 sandbox 档位拒绝这条命令；把命令限制在工作区 cwd 内，或让用户显式切到更宽档位" +
+			sandbox.SandboxDenialMarker(mode)
 	case errors.Is(err, sandbox.ErrPolicyUnwired):
 		return "宿主没有把 sandbox 策略接进本进程；去掉 sandbox_permissions 参数，或让宿主设置 DSHD_SANDBOX_MODE"
 	case errors.Is(err, sandbox.ErrMissingContext):

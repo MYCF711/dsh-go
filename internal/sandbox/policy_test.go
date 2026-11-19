@@ -126,7 +126,7 @@ func TestEvaluateRejectsInvalidContextAndPermission(t *testing.T) {
 	}
 }
 
-func TestReadOnlyDeniesWritesExecutionAndEscalation(t *testing.T) {
+func TestReadOnlyDeniesWritesAndExecutesButCanEscalateWithApproval(t *testing.T) {
 	f := newPolicyFixture(t)
 	p := f.policy(t, "session-A", ModeReadOnly)
 
@@ -144,10 +144,12 @@ func TestReadOnlyDeniesWritesExecutionAndEscalation(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertDecision(t, write, ActionDeny, ReasonReadOnlyWrite, ModeReadOnly)
-	if write.EscalationEligible || write.Approval != nil {
-		t.Fatalf("read-only write unexpectedly offers escalation: %+v", write)
+	if !write.EscalationEligible || write.Approval != nil {
+		t.Fatalf("read-only write 的拒绝必须广告官方升级阶梯且不预置审批: %+v", write)
 	}
 
+	// 官方 WIDER_MODES（`dsh-sandbox/src/escalation.ts:64-67`）：read-only 也能单次升到
+	// workspace-write 或 danger-full-access，但必须经真实审批，未获批前命令/写入都不执行。
 	for _, permission := range []Permission{PermissionWorkspaceWrite, PermissionDangerFullAccess} {
 		t.Run("write upgrade "+string(permission), func(t *testing.T) {
 			d, err := p.EvaluateFS(FSRequest{
@@ -157,9 +159,20 @@ func TestReadOnlyDeniesWritesExecutionAndEscalation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertDecision(t, d, ActionDeny, ReasonReadOnlyEscalation, ModeReadOnly)
-			if d.Approval != nil || d.EscalationEligible {
-				t.Fatalf("read-only upgrade must be denied without approval: %+v", d)
+			assertDecision(t, d, ActionNeedsApproval, ReasonEscalationRequired, ModeReadOnly)
+			if d.Approval == nil || d.Approval.Permission != permission || !d.Approval.OneShot {
+				t.Fatalf("审批需求必须绑定本次调用的目标档位: %+v", d)
+			}
+			approved, err := p.EvaluateFS(FSRequest{
+				Call: Call{SessionID: "session-A", CallID: "write-" + string(permission),
+					SandboxPermissions: permission, Escalation: d.Approval.Decide(true)},
+				Operation: OperationWrite, Path: "file.txt",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if approved.Action != ActionAllow || approved.EffectiveMode != Mode(permission) || approved.Mode != ModeReadOnly {
+				t.Fatalf("获批后按授予档位判定、会话档位不变: %+v", approved)
 			}
 		})
 		t.Run("execute upgrade "+string(permission), func(t *testing.T) {
@@ -170,7 +183,7 @@ func TestReadOnlyDeniesWritesExecutionAndEscalation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertDecision(t, d, ActionDeny, ReasonReadOnlyEscalation, ModeReadOnly)
+			assertDecision(t, d, ActionNeedsApproval, ReasonEscalationRequired, ModeReadOnly)
 		})
 	}
 
@@ -189,7 +202,7 @@ func TestReadOnlyDeniesWritesExecutionAndEscalation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertDecision(t, outsideRead, ActionDeny, ReasonReadOnlyEscalation, ModeReadOnly)
+	assertDecision(t, outsideRead, ActionNeedsApproval, ReasonEscalationRequired, ModeReadOnly)
 }
 
 func TestDangerFullAccessAllowsWithoutReplacingToolApproval(t *testing.T) {
@@ -211,8 +224,20 @@ func TestDangerFullAccessAllowsWithoutReplacingToolApproval(t *testing.T) {
 		t.Fatalf("enforcement = %q", write.Enforcement)
 	}
 
-	execute, err := p.EvaluateCommand(CommandRequest{
+	// 官方阶梯（`dsh-sandbox/src/escalation.ts:212-220`）：danger-full-access 之上
+	// 没有更宽档位，所以任何 sandbox_permissions 目标都不"严格更宽"，执行期 fail-loud，
+	// 不静默当成同档放行。
+	_, err = p.EvaluateCommand(CommandRequest{
 		Call:    Call{SessionID: "session-A", CallID: "exec", SandboxPermissions: PermissionWorkspaceWrite},
+		Command: "pwd", Cwd: f.outside,
+	})
+	var escalationErr *EscalationError
+	if !errors.As(err, &escalationErr) || escalationErr.Code != EscalationInvalidArgument {
+		t.Fatalf("danger 档上的更窄请求必须报 SANDBOX_ESCALATION_INVALID_ARGUMENT，得到 %v", err)
+	}
+
+	execute, err := p.EvaluateCommand(CommandRequest{
+		Call:    testCall("session-A", "exec-plain"),
 		Command: "pwd", Cwd: f.outside,
 	})
 	if err != nil {

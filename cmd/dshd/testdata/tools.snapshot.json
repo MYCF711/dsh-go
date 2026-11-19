@@ -94,7 +94,11 @@
             "workspace-write",
             "danger-full-access"
           ],
-          "description": "可选：仅本次调用的 sandbox 请求。danger-full-access 需要先经审批；不会改变会话档位"
+          "description": "The narrowest wider sandbox mode for a one-shot retry of the exact command the sandbox just denied; the retry asks the user for approval."
+        },
+        "justification": {
+          "type": "string",
+          "description": "Required with sandbox_permissions: one sentence for the user explaining why this exact command needs the wider access. Use the language of the user’s current request."
         }
       },
       "required": [
@@ -831,7 +835,11 @@
             "workspace-write",
             "danger-full-access"
           ],
-          "description": "可选：仅本次调用的 sandbox 请求。danger-full-access 需要先经审批；不会改变会话档位"
+          "description": "The narrowest wider sandbox mode for a one-shot retry of the exact command the sandbox just denied; the retry asks the user for approval."
+        },
+        "justification": {
+          "type": "string",
+          "description": "Required with sandbox_permissions: one sentence for the user explaining why this exact command needs the wider access. Use the language of the user’s current request."
         }
       },
       "required": [

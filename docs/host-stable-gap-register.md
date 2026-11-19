@@ -621,19 +621,21 @@ terminal.input/open/output/resize, workspace.init/list
 ### 4.6 sandbox（`sandbox` #40 / `sandbox-policy` #41 / `bash-sandbox` #42 / `pwsh-sandbox` #43 / `fs-sandbox` #95）
 
 - 旧：#40/#41/#42/#43 MISSING；#95 PARTIAL
-- 当前：#41 **IMPLEMENTED**、#95 **PARTIAL**、#40 **DEFERRED**、#43 **DEFERRED**、#42 **OFFICIAL_UNSUPPORTED**
-- 证据：
-  - 策略层：`internal/sandbox/policy.go:19-21`（`read-only` / `workspace-write` / `danger-full-access`）、`:28 Permission 常量`、`internal/sandbox/command.go:17`（"workspace-write 默认只允许工作区 cwd；危险全权升级未获批前不会返回 allow"）
-  - 生产接线：`cmd/dshd/serve_sandbox_policy.go:18`（preset → runtime 档位）、`:40 sandboxModeStore`（`<home>/state/session-sandbox.json`）、`:255 sandboxModeForPresetID`、`:401 sandboxChildEnv`（`DSHD_SANDBOX_MODE` 传子进程）
-  - 工具面：`modules/exec/bash/tools.go:68 sandbox_permissions`（`workspace-write`/`danger-full-access`，需要先审批）、`:114` 白名单、`:235` 环境缺失时**拒绝**带升级字段的调用（fail-loud 不静默降级）；`modules/tool/pwsh/pwsh.go:38`、`:113` 同构
-  - FS 面：`modules/fs/local/local.go:104 BoundaryFromEnv`、`:114 SandboxMode`、`:141 NewBoundary`、`:235` danger 档直接放行、`:248 ErrOutsideReadBoundary`
-  - preset 面：`internal/modes/modes.go:37 SandboxMode`、`:69-96` 三个内置 preset 各自带 `Sandbox` 字段（approval + sandbox 两侧都捆上，旧 map 的"只有 approval 半档"作废）
-- 测试：`go test ./internal/sandbox -count=1` → `ok 4.103s`；`modules/fs/local/sandbox_policy_test.go`（189 行）、`modules/tool/pwsh/sandbox_test.go`（164 行）、`modules/exec/bash/sandbox_gate_test.go` 在包内
-- 还差（每条都点名，不合并成一句）：
-  1. `#40 sandbox` = **DEFERRED**：策略层与门闸已有，但缺官方那种"平台 runner"（Windows AppContainer / unix 侧同类机制）。`docs/sandbox-policy.md:66` §4 把 OS 级隔离列为"另行评估"，`internal/sandbox/fs.go:15 Policy.EvaluateFS` 的 allow/needs-approval 决策**没有生产调用方**（只有 `*_test.go`）。按"沙盒不得冒名"（`AGENTS.md`）不能记 IMPLEMENTED。
-  2. `#42 bash-sandbox` = **OFFICIAL_UNSUPPORTED**：上游 `dsh-base/cordis.patch.yml:249-257` 在 win32 **disabled** 这一行（`:281-283` 连 `tool-bash` 也 disabled，见 `docs/sandbox-policy.md:70` 原文）。宿主做到的是工具级 `sandbox_permissions` 策略 + 子进程 env，不是命令沙箱。
-  3. `#43 pwsh-sandbox` = **DEFERRED**：只有策略闸门（三档 + 一次性升级 + 拒绝前零进程），无 OS 级强制；architect 任务书定 POSTPONE。
-  4. `#95 fs-sandbox` = **PARTIAL**：FS 侧生产接线是真的（`BoundaryFromEnv` → `CheckWrite` 三档、canonical 化），缺的是**一次性 `sandbox_permissions` 升级在 FS 侧没有生产入口**（`Policy.EvaluateFS` 只被测试调用）。命令侧的门闸（`modules/exec/bash/tools.go:240`、`modules/tool/pwsh/pwsh.go:250`）已经接了。
+- 当前（2026-11-19 按官方 rc.2 asar 内 `src/*.ts` 重判）：#41 **IMPLEMENTED**、#95 **PARTIAL**、#40/#42/#43 **PARTIAL**
+- **官方三件的真实形状**（逐条 `file:line` 见 [`docs/sandbox-trio-official-shape.md`](sandbox-trio-official-shape.md)；asar sha256 `f87a50e9…`）：
+  - `id: sandbox` 在官方 `dsh-base/cordis.patch.yml:240-241` 绑的是 **`@deepseek-ai/dsh-sandbox-local`**（真 runner），不是抽象包 `dsh-sandbox`；后者是纯契约缝（`dsh-sandbox/src/index.ts:207-226` 抽象 `confine`、`:141-161 SANDBOX_UNAVAILABLE`）。
+  - Windows 链：`dsh-sandbox-local/src/index.ts:184 win32: ['windows-acl']`、`:554` 按平台取链、无链 fail-closed；runner `@deepseek-ai/dsh-sandbox-windows-acl` 用 `WRITE_RESTRICTED` 受限令牌 + Low 完整性标签 + 每工作区 SID + 每会话私有 temp SID + world `FILE_DELETE_CHILD` 拒绝，**官方自标 partial**（`README.zh.md:127`「写入与删除受限；读取、网络与进程可见性不受限」）。
+  - **平台事实**：`cordis.patch.yml:251` `bash-sandbox` 在 win32 **disabled**（同批 `:283` 连 `tool-bash` 也关）；`:257` `pwsh-sandbox` **只在 win32 启用**，它是把每条 pwsh 命令送进 ACL runner 的执行器（`dsh-pwsh-sandbox/src/index.ts:4-5`、`:194-196`）。旧登记把「bash 在 win32 disabled」外推成「官方 Windows 上没有命令级 OS 沙箱」**是错的**。
+- 本轮补了什么（**都是策略层/契约层，不含 OS 强制**）：
+  - `internal/sandbox/escalation.go` 逐字移植官方 `dsh-sandbox/src/escalation.ts`：四个 `SANDBOX_ESCALATION_*` 错误码（`:33-38`）、`WIDER_MODES` 阶梯（`:64-67`）、`ESCALATION_TARGETS`（`:77`）、`validateEscalationArgs` 三句配对校验（`:88-98`）、`sandboxDenialMarker`（`:108-110`）、`escalationHintMarker`（`:121-123`）、`sandboxPermissionsDescription`（`:132-134`）、`justification` 描述（`dsh-tool-pwsh/src/index.ts:437-440`）。
+  - `read-only` 不再是硬上限：官方阶梯允许 read-only 单次升到 `workspace-write` / `danger-full-access`，仍必须先过真实审批；`internal/sandbox/policy.go` 的 `evaluate` 改为按**授予档位**判定（`EffectiveMode`），会话档位不变，`sandbox_permissions` 与 `justification` 不成对时起进程前 fail-loud。
+  - 工具面：`modules/tool/pwsh/pwsh.go`、`modules/exec/bash/tools.go` schema 增加官方 `justification`、`sandbox_permissions` 描述改用官方 `sandboxPermissionsDescription('command')`；拒绝/待审批 Hint 带官方标记行；两个族的 `sandbox_scope.go` 在**准入层**就判配对（不弹多余审批）。
+- 已到达的层级（可复核）：三档真实运行时档位（`internal/sandbox/policy.go`）+ 每调用一次性升级 + canonical 路径边界（`internal/sandbox/runtime.go`）+ 拒绝前零进程 + 官方 escalation 文案/标记 + 自报 `enforcement: policy-only-no-os-isolation`。
+- **仍未到达**（不得写 DONE）：
+  1. `#40 sandbox` 与 `#43 pwsh-sandbox` 缺的是**同一个**东西：Windows ACL runner（受限令牌 + Low 标签 + 持久 ACL）。官方语义是 partial（只限写/删），代价是对真实工作区目录树的**驻留** ACL/Low 标签改动（官方 `README.zh.md:130-131`：`icacls` 回收不了、`ERROR_NONE_MAPPED` 1332，并随包发 `diagnose-windows-sandbox-acl` 修复技能）。共享工作区上做这件事需要独立设计 + 独立探针（不在用户工作区落持久标签）+ 回滚方案，属**需用户拍板的独立单**，本单不硬做。
+  2. `#42 bash-sandbox` 与官方**同形**（win32 官方 disabled）；本仓额外仍有策略闸门与 escalation 契约（相对官方是多，不是少）。
+  3. `#95 fs-sandbox`：FS 侧 `Policy.EvaluateFS` 仍无生产调用方（只有 `*_test.go`），一次性升级在 FS 侧没有生产入口。
+- 测试：`go test ./internal/sandbox ./modules/exec/bash ./modules/tool/pwsh -count=1` 全绿；新增 `internal/sandbox/escalation_test.go`（官方逐字文案 + 阶梯 + 三句配对）、`modules/tool/pwsh/sandbox_test.go` 与 `modules/exec/bash/sandbox_gate_test.go` 的 `TestSandboxEscalationRequiresPairedJustification` / `TestSandboxMarkersAreOfficial` / `TestSandboxReadOnlyCanEscalateToWorkspaceWrite`。
 
 ### 4.7 checkpoint（`session-checkpoint-policy` #78）
 
@@ -1057,8 +1059,8 @@ officeToPdf **未装 LibreOffice 实测**；directoryPicker 原生目录框**人
 |---|---:|---|
 | 已补（本表对应行已改 `IMPLEMENTED`/`PARTIAL` + 新证据） | 12 | #1 #3 #4 #6 #10 #23 #37 #53 #54 #68 #71 #77（审计表编号 #70/#73/#79 = 本表 #68/#71/#77） |
 | R6 不做 | 1 | `workflow-ptc`（插件的唯一内容是 JS 运行时；六类钩子已由宿主原生引擎实现） |
-| 要用户拍板 | 4 | `llm-pi-ai`（四协议产品取舍）、`session-query-sqlite`（FTS5 vs 零依赖）、`sandbox` / `pwsh-sandbox`（要不要 Windows ACL partial 隔离） |
-| 不该补 | 1 | `bash-sandbox`（官方自己在 win32 上 `disabled:true`，同批 `tool-bash` 也 disabled——本仓在同一平台上的形状与官方一致，且本仓仍跑三档策略闸门） |
+| 要用户拍板 | 4 | `llm-pi-ai`（四协议产品取舍）、`session-query-sqlite`（FTS5 vs 零依赖）、`sandbox` / `pwsh-sandbox`（要不要 Windows ACL partial 隔离：官方 runner 会往工作区目录树写**驻留** ACL + Low 标签，`icacls` 回收不了，见 §4.6） |
+| 不该补 | 1 | `bash-sandbox`（官方自己在 win32 上 `disabled:true`，同批 `tool-bash` 也 disabled——本仓在同一平台上的形状与官方一致，且本仓仍跑三档策略闸门 + 官方 escalation 契约） |
 | 不适用 | 1 | `agent`（rc.1 遗留判定；PR #24 已在 `cmd/dshd/serve.go:493` 传 `Emit`，`cmd/dshd/agent_events_wiring_test.go` 钉住） |
 
 > **2026-11-19 更正（§HOST-PTC）**：上表「R6 不做 | workflow-ptc」这一条的依据是「插件的唯一内容是 JS 运行时」——**这句只对 `dsh-workflow-ptc` 的宿主侧引擎成立，对 `dsh-ptc-runtime` 不成立**。`ptc-runtime` 是纯契约包（无执行代码），执行由 provider 走外部受管 node 完成，R6 的词面（不**嵌**引擎）没有被子进程方案触碰。因此 `ptc-runtime` / `tool-executor-ptc` 已从 MISSING 改判 PARTIAL，见 §HOST-PTC。历史行保留不改写。

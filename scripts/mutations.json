@@ -158,5 +158,45 @@
     "new": "\t\t\t\tif idleLimit > 0 && time.Since(last) > idleLimit*1000 {",
     "pkg": "./internal/transport",
     "test": "TestServeConnReturnsIdleAfterSilence"
+  },
+  {
+    "name": "sandbox-denial-marker-wording",
+    "file": "internal/sandbox/escalation.go",
+    "old": "\treturn fmt.Sprintf(\"[sandbox: file access denied under %s mode]\", string(mode))",
+    "new": "\treturn fmt.Sprintf(\"[sandbox: file access denied in %s mode]\", string(mode))",
+    "pkg": "./internal/sandbox",
+    "test": "TestEscalationMarkersAreOfficialVerbatim"
+  },
+  {
+    "name": "sandbox-ladder-drops-readonly-workspacewrite",
+    "file": "internal/sandbox/escalation.go",
+    "old": "\tModeReadOnly:       {ModeWorkspaceWrite, ModeDangerFullAccess},",
+    "new": "\tModeReadOnly:       {ModeDangerFullAccess},",
+    "pkg": "./internal/sandbox",
+    "test": "TestWiderModesLadder"
+  },
+  {
+    "name": "sandbox-escalation-without-justification-allowed",
+    "file": "internal/sandbox/escalation.go",
+    "old": "\tif permission != \"\" && justification == nil {",
+    "new": "\tif false && permission != \"\" && justification == nil {",
+    "pkg": "./internal/sandbox",
+    "test": "TestValidateEscalationArgs"
+  },
+  {
+    "name": "sandbox-approved-escalation-ignored",
+    "file": "internal/sandbox/policy.go",
+    "old": "\t\teffective = Mode(call.SandboxPermissions)",
+    "new": "\t\teffective = effective",
+    "pkg": "./internal/sandbox",
+    "test": "TestReadOnlyDeniesWritesAndExecutesButCanEscalateWithApproval"
+  },
+  {
+    "name": "pwsh-justification-not-required",
+    "file": "modules/tool/pwsh/pwsh.go",
+    "old": "\tif err := sandbox.ValidateEscalationArgs(permission, a.Justification); err != nil {",
+    "new": "\tif err := error(nil); err != nil {",
+    "pkg": "./modules/tool/pwsh",
+    "test": "TestSandboxEscalationRequiresPairedJustification"
   }
 ]
