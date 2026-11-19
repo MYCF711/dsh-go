@@ -34,6 +34,10 @@ func runVersion(ctx context.Context, nodePath string) (string, error) {
 //
 // 通道协议是本 provider **私有**的（官方那套 wire 不是公开契约，我们也从没宣称
 // 与之兼容）：stdin/stdout 各一行一帧 JSON。名字只服务本包的 host 与 worker 两边。
+//
+// `format` / `retainsState` 两个字段是官方 `ProgramBootData`（`src/protocol.ts`）
+// 的同名事实：前者选求值器（function-body / script），后者决定结算之后进程是否
+// 继续活着。取值跟着官方的词走，不另起名字。
 type frame struct {
 	T string `json:"t"`
 
@@ -46,11 +50,12 @@ type frame struct {
 	Text string `json:"text,omitempty"`
 
 	// eval 载荷
-	Program    string   `json:"program,omitempty"`
-	Format     string   `json:"format,omitempty"`
-	Cwd        string   `json:"cwd,omitempty"`
-	MaxOutput  int64    `json:"maxOutputBytes,omitempty"`
-	Namespaces []wireNS `json:"namespaces,omitempty"`
+	Program      string   `json:"program,omitempty"`
+	Format       string   `json:"format,omitempty"`
+	Cwd          string   `json:"cwd,omitempty"`
+	MaxOutput    int64    `json:"maxOutputBytes,omitempty"`
+	Namespaces   []wireNS `json:"namespaces,omitempty"`
+	RetainsState bool     `json:"retainsState,omitempty"`
 
 	// bind
 	Call uint64          `json:"call,omitempty"`

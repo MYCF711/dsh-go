@@ -595,25 +595,25 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/ptc/nodeprovider/runner.go:131",
+      "site": "internal/ptc/nodeprovider/runner.go:180",
       "what": "把子进程 stderr 拷进 s.stderr（stderr 是 logMu 保护的有界缓冲）",
       "sync": "读过：目标是 *logBuffer，内部 logMu 互斥写，append 时按上限截断；goroutine 随子进程退出而结束（stderr 关闭 -> io.Copy 返回），不写 session 其它字段",
       "verified_at": "2026-11-20"
     },
     {
-      "site": "internal/ptc/nodeprovider/runner.go:134",
+      "site": "internal/ptc/nodeprovider/runner.go:183",
       "what": "cmd.Wait() 的 waitErr 写入与 close(s.exited)",
       "sync": "读过：waitErr 只在 terminate/close 之后由 exited 关闭作 happens-before 屏障被主路径读；close(s.exited) 后不再写 waitErr",
       "verified_at": "2026-11-20"
     },
     {
-      "site": "internal/ptc/nodeprovider/runner.go:138",
+      "site": "internal/ptc/nodeprovider/runner.go:187",
       "what": "readFrames 读子进程 stdout，把帧推进 s.frames 通道",
       "sync": "读过：只经 cap 64 的 s.frames 通道交给消费方，退出时 defer close(s.frames)；不直接改 session 字段",
       "verified_at": "2026-11-20"
     },
     {
-      "site": "internal/ptc/nodeprovider/runner.go:301",
+      "site": "internal/ptc/nodeprovider/runner.go:356",
       "what": "每个 bind 帧起一个 handleBind，运行工具/宿主回调后回写 bindResult",
       "sync": "读过：写侧走 writeMu 串行化整帧写；bindReply 经 s.mu 保护的 pending map 回投，ctx 取消时 terminate 收整棵进程树",
       "verified_at": "2026-11-20"

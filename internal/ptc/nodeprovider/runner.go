@@ -23,26 +23,46 @@ type bindReply struct {
 	err   error
 }
 
-// session 是**一次**运行对应的受管进程。
+// runState 是**一次**求值的状态：日志与字节预算。
 //
-// 生命周期：start → 握手 → 发 eval → 收帧 → settle → close（终止并回收进程树）。
+// 常驻会话（scriptPersistence）里进程跨多次求值复用，所以这些计数不能挂在
+// session 上——否则第二轮会继承第一轮的日志与预算。官方也是每次求值一只
+// OutputLedger（`worker.ts:101-104`）。
+type runState struct {
+	mu       sync.Mutex
+	logs     []string
+	logBytes int64
+}
+
+// appendLog 收一条日志；超过预算返回 false（调用方负责报 output-limit）。
+func (r *runState) appendLog(text string, limit int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logs = append(r.logs, text)
+	r.logBytes += int64(len(text)) + 1
+	return r.logBytes <= limit
+}
+
+func (r *runState) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.logs))
+	copy(out, r.logs)
+	return out
+}
+
+// session 是**一个受管进程**：一次性运行或按 stateOwner 常驻。
+//
+// 生命周期：start → 握手 → 收帧 → settle → close（终止并回收进程树）。
+// 常驻会话在 settle 之后**不关**，下一轮直接再发 eval（官方 worker.ts 同形）。
 type session struct {
 	p    *Provider
-	spec ptc.RunSpec
+	tree processTree
 
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
-	tree  processTree
 
 	writeMu sync.Mutex
-
-	mu      sync.Mutex
-	pending map[uint64]chan bindReply
-	nextID  atomic.Uint64
-
-	logMu    sync.Mutex
-	logs     []string
-	logBytes int64
 
 	frames  chan frame
 	done    chan struct{}
@@ -50,9 +70,37 @@ type session struct {
 	waitErr error
 	exited  chan struct{}
 
+	// format/retains 由 provider 的 executionMode 决定，整个会话固定。
+	format  ptc.ProgramFormat
+	retains bool
+	// busy 是"这一轮有人在用"的单飞闸（官方 worker.ts:76-79 的 assertIdle）。
+	busy atomic.Bool
+
+	specMu sync.RWMutex
+	spec   ptc.RunSpec
+	runs   int
+
 	settleMu sync.Mutex
 	settled  bool
 	killed   atomic.Bool
+}
+
+func (s *session) setSpec(spec ptc.RunSpec) {
+	s.specMu.Lock()
+	s.spec = spec
+	s.specMu.Unlock()
+}
+
+func (s *session) currentBindings() []ptc.BindingNamespace {
+	s.specMu.RLock()
+	defer s.specMu.RUnlock()
+	return s.spec.Bindings
+}
+
+func (s *session) isClosed() bool {
+	s.settleMu.Lock()
+	defer s.settleMu.Unlock()
+	return s.settled
 }
 
 // ringBuffer 保留 stderr 的**尾部**：进程被打死时前半段基本都是噪音，
@@ -86,9 +134,9 @@ func (r *ringBuffer) String() string {
 	return string(r.buf)
 }
 
-// start 起一个 per-call 进程并完成握手。
-func (p *Provider) start(ctx context.Context, nodePath string, spec ptc.RunSpec) (*session, error) {
-	cmd := exec.Command(nodePath, p.heapArg(), p.script)
+// start 起一个受管进程并完成握手。retains=true 表示这次会话会跨多次求值常驻。
+func (p *Provider) start(ctx context.Context, nodePath string, spec ptc.RunSpec, retains bool) (*session, error) {
+	cmd := exec.Command(nodePath, "--no-warnings", p.heapArg(), p.script)
 	cmd.Dir = spec.Cwd
 	cmd.Env = append(os.Environ(), "NODE_NO_WARNINGS=1")
 	buildProcAttrs(cmd)
@@ -111,11 +159,12 @@ func (p *Provider) start(ctx context.Context, nodePath string, spec ptc.RunSpec)
 		spec:    spec,
 		cmd:     cmd,
 		stdin:   stdin,
-		pending: map[uint64]chan bindReply{},
 		frames:  make(chan frame, 64),
 		done:    make(chan struct{}),
 		stderr:  newRingBuffer(0),
 		exited:  make(chan struct{}),
+		format:  p.format,
+		retains: retains,
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -138,7 +187,7 @@ func (p *Provider) start(ctx context.Context, nodePath string, spec ptc.RunSpec)
 	go s.readFrames(stdout)
 
 	if err := s.handshake(ctx); err != nil {
-		s.terminate()
+		s.close()
 		return nil, err
 	}
 	return s, nil
@@ -233,21 +282,21 @@ func (s *session) write(f frame) error {
 	return err
 }
 
-// appendLog 收一条日志，超预算就地报 output-limit。
-func (s *session) appendLog(text string) bool {
-	s.logMu.Lock()
-	defer s.logMu.Unlock()
-	s.logs = append(s.logs, text)
-	s.logBytes += int64(len(text)) + 1
-	return s.logBytes <= s.p.cfg.MaxOutputBytes
-}
-
-func (s *session) snapshotLogs() []string {
-	s.logMu.Lock()
-	defer s.logMu.Unlock()
-	out := make([]string, len(s.logs))
-	copy(out, s.logs)
-	return out
+// discardStaleFrames 丢掉上一次求值结算后可能还排在管道里的帧。
+//
+// worker 在 settle 之后不再发帧（`settled` 闸），所以正常情况下这里什么都不丢；
+// 这条只是防止"上一轮的尾巴被当成这一轮的帧"——常驻会话里那会串状态。
+func (s *session) discardStaleFrames() {
+	for {
+		select {
+		case _, ok := <-s.frames:
+			if !ok {
+				return
+			}
+		default:
+			return
+		}
+	}
 }
 
 // execute 发 eval 并跑到结算。
@@ -255,7 +304,12 @@ func (s *session) snapshotLogs() []string {
 // started 是这次 Run 进入的时刻：elapsed 预算覆盖**启动 + 握手 + 执行**
 // （官方原文："An enabled deadline covers runtime setup and execution"），
 // 所以这里要把起进程已经花掉的那段扣掉。
-func (s *session) execute(ctx context.Context, spec ptc.RunSpec, started time.Time) ptc.RunResult {
+func (s *session) execute(ctx context.Context, spec ptc.RunSpec, started time.Time, rs *runState) ptc.RunResult {
+	s.setSpec(spec)
+	s.discardStaleFrames()
+	s.runs++
+	runID := uint64(s.runs)
+
 	var deadline <-chan time.Time
 	var timer *time.Timer
 	var budgetMs int64
@@ -265,7 +319,7 @@ func (s *session) execute(ctx context.Context, spec ptc.RunSpec, started time.Ti
 		if remaining <= 0 {
 			s.terminate()
 			return ptc.Fail(ptc.FailureTimeout,
-				fmt.Sprintf("执行超过 %d ms 预算（还没把程序交给 worker）", budgetMs), s.snapshotLogs())
+				fmt.Sprintf("执行超过 %d ms 预算（还没把程序交给 worker）", budgetMs), rs.snapshot())
 		}
 		timer = time.NewTimer(remaining)
 		defer timer.Stop()
@@ -273,59 +327,60 @@ func (s *session) execute(ctx context.Context, spec ptc.RunSpec, started time.Ti
 	}
 
 	if err := s.write(frame{
-		T:          "eval",
-		ID:         1,
-		Program:    spec.Program,
-		Format:     string(ptc.FormatFunctionBody),
-		Cwd:        spec.Cwd,
-		MaxOutput:  s.p.cfg.MaxOutputBytes,
-		Namespaces: wireNamespaces(spec.Bindings),
+		T:            "eval",
+		ID:           runID,
+		Program:      spec.Program,
+		Format:       string(s.format),
+		Cwd:          spec.Cwd,
+		MaxOutput:    s.p.cfg.MaxOutputBytes,
+		Namespaces:   wireNamespaces(spec.Bindings),
+		RetainsState: s.retains,
 	}); err != nil {
-		return ptc.Fail(ptc.FailureWorkerExit, "把程序交给 worker 失败："+err.Error(), s.snapshotLogs())
+		return ptc.Fail(ptc.FailureWorkerExit, "把程序交给 worker 失败："+err.Error(), rs.snapshot())
 	}
 
 	for {
 		select {
 		case f, ok := <-s.frames:
 			if !ok {
-				return s.workerExit()
+				return s.workerExit(rs)
 			}
 			switch f.T {
 			case "log":
-				if !s.appendLog(f.Text) {
+				if !rs.appendLog(f.Text, s.p.cfg.MaxOutputBytes) {
 					s.terminate()
 					return ptc.Fail(ptc.FailureOutputLimit,
-						fmt.Sprintf("捕获输出超过 %d 字节上限，运行已终止", s.p.cfg.MaxOutputBytes), s.snapshotLogs())
+						fmt.Sprintf("捕获输出超过 %d 字节上限，运行已终止", s.p.cfg.MaxOutputBytes), rs.snapshot())
 				}
 			case "bind":
 				go s.handleBind(ctx, f)
 			case "done":
-				return s.doneResult(f)
+				return s.doneResult(f, rs)
 			case "fail":
-				return ptc.Fail(ptc.FailureKind(f.Kind), f.Message, s.snapshotLogs())
+				return ptc.Fail(ptc.FailureKind(f.Kind), f.Message, rs.snapshot())
 			case "protocol":
 				s.terminate()
-				return ptc.Fail(ptc.FailureProtocol, f.Message, s.snapshotLogs())
+				return ptc.Fail(ptc.FailureProtocol, f.Message, rs.snapshot())
 			case "ready":
 				// 重复 ready 无害，忽略。
 			default:
 				s.terminate()
-				return ptc.Fail(ptc.FailureProtocol, "未知控制帧 "+f.T, s.snapshotLogs())
+				return ptc.Fail(ptc.FailureProtocol, "未知控制帧 "+f.T, rs.snapshot())
 			}
 		case <-ctx.Done():
 			s.terminate()
-			return ptc.Fail(ptc.FailureAbort, "运行被调用方取消", s.snapshotLogs())
+			return ptc.Fail(ptc.FailureAbort, "运行被调用方取消", rs.snapshot())
 		case <-deadline:
 			s.terminate()
 			return ptc.Fail(ptc.FailureTimeout,
-				fmt.Sprintf("执行超过 %d ms 预算", budgetMs), s.snapshotLogs())
+				fmt.Sprintf("执行超过 %d ms 预算", budgetMs), rs.snapshot())
 		}
 	}
 }
 
 // doneResult 组装成功结果，并按总字节预算再核一次（日志 + 完成值）。
-func (s *session) doneResult(f frame) ptc.RunResult {
-	logs := s.snapshotLogs()
+func (s *session) doneResult(f frame, rs *runState) ptc.RunResult {
+	logs := rs.snapshot()
 	total := int64(0)
 	for _, line := range logs {
 		total += int64(len(line)) + 1
@@ -350,7 +405,7 @@ func (s *session) doneResult(f frame) ptc.RunResult {
 }
 
 // workerExit 把"对端没了"归类成 worker-exit，并带上退出码与 stderr 尾巴。
-func (s *session) workerExit() ptc.RunResult {
+func (s *session) workerExit(rs *runState) ptc.RunResult {
 	<-s.exited
 	exit := "未知"
 	if s.waitErr != nil {
@@ -363,7 +418,7 @@ func (s *session) workerExit() ptc.RunResult {
 	if tail != "" {
 		message += "；stderr 尾部：" + truncate(tail, 2000)
 	}
-	return ptc.Fail(ptc.FailureWorkerExit, message, s.snapshotLogs())
+	return ptc.Fail(ptc.FailureWorkerExit, message, rs.snapshot())
 }
 
 // handleBind 处理一条嵌套绑定调用。
@@ -391,7 +446,7 @@ func (s *session) handleBind(ctx context.Context, f frame) {
 		}
 	}
 
-	fn, ok := lookupBinding(s.spec.Bindings, f.NS, f.FN)
+	fn, ok := lookupBinding(s.currentBindings(), f.NS, f.FN)
 	if !ok {
 		reply(bindReply{err: fmt.Errorf("没有名为 %s.%s 的绑定", f.NS, f.FN)})
 		return
@@ -478,7 +533,7 @@ func (s *session) terminate() {
 	}
 }
 
-// close 结束这次运行：终止进程树、关闭管道、回收临时资源。
+// close 结束这个会话：终止进程树、关闭管道、回收临时资源。
 func (s *session) close() {
 	s.settleMu.Lock()
 	if !s.settled {

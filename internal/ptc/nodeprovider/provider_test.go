@@ -67,14 +67,24 @@ func numberOf(t *testing.T, value any) json.Number {
 }
 
 func TestNewRejectsUnimplementedModes(t *testing.T) {
-	for _, mode := range []ExecutionMode{ModeVMScript, ModePersistentInMemory} {
-		if _, err := New(Config{ExecutionMode: mode}); err == nil {
-			t.Errorf("executionMode %q 必须装配期就拒（静默降级成 per-call 会让保留状态变成查不出的错觉）", string(mode))
-		}
+	// persistent-in-memory 需要官方 evaluators/repl.ts 的 Node REPL，本 provider 没做：
+	// 装配期就拒，绝不静默降级成别的东西。
+	if _, err := New(Config{ExecutionMode: ModePersistentInMemory}); err == nil {
+		t.Error("persistent-in-memory 必须装配期就拒（静默降级会让保留状态变成查不出的错觉）")
 	}
 	if _, err := New(Config{ExecutionMode: "whatever"}); err == nil {
 		t.Error("未知 executionMode 必须被拒")
 	}
+	// 官方 src/config.ts:57："scriptPersistence requires executionMode: vm-script"。
+	if _, err := New(Config{ExecutionMode: ModePerCall, ScriptPersistence: true}); err == nil {
+		t.Error("per-call + scriptPersistence 必须被拒（官方 config.ts:57）")
+	}
+	// vm-script 现在是**真实现**（语义与隔离层级见 vmscript_test.go）。
+	vmProvider, err := New(Config{ExecutionMode: ModeVMScript})
+	if err != nil {
+		t.Fatalf("vm-script 应可装配：%v", err)
+	}
+	_ = vmProvider.Close()
 	provider, err := New(DefaultConfig())
 	if err != nil {
 		t.Fatalf("默认配置应该可用：%v", err)

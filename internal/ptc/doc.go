@@ -27,8 +27,13 @@
 //
 // # 本仓已到达的能力边界（如实写在代码里，不写进 README 就完事）
 //
-//   - 只实现 per-call（`function-body`）一种求值形态；`repl` / `script` 需要
-//     `node:vm` 的保留环境，尚未实现，`Resolve` 会明确拒绝而不是假装支持；
+//   - 求值形态：`per-call`（`function-body`）与 `vm-script`（`script`，`node:vm`
+//     上下文 + 可选 `scriptPersistence` 保留环境）两种，与官方
+//     `executionMode` 同名同义（`execution.ts:132-167`）；`persistent-in-memory`
+//     （官方 Node REPL）尚未实现，`New` 会明确拒绝而不是假装支持；
+//   - **`node:vm` 不是安全边界**：官方 `dsh-ptc-runtime-node/README.md:72` 原文
+//     "the context is not a security boundary"（中文版 `README.zh.md:72`）。
+//     隔离层级、做到哪层没做到哪层，逐条见 `docs/ptc-vm-script.md`；
 //   - 不做 OS 文件沙盒：`SandboxMode()` 报"无 confinement"，显式档位策略被
 //     拒绝（官方原文："Providers without confinement reject an explicit policy"）；
 //   - 因此这个 provider 是**可选、显式开启**的（见 `modules/tool/runcode`），
