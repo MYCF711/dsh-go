@@ -130,7 +130,22 @@ func ListConfigurableProviders(catalog *ModelCatalogStore) []ConfigurableProvide
 
 // DiscoverModelsForProvider 用 provider 路由解析端点并发真实 GET /models。
 // 这是 llm.discoverModels 的 provider 分支；显式 baseURL 仍由调用方直接传。
+//
+// 没有声明协议时的默认（`openai-completions`）与官方 `discovery.ts:293` 一致；
+// 草稿声明了协议就走 `DiscoverModelsForProviderProtocol`。
 func DiscoverModelsForProvider(ctx context.Context, catalog *ModelCatalogStore, provider, apiKey string) ([]DiscoveredModel, error) {
+	return DiscoverModelsForProviderProtocol(ctx, catalog, provider, ProviderAPIOpenAICompletions, apiKey)
+}
+
+// DiscoverModelsForProviderProtocol 是带协议的 provider 分支：端点从 catalog 声明里
+// 推出来，列表端点/鉴权头/响应形状按 `protocol` 决定（见 discover_protocols.go）。
+//
+// 为什么协议要由调用方给而不是从 catalog 猜：catalog 里同一 provider 可以有多条
+// 模型条目，它们的 `api` 是**模型**的协议；草稿要问的是"这个端点能列什么"，
+// 那是调用方正在编辑的那个路由的协议。
+func DiscoverModelsForProviderProtocol(
+	ctx context.Context, catalog *ModelCatalogStore, provider, protocol, apiKey string,
+) ([]DiscoveredModel, error) {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		return nil, fmt.Errorf("%w: provider 为空", ErrProviderNoEndpoint)
@@ -163,5 +178,5 @@ func DiscoverModelsForProvider(ctx context.Context, catalog *ModelCatalogStore, 
 			ErrProviderNoEndpoint, provider)
 	}
 	client := New(baseURL, apiKey)
-	return client.DiscoverModels(ctx)
+	return client.DiscoverModelsProtocol(ctx, protocol)
 }
