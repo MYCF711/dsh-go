@@ -1082,7 +1082,13 @@ func cmdServe(args []string) error {
 	srv.AttachOfficialForgeRC2API(newForgeRC2API(func(sessionID string) (string, error) {
 		return src.Cwd(sessionID)
 	}, worktreeSvc))
-	if forgeHost, ferr := newForgePanelHost(*home); ferr == nil && forgeHost != nil {
+	// PARITY-W2-STATE / #64：forgePanel.{track,dismiss,refresh,follow}。
+	// follow 发的是官方 ForgePanelState（每帧一个完整状态），其中的
+	// `worktree.editable` 与 `worktree.creation` 读的就是这里的 worktreeSvc 与
+	// src.Cwd —— 与 worktree 面板、forgePanel git 族**同一份**实例，不另建账本。
+	if forgeHost, ferr := newForgePanelHost(*home, worktreeSvc, func(sessionID string) (string, error) {
+		return src.Cwd(sessionID)
+	}); ferr == nil && forgeHost != nil {
 		srv.AttachOfficialForgePanelAPI(forgeHost.api())
 	}
 	srv.AttachOfficialLLMProviderAPI(newLLMProviderAPI(modelCatalog))

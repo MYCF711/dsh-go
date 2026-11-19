@@ -1,7 +1,13 @@
 package transport
 
-// PARITY-W2-STATE 契约测试：forgePanel 的 4 个方法必须有真实接线，
-// 未接线时必须是 501（不能静默成功），存储错误要有官方四字段。
+// `forgePanel.follow` 的官方契约测试。
+//
+// 钉三件事：
+//
+//  1. 线上形状是官方 `ForgePanelState`（每帧一个完整状态，七个顶层字段、
+//     worktree 九个字段一个不少）—— 不是旧的 baseline/upsert/remove 差异帧；
+//  2. 值是真的：改底层状态（editable 翻转、creation 出现/消失），下一帧就跟着变；
+//  3. 真 TCP + 真 NDJSON：头、逐行 flush、参数校验、取消收尾都对。
 
 import (
 	"bufio"
@@ -14,6 +20,11 @@ import (
 	"testing"
 	"time"
 )
+
+// ---------------------------------------------------------------------------
+// unary 三个方法（track / dismiss / refresh）的既有契约：未接线 501、
+// 存储错误四字段、参数校验 400。这一组是既有覆盖，一个断言都没放宽。
+// ---------------------------------------------------------------------------
 
 func fakeForgePanelAPI() *OfficialForgePanelAPI {
 	var api OfficialForgePanelAPI
@@ -129,24 +140,39 @@ func TestForgePanelBadURLIs400(t *testing.T) {
 	}
 }
 
-// syncRecorder 是并发安全的 ResponseWriter（follow 流在另一个 goroutine 写）。
+func officialPanelStateForTest(editable bool, creation *OfficialForgeWorktreeCreation) OfficialForgePanelState {
+	return OfficialForgePanelState{
+		Directory: "/repo/checkout",
+		Checkout: OfficialForgeCheckoutState{
+			State: "ready",
+			Checkout: &OfficialForgeCheckout{
+				Root:   "/repo/checkout",
+				Branch: officialForgeStringPtr("main"),
+				Linked: false,
+				Commit: officialForgeStringPtr("deadbeef"),
+			},
+		},
+		ChangeRequests: []OfficialForgePanelChangeRequest{},
+		Worktree: OfficialForgePanelWorktree{
+			Editable: editable,
+			Creation: creation,
+		},
+	}
+}
+
+// syncRecorder 是能在流还在写的时候读的安全 ResponseWriter。
 type syncRecorder struct {
 	mu     sync.Mutex
-	header http.Header
 	status int
 	body   []byte
 }
 
-func newSyncRecorder() *syncRecorder { return &syncRecorder{header: http.Header{}} }
-
-func (r *syncRecorder) Header() http.Header { return r.header }
+func (r *syncRecorder) Header() http.Header { return http.Header{} }
 
 func (r *syncRecorder) WriteHeader(status int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.status == 0 {
-		r.status = status
-	}
+	r.status = status
 }
 
 func (r *syncRecorder) Write(p []byte) (int, error) {
@@ -171,22 +197,22 @@ func (r *syncRecorder) lines() []string {
 	return strings.Split(s, "\n")
 }
 
-// follow 必须真流：baseline → upsert，且变化由真实写入触发。
-func TestForgePanelFollowStreamsRealChanges(t *testing.T) {
+// follow 必须真流：当前状态 → 变化后的状态，且值来自真实状态读取。
+func TestForgePanelFollowStreamsOfficialPanelState(t *testing.T) {
 	var mu sync.Mutex
-	var state []OfficialForgePanelBinding
-	var version int64
+	state := officialPanelStateForTest(true, nil)
 	wake := make(chan struct{}, 8)
 
 	api := OfficialForgePanelAPI{
-		Snapshot: func() (OfficialForgePanelSnapshot, error) {
+		State: func(ctx context.Context, sessionID string) (OfficialForgePanelState, error) {
 			mu.Lock()
 			defer mu.Unlock()
-			out := make([]OfficialForgePanelBinding, len(state))
-			copy(out, state)
-			return OfficialForgePanelSnapshot{Version: version, Bindings: out}, nil
+			if sessionID != "s-1" {
+				t.Errorf("follow 必须把官方 sessionId 传下来，得到 %q", sessionID)
+			}
+			return state, nil
 		},
-		Wait: func(ctx context.Context, since int64) error {
+		Wait: func(ctx context.Context, sessionID string) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -202,8 +228,9 @@ func TestForgePanelFollowStreamsRealChanges(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rec := newSyncRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/forgePanel.follow", strings.NewReader(`{}`))
+	rec := &syncRecorder{}
+	req := httptest.NewRequest(http.MethodPost, "/api/forgePanel.follow",
+		strings.NewReader(`{"sessionId":"s-1"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(ctx)
 
@@ -214,25 +241,48 @@ func TestForgePanelFollowStreamsRealChanges(t *testing.T) {
 	}()
 
 	first := waitForgeLine(t, rec, 0)
-	if first["type"] != "baseline" {
-		t.Fatalf("首帧必须是 baseline：%v", first)
+	// 官方 follow 的每帧就是 ForgePanelState 本身：没有 type/value/bindings 信封。
+	for _, forbidden := range []string{"type", "value", "bindings", "binding"} {
+		if _, ok := first[forbidden]; ok {
+			t.Fatalf("帧里不该有旧差异帧的信封键 %q：%v", forbidden, first)
+		}
+	}
+	assertOfficialPanelStateShape(t, first)
+	if editable, _ := findWorktree(t, first)["editable"].(bool); !editable {
+		t.Fatalf("首帧 worktree.editable 必须是底层真值 true：%v", first["worktree"])
 	}
 
+	// 变异 1：底层 editable 翻成 false（等价于"turn 开跑了"）。
 	mu.Lock()
-	state = append(state, OfficialForgePanelBinding{
-		SessionID: "s-1", URL: "https://github.com/o/r/pull/7", Tracked: true,
-	})
-	version++
+	state = officialPanelStateForTest(false, nil)
 	mu.Unlock()
 	wake <- struct{}{}
 
 	second := waitForgeLine(t, rec, 1)
-	if second["type"] != "upsert" {
-		t.Fatalf("第二条必须是 upsert：%v", second)
+	if editable, ok := findWorktree(t, second)["editable"].(bool); !ok || editable {
+		t.Fatalf("editable 变了之后下一帧必须跟着变 false：%v", second["worktree"])
 	}
-	b, _ := second["binding"].(map[string]any)
-	if b["url"] != "https://github.com/o/r/pull/7" {
-		t.Fatalf("upsert 绑定不对：%v", b)
+
+	// 变异 2：底层出现一个运行中的创建（prepare 阶段），creation 必须出现。
+	mu.Lock()
+	state = officialPanelStateForTest(false, &OfficialForgeWorktreeCreation{
+		Phase:  "prepare",
+		Branch: "dsh-00000001-abcd",
+		Held:   true,
+	})
+	mu.Unlock()
+	wake <- struct{}{}
+
+	third := waitForgeLine(t, rec, 2)
+	creation, ok := findWorktree(t, third)["creation"].(map[string]any)
+	if !ok {
+		t.Fatalf("creation 必须出现（这是「创建进度」那张卡的值）：%v", third["worktree"])
+	}
+	if creation["phase"] != "prepare" || creation["branch"] != "dsh-00000001-abcd" {
+		t.Fatalf("creation 值不对：%v", creation)
+	}
+	if creation["held"] != true {
+		t.Fatalf("creation.held 必须跟着真值走：%v", creation)
 	}
 
 	// 取消必须让流结束（不是永远挂着）。
@@ -242,6 +292,61 @@ func TestForgePanelFollowStreamsRealChanges(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("ctx 取消后 follow 流没有退出")
 	}
+}
+
+// 官方 zod 的严格字段集：多一个少一个都是契约违规。
+func assertOfficialPanelStateShape(t *testing.T, frame map[string]any) {
+	t.Helper()
+	wantTop := []string{"directory", "checkout", "repository", "readiness", "changeRequests", "worktree", "local"}
+	if len(frame) != len(wantTop) {
+		t.Fatalf("ForgePanelState 顶层必须正好 %d 个键，得到 %d：%v", len(wantTop), len(frame), frame)
+	}
+	for _, key := range wantTop {
+		if _, ok := frame[key]; !ok {
+			t.Fatalf("ForgePanelState 缺字段 %q：%v", key, frame)
+		}
+	}
+	worktree := findWorktree(t, frame)
+	wantWorktree := []string{"editable", "blocker", "request", "created", "creation", "failure", "missing", "restoration", "waiting"}
+	if len(worktree) != len(wantWorktree) {
+		t.Fatalf("ForgePanelWorktree 必须正好 %d 个键，得到 %d：%v", len(wantWorktree), len(worktree), worktree)
+	}
+	for _, key := range wantWorktree {
+		if _, ok := worktree[key]; !ok {
+			t.Fatalf("ForgePanelWorktree 缺字段 %q：%v", key, worktree)
+		}
+	}
+	// 可空的九个字段在没值时必须是 JSON null，不是缺失。
+	for _, key := range []string{"blocker", "request", "created", "creation", "failure", "missing", "restoration", "waiting"} {
+		if v, ok := worktree[key]; !ok || v != nil {
+			t.Fatalf("%q 没值时必须是 null，得到 %v", key, worktree[key])
+		}
+	}
+	// 顶层三个可空字段同理。
+	for _, key := range []string{"repository", "readiness", "local"} {
+		if v, ok := frame[key]; !ok || v != nil {
+			t.Fatalf("%q 没值时必须是 null，得到 %v", key, frame[key])
+		}
+	}
+	if _, ok := frame["changeRequests"].([]any); !ok {
+		t.Fatalf("changeRequests 必须是数组：%v", frame["changeRequests"])
+	}
+	checkout, ok := frame["checkout"].(map[string]any)
+	if !ok || checkout["state"] != "ready" {
+		t.Fatalf("checkout 必须是官方 union 的 ready 分支：%v", frame["checkout"])
+	}
+	if _, ok := checkout["checkout"].(map[string]any); !ok {
+		t.Fatalf("ready 分支必须带 checkout 对象：%v", checkout)
+	}
+}
+
+func findWorktree(t *testing.T, frame map[string]any) map[string]any {
+	t.Helper()
+	worktree, ok := frame["worktree"].(map[string]any)
+	if !ok {
+		t.Fatalf("帧里没有 worktree 对象：%v", frame)
+	}
+	return worktree
 }
 
 func waitForgeLine(t *testing.T, rec *syncRecorder, n int) map[string]any {
@@ -262,22 +367,62 @@ func waitForgeLine(t *testing.T, rec *syncRecorder, n int) map[string]any {
 	return nil
 }
 
-// 真实 TCP + 真 NDJSON：用 httptest.Server 起一个真监听端口，客户端按行读。
-// 这不是 syncRecorder（内存 writer）——证明线上形状（头、逐行 flush、取消）都对。
+// 参数缺失必须在写头之前回四字段（不能先 200 再在流里报错）。
+func TestForgePanelFollowRequiresSessionID(t *testing.T) {
+	srv := &Server{}
+	srv.AttachOfficialForgePanelAPI(OfficialForgePanelAPI{
+		State: func(context.Context, string) (OfficialForgePanelState, error) {
+			return officialPanelStateForTest(true, nil), nil
+		},
+	})
+	defer srv.DetachOfficialForgePanelAPI()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/forgePanel.follow", strings.NewReader(`{}`))
+	srv.ServeOfficialForgePanelFollowHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("缺 sessionId 必须 400，得到 %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "ndjson") {
+		t.Fatalf("参数错不能以流的形式回：%q", ct)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("错误体不是 JSON：%q", rec.Body.String())
+	}
+	errObj, _ := body["error"].(map[string]any)
+	if errObj["code"] != "bad_request" {
+		t.Fatalf("错误码必须是官方四字段的 bad_request：%v", body)
+	}
+}
+
+// 未接线（没有 State）必须 501，且说明缺什么 —— 不能开一条只发空帧的假流。
+func TestForgePanelFollowUnwiredReturns501(t *testing.T) {
+	srv := &Server{}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/forgePanel.follow",
+		strings.NewReader(`{"sessionId":"s-1"}`))
+	srv.ServeOfficialForgePanelFollowHTTP(rec, req)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("未接线必须 501，得到 %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "forgeSession") {
+		t.Fatalf("501 必须说明缺什么：%s", rec.Body.String())
+	}
+}
+
+// 真实 TCP + 真 NDJSON：证明线上形状（头、逐行 flush、取消）都对。
 func TestForgePanelFollowOverRealHTTP(t *testing.T) {
 	var mu sync.Mutex
-	var state []OfficialForgePanelBinding
-	var version int64
+	state := officialPanelStateForTest(true, nil)
 	wake := make(chan struct{}, 8)
 	api := OfficialForgePanelAPI{
-		Snapshot: func() (OfficialForgePanelSnapshot, error) {
+		State: func(context.Context, string) (OfficialForgePanelState, error) {
 			mu.Lock()
 			defer mu.Unlock()
-			out := make([]OfficialForgePanelBinding, len(state))
-			copy(out, state)
-			return OfficialForgePanelSnapshot{Version: version, Bindings: out}, nil
+			return state, nil
 		},
-		Wait: func(ctx context.Context, since int64) error {
+		Wait: func(ctx context.Context, _ string) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -298,7 +443,7 @@ func TestForgePanelFollowOverRealHTTP(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		httpSrv.URL+"/api/forgePanel.follow", strings.NewReader(`{}`))
+		httpSrv.URL+"/api/forgePanel.follow", strings.NewReader(`{"sessionId":"s-1"}`))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -328,21 +473,33 @@ func TestForgePanelFollowOverRealHTTP(t *testing.T) {
 		}
 		return out
 	}
-	if got := readLine(); got["type"] != "baseline" {
-		t.Fatalf("首帧必须是 baseline：%v", got)
-	}
+	assertOfficialPanelStateShape(t, readLine())
 
+	// 变异：底层状态换成"已创建 worktree"（created 非空、editable=false）。
 	mu.Lock()
-	state = append(state, OfficialForgePanelBinding{
-		SessionID: "s-1", URL: "https://github.com/o/r/pull/7", Tracked: true,
-	})
-	version++
+	next := officialPanelStateForTest(false, nil)
+	next.Worktree.Created = &OfficialForgeSessionWorktree{
+		Path:           "/repo/checkout/.agents/worktrees/dsh-1",
+		Branch:         "dsh-1",
+		BaseCommit:     "cafe",
+		RepositoryRoot: "/repo/checkout",
+	}
+	next.Worktree.Request = &OfficialForgeWorktreeRequest{}
+	state = next
 	mu.Unlock()
 	wake <- struct{}{}
 
 	got := readLine()
-	if got["type"] != "upsert" {
-		t.Fatalf("第二帧必须是 upsert：%v", got)
+	worktree := findWorktree(t, got)
+	created, ok := worktree["created"].(map[string]any)
+	if !ok {
+		t.Fatalf("created 必须出现：%v", worktree)
+	}
+	if created["branch"] != "dsh-1" || created["baseCommit"] != "cafe" {
+		t.Fatalf("created 值不对：%v", created)
+	}
+	if created["from"] != nil {
+		t.Fatalf("没请求 base 分支时 from 必须是 null：%v", created)
 	}
 	// 取消连接必须让服务端收尾（不是泄漏 goroutine）。
 	cancel()

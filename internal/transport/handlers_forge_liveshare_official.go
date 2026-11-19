@@ -296,7 +296,7 @@ func forgeLiveshareSpecs() []forgeMethodSpec {
 			official: "typert.host.js:934 / client-ui-forge/src/index.ts:158",
 			params:   sessionOnly,
 			need:     "forge panel 状态流（ForgePanelState：先当前状态再后续状态）+ session query + forge registry",
-			note:     "本仓没有 panel 状态机；开一条只发空帧的流就是假流式",
+			note:     "已真实现：handlers_forge_panel_state.go 按官方 ForgePanelState 逐帧发当前状态（含 worktree.editable / worktree.creation）；这一行走 501 只在宿主没挂 OfficialForgePanelAPI.State（没有 worktree 服务与绑定账本）时生效——空帧流不算实现，所以未接线时如实报缺",
 		},
 		{
 			method:   MethodForgePanelLocalDiff,
@@ -434,8 +434,7 @@ func (s *Server) serveOfficialForgeLiveshareAPI(w http.ResponseWriter, r *http.R
 	// PARITY-W2-STATE：forgePanel 的 track/dismiss/refresh/follow 有真实绑定
 	// 存储时走真实现；没接线（api 全 nil）仍落下面的 501，语义不变。
 	if IsOfficialForgePanelStateMethod(name) {
-		if api := s.officialForgePanelAPI(); api.Track != nil || api.Dismiss != nil ||
-			api.Refresh != nil || api.Snapshot != nil {
+		if api := s.officialForgePanelAPI(); api.forgePanelWired() {
 			if Method(name) == MethodForgePanelFollow {
 				s.ServeOfficialForgePanelFollowHTTP(w, r)
 				return
