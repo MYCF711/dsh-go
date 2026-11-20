@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"dshgo/internal/kernel"
+	"dshgo/internal/sandbox"
 	"dshgo/internal/spi"
 )
 
@@ -78,6 +79,10 @@ func (t *Tool) startBackground(ctx context.Context, spec backgroundSpec) (spi.Re
 		Command:     spec.command,
 		Workdir:     spec.workdir,
 		Background:  true,
+		// 后台面由 jobs 运行时（bash Service）执行，那里打不了受限令牌，
+		// 所以这一步**如实**报策略层。受控根模式在 Exec 里就已经拒绝后台请求了，
+		// 走不到这里；这里写死 policy-only 而不是抄 runner 的档位，是为了不冒名。
+		Enforcement: string(sandbox.EnforcementPolicyOnlyNoOSIsolation),
 	}
 	seam, err := t.jobsSeam()
 	if err != nil {

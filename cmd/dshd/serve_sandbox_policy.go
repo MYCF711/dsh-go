@@ -313,7 +313,24 @@ type sandboxPermissionResult struct {
 	Persisted   bool         `json:"persisted"`
 	Approval    string       `json:"approval,omitempty"`
 	Enforcement string       `json:"enforcement"`
-	Error       string       `json:"error,omitempty"`
+	// EnforcementNote 说明 enforcement 为什么是这一档：未到达 ACL 层时必须给出原因
+	// （没配受控根 / 档位是 danger-full-access / 本平台没实现），不许只报一个值。
+	EnforcementNote string `json:"enforcement_note,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
+// sandboxEnforcementNow 报告这个会话当前**真实**能到达的隔离层级。
+//
+// 受控根是显式开关（`DSHD_SANDBOX_ACL_ROOT`）：没配就只能是策略层，
+// 这里如实报 policy-only 并带上原因，不把「有能力做」写成「已经做了」。
+func sandboxEnforcementNow(home, sessionID string, mode sandbox.Mode) (string, string) {
+	enforcement, note := sandbox.EnforcementFor(sandbox.RunnerSpec{
+		SessionID: sessionID,
+		ParentDir: os.Getenv(sandbox.EnvACLRoot),
+		HomeDir:   home,
+		Mode:      mode,
+	})
+	return string(enforcement), note
 }
 
 // sandboxApprovalValue 是旧的审批值集合。它们仍然能设置，但不再被当作 sandbox 档位。
@@ -335,20 +352,27 @@ func sandboxSetPermission(
 	presets *modes.Registry,
 	sandboxStore *sandboxModeStore,
 	approvals *permissionOverrideStore,
-) (sandboxPermissionResult, error) {
+) (result sandboxPermissionResult, err error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return sandboxPermissionResult{}, fmt.Errorf("%w: id 为空：要改哪个会话", sandbox.ErrMissingContext)
 	}
+	// enforcement 按**最终生效档位**报：只在成功返回时算一次，免得三处 return 各写一遍
+	// 又漂成不一致。受控根没配/档位不允许/平台没实现时它自己会退回 policy-only 并带上原因。
+	defer func() {
+		if err != nil {
+			return
+		}
+		result.Enforcement, result.EnforcementNote = sandboxEnforcementNow(home, sessionID, result.Effective)
+	}()
 	current, err := resolveSandboxModeForSession(home, sessionID, presets, sandboxStore)
 	if err != nil {
 		return sandboxPermissionResult{}, err
 	}
-	result := sandboxPermissionResult{
-		Action:      string(sandbox.ActionAllow),
-		Mode:        current.Effective,
-		Effective:   current.Effective,
-		Preset:      current.PresetID,
-		Enforcement: string(sandbox.EnforcementPolicyOnlyNoOSIsolation),
+	result = sandboxPermissionResult{
+		Action:    string(sandbox.ActionAllow),
+		Mode:      current.Effective,
+		Effective: current.Effective,
+		Preset:    current.PresetID,
 	}
 	trimmed := strings.TrimSpace(value)
 	switch {

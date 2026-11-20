@@ -66,6 +66,15 @@ type Enforcement string
 const (
 	// EnforcementPolicyOnlyNoOSIsolation 表示只有工具前置策略，没有 OS 文件或网络隔离。
 	EnforcementPolicyOnlyNoOSIsolation Enforcement = "policy-only-no-os-isolation"
+	// EnforcementWindowsACLWriteOnly 是 Windows ACL runner **真实**到达的层级：
+	// 只限制「受控根之外的写与删」（WRITE_RESTRICTED 受限 SID + Low 完整性标签 +
+	// 受控根 DACL），读、网络、进程可见性、注册表、以及受控根**内部**的写都不受限。
+	//
+	// 名字里带 `partial` 是刻意的：官方 `dsh-sandbox-windows-acl` 自标 partial
+	// （`README.zh.md:127`「写入与删除受限；读取、网络与进程可见性不受限」），
+	// 而且官方连工作区都授给受限 SID；本仓只授宿主自有的受控根，所以比官方**还窄一层**。
+	// 任何把这一档写成「完整沙箱」的文案都是冒名（`AGENTS.md`「沙盒不得冒名」）。
+	EnforcementWindowsACLWriteOnly Enforcement = "windows-acl-write-only-partial"
 )
 
 // Operation 是被闸门的操作类型。

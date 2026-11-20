@@ -492,7 +492,7 @@
       "id": "sandbox",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`internal/sandbox/policy.go` `New`/`evaluate` 三档、`internal/sandbox/escalation.go`（官方 `dsh-sandbox/src/escalation.ts` 逐字移植：四个错误码 / `WIDER_MODES` 阶梯 / 配对校验 / 官方标记）、`internal/sandbox/runtime.go` `NewGate`/`NewBoundary`/`CheckWrite`/`SetSessionMode`",
+      "evidence": "`internal/sandbox/runner.go`（受控根路径/引用计数生命周期/`EnforcementFor`/`ProbeExecutable`）、`internal/sandbox/runner_windows.go`（`CreateRestrictedToken(WRITE_RESTRICTED=0x8)` + `SetTokenInformation(TokenIntegrityLevel, S-1-16-4096)` + `GetNamedSecurityInfoW`/`SetEntriesInAclW`/`SetNamedSecurityInfoW` 直授随机会话 SID + `os/exec` 的 `syscall.SysProcAttr.Token` 启动）、`internal/sandbox/runner_other.go`（非 Windows fail-loud）、`internal/sandbox/policy.go:66-77` `EnforcementWindowsACLWriteOnly`、`internal/sandbox/runner_windows_test.go`（四条证明）、`cmd/dshd/serve_sandbox_policy.go` `sandboxEnforcementNow`（`enforcement` + `enforcement_note` 如实上报）",
       "changes": [
         {
           "from": "DEFERRED",
@@ -500,7 +500,7 @@
           "source": "audit-4.1"
         }
       ],
-      "note": "2026-11-19 重判：官方 `id: sandbox` 绑的是 `dsh-sandbox-local`（真 Windows ACL 受限令牌 runner，`src/index.ts:184/554`），本仓只有策略层 + 路径边界，缺 runner；官方 runner 会往工作区目录树写驻留 ACL/Low 标签（`README.zh.md:130-131`），属需用户拍板的独立单。见 `docs/sandbox-trio-official-shape.md`、register §4.6"
+      "note": "2026-11-20 收口（task-129）：Windows ACL runner 真落地，四条证明在 `runner_windows_test.go`（根外写 code=5 / 根内写 code=0 / 删根后父目录 DACL 逐字不变 / 同 Low 完整性只差一个 ACE 的因果对照）。**仍是 PARTIAL 且比官方窄一层**：只授宿主自有的 `<home>/sandbox-roots/<session-id>/`，绝不往用户/共享工作区写驻留 ACE 或 Low 标签（官方 `README.zh.md:130-131` 的驻留代价由此避免）；读、网络、进程可见性、注册表不受限；默认不启用（`DSHD_SANDBOX_ACL_ROOT`），没配时 enforcement 如实报 `policy-only-no-os-isolation`。旧的「需用户拍板是否接受驻留 ACL」问题因此不再成立——本实现没有驻留改动，删掉受控根即无残留。"
     },
     {
       "id": "sandbox-policy",
@@ -530,7 +530,7 @@
       "id": "pwsh-sandbox",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`modules/tool/pwsh/pwsh.go` 官方 `sandbox_permissions`+`justification` schema、`ParsePermission`、`authorize`（拒绝前零进程）；`modules/tool/pwsh/sandbox_scope.go` 准入层配对；`internal/sandbox/escalation.go`",
+      "evidence": "`modules/tool/pwsh/sandbox_runner.go`（每会话 runner 缓存 + 能力探针 + 如实退回 + `workdirInsideRoot`）、`modules/tool/pwsh/pwsh.go` 结果 `data` 的 `enforcement`/`sandbox_root`/`runner_note`、`modules/tool/pwsh/sandbox_runner_test.go`、`internal/sandbox/runner.go` `ProbeExecutable`",
       "changes": [
         {
           "from": "DEFERRED",
@@ -538,7 +538,7 @@
           "source": "audit-4.1"
         }
       ],
-      "note": "官方 `cordis.patch.yml:257` 在 win32 **启用**，且是唯一把每条 pwsh 命令送进 ACL runner 的执行器（`dsh-pwsh-sandbox/src/index.ts:4-5/194-196`）；本仓有策略闸门 + escalation 契约，缺 runner（同 #40）"
+      "note": "2026-11-20 收口（task-129）：已接线到真 ACL runner，但**先探一次**再决定——探针不通就如实退回策略层并把原因写进 `runner_note`，不静默降级；受控根模式下 `run_in_background` 明确拒绝（后台面打不了受限令牌），越界 workdir fail-loud（不替调用方改写 cwd）。**本机实测**：PowerShell 7 在受限令牌下加载期就 `0xc0000142`（`cmd.exe` 正常；只造受限令牌、不降完整性仍 `0xc0000142` ⇒ 挡住它的是受限令牌本身，不是 Low 标签），所以今天生产里 `enforcement` 仍是 `policy-only-no-os-isolation`。与官方形状的差距因此从「没有 runner」变成「runner 有、但受控根版在受限令牌下跑不了 pwsh」——受限令牌下的 DLL 加载/窗口站访问需要另一轮独立设计。"
     },
     {
       "id": "approval",
