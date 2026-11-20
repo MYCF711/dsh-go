@@ -404,7 +404,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	}
 	// 官方 #53 `agent-instructions` durable 基线：用户消息之后、**耐久 checkpoint 之前**
 	// （侧车按"请求前缀"记身份，锚点必须覆盖真实请求）。每会话一份投影器；
-	// 默认不挂载（`DSHD_INSTRUCTION_DURABLE=1` 才开，理由见 aiInstrDurableEnabled）。
+	// 默认形状是**唯一载体**（系统提示不装配指令段，判据见 instructionsCarriedByDurableFrame）。
 	aiInstr := r.aiInstrFor(sessionID)
 	aiInstrText, aiErr := aiInstr.Baseline(logw, cwd)
 	if aiErr != nil {
@@ -1013,7 +1013,7 @@ func cmdACP(argv []string) error {
 	maxInlineTokens := fs.Int("max-inline-tokens", 0, "工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
 	home := fs.String("home", defaultHome(), "会话根目录")
 	steps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步")
-	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "AGENTS.md 进系统提示的字节上限（0=不传）")
+	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "每个工作区指令链的字节上限（进 durable 帧；0=不传）")
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	// 与 run/serve 同一份默认值与同一套写法（整数或 true/false），见 host_run_options.go。
 	autoCompact := defaultAutoCompact
@@ -1270,10 +1270,10 @@ func cmdACP(argv []string) error {
 // 用途：给"写代码的执行者"喂精简手册（docs/WORKER.md），而不是维护者那本。
 var rulesPath = flag.String("agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 
-// buildSystemPrompt 保留非 ACP 入口的原行为：没有显式 home，就不注入全局规则。
-func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes int) (string, error) {
-	return buildSystemPromptWithHome(reg, model, cwd, "", workspaceBytes)
-}
+// 注：原来还有一个 `buildSystemPrompt`（home 固定传空串的薄包装，只给 run 用）：
+// 它让 run 与 acp 在"谁承载指令"这件事上各判各的（run 永远没有 home ⇒ 永远看不到
+// 用户全局链，而 durable 侧拿得到）。run 现在直接调 `buildSystemPromptWithHome` 并传
+// `--home`，包装没有第二个调用方了，删掉以免有人再拿它绕开判据。
 
 // buildSystemPromptWithHome 分别给 <home>/AGENTS.md 与项目规则同样的正文预算。
 //
@@ -1282,15 +1282,17 @@ func buildSystemPrompt(reg spi.ToolRegistry, model, cwd string, workspaceBytes i
 // 没设/全空白 = 宿主既有形状逐字节不变。两个入口（run / acp）都经过这里，
 // 所以不存在"某个入口偷偷不读"。
 //
-// 官方 #53 `agent-instructions` 默认开（`dsh-base` 带着它、每链 65,536 字节，
-// 见 `@deepseek-ai/dsh-agent-instructions/README.md:30`）：所以这里**默认打开**
-// project root→cwd 指令链（`prompt.Context.EnableInstructionChain`）。关闭方式
-// `DSHD_INSTRUCTION_CHAIN=0`（显式关，不是"没设就不开"）。
+// 官方 #53 `agent-instructions` **默认开**（`dsh-base` 带着它、每链 65,536 字节，
+// 见 `@deepseek-ai/dsh-agent-instructions/README.md:30`），而且官方把指令放在
+// **一条 durable `user/message` 基线帧**里（README.md:34）——所以这里的默认形状是：
+// `InstructionsInDurableFrame` 为真 ⇒ 系统提示里**一个指令段都不装配**
+// （`GlobalRules` / `WorkspaceRules` / `ProjectInstructions` 全部让位），指令由
+// durable 帧唯一承载。判据只有一处：`instructionsCarriedByDurableFrame(home)`。
 //
-// 为什么默认开而不是默认关：能力下限规则要求"官方默认有的，我们不能默认没有"。
-// 官方在 base 组合里就是开着的；本仓以前只有"一个全局文件 + 一个 cwd AGENTS.md"
-// 两点链，等于默认少了整条 project 链（monorepo 里 `pkg/AGENTS.md` 根本看不到）。
-// 显式 `--agents`（`ExtraRulesPath`）给出时链让位：那是宿主独有的"单手册"入口。
+// 只有**没有** durable 载体时才回到旧形状（三条显式出口写在
+// `agent_instructions_wiring.go` 文件头）：`--agents` 单手册、`DSHD_INSTRUCTION_CHAIN=0`、
+// 没有 harness home 的装配。显式 `--agents`（`ExtraRulesPath`）给出时链让位：那是宿主
+// 独有的"单手册"入口。
 func buildSystemPromptWithHome(reg spi.ToolRegistry, model, cwd, home string, workspaceBytes int) (string, error) {
 	globalRulesPath := ""
 	sharedGlobalRulesPath := ""
@@ -1321,6 +1323,9 @@ func buildSystemPromptWithHome(reg spi.ToolRegistry, model, cwd, home string, wo
 		ExtraRulesPath:         *rulesPath,
 		PersonaPrefix:          strings.TrimSpace(os.Getenv(personaPrefixEnv)),
 		EnableInstructionChain: instructionChainEnabled(),
+		// 指令的唯一载体是 durable 帧：为真时系统提示里连旧的两段
+		// （`GlobalRules` / `WorkspaceRules`）也不装配——它们带的就是同一批 AGENTS.md。
+		InstructionsInDurableFrame: instructionsCarriedByDurableFrame(home),
 	}), nil
 }
 

@@ -129,10 +129,13 @@ type renderedInstructionChain struct {
 // 单点 `WorkspaceRules`：库层默认关闭 = 既有提示形状逐字节不变（官方链要跨
 // 全局链 + 项目链改装配形状，不能靠"顺手多一段"偷偷翻掉既有字节）。
 //
-// **生产装配点是开着的**：`cmd/dshd/acp.go` 的 `buildSystemPromptWithHome` 默认传
-// `EnableInstructionChain: instructionChainEnabled()`（`DSHD_INSTRUCTION_CHAIN=0` 可关），
-// 因为官方 `dsh-base` 默认就装配 `dsh-agent-instructions`（README.md:30），
-// "官方默认有的，我们不能默认没有"。库层默认关只是为了让改造保持可验证。
+// **生产装配点由 durable 载体决定**：`cmd/dshd/acp.go` 的 `buildSystemPromptWithHome`
+// 只在**没有** durable 载体时才让这段进系统提示（`Context.InstructionsInDurableFrame`
+// 为假：显式 `--agents` 单手册、`DSHD_INSTRUCTION_CHAIN=0`、没有 harness home）。
+// 默认形状是官方的：项目链与用户全局链都渲染进**一条** durable `user/message`
+// 基线帧（`internal/ainstr`），系统提示里 0 处指令——两者同时开会把同一份指令注两次。
+// 库层仍然保留这段，是因为它是 durable 层唯一的渲染实现（`ainstr` 通过
+// `LoadInstructionChain` 调它），不是"另一条并行通道"。
 type ProjectInstructions struct{}
 
 func (ProjectInstructions) Name() string { return "instructions" }
@@ -644,19 +647,18 @@ func truncateUTF8(value string, maxBytes int) string {
 	return value[:end]
 }
 
-// ---------- 未做（明确的剩余缺口，别当成已实现） ----------
+// ---------- 剩余缺口（明确的，别当成已实现） ----------
 //
-//  1. fs 操作后的嵌套文件发现 / change·removal 通知：官方靠 `tools/result` touch
-//     追踪 + durable 消息投影 + version/digest 缓存（index.ts、state.ts），
-//     本轮只做基线装配（`Build` 每次重读，cwd 变了链跟着变，但"read 到更深目录
-//     后追加新段"没有）。
-//  2. 用户全局链的**帧形状**：两根现在都读（`Context.GlobalRulesPath` 是 harness-home、
-//     `Context.SharedGlobalRulesPath` 是 `$DSH_AGENTS_HOME/AGENTS.md` → `~/.agents/AGENTS.md`，
-//     同组 trim 去重、harness-home 先丢，见 `prompt.go` 的 `GlobalRules`），但它们渲染在
-//     既有的 `全局约定（path）：正文` 块里，**不是**官方那条与 project 链合并进同一个
-//     `<system-reminder>` 帧、并且每链一份独立预算的形状（README.md:74-76）。要换成官方帧，
-//     生产提示词字节会整体翻掉，而 `cmd/dshd/prompt_budget_probe_test.go` 与
-//     `internal/prompt/budget_test.go` 按字节钉着现形状——那是一次「改判据」的改动，
-//     得由 Lead 定口径后单独做。
-//  3. 链的开关接线在 `cmd/dshd`：`EnableInstructionChain` 由调用方打开，
-//     生产两个入口（run / acp）默认传 true（`DSHD_INSTRUCTION_CHAIN=0` 可关）。
+//  1. 独立的"只做基线装配"入口：`Build` 每次重读文件系统（cwd 换了、文件改了，
+//     下一次装配的结果就跟着变）。**生产不再走这条入口**——嵌套发现 / change·removal
+//     通知由 durable 层做（`internal/ainstr` 的 reconcile + touch），本文件只被
+//     `LoadInstructionChain` 当"发现 + 读 + 组内去重 + 预算退化"的实现复用。
+//  2. 用户全局链的**系统提示形状**：两根仍可由 `GlobalRules` 渲染成
+//     `全局约定（path）：正文` 块（`prompt.go`），但那只在没有 durable 载体时才出现；
+//     默认形状下用户全局链走 durable 帧里的官方合并 `<system-reminder>`（每链一份独立
+//     预算，`instructions_chains.go` 的 `RenderInstructionChains`）。`GlobalRules` 那条
+//     旧形状因此只服务 `--agents` / `DSHD_INSTRUCTION_CHAIN=0` / 无 home 的装配。
+//  3. 链的开关接线在 `cmd/dshd`：`EnableInstructionChain` 由调用方打开；生产的
+//     "谁承载指令"由 `instructionsCarriedByDurableFrame` 一处判定
+//     （run / acp 两个入口共用，`DSHD_INSTRUCTION_CHAIN=0` 关链、
+//     `DSHD_INSTRUCTION_DURABLE=0` 只关 durable 层）。

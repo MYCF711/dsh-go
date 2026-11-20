@@ -31,7 +31,7 @@ type hostRunOptions struct {
 	// 子进程 `dshd run`：否则"从界面起的会话"与"命令行起的会话"预算不同，
 	// 而这种差异在界面上完全看不出来。
 	maxInlineTokens int
-	// workspaceBytes 是 AGENTS.md 进系统提示的字节上限（0 = 不传）。
+	// workspaceBytes 是每个工作区指令链的字节上限（渲染进官方 durable 基线帧；0 = 不传）。
 	workspaceBytes int
 	// contextWindow / maxOutput 是显式容量声明（0 = 按模型容量解析）。
 	// run 把它们写进 v4 `request/context`（contextWindow）与请求的 max_tokens（maxOutput）。
@@ -75,7 +75,7 @@ func addHostRunFlags(fs *flag.FlagSet) *hostRunOptions {
 	fs.IntVar(&o.maxInlineTokens, "max-inline-tokens", 0,
 		"工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
 	fs.IntVar(&o.workspaceBytes, "workspace-bytes", defaultWorkspaceBytes,
-		"AGENTS.md 进系统提示的字节上限（0=不传）")
+		"每个工作区指令链的字节上限（进 durable 帧；0=不传）")
 	fs.IntVar(&o.contextWindow, "context-window", 0,
 		"显式上下文窗口（写进 v4 request/context，界面据此算占比）；0=按模型容量解析")
 	fs.IntVar(&o.maxOutput, "max-output", 0,

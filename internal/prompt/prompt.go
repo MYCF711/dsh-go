@@ -54,15 +54,35 @@ type Context struct {
 	// 的默认串塞进来是另一种产品形状，不是能力补齐。要官方那句话，显式设
 	// `DSH_SYSTEM_PROMPT='You are a helpful software engineer assistant.'` 即可。
 	PersonaPrefix string
+	// InstructionsInDurableFrame 表示工作区指令**已经由别处承载**，系统提示里一个
+	// 指令段都不要装配（`GlobalRules` / `WorkspaceRules` / `ProjectInstructions` 全部让位）。
+	//
+	// 唯一合法来源是官方的 durable 基线帧（`@deepseek-ai/dsh-agent-instructions`）：
+	//
+	//	"The first request includes **one durable baseline message** with the user-global
+	//	 chain — `$DSH_HOME/AGENTS.md`, then `<agentsHome>/AGENTS.md` — followed by the
+	//	 project chain: every existing candidate file from the project root down to the
+	//	 session working directory, in broad-to-specific order."
+	//	（README.md:34；`internal/ainstr` 就是这条帧的落地）
+	//
+	// 为什么是"抑制"而不是"关掉 EnableInstructionChain"：链关掉时 `Default` 会退回
+	// 旧的单点 `WorkspaceRules`（cwd 的 AGENTS.md），而 cwd 的 AGENTS.md 正好也在
+	// durable 基线里——同一份文件于是又注了两次。抑制 = 三处一起让位，
+	// 位置因此唯一：指令只在 durable `user/message` 帧里，系统提示里 0 处。
+	InstructionsInDurableFrame bool
 	// EnableInstructionChain 打开官方 `@deepseek-ai/dsh-agent-instructions` 的
 	// **project root → session cwd** 指令链（实现与官方引文见 instructions.go）。
 	//
 	// 零值 = 关闭：`Default` 继续走旧的单点 `WorkspaceRules`，宿主既有提示形状
-	// 逐字节不变。为什么默认关闭而不是默认开：官方链把项目段从
+	// 逐字节不变。为什么库层默认关闭而不是默认开：官方链把项目段从
 	// 「一个 AGENTS.md」换成「一条带 `<system-reminder>` 框架的链」，默认翻会
 	// 改掉所有既有字节与既有测试断言；官方自己也是"挂载插件才生效"
 	// （README.md:30 "Mount this plugin when agents should work from the
 	// workspace's own instruction files"）。
+	//
+	// **生产装配不走这一支**：`InstructionsInDurableFrame` 为真时整个项目段都不装配
+	// （指令由 durable 帧唯一承载）。这一支只剩"没有 durable 载体"的形状：
+	// 显式 `--agents` 单手册、`DSHD_INSTRUCTION_CHAIN=0`、以及没有 harness home 的装配。
 	EnableInstructionChain bool
 	// ProjectRootMarkers 是官方 `projectRootMarkers`（src/config.ts:11，默认 `['.git']`）：
 	// 用这些目录名从 cwd 向上认项目根；找不到就用 cwd 自己（不猜祖先）。
@@ -357,12 +377,26 @@ func rulesFromFile(title, path string, limit int) string {
 
 // Default 是默认的装配组合。
 //
-// `EnableInstructionChain` 打开时，项目段换成官方 project 指令链（ProjectInstructions）：
-// 官方的一条消息里用户全局链在前、项目链在后（README.md:34），所以链排在 GlobalRules 之后。
+// **指令段的唯一载体是 durable 帧**（官方 README.md:34 "one durable baseline message"）：
+// `InstructionsInDurableFrame` 为真时，`GlobalRules` 与项目段**都不进系统提示**——
+// 用户全局链（两根）和项目链全在那一条 durable `user/message` 里（`internal/ainstr`）。
+// 系统提示因此只剩 Persona / Runtime / ToolGuide 三段，指令计数在请求里恒为 1。
+//
+// 不开 durable 载体时维持旧行为：项目段按 `EnableInstructionChain` 二选一
+// （官方 project 链 / 旧单点 `WorkspaceRules`），用户全局链走 `GlobalRules`。
+//
 // `ExtraRulesPath` 是宿主的**显式单手册**入口（官方没有这个字段）：一旦给了它就按既有语义
 // 只注入那一本，自动发现链让位——否则两本手册会同时进提示词，与既有语义（extra_test.go
-// "两本手册不能同时进提示词"）冲突。
+// "两本手册不能同时进提示词"）冲突。调用方在给 `--agents` 时不得打开
+// `InstructionsInDurableFrame`（两本手册 + durable 链会三份并存），判据见
+// `cmd/dshd` 的 `instructionsCarriedByDurableFrame`。
 func Default(c Context) string {
+	if c.InstructionsInDurableFrame {
+		// 指令已由 durable 帧承载：系统提示里一个指令段都不装配。
+		// 这不是"少装配了一段"，是**位置唯一性**——同一份 AGENTS.md 出现在 system 与
+		// user 两个角色里，计数就是 2，而没有任何断言会因此变红（模型只是更贵）。
+		return Assemble(c, Persona{}, Runtime{}, ToolGuide{})
+	}
 	var workspace Provider = WorkspaceRules{}
 	if c.EnableInstructionChain && strings.TrimSpace(c.ExtraRulesPath) == "" {
 		workspace = ProjectInstructions{}
