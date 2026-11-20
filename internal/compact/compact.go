@@ -123,8 +123,34 @@ type Chat interface {
 	Stream(ctx context.Context, req llm.Request, onEvent func(llm.Event) error) (*llm.Response, error)
 }
 
-// Summarize 把一段 surface 消息压成文字摘要。
+// SummarizeMaxTokensDefault 是官方摘要调用的**输出上限**出厂值。
+//
+// 官方 `@deepseek-ai/dsh-compaction-basic` 的 `maxTokens` 是"摘要调用能输出多少
+// token"，默认取 `config.maxTokens ?? headroomTokens`：
+//
+//	`tmp/GO3-PARAMS/_official/dsh-compaction-basic/lib/index.js:66-67`
+//	  const headroomTokens = config.headroomTokens ?? 65536;
+//	  const maxTokens = config.maxTokens ?? headroomTokens;
+//	同文件 :961-965 把它放进 `spec.maxTokens`，摘要调用用这一档。
+//
+// 宿主以前写死 2000（比官方小 32 倍）：长会话的摘要会被截断在 2000 token，
+// 而官方允许 65536。这里只对齐**上限**，模型实际输出多长不受影响。
+const SummarizeMaxTokensDefault = 65536
+
+// Summarize 把一段 surface 消息压成文字摘要（官方默认输出上限）。
 func Summarize(ctx context.Context, chat Chat, model string, items []session.SurfaceMsg) (string, error) {
+	return SummarizeWithMaxTokens(ctx, chat, model, items, 0)
+}
+
+// SummarizeWithMaxTokens 同 Summarize，但显式给摘要调用的输出上限。
+//
+// maxTokens <= 0 表示用官方默认（SummarizeMaxTokensDefault）。生产调用方必须传
+// 解析后的压缩策略（`Policy.SummarizeMaxTokens()`），否则 `modelPolicies[].maxTokens`
+// 这条官方配置在摘要调用上等于没接线。
+func SummarizeWithMaxTokens(ctx context.Context, chat Chat, model string, items []session.SurfaceMsg, maxTokens int) (string, error) {
+	if maxTokens <= 0 {
+		maxTokens = SummarizeMaxTokensDefault
+	}
 	if len(items) == 0 {
 		return "", fmt.Errorf("没有可摘要的消息")
 	}
@@ -166,7 +192,7 @@ func Summarize(ctx context.Context, chat Chat, model string, items []session.Sur
 			{Role: "system", Content: "你是会话压缩器。只输出摘要正文，不要客套。"},
 			{Role: "user", Content: b.String()},
 		},
-		MaxTokens: 2000,
+		MaxTokens: maxTokens,
 	}, nil)
 	if err != nil {
 		return "", fmt.Errorf("生成摘要失败: %w", err)

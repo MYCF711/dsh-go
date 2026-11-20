@@ -121,15 +121,49 @@ func TestResolveWildcardEverything(t *testing.T) {
 	}
 }
 
-func TestPolicyBudgetHonorsExplicitMaxTokens(t *testing.T) {
+// 预留额度只来自请求面：官方 `reservedCompletionTokens(header, defaultMaxTokens)`
+// 是 `header.config.maxTokens ?? adapter defaultMaxTokens ?? 0`，压缩策略自己的
+// `maxTokens` 不参与（dsh-compaction-basic/lib/index.js:124-128 与 :959-961；
+// 策略 maxTokens 只进 spec.maxTokens = 摘要调用上限，同文件 :961-965）。
+func TestPolicyBudgetReservationIgnoresPolicyMaxTokens(t *testing.T) {
 	got := DefaultPolicy().Budget(100_000, 8192)
 	if got.ReservedCompletionTokens != 8192 {
 		t.Fatalf("没配 maxTokens 时用 adapter 每请求默认值，得到 %d", got.ReservedCompletionTokens)
 	}
 	maxTokens := 20000
 	p := Resolve([]ModelPolicy{{Model: "m", MaxTokens: &maxTokens}}, DefaultPolicy(), "m")
-	if b := p.Budget(100_000, 8192); b.ReservedCompletionTokens != 20000 {
-		t.Fatalf("显式 maxTokens 必须压过 adapter 默认值，得到 %d", b.ReservedCompletionTokens)
+	if b := p.Budget(100_000, 8192); b.ReservedCompletionTokens != 8192 {
+		t.Fatalf("策略 maxTokens 不能改预留额度（官方 :124-128 只认请求头/适配器），得到 %d", b.ReservedCompletionTokens)
+	}
+	// 负数预留按 0 处理，不能算出比消息预算还大的压力预算。
+	if b := DefaultPolicy().Budget(100_000, -5); b.ReservedCompletionTokens != 0 {
+		t.Fatalf("负预留要收成 0，得到 %d", b.ReservedCompletionTokens)
+	}
+}
+
+// 摘要调用的输出上限 = 官方 `config.maxTokens ?? headroomTokens`
+// （dsh-compaction-basic/lib/index.js:66-67），出厂 65536。
+func TestPolicySummarizeMaxTokens(t *testing.T) {
+	if got := DefaultPolicy().SummarizeMaxTokens(); got != 65536 {
+		t.Fatalf("摘要输出上限默认 = %d，官方是 headroomTokens 65536", got)
+	}
+	// 显式 maxTokens 压过 headroom。
+	maxTokens := 20000
+	p := Resolve([]ModelPolicy{{Model: "m", MaxTokens: &maxTokens}}, DefaultPolicy(), "m")
+	if got := p.SummarizeMaxTokens(); got != 20000 {
+		t.Fatalf("显式 maxTokens 必须生效，得到 %d", got)
+	}
+	// 只改 headroom 时，摘要上限跟着解析后的 headroom 走（官方 :66-67 同一行）。
+	headroom := 4096
+	q := Resolve([]ModelPolicy{{Model: "m", HeadroomTokens: &headroom}}, DefaultPolicy(), "m")
+	if got := q.SummarizeMaxTokens(); got != 4096 {
+		t.Fatalf("headroom=4096 时摘要上限应是 4096，得到 %d", got)
+	}
+	// headroom=0：官方加载期拒绝（README.md:80），宿主保留安全默认而不是发 0。
+	zero := 0
+	z := Resolve([]ModelPolicy{{Model: "m", HeadroomTokens: &zero}}, DefaultPolicy(), "m")
+	if got := z.SummarizeMaxTokens(); got != DefaultHeadroomTokens {
+		t.Fatalf("headroom=0 时摘要上限回落 %d，得到 %d", DefaultHeadroomTokens, got)
 	}
 }
 

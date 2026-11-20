@@ -73,10 +73,12 @@ func retryCount(raw string, fallback int) int {
 //
 // 返回的是**最后一次**失败（`errors.Is` 能追到原始错误），不会把中间几次的
 // 错误吞掉换成一个笼统的"重试失败"。
-func SummarizeWithRetry(ctx context.Context, chat Chat, model string, items []session.SurfaceMsg, policy RetryPolicy) (string, error) {
+// maxTokens 是摘要调用的输出上限（官方 `context.compaction.maxTokens`；
+// <=0 用官方默认，见 SummarizeMaxTokensDefault）。
+func SummarizeWithRetry(ctx context.Context, chat Chat, model string, items []session.SurfaceMsg, maxTokens int, policy RetryPolicy) (string, error) {
 	if len(items) == 0 {
 		// 走一遍 Summarize 拿到它那句准确的参数错误；不会调用模型。
-		return Summarize(ctx, chat, model, items)
+		return SummarizeWithMaxTokens(ctx, chat, model, items, maxTokens)
 	}
 	attempts := 1
 	if policy.Retries > 0 {
@@ -91,7 +93,7 @@ func SummarizeWithRetry(ctx context.Context, chat Chat, model string, items []se
 			}
 			return "", err
 		}
-		out, err := Summarize(ctx, chat, model, items)
+		out, err := SummarizeWithMaxTokens(ctx, chat, model, items, maxTokens)
 		if err == nil {
 			return out, nil
 		}

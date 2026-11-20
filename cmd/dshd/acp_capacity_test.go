@@ -139,19 +139,22 @@ func TestACPModelAndSessionCapacityIsolation(t *testing.T) {
 	}
 }
 
-// 内置已知模型的容量来自网关实测：/v1/models 对 group/deepseek-v4.1-flash-1017
-// 返回 context_length=1000000。早期写的 128000 是没实测时的猜测，会把 1M 窗口的
-// 会话画成"上下文快撑爆"；max_tokens 仍保持缺省 0（常规请求不新增该参数）。
-func TestACPKnownModelKeepsExistingCapacity(t *testing.T) {
+// 内置已知模型的容量 = 官方桌面 profile 对同一条 magpie 路由的声明：
+// contextWindow 1000000、maxTokens 128000
+// （cordis.patch.yml.bak-1794253367009:440-441；maxTokens 128000 也是 pi-ai 的
+// 默认输出上限 dsh-llm-pi-ai/lib/index.js:962/:1158）。
+// 官方请求面永远带 max_tokens（核心物化 dsh-llm/lib/index.js:2188-2193 →
+// 适配器发出 dsh-llm-deepseek/lib/index.js:1732），所以这里断言真实请求字段 128000。
+func TestACPKnownModelUsesOfficialProfileCapacity(t *testing.T) {
 	base, reqs := capacityPromptServer(t)
 	r := newCapacityPromptRunner(t, base, "group/deepseek-v4.1-flash-1017")
 	if got := r.ctxWindow; got != 1000000 {
-		t.Errorf("内置已知模型 context = %d，期望网关实测 1000000", got)
+		t.Errorf("内置已知模型 context = %d，期望官方 profile 的 1000000", got)
 	}
 	events := promptOnce(t, r, "known-session")
 	req := onlyCapacityRequest(t, reqs)
-	if got := req.MaxTokens; got != 0 {
-		t.Errorf("内置已知模型新增了 max_tokens=%d，期望保持缺省 0", got)
+	if got := req.MaxTokens; got != 128000 {
+		t.Errorf("内置已知模型 max_tokens = %d，期望官方 profile 的 128000", got)
 	}
 	if got := usageSize(events); got != 1000000 {
 		t.Errorf("已知模型 usage_update size = %d，期望 1000000", got)

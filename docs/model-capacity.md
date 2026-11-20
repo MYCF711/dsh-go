@@ -9,12 +9,12 @@
 按字段应用以下顺序：
 
 1. 调用方显式声明的正整数优先；32K/8K 及更小端点的值原样保留，不被默认值抬高。
-2. 当前内置已知模型使用既有兼容值。
+2. 内置容量表的已知模型使用官方声明值（magpie 两个模型各 `1000000/128000`，见 §2 与 `internal/llm/capacity.go` 的注释）。
 3. 只有未声明容量的自定义模型补十进制 **1,000,000 context / 128,000 maxOutput**（不是 1,048,576 / 131,072）。
 
 当前声明入口：
 
-- 常规 agent 调用：`agent.Loop.Capacity`；解析后的 `MaxOutput` 写入 `llm.Request.MaxTokens`，因此未声明自定义模型的常规请求带 `max_tokens:128000`。
+- 常规 agent 调用：`agent.Loop.Capacity`；解析后的 `MaxOutput` 写入 `llm.Request.MaxTokens`。**包括内置模型在内**，常规请求都带 `max_tokens`——官方 0.2.2 的请求面永远有输出上限：适配器声明 `defaultMaxTokens`（`dsh-llm-deepseek/lib/index.js:536`、`dsh-llm-pi-ai/lib/index.js:1158`），核心在调用配置省略时把它物化（`dsh-llm/lib/index.js:2188-2193`），适配器再原样发出（`dsh-llm-deepseek/lib/index.js:1732`）。
 - ACP：`--context-window` 与 `--max-output`。两者缺省为 0，表示按模型解析；显式正值优先。有效 `ContextWindow` 同时作为 `usage_update.size`。
 
 ## 2. 当前“已知 / 自定义”的边界
@@ -23,8 +23,9 @@
 
 | 模型 ID | 未显式声明时的结果 |
 |---|---|
-| `group/deepseek-v4.1-flash-1017`（当前内置默认模型） | 保持 `ContextWindow=128000`、`MaxOutput=0`；常规请求仍不新增 `max_tokens` |
-| 其他非空自由文本 `--model` | 视为未声明自定义模型，得到 `1000000/128000` |
+| `group/deepseek-v4.1-flash-1017`（当前内置默认模型） | `ContextWindow=1000000`、`MaxOutput=128000`，与官方桌面 profile 的 `contextWindow: 1000000` / `maxTokens: 128000` 逐字一致（`cordis.patch.yml.bak-1794253367009:440-441`） |
+| `group/kimi-k3.1-pro`（官方 profile 同一条 magpie 渠道的第二个模型） | `1000000/128000`（同文件 `:446-453`） |
+| 其他非空自由文本 `--model` | 视为未声明自定义模型，得到 `1000000/128000`（pi-ai 默认 `dsh-llm-pi-ai/lib/index.js:960,:962,:1158`） |
 | 空模型 ID | 不补默认值，保留调用方声明；空零值仍是未知 |
 
 因此，“网关列表里存在某个 ID”不等于“宿主知道它的容量”。较小端点必须经上述声明入口显式给出容量，否则会按自定义默认处理。后续若引入真实模型目录，应在同一个解析点补目录优先级，而不是在 ACP、Transport 或请求构造处另写一套默认值。
@@ -54,7 +55,7 @@ go test ./cmd/dshd -run 'Capacity' -count=1 -v
 - 未声明自定义模型得到十进制 1M/128K，真实 ACP HTTP 请求带 `max_tokens=128000`。
 - 显式 32K/8K 原样生效，`--context-window` 使用的同一入口优先于默认值。
 - A→B→A 不同模型及不同会话的请求和 `usage_update` 不串值。
-- 内置已知模型保持 128K 窗口且请求不新增输出上限。
+- 内置已知模型按官方 profile 声明得到 `1000000/128000`，请求带 `max_tokens:128000`。
 - 空 ID、逐字段声明和更小端点覆盖都有独立解析测试。
 
 定向命令：

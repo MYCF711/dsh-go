@@ -128,6 +128,27 @@ func TestSummarizeCallsModelOnce(t *testing.T) {
 	}
 }
 
+// 摘要调用的输出上限：默认 = 官方 context.compaction.maxTokens（config.maxTokens
+// ?? headroomTokens，出厂 65536，dsh-compaction-basic/lib/index.js:66-67）；显式
+// 传入（Policy.SummarizeMaxTokens）必须覆盖，否则 modelPolicies[].maxTokens 这条
+// 官方配置在摘要调用上就没接线。
+func TestSummarizeOutputCap(t *testing.T) {
+	chat := &fakeChat{reply: "ok"}
+	if _, err := Summarize(context.Background(), chat, "m", surfaceOf(2)); err != nil {
+		t.Fatal(err)
+	}
+	if chat.got.MaxTokens != SummarizeMaxTokensDefault {
+		t.Fatalf("默认摘要上限 = %d，官方 %d", chat.got.MaxTokens, SummarizeMaxTokensDefault)
+	}
+	chat = &fakeChat{reply: "ok"}
+	if _, err := SummarizeWithMaxTokens(context.Background(), chat, "m", surfaceOf(2), 20000); err != nil {
+		t.Fatal(err)
+	}
+	if chat.got.MaxTokens != 20000 {
+		t.Fatalf("显式摘要上限没生效：%d", chat.got.MaxTokens)
+	}
+}
+
 func TestSummarizeErrors(t *testing.T) {
 	if _, err := Summarize(context.Background(), &fakeChat{reply: "x"}, "m", nil); err == nil {
 		t.Fatal("空输入必须报错")

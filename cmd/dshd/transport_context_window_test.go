@@ -4,7 +4,7 @@ package main
 //
 // 旧实现只认 DSHD_CONTEXT_WINDOW，没设就恒回 0——真实试玩里状态栏的上下文占用
 // 于是永远不显示。这里钉住新的解析顺序，**按官方基线**：
-// 模型目录 > DSHD_CONTEXT_WINDOW（兜底）> 内置表 > 0。
+// 模型目录 > 内置表（官方 base.contextWindow）> DSHD_CONTEXT_WINDOW（兜底）> 0。
 // 官方证据：llm-pi-ai `entry.contextWindow ?? base.contextWindow ??
 // request.defaultContextWindow`（@dsa/dsh-llm-pi-ai/lib/index.js:694）；
 // `DSH_CONTEXT_WINDOW` 只在 dsh-sdk-minimal 里作 defaultContextWindow 兜底
@@ -135,12 +135,36 @@ func TestLoadContextWindowCatalogBeatsEnv(t *testing.T) {
 	}
 }
 
-// 目录没给这个模型声明窗口时，env 才生效（官方 sdk-minimal 的 defaultContextWindow 语义）。
-// 用 32000 而不是 1000000：内置表兜底也是 1000000，选它区分不出"env 生效"。
+// 目录与内置表都没给这个模型声明窗口时，env 才生效（官方 sdk-minimal 的
+// defaultContextWindow 语义；解析链里它在 base.contextWindow 之后，
+// `tmp/GO3-PARAMS/_official/dsh-llm-pi-ai/lib/index.js:695-696`）。
 func TestLoadContextWindowEnvFallbackWhenCatalogMisses(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	const sid = "session-context-window-env-fallback-2"
+	const unknownModel = "custom/not-in-builtin"
+	seedTurnSession(t, home, cwd, sid, func(lg *session.Log) error {
+		return lg.Append("request/context", map[string]any{"provider": "other", "model": unknownModel})
+	})
+	writeModelCatalog(t, home, `{"id":"other/model","name":"other","contextWindow":65536}`)
+	t.Setenv("DSHD_CONTEXT_WINDOW", "32000")
+
+	if got := loadContextWindow(t, home, cwd, sid, func(src *sessionSource) {
+		src.catalog = llm.OpenModelCatalog(home)
+	}); got != 32000 {
+		t.Fatalf("session.load contextWindow = %d，期望 env 兜底 32000（目录与内置表都没声明这个模型）", got)
+	}
+}
+
+// 内置表是官方 base.contextWindow（适配器目录条目），属"声明"：env 不能压过它。
+// 官方解析链 entry.contextWindow ?? base.contextWindow ?? request.defaultContextWindow
+// （`tmp/GO3-PARAMS/_official/dsh-llm-pi-ai/lib/index.js:695-696`）里
+// defaultContextWindow 在 base 之后；官方桌面 profile 给这条 magpie 路由写的
+// contextWindow 就是 1000000（cordis.patch.yml.bak-1794253367009:440）。
+func TestLoadContextWindowBuiltInDeclarationBeatsEnv(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	const sid = "session-context-window-builtin-vs-env"
 	seedTurnSession(t, home, cwd, sid, func(lg *session.Log) error {
 		return lg.Append("request/context", map[string]any{"provider": "magpie", "model": knownModelID})
 	})
@@ -149,8 +173,8 @@ func TestLoadContextWindowEnvFallbackWhenCatalogMisses(t *testing.T) {
 
 	if got := loadContextWindow(t, home, cwd, sid, func(src *sessionSource) {
 		src.catalog = llm.OpenModelCatalog(home)
-	}); got != 32000 {
-		t.Fatalf("session.load contextWindow = %d，期望 env 兜底 32000（目录没声明这个模型）", got)
+	}); got != 1000000 {
+		t.Fatalf("session.load contextWindow = %d，期望内置声明的 1000000（env 32000 只配给未声明模型）", got)
 	}
 }
 

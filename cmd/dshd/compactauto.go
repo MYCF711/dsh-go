@@ -56,7 +56,7 @@ func autoCompact(ctx context.Context, path string, keep, maxMessages int, model,
 	// 摘要失败按官方 `compactionRetries`（DSHD_COMPACT_RETRIES，默认 1）重试：
 	// 以前一次抖动就整次压缩失败，这一轮上下文继续往上顶。
 	text, err := compact.SummarizeWithRetry(ctx, llm.New(base, envOr("DSHD_LLM_KEY", "")), model, items,
-		compact.RetryPolicyFromEnv(os.Getenv))
+		compact.DefaultPolicy().SummarizeMaxTokens(), compact.RetryPolicyFromEnv(os.Getenv))
 	if err != nil {
 		return out, fmt.Errorf("生成摘要失败: %w", err)
 	}

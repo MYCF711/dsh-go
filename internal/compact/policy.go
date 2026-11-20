@@ -223,12 +223,20 @@ func mergePolicy(defaults Policy, p ModelPolicy) Policy {
 
 // Budget 把策略摊成一份窗口预算（官方 resolveCompactSpec 的宿主形状）。
 //
-// reservedFallback 是"请求头没声明 maxTokens 时 adapter 给的每请求默认值"；
-// 策略显式给了 maxTokens 就压过它（官方 config.maxTokens 语义）。
-func (p Policy) Budget(contextWindow, reservedFallback int) PressureBudget {
-	reserved := p.MaxTokens
-	if reserved <= 0 {
-		reserved = reservedFallback
+// # reserved 只来自请求面，不受压缩策略的 maxTokens 影响
+//
+// 官方 `resolveCompactSpec(policy, contextWindow, reservedCompletionTokens)`
+// 的第三个参数由 `reservedCompletionTokens(header, info.defaultMaxTokens)` 给出
+// —— 即 `header.config.maxTokens ?? adapter defaultMaxTokens ?? 0`
+// （`tmp/GO3-PARAMS/_official/dsh-compaction-basic/lib/index.js:124-128`、`:959-961`）。
+// 压缩策略自己的 `maxTokens` **不参与**预留：同文件 :961-965 里它只写进
+// `spec.maxTokens`，那是**摘要调用**的输出上限（见 Policy.SummarizeMaxTokens）。
+//
+// 旧实现让 `modelPolicies[].maxTokens` 顶掉这里的预留，等于把"摘要能写多长"
+// 当成"这次请求预留多少输出"——两件事，后者错一格，压力预算就整体偏。
+func (p Policy) Budget(contextWindow, reserved int) PressureBudget {
+	if reserved < 0 {
+		reserved = 0
 	}
 	return PressureBudget{
 		ContextWindow:            contextWindow,
@@ -236,6 +244,22 @@ func (p Policy) Budget(contextWindow, reservedFallback int) PressureBudget {
 		HeadroomTokens:           p.HeadroomTokens,
 		ThresholdRatio:           p.ThresholdRatio,
 	}
+}
+
+// SummarizeMaxTokens 是官方摘要调用的输出上限：`config.maxTokens ?? headroomTokens`
+// （`tmp/GO3-PARAMS/_official/dsh-compaction-basic/lib/index.js:66-67`）。
+//
+// 显式 maxTokens 优先；否则用解析后的 headroomTokens（默认 65536）。headroom 被
+// 显式配成 0 时官方在加载期就拒绝（"Zero headroom requires an explicit positive
+// maxTokens"，同包 README.md:80），宿主保留一个安全的默认上限而不是发 0。
+func (p Policy) SummarizeMaxTokens() int {
+	if p.MaxTokens > 0 {
+		return p.MaxTokens
+	}
+	if p.HeadroomTokens > 0 {
+		return p.HeadroomTokens
+	}
+	return DefaultHeadroomTokens
 }
 
 // Describe 是给诊断日志用的稳定描述（不参与判定）。
