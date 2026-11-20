@@ -26,6 +26,17 @@
 > python tmp/GO3-PARAMS/register/audit_refs.py
 > ```
 > 过程证据（`tmp/` 是 gitignore 的，不入库）：`tmp/GO8-RC2/reports/D1-param-register-impl.md`、`tmp/GO8-RC2/register/`。
+>
+> **2026-11-21 修订（两个自造默认值，先改代码、总账待重生成）**：用户指出「很多不是我设置的参数」。
+> 下面 §4–§6 的登记是 `2026-11-12T06:05` 的生成快照，仍带着旧默认值，**不要拿它当现状**；代码已改成：
+> - `toolResult.spill.maxInlineTokens` 出厂 `0`（= 官方语义的关闭保留策略）→ **`12500`**。官方原件
+>   `@deepseek-ai/dsh-base/cordis.patch.yml:417`；落点 `modules/tools/pipeline.go`（`DefaultMaxInlineTokens`）、
+>   `cmd/dshd/host_run_options.go`（`defaultMaxInlineTokensFromEnv` / `addSpillBudgetFlags`）。
+> - `--max-chars` 出厂 `4000` → **无出厂默认值**（`0` = 字符臂不参与）。官方 `dsh-spill-policy` 只有
+>   `maxInlineTokens`，没有字符旋钮（`thresholdChars: 8192` 属于另一个插件 `dsh-compaction-tool-result-pruner`）。
+>   两条一起看才有意义：4000 字符 ≈ 1000 估算 token ≪ 12500，字符臂永远先赢，官方预算被架空。
+> - **仍未对齐**（下一轮清单）：`internal/prune.DefaultMaxBytes=16<<10` / `DefaultMaxLines=200`（投影层，
+>   现在成了最紧的一道）、`cmd/dshd/serve.go` 的 `defaultTurnMaxSteps=2000`（官方无步数上限）。
 
 ## 0. 怎么读
 

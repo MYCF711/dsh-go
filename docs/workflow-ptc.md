@@ -189,11 +189,15 @@ workflow 被中断：已完成 2/5 步（grep、read），第 3 步 read 中断�
 
 | 层 | 阈值 | 行为 | 证据 |
 |---|---|---|---|
-| spill（事后，落盘） | 4000 **字符** | Data 外置成 artifact + 指针；Text 砍到 3000 rune（`MaxChars*3/4`） | `modules/tools/pipeline.go:23`、`:30-33`、`:200-218`、`:225`；默认值来源 `cmd/dshd/main.go:357`、`cmd/dshd/acp.go:403` |
+| spill（事后，落盘） | 官方 `maxInlineTokens` = **12500 估算 token**（文本+图片共享）；`--max-chars` 是显式才生效的兼容字符臂（出厂 0 = 不参与） | Data 外置成 artifact + 指针；token 臂换头/尾 + notice；字符臂显式配置时把 Text 砍到 `MaxChars*3/4` | `modules/tools/pipeline.go`（`DefaultMaxInlineTokens`、`overChars`、`spill`）；`modules/tools/spill_policy.go`（`retainInline`）；注册处 `cmd/dshd/host_run_options.go`（`addSpillBudgetFlags`）；官方原件 `dsh-base/cordis.patch.yml:417` |
 | prune（事前，投影） | 16 KB / 200 行 | 头 60% / 尾 40%，中间一行指针；**不超预算原样返回** | `internal/prune/prune.go:26-34`、`:79-81`、`:142-163`；调用点 `internal/session/project.go:33` |
 | compact（历史） | 尾巴 2000 token；摘要输入 24000 字符 / 单条 1200 字符 | 只压前缀 | `internal/compact/compact.go:38-40`、`:52-63`、`:116-119` |
 
-`prune` 的注释（`prune.go:26-31`）已经写明为什么 16KB 而不是 8KB：4000 字符的中文约 12KB，定 8KB 会"在已经截断过的内容上再截一刀"。
+`prune` 的注释（`prune.go:26-31`）原本的理由是"spill 先按 4000 字符截过，4000 字符的中文约 12KB，定 8KB 会在已截断的内容上再截一刀"。
+**这条前提 2026-11-21 已变**：spill 的字符臂不再有出厂 4000，出厂走的是官方 12500 token 预算（ASCII 约 50KB），
+于是 prune 的 16KB/200 行成了实际最紧的一道，而它**没有官方依据**（官方对应的是另一个插件
+`dsh-compaction-tool-result-pruner` 的 `thresholdChars: 8192` / `headChars: 4096` / `tailChars: 1024`）。
+本轮只记录、不改 prune——改它要把 16KB 换成官方的 8192/4096/1024 三件套，属于下一轮。
 
 ### 4.2 脚本侧的四条预算
 

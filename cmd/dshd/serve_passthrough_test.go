@@ -23,6 +23,7 @@ import (
 
 	"dshgo/internal/compact"
 	"dshgo/internal/session"
+	"dshgo/modules/tools"
 )
 
 // parseServeHostRunFlags 用 serve 的同一套注册函数解析参数（不启动服务器）。
@@ -78,6 +79,9 @@ func TestServeHostRunFlagsReachChildArgs(t *testing.T) {
 // 不写 --agents 时不传这个参数：空串在 run 侧是"用工作区自己的 AGENTS.md"，
 // 显式传空会是另一种语义。
 func TestServeHostRunFlagsOmitEmptyAgents(t *testing.T) {
+	// 出厂 token 预算是"官方 12500 或环境变量"（env 只当默认值）：不隔离的话，
+	// 外部恰好设了 DSHD_MAX_INLINE_TOKENS 就会让下面那条断言红在一个无关变量上。
+	t.Setenv("DSHD_MAX_INLINE_TOKENS", "")
 	opts := parseServeHostRunFlags(t, nil)
 	runner := &loopRunner{home: "h", policy: "allow", maxSteps: defaultTurnMaxSteps, model: "m", runOpts: opts}
 	args := runner.childArgs("sid", "hello")
@@ -95,8 +99,16 @@ func TestServeHostRunFlagsOmitEmptyAgents(t *testing.T) {
 	if !containsArgPair(args, "--auto-compact", autoCompactAuto) {
 		t.Fatalf("默认自动压缩阈值没有透传成 auto：%v", args)
 	}
-	if !containsArgPair(args, "--max-chars", strconv.Itoa(defaultMaxChars)) {
-		t.Fatalf("默认外置阈值没有透传：%v", args)
+	// --max-chars 的出厂值是 **0**（字符臂不参与）：官方 spill-policy 没有这个旋钮，
+	// 我们自造的 4000 已删（它会抢在官方 12500 token 预算之前截断）。仍然要透传：
+	// 0 是"字符臂关闭"这一事实，不能被"不传"顶掉（不传 = 子进程自己的默认，同样 0，
+	// 但那就不是"父进程的值是唯一真值"了）。
+	if !containsArgPair(args, "--max-chars", strconv.Itoa(0)) {
+		t.Fatalf("出厂字符阈值没有透传：%v", args)
+	}
+	// 出厂 token 预算必须是**官方的 12500**，不是 0（0 = 关闭保留策略）。
+	if !containsArgPair(args, "--max-inline-tokens", strconv.Itoa(tools.DefaultMaxInlineTokens)) {
+		t.Fatalf("出厂 token 预算没有按官方 12500 透传：%v", args)
 	}
 }
 

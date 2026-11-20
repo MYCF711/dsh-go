@@ -127,7 +127,7 @@ func (r *loopRunner) childArgs(sessionID, text string, promptContentFile ...stri
 		args = append(args, "--model", r.model)
 	}
 	// serve 侧解析过的宿主旋钮原样交给子进程：这些值在子进程里**没有别处可查**，
-	// 不传就等于退回 run 的默认（自动压缩掉回"未设置"= 用户覆盖丢失 / 外置 4000 /
+	// 不传就等于退回 run 的默认（自动压缩掉回"未设置"= 用户覆盖丢失 / 字符臂不参与 /
 	// 容量 0…）。
 	args = append(args, r.runOpts.args()...)
 	if r.reasoning != "" || r.reasoningSet {

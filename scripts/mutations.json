@@ -318,5 +318,21 @@
     "new": "\tif a == nil {\n\t\treturn\n\t}",
     "pkg": "./cmd/dshd",
     "test": "TestAIInstrFailedToolDoesNotTouch"
+  },
+  {
+    "name": "inline-budget-maxchars-default-4000-back",
+    "file": "modules/tools/pipeline.go",
+    "old": "\t// MaxChars **不**在这里补默认值",
+    "new": "\tif o.MaxChars <= 0 {\n\t\to.MaxChars = 4000\n\t}\n\t// MaxChars **不**在这里补默认值",
+    "pkg": "./cmd/dshd",
+    "test": "TestInlineBudgetOfficialDefaults"
+  },
+  {
+    "name": "inline-budget-token-default-back-to-off",
+    "file": "cmd/dshd/host_run_options.go",
+    "old": "\tif !configured {\n\t\treturn tools.DefaultMaxInlineTokens\n\t}",
+    "new": "\tif !configured {\n\t\treturn 0\n\t}",
+    "pkg": "./cmd/dshd",
+    "test": "TestInlineBudgetOfficialDefaults"
   }
 ]

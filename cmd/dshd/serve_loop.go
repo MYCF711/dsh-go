@@ -73,7 +73,7 @@ func (r *modelOverrideLoopRunner) Run(ctx context.Context, sessionID, turnID, te
 		maxSteps:     r.base.maxSteps,
 		toolsMode:    r.base.toolsMode,
 		// 宿主旋钮整块拷贝：漏了它，modelOverride 路径上的每一轮都会静默退回
-		// 子进程默认值（自动压缩掉回"未设置"= 用户的覆盖丢失 / 外置 4000 / 容量 0），
+		// 子进程默认值（自动压缩掉回"未设置"= 用户的覆盖丢失 / 字符臂不参与 / 容量 0），
 		// 而界面上毫无异常。
 		runOpts: r.base.runOpts,
 		// 沙盒档位是"每轮透传给子进程"的字段：漏了它，read-only/workspace-write
