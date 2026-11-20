@@ -153,7 +153,11 @@ func TestOpenSessionAtConcurrentWritersKeepV4SeqContiguous(t *testing.T) {
 			defer wg.Done()
 			var logw *Log
 			var err error
-			deadline := time.Now().Add(10 * time.Second)
+			// 用本包的 barrierWait（30s），不写死 10s：这条只是**防挂死的上限**，
+			// 不参与判定 —— 真正判的是「32 个写者最后全都落盘、且 v4 seq 连续」，
+			// 那两条断言在下面，一点没放宽。CI 上 -race 与上百个包并行时，32 个写者
+			// 抢同一把会话锁，10 秒不够（实测本地 -race -count=5 全绿、CI 红）。
+			deadline := time.Now().Add(barrierWait)
 			for {
 				logw, err = OpenSessionAt(path)
 				if err == nil {

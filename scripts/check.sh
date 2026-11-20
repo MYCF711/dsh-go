@@ -53,7 +53,12 @@ else
   # `FAIL go test -race`——那不是"测试挂了"，是门禁被自己的默认超时掐死（2026-11-12
   # run 43180483371 起连续复现；本地 16 核 535s 刚好擦线）。放宽的是**等待时长**，不是断言：
   # 照样要求全绿，只是给它跑完的时间。
-  race_out="$(go test ./... -race -timeout 20m 2>&1)"; race_rc=$?
+  #
+  # 2026-11-20 再放宽到 30m：20m 也不够了。三次 PR（#89/#95 等）CI 上都出现
+  # `panic: test timed out after 20m0s` 且**没有任何 --- FAIL 行** —— 说明不是某条用例
+  # 挂了，是整包被自己的超时掐死。2 核 runner 上 cmd/dshd 的 subprocess 用例在 -race
+  # 下越来越慢（分母是几十条、每条 28s 起）。同样只放宽等待，不动断言。
+  race_out="$(go test ./... -race -timeout 30m 2>&1)"; race_rc=$?
   if [ $race_rc -eq 0 ]; then
     pass "go test -race"
   elif echo "$race_out" | grep -qiE 'requires cgo|C compiler|gcc.{0,12}not found|exec: "gcc"'; then
