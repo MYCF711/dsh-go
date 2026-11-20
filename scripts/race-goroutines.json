@@ -55,31 +55,31 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:800",
+      "site": "cmd/dshd/main.go:801",
       "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
       "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:975",
+      "site": "cmd/dshd/main.go:976",
       "what": "run 的看门狗协程：父进程没了就取消本轮 ctx",
       "sync": "读过：只调 cancel()，不碰会话/日志；runCtx 与主 goroutine 共享，取消是幂等的",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:975",
+      "site": "cmd/dshd/main.go:976",
       "what": "serveJobsOut：后台任务通道",
       "sync": "读过：写 stdout 的 @@JOBS@@ 行，写侧有自己的一把锁；读的是 jobs 服务的快照",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:975",
+      "site": "cmd/dshd/main.go:976",
       "what": "父进程看门狗：父没了就取消本轮 ctx",
       "sync": "读过：只调 stopOnParentGone()（cancel 幂等），不碰会话/日志",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:975",
+      "site": "cmd/dshd/main.go:976",
       "what": "serveSteerIPC：steer IPC 接收循环",
       "sync": "读过：收到的请求投进 steerInbox（自己加锁的队列）；runCtx 取消即退",
       "verified_at": "2026-11-09"
@@ -91,13 +91,13 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/serve.go:289",
+      "site": "cmd/dshd/serve.go:290",
       "what": "插件热重载循环",
       "sync": "读过：hmrCtx 取消即退；pluginRT.HMR() 内部自己串行化，不直写共享表",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve.go:581",
+      "site": "cmd/dshd/serve.go:582",
       "what": "profile 配置热重载循环（ConfigHMR.Run）",
       "sync": "读过：hmrCtx 取消即退；store.Reload() 与 store.Revision() 各自在 config.Store 的 mu 下；本组件自己的状态（checks/reloads/lastRev/onChange/lastErr）全在 ConfigHMR.mu 下；Tick 由 tickMu 串行化；消费者在锁外被调用，单个消费者 panic 被 recover 且只记 Err。不写任何文件。",
       "verified_at": "2026-11-14"

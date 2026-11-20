@@ -186,9 +186,10 @@ func cmdServe(args []string) error {
 	// **从 serve 侧根本调不了**。默认值与 run 同源（见 host_run_options.go）。
 	serveRunOpts := addHostRunFlags(fs)
 	serveModel := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"), "模型 id（透传给子进程）")
-	// 推理强度透传给子进程；空 = 不要。界面线要能看到 reasoning 就得从这里打开。
-	serveReasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
-		"推理强度：空=不要（默认）| xhigh | max")
+	// 推理强度透传给子进程；默认 max（官方 profile 口径），空 = 不要。
+	// 界面线要能看到 reasoning 就得从这里打开。
+	serveReasoning := fs.String("reasoning", defaultReasoningEffortFromEnv(),
+		"推理强度：max=默认（官方 profile 口径）| xhigh | 空=不要")
 	addr := fs.String("addr", "", "监听地址（默认 127.0.0.1:0，端口由 OS 分配）")
 	// directoryPicker 是**互斥组合**（官方一个 Context 只能挂一套：native 的 pick
 	// 或 browse 的 list/createDirectory）。空 = 自动，按官方 resolve 的兜底取 browse

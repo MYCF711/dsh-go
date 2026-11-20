@@ -703,11 +703,12 @@ func cmdRun(argv []string) (retErr error) {
 	resumeSession := fs.String("session", "", "续这个会话（空=新建）；cwd 可省，按 id 找")
 	// 工具表默认压掉参数说明：20 次 A/B（10 个任务 × 两种表）结果一致，输入省 22%。
 	// 要完整表就显式写 --tool-schema=full——比如排查"模型没填对参数"时。
-	// 推理强度：空 = 不要（默认），xhigh/max = 向网关要推理内容。
+	// 推理强度：默认 max（官方 profile 的 agent-default-model.reasoningEffort），
+	// 空 = 不要；xhigh/max = 向网关要推理内容。
 	// 为什么要有 flag 而不是只有环境变量：界面线/脚本要能显式打开它，
 	// 而环境变量在 --help 里看不见，等于"藏起来的开关"。
-	reasoningEffort := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
-		"推理强度：空=不要（默认）| xhigh | max。要了才把 reasoning 写进日志与流")
+	reasoningEffort := fs.String("reasoning", defaultReasoningEffortFromEnv(),
+		"推理强度：max=默认（官方 profile 口径）| xhigh | 空=不要。要了才把 reasoning 写进日志与流")
 	// serve 父进程把本轮解析出的 catalog level 与 wire 一起交给真正发请求的
 	// cmdRun。selection 在每个 step/start 处落盘，不能由父进程回合后按 store 补造。
 	recordEffort := fs.Bool("record-effort", false, "serve 内部：逐步记录真实模型请求 selection")
@@ -1922,10 +1923,13 @@ func runCompactor(chat agent.Chat, logw *session.Log, budget int, policy compact
 			return nil, nil // 真没得压
 		}
 		// 摘要失败按官方 `compactionRetries`（DSHD_COMPACT_RETRIES，默认 1）重试。
-		text, err := compact.SummarizeWithRetry(ctx, chat, model, items, compact.RetryPolicy{
-			Retries:         policy.CompactionRetries,
-			OverflowRetries: policy.MaxOverflowRetries,
-		})
+		// 摘要调用的输出上限 = 官方 `context.compaction.maxTokens`
+		//（config.maxTokens ?? headroomTokens，默认 65536）。
+		text, err := compact.SummarizeWithRetry(ctx, chat, model, items, policy.SummarizeMaxTokens(),
+			compact.RetryPolicy{
+				Retries:         policy.CompactionRetries,
+				OverflowRetries: policy.MaxOverflowRetries,
+			})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "自动压缩失败（不影响本轮）：%v\n", err)
 			return nil, nil

@@ -344,12 +344,19 @@ func (s *sessionSource) Cwd(sessionID string) (string, error) {
 //     这是**官方主路径**：适配器解析链 `entry.contextWindow ?? base.contextWindow ??
 //     request.defaultContextWindow`（@dsa/dsh-llm-pi-ai/lib/index.js:694），经
 //     `request/context` 进入 contextPressure 投影；
-//  2. `DSHD_CONTEXT_WINDOW`：**兜底**。官方 `DSH_CONTEXT_WINDOW` 只出现在
-//     dsh-sdk-minimal，喂 `defaultContextWindow`（"不在适配器建议目录中的模型的后备容量"，
-//     @dsa/dsh-sdk-minimal/cordis.patch.yml:30 + README.md:35）。以前把它放在第一位，
-//     等于让运维开关压过真实模型元数据，顺序反了；
-//  3. `llm.ResolveModelCapacity` 的内置/未声明默认值；
-//  4. 都没有 → 0。
+//  2. 内置容量表（`llm.KnownModelCapacity`）：官方 `base.contextWindow`——
+//     **适配器自带目录条目**的宿主等价物。官方桌面 profile 对同一条 magpie 路由
+//     显式写了 `contextWindow: 1000000`
+//     （`D:/DeepSeek Harness/home/profiles/desktop/cordis.patch.yml.bak-1794253367009:440`、`:448`），
+//     所以它是"声明"而不是"兜底"：`request.defaultContextWindow` 不得压过它；
+//  3. `DSHD_CONTEXT_WINDOW`：**只对目录与内置表都没声明的模型生效**。官方
+//     `DSH_CONTEXT_WINDOW` 只出现在 dsh-sdk-minimal，喂 `defaultContextWindow`
+//     （"不在适配器建议目录中的模型的后备容量"，
+//     @dsa/dsh-sdk-minimal/cordis.patch.yml:30 + README.md:35）。解析链里它在
+//     `base.contextWindow` **之后**（`tmp/GO3-PARAMS/_official/dsh-llm-pi-ai/lib/index.js:695-696`），
+//     所以第 2 步必须先于它；
+//  4. `llm.ResolveModelCapacity` 对未声明自定义模型的 1M 默认值；
+//  5. 都没有 → 0。
 //
 // # 会话模型从哪来
 //
@@ -375,7 +382,15 @@ func (s *sessionSource) ContextWindow(sessionID string) int {
 			}
 		}
 	}
-	// 2) env 兜底（官方 sdk-minimal 的 defaultContextWindow 语义）。
+	// 2) 内置容量表 = 官方 base.contextWindow（适配器目录条目）。它也是"声明"，
+	//    必须排在 defaultContextWindow（DSHD_CONTEXT_WINDOW）之前；只在该模型
+	//    确实在表里时命中，未声明自定义模型继续往下走。
+	if model != "" {
+		if capacity, known := llm.KnownModelCapacity(model); known && capacity.ContextWindow > 0 {
+			return capacity.ContextWindow
+		}
+	}
+	// 3) env 兜底（官方 sdk-minimal 的 defaultContextWindow 语义）。
 	if v := os.Getenv("DSHD_CONTEXT_WINDOW"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
@@ -384,7 +399,7 @@ func (s *sessionSource) ContextWindow(sessionID string) int {
 	if model == "" {
 		return 0
 	}
-	// 3) 内置表 / 未声明自定义模型的默认值；4) 仍然没有就 0。
+	// 4) 未声明自定义模型的默认值；5) 仍然没有就 0。
 	return llm.ResolveModelCapacity(model, llm.ModelCapacity{}).ContextWindow
 }
 

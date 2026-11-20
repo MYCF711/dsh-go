@@ -53,7 +53,27 @@ const (
 	defaultAutoCompact = 40000
 	// defaultMaxChars 是工具输出外置的默认阈值。
 	defaultMaxChars = 4000
+	// defaultReasoningEffort 是**官方 0.2.2 桌面 profile 的出厂推理档**。
+	//
+	// 官方原件：`D:/DeepSeek Harness/home/profiles/desktop/cordis.patch.yml.bak-1794253367009:8`
+	// （`agent-default-model.config.reasoningEffort: max`）。官方的默认模型选择把
+	// 这一档一起带进会话，核心再把 selection 的 effort 校验并物化进每条请求
+	// （`tmp/GO3-PARAMS/_official/dsh-llm/lib/index.js:2188-2210`：
+	// `requested ?? reasoning.defaultEffort` → 落在 `resolvedConfig.reasoningEffort`），
+	// 适配器据此发 `reasoning_effort` / `output_config.effort`
+	// （`dsh-llm-pi-ai/lib/index.js:1993`、`dsh-llm-deepseek/lib/index.js:1720-1734`）。
+	//
+	// 所以"宿主默认不带推理档"与官方出厂行为相反；要关掉仍可显式
+	// `--reasoning=`（空值）或 `--reasoning off`。
+	defaultReasoningEffort = "max"
 )
+
+// defaultReasoningEffortFromEnv 是三个入口（run / acp / serve）共用的默认值解析。
+//
+// 与 `--base` 同一形状：`envOr(env, 唯一常量)`，env 只在非空时覆盖。
+func defaultReasoningEffortFromEnv() string {
+	return envOr("DSHD_REASONING_EFFORT", defaultReasoningEffort)
+}
 
 // addHostRunFlags 把宿主旋钮注册到给定 flagset，返回解析目标。
 //

@@ -96,7 +96,11 @@ func TestRunContextWindowFlagWritesRequestContext(t *testing.T) {
 
 // 不写旗标时**不许编分母**：request/context 只带 model，不带 contextWindow
 // （"按模型名猜一个分母"会让 context.usage 的百分比变成假精确）。
-// 同时常规请求不带 max_tokens——保持既有行为。
+// max_tokens 则按**模型容量**走：官方解析链
+// `entry.maxTokens ?? base.maxTokens ?? request.defaultMaxTokens`
+// （dsh-llm-pi-ai/lib/index.js:696）在 --max-output 未声明时用适配器默认，
+// 官方桌面 profile 给这条路由写的是 128000（cordis.patch.yml.bak-1794253367009:441）。
+// 所以"不发 max_tokens"不是官方行为，这里钉住 128000。
 func TestRunRequestContextOmitsUndeclaredWindow(t *testing.T) {
 	t.Setenv("DSHD_CONTEXT_WINDOW", "")
 	home, cwd := d1Workspace(t, "session-run-context-default")
@@ -119,8 +123,8 @@ func TestRunRequestContextOmitsUndeclaredWindow(t *testing.T) {
 	if len(*maxTokens) == 0 {
 		t.Fatal("没有捕获到模型请求")
 	}
-	if got := (*maxTokens)[0]; got != 0 {
-		t.Fatalf("未声明 --max-output 时不该带 max_tokens，实际 %d", got)
+	if got := (*maxTokens)[0]; got != 128000 {
+		t.Fatalf("未声明 --max-output 时 max_tokens = %d，期望模型容量的官方默认 128000", got)
 	}
 }
 

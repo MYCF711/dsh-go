@@ -80,7 +80,11 @@ func TestEffortGoalRealDSHDSetEffortCatalogLoadABRestartAndRunner(t *testing.T) 
 	assertEffortSelection(t, client, server.base, sessionA, "")
 	assertEffortSelection(t, client, server.base, sessionB, "low")
 	assertActualEffort(t, client, server.base, sessionA, "deep")
-	effortGoalPromptAndAssert(t, client, server, sessionA, "prove cleared", seen, "effort-model", "")
+	// 清掉会话档后回落到**宿主默认档**：官方 profile 出厂 max
+	// （cordis.patch.yml.bak-1794253367009:8），见 reasoning_default_test.go。
+	// 该 fixture 模型只声明 off/low/deep，所以 v4 记录的 catalog level 仍是 ""
+	// （宿主默认值不是这个模型的声明 key），但真实请求带的是默认 wire 值 "max"。
+	effortGoalPromptAndAssert(t, client, server, sessionA, "prove cleared", seen, "effort-model", "max")
 	assertActualEffort(t, client, server.base, sessionA, "")
 	assertActualEffort(t, client, server.base, sessionB, "low")
 	t.Log("EFFORT_REAL_SUMMARY OK=1 FAIL=0")

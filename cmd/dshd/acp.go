@@ -1004,8 +1004,8 @@ func cmdACP(argv []string) error {
 	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"), "模型 id")
 	// 三个入口（run/serve/acp）要有同一个开关：ACP 是 Martty 那条路，
 	// 这里缺了就意味着"同一个模型，换个客户端就没有 reasoning"——那种差异最难解释。
-	reasoning := fs.String("reasoning", os.Getenv("DSHD_REASONING_EFFORT"),
-		"推理强度：空=不要（默认）| xhigh | max")
+	reasoning := fs.String("reasoning", defaultReasoningEffortFromEnv(),
+		"推理强度：max=默认（官方 profile 口径）| xhigh | 空=不要")
 	base := fs.String("base", envOr("DSHD_LLM_BASE", defaultLLMBase), "OpenAI 兼容端点")
 	maxChars := fs.Int("max-chars", defaultMaxChars, "工具输出外置阈值（字符）")
 	// 与 run/serve 同一个旋钮（官方 0.2.2 #79 `config.maxInlineTokens`）：三个入口
@@ -1550,7 +1550,8 @@ func (r *acpRunner) compactSurface(ctx context.Context, sessionID, path string, 
 		}
 		fmt.Fprintf(os.Stderr, "超预算且无处可压：放宽到只保留最近 %d 条\n", keep)
 	}
-	text, err := compact.SummarizeWithRetry(ctx, r.compactChatFor(), r.model, items, r.retry)
+	text, err := compact.SummarizeWithRetry(ctx, r.compactChatFor(), r.model, items,
+		r.compactPolicy().SummarizeMaxTokens(), r.retry)
 	if err != nil {
 		return false, err
 	}

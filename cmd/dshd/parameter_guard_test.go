@@ -114,6 +114,10 @@ func TestGuardFlagDefaultsAreSingleSourced(t *testing.T) {
 		"home": {"defaultHome()", `envOr("DSHD_HOME", "")`},
 		// 模型端点：所有入口都必须是 envOr(env, 同一个默认常量)，不许再写字面量。
 		"base": {`envOr("DSHD_LLM_BASE", defaultLLMBase)`},
+		// 推理强度：三个入口同一个解析函数。默认 **max**（官方桌面 profile 的
+		// `agent-default-model.reasoningEffort: max`，经核心物化进每条请求），
+		// 谁把默认改回"空"或另写一份 env 读取，这条就红。
+		"reasoning": {`defaultReasoningEffortFromEnv()`},
 	}
 
 	for flag, want := range allowed {

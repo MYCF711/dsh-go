@@ -199,12 +199,17 @@ func TestRegularRequestUsesModelCapacity(t *testing.T) {
 			name: "显式32K上下文和8K输出覆盖不变", model: "custom/small",
 			declared: llm.ModelCapacity{ContextWindow: 32000, MaxOutput: 8000}, wantMaxTokens: 8000,
 		},
-		{name: "内置已知模型保持原行为", model: "group/deepseek-v4.1-flash-1017", wantMaxTokens: 0},
 		{
-			// 真实 TUI 会话持久化的模型 id 没有 `group/` 前缀；它必须归一到内置
-			// 已知模型，常规请求才不会被注入 max_tokens=128000（网关按模型上限
-			// 拒绝或截断）。这里断的是**真实请求字段**，不是常量。
-			name: "无前缀别名不注入max_tokens", model: "deepseek-v4.1-flash-1017", wantMaxTokens: 0,
+			// 官方桌面 profile 对这条 magpie 路由声明 maxTokens: 128000
+			//（cordis.patch.yml.bak-1794253367009:441），官方请求面永远带 max_tokens
+			//（dsh-llm/lib/index.js:2188-2193 物化 → dsh-llm-deepseek/lib/index.js:1732 发出）。
+			// 断的是**真实请求字段**，不是常量。
+			name: "内置已知模型带官方128K输出上限", model: "group/deepseek-v4.1-flash-1017", wantMaxTokens: 128000,
+		},
+		{
+			// 真实 TUI 会话持久化的模型 id 没有 `group/` 前缀；归一后必须与规范 id
+			// 给出同一份容量（同一个 base 目录条目），所以 max_tokens 也是 128000。
+			name: "无前缀别名与规范id带同一输出上限", model: "deepseek-v4.1-flash-1017", wantMaxTokens: 128000,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

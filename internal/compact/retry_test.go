@@ -40,7 +40,7 @@ func TestSummarizeWithRetryRetriesOnceByDefault(t *testing.T) {
 		t.Fatalf("默认策略 = %+v，期望 retries=%d overflowRetries=%d",
 			policy, DefaultCompactRetries, DefaultCompactOverflowRetries)
 	}
-	out, err := SummarizeWithRetry(context.Background(), chat, "m", surfaceOf(4), policy)
+	out, err := SummarizeWithRetry(context.Background(), chat, "m", surfaceOf(4), 0, policy)
 	if err != nil {
 		t.Fatalf("首次失败后应该重试成功：%v", err)
 	}
@@ -52,7 +52,7 @@ func TestSummarizeWithRetryRetriesOnceByDefault(t *testing.T) {
 func TestSummarizeWithRetryExhaustsConfiguredRetries(t *testing.T) {
 	chat := &flakyChat{failFor: 3, reply: "摘要"}
 	policy := RetryPolicy{Retries: 2}
-	if _, err := SummarizeWithRetry(context.Background(), chat, "m", surfaceOf(4), policy); err == nil {
+	if _, err := SummarizeWithRetry(context.Background(), chat, "m", surfaceOf(4), 0, policy); err == nil {
 		t.Fatal("重试次数用尽后必须把错误冒出来")
 	}
 	if chat.calls != 3 {
@@ -60,7 +60,7 @@ func TestSummarizeWithRetryExhaustsConfiguredRetries(t *testing.T) {
 	}
 
 	noRetry := &flakyChat{failFor: 1, reply: "摘要"}
-	if _, err := SummarizeWithRetry(context.Background(), noRetry, "m", surfaceOf(4), RetryPolicy{Retries: 0}); err == nil {
+	if _, err := SummarizeWithRetry(context.Background(), noRetry, "m", surfaceOf(4), 0, RetryPolicy{Retries: 0}); err == nil {
 		t.Fatal("Retries=0 时首次失败必须直接失败")
 	}
 	if noRetry.calls != 1 {
@@ -74,7 +74,7 @@ func TestSummarizeWithRetryStopsOnCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	chat := &flakyChat{failFor: 10, reply: "摘要"}
-	if _, err := SummarizeWithRetry(ctx, chat, "m", surfaceOf(4), RetryPolicy{Retries: 1}); !errors.Is(err, context.Canceled) {
+	if _, err := SummarizeWithRetry(ctx, chat, "m", surfaceOf(4), 0, RetryPolicy{Retries: 1}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("取消必须原样冒出来，实际 %v", err)
 	}
 	if chat.calls != 0 {
@@ -85,7 +85,7 @@ func TestSummarizeWithRetryStopsOnCancelledContext(t *testing.T) {
 // 参数错误（没有可摘要的消息）重试也不会有不同结果：一次都不重试。
 func TestSummarizeWithRetryDoesNotRetryEmptyInput(t *testing.T) {
 	chat := &flakyChat{reply: "摘要"}
-	if _, err := SummarizeWithRetry(context.Background(), chat, "m", nil, RetryPolicy{Retries: 1}); err == nil {
+	if _, err := SummarizeWithRetry(context.Background(), chat, "m", nil, 0, RetryPolicy{Retries: 1}); err == nil {
 		t.Fatal("空输入必须报错")
 	}
 	if chat.calls != 0 {
