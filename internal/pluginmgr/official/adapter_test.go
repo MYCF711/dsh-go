@@ -221,15 +221,20 @@ func TestInspectRealPackageAndRefusals(t *testing.T) {
 	}
 }
 
-// 非本地路径形态（registry/name、git、tarball）需要 registry/pnpm/git 客户端，
-// 本仓一个都没有 → 必须是四字段 501，不许假装 accepted。
+// 没有 registry/下载源的形态（registry 名、tarball URL）必须结构化拒绝，
+// 不许假装 accepted / applied。
+//
+// 2026-11-20 修订（task-121）：git 形态已真实现（git_fetch.go + git_adapter.go，
+// 取本机 git、spec 仍按官方 install-spec），不再是这条的 501——git 的行为
+// （inspect 只回形态、install 真取内容、取不到结构化 failed）改由
+// git_adapter_test.go 用**本机临时仓库**（git+file://）钉住，不联网。
+// 这里只留"真的没有下载源"的 registry/tarball 两条。
 func TestInspectAndInstallRefuseUnsupportedSpecForms(t *testing.T) {
 	f := newFixture(t, "")
 	for _, spec := range []string{
 		"acme.bundle",
 		"acme.bundle@1.2.3",
 		"@scope/bundle",
-		"git+https://example.com/acme.git",
 		"https://example.com/acme-1.0.0.tgz",
 	} {
 		// 没有配置 registry 时：inspect 真实 refused（不是 501），install
@@ -237,13 +242,6 @@ func TestInspectAndInstallRefuseUnsupportedSpecForms(t *testing.T) {
 		result := f.result(t, "pluginManager.inspect", map[string]any{"spec": spec})
 		if result["status"] != "refused" {
 			t.Fatalf("%q 的 inspect 必须是结构化 refused：%v", spec, result)
-		}
-		if strings.HasPrefix(spec, "git+") {
-			// git 形态仍明确 501（不冒充已支持）；registry/tarball 才走
-			// 结构化 refused/failed。
-			f.fourField(t, "pluginManager.installBundle", map[string]any{"spec": spec},
-				http.StatusNotImplemented, "not_implemented")
-			continue
 		}
 		change := f.result(t, "pluginManager.installBundle", map[string]any{"spec": spec})
 		if change["application"] != "failed" {

@@ -116,10 +116,33 @@ func (a *adapter) inspect(p transport.OfficialInspectParams) (transport.Official
 				fmt.Sprintf("tarball manifest 版本 %s 与 registry 解析版本 %s 不一致", manifest.Version, resolved.Version)), nil
 		}
 		return a.inspectManifest(manifest, kind)
+	case "git":
+		return a.inspectGitSpec(spec)
 	default:
 		return transport.OfficialInspectionRefused("not-a-package",
-			fmt.Sprintf("%s 规格不是可安装的包（本仓支持 path/registry/tarball）", kind)), nil
+			fmt.Sprintf("%s 规格不是可安装的包（本仓支持 path/registry/tarball/git）", kind)), nil
 	}
+}
+
+// inspectGitSpec 是官方 git 形态的 `inspect`：**只看形态，不取内容**。
+//
+// 官方（`src/index.ts:637`，在 `:620-668` 的 inspect 里）对 git spec 的回答是
+//
+//	{ status:'accepted', kind:'git', bundle:null, registry:<首问源>, host:<主机> }
+//
+// ——name/version/bundle 三个字段**都不出现**，因为"这个包是什么"要等 pnpm
+// 取下来才知道（`src/types.ts:243-262` 的原文：git/tarball 只答形态、"the package
+// is known once pnpm has fetched it"）。
+// `bundle:null` 是"形态说不出有没有 patch"，不是 false。
+//
+// 本仓此前对这一形态回 refused(not-a-package)，那是与官方不同的答案。
+func (a *adapter) inspectGitSpec(spec string) (transport.OfficialPluginSpecInspection, error) {
+	location, ok := SplitGitSpec(spec)
+	if !ok {
+		return transport.OfficialInspectionRefused("invalid-spec",
+			fmt.Sprintf("%q 不是 git 地址（需要主机简写、git URL、scp 形态或托管仓库 URL）", spec)), nil
+	}
+	return transport.OfficialInspectionAcceptedGit(location.Host, configuredRegistry()), nil
 }
 
 func (a *adapter) inspectManifest(manifest pluginmgr.Manifest, sourceKind string) (transport.OfficialPluginSpecInspection, error) {
@@ -299,6 +322,11 @@ func (a *adapter) installBundle(p transport.OfficialInstallBundleParams) (transp
 	spec := strings.TrimSpace(p.Spec)
 	kind := pluginmgr.SourceKind(spec)
 	local := spec
+	// sourceRecorded 是**落进 state.json 的来源**。对 registry/tarball/git 三种
+	// "下载形态"它必须是 spec 本身，而不是取下来的本地缓存目录——否则
+	// `BundleInfo.source`/`update` 就判不出这个包还能不能更新（见 updatekind.go）。
+	// path 形态本来就是本地目录，两者相同。
+	sourceRecorded := ""
 	var approvedWarning string
 	if len(p.ApprovedBuilds) > 0 {
 		approvedWarning = "approvedBuilds 已收到，但本仓插件包没有 package.json 构建脚本；未执行任何构建"
@@ -311,6 +339,14 @@ func (a *adapter) installBundle(p transport.OfficialInstallBundleParams) (transp
 			return registryChangeRefused(spec, "not-a-package", err), nil
 		}
 		local = downloaded
+		sourceRecorded = spec
+	case "git":
+		downloaded, fetchErr := a.materializeGitSpec(spec)
+		if fetchErr != nil {
+			return gitChangeRefused(spec, fetchErr), nil
+		}
+		local = downloaded
+		sourceRecorded = spec
 	default:
 		return transport.OfficialChangeResult{}, formUnsupported(kind)
 	}
@@ -322,7 +358,7 @@ func (a *adapter) installBundle(p transport.OfficialInstallBundleParams) (transp
 	if p.RequestID != nil {
 		requests.RequestID = *p.RequestID
 	}
-	job, err := a.manager.StartInstall(local, requests)
+	job, err := a.manager.StartInstallFrom(local, sourceRecorded, requests)
 	if err != nil {
 		return transport.OfficialChangeResult{}, hostError(err)
 	}
@@ -461,9 +497,9 @@ func expectedMismatch(expected *transport.OfficialExpectedPackage, info pluginmg
 // 是**更新一点的 SemVer**，再要求 `options.spec` 钉住**同一个仓库目录**的
 // 完整 commit；两条都过了才 checkout 那个 commit 并安装。
 //
-// 本仓没有 git 获取器（AGENTS R6：不嵌 pnpm/git 子进程），所以最后一步做不到。
-// 这里先如实完成**契约校验**（拒绝理由与官方逐条一致），校验通过后再回四字段
-// 501 并点名缺 git——不假装更新成功，也不改任何状态。
+// 前四条是**契约层面的拒绝**（与官方逐条同话术，`invalid-spec`）；过了之后
+// 是真的按 `options.spec` 取那个 commit 的内容再走 Manager 的更新事务——与
+// registry 形态在 `materializeRegistrySpec` 之后的做法是同一件事。
 func (a *adapter) updateGitBundle(state pluginmgr.BundleState, p transport.OfficialUpdateBundleParams) (transport.OfficialUpdateResult, error) {
 	from := state.Version
 	compare, err := pluginmgr.CompareVersions(p.Version, from)
@@ -490,9 +526,26 @@ func (a *adapter) updateGitBundle(state pluginmgr.BundleState, p transport.Offic
 		return updateRefused(from, p.Name, p.Version, "invalid-spec",
 			fmt.Sprintf("%s 不在 %s 装进来的仓库目录 %s 里（收到 %s）", *p.Spec, p.Name, origin, target)), nil
 	}
-	return transport.OfficialUpdateResult{}, fmt.Errorf(
-		"%w: git 更新目标 %s 已通过契约校验（版本、完整 commit、同仓库目录），但本仓没有 git 获取器 checkout 它（已装 %s@%s）；AGENTS R6 不嵌 pnpm/git",
-		transport.ErrOfficialNotImplemented, *p.Spec, p.Name, from)
+	// 契约校验全过：按 spec 取那个 commit，再走真实更新事务。
+	local, fetchErr := a.materializeGitSpec(*p.Spec)
+	if fetchErr != nil {
+		return updateRefused(from, p.Name, p.Version, gitRefusalCode(fetchErr), fetchErr.Error()), nil
+	}
+	info, err := a.manager.UpdateFrom(p.Name, local, *p.Spec)
+	if err != nil {
+		var apiErr *pluginmgr.Error
+		if errors.As(err, &apiErr) {
+			return updateRefused(from, p.Name, p.Version, mapChangeCode(apiErr.Code), apiErr.Message), nil
+		}
+		return transport.OfficialUpdateResult{}, hostError(err)
+	}
+	result := transport.OfficialAppliedChange("install", p.Name, info.Enabled)
+	result.Bundle = info.ID
+	result.Version = info.Version
+	if warning := a.exemptionWarningFor(info.ID + "@" + info.Version); warning != "" {
+		result.Warnings = append(result.Warnings, warning)
+	}
+	return transport.OfficialUpdateResult{From: from, To: info.Version, Step: "install", Result: result}, nil
 }
 
 func updateRefused(from, name, version, code, diagnostic string) transport.OfficialUpdateResult {

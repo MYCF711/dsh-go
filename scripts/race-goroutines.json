@@ -403,13 +403,13 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/pluginmgr/jobs.go:145",
+      "site": "internal/pluginmgr/jobs.go:154",
       "what": "后台安装作业",
       "sync": "读过：job.control 只属于这次作业；结束经 m.finishJob 落账（m 自己的锁）",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "internal/pluginmgr/jobs.go:158",
+      "site": "internal/pluginmgr/jobs.go:167",
       "what": "后台切版（update）作业",
       "sync": "读过：同上，runUpdateJob → m.finishJob（m 自己的锁）",
       "verified_at": "2026-11-09"

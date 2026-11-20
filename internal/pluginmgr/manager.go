@@ -138,6 +138,31 @@ func (m *Manager) Install(source string) (PluginInfo, error) {
 	return m.installLocked(source, false, nil)
 }
 
+// InstallFrom 与 Install 相同，但**落进 state.json 的来源记 recorded**。
+//
+// 为什么需要它（官方 pluginManager 的三种"下载形态"）：registry/tarball/git
+// 的包体是从网络取下来的，Manager 拿到的是本地缓存目录；而 `BundleInfo.source`
+// 与 `BundleInfo.update`（rc.2 的 `'registry' | 'git'`）判的是**安装 spec**，
+// 不是缓存路径。记成缓存目录会让"从 registry 装的包"和"从 git 装的包"在
+// 刷新界面后都变成"来源是一个临时目录、换不了版本"——那是假信息。
+//
+// recorded 为空串时退化成 Install（既有调用点行为一字不变）。
+func (m *Manager) InstallFrom(source, recorded string, opts InstallOptions) (PluginInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.installLockedFrom(source, recorded, opts.Enable, nil)
+}
+
+// UpdateFrom 与 Update 相同，但**落进 state.json 的来源记 recorded**。
+//
+// 语义与 InstallFrom 对称：换版之后 `BundleInfo.source` 必须是新的安装 spec，
+// 否则下一次 updateBundle 的 origin 判据会看到旧缓存路径而不是这个仓库。
+func (m *Manager) UpdateFrom(id, source, recorded string) (PluginInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.updateLocked(id, source, recorded)
+}
+
 // installLocked 是 install 的唯一实现：enable 与 control 只为官方
 // `pluginManager.installBundle` 的 enabled/requestId 服务；nil control 表示
 // 这次安装不可取消（既有 plugin.install 就是这条路）。
@@ -145,6 +170,12 @@ func (m *Manager) Install(source string) (PluginInfo, error) {
 // 启用位与安装写在同一份 state 里、由同一个事务提交：不会出现"装上了但
 // 启用位另写一次、中途失败"的半截状态。
 func (m *Manager) installLocked(source string, enable bool, control *installControl) (PluginInfo, error) {
+	return m.installLockedFrom(source, "", enable, control)
+}
+
+// installLockedFrom 是 installLocked 的唯一实现；recorded 非空时它成为
+// `state.json` 里这个版本的来源（见 InstallFrom 的说明）。
+func (m *Manager) installLockedFrom(source, recorded string, enable bool, control *installControl) (PluginInfo, error) {
 	if err := control.checkpoint(); err != nil {
 		return PluginInfo{}, err
 	}
@@ -161,7 +192,7 @@ func (m *Manager) installLocked(source string, enable bool, control *installCont
 			"使用 plugin.update 安装更高 SemVer，或先 uninstall", "插件 id %s 已安装，拒绝重复安装", manifest.ID)
 	}
 	record := &pluginRecord{ID: manifest.ID, Version: manifest.Version, Enabled: enable,
-		Versions: map[string]versionSource{manifest.Version: {Source: absolute}}}
+		Versions: map[string]versionSource{manifest.Version: {Source: recordedSource(recorded, absolute)}}}
 	if err := m.installVersionLocked("install", manifest, absolute, nil, record, control); err != nil {
 		return PluginInfo{}, err
 	}
@@ -171,6 +202,11 @@ func (m *Manager) installLocked(source string, enable bool, control *installCont
 func (m *Manager) Update(id, source string) (PluginInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.updateLocked(id, source, "")
+}
+
+// updateLocked 是 Update 的唯一实现；recorded 非空时成为新版本的来源。
+func (m *Manager) updateLocked(id, source, recorded string) (PluginInfo, error) {
 	before := m.state.Plugins[id]
 	if before == nil {
 		return PluginInfo{}, notFound(id)
@@ -201,11 +237,21 @@ func (m *Manager) Update(id, source string) (PluginInfo, error) {
 	after := cloneState(&persistentState{Schema: stateSchema, Plugins: map[string]*pluginRecord{id: before}}).Plugins[id]
 	after.Version = manifest.Version
 	after.PreviousVersion = before.Version
-	after.Versions[manifest.Version] = versionSource{Source: absolute}
+	after.Versions[manifest.Version] = versionSource{Source: recordedSource(recorded, absolute)}
 	if err := m.installVersionLocked("update", manifest, absolute, before, after, nil); err != nil {
 		return PluginInfo{}, err
 	}
 	return m.pluginInfoLocked(id)
+}
+
+// recordedSource 定"落进 state.json 的来源"：给了 recorded 用它，否则用绝对路径。
+//
+// 单独一个函数是为了让两条安装路径（install/update）不可能各写一份判空。
+func recordedSource(recorded, absolute string) string {
+	if trimmed := strings.TrimSpace(recorded); trimmed != "" {
+		return trimmed
+	}
+	return absolute
 }
 
 func (m *Manager) validateSourceLocked(source string) (Manifest, string, error) {
