@@ -35,7 +35,7 @@
 - 不改 Transport API、事件、快照或 golden；Transport `contextWindow=0` 仍表示未知，本包不会把 1M 填进去。
 - 不改 `/v1/models` 或 `models.list` 字段；内部解析器不扩展现有 `ModelEntry`。
 - 不改模型选择、会话模型覆盖或路由。
-- `--auto-compact=40000` 保持原默认值。1M context 不表示自动压缩已经延到 1M；压缩阈值是否调整是独立产品变更。
+- 自动压缩阈值**已按官方口径**（2026-11-20 变更）：1M context 现在真的把触发点上移到 `floor(min(1M×0.8, 1M−O−B))` = **800000**。宿主自己编的出厂默认 `40000` 已删除；`--auto-compact=N` 只剩「显式覆盖」一个作用（`0/false` 关闭），窗口未知时按官方 fail-loud。见 `docs/params-align-official.md` §5 缺口2。
 - 压缩、标题等直接构造的特殊 LLM 请求不经过 `agent.Loop`，其既有 `MaxTokens` 策略不被本包重写。
 - 未移植上游完整的 catalog、`modelOverrides`、`configuredMaxTokens` 或动态声明配置系统。
 

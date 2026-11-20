@@ -34,6 +34,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"dshgo/internal/compact"
 )
 
 type flagDefault struct {
@@ -232,5 +234,16 @@ func TestGuardHostRunOptionsFieldsAreAllForwarded(t *testing.T) {
 		if !strings.Contains(joined, value) {
 			t.Errorf("hostRunOptions.args() 没把值 %s 传下去（argv=%v）", value, argv)
 		}
+	}
+	// 未设置（出厂路径）必须用 `auto` 这个拼写传下去：没有数值默认值可传，
+	// 而传任何一个数字都会让子进程把它当成"用户覆盖"（见 compact.AutoCompactUnset）。
+	unset := hostRunOptions{autoCompact: compact.AutoCompactUnset}
+	if !containsArgPair(unset.args(), "--auto-compact", autoCompactAuto) {
+		t.Errorf("未设置时自动压缩阈值没有透传成 auto：%v", unset.args())
+	}
+	// 关闭必须原样传 0，不能变成"用默认值"（那就等于把压缩又打开了）。
+	off := hostRunOptions{autoCompact: compact.AutoCompactOff}
+	if !containsArgPair(off.args(), "--auto-compact", "0") {
+		t.Errorf("--auto-compact=0 必须透传成 0（关闭）：%v", off.args())
 	}
 }

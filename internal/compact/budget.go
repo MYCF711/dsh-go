@@ -17,9 +17,14 @@ import (
 // 为什么必须先扣 O：provider 把"这次最多生成多少"算在**同一个**窗口里。不扣的话，
 // 一次长输出就能把窗口顶穿，而压缩阈值还停在"看起来很安全"的位置。
 //
-// 宿主现状：自动压缩用的是**绝对**阈值（`--auto-compact`，默认 40000）。
-// 这里不推翻它——两者取小（见 HostThreshold），默认行为一个字节都不变，
-// 只有小窗口/大预留时官方口径才真正咬合。
+// 宿主另有自己的旋钮 `--auto-compact`（官方没有这个字段），它是**显式覆盖**：
+// 不写就完全按官方口径算；写了正整数就覆盖成那个绝对值；写 0/false 就关闭。
+//
+// 特别注意**没有**出厂绝对默认值：`40000` 这种数是我们历史上自己编的，官方既
+// 无此默认也无此类字段。以前它无条件参与取小，等于把 1M 窗口截到 4 万（官方
+// 800000，早 20 倍），表现为"聊不了几句上下文就被压走"。现在出厂路径上不存在
+// 任何我方自造的阈值，唯一来源就是官方公式；算不出来（窗口未知/预算不成立）
+// 就照官方 fail-loud，不猜。
 
 // DefaultThresholdRatio 是官方 `context.compaction.thresholdRatio` 的出厂值。
 const DefaultThresholdRatio = 0.8
@@ -99,23 +104,50 @@ func (b PressureBudget) ThresholdTokens() (int, error) {
 	return budget, nil
 }
 
-// HostThreshold 把官方阈值与宿主既有的**绝对**阈值取小。
+// 宿主 `--auto-compact` 的三种取值。它是**显式覆盖**手段，出厂没有数值默认值。
 //
-// 三种情况都不改变既有行为：
-//   - 窗口未知（0）：只有绝对阈值可用，返回它；
-//   - 预算配置不成立：返回绝对阈值（配置错误由调用方在能 fail-loud 的地方报，
-//     这里退回"还能用的那个真值"，绝不返回 0 让压缩就此停摆）；
-//   - 官方阈值更宽松：绝对阈值更严格，用绝对阈值。
-func HostThreshold(absoluteTokens int, b PressureBudget) int {
-	if b.ContextWindow <= 0 {
-		return absoluteTokens
+// 为什么不设一个"默认绝对阈值"：官方的阈值只由窗口与预算推出来
+// （`dsh-compaction-basic/lib/index.js:132`），任何宿主自造的绝对值都会把大窗口
+// 提前截断。`40000` 这个数就是历史上我们自己编的默认值，1M 窗口因此被截到
+// 4 万（官方 800000，早 20 倍）——"默认配置根本用不了"就是这么来的。
+const (
+	// AutoCompactUnset 是"用户没写 `--auto-compact`"：阈值**完全**按官方口径。
+	AutoCompactUnset = -1
+	// AutoCompactOff 是 `--auto-compact=0` / `false`：自动压缩关闭。
+	AutoCompactOff = 0
+)
+
+// AutoCompactEnabled 是自动压缩的**开关**语义：只有显式关闭才算关。
+//
+// 抽成一个函数是为了让两个入口（acp 的每轮自检、run 的每步钩子）用同一个判据。
+// 以前 acp 是 `r.autoCompact > 0`、run 是 `budget <= 0`，各写各的；谁改成
+// `!= 0` 就会把"负数=拼错"变成"一直在压缩"。
+func AutoCompactEnabled(override int) bool { return override != AutoCompactOff }
+
+// HostThreshold 返回自动压缩的**生效**阈值。
+//
+// 三条分支，每条都有官方依据：
+//
+//   - 未设置（AutoCompactUnset）：官方口径 floor(min(W × ratio, W − O − B))
+//     —— `dsh-compaction-basic/lib/index.js:132`。**不经过任何我方自造的截断**；
+//   - 显式覆盖（> 0）：用户自己要的绝对值（官方没有这个字段，是我们的额外旋钮）；
+//   - 关闭（AutoCompactOff）：不产生阈值，返回错误——调用方必须先判
+//     AutoCompactEnabled；这里不返回 0，因为"阈值 0"在任何调用点都等于
+//     "每一步都压缩"，会把"关掉"静默变成"最激进"。
+//
+// 算不出来时**返回错误**，不猜阈值：官方在 `contextWindow` 未知/非法、
+// messageBudget ≤ 0、pressureBudget ≤ 0 时都直接抛 `TargetPressureConfigError`
+// （`lib/index.js:126-131`，窗口未知那条在 `:958`：「no context capacity for
+// <target>; configure contextWindow on that adapter model」），再由 pre-step 的
+// catch 分支告警一次、跳过压缩、继续这一轮（`:844-851`）。宿主照同一形状：
+// 这里 fail-loud，调用方报一次配置错误然后跳过压缩——既不退回一个编造的
+// 绝对阈值，也不静默不压缩。
+func HostThreshold(override int, b PressureBudget) (int, error) {
+	if !AutoCompactEnabled(override) {
+		return 0, fmt.Errorf("自动压缩已关闭（--auto-compact=0/false），没有阈值可算")
 	}
-	threshold, err := b.ThresholdTokens()
-	if err != nil {
-		return absoluteTokens
+	if override > AutoCompactOff {
+		return override, nil
 	}
-	if absoluteTokens <= 0 || threshold < absoluteTokens {
-		return threshold
-	}
-	return absoluteTokens
+	return b.ThresholdTokens()
 }

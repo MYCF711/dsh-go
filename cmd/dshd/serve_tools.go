@@ -127,7 +127,8 @@ func (r *loopRunner) childArgs(sessionID, text string, promptContentFile ...stri
 		args = append(args, "--model", r.model)
 	}
 	// serve 侧解析过的宿主旋钮原样交给子进程：这些值在子进程里**没有别处可查**，
-	// 不传就等于退回 run 的写死默认（自动压缩 40000 / 外置 4000 / 容量 0…）。
+	// 不传就等于退回 run 的默认（自动压缩掉回"未设置"= 用户覆盖丢失 / 外置 4000 /
+	// 容量 0…）。
 	args = append(args, r.runOpts.args()...)
 	if r.reasoning != "" || r.reasoningSet {
 		// off:null 也必须显式带空值，否则 cmdRun 会重新继承 DSHD_REASONING_EFFORT。

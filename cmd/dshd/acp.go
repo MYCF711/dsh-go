@@ -69,7 +69,9 @@ type acpRunner struct {
 	system string
 	// workspaceBytes 与启动时装配使用同一指令链预算，保证 cordis 重组不丢配置。
 	workspaceBytes int
-	// autoCompact 是自动压缩的 token 阈值（0 = 关闭）。
+	// autoCompact 是自动压缩的**显式覆盖**（三态，见 compact.AutoCompactUnset /
+	// compact.AutoCompactOff）。未设置 = 阈值完全按官方口径算；正整数 = 覆盖；
+	// 0 = 关闭。出厂没有数值默认值：宿主自造的阈值会把大窗口提前截断。
 	autoCompact int
 	// keepRecent 是自动压缩时**至少**保留的最近消息数（下限）。
 	//
@@ -85,8 +87,9 @@ type acpRunner struct {
 	// 两者一起进 compact.Resolve（见 compactPolicy）。
 	compactDefaults compact.Policy
 	compactPolicies []compact.ModelPolicy
-	// compactWarned 保证"窗口预算不成立"的诊断只打一次：每轮都打会把 stderr
-	// 刷成噪声，而人只需要知道一次"你的 headroom 比窗口还大"。
+	// compactWarned 保证"算不出压缩阈值"这个配置错误只报一次（窗口未知 / headroom
+	// 吃掉全部预算）。每轮都报会把 stderr 刷成噪声，而人只需要知道一次；这也与
+	// 官方 pre-step 的 warnedPressureConfigTargets 同形状（lib/index.js:844-851）。
 	compactWarned atomic.Bool
 	// runtimeContextOn 是"每步重投影运行时事实"的开关（官方
 	// context.runtimeContext.perStep，默认 true）。
@@ -375,7 +378,7 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 	attachHistory(logw)
 
 	// 每轮开始前自检：token 估算超过阈值就自动压缩（失败只记日志，不打断这一轮）。
-	if r.autoCompact > 0 {
+	if r.autoCompactEnabled() {
 		if err := r.autoCompactNow(ctx, sessionID); err != nil {
 			fmt.Fprintf(os.Stderr, "自动压缩失败（不影响本轮）：%v\n", err)
 		}
@@ -1015,10 +1018,9 @@ func cmdACP(argv []string) error {
 	steps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步")
 	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "每个工作区指令链的字节上限（进 durable 帧；0=不传）")
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
-	// 与 run/serve 同一份默认值与同一套写法（整数或 true/false），见 host_run_options.go。
-	autoCompact := defaultAutoCompact
-	fs.Var(autoCompactValue{target: &autoCompact}, "auto-compact",
-		"surface 估算超过多少 token 就自动压缩（0/false=关闭，true=默认 40000）")
+	// 与 run/serve 同一个注册函数（整数 / auto / true / false 四种写法），见 host_run_options.go。
+	autoCompact := compact.AutoCompactUnset
+	addAutoCompactFlag(fs, &autoCompact)
 	ctxWindow := fs.Int("context-window", 0, "显式上下文窗口（usage_update 分母）；0=按模型容量解析")
 	maxOutput := fs.Int("max-output", 0, "显式单次最大输出 token；0=按模型容量解析")
 	// 官方 context.compaction.headroomTokens / modelPolicies（默认 65536 / []）：
@@ -1452,7 +1454,10 @@ func (r *acpRunner) compactSelectOptions() compact.Options {
 //
 // GO.6 起多两层收敛（官方 `context.compaction.compactionRetries` /
 // `maxOverflowRetries` / `reservedCompletionTokens`）：
-//   - 阈值 = min(绝对阈值 --auto-compact, 官方 W − O − B 口径)（见 compactThreshold）；
+//   - 阈值 = 官方口径 floor(min(W × ratio, W − O − B))；`--auto-compact=N` 是显式
+//     覆盖、`0/false` 是关闭（见 compactThreshold / compact.HostThreshold）；
+//   - 算不出阈值（窗口未知 / 预算不成立）= 官方 TargetPressureConfigError：
+//     **告警一次后跳过压缩、本轮继续**（官方 pre-step 的 catch 分支），不猜阈值；
 //   - 摘要失败按 `DSHD_COMPACT_RETRIES`（默认 1）重试；
 //   - 压完压力**仍**高于阈值时再压一次（官方 compactionRetries 语义，默认 1 次），
 //     而不是"压过一次就算交差"。
@@ -1466,7 +1471,17 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 	if path == "" {
 		return nil
 	}
-	threshold := r.compactThreshold()
+	threshold, err := r.compactThreshold()
+	if err != nil {
+		// 官方 TargetPressureConfigError：同一个目标只警告一次，然后**跳过压缩**、
+		// 继续这一轮（lib/index.js:844-851 的 catch 分支就是这个形状）。绝不静默——
+		// 不报警等于"永远不会压缩"没有任何线索。
+		if !r.compactWarned.CompareAndSwap(false, true) {
+			return nil
+		}
+		return fmt.Errorf("自动压缩不可用（配置错误，本会话只报一次）：%w；"+
+			"用 --context-window 声明该模型容量，或换一个能解析容量的模型", err)
+	}
 	compactions := 0
 	for {
 		back, err := v4.ReadFile(path)
@@ -1499,29 +1514,29 @@ func (r *acpRunner) autoCompactNow(ctx context.Context, sessionID string) error 
 	}
 }
 
+// autoCompactEnabled 是自动压缩的**开关**：只有 `--auto-compact=0/false` 关掉，
+// 其余（不写、auto、true、正整数覆盖）都是开。
+func (r *acpRunner) autoCompactEnabled() bool { return compact.AutoCompactEnabled(r.autoCompact) }
+
 // compactThreshold 是这一轮自动压缩的**有效**阈值（唯一计算点）。
 //
 // 官方口径 `floor(min(W × thresholdRatio, W − O − B))`（dsh-compaction-basic
-// lib/index.js:124-150），宿主既有的是绝对阈值 `--auto-compact`；两者取小。
+// lib/index.js:132）。`--auto-compact=N` 是宿主额外的**显式覆盖**，`0/false` 关闭；
+// 出厂路径上没有任何宿主自造的阈值（历史上那个 40000 把 1M 窗口截成了官方阈值的
+// 1/20 —— 早 20 倍压缩，这就是"默认配置根本用不了"）。
+//
+// 算不出来就返回错误，不猜：官方在 contextWindow 未知/非法、messageBudget ≤ 0、
+// pressureBudget ≤ 0 时都抛 TargetPressureConfigError（lib/index.js:126-131，
+// 窗口未知那条在 :958），随后由 pre-step 的 catch 告警一次、跳过压缩、继续这一轮
+// （:844-851）。宿主照同一形状：这里 fail-loud，调用方报一次然后跳过压缩。
 //
 // 预留完成 token O 的取值：`header.config.maxTokens ?? adapter default ?? 0`。
 // 宿主没有单独的 per-request header maxTokens —— `capacity.MaxOutput` **就是**
 // 请求里真正发出去的 `max_tokens`（internal/agent/loop.go 原样使用），所以这里
 // 它同时承担"header 声明"与"adapter 默认"两个角色；两者都没声明时是 0。
-func (r *acpRunner) compactThreshold() int {
+func (r *acpRunner) compactThreshold() (int, error) {
 	policy := r.compactPolicy()
-	budget := policy.Budget(r.ctxWindow, r.capacity.MaxOutput)
-	threshold := compact.HostThreshold(r.autoCompact, budget)
-	// 预算不成立（headroom 比窗口还大）是配置错误：官方此时拒绝给出阈值
-	// （TargetPressureConfigError）。宿主不能因此停摆（停摆 = 永不压缩 = 每次
-	// 超窗），所以退回绝对阈值，但**必须说出来**——否则用户以为 headroom 生效了。
-	if r.ctxWindow > 0 {
-		if _, err := budget.PressureBudgetTokens(); err != nil && r.compactWarned.CompareAndSwap(false, true) {
-			fmt.Fprintf(os.Stderr, "压缩预算不成立（%v）；本轮起退回绝对阈值 %d，"+
-				"把 --compact-headroom-tokens 调小或换更大的窗口\n", err, r.autoCompact)
-		}
-	}
-	return threshold
+	return compact.HostThreshold(r.autoCompact, policy.Budget(r.ctxWindow, r.capacity.MaxOutput))
 }
 
 // compactSurface 压一次：选区间 → 生成摘要（带重试）→ 写三条事件 → 重派生历史。

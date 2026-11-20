@@ -95,7 +95,7 @@ func newCompactRunner(t *testing.T) *acpRunner {
 // 摘要第一次失败、第二次成功：整次压缩必须成功（旧行为：直接失败）。
 func TestACPCompactRetriesSummarizeOnce(t *testing.T) {
 	r := newCompactRunner(t)
-	r.autoCompact = 3000 // 初始 ~4100 > 3000；压一次后 ~2050 < 3000，不会连环压
+	r.autoCompact = 3000 // 显式覆盖成 3000：初始 ~4100 > 3000；压一次后 ~2050 < 3000，不会连环压
 	r.retry = compact.RetryPolicy{Retries: 1, OverflowRetries: 1}
 	chat := &failingChat{failures: 1, reply: "（摘要）"}
 	r.compactChat = chat
