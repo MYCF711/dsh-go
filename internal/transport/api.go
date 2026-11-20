@@ -120,6 +120,16 @@ const (
 	// 它们不进入 canonical 25，也不改变旧 session.prompt{text} 的形状。
 	MethodAttachmentPut Method = "attachment.put"
 	MethodAttachmentGet Method = "attachment.get"
+	// 界面状态是独立 additive 扩展：官方 GUI 把它放在 Electron 的
+	// `Local Storage`（leveldb），本宿主没有那个容器，落在
+	// `<home>/state/ui-state/<key>.json`（key 逐字用官方 localStorage 键名）。
+	//
+	// **为什么不能塞进 settings.mutate**：settings 有 revision 栅栏，界面每点
+	// 一次"已读"都会推进 revision，用户这时保存设置就会 revision_conflict。
+	// 这是正确性问题，不是风格问题；所以它自己一条通道，且不进入 canonical 25。
+	MethodUIStateGet    Method = "uiState.get"
+	MethodUIStateSet    Method = "uiState.set"
+	MethodUIStateDelete Method = "uiState.delete"
 )
 
 // TerminalResizeMethods 是 `terminal.resize` 的独立 additive 扩展面。
@@ -134,6 +144,15 @@ func TerminalResizeMethods() []Method {
 // AttachmentMethods 是本地附件的独立扩展面，绝不加入 canonical 25。
 func AttachmentMethods() []Method {
 	return []Method{MethodAttachmentPut, MethodAttachmentGet}
+}
+
+// UIStateMethods 是界面状态的独立扩展面，绝不加入 canonical 25。
+//
+// 官方那 66 个 UI 部件里有若干纯前端状态（已读标记、草稿、tab 记忆）在
+// Electron 上由 `Local Storage` 承载；它们是**用户界面的记忆**，不是设置，
+// 所以既不属于 settings 命名空间，也不属于任何官方 host 方法。
+func UIStateMethods() []Method {
+	return []Method{MethodUIStateGet, MethodUIStateSet, MethodUIStateDelete}
 }
 
 // TaskActionMethods 是独立任务 mutation 扩展面。jobs.output 已属于 canonical 25，
@@ -393,6 +412,34 @@ type AttachmentStore interface {
 	Put(path string) (Attachment, error)
 	Get(id string) (AttachmentContent, error)
 }
+
+// UIState 是一份界面状态的原样字节。
+//
+// 值**不解释**：官方 `Local Storage` 存的本来就是字符串（各部件自己 JSON 编解码），
+// 宿主既不解析也不迁移，读回来必须与写进去逐字节相同。
+type UIState struct {
+	Key   string `json:"key"`
+	Value []byte `json:"value"`
+}
+
+// UIStateStore 由宿主实现（落 `<home>/state/ui-state/<key>.json`）。
+//
+// 与 AttachmentStore 同一条规则：transport 只经 cookie 后的方法调用它，
+// 不自行读盘，也不解释 key 的语义。
+type UIStateStore interface {
+	// Get 读一份状态。没存过时 second=false 且 err=nil——"没有"不是错误。
+	Get(key string) (UIState, bool, error)
+	// Set 整份覆盖（last-write-wins）。
+	Set(key string, value []byte) error
+	// Delete 删掉一份状态。没存过时 deleted=false 且 err=nil。
+	Delete(key string) (deleted bool, err error)
+}
+
+// ErrUIStateBadKey 是"这个 key 不能当文件名"的哨兵。
+//
+// 宿主实现必须用 %w 包它，transport 才知道该回 400 而不是 500——key 非法是
+// 调用方的错，不是宿主的错（这条区分决定客户端该改请求还是该重试）。
+var ErrUIStateBadKey = errors.New("界面状态的 key 非法")
 
 // UsageMsg 是一条助手消息的用量。字段名照 v4 的 usage 原样搬，不另起一套。
 type UsageMsg struct {

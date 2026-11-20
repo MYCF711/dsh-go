@@ -598,7 +598,7 @@ func cmdServe(args []string) error {
 	// workspaceId 建会话与 workspace.* 必须共用稍后装配的那一份 registry。
 	// 闭包在 Start 前完成晚绑定；请求到来时绝不会看到另一个 registry 实例。
 	var wsHost *officialWorkspaceHost
-	srv, err := transport.NewServer(withOfficialSessionOptions(*home, withSessionOperationOptions(*home, transport.Options{
+	srv, err := transport.NewServer(withUIStateOptions(*home, withOfficialSessionOptions(*home, withSessionOperationOptions(*home, transport.Options{
 		Source: src,
 		// 只把适配器交给 Transport；它们在既有 cookie 认证之后才会被调用。
 		PluginHandler:       newPluginHTTPHandler(pluginManager),
@@ -965,7 +965,7 @@ func cmdServe(args []string) error {
 		})().create,
 		// 官方 job.*/terminal.*（11 个方法）的路由层。
 		OfficialJobTerminal: officialJT.Handler(),
-	}), prompts, settingsStore))
+	}), prompts, settingsStore)))
 	if err != nil {
 		return err
 	}
