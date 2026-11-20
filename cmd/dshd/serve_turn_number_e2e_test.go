@@ -12,8 +12,10 @@ package main
 // 它不检查任何函数被调用过，也不读进程内计数器。
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -116,10 +118,56 @@ func countTurnOutcomes(frames []map[string]any) int {
 // 等结局帧而不是 sleep：`turn/done` 是在 follow 把 v4 全部 drain 完之后才发的
 // （serve_loop.go 的 emitTurn 在 close(done)/fw.Wait() 之后），所以它出现时
 // 同一轮的 `turn/start`/`turn/end` 一定已经进了 journal。
+// promptAllowingBusy 发 session.prompt，遇到 409（会话忙）就在 realChainWait 内重试。
+//
+// 为什么必须容忍：宿主在上一轮 turn 收尾期间会拒绝新 prompt，这是正确行为；
+// 但"收尾完成"与"客户端发出下一次 prompt"之间没有同步点，慢机器上就会撞上。
+// **只重试 409**，其它状态码与传输错误一律照常判死。
+func promptAllowingBusy(t *testing.T, client *http.Client, base, sid, text string) (map[string]any, bool) {
+	t.Helper()
+	deadline := time.Now().Add(realChainWait)
+	for {
+		raw, err := json.Marshal(map[string]any{"id": sid, "text": text})
+		if err != nil {
+			t.Fatalf("session.prompt params marshal: %v", err)
+		}
+		resp, err := client.Post(base+"/api/session.prompt", "application/json", bytes.NewReader(raw))
+		if err != nil {
+			t.Fatalf("POST session.prompt transport error: %v base=%s", err, base)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("读 session.prompt 响应失败：%v", readErr)
+		}
+		if resp.StatusCode == http.StatusConflict {
+			if time.Now().After(deadline) {
+				return nil, false
+			}
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST session.prompt status=%d body=%s", resp.StatusCode, body)
+		}
+		var envelope map[string]any
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatalf("session.prompt 响应不是 JSON：%v body=%s", err, body)
+		}
+		return envelope, true
+	}
+}
+
 func promptAndWaitNumericTurn(t *testing.T, client *http.Client, base, sid, text string, wantOutcomes int) (string, []map[string]any) {
 	t.Helper()
-	envelope := postPluginGlue(t, client, base, "session.prompt",
-		map[string]any{"id": sid, "text": text}, http.StatusOK)
+	// 409 是**合法的瞬时状态**：上一轮的 turn 还在收尾时宿主会拒绝新的 prompt。
+	// CI 的 2 核 runner 上这个窗口比本地宽得多（实测本地 -count=3 全绿、CI 红在
+	// `POST session.prompt status=409`）。这里只容忍这个瞬时冲突，**判定一点没放宽**：
+	// 等到拿到 200 之后，下面照样逐条校验 turn 数值序列。
+	envelope, ok := promptAllowingBusy(t, client, base, sid, text)
+	if !ok {
+		t.Fatalf("session.prompt 在 %s 内一直 409（会话持续繁忙）：%s", realChainWait, text)
+	}
 	result, _ := envelope["result"].(map[string]any)
 	turnID, _ := result["turnId"].(string)
 	if turnID == "" {
