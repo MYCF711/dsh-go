@@ -296,7 +296,7 @@ official covered by const: 155 of 193
 | 61 | `command-goal` | IMPLEMENTED | `cmd/dshd/serve_commands_api.go:68`、`cmd/dshd/serve_commands_api.go:126` | `/goal` 已注册并读真实 goal 存储，回 phase / 目标 / 轮次 / 上限（旧审计 grep `"/goal"`=0 是漏了不带斜杠的常量）。 |
 | 62 | `plan-mode` | PARTIAL | `modules/tool/plan/plan.go:277`、`cmd/dshd/serve_commands_api.go:146` | enter_plan_mode / exit_plan_mode + 闸门已接持久 plan-review（Approve 才退出，Keep planning/custom 继续）；`/plan off` 已注册并真实写状态 + durable `plan/mode`。仍 PARTIAL：`/plan on` 与 message/附件 steer 未接，明确 501，不假成功。 |
 | 63 | `token-meter` | IMPLEMENTED | `internal/session/tokens.go:21`、`cmd/dshd/context_usage.go:17` | 服务端实测锚点校准（`Meter.Observe`/`Estimate`）+ `context.usage` 重放读 v4 最近 assistant 真值，不拿启发式伪造 full token-count。 |
-| 64 | `compaction-basic` | IMPLEMENTED | `internal/compact/compact.go:66`、`cmd/dshd/serve.go:587` | 压力阈值触发（`--auto-compact` 默认 40000 token，`main.go:514`），CLI 与 transport `session.compact` 走同一段 `autoCompact`，摘要 + 遮蔽区间落 v4 事件。 |
+| 64 | `compaction-basic` | IMPLEMENTED | `internal/compact/compact.go:66`、`cmd/dshd/serve.go:587` | 压力阈值触发，阈值只来自官方公式 `floor(min(W×ratio, W−O−B))`（1M 窗口 = 800000；`--auto-compact=N` 为显式覆盖、`0/false` 关闭、窗口未知按官方 fail-loud）；CLI 与 transport `session.compact` 走同一段 `autoCompact`，摘要 + 遮蔽区间落 v4 事件。 |
 
 ### 2.5 分表三：#65–#97（派生/压缩 + 工具/执行器）
 

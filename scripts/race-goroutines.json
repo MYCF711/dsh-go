@@ -19,13 +19,13 @@
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/acp.go:1240",
+      "site": "cmd/dshd/acp.go:1242",
       "what": "父进程看门狗收尾：watch.Done() 之后关服务",
       "sync": "读过：只做 close/取消，不写会话文件；与主流程之间靠 context 取消 + 单向 channel",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/acp.go:1240",
+      "site": "cmd/dshd/acp.go:1242",
       "what": "父进程看门狗：watch.Done() 就取消本轮并关 stdin",
       "sync": "读过：只调 cancel() 与 os.Stdin.Close()，两个都幂等；不写共享状态",
       "verified_at": "2026-11-09"
@@ -55,31 +55,31 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:801",
+      "site": "cmd/dshd/main.go:802",
       "what": "serveJobsOut：等父进程发来的后台任务输出请求，取一份输出写回 stdout",
       "sync": "只读 jobsOutCh（容量 4，来自 stdin 分发协程）；写 stdout 用同一条带锁的输出函数；进程退出即结束",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:976",
+      "site": "cmd/dshd/main.go:977",
       "what": "run 的看门狗协程：父进程没了就取消本轮 ctx",
       "sync": "读过：只调 cancel()，不碰会话/日志；runCtx 与主 goroutine 共享，取消是幂等的",
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/main.go:976",
+      "site": "cmd/dshd/main.go:977",
       "what": "serveJobsOut：后台任务通道",
       "sync": "读过：写 stdout 的 @@JOBS@@ 行，写侧有自己的一把锁；读的是 jobs 服务的快照",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:976",
+      "site": "cmd/dshd/main.go:977",
       "what": "父进程看门狗：父没了就取消本轮 ctx",
       "sync": "读过：只调 stopOnParentGone()（cancel 幂等），不碰会话/日志",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/main.go:976",
+      "site": "cmd/dshd/main.go:977",
       "what": "serveSteerIPC：steer IPC 接收循环",
       "sync": "读过：收到的请求投进 steerInbox（自己加锁的队列）；runCtx 取消即退",
       "verified_at": "2026-11-09"
@@ -121,13 +121,13 @@
       "verified_at": "2026-11-04"
     },
     {
-      "site": "cmd/dshd/serve_loop.go:207",
+      "site": "cmd/dshd/serve_loop.go:208",
       "what": "把子进程 stderr 扫进 broker",
       "sync": "读过：watchWG 在调用方 Add、这里 Done；broker.WatchSession 自己加锁，写的是它自己的缓冲",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve_loop.go:245",
+      "site": "cmd/dshd/serve_loop.go:246",
       "what": "follow：轮询本轮 sess 日志推进进度",
       "sync": "读过：fw 在调用方 Add、这里 Done；done channel 停止；进度写 &prog（调用方在 cmd.Wait 后统一读）",
       "verified_at": "2026-11-09"
@@ -151,13 +151,13 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "cmd/dshd/serve_tools.go:238",
+      "site": "cmd/dshd/serve_tools.go:239",
       "what": "每轮一个 follow",
       "sync": "读过：follow 只读日志，向 hub 推送；prog 仅在 fw.Wait() 之后读，无并发窗口",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "cmd/dshd/serve_tools.go:286",
+      "site": "cmd/dshd/serve_tools.go:287",
       "what": "follow 子进程日志并把事件推进 journal",
       "sync": "fw 计数收尾；ctx 取消即退出；写 journal 经 hub 自己的锁",
       "verified_at": "2026-11-04"

@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"testing"
 
+	"dshgo/internal/compact"
 	"dshgo/internal/session"
 )
 
@@ -87,8 +88,12 @@ func TestServeHostRunFlagsOmitEmptyAgents(t *testing.T) {
 	}
 	// 其余五个旋钮仍然要带（它们的默认值就是 run 的默认值，传与不传等价，
 	// 但显式传保证"父进程的值是唯一真值"）。
-	if !containsArgPair(args, "--auto-compact", strconv.Itoa(defaultAutoCompact)) {
-		t.Fatalf("默认自动压缩阈值没有透传：%v", args)
+	//
+	// --auto-compact 的默认值用 `auto` 传而不是 `40000`：这一位决定子进程把阈值
+	// 当成"出厂默认（跟官方口径）"还是"用户硬上限"。传数字会让界面起的会话退回
+	// "4 万 token 就压缩"（见 compact_threshold_official_test.go）。
+	if !containsArgPair(args, "--auto-compact", autoCompactAuto) {
+		t.Fatalf("默认自动压缩阈值没有透传成 auto：%v", args)
 	}
 	if !containsArgPair(args, "--max-chars", strconv.Itoa(defaultMaxChars)) {
 		t.Fatalf("默认外置阈值没有透传：%v", args)
@@ -136,17 +141,19 @@ func TestServeForwardsHostRunOptionsToTurnChild(t *testing.T) {
 	}
 }
 
-// 三种写法落到同一个整数：false → 关闭、true → 默认阈值、整数 → 原样。
+// 四种写法落到同一个三态上：false/0 → 关闭、true/auto/不写 → 不覆盖（官方口径）、
+// 整数 → 原样覆盖。出厂**没有**数值默认值可回退。
 func TestAutoCompactFlagAcceptsBooleanAndInteger(t *testing.T) {
 	cases := []struct {
 		argv []string
 		want int
 	}{
-		{argv: []string{"--auto-compact=false"}, want: 0},
-		{argv: []string{"--auto-compact=true"}, want: defaultAutoCompact},
-		{argv: []string{"--auto-compact", "0"}, want: 0},
+		{argv: []string{"--auto-compact=false"}, want: compact.AutoCompactOff},
+		{argv: []string{"--auto-compact=true"}, want: compact.AutoCompactUnset},
+		{argv: []string{"--auto-compact=" + autoCompactAuto}, want: compact.AutoCompactUnset},
+		{argv: []string{"--auto-compact", "0"}, want: compact.AutoCompactOff},
 		{argv: []string{"--auto-compact", "8000"}, want: 8000},
-		{argv: nil, want: defaultAutoCompact},
+		{argv: nil, want: compact.AutoCompactUnset},
 	}
 	for _, tc := range cases {
 		opts := parseServeHostRunFlags(t, tc.argv)
@@ -154,7 +161,7 @@ func TestAutoCompactFlagAcceptsBooleanAndInteger(t *testing.T) {
 			t.Fatalf("argv=%v autoCompact=%d，期望 %d", tc.argv, opts.autoCompact, tc.want)
 		}
 	}
-	// 负数不是"关闭"，是拼错了——必须报错，不能静默变成 0。
+	// 负数既不是"关闭"也不是"不写"，是拼错了——必须报错，不能静默变成某一个态。
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	_ = addHostRunFlags(fs)
 	fs.SetOutput(nopWriter{})

@@ -4,7 +4,7 @@ package main
 // 在宿主三个入口（run / serve / acp）上的接线。
 //
 // 判据（缺一即红）：
-//  1. headroom 真的改变阈值（小窗口被压到官方口径，大窗口行为不变）；
+//  1. headroom 真的改变阈值（官方口径 floor(min(W×ratio, W−O−B))）；
 //  2. per-model 覆盖真的按目标命中（provider/model 精确 > 通配 > 默认）；
 //  3. 非法配置在**启动期** fail-loud，不静默回退；
 //  4. serve 透传（否则"从界面起的会话"与命令行起的会话阈值不同）。
@@ -22,36 +22,73 @@ func newCompactTestRunner(t *testing.T, model string, ctxWindow, maxOutput int) 
 	t.Helper()
 	r := newACPRunner(nil, nil, "http://127.0.0.1:1/v1", model, t.TempDir(), 1)
 	r.setModelCapacity(llm.ModelCapacity{ContextWindow: ctxWindow, MaxOutput: maxOutput})
-	r.autoCompact = defaultAutoCompact
+	// 出厂路径：`--auto-compact` 没写 = 阈值完全按官方口径（宿主没有数值默认值）。
+	r.autoCompact = compact.AutoCompactUnset
 	return r
 }
 
+// mustThreshold 取阈值并在出错时直接失败（成功路径上不该有错误）。
+func mustThreshold(t *testing.T, r *acpRunner) int {
+	t.Helper()
+	got, err := r.compactThreshold()
+	if err != nil {
+		t.Fatalf("阈值算不出来（%v）；成功路径上不该报错", err)
+	}
+	return got
+}
+
 func TestCompactThresholdAppliesOfficialHeadroom(t *testing.T) {
-	// 100K 窗口、8K 预留：官方 100K−8K−65536 = 26272 < 绝对阈值 40000。
+	// 100K 窗口、8K 预留：官方 min(floor(100K×0.8)=80000, 100K−8K−65536=26272) = 26272。
 	r := newCompactTestRunner(t, "group/m", 100_000, 8192)
-	if got := r.compactThreshold(); got != 26272 {
+	if got := mustThreshold(t, r); got != 26272 {
 		t.Fatalf("headroom 没接线：100K 窗口阈值应为 26272，得到 %d", got)
 	}
-	// headroom=0：回到比例阈值 min(80000, 91808)=80000 与绝对 40000 取小 → 40000。
+	// headroom=0：回到比例阈值 min(80000, 91808)=80000。宿主不再有 40000 截断
+	// （改前这里返回 40000，比官方早一半压缩）。
 	r.compactDefaults.HeadroomTokens = 0
-	if got := r.compactThreshold(); got != defaultAutoCompact {
-		t.Fatalf("headroom=0 时必须回到既有绝对阈值，得到 %d", got)
+	if got := mustThreshold(t, r); got != 80_000 {
+		t.Fatalf("headroom=0 时必须取官方比例阈值 80000，得到 %d", got)
+	}
+	// 用户写了 --auto-compact=N：显式覆盖，用 N（官方没有这个字段）。
+	r.autoCompact = 30_000
+	if got := mustThreshold(t, r); got != 30_000 {
+		t.Fatalf("显式覆盖必须生效（30000），得到 %d", got)
 	}
 }
 
-func TestCompactThresholdLargeWindowUnchanged(t *testing.T) {
-	// 1M 窗口：比例阈值 800000 远大于绝对阈值，默认 headroom 不改变行为。
+func TestCompactThresholdLargeWindowFollowsOfficial(t *testing.T) {
+	// 1M 窗口、8K 预留、默认 headroom 65536：官方 floor(min(800000, 926272)) = 800000。
+	// 改前这里被宿主自造的 40000 截断（早 20 倍压缩），这是"默认配置根本用不了"的根因。
 	r := newCompactTestRunner(t, "group/m", 1_000_000, 8192)
-	if got := r.compactThreshold(); got != defaultAutoCompact {
-		t.Fatalf("大窗口不应改变既有阈值，得到 %d", got)
+	if got := mustThreshold(t, r); got != 800_000 {
+		t.Fatalf("1M 窗口必须按官方口径 800000 压缩，得到 %d", got)
 	}
 }
 
-func TestCompactThresholdUnknownWindowFallsBack(t *testing.T) {
-	// 窗口未知（0）时只有绝对阈值可用——headroom 不能把它算成 0。
-	r := newCompactTestRunner(t, "group/m", 0, 0)
-	if got := r.compactThreshold(); got != defaultAutoCompact {
-		t.Fatalf("窗口未知时必须用绝对阈值，得到 %d", got)
+func TestCompactThresholdUnknownWindowFailsLoud(t *testing.T) {
+	// 窗口未知 = 官方 TargetPressureConfigError（lib/index.js:958），必须报出来，
+	// 不许退回任何宿主自造的绝对阈值、也不许静默返回一个"能用的数"。
+	//
+	// 这里必须用**空模型 id** 才真的走到"未知"：ResolveModelCapacity 对任何非空
+	// 自定义模型都会补 1M 默认窗口，用 "group/m" 的夹具以前其实走的是已知窗口分支。
+	r := newCompactTestRunner(t, "", 0, 0)
+	if r.ctxWindow != 0 {
+		t.Fatalf("夹具没造出未知窗口（ctxWindow=%d）", r.ctxWindow)
+	}
+	got, err := r.compactThreshold()
+	if err == nil {
+		t.Fatalf("窗口未知必须报配置错误，却给出了阈值 %d", got)
+	}
+	if got != 0 {
+		t.Fatalf("报错时不该给阈值，实际 %d", got)
+	}
+	if !r.autoCompactEnabled() {
+		t.Fatal("窗口未知不影响开关：自动压缩仍是开着的（只是算不出阈值）")
+	}
+	// 显式覆盖不依赖窗口：用户写的数就是阈值。
+	r.autoCompact = 30_000
+	if got, err := r.compactThreshold(); err != nil || got != 30_000 {
+		t.Fatalf("显式覆盖不该被窗口未知挡住：%d（err=%v）", got, err)
 	}
 }
 
@@ -66,7 +103,7 @@ func TestCompactModelPoliciesOverridePerTarget(t *testing.T) {
 	r := newCompactTestRunner(t, "group/small", 100_000, 8192)
 	r.compactDefaults, r.compactPolicies = policy, policies
 	// 比例 0.3 → floor(100000×0.3)=30000；headroom 0 → 预算 91808；取小 30000。
-	if got := r.compactThreshold(); got != 30000 {
+	if got := mustThreshold(t, r); got != 30000 {
 		t.Fatalf("per-model thresholdRatio 没生效：得到 %d", got)
 	}
 	if got := r.compactPolicy().CompactionRetries; got != 3 {
@@ -78,7 +115,7 @@ func TestCompactModelPoliciesOverridePerTarget(t *testing.T) {
 	// 别的模型必须完全走默认（同一个进程里两条会话不能互相污染）。
 	other := newCompactTestRunner(t, "group/other", 100_000, 8192)
 	other.compactDefaults, other.compactPolicies = compact.DefaultPolicy(), policies
-	if got := other.compactThreshold(); got != 26272 {
+	if got := mustThreshold(t, other); got != 26272 {
 		t.Fatalf("未命中的模型必须走默认策略（26272），得到 %d", got)
 	}
 }

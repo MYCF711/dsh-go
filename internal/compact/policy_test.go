@@ -29,13 +29,18 @@ func TestDefaultPolicyMatchesOfficial(t *testing.T) {
 func TestHeadroomShrinksThresholdForSmallWindow(t *testing.T) {
 	// 100K 窗口、8K 预留：官方口径 min(floor(100K×0.8)=80000, 100K−8K−65536=26272) = 26272。
 	// 改前宿主只有绝对阈值 40000，小窗口模型会比官方晚 13K token 才压缩。
-	got := HostThreshold(40000, DefaultPolicy().Budget(100_000, 8192))
-	if got != 26272 {
-		t.Fatalf("100K 窗口应被 headroom 压到 26272，得到 %d", got)
+	got, err := HostThreshold(AutoCompactUnset, DefaultPolicy().Budget(100_000, 8192))
+	if err != nil || got != 26272 {
+		t.Fatalf("100K 窗口应被 headroom 压到 26272，得到 %d（err=%v）", got, err)
 	}
-	// 大窗口时绝对阈值更严格 → 行为不变。
-	if got := HostThreshold(40000, DefaultPolicy().Budget(1_000_000, 8192)); got != 40000 {
-		t.Fatalf("1M 窗口不应改变既有绝对阈值，得到 %d", got)
+	// 1M 窗口：官方口径 floor(min(1e6×0.8, 1e6−8192−65536)) = 800000。
+	// 出厂路径**没有**宿主的 40000 截断（改前这里返回 40000，比官方早 20 倍压缩）。
+	if got, err := HostThreshold(AutoCompactUnset, DefaultPolicy().Budget(1_000_000, 8192)); err != nil || got != 800_000 {
+		t.Fatalf("1M 窗口应取官方口径 800000，得到 %d（err=%v）", got, err)
+	}
+	// 用户显式覆盖时才用那个绝对值（官方没有这个字段，是我们的额外旋钮）。
+	if got, err := HostThreshold(40_000, DefaultPolicy().Budget(1_000_000, 8192)); err != nil || got != 40_000 {
+		t.Fatalf("显式覆盖 40000 + 1M 窗口应得 40000，得到 %d（err=%v）", got, err)
 	}
 }
 
@@ -45,8 +50,13 @@ func TestHeadroomZeroDisablesReserve(t *testing.T) {
 	if p.HeadroomTokens != 0 {
 		t.Fatalf("显式 headroomTokens=0 必须生效（0 是合法值，不是缺省），得到 %d", p.HeadroomTokens)
 	}
-	if got := HostThreshold(40000, p.Budget(100_000, 8192)); got != 40000 {
-		t.Fatalf("headroom=0 时应回到比例阈值 min(80000, 91808)=80000 与绝对 40000 取小 → 40000，得到 %d", got)
+	// headroom=0 → 预算 91808，比例阈值 80000 → 官方口径 80000。
+	if got, err := HostThreshold(AutoCompactUnset, p.Budget(100_000, 8192)); err != nil || got != 80_000 {
+		t.Fatalf("headroom=0 时应取比例阈值 min(80000, 91808)=80000，得到 %d（err=%v）", got, err)
+	}
+	// 显式覆盖仍然生效。
+	if got, err := HostThreshold(40_000, p.Budget(100_000, 8192)); err != nil || got != 40_000 {
+		t.Fatalf("显式覆盖 40000 时阈值应保持 40000，得到 %d（err=%v）", got, err)
 	}
 }
 

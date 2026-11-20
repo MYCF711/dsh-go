@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"dshgo/codecs/v4"
@@ -721,11 +722,11 @@ func cmdRun(argv []string) (retErr error) {
 	// 规则文件：默认工作区的 AGENTS.md；给"执行者"喂精简手册时指到 docs/WORKER.md。
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	policy := fs.String("policy", defaultRunPolicy, "审批策略：ask/allow/deny/auto（auto=终端问、非终端拒）")
-	// --auto-compact 同时接受整数与 true/false（"关掉自动压缩"最自然的是
-	// --auto-compact=false）。默认值与 serve 侧同源，见 host_run_options.go。
-	autoCompact := defaultAutoCompact
-	fs.Var(autoCompactValue{target: &autoCompact}, "auto-compact",
-		"每步前估算超过多少 token 就自动压缩（0/false=关闭，true=默认 40000）")
+	// --auto-compact 同时接受整数、auto 与 true/false（"关掉自动压缩"最自然的是
+	// --auto-compact=false）。不写 = 阈值按官方口径算（出厂没有数值默认值）。
+	// 注册与语义都在 host_run_options.go，三个入口共用一份。
+	autoCompact := compact.AutoCompactUnset
+	addAutoCompactFlag(fs, &autoCompact)
 	// 显式容量声明：serve 会把这两个值原样透传进来（它自己也从同名 flag 解析）。
 	// contextWindow 落到 v4 request/context（界面/context.usage 的分母），
 	// maxOutput 落到请求的 max_tokens。
@@ -1220,7 +1221,10 @@ func cmdRun(argv []string) (retErr error) {
 		// 容量声明由调用方给（serve 透传 --context-window/--max-output）；
 		// 循环里唯一的解析点是 llm.ResolveModelCapacity，这里不重复算。
 		Capacity: llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput},
-		Compact:  runCompactor(chat, logw, autoCompact, compactPolicy, llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput}, *model, meter),
+		// 压缩阈值同理走官方口径（--auto-compact 只是显式覆盖）。窗口由 runCompactor
+		// 自己经同一个解析点补齐，两个入口不会压出两种结果。
+		Compact: runCompactor(chat, logw, autoCompact, compactPolicy,
+			llm.ModelCapacity{ContextWindow: *ctxWindow, MaxOutput: *maxOutput}, *model, meter),
 		// 官方 context.runtimeContext.perStep：每步重投影运行时事实（不重组提示）。
 		RuntimeContext: runtimeContextProvider(*runtimeContextOn, sessID),
 		Tools:          table,
@@ -1889,15 +1893,33 @@ func isTerminal(f *os.File) bool {
 //
 // 和 ACP 那条用的是同一套：读 log → Surface → compact.Select → Summarize →
 // session.Compact 写事件 → 从日志重建历史。区别只在于触发时机（每步 vs 每轮）。
-func runCompactor(chat agent.Chat, logw *session.Log, budget int, policy compact.Policy,
+//
+// override 是 `--auto-compact` 的三态：未设置 = 阈值按官方口径；正整数 = 覆盖；
+// 0 = 关闭（这时返回 nil，Loop 拿到 nil 就不压）。
+func runCompactor(chat agent.Chat, logw *session.Log, override int, policy compact.Policy,
 	capacity llm.ModelCapacity, model string, meter *session.Meter) func(context.Context, int, []llm.Message) ([]llm.Message, error) {
-	if budget <= 0 {
+	if !compact.AutoCompactEnabled(override) {
 		return nil
 	}
-	// 有效阈值 = min(绝对阈值 --auto-compact, 官方 W − O − B 口径)。run 这条
-	// 路径与 ACP 走同一个 compact.HostThreshold，两个入口不会压出两种结果。
-	threshold := compact.HostThreshold(budget, policy.Budget(capacity.ContextWindow, capacity.MaxOutput))
+	// 生效阈值要用**与请求同一个**有效窗口。调用方给的只是声明覆盖（serve 透传
+	// --context-window，命令行默认 0），真正的解析点仍是 llm.ResolveModelCapacity：
+	// 不在这里补齐，命令行起的会话、以及界面起的子进程（`--context-window 0`）会
+	// 永远卡在"窗口未知"上，而同一进程里的请求早就在按 1M 窗口发了。
+	capacity = llm.ResolveModelCapacity(model, capacity)
+	budget := policy.Budget(capacity.ContextWindow, capacity.MaxOutput)
+	// 算不出阈值（窗口未知 / 预算不成立）时按官方 TargetPressureConfigError 的形状处理：
+	// 每个入口只告警一次，然后**跳过压缩、继续这一步**（lib/index.js:844-851），
+	// 既不退回一个编造的绝对阈值，也不静默不压缩。
+	var warned atomic.Bool
 	return func(ctx context.Context, step int, hist []llm.Message) ([]llm.Message, error) {
+		threshold, terr := compact.HostThreshold(override, budget)
+		if terr != nil {
+			if warned.CompareAndSwap(false, true) {
+				fmt.Fprintf(os.Stderr, "自动压缩不可用（配置错误，只报一次，本步起跳过压缩）：%v；"+
+					"用 --context-window 声明该模型容量，或换一个能解析容量的模型\n", terr)
+			}
+			return nil, nil
+		}
 		back, err := v4.ReadFile(logw.Path)
 		if err != nil {
 			return hist, nil // 读不了就别拦着干活
