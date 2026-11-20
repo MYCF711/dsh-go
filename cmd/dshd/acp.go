@@ -1015,7 +1015,7 @@ func cmdACP(argv []string) error {
 	// 各差一个开关，就会出现"同一份配置换个客户端就不生效"的差异。
 	maxInlineTokens := fs.Int("max-inline-tokens", 0, "工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
 	home := fs.String("home", defaultHome(), "会话根目录")
-	steps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步")
+	steps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步；0 = 不设上限（官方语义）")
 	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "每个工作区指令链的字节上限（进 durable 帧；0=不传）")
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	// 与 run/serve 同一个注册函数（整数 / auto / true / false 四种写法），见 host_run_options.go。

@@ -692,7 +692,7 @@ func cmdRun(argv []string) (retErr error) {
 	turnID := fs.String("turn-id", "", "serve 当前 turn 的宿主身份（steer IPC 内部参数）")
 	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"), "模型 id")
 	base := fs.String("base", envOr("DSHD_LLM_BASE", defaultLLMBase), "OpenAI 兼容端点")
-	maxSteps := fs.Int("max-steps", defaultTurnMaxSteps, "最多几步")
+	maxSteps := fs.Int("max-steps", defaultTurnMaxSteps, "最多几步；0 = 不设上限（官方语义）")
 	home := fs.String("home", defaultHome(), "会话根目录")
 	maxChars := fs.Int("max-chars", defaultMaxChars, "工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
 	// 官方 0.2.2 #79 `dsh-spill-policy` 的 `config.maxInlineTokens`：文本与图片**共享**

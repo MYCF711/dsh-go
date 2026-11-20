@@ -32,7 +32,7 @@ func ProjectResult(r spi.Result) []Block {
 	if r.Text != "" {
 		text, cut, ev := prune.ApplyWithPointer(r.Text, prune.Budget{}, sourcePointer(r))
 		out = append(out, Block{Type: "text", Text: text})
-		// 裁剪证据要单独说一句：正文里那行"第 X–Y 行已省略"只说"少了什么"，
+		// 裁剪证据要单独说一句：正文里那行官方 marker 只说"少了什么"，
 		// 不说"原文还在不在、在哪"，模型据此决定是重读还是收工。
 		//
 		// 但下面那条「已截断」说明已经给出指针时就不再说第二遍——三条消息说同一件事
@@ -41,7 +41,9 @@ func ProjectResult(r spi.Result) []Block {
 		if cut && ev != nil && (r.Truncated == nil || r.Truncated.Pointer == "") {
 			out = append(out, Block{
 				Type: "text",
-				Text: fmt.Sprintf("（已按预算裁剪：保留 %d/%d；取全文：%s）",
+				// 单位是**字符**（官方口径，prune.DefaultThresholdChars 就是按码点量的），
+				// 不是字节：同一段中文按字节报数会让"保留 4096/8192"看起来像砍掉了三分之二。
+				Text: fmt.Sprintf("（已按预算裁剪：保留 %d/%d 字符；取全文：%s）",
 					ev.Kept, ev.Total, ev.Pointer),
 			})
 		}
