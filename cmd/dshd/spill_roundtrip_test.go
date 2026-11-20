@@ -13,6 +13,14 @@ import (
 	"dshgo/internal/spi"
 )
 
+// explicitCharThreshold 是这两个用例**显式**配的字符臂阈值。
+//
+// 它不再依赖出厂默认值：`--max-chars` 的 4000 是宿主自造的数字（官方
+// `dsh-spill-policy` 只有 maxInlineTokens: 12500，没有字符旋钮），已删；
+// 现在 0 = 字符臂不参与。这两个用例测的正是**字符臂**，所以自己把它配上——
+// 断言（9000 字符必被外置、模型看到的正文 ≤ 阈值）一个字都没动。
+const explicitCharThreshold = 4000
+
 // 大输出被外置之后，Hint 会说「用 read 读全文」。
 // 那句话必须是真的：read 要能读到 artifact 路径。
 func TestSpilledArtifactIsReadable(t *testing.T) {
@@ -21,7 +29,7 @@ func TestSpilledArtifactIsReadable(t *testing.T) {
 
 	k := kernel.New("spilltest")
 	defer k.Root().Dispose()
-	if _, err := kernel.Assemble(k.Root(), builtinModules(wd, home, 0, 0, nil)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(wd, home, explicitCharThreshold, 0, nil)); err != nil {
 		t.Fatal(err)
 	}
 	runner, err := kernel.Inject(k.Root(), spi.ToolRunnerKey)
@@ -29,7 +37,7 @@ func TestSpilledArtifactIsReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 造一个必然被外置的输出：超过 MaxChars(4000)
+	// 造一个必然被外置的输出：超过显式配的字符阈值 4000
 	big := strings.Repeat("x", 9000)
 	if err := os.WriteFile(filepath.Join(wd, "big.txt"), []byte(big), 0o644); err != nil {
 		t.Fatal(err)
@@ -46,7 +54,7 @@ func TestSpilledArtifactIsReadable(t *testing.T) {
 		ptr = res.Truncated.Pointer
 	}
 	if ptr == "" {
-		t.Fatalf("9000 字符的输出没被外置（MaxChars 默认 4000）: Summary=%q Hint=%q", res.Summary, res.Hint)
+		t.Fatalf("9000 字符的输出没被外置（显式 MaxChars=4000）: Summary=%q Hint=%q", res.Summary, res.Hint)
 	}
 	if !strings.Contains(ptr, "artifacts") {
 		t.Fatalf("artifact 应该落在 home/artifacts 下，实际 %q", ptr)
@@ -71,7 +79,7 @@ func TestSpillBoundsWhatModelSees(t *testing.T) {
 
 	k := kernel.New("spillbound")
 	defer k.Root().Dispose()
-	if _, err := kernel.Assemble(k.Root(), builtinModules(wd, home, 0, 0, nil)); err != nil {
+	if _, err := kernel.Assemble(k.Root(), builtinModules(wd, home, explicitCharThreshold, 0, nil)); err != nil {
 		t.Fatal(err)
 	}
 	runner, err := kernel.Inject(k.Root(), spi.ToolRunnerKey)
@@ -94,6 +102,6 @@ func TestSpillBoundsWhatModelSees(t *testing.T) {
 		seen += len([]rune(b.Text))
 	}
 	if seen > 4000 {
-		t.Fatalf("模型会看到 %d 字符，而阈值是 4000 —— spill 只换了 Data，没管 Text", seen)
+		t.Fatalf("模型会看到 %d 字符，而显式阈值是 4000 —— spill 只换了 Data，没管 Text", seen)
 	}
 }

@@ -182,7 +182,7 @@ func cmdServe(args []string) error {
 	// 那是"藏起来的开关"。默认值和 run 保持一致。
 	// 宿主旋钮：自动压缩阈值 / 工具输出外置阈值 / AGENTS.md 字节上限 /
 	// 显式容量 / 规则文件。以前 serve 侧连这些旗标都没有，于是生产链上它们
-	// 恒为子进程 run 的写死默认值（自动压缩 = 官方口径 / 4000 / 65536 / 0 / 0），
+	// 恒为子进程 run 的写死默认值（自动压缩 = 官方口径 / 字符臂不参与 / 65536 / 0 / 0），
 	// **从 serve 侧根本调不了**。默认值与 run 同源（见 host_run_options.go）。
 	serveRunOpts := addHostRunFlags(fs)
 	serveModel := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"), "模型 id（透传给子进程）")

@@ -56,6 +56,10 @@ func scanFlagDefaults(t *testing.T) map[string][]flagDefault {
 	out := map[string][]flagDefault{}
 	// 只认这些注册方法：fs.Var 的第二个参数是名字而不是默认值，形状不同。
 	typed := map[string]bool{"Int": true, "String": true, "Bool": true, "Duration": true, "Int64": true}
+	// 指针形式的注册（IntVar/StringVar…）：name 在 args[1]、默认值在 args[2]。
+	// 不扫它们的话，`addHostRunFlags` 里**唯一**一处 serve 侧注册就完全在守卫之外——
+	// 而"serve 用默认值、run 用另一个"正是这组守卫要拦的病（2026-11-21 补）。
+	typedVar := map[string]bool{"IntVar": true, "Int64Var": true, "StringVar": true, "BoolVar": true, "DurationVar": true}
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
@@ -71,14 +75,25 @@ func scanFlagDefaults(t *testing.T) map[string][]flagDefault {
 				return true
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || !typed[sel.Sel.Name] || len(call.Args) < 2 {
+			if !ok || len(call.Args) < 2 {
 				return true
 			}
 			recv, ok := sel.X.(*ast.Ident)
 			if !ok || recv.Name != "fs" {
 				return true
 			}
-			lit, ok := call.Args[0].(*ast.BasicLit)
+			nameArg, defArg := 0, 1
+			switch {
+			case typed[sel.Sel.Name]:
+			case typedVar[sel.Sel.Name]:
+				if len(call.Args) < 3 {
+					return true
+				}
+				nameArg, defArg = 1, 2
+			default:
+				return true
+			}
+			lit, ok := call.Args[nameArg].(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
 				return true
 			}
@@ -89,7 +104,7 @@ func scanFlagDefaults(t *testing.T) map[string][]flagDefault {
 			out[flagName] = append(out[flagName], flagDefault{
 				file: filepath.Base(name),
 				line: fset.Position(call.Pos()).Line,
-				expr: types.ExprString(call.Args[1]),
+				expr: types.ExprString(call.Args[defArg]),
 			})
 			return true
 		})
@@ -105,8 +120,19 @@ func TestGuardFlagDefaultsAreSingleSourced(t *testing.T) {
 	allowed := map[string][]string{
 		// 每轮步数上限：四个入口 + 子代理统一到 defaultTurnMaxSteps（安全阀，唯一常量）。
 		"max-steps": {"defaultTurnMaxSteps"},
-		// 工具输出外置阈值：run/acp/serve 同一常量。
-		"max-chars": {"defaultMaxChars"},
+		// 工具输出外置的**字符臂**阈值：run/acp/serve 三处都必须是字面量 0。
+		//
+		// 为什么允许的表达式是 "0" 而不是某个常量：官方 `dsh-spill-policy` 只有
+		// `maxInlineTokens`，**没有**按字符的旋钮（`thresholdChars: 8192` 属于另一个
+		// 插件 tool-result-pruner），所以字符臂不许有出厂数值默认值——0 = 不参与。
+		// 谁把 4000（或任何数值）写回任一入口的默认值，这里立刻红：那等于把官方
+		// 12500 token 的预算架空（4000 字符 ≈ 1000 估算 token），用户
+		// 2026-11-21 报的"很多不是我设置的参数"就是这一类。
+		"max-chars": {"0"},
+		// 工具结果内联的 token 预算：三入口同走一个解析函数，出厂 = 官方 12500
+		// （dsh-base/cordis.patch.yml:417，见 modules/tools.DefaultMaxInlineTokens）。
+		// 谁把默认值写回 0（关闭）或另写一个数字，这条红。
+		"max-inline-tokens": {"defaultMaxInlineTokensFromEnv()"},
 		// AGENTS.md 字节预算：run/serve 是 defaultWorkspaceBytes；ACP 以前写死 8000。
 		"workspace-bytes": {"defaultWorkspaceBytes"},
 		// 自动压缩阈值：只有一份默认值（defaultAutoCompact，经 autoCompactValue 注册）。

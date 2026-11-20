@@ -41,12 +41,12 @@ func (t *inlineTokensStubTool) Exec(context.Context, json.RawMessage) (spi.Resul
 
 // 叶子：toolsOptions 把 flag 值原样放进 Options。
 func TestToolsOptionsCarriesMaxInlineTokens(t *testing.T) {
-	opts := toolsOptions(t.TempDir(), defaultMaxChars, 777)
+	opts := toolsOptions(t.TempDir(), explicitCharThreshold, 777)
 	if opts.MaxInlineTokens != 777 {
 		t.Fatalf("toolsOptions 没把 maxInlineTokens 放进 Options：%d", opts.MaxInlineTokens)
 	}
 	// 0 = 未配置：必须保持 0（modules/tools 才会回落到 DSHD_MAX_INLINE_TOKENS）。
-	if got := toolsOptions(t.TempDir(), defaultMaxChars, 0).MaxInlineTokens; got != 0 {
+	if got := toolsOptions(t.TempDir(), explicitCharThreshold, 0).MaxInlineTokens; got != 0 {
 		t.Fatalf("0 必须原样传下去（未配置语义），得到 %d", got)
 	}
 }
@@ -118,7 +118,7 @@ func TestMaxInlineTokensTakesEffectInProductionAssembly(t *testing.T) {
 func TestNegativeMaxInlineTokensFailsAtAssembly(t *testing.T) {
 	k := kernel.New("inline-token-negative")
 	defer k.Root().Dispose()
-	_, err := kernel.Assemble(k.Root(), builtinModules(t.TempDir(), t.TempDir(), defaultMaxChars, -1, nil))
+	_, err := kernel.Assemble(k.Root(), builtinModules(t.TempDir(), t.TempDir(), explicitCharThreshold, -1, nil))
 	if err == nil {
 		t.Fatal("负的 --max-inline-tokens 必须在装配期报错，不能静默当成 0")
 	}

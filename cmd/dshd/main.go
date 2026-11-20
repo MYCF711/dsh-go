@@ -694,12 +694,13 @@ func cmdRun(argv []string) (retErr error) {
 	base := fs.String("base", envOr("DSHD_LLM_BASE", defaultLLMBase), "OpenAI 兼容端点")
 	maxSteps := fs.Int("max-steps", defaultTurnMaxSteps, "最多几步")
 	home := fs.String("home", defaultHome(), "会话根目录")
-	maxChars := fs.Int("max-chars", defaultMaxChars, "工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
-	// 官方 0.2.2 #79 `dsh-spill-policy` 的 `config.maxInlineTokens`：文本与图片**共享**
-	// 的估算 token 预算。0 = 未配置（回落到 DSHD_MAX_INLINE_TOKENS，再没有就是关闭）。
-	// 负值不在这里挡：装配期由 modules/tools 的 Options.Validate fail-loud（与官方
-	// "Invalid config fails at load" 同一形状），这样库层与宿主是同一份判据。
-	maxInlineTokens := fs.Int("max-inline-tokens", 0, "工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
+	// 工具结果预算的两个旋钮：与 acp/serve **同一个注册函数**（见 host_run_options.go），
+	// 出厂值都来自官方——max-inline-tokens = 12500（dsh-base/cordis.patch.yml:417）、
+	// max-chars 官方无此旋钮所以出厂不设=字符臂不参与。负值不在这里挡：装配期由
+	// modules/tools 的 Options.Validate fail-loud（与官方 "Invalid config fails at
+	// load" 同一形状），库层与宿主是同一份判据。
+	var maxChars, maxInlineTokens int
+	addSpillBudgetFlags(fs, &maxChars, &maxInlineTokens)
 	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "每个工作区指令链的字节上限（进 durable 帧；0=不传）")
 	resumeSession := fs.String("session", "", "续这个会话（空=新建）；cwd 可省，按 id 找")
 	// 工具表默认压掉参数说明：20 次 A/B（10 个任务 × 两种表）结果一致，输入省 22%。
@@ -828,7 +829,7 @@ func cmdRun(argv []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	mods, pluginRT, err := loadModsWithPluginsIn(*manifest, *home, *maxChars, *maxInlineTokens, subp, workDir)
+	mods, pluginRT, err := loadModsWithPluginsIn(*manifest, *home, maxChars, maxInlineTokens, subp, workDir)
 	if err != nil {
 		return err
 	}
@@ -876,7 +877,7 @@ func cmdRun(argv []string) (retErr error) {
 	if _, err := kernel.Inject(root, spi.ToolRunnerKey); err != nil {
 		return err
 	}
-	runner := hostToolRunner(root, reg, *home, *maxChars, *maxInlineTokens)
+	runner := hostToolRunner(root, reg, *home, maxChars, maxInlineTokens)
 
 	// 新会话的工作目录与工具根是同一个值（装配期就定死的 workDir，见上面）。
 	// `--home` 是会话根，不是工作目录——两者互不替代。
