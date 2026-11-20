@@ -1,9 +1,11 @@
-// `agent-instructions`（官方 #53 的 durable 层）在 **run 入口**（`dshd run`）的接线。
+// `agent-instructions`（官方 #53 的 durable 层）在**两个生产入口**（`dshd run` /
+// ACP）的接线。
 //
 // # 这一层做什么（对照官方 `src/index.ts` 的生命周期）
 //
 //   - **基线**（官方 index.ts:139-205，`compose` 的 baseline 分支）：第一处模型请求之前，
-//     把「项目 root→cwd 链」的渲染结果落成 durable `user/message`
+//     把「用户全局链（`$DSH_HOME` → `<agentsHome>`）+ 项目 root→cwd 链」的渲染结果
+//     落成 durable `user/message`
 //     （`source.kind='agent-instructions'`，带 `baseline:true` + `baselineIdentity` +
 //     `changes`）。之后每一轮靠**身份对账**决定要不要重发：身份相等 → 只做增量
 //     reconcile；不等（cwd 变了 / 配置变了）→ 发**替换型**基线并显式 remove 旧基线里
@@ -16,21 +18,37 @@
 //     重启/断线后自然对齐（官方 resume reconcile 的机制；连"基线被预算挡掉的 scope"
 //     本仓也从日志推，比官方的内存表更强）。
 //
+// # 唯一载体（默认形状，官方形状）
+//
+// **工作区指令只有一个载体：这条 durable 基线帧。** 官方 README.md:34：
+//
+//	"The first request includes one durable baseline message with the user-global chain
+//	 — `$DSH_HOME/AGENTS.md`, then `<agentsHome>/AGENTS.md` — followed by the project
+//	 chain: every existing candidate file from the project root down to the session
+//	 working directory, in broad-to-specific order."
+//
+// 所以系统提示里**不装配任何指令段**（`prompt.Context.InstructionsInDurableFrame`，
+// 见 `prompt.Default`）：用户全局链两根 + 项目链全在这一条 `user/message` 里，
+// 请求里每份 AGENTS.md 的内容恒出现**一次**。这条判据只有一处：
+// `instructionsCarriedByDurableFrame` —— 系统提示侧与 durable 侧共用它，两边不可能
+// 各判各的（各判各的就会一边开一边关，同一份指令注两次或一次都不注）。
+//
+// # 什么情况下不是唯一载体（四条显式出口，都与"默认"无关）
+//
+//   - `--agents <path>`：宿主独有的**显式单手册**入口（官方没有这个字段）。给了就是
+//     "只注入这一本"，durable 的自动发现链让位，系统提示按旧形状带那一本。
+//   - `DSHD_INSTRUCTION_CHAIN=0`：整条链关掉（老开关）。durable 不挂载，系统提示回到
+//     旧形状（`GlobalRules` + 单点 `WorkspaceRules`）。
+//   - `DSHD_INSTRUCTION_DURABLE=0`：只关 durable 层（回滚开关）。同样回到旧形状。
+//   - 没有 harness home 的装配（`buildSystemPromptWithHome(..., home="")`）：durable 帧
+//     是会话日志里的内容，没有 home 就没有这条会话，也就没有载体——系统提示按旧形状。
+//
 // # 为什么接在 run 入口而不是 Loop 里
 //
 // 落盘目标是**这条会话的 v4 日志**（`logw`），而 v4 是单写者——只有 run 入口持有它
 // （serve 每轮起一个 `dshd run` 子进程，ACP 同样）。放 Loop 里就得把 writer 传进
 // internal/agent，那会让循环包认识会话日志格式，越出它的分层（循环只认 `llm.Message`
 // 与事件）。
-//
-// # 开关（两个，都要开）
-//
-//   - `DSHD_INSTRUCTION_CHAIN=0` 关：与 cwd 链同一个开关（见 acp.go 的
-//     `instructionChainEnabled`），链关掉时 durable 层整体不挂载。
-//   - `DSHD_INSTRUCTION_DURABLE=1` 开：**durable 层自己的开关，默认关**。
-//     原因写在 `aiInstrDurableEnabled` 里：系统提示已经带着同一份 cwd 链，同时开会把
-//     指令注进请求两次并改掉落盘字节；去重整条要改判据（生产提示词字节整体变化），
-//     需要明确裁定，不在本单自行翻。默认关时生产报文与改动前**逐字节一致**。
 package main
 
 import (
@@ -75,33 +93,72 @@ func (s v4EventSource) Payloads() [][]byte {
 	return out
 }
 
-// aiInstrDurableEnabled 是 durable 层的挂载开关（**默认关**，显式 `DSHD_INSTRUCTION_DURABLE=1` 开）。
+// aiInstrDurableEnabled 是 durable 层的开关（**默认开**，官方形状；
+// `DSHD_INSTRUCTION_DURABLE=0` 显式关）。
 //
-// 为什么默认关：cwd 指令链已经在**系统提示**里（`EnableInstructionChain` 默认开），
-// 而官方把指令放在一条 durable `user/message` 里。两者同时开会把同一份指令注进请求两次
-// （整份基线各一份 = 首轮 prompt 直接翻倍），并且会改掉 run/acp 的落盘字节
-// （`TestCheckpointCLIRunSurvivesKill` 这类按字节钉着"请求前最后一帧就是 user/message"的
-// 探针会红）。去掉重复只有一条路：让 durable 帧成为唯一载体、系统提示不再装配 project 链
-// ——那是**改判据**（生产提示词字节整体变化），按项目纪律要有明确裁定，不在本单自行翻。
-//
-// 所以本单交付的是**可用、可测、可打开的层**：`DSHD_INSTRUCTION_DURABLE=1` 一个开关生效；
-// 默认关时生产报文与改动前逐字节一致。缺口登记 §53 已把这条与裁定项写清。
+// 三值约定与 `instructionChainEnabled` 同一种形状：未设/空前缀 = 默认（开）、
+// `0/false/off/no` = 关。关掉它必须与系统提示侧**同一个判断**：只关 durable 而不把
+// 指令放回系统提示，等于一次都不注（比注两次更糟，且没有任何断言会红）。
+// 所以这个函数只被 `instructionsCarriedByDurableFrame` 消费，不要单独读它。
 func aiInstrDurableEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("DSHD_INSTRUCTION_DURABLE"))) {
-	case "1", "true", "on", "yes":
-		return true
+	case "0", "false", "off", "no":
+		return false
 	}
-	return false
+	return true
 }
 
-// newAIInstrRunner 建一个 run 入口的投影器；链或 durable 开关关掉时返回 nil（整体不挂载）。
+// instructionsCarriedByDurableFrame 回答"这一轮的**工作区指令由谁承载**"。
+//
+// 唯一真值，两个消费方共用（不许各判各的）：
+//   - 系统提示侧：为真 ⇒ `prompt.Context.InstructionsInDurableFrame`，
+//     `GlobalRules` / `WorkspaceRules` / `ProjectInstructions` 全部不装配；
+//   - durable 侧：为真 ⇒ `newAIInstrRunner` 建投影器（基线帧 = 唯一载体）。
+//
+// 四条让位条件写在文件头（`--agents` / `DSHD_INSTRUCTION_CHAIN=0` /
+// `DSHD_INSTRUCTION_DURABLE=0` / 没有 harness home）。没有第五个条件：
+// 默认形状就是"durable 帧唯一承载"，不存在"还要再设一个变量才生效"。
+func instructionsCarriedByDurableFrame(home string) bool {
+	if strings.TrimSpace(home) == "" {
+		// 没有 harness home 就没有这条会话的 durable 记录（日志在 home 下），
+		// 也就没有载体。这条装配入口（home=""）因此保持旧形状。
+		return false
+	}
+	if !instructionChainEnabled() {
+		return false
+	}
+	// `--agents` 是宿主的显式单手册入口：只注入那一本，自动发现链让位。
+	if strings.TrimSpace(*rulesPath) != "" {
+		return false
+	}
+	return aiInstrDurableEnabled()
+}
+
+// aiInstrChainMaxBytes 把宿主 `--workspace-bytes` 的三值口径映射成官方 `maxBytes`。
+//
+//	0  = 官方默认（每条链 65,536，见 `defaultWorkspaceBytes`）；
+//	>0 = 该链的正文字节上限（官方语义：两条链各自一份）；
+//	<0 = 这条链不注入（官方 `maxBytes <= 0` 时什么都不渲染，src/files.ts:474）。
+//
+// 必须由调用方把宿主自己的哨兵值换算好再传：run 的 `--workspace-bytes 0` 表示"不传"
+// （`workspaceBytesForPrompt` 给 -1），而 ACP 的 0 表示"用默认"。两种约定各自保留，
+// 换算点就在调用方（见 main.go / acp.go 的 `newAIInstrRunner` 调用）。
+func aiInstrChainMaxBytes(workspaceBytes int) int {
+	if workspaceBytes == 0 {
+		return defaultWorkspaceBytes
+	}
+	return workspaceBytes
+}
+
+// newAIInstrRunner 建一个 run 入口的投影器；不是唯一载体时返回 nil（整体不挂载）。
 //
 // 配置与 cwd 链同源：home 来自进程参数，agents home 走 `$DSH_AGENTS_HOME` → `~/.agents`
 // （acp.go 的 `resolveSharedGlobalRulesPath` 解析的是**文件路径**；这里要的是**根目录**，
-// 输出形状不同、消费方不同，不是同一规则的第二份实现）。预算沿用 cwd 链的官方默认
-// （65,536 / 每条链，`defaultWorkspaceBytes`）。
-func newAIInstrRunner(home string) *aiInstrRunner {
-	if !instructionChainEnabled() || !aiInstrDurableEnabled() {
+// 输出形状不同、消费方不同，不是同一规则的第二份实现）。预算与系统提示同源
+// （`--workspace-bytes`）：两者不同源时，"系统提示里截到 8,000"与"durable 帧里给 65,536"
+// 会同时成立，`--workspace-bytes` 就成了一个只影响其中一半的开关。
+func newAIInstrRunner(home string, workspaceBytes int) *aiInstrRunner {
+	if !instructionsCarriedByDurableFrame(home) {
 		return nil
 	}
 	runner := &aiInstrRunner{
@@ -109,7 +166,7 @@ func newAIInstrRunner(home string) *aiInstrRunner {
 		config: ainstr.ResolveConfig(ainstr.Config{
 			DshHome:    home,
 			AgentsHome: sharedAgentsHomeRoot(),
-			MaxBytes:   defaultWorkspaceBytes,
+			MaxBytes:   aiInstrChainMaxBytes(workspaceBytes),
 		}),
 	}
 	return runner
@@ -234,7 +291,7 @@ func (a *aiInstrRunner) OnStepEnd(logw *session.Log, cwd string) {
 // aiInstrFor 返回某会话的 durable 投影器（ACP 进程内多会话 ⇒ 每会话一份）。
 //
 // 与 run 入口的差别只有"按会话隔离"：version 缓存与攒批都是每会话状态，
-// 共用一份会让 A 会话的 touch 触发 B 会话的投影。链被关掉时返回 nil（钩子全 nil）。
+// 共用一份会让 A 会话的 touch 触发 B 会话的投影。不是唯一载体时返回 nil（钩子全 nil）。
 func (r *acpRunner) aiInstrFor(sessionID string) *aiInstrRunner {
 	r.aiInstrMu.Lock()
 	defer r.aiInstrMu.Unlock()
@@ -244,7 +301,7 @@ func (r *acpRunner) aiInstrFor(sessionID string) *aiInstrRunner {
 	if runner, ok := r.aiInstr[sessionID]; ok {
 		return runner
 	}
-	runner := newAIInstrRunner(r.home)
+	runner := newAIInstrRunner(r.home, r.workspaceBytes)
 	r.aiInstr[sessionID] = runner
 	return runner
 }

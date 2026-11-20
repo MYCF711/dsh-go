@@ -1417,6 +1417,9 @@ func newSubagentRealGateway(t *testing.T) *httptest.Server {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// `lastUser` = 人说的那句。官方 #53 的 durable 基线帧也是 user 消息
+		// （README.md:34），且排在本轮用户消息之后；脚本化网关按 prompt 分派回答，
+		// 所以官方帧必须跳过，否则"最后一条 user 消息"就是那句总说明。
 		var lastUser string
 		hasTool := false
 		for _, m := range req.Messages {
@@ -1425,7 +1428,7 @@ func newSubagentRealGateway(t *testing.T) *httptest.Server {
 			}
 			if m.Role == "user" {
 				var s string
-				if json.Unmarshal(m.Content, &s) == nil {
+				if json.Unmarshal(m.Content, &s) == nil && !strings.HasPrefix(s, "<system-reminder>") {
 					lastUser = s
 				}
 			}

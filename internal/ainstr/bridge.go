@@ -14,13 +14,17 @@
 // `InstructionChainFile`（显示路径 + 正文 + 是否进了渲染），与官方
 // `loadBaselineInstructionSet`（`src/files.ts:469-516`）的 `included` 同义。
 //
-// 用户全局链（`$DSH_HOME/AGENTS.md` + `$DSH_AGENTS_HOME/AGENTS.md`）**不在**这里：
-// 它在本仓的既有形状是 `GlobalRules`（`prompt.go:210-308`），渲染在 `全局约定（path）：`
-// 块里而不是官方的合并 `<system-reminder>` 帧里（缺口登记 §53 的第三条）。把它搬进
-// 本包的 durable 层会同时改掉生产提示词字节与既有断言 —— 那是"改判据"，需要单独定口径。
+// 用户全局链（`$DSH_HOME/AGENTS.md` + `$DSH_AGENTS_HOME/AGENTS.md`）也在本文件里加载
+// （`LoadBaselineSegments` 的第一段），但它的发现/读/同组 trim 去重不经过 prompt 包的
+// 项目链：官方 `userGlobalRoots`（files.ts:90-102）是一条独立的、只有两个固定候选的链。
+// 两条链合进**同一个** `<system-reminder>` 帧、每链一份预算，由
+// `prompt.RenderInstructionChains` 做（官方 renderInstructionChains）。
 //
-// 所以本文件只桥**项目链**，并且把"用户全局链没进 durable 层"这件事显式返回给调用方
-// （`Bridge.UserGlobalInDurable == false`），不许让调用方以为它已经在里面了。
+// 这正是"唯一载体"的落点：官方 README.md:34 "The first request includes **one durable
+// baseline message** with the user-global chain — `$DSH_HOME/AGENTS.md`, then
+// `<agentsHome>/AGENTS.md` — followed by the project chain"，所以用户全局链与项目链
+// **都**在这条 durable `user/message` 里，系统提示里两个都不再装配
+// （判据见 `cmd/dshd` 的 `instructionsCarriedByDurableFrame`）。
 package ainstr
 
 import (

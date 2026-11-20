@@ -68,8 +68,21 @@ func TestW149RealDSHDContextUsageFromNaturalPromptAndRestart(t *testing.T) {
 			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
 			return
 		}
+		// 取**人说的话**：官方 #53 的 durable 基线帧也是一条 user 消息
+		// （README.md:34 "one durable baseline message"），它排在本轮用户消息之后，
+		// 所以"最后一条消息"不再等于"用户的 prompt"。帧的形状是官方
+		// `<system-reminder>`，跳过去即可 —— 判据没放宽，仍是"按 prompt 分派 usage"。
 		var prompt string
-		_ = json.Unmarshal(request.Messages[len(request.Messages)-1].Content, &prompt)
+		for _, message := range request.Messages {
+			var text string
+			if err := json.Unmarshal(message.Content, &text); err != nil {
+				continue
+			}
+			if strings.HasPrefix(text, "<system-reminder>") {
+				continue
+			}
+			prompt = text
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		usage := ""
 		switch prompt {

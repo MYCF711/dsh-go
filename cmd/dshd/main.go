@@ -699,7 +699,7 @@ func cmdRun(argv []string) (retErr error) {
 	// 负值不在这里挡：装配期由 modules/tools 的 Options.Validate fail-loud（与官方
 	// "Invalid config fails at load" 同一形状），这样库层与宿主是同一份判据。
 	maxInlineTokens := fs.Int("max-inline-tokens", 0, "工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
-	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "AGENTS.md 进系统提示的字节上限（0=不传）")
+	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "每个工作区指令链的字节上限（进 durable 帧；0=不传）")
 	resumeSession := fs.String("session", "", "续这个会话（空=新建）；cwd 可省，按 id 找")
 	// 工具表默认压掉参数说明：20 次 A/B（10 个任务 × 两种表）结果一致，输入省 22%。
 	// 要完整表就显式写 --tool-schema=full——比如排查"模型没填对参数"时。
@@ -896,7 +896,13 @@ func cmdRun(argv []string) (retErr error) {
 	for _, w := range warns {
 		fmt.Fprintln(os.Stderr, "工具表："+w)
 	}
-	sys, err := buildSystemPrompt(table, *model, cwd, workspaceBytesForPrompt(*workspaceBytes))
+	// run 与 acp 走**同一份**装配（同一个 `buildSystemPromptWithHome`，同样的 home）：
+	// "谁承载指令"的判据只有一处（`instructionsCarriedByDurableFrame`），两个入口各传各的
+	// home 才能都得到同一个答案。以前这里走的是"没有 home"的 `buildSystemPrompt`，
+	// 于是 run 的系统提示永远看不到用户全局链，而 durable 侧却拿得到 —— 正是
+	// "两边各判各的"那种形状。默认形状下这段不产出任何指令段（指令在 durable 帧里）；
+	// 显式关掉 durable/链之后，run 也会像 acp 一样带上 `$DSH_HOME/AGENTS.md`。
+	sys, err := buildSystemPromptWithHome(table, *model, cwd, *home, workspaceBytesForPrompt(*workspaceBytes))
 	if err != nil {
 		return err
 	}
@@ -1092,8 +1098,9 @@ func cmdRun(argv []string) (retErr error) {
 		return err
 	}
 	// 官方 `agent-instructions`（#53）的 durable 投影器：一个 run 进程 = 一个会话一份。
-	// 默认不挂载（`DSHD_INSTRUCTION_DURABLE=1` 才开，理由见 aiInstrDurableEnabled）。
-	aiInstr := newAIInstrRunner(*home)
+	// 默认形状是**唯一载体**（系统提示里的指令段已被抑制，判据见
+	// instructionsCarriedByDurableFrame）；预算与系统提示同源（--workspace-bytes）。
+	aiInstr := newAIInstrRunner(*home, workspaceBytesForPrompt(*workspaceBytes))
 	// 基线写在**耐久 checkpoint 之前**：侧车按"请求前缀"记身份
 	// （`TestCheckpointCLIRunSurvivesKill` 钉着"请求前最后一帧是 user/message"），
 	// 先写基线，锚点才与真实请求一致。

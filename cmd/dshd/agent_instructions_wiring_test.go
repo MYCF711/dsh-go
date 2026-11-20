@@ -6,8 +6,9 @@ package main
 //
 // 覆盖：
 //
-// 挂载条件：`DSHD_INSTRUCTION_CHAIN` 未关 **且** `DSHD_INSTRUCTION_DURABLE=1`
-// （durable 开关默认关，理由见 aiInstrDurableEnabled：与系统提示里的 cwd 链重复）。
+// 挂载条件（默认形状）：`instructionsCarriedByDurableFrame(home)` —— 有 harness home、
+// `DSHD_INSTRUCTION_CHAIN` 未关、没给 `--agents`、`DSHD_INSTRUCTION_DURABLE` 未显式关。
+// **默认就是挂载**（durable 帧是工作区指令的唯一载体，官方 README.md:34）。
 //
 //	TestAIInstrBaselineWritesDurableUserMessage —— 落盘形状是 `user/message` +
 //	  `source.kind='agent-instructions'` + `baseline:true` + `baselineIdentity` + `changes`，
@@ -16,7 +17,10 @@ package main
 //	TestAIInstrStepTouchesProjectNestedInstructions —— read/write/edit 成功触摸
 //	  `pkg/sub/AGENTS.md` 后，下一次 step 投影落一条 `Additional instructions from:` 帧。
 //	TestAIInstrFailedToolDoesNotTouch —— 失败的工具结果不产生 touch、不落帧。
-//	TestAIInstrDisabledByEnvKeepsCurrentBytes —— `DSHD_INSTRUCTION_CHAIN=0` 时整体不挂载。
+//	TestAIInstrDisabledByEnvKeepsCurrentBytes —— 三条显式出口（链关 / durable 关 /
+//	  `--agents`）都**成对**让位：durable 不挂载 **且** 系统提示回到旧形状。
+//	TestAIInstrDefaultIsMountedAndPromptCarriesNoInstructions —— 默认形状：挂载 + 系统提示
+//	  里一个指令段都没有（位置唯一性的单元面）。
 //	TestAIInstrReplaysAfterRestart —— 新进程（新 runner、同一份日志）身份相等 → 不重发基线，
 //	  这是 official resume reconcile 的直接证据。
 
@@ -33,6 +37,10 @@ import (
 )
 
 // aiInstrFixture 造一个临时 home + 带 .git 的项目树 + 一份已打开的会话日志。
+//
+// `$DSH_AGENTS_HOME` 显式指到一个空临时目录：不钉住的话，第二根会落到**跑测试那台
+// 机器**的 `~/.agents/AGENTS.md` 上，断言就随机器漂（同一个病
+// `TestPromptWithoutHarnessHomeIgnoresSharedRoot` 在系统提示侧守着）。
 func aiInstrFixture(t *testing.T) (home, root, cwd string, logw *session.Log) {
 	t.Helper()
 	base := t.TempDir()
@@ -43,6 +51,7 @@ func aiInstrFixture(t *testing.T) (home, root, cwd string, logw *session.Log) {
 			t.Fatal(err)
 		}
 	}
+	t.Setenv(sharedAgentsHomeEnv, filepath.Join(base, "agents"))
 	writeFixtureFile(t, filepath.Join(root, "AGENTS.md"), "root-rules\n")
 	logw, err := session.CreateSession(home, root, "sess-ai", "")
 	if err != nil {
@@ -96,8 +105,8 @@ func aiInstrFramesFromLog(t *testing.T, path string) []struct {
 func TestAIInstrBaselineWritesDurableUserMessage(t *testing.T) {
 	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
 	t.Setenv("DSHD_INSTRUCTION_DURABLE", "1")
-	home, root, cwd, logw := aiInstrFixture(t)
-	runner := newAIInstrRunner(home)
+	home, _, cwd, logw := aiInstrFixture(t)
+	runner := newAIInstrRunner(home, defaultWorkspaceBytes)
 	if runner == nil {
 		t.Fatal("链与 durable 开关都显式打开时，runner 不该是 nil")
 	}
@@ -134,7 +143,6 @@ func TestAIInstrBaselineWritesDurableUserMessage(t *testing.T) {
 	if !found {
 		t.Fatalf("changes 缺 root AGENTS.md 的 set+digest: %+v", frame.Source.Changes)
 	}
-	_ = root
 }
 
 // aliveIntroFragment 是官方 `AGENT_INSTRUCTIONS_INTRO` 的第一句（逐字）。
@@ -146,7 +154,7 @@ func TestAIInstrBaselineIsIdempotentWithinSession(t *testing.T) {
 	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
 	t.Setenv("DSHD_INSTRUCTION_DURABLE", "1")
 	home, _, cwd, logw := aiInstrFixture(t)
-	runner := newAIInstrRunner(home)
+	runner := newAIInstrRunner(home, defaultWorkspaceBytes)
 	if _, err := runner.Baseline(logw, cwd); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +174,7 @@ func TestAIInstrStepTouchesProjectNestedInstructions(t *testing.T) {
 	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
 	t.Setenv("DSHD_INSTRUCTION_DURABLE", "1")
 	home, root, cwd, logw := aiInstrFixture(t)
-	runner := newAIInstrRunner(home)
+	runner := newAIInstrRunner(home, defaultWorkspaceBytes)
 	if _, err := runner.Baseline(logw, cwd); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +208,7 @@ func TestAIInstrFailedToolDoesNotTouch(t *testing.T) {
 	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
 	t.Setenv("DSHD_INSTRUCTION_DURABLE", "1")
 	home, root, cwd, logw := aiInstrFixture(t)
-	runner := newAIInstrRunner(home)
+	runner := newAIInstrRunner(home, defaultWorkspaceBytes)
 	if _, err := runner.Baseline(logw, cwd); err != nil {
 		t.Fatal(err)
 	}
@@ -221,20 +229,115 @@ func TestAIInstrFailedToolDoesNotTouch(t *testing.T) {
 	}
 }
 
-// TestAIInstrDisabledByEnvKeepsCurrentBytes 钉 `DSHD_INSTRUCTION_CHAIN=0` 时整体不挂载。
+// TestAIInstrDisabledByEnvKeepsCurrentBytes 钉**三条显式出口的成对性**。
+//
+// 原来钉的是什么：`DSHD_INSTRUCTION_CHAIN=0` 不挂载；而 durable 开关**默认关**，
+// 所以"生产报文逐字节不变"成立（那些字节当时由系统提示的 cwd 链负责）。
+// 为什么它跟着变了：durable 帧现在是**唯一载体**，默认必须挂载。开关一旦只影响
+// durable 一侧，"关掉"就会让指令一次都不注（比注两次更糟）；所以每一处让位都必须是
+// **成对**的：durable 不挂载 ＋ 系统提示回到旧形状。这条测试因此变强了而不是变弱。
+// 现在钉的是什么：三个显式出口各自 —— (a) 不建投影器；(b) 系统提示里**确实**有旧形状
+// 的指令段（`DSHD_INSTRUCTION_CHAIN=0` → 单点 `工作区约定（`；
+// `DSHD_INSTRUCTION_DURABLE=0` → 官方 project 链帧；`--agents` → 那本单手册），
+// 也就是"关掉 durable 不等于丢掉指令"。
 func TestAIInstrDisabledByEnvKeepsCurrentBytes(t *testing.T) {
+	home, root, cwd, _ := aiInstrFixture(t)
+
+	// ① 链整体关：与 cwd 链同一个开关，durable 跟着让位。
+	// 用项目根当 cwd：旧的单点 `WorkspaceRules` 只读 **cwd** 的 AGENTS.md。
 	for _, value := range []string{"0", "false", "off", "no"} {
 		t.Setenv("DSHD_INSTRUCTION_CHAIN", value)
-		t.Setenv("DSHD_INSTRUCTION_DURABLE", "1")
-		if runner := newAIInstrRunner(t.TempDir()); runner != nil {
+		t.Setenv("DSHD_INSTRUCTION_DURABLE", "")
+		oldRules := *rulesPath
+		*rulesPath = ""
+		if runner := newAIInstrRunner(home, defaultWorkspaceBytes); runner != nil {
+			*rulesPath = oldRules
 			t.Fatalf("DSHD_INSTRUCTION_CHAIN=%q 时不该挂载 durable 层", value)
 		}
+		prompt, err := buildSystemPromptWithHome(emptyRegistry{}, "m", root, home, defaultWorkspaceBytes)
+		*rulesPath = oldRules
+		if err != nil {
+			t.Fatalf("装配系统提示: %v", err)
+		}
+		if !strings.Contains(prompt, "工作区约定（") || !strings.Contains(prompt, "root-rules") {
+			t.Fatalf("链关掉后系统提示必须回到旧形状（单点 工作区约定 + 正文）：\n%s", prompt)
+		}
 	}
-	// durable 开关默认关：没有显式打开时一个钩子都不接（生产报文逐字节不变）。
+
+	// ② 只关 durable 层（回滚开关）：系统提示必须把指令接回去，否则等于一次都不注。
+	for _, value := range []string{"0", "false", "off", "no"} {
+		t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
+		t.Setenv("DSHD_INSTRUCTION_DURABLE", value)
+		oldRules := *rulesPath
+		*rulesPath = ""
+		if runner := newAIInstrRunner(home, defaultWorkspaceBytes); runner != nil {
+			*rulesPath = oldRules
+			t.Fatalf("DSHD_INSTRUCTION_DURABLE=%q 时不该挂载 durable 层", value)
+		}
+		prompt, err := buildSystemPromptWithHome(emptyRegistry{}, "m", cwd, home, defaultWorkspaceBytes)
+		*rulesPath = oldRules
+		if err != nil {
+			t.Fatalf("装配系统提示: %v", err)
+		}
+		if !strings.Contains(prompt, "root-rules") {
+			t.Fatalf("durable 关掉后系统提示必须重新携带项目链（否则指令一次都不注）：\n%s", prompt)
+		}
+	}
+
+	// ③ `--agents` 显式单手册：自动发现链让位，durable 不挂载，那本手册照旧进系统提示。
 	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
 	t.Setenv("DSHD_INSTRUCTION_DURABLE", "")
-	if runner := newAIInstrRunner(t.TempDir()); runner != nil {
-		t.Fatal("DSHD_INSTRUCTION_DURABLE 默认关，不该挂载（生产字节必须保持改动前）")
+	manual := filepath.Join(t.TempDir(), "WORKER.md")
+	writeFixtureFile(t, manual, "single-manual-rules\n")
+	oldRules := *rulesPath
+	*rulesPath = manual
+	defer func() { *rulesPath = oldRules }()
+	if runner := newAIInstrRunner(home, defaultWorkspaceBytes); runner != nil {
+		t.Fatal("给了 --agents 单手册时不该挂 durable 自动发现链（两本手册会同时出现）")
+	}
+	prompt, err := buildSystemPromptWithHome(emptyRegistry{}, "m", cwd, home, defaultWorkspaceBytes)
+	if err != nil {
+		t.Fatalf("装配系统提示: %v", err)
+	}
+	if !strings.Contains(prompt, "single-manual-rules") {
+		t.Fatalf("--agents 指定的手册没进系统提示：\n%s", prompt)
+	}
+}
+
+// TestAIInstrDefaultIsMountedAndPromptCarriesNoInstructions 钉**默认形状**（这条以前钉的是
+// 反面：默认不挂载、生产字节不变）。
+//
+// 原来钉的是什么：`DSHD_INSTRUCTION_DURABLE` 未设 ⇒ 不挂载。
+// 为什么它跟着变了：durable 帧是官方形状的唯一载体（README.md:34 "one durable baseline
+// message"），默认必须挂载；同时系统提示里必须**一个指令段都没有**——否则同一份
+// AGENTS.md 在 system 与 user 两个角色里各一份，计数就是 2。
+// 现在钉的是什么：默认（两个开关都不设、没有 `--agents`）⇒ 挂载，且系统提示里
+// 0 处 `root-rules` / 0 处 `工作区约定（` / 0 处 `全局约定（` / 0 处 `Instructions from:`。
+func TestAIInstrDefaultIsMountedAndPromptCarriesNoInstructions(t *testing.T) {
+	home, _, cwd, _ := aiInstrFixture(t)
+	if err := os.WriteFile(filepath.Join(home, "AGENTS.md"), []byte("home-rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
+	t.Setenv("DSHD_INSTRUCTION_DURABLE", "")
+	oldRules := *rulesPath
+	*rulesPath = ""
+	t.Cleanup(func() { *rulesPath = oldRules })
+
+	if runner := newAIInstrRunner(home, defaultWorkspaceBytes); runner == nil {
+		t.Fatal("默认形状下 durable 层必须挂载（它是指令的唯一载体）")
+	}
+	prompt, err := buildSystemPromptWithHome(emptyRegistry{}, "m", cwd, home, defaultWorkspaceBytes)
+	if err != nil {
+		t.Fatalf("装配系统提示: %v", err)
+	}
+	for _, marker := range []string{"root-rules", "home-rules", "工作区约定（", "全局约定（", "Instructions from:", "<system-reminder>"} {
+		if strings.Contains(prompt, marker) {
+			t.Fatalf("系统提示里出现了指令内容 %q（指令必须只在 durable 帧里）：\n%s", marker, prompt)
+		}
+	}
+	if !strings.Contains(prompt, "Runtime: dsh-go") {
+		t.Fatalf("抑制指令段把运行时事实一起吃掉了：\n%s", prompt)
 	}
 }
 
@@ -244,14 +347,14 @@ func TestAIInstrReplaysAfterRestart(t *testing.T) {
 	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
 	t.Setenv("DSHD_INSTRUCTION_DURABLE", "1")
 	home, root, cwd, logw := aiInstrFixture(t)
-	first := newAIInstrRunner(home)
+	first := newAIInstrRunner(home, defaultWorkspaceBytes)
 	if _, err := first.Baseline(logw, cwd); err != nil {
 		t.Fatal(err)
 	}
 	baselineFrames := len(aiInstrFramesFromLog(t, logw.Path))
 
 	// "重启"：同一份日志、新的 runner 实例（进程内状态全丢）。
-	second := newAIInstrRunner(home)
+	second := newAIInstrRunner(home, defaultWorkspaceBytes)
 	if _, err := second.Baseline(logw, cwd); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +383,7 @@ func TestAIInstrPromptInjectionIsUserRole(t *testing.T) {
 	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
 	t.Setenv("DSHD_INSTRUCTION_DURABLE", "1")
 	home, _, cwd, logw := aiInstrFixture(t)
-	runner := newAIInstrRunner(home)
+	runner := newAIInstrRunner(home, defaultWorkspaceBytes)
 	if _, err := runner.Baseline(logw, cwd); err != nil {
 		t.Fatal(err)
 	}

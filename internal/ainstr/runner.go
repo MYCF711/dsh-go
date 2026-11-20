@@ -265,33 +265,44 @@ func Compose(options Options) (Composed, error) {
 		if renderErr != nil {
 			return Composed{}, renderErr
 		}
-		rendered, _ := prompt.RenderInstructionChains(segments, prompt.InstructionChainOptions{
-			MaxBytes:                config.MaxBytes,
-			Intro:                   prompt.AgentInstructionsIntro,
-			ReplacePreviousBaseline: baselinePresent,
-		})
-		content = append(content, rendered.Text)
-		baselineChanges, baselineUpdates := BaselineState(included)
-		// 官方 `excludedScopes`（index.ts:163-173）：观测到但没进渲染的 scope。
-		// 同组 trim 重复且组内已有同内容被渲染的，**保持可提升**（官方最后一段循环）。
-		excluded = observedMinusIncluded(observed, included)
-		versionUpdates = append(versionUpdates, baselineUpdates...)
-		if baselinePresent {
-			// 替换型基线：旧基线里"这条新基线没有覆盖"的 scope 必须显式 remove，
-			// 否则模型会以为那些文件还在生效（官方 index.ts:184-193 的 replacementRemovals）。
-			kept := make(map[string]bool, len(baselineChanges))
-			for _, change := range baselineChanges {
-				kept[change.Scope] = true
-			}
-			for _, previous := range options.State.Baseline.Changes {
-				if previous.Action == ActionRemove || kept[previous.Scope] {
-					continue
+		// 官方 "an empty chain adds nothing"（README.md:12、:158 "an empty chain
+		// contributes zero tokens"）：一条链上**没有任何候选文件**、而且此前也没有
+		// 基线时，`renderInstructionChains` 仍然会给出"总说明 + 空 `<system-reminder>` 帧"
+		// 的空壳——那不是"这条链的内容"，是**框架**。把它落盘等于每个没有 AGENTS.md 的
+		// 会话都多一条空 reminder（durable 层默认开之后，那就是全部会话），
+		// 既白涨 token 又让"指令恰好注一次"的计数多出一条没有指令的帧。
+		//
+		// 保留的另一支：`baselinePresent` 为真时**必须**发（替换型基线），否则模型会以为
+		// 上一份指令还在生效（官方 EMPTY_REPLACEMENT 那句就是干这个的）。
+		if len(segments) > 0 || baselinePresent {
+			rendered, _ := prompt.RenderInstructionChains(segments, prompt.InstructionChainOptions{
+				MaxBytes:                config.MaxBytes,
+				Intro:                   prompt.AgentInstructionsIntro,
+				ReplacePreviousBaseline: baselinePresent,
+			})
+			content = append(content, rendered.Text)
+			baselineChanges, baselineUpdates := BaselineState(included)
+			// 官方 `excludedScopes`（index.ts:163-173）：观测到但没进渲染的 scope。
+			// 同组 trim 重复且组内已有同内容被渲染的，**保持可提升**（官方最后一段循环）。
+			excluded = observedMinusIncluded(observed, included)
+			versionUpdates = append(versionUpdates, baselineUpdates...)
+			if baselinePresent {
+				// 替换型基线：旧基线里"这条新基线没有覆盖"的 scope 必须显式 remove，
+				// 否则模型会以为那些文件还在生效（官方 index.ts:184-193 的 replacementRemovals）。
+				kept := make(map[string]bool, len(baselineChanges))
+				for _, change := range baselineChanges {
+					kept[change.Scope] = true
 				}
-				changes = append(changes, Change{Action: ActionRemove, Scope: previous.Scope, Path: previous.Path})
+				for _, previous := range options.State.Baseline.Changes {
+					if previous.Action == ActionRemove || kept[previous.Scope] {
+						continue
+					}
+					changes = append(changes, Change{Action: ActionRemove, Scope: previous.Scope, Path: previous.Path})
+				}
 			}
+			changes = append(changes, baselineChanges...)
+			desiredBaseline = true
 		}
-		changes = append(changes, baselineChanges...)
-		desiredBaseline = true
 	}
 
 	// ---- 增量 reconcile ----
