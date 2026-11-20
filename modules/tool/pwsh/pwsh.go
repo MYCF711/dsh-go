@@ -106,6 +106,24 @@ type Tool struct {
 	envMu       sync.Mutex
 	envProvider spi.ShellEnvProvider
 	envTried    bool
+	// aclRootParent 是受控根父目录（`sandbox.EnvACLRoot`）。空 = **未启用** ACL runner，
+	// 命令仍以宿主用户权限运行，enforcement 如实报 policy-only。
+	//
+	// 默认关闭是有意的：受控根把命令的可写面收在一个宿主自有的目录里，
+	// workspace-write 下就写不进用户工作区了；要启用必须显式配置。
+	aclRootParent string
+	// homeDir 在默认受控根路径 `<home>/sandbox-roots/<session-id>/` 里用。
+	homeDir string
+	// runnerMu / runners 是每会话的 ACL runner 缓存（含「启用但用不了」的原因）。
+	// 一个会话一个受控根；探测失败会缓存原因，不会每条命令重试一次 pwsh。
+	runnerMu sync.Mutex
+	runners  map[string]sessionRunnerState
+}
+
+// sessionRunnerState 是一个会话的 runner 结论：要么 runner 可用，要么 note 说明为什么退回了。
+type sessionRunnerState struct {
+	runner *sandbox.Runner
+	note   string
 }
 
 // Option 是 Tool 的可选项（测试注入与将来宿主接线用）。
@@ -164,6 +182,19 @@ func WithMaxOutputBytes(n int) Option {
 	}
 }
 
+// WithSandboxACLRoot 显式启用 ACL 受控根（生产从 `DSHD_SANDBOX_ACL_ROOT` 解析，
+// 这里只是让测试与宿主自建 scope 能注入）。
+//
+// parent 为空表示**不启用**——这是默认值，不是「用默认目录启用」。
+func WithSandboxACLRoot(parent, home string) Option {
+	return func(t *Tool) {
+		t.aclRootParent = strings.TrimSpace(parent)
+		if h := strings.TrimSpace(home); h != "" {
+			t.homeDir = h
+		}
+	}
+}
+
 func newTool(opts ...Option) (*Tool, error) {
 	t := &Tool{}
 	for _, opt := range opts {
@@ -179,6 +210,19 @@ func newTool(opts ...Option) (*Tool, error) {
 			return nil, fmt.Errorf("pwsh 装配沙箱策略失败: %w", err)
 		}
 		t.gate = gate
+	}
+	// 受控根是**显式开关**：没配 `DSHD_SANDBOX_ACL_ROOT` 就完全不起 runner，
+	// 命令仍以宿主用户权限运行（enforcement 如实报 policy-only）。
+	if t.aclRootParent == "" {
+		t.aclRootParent = strings.TrimSpace(os.Getenv(sandbox.EnvACLRoot))
+	}
+	if t.homeDir == "" {
+		t.homeDir = strings.TrimSpace(os.Getenv(sandbox.EnvHomeDir))
+		if t.homeDir == "" {
+			if home, err := os.UserHomeDir(); err == nil {
+				t.homeDir = home
+			}
+		}
 	}
 	return t, nil
 }
@@ -222,6 +266,15 @@ type data struct {
 	// JobID 非空表示已转后台：用 job_output 取输出、job_kill 终止。
 	JobID      string `json:"job_id,omitempty"`
 	Background bool   `json:"background,omitempty"`
+	// Enforcement 是这次调用**实际**到达的隔离层级，逐次如实上报：
+	//   policy-only-no-os-isolation   = 只有策略闸门（今天的事实）
+	//   windows-acl-write-only-partial = 走 Windows ACL 受控根（只限写/删，读/网络/进程不受限）
+	Enforcement string `json:"enforcement"`
+	// SandboxRoot 非空表示这次调用真的在受控根里跑（`<home>/sandbox-roots/<session-id>/`）。
+	SandboxRoot string `json:"sandbox_root,omitempty"`
+	// RunnerNote 记「启用了受控根但没能用上」的具体原因。这条**必须有**：
+	// 退回策略层是允许的，静默退回不允许。
+	RunnerNote string `json:"runner_note,omitempty"`
 }
 
 // resolveTimeout 决定这次调用的超时。
@@ -338,9 +391,25 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		script = legacyPrologue + cmdline
 	}
 
+	// ACL 受控根：只在**显式启用且探针通过**时使用。runner 为 nil 表示这次调用
+	// 走策略层，runnerNote 说明为什么（未启用时为空，启用但用不上时非空）。
+	runner, runnerNote := t.runnerFor(ctx, shell)
+
 	// 立刻转后台：官方语义是"注册进 jobs 运行时、马上回 job id、无超时"。
 	// 走的是与 bash 工具**同一个** jobs 表（spi.Exec 接缝），见 background.go。
 	if a.RunInBackground {
+		if runner != nil {
+			// 后台面由 jobs 运行时执行，那里打不了受限令牌；静默降级成"没沙箱"不行。
+			return spi.Result{
+				Summary: "受控根模式不支持后台任务，命令未执行",
+				Data: map[string]any{
+					"enforcement":  string(sandbox.EnforcementWindowsACLWriteOnly),
+					"sandbox_root": runner.Root(),
+					"runner_note":  "run_in_background 走 jobs 运行时，无法打受限令牌",
+				},
+				Hint: "去掉 run_in_background 再试；受控根模式下每条命令都要一个受限子进程",
+			}, fmt.Errorf("受控根模式不支持 run_in_background（无法为后台任务打受限令牌）")
+		}
 		return t.startBackground(ctx, backgroundSpec{
 			shell:       shell,
 			script:      script,
@@ -368,9 +437,60 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	cmd.Stdout = out
 	cmd.Stderr = out
 
+	enforcement := sandbox.EnforcementPolicyOnlyNoOSIsolation
+	sandboxRoot := ""
+	var releaseRoot func() error
+	if runner != nil {
+		// 受控根模式下 cwd 必须是根内：静默改写 cwd 会让命令在错误目录里产生副作用，
+		// 所以这里 fail-loud，而不是替用户换目录。
+		inside, inErr := workdirInsideRoot(dir, runner.Root())
+		if inErr != nil {
+			return spi.Result{Hint: "解析工作目录失败：" + inErr.Error()}, inErr
+		}
+		if !inside {
+			return spi.Result{
+				Summary: "受控根模式下 workdir 必须在受控根内，命令未执行",
+				Data: map[string]any{
+					"enforcement":  string(sandbox.EnforcementWindowsACLWriteOnly),
+					"sandbox_root": runner.Root(),
+				},
+				Hint: fmt.Sprintf("受控根模式把可写面收在 %s 里；把 workdir 指到根内，或关掉 %s 再跑",
+					runner.Root(), sandbox.EnvACLRoot),
+			}, fmt.Errorf("workdir %q 不在受控根 %q 内", dir, runner.Root())
+		}
+		release, prepErr := runner.Prepare(cmd)
+		if prepErr != nil {
+			return spi.Result{
+				Summary: "受控根准备失败，命令未执行",
+				Data: map[string]any{
+					"enforcement": string(sandbox.EnforcementPolicyOnlyNoOSIsolation),
+					"runner_note": prepErr.Error(),
+				},
+				Hint: "受控根建不起来就明确失败，不静默降级成无沙箱执行；检查 " + sandbox.EnvACLRoot,
+			}, prepErr
+		}
+		releaseRoot = release
+		enforcement = runner.Enforcement()
+		sandboxRoot = runner.Root()
+	}
+
 	start := time.Now()
 	runErr := cmd.Run()
 	elapsed := time.Since(start)
+	if releaseRoot != nil {
+		// 收工失败（受控根残留）要说出来：那是硬问题，不是日志噪音。
+		if relErr := releaseRoot(); relErr != nil {
+			return spi.Result{
+				Summary: "命令已执行但受控根没清干净",
+				Data: map[string]any{
+					"enforcement":  string(enforcement),
+					"sandbox_root": sandboxRoot,
+					"runner_note":  relErr.Error(),
+				},
+				Hint: "受控根残留会把目录留在 " + sandboxRoot + "；报告宿主，别忽略",
+			}, relErr
+		}
+	}
 
 	body := out.String()
 	trunc := out.Truncated()
@@ -398,6 +518,9 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 			Truncated:   trunc,
 			Bytes:       out.Len(),
 			TimeoutMS:   timeoutMS,
+			Enforcement: string(enforcement),
+			SandboxRoot: sandboxRoot,
+			RunnerNote:  runnerNote,
 		},
 	}
 
