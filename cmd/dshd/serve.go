@@ -143,27 +143,48 @@ func newEpochFunc() func() int64 {
 // defaultTurnMaxSteps 是**每轮步数上限**的唯一默认值：run / serve / acp / schedule
 // 四个入口共用同一个数，不留第二套默认。
 //
-// # 为什么是 2000，不是 8/12
+// # 0 = 不设上限，因为官方就是"没有上限"
 //
-// 官方 40 个真实会话 3060 轮里，**1519 轮**的最大 step ≥ 9；全体 assistant step
-// 分位是 p50=13 / p90=90 / p95=174 / p99=938 / max=1318，>200 的样本 11507 个。
-// 也就是说"8 步"会砍掉一半以上的真实轮次——用户看到的是
-// `turn 用满了 8 步仍未收敛（模型一直在请求工具）`，而那一轮本来能跑完。
+// 以前这里写的是 2000，理由是"安全阀要高于真实 step 分布的 p99=938"。
+// 那个数**没有任何官方依据**：官方 agent loop 根本没有内置轮次预算。
 //
-// 步数是**安全阀**，不是预算：正常情况下模型自己会在没有工具调用时收敛
-// （loop 里 `len(resp.ToolCalls)==0` 就结束并写 turn/end）。只有模型真的陷入
-// 循环时才需要这个上限把人从死循环里救出来，所以它必须显著高于真实分布的
-// p99，而不是刚好卡在分布中间。2000 仍远低于"无限"：一次真死循环会在 2000 步
-// 内被截断，且错误文案照旧是"用满仍未收敛"（不吞错、不改结局语义）。
+//	`dsh-agent-loop/README.zh.md:236`（英文 README.md:236 同段）：
+//	  "**没有内置轮次预算**：工具调用或 steering 会让当前轮次继续；
+//	   限制失控轮次的策略必须从既有生命周期扩展点（如 `agent/turn-stopping`）
+//	   执行取消。"
+//
+// 代码侧同样没有隐藏的上限：`dsh-agent-loop/src/agent.ts:350` 是 `while (true)`，
+// 步号 `phase.step` 只增不减、没有任何天花板；一轮的出口只有四个——
+// `signal.throwIfAborted()`（:351/:366/:400）、`agent/pre-step` 拒绝（:354-357）、
+// 没有待接管的 steer 时收轮（:401-405）、或抛错。
+// 全树 grep `maxSteps|maxTurns|stepLimit|stepsPerTurn` 在 agent-loop 里 **0 命中**。
+// 官方 agent-loop 命名空间里唯一被暴露的上限是**并发工具调用数**
+// （`src/constants.ts:6` `DEFAULT_MAX_PARALLEL_TOOL_CALLS = 10`），设置页也只有这一个
+// 字段（`dsh-client-ui-settings-agent-loop/README.md`：One field of the namespace）。
+//
+// # 那官方靠什么防死循环
+//
+// 靠**外部中止**，不是计数器：每一轮带着自己的 AbortSignal（`agent/turn-stopping`
+// 是 serial 钩子，`agent/pre-step` 是 waterfall 钩子，插件可在任一处取消本轮）。
+// 宿主有等价机制，且已经在生产路径上：
+//   - 每一步都查 `ctx.Err()`（`internal/agent/loop.go:329`、`:356`）；
+//   - `session.cancel` → `cancelTurn`（`cmd/dshd/serve_approval.go:504`）先拒掉
+//     挂着的审批再取消这一轮，界面点"停止"走的就是这条路；
+//   - 子代理另有 5 分钟墙钟（`cmd/dshd/main.go:1202` 的 `timeout`），不是无人值守的无限任务。
+//
+// 所以默认 0（不设上限）**不是**"没有出路地挂死"：出路是用户/界面取消，与官方一致。
+// 保留 `--max-steps` 这个旗标是**超集**：官方连可配的上限都没有，部署方显式给一个
+// 正数才会截断，错误文案照旧是"用满仍未收敛"（不吞错、不改结局语义）。
 //
 // 能力下限规则（AGENTS.md）：只能比官方宿主更多、更强，不能更少、更弱。
-const defaultTurnMaxSteps = 2000
+// 默认 0 与官方同弱/同强；显式正数是我们多的那一档。
+const defaultTurnMaxSteps = 0
 
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	home := fs.String("home", envOr("DSHD_HOME", ""), "会话根目录（必填）")
 	// 留空 = 让 transport 用 127.0.0.1:0，端口由 OS 分配。
-	serveSteps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步（子进程 run 的上限）")
+	serveSteps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步（子进程 run 的上限）；0 = 不设上限（官方语义）")
 	// H12：会话内容列宽（逻辑像素）。0 = 不知道，界面自己算。
 	// 为什么不给默认值：官方是 min(748*0.702, 82%)，直接抄 748 会让别的窗口尺寸下偏宽/偏窄。
 	serveWidth := fs.Int("content-width", 0, "会话内容列宽（逻辑像素）；0 = 不知道，界面自己算")

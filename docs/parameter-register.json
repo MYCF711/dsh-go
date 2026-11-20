@@ -278,11 +278,11 @@
       "officialDefault": null,
       "hostReadPoint": "cmd/dshd/main.go:621",
       "hostUsePoint": "cmdRun 构造 agent.Loop.MaxSteps（cmd/dshd/main.go:621）；serve/acp/schedule 共用同一常量",
-      "ourDefault": "defaultTurnMaxSteps = 2000",
+      "ourDefault": "defaultTurnMaxSteps = 0（不设上限；官方无内置轮次预算）",
       "verdict": "OK",
       "fixedBy": null,
       "owner": "host",
-      "note": "",
+      "note": "官方 agent loop 没有内置轮次预算（dsh-agent-loop/README.zh.md:236）；0 = 不设上限就是官方形状。显式正数才截断，属宿主多出的一档。",
       "evidence": "cmd/dshd/main.go:621"
     },
     {
@@ -291,12 +291,12 @@
       "officialSource": "agent.maxSteps",
       "officialDefault": null,
       "hostReadPoint": "cmd/dshd/serve.go:153",
-      "hostUsePoint": "四个入口（run/serve/acp/schedule）与 subRunner 的唯一默认值；按官方 3060 轮 p99=938 取 2x 余量",
-      "ourDefault": "2000",
+      "hostUsePoint": "四个入口（run/serve/acp/schedule）与 subRunner 的唯一默认值；官方无内置轮次预算，故默认 0 = 不设上限（dsh-agent-loop/src/agent.ts:350 是 while(true)，无步号天花板）",
+      "ourDefault": "0",
       "verdict": "OK",
       "fixedBy": null,
       "owner": "host",
-      "note": "",
+      "note": "曾经的 2000 是自造安全阀（无官方依据）。官方防死循环靠 per-turn AbortSignal + agent/turn-stopping / agent/pre-step 钩子取消，宿主等价物：internal/agent/loop.go:329/:356 每步查 ctx.Err()、session.cancel→cancelTurn（cmd/dshd/serve_approval.go:504）。",
       "evidence": "cmd/dshd/serve.go:153"
     },
     {
@@ -348,7 +348,7 @@
       "officialDefault": null,
       "hostReadPoint": "cmd/dshd/subagent.go:146",
       "hostUsePoint": "子代理 Loop.MaxSteps，与主代理同源（本次事故同型核对点：已统一）",
-      "ourDefault": "defaultTurnMaxSteps (2000)",
+      "ourDefault": "defaultTurnMaxSteps (0)",
       "verdict": "OK",
       "fixedBy": null,
       "owner": "host",
@@ -362,7 +362,7 @@
       "officialDefault": null,
       "hostReadPoint": "cmd/dshd/serve.go:159",
       "hostUsePoint": "loopRunner.maxSteps → childArgs 透传 --max-steps 给 run 子进程（cmd/dshd/serve_tools.go:119）",
-      "ourDefault": "defaultTurnMaxSteps = 2000",
+      "ourDefault": "defaultTurnMaxSteps = 0",
       "verdict": "OK",
       "fixedBy": null,
       "owner": "host",
@@ -376,7 +376,7 @@
       "officialDefault": null,
       "hostReadPoint": "cmd/dshd/acp.go:956",
       "hostUsePoint": "newACPRunner(..., steps) → acpRunner.steps → Loop.MaxSteps（cmd/dshd/acp.go:956）",
-      "ourDefault": "defaultTurnMaxSteps = 2000",
+      "ourDefault": "defaultTurnMaxSteps = 0",
       "verdict": "OK",
       "fixedBy": null,
       "owner": "host",
@@ -390,7 +390,7 @@
       "officialDefault": null,
       "hostReadPoint": "cmd/dshd/schedule.go:39",
       "hostUsePoint": "schedule run 拼子进程 argv（cmd/dshd/schedule.go:90，strconv.Itoa）",
-      "ourDefault": "defaultTurnMaxSteps = 2000",
+      "ourDefault": "defaultTurnMaxSteps = 0",
       "verdict": "OK",
       "fixedBy": null,
       "owner": "host",
@@ -4724,16 +4724,17 @@
       "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-agent-loop/README.md:236 | grep -E 'maxSteps|stepLimit|maxTurns|maxStepsPerTurn' over every @deepseek-ai lib/*.js => 0 hits",
       "officialDefault": null,
       "status": "N-A",
-      "reason": "官方自己在 whereApplied 里写明 absent — no such parameter，README 原文 No built-in turn budget；宿主侧对应物不是该参数，而是宿主自加的安全阀 --max-steps（默认 2000），两者不是同一个东西，不能算等价覆盖。",
+      "reason": "官方自己在 whereApplied 里写明 absent — no such parameter，README 原文 No built-in turn budget；宿主侧对应物不是该参数，而是宿主自加的上限旗标 --max-steps（默认 0 = 不设上限，与官方一致），两者不是同一个东西，不能算等价覆盖。",
       "evidence": [
         "tmp/GO3-PARAMS/official.json 该条 type=absent / whereApplied='the turn/step machine ends a turn only when the model stops calling tools or the agent is cancelled; nothing counts steps'",
         "internal/agent/loop.go:224-233 注释逐字引用官方 README.md:3 并说明宿主 --max-steps 是显式安全阀",
-        "cmd/dshd/serve.go:153 `const defaultTurnMaxSteps = 2000`"
+        "cmd/dshd/serve.go:153 `const defaultTurnMaxSteps = 0`"
       ],
       "triageDomain": "agent-loop",
       "naClass": "protocol-shape",
       "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。",
-      "officialAnchor": "ALIVE"
+      "officialAnchor": "ALIVE",
+      "note": ""
     },
     {
       "key": "agentLoop.turnBudgetEnforcement",
@@ -5242,40 +5243,46 @@
       "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-compaction-tool-result-pruner/lib/index.js:11 | app.asar:dsh/node_modules/@deepseek-ai/dsh-base/cordis.patch.yml:438",
       "officialDefault": 8192,
       "status": "COVERED",
-      "note": "宿主侧对应：childArgs 缺口: --max-chars",
-      "reason": "宿主侧对应：childArgs 缺口: --max-chars",
-      "officialAnchor": "ALIVE"
+      "note": "宿主 internal/prune 的 DefaultThresholdChars 与官方同值同单位（码点）",
+      "reason": "internal/prune/prune.go `DefaultThresholdChars = 8192`；Apply 按 Unicode 码点计量（官方 codePointLength，lib/index.js:25-27），不再按字节。",
+      "officialAnchor": "ALIVE",
+      "evidence": [
+        "internal/prune/prune.go `DefaultThresholdChars = 8192`（lib/index.js:11 同值）",
+        "internal/prune/prune.go ApplyWithPointer：`total := utf8.RuneCountInString(text)` ≤ threshold 即原样返回",
+        "internal/prune/prune.go `Validate()` 复刻官方 lib/index.js:43-44 的 head+marker+tail ≤ threshold 校验"
+      ]
     },
     {
       "key": "toolResult.prune.headChars",
       "domain": "agent-loop",
-      "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-compaction-tool-result-pruner/lib/index.js:12",
+      "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-compaction-tool-result-pruner/lib/index.js:12 | app.asar:dsh/node_modules/@deepseek-ai/dsh-base/cordis.patch.yml:439",
       "officialDefault": 4096,
       "status": "COVERED-EQUIV",
-      "reason": "宿主 prune 包同样“留头留尾、中间换一行说明”，但按比例（头 60%）而不是固定 4096 字符；默认预算 16KB/200 行。",
+      "reason": "internal/prune/prune.go `DefaultHeadChars = 4096` 与官方同值；头段按固定字符数保留，不再用 60% 比例。",
       "evidence": [
-        "internal/prune/prune.go:6-18 模式说明“按比例留头留尾，把中间换成一行省略说明”",
-        "internal/prune/prune.go:41-43 `headShare = 6` / `shareBase = 10`",
-        "internal/prune/prune.go:32-34 `DefaultMaxBytes = 16 << 10` / `DefaultMaxLines = 200`"
+        "internal/prune/prune.go `DefaultHeadChars = 4096`（lib/index.js:12 同值）",
+        "internal/prune/prune.go headRunes(text, width.HeadChars)：按码点取前 N 个字符",
+        "internal/prune/prune_test.go TestApplyTruncatesToOfficialHeadMarkerTail：输出必须逐字符等于「头4096+marker+尾1024」"
       ],
       "triageDomain": "agent-loop",
-      "hostEquivalent": "prune.headShare（internal/prune/prune.go:41-43 headShare=6 / shareBase=10）+ :142-166 cutLines 留头",
+      "hostEquivalent": "internal/prune/prune.go DefaultHeadChars=4096 + headRunes（码点切片）",
       "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。",
       "officialAnchor": "ALIVE"
     },
     {
       "key": "toolResult.prune.tailChars",
       "domain": "agent-loop",
-      "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-compaction-tool-result-pruner/lib/index.js:13",
+      "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-compaction-tool-result-pruner/lib/index.js:13 | app.asar:dsh/node_modules/@deepseek-ai/dsh-base/cordis.patch.yml:440",
       "officialDefault": 1024,
       "status": "COVERED-EQUIV",
-      "reason": "同 headChars：尾巴按剩余 40% 保留（tail := usable - head），不是固定 1024 字符，但“保住错误/结论那段”的语义一致。",
+      "reason": "internal/prune/prune.go `DefaultTailChars = 1024` 与官方同值；尾段按固定字符数保留，不再用剩余 40% 比例。",
       "evidence": [
-        "internal/prune/prune.go:154-156 `usable := maxLines - 1` / `head := usable * headShare / shareBase` / `tail := usable - head`",
-        "internal/prune/prune.go:169-175 `b.WriteString(strings.Join(lines[:head], \"\\n\"))` … 尾段 lines[len(lines)-tail:]"
+        "internal/prune/prune.go `DefaultTailChars = 1024`（lib/index.js:13 同值）",
+        "internal/prune/prune.go tailRunes(text, width.TailChars)：从尾部倒按 rune 起点取",
+        "internal/prune/prune_test.go TestDefaultThresholdIsOfficialCharBoundaryForCJK：8192 汉字（24576 字节）不裁，8193 才裁"
       ],
       "triageDomain": "agent-loop",
-      "hostEquivalent": "internal/prune/prune.go:156 `tail := usable - head`（尾段保留）+ :166-175 拼接",
+      "hostEquivalent": "internal/prune/prune.go DefaultTailChars=1024 + tailRunes（码点切片）",
       "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。",
       "officialAnchor": "ALIVE"
     },
@@ -5285,13 +5292,14 @@
       "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-compaction-tool-result-pruner/lib/index.js:8",
       "officialDefault": "\"\\n\\n[... tool result middle pruned ...]\\n\\n\"",
       "status": "COVERED-EQUIV",
-      "reason": "宿主有等价的省略标记（一行中文占位，带被省略的行区间与总行数，并附“原文在哪/有没有原文”的指针），只是文案不是官方那句英文常量。",
+      "reason": "internal/prune/prune.go `Marker` 就是官方常量原文，逐字节一致（lib/index.js:8）。",
       "evidence": [
-        "internal/prune/prune.go:32-163 `omittedFrom := head + 1` / `omittedTo := len(lines) - tail` / `notice := fmt.Sprintf(\"…（第 %d–%d 行已省略，共 %d 行）…\", ...)`",
-        "internal/prune/prune.go:29-39 `// NoPointer 是\"原文没有外置\"时的指针文案……不许为空`"
+        "internal/prune/prune.go `Marker = \"\n\n[... tool result middle pruned ...]\n\n\"`（lib/index.js:8 原文）",
+        "internal/prune/prune_test.go TestDefaultBudgetIsOfficialTriple：marker 与官方字面量逐字节比对",
+        "internal/prune/prune.go NoPointer：官方无 pointer 概念，宿主为 spill 层补的“去哪取”文案"
       ],
       "triageDomain": "agent-loop",
-      "hostEquivalent": "internal/prune/prune.go:29 `notice := fmt.Sprintf(\"…（第 %d–%d 行已省略，共 %d 行）…\", ...)` + :35-39 NoPointer",
+      "hostEquivalent": "internal/prune/prune.go `Marker`（官方原文）+ `NoPointer`（宿主补的指针文案）",
       "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。",
       "officialAnchor": "ALIVE"
     },

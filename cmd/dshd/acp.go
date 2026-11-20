@@ -1017,7 +1017,7 @@ func cmdACP(argv []string) error {
 	var maxChars, maxInlineTokens int
 	addSpillBudgetFlags(fs, &maxChars, &maxInlineTokens)
 	home := fs.String("home", defaultHome(), "会话根目录")
-	steps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步")
+	steps := fs.Int("max-steps", defaultTurnMaxSteps, "每轮最多几步；0 = 不设上限（官方语义）")
 	workspaceBytes := fs.Int("workspace-bytes", defaultWorkspaceBytes, "每个工作区指令链的字节上限（进 durable 帧；0=不传）")
 	fs.StringVar(rulesPath, "agents", "", "规则文件路径（默认工作区 AGENTS.md）")
 	// 与 run/serve 同一个注册函数（整数 / auto / true / false 四种写法），见 host_run_options.go。

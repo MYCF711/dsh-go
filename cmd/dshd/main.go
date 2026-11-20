@@ -692,7 +692,7 @@ func cmdRun(argv []string) (retErr error) {
 	turnID := fs.String("turn-id", "", "serve 当前 turn 的宿主身份（steer IPC 内部参数）")
 	model := fs.String("model", envOr("DSHD_LLM_MODEL", "group/deepseek-v4.1-flash-1017"), "模型 id")
 	base := fs.String("base", envOr("DSHD_LLM_BASE", defaultLLMBase), "OpenAI 兼容端点")
-	maxSteps := fs.Int("max-steps", defaultTurnMaxSteps, "最多几步")
+	maxSteps := fs.Int("max-steps", defaultTurnMaxSteps, "最多几步；0 = 不设上限（官方语义）")
 	home := fs.String("home", defaultHome(), "会话根目录")
 	// 工具结果预算的两个旋钮：与 acp/serve **同一个注册函数**（见 host_run_options.go），
 	// 出厂值都来自官方——max-inline-tokens = 12500（dsh-base/cordis.patch.yml:417）、

@@ -320,6 +320,46 @@
     "test": "TestAIInstrFailedToolDoesNotTouch"
   },
   {
+    "name": "max-steps-default-back-to-2000",
+    "file": "cmd/dshd/serve.go",
+    "old": "const defaultTurnMaxSteps = 0",
+    "new": "const defaultTurnMaxSteps = 2000",
+    "pkg": "./cmd/dshd",
+    "test": "TestDefaultTurnMaxStepsIsUnlimitedLikeOfficial"
+  },
+  {
+    "name": "prune-threshold-back-to-16kb",
+    "file": "internal/prune/prune.go",
+    "old": "DefaultThresholdChars = 8192",
+    "new": "DefaultThresholdChars = 16384",
+    "pkg": "./internal/prune",
+    "test": "TestDefaultBudgetIsOfficialTriple"
+  },
+  {
+    "name": "prune-head-back-to-share",
+    "file": "internal/prune/prune.go",
+    "old": "DefaultHeadChars = 4096",
+    "new": "DefaultHeadChars = 2048",
+    "pkg": "./internal/prune",
+    "test": "TestApplyTruncatesToOfficialHeadMarkerTail"
+  },
+  {
+    "name": "prune-tail-back-to-share",
+    "file": "internal/prune/prune.go",
+    "old": "DefaultTailChars = 1024",
+    "new": "DefaultTailChars = 512",
+    "pkg": "./internal/prune",
+    "test": "TestApplyTruncatesToOfficialHeadMarkerTail"
+  },
+  {
+    "name": "prune-measures-bytes-not-codepoints",
+    "file": "internal/prune/prune.go",
+    "old": "total := utf8.RuneCountInString(text)",
+    "new": "total := len(text)",
+    "pkg": "./internal/prune",
+    "test": "TestApplyPassesThroughSmallText"
+  },
+  {
     "name": "inline-budget-maxchars-default-4000-back",
     "file": "modules/tools/pipeline.go",
     "old": "\t// MaxChars **不**在这里补默认值",

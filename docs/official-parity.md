@@ -31,7 +31,7 @@
 |---|---|---|
 | ~~**计划模式**~~ ✅ 已补 | `planning` + `plan-mode` | M306 落地：状态按会话落盘，跨轮生效（serve 每轮是新子进程） |
 | ~~**程序化工具调用**~~ ✅ 已补（有限形态） | `workflow-ptc` + `tool-workflow` | M312：`workflow` 工具，参数名对齐 DSH（`script`/`meta`），但 **script 内容是 JSON 步骤表，不是 JS**（本仓 R6 不嵌 JS 运行时）。子调用走 ctx 里的 `spi.SubDispatch`，照样过审批/闸门/spill |
-| ~~**工具结果裁剪**~~ ✅ 已补 | `tool-result-pruner` | M307/M308：`internal/prune` 按字节/行预算裁，接在 `session.ProjectResult`，默认 16KB 高于 spill 最坏产出 |
+| ~~**工具结果裁剪**~~ ✅ 已补 | `tool-result-pruner` | M307/M308：`internal/prune` 按**官方三件套**（`thresholdChars` 8192 / `headChars` 4096 / `tailChars` 1024，单位 Unicode 码点）裁，接在 `session.ProjectResult`（官方 `lib/index.js:10-14`） |
 | **斜杠命令** | `command-goal` / `command-compact` 等 | 宿主没有 `/compact`、`/resume`、`/new` 这类入口，只能靠自然语言 |
 | ~~**插件管理**~~ ⚠️ 部分 | `tool-plugin-manager` / `tool-plugin-market` | M318：`plugin` 工具可 list/enable/disable **manifest 那层**（static 模块），改完下次启动生效；wasm/process 与"市场"仍缺。顺带修了 `enabled=false` 只解析不生效的老 bug |
 | **棋谱压缩** | `gokifu-compact`（第三方，顶替了官方 compaction） | 那是你自己那套上下文系统。dsh-go 的压缩是通用摘要，不懂"棋谱/节点/死路" |

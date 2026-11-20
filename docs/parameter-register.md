@@ -105,15 +105,15 @@
 
 | key | 官方源 | 官方默认 | 宿主读取点 | 我们的默认 | verdict | 备注 |
 |---|---|---|---|---|---|---|
-| `--max-steps@run` | agent.maxSteps / 官方宿主无此暴露项（安全阀，非预算） | — | `cmd/dshd/main.go:621` | defaultTurnMaxSteps = 2000 | **OK** |  |
-| `defaultTurnMaxSteps` | agent.maxSteps | — | `cmd/dshd/serve.go:153` | 2000 | **OK** |  |
+| `--max-steps@run` | agent.maxSteps / 官方宿主无此暴露项（上限旗标，非预算：官方无内置轮次预算） | — | `cmd/dshd/main.go:621` | defaultTurnMaxSteps = 0（不设上限） | **OK** |  |
+| `defaultTurnMaxSteps` | agent.maxSteps | — | `cmd/dshd/serve.go:153` | 0 | **OK** | 官方 README.zh.md:236「没有内置轮次预算」，`src/agent.ts:350` 是 while(true) 无步号天花板；0 = 不设上限即官方形状，显式正数才截断（宿主多出的一档）。 |
 | `agent.Loop.maxSteps fallback` | agent.maxSteps | — | `internal/agent/loop.go:234` | 32 | **OK** | 0 现在明确表示不设上限（官方 agent loop 无 turn budget）；32 兜底已删。测试 TestMaxStepsZeroMeansUnlimitedUntilCanceled。 |
 | `subRunner.timeout (subagent 墙钟)` | subagent.timeoutMs / dsh-subagent 的 timeout | — | `cmd/dshd/main.go:1042` | 5 * time.Minute | **UNREAD** | 子代理 5min 墙钟写死在装配点。官方由插件传 timeout；宿主可加 --subagent-timeout，本任务不扩参数面。 |
 | `subRunner.maxDepth` | subagent.maxDepth | — | `cmd/dshd/subagent.go:57` | 1 | **UNREAD** | 官方 subagent 有 maxDepth 概念，宿主写死 1（防递归）。做成 --subagent-max-depth 属新增能力，本任务不扩参数面；登记为结构化未实现。 |
-| `subRunner.maxSteps` | agent.maxSteps | — | `cmd/dshd/subagent.go:146` | defaultTurnMaxSteps (2000) | **OK** |  |
-| `--max-steps@serve` | agent.maxSteps | — | `cmd/dshd/serve.go:159` | defaultTurnMaxSteps = 2000 | **OK** |  |
-| `--max-steps@acp` | agent.maxSteps | — | `cmd/dshd/acp.go:956` | defaultTurnMaxSteps = 2000 | **OK** |  |
-| `--max-steps@schedule` | agent.maxSteps | — | `cmd/dshd/schedule.go:39` | defaultTurnMaxSteps = 2000 | **OK** |  |
+| `subRunner.maxSteps` | agent.maxSteps | — | `cmd/dshd/subagent.go:146` | defaultTurnMaxSteps (0) | **OK** |  |
+| `--max-steps@serve` | agent.maxSteps | — | `cmd/dshd/serve.go:159` | defaultTurnMaxSteps = 0 | **OK** |  |
+| `--max-steps@acp` | agent.maxSteps | — | `cmd/dshd/acp.go:956` | defaultTurnMaxSteps = 0 | **OK** |  |
+| `--max-steps@schedule` | agent.maxSteps | — | `cmd/dshd/schedule.go:39` | defaultTurnMaxSteps = 0 | **OK** |  |
 | `childArgs 透传面（serve → run）` | n/a（宿主内部透传） | — | `cmd/dshd/serve_tools.go:113` | home/session/prompt/policy/max-steps/tools-mode/model/reasoning/record-effort/effort-level/prompt-content-file/turn-id | **OK** |  |
 | `childArgs 缺口: --auto-compact` | compaction.autoCompactTokens | — | `cmd/dshd/serve_tools.go:113` | 子进程默认 40000（main.go:619） | **OK** | serve 注册 --auto-compact 并透传给子进程 run；TestServeHostRunFlagsReachChildArgs。 |
 | `childArgs 缺口: --max-chars` | tools.spillThresholdChars | — | `cmd/dshd/serve_tools.go:113` | 子进程默认 4000 | **OK** | serve 注册 --max-chars 并透传；argv 级测试。 |
@@ -471,9 +471,13 @@
 | `tool.web.searchMaxResults` | modules/tool/websearch/websearch.go:122-39 `maxQueries = 4` / `maxResults = 8` + :102 runSearchQueries(..., maxResults) | 宿主 web_search 的合并来源上限就是 8，与官方默认一致，落在 maxResults 常量（不可配置）。 |
 | `tool.web.searchSummaryMaxChars` | websearch.Tool.summaryMaxChars（modules/tool/websearch/websearch.go:106）+ capSummary（:375） | web_search 的每条来源摘要现在钳到 800 字符（省略号算在上限里），先合并空白；DSHD_WEB_SEARCH_SUMMARY_MAX_CHARS 可覆盖。旧实现是宿主自造的 240 rune，且环境变量完全无效。 |
 | `tool.web.searchTimeoutMs` | websearch.Tool.searchBudget（modules/tool/websearch/websearch.go:47）+ spi.WebSearchTimeout（internal/spi/search.go:65） | web_search 现在有自己的协作预算：默认 30s、基础包 provider（deepseek-official）60s、DSHD_WEB_SEARCH_TIMEOUT_MS 覆盖；超时返回 WEB_SEARCH_TIMEOUT + 可执行 Hint。provider 不守 ctx 也会按时返回（收集端 select ctx.Done）。 |
-| `toolResult.prune.headChars` | prune.headShare（internal/prune/prune.go:41-43 headShare=6 / shareBase=10）+ :142-166 cutLines 留头 | 宿主 prune 包同样“留头留尾、中间换一行说明”，但按比例（头 60%）而不是固定 4096 字符；默认预算 16KB/200 行。 |
-| `toolResult.prune.marker` | internal/prune/prune.go:29 `notice := fmt.Sprintf("…（第 %d–%d 行已省略，共 %d 行）…", ...)` + :35-39 NoPointer | 宿主有等价的省略标记（一行中文占位，带被省略的行区间与总行数，并附“原文在哪/有没有原文”的指针），只是文案不是官方那句英文常量。 |
-| `toolResult.prune.tailChars` | internal/prune/prune.go:156 `tail := usable - head`（尾段保留）+ :166-175 拼接 | 同 headChars：尾巴按剩余 40% 保留（tail := usable - head），不是固定 1024 字符，但“保住错误/结论那段”的语义一致。 |
+| `toolResult.prune.headChars` | `internal/prune/prune.go` `DefaultHeadChars = 4096` + `headRunes` 按码点取前 N 个字符 | 与官方**同值同单位**：头段固定留 4096 字符（官方 lib/index.js:12；dsh-base/cordis.patch.yml:439 出厂再配一次），不再用 60% 比例、也不按字节。 |
+| `toolResult.prune.marker` | `internal/prune/prune.go` `Marker` = 官方 lib/index.js:8 原文 | 逐字节一致：`
+
+[... tool result middle pruned ...]
+
+`。官方 pruner 无 pointer 概念，宿主另加 `NoPointer`（spill 层要一个非空“去哪取”）。 |
+| `toolResult.prune.tailChars` | `internal/prune/prune.go` `DefaultTailChars = 1024` + `tailRunes` 从尾部倒按 rune 起点取 | 与官方**同值**：尾段固定留 1024 字符（lib/index.js:13；cordis.patch.yml:440）。头尾不对称是官方原样（尾=错误/结论，通常更短）。 |
 | `toolResult.spill.maxInlineTokens` | tools.Pipeline.Options.MaxChars（modules/tools/pipeline.go:22-24 默认 4000 字符）+ :525-575 spill() + :582-600 spillText() | 宿主有 spill 层（超阈值外置成 artifact + 指针），但预算口径是字符而不是 token：阈值 4000 字符、正文留头 3/4 留尾 1/4；官方 12500 token 的内联预算在宿主用更严格的字符阈值实现。 |
 | `web.searchProvider **(rc.2)**` | internal/transport/handlers_web_providers_rc2.go:81 报基线 `deepseek-search-api`；modules/search/search.go:52 注册表；modules/search/deepseek.go:30 `DeepSeekProviderID = "deepseek-official"` | 宿主有可替换 provider 注册表并**如实报告**官方基线名；但出厂默认注册项仍叫 `deepseek-official`（A3 在途）。差异=名字与默认选择，不是能力缺席。 |
 
@@ -767,7 +771,7 @@
 | 官方 key | 域 | 为什么对无头宿主不适用 |
 |---|---|---|
 | `agentLoop.maxParallelToolCallsConstant` | agent-loop | 这不是独立可配参数，只是官方把 schema 默认值再导出一份常量（lib/index.js:1101 对 1309 的镜像）。宿主**有**并行工具执行（实体能力登记在 `agentLoop.maxParallelToolCalls`，实现 `internal/agent/parallel.go`），但没有把这个默认值再导出一份镜像常量——本仓默认值直接写在解析函数里，不存在第二份镜像。这里不重复计一次缺口。 |
-| `agentLoop.stepsPerTurn` | agent-loop | 官方自己在 whereApplied 里写明 absent — no such parameter，README 原文 No built-in turn budget；宿主侧对应物不是该参数，而是宿主自加的安全阀 --max-steps（默认 2000），两者不是同一个东西，不能算等价覆盖。 |
+| `agentLoop.stepsPerTurn` | agent-loop | 官方自己在 whereApplied 里写明 absent — no such parameter，README 原文 No built-in turn budget；宿主侧对应物不是该参数，而是宿主自加的上限旗标 --max-steps（默认 0 = 不设上限，与官方一致；显式正数才是宿主多出的一档），两者不是同一个东西，不能算等价覆盖。 |
 | `tool.fsSearch.graceMs` | agent-loop | 这是“终止 rg 子进程前的宽限”参数；宿主 glob/grep 是进程内纯 Go 实现（不 spawn rg），没有子进程可终止，因此该参数在宿主实现形状下不适用。 |
 | `tool.fsSearch.rawOutputMaxBytes` | agent-loop | 这是 rg 子进程 stdout 的原始字节上限（20MB，超了报 SEARCH_RAW_OUTPUT_OVERFLOW）；宿主没有 rg 子进程与 raw stdout，改用“单文件读取上限 2MB”的进程内边界，形状不同不可等价。 |
 | `tool.fsSearch.searchMetaMaxBytes` | agent-loop | 官方给“序列化后的 presentationMeta”设 64KB 上限，这是官方检索工具的结果投影形状；宿主结果结构是 spi.Result{Text,Data,Hint,Artifacts}，没有 presentationMeta 这一层，故不适用。 |
