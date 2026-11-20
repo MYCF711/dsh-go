@@ -716,9 +716,13 @@ func TestAutoTitleFailureWritesNothingAndDoesNotRetry(t *testing.T) {
 			},
 			// 80ms 在 CI 高负载下会**先于请求落地**就超时，于是 gateway.count()==0，
 			// 而下面断言"至少 1 次调用"就红了（2026-11-13 run 43379687781 实测）。
-			// 这条测的是"超时后不重试"，不是"调度得多快"：给足 1s 让请求一定落地，
+			// 这条测的是"超时后不重试"，不是"调度得多快"：给足让请求一定落地，
 			// 网关仍要 5s 才回，所以照样超时；`maxCalls=1` 仍然守住"不无界重试"。
-			timeout:  1 * time.Second,
+			//
+			// 2026-11-20 再抬：1s 在 2 核 runner 上**仍然不够**（run 44760532701 又是
+			// count==0）。现在 3s —— 与下面 elapsed 的判据一起按 tc.timeout 推导，
+			// 两者不再各写一个魔法数。
+			timeout:  3 * time.Second,
 			maxCalls: 1,
 		},
 	}
@@ -739,8 +743,10 @@ func TestAutoTitleFailureWritesNothingAndDoesNotRetry(t *testing.T) {
 			if title != "" {
 				t.Fatalf("失败不该返回标题，拿到 %q", title)
 			}
-			if tc.name == "timeout" && elapsed > 2*time.Second {
-				t.Fatalf("超时门没生效：耗时 %s", elapsed)
+			// 判据跟着 tc.timeout 走：超时门必须**在配置的超时附近**生效，
+			// 而不是拿到网关那 5 秒的回复。多留 2s 给调度，避免 CI 抖动误红。
+			if tc.name == "timeout" && elapsed > tc.timeout+2*time.Second {
+				t.Fatalf("超时门没生效：耗时 %s，配置超时 %s", elapsed, tc.timeout)
 			}
 			if got := gateway.count(); got < 1 || got > tc.maxCalls {
 				t.Fatalf("标题调用次数=%d，要在 1..%d 之间（有界，不无界重试）", got, tc.maxCalls)
@@ -792,8 +798,13 @@ func TestAutoTitleDoesNotBlockMainTurn(t *testing.T) {
 		t.Fatalf("主 turn 收口失败: %v", err)
 	}
 	elapsed := time.Since(start)
-	if elapsed > 2*time.Second {
-		t.Fatalf("标题调用挡住了主 turn：Run 耗时 %s", elapsed)
+	// 判别式是**网关自己的延迟**，不是绝对墙钟：这个用例的标题网关要 1 小时才回
+	// （只有客户端取消能结束它），所以"挡住了"会表现为 Run 耗时接近 1 小时。
+	// 原来这条钉 2 秒，但 Run 本身含真进程 spawn + 一轮模型调用，2 核 CI runner 上
+	// 即使**完全没挡**也可能超过 2 秒（2026-11-20 run 44760532701 实测 15.6s 红）。
+	// 改成 1 分钟：对"没挡"仍绰绰有余，离 1 小时那个挡住的信号有 60 倍余量，判别力不减。
+	if elapsed > time.Minute {
+		t.Fatalf("标题调用挡住了主 turn：Run 耗时 %s（标题网关要 1 小时才回，没挡就不该接近它）", elapsed)
 	}
 	pubMu.Lock()
 	turnDone := false
