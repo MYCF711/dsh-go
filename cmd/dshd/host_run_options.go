@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"dshgo/internal/compact"
+	"dshgo/modules/tools"
 )
 
 // 宿主旋钮：`serve` 解析一次，透传给**每一轮**的子进程 `dshd run`。
@@ -16,8 +17,8 @@ import (
 //
 // `serve` 起的每一轮就是子进程 `dshd run`（见 serve_tools.go 的 childArgs），
 // 而 childArgs 是**逐字段拷贝**：漏一个参数就静默退回子进程的默认值
-// （`--auto-compact` 掉回"未设置"= 用户写了 N 也丢、`--max-chars` 变 4000、
-// `--context-window` 变 0……），
+// （`--auto-compact` 掉回"未设置"= 用户写了 N 也丢、`--max-chars` 掉回"字符臂
+// 不参与"= 用户配的字符阈值丢、`--context-window` 变 0……），
 // 界面上完全看不出来。以前这 6 组参数在 serve 侧连 flag 都没有，
 // 于是"从 serve 侧根本调不了"——这正是"参数存在但没接上"的典型。
 //
@@ -29,13 +30,17 @@ type hostRunOptions struct {
 	// 该绝对值；0 = 关闭。出厂**没有**数值默认值——任何宿主自造的默认阈值都会把
 	// 大窗口提前截断（历史上那个 40000 就把 1M 窗口截成官方阈值的 1/20）。
 	autoCompact int
-	// maxChars 是工具输出外置阈值（字符）。
+	// maxChars 是**字符臂**的工具输出外置阈值（字符）。官方 spill-policy 没有这个
+	// 旋钮（只有 maxInlineTokens），所以出厂**不设数值默认值**：0 = 字符臂不参与，
+	// 只有显式 --max-chars=N 才生效。历史上的 4000 会把工具输出截在官方 token
+	// 预算之前（4000 字符 ≈ 1000 估算 token ≪ 官方 12500）。
 	maxChars int
 	// maxInlineTokens 是官方 #79 `dsh-spill-policy` 的 `config.maxInlineTokens`
-	// （文本与图片共享的估算 token 预算；0 = 未配置，回落
-	// DSHD_MAX_INLINE_TOKENS）。它必须和 maxChars 一样**逐字段透传**给
-	// 子进程 `dshd run`：否则"从界面起的会话"与"命令行起的会话"预算不同，
-	// 而这种差异在界面上完全看不出来。
+	// （文本与图片共享的估算 token 预算）。出厂值就是**官方的 12500**
+	// （dsh-base/cordis.patch.yml:417，见 tools.DefaultMaxInlineTokens）；
+	// 0 = 未配置（回落 DSHD_MAX_INLINE_TOKENS，再没有就是关闭）。
+	// 它必须和 maxChars 一样**逐字段透传**给子进程 `dshd run`：否则"从界面起的会话"
+	// 与"命令行起的会话"预算不同，而这种差异在界面上完全看不出来。
 	maxInlineTokens int
 	// workspaceBytes 是每个工作区指令链的字节上限（渲染进官方 durable 基线帧；0 = 不传）。
 	workspaceBytes int
@@ -62,8 +67,6 @@ const (
 	// `dshd run`，而 argv 里只有字符串；`auto` 比传一个数字多带这一位信息，
 	// 也不用再加一个隐藏 flag。（字符串 `auto` ↔ 数值 compact.AutoCompactUnset。）
 	autoCompactAuto = "auto"
-	// defaultMaxChars 是工具输出外置的默认阈值。
-	defaultMaxChars = 4000
 	// defaultReasoningEffort 是**官方 0.2.2 桌面 profile 的出厂推理档**。
 	//
 	// 官方原件：`D:/DeepSeek Harness/home/profiles/desktop/cordis.patch.yml.bak-1794253367009:8`
@@ -86,6 +89,51 @@ func defaultReasoningEffortFromEnv() string {
 	return envOr("DSHD_REASONING_EFFORT", defaultReasoningEffort)
 }
 
+// defaultMaxInlineTokensFromEnv 是三个入口（run / acp / serve）共用的 token 预算默认值。
+//
+// 出厂值 = **官方的** 12500（`tools.DefaultMaxInlineTokens`，原件
+// `dsh-base/cordis.patch.yml:417`）；`DSHD_MAX_INLINE_TOKENS` 只在非空时覆盖它——
+// 与 `--base` / `--reasoning` 同一形状：env 只当默认值，显式 flag 仍然优先。
+//
+// 非法 env 返回 0：flag 注册期没有错误返回口，而 0 会让装配期的
+// `modules/tools.resolveOptions` 再读同一个变量并报**原文**错误（启动期 fail-loud，
+// 消息里带非法值本身）。显式 `--max-inline-tokens=N` 仍然优先，不被坏 env 拖垮。
+//
+// 为什么出厂值不能是 0（改前就是这样）：官方语义里 0/省略 = **关闭**整个 token
+// 保留策略，于是宿主出厂等于"官方能力一项都没开"，只剩字符臂在按自造的 4000 截。
+func defaultMaxInlineTokensFromEnv() int {
+	v, configured, err := tools.MaxInlineTokensFromEnv(os.Getenv)
+	if err != nil {
+		return 0
+	}
+	if !configured {
+		return tools.DefaultMaxInlineTokens
+	}
+	return v
+}
+
+// addSpillBudgetFlags 是 run / acp / serve 三个入口注册**工具结果预算**旋钮的唯一一处。
+//
+// 为什么必须共用：同一份配置换个入口就换了预算，是这组参数最难解释的差异（该文件
+// 顶部那段注释说的就是这个）。共用一个注册函数之后，"三入口一致"是结构性的，
+// 而且它可以被直接解析（TestInlineBudgetOfficialDefaults 就是这么测的）。
+//
+// 两个旋钮的出厂值**都来自官方**，不是我们拍的：
+//
+//   - `--max-inline-tokens`：官方 `@deepseek-ai/dsh-spill-policy` 的
+//     `config.maxInlineTokens: 12500`（`dsh-base/cordis.patch.yml:417`）。
+//     改前出厂是 0 = 官方语义的"关闭保留策略"——等于官方能力一项都没开。
+//   - `--max-chars`：官方 spill-policy **没有**按字符的旋钮（最接近的
+//     `thresholdChars: 8192` 属于另一个插件 tool-result-pruner），所以出厂
+//     **不设数值默认值**：0 = 字符臂不参与，显式写 N 才生效。改前那个 4000 是宿主
+//     自造的，它 ≈1000 估算 token，会把官方 12500 的预算整个架空。
+func addSpillBudgetFlags(fs *flag.FlagSet, maxChars, maxInlineTokens *int) {
+	fs.IntVar(maxChars, "max-chars", 0,
+		"工具输出外置阈值（字符；官方无此旋钮 → 出厂不设=不参与，显式写才生效）")
+	fs.IntVar(maxInlineTokens, "max-inline-tokens", defaultMaxInlineTokensFromEnv(),
+		"工具结果内联的估算 token 预算（文本+图片共享；官方出厂 12500；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
+}
+
 // addHostRunFlags 把宿主旋钮注册到给定 flagset，返回解析目标。
 //
 // run / serve 都调它一次就能拿到完全一致的默认值与语义；哪天要加第 7 个旋钮，
@@ -100,10 +148,7 @@ func addHostRunFlags(fs *flag.FlagSet) *hostRunOptions {
 	o := &hostRunOptions{autoCompact: compact.AutoCompactUnset, compactHeadroom: headroom,
 		compactPolicies: os.Getenv(EnvCompactModelPolicies)}
 	addAutoCompactFlag(fs, &o.autoCompact)
-	fs.IntVar(&o.maxChars, "max-chars", defaultMaxChars,
-		"工具输出超过多少字符就外置成 artifact（越小越省 token，越大越少重读）")
-	fs.IntVar(&o.maxInlineTokens, "max-inline-tokens", 0,
-		"工具结果内联的估算 token 预算（文本+图片共享；0=未配置，回落 DSHD_MAX_INLINE_TOKENS）")
+	addSpillBudgetFlags(fs, &o.maxChars, &o.maxInlineTokens)
 	fs.IntVar(&o.workspaceBytes, "workspace-bytes", defaultWorkspaceBytes,
 		"每个工作区指令链的字节上限（进 durable 帧；0=不传）")
 	fs.IntVar(&o.contextWindow, "context-window", 0,

@@ -19,12 +19,24 @@ import (
 	"dshgo/internal/spi"
 )
 
-// Options 是流水线的可调参数。默认值来自实测：dsc 的 spill 阈值 4000 字符。
+// Options 是流水线的可调参数。**数值旋钮的出厂值只许来自官方**（见 DefaultMaxInlineTokens）。
 type Options struct {
 	SpillDir string // 外置目录；空 = <temp>/dshd-spill
-	MaxChars int    // 超过就外置；<=0 = 4000
+	// MaxChars 是**字符臂**的阈值（本仓兼容机制，不是官方旋钮）。
+	//
+	// 官方 0.2.2 base #79 `@deepseek-ai/dsh-spill-policy` 的 config 里**只有**
+	// `maxInlineTokens`，没有按字符的阈值；最接近的 `thresholdChars: 8192` 属于
+	// 另一个插件（`dsh-compaction-tool-result-pruner`）。所以这个旋钮**没有出厂
+	// 默认值**：0（或负）= 不参与，只有显式设置才生效。
+	//
+	// 历史上的 4000 是宿主自造的：4000 字符 ≈ 1000 估算 token，远小于官方
+	// 12500 的预算，于是字符臂**永远先赢**，把官方预算架空（2026-11-21 修）。
+	MaxChars int
 	// MaxInlineTokens 是"这次结果**内联**多少"的估算 token 预算（官方 0.2.2 base #79
 	// `@deepseek-ai/dsh-spill-policy` 的 `config.maxInlineTokens`）。
+	//
+	// 出厂值是**官方的** 12500（见 DefaultMaxInlineTokens）；三个宿主入口默认就传它，
+	// 不需要任何环境变量/旗标去"打开"token 臂。
 	//
 	// 三值约定（与 ToolTimeout 同一套）：0 = 未配置（官方语义就是"省略
 	// maxInlineTokens 关闭保留策略"，此时回落到环境变量 DSHD_MAX_INLINE_TOKENS，
@@ -145,38 +157,58 @@ func (o Options) withDefaults() Options {
 	if o.SpillDir == "" {
 		o.SpillDir = filepath.Join(os.TempDir(), "dshd-spill")
 	}
-	if o.MaxChars <= 0 {
-		o.MaxChars = 4000
-	}
+	// MaxChars **不**在这里补默认值：官方 spill-policy 没有字符旋钮，任何出厂数值
+	// 都是我们编的（历史上的 4000 就把官方 12500 token 的预算架空了）。
+	// 0 = 字符臂不参与；显式 --max-chars=N 才生效。
 	if o.ToolTimeout == 0 {
 		o.ToolTimeout = toolTimeoutFromEnv()
 	}
 	return o
 }
 
-// maxInlineTokensEnv 让装配/运维不改代码就能打开 token 保留策略（官方 0.2.2 base #79）。
+// DefaultMaxInlineTokens 是官方 `dsh-spill-policy` 的出厂 token 预算。
 //
-// 与 toolTimeoutEnv 同一条三值约定：空 = 未配置（策略关闭，这是官方语义：
-// "Omitting maxInlineTokens disables retention"）；正整数 = 预算；
+// 官方原件：`@deepseek-ai/dsh-base/cordis.patch.yml:417`（`spill-policy` 插件
+// `config.maxInlineTokens: 12500`），机器可读清单
+// `tmp/GO3-PARAMS/official.json` 的 `toolResult.spill.maxInlineTokens` 同值。
+// 宿主三个入口（run / acp / serve）默认就传这个值，所以出厂即"按官方预算内联"。
+const DefaultMaxInlineTokens = 12500
+
+// maxInlineTokensEnv 让装配/运维不改代码就能覆盖上面那个出厂预算（官方没有这个
+// 环境变量读点，是本仓的运维口子）。
+//
+// 与 toolTimeoutEnv 同一条三值约定：空 = 未配置（宿主侧回落 DefaultMaxInlineTokens，
+// 直接构造 Options 的库调用方回落"关闭"）；正整数 = 预算；
 // 非法/负值 = 装配期失败（不是"静默按关闭处理"——把笔误变成"策略永远不生效"
 // 是最坏的失败方式，官方 index.ts:52-54 也是 fail plugin load）。
 const maxInlineTokensEnv = "DSHD_MAX_INLINE_TOKENS"
 
-// maxInlineTokensFromEnv 解析上面那个环境变量。
-func maxInlineTokensFromEnv(getenv func(string) string) (int, error) {
+// MaxInlineTokensFromEnv 解析上面那个环境变量，供宿主三个入口在**注册 flag 时**
+// 求默认值（env 只能当默认值，显式 --max-inline-tokens 仍然优先）。
+//
+// 三值返回：`configured=false` = 环境变量为空（调用方用官方出厂值
+// DefaultMaxInlineTokens）；`configured=true && value==0` = **显式关掉**保留策略
+// （官方 "omitting maxInlineTokens disables retention" 的显式写法）。
+func MaxInlineTokensFromEnv(getenv func(string) string) (value int, configured bool, err error) {
 	raw := strings.TrimSpace(getenv(maxInlineTokensEnv))
 	if raw == "" {
-		return 0, nil
+		return 0, false, nil
 	}
-	n, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, fmt.Errorf("%s=%q 不是整数: %w", maxInlineTokensEnv, raw, err)
+	n, convErr := strconv.Atoi(raw)
+	if convErr != nil {
+		return 0, true, fmt.Errorf("%s=%q 不是整数: %w", maxInlineTokensEnv, raw, convErr)
 	}
 	if n < 0 {
-		return 0, fmt.Errorf("%s=%q 非法：maxInlineTokens 不能是负数（0 = 关闭保留策略）",
+		return 0, true, fmt.Errorf("%s=%q 非法：maxInlineTokens 不能是负数（0 = 关闭保留策略）",
 			maxInlineTokensEnv, raw)
 	}
-	return n, nil
+	return n, true, nil
+}
+
+// maxInlineTokensFromEnv 是包内两值形式：0 = 未配置或显式关闭（两者都不给预算）。
+func maxInlineTokensFromEnv(getenv func(string) string) (int, error) {
+	v, _, err := MaxInlineTokensFromEnv(getenv)
+	return v, err
 }
 
 // Validate 是 Options 的**装配期**校验（纯函数，可单测）。
@@ -193,6 +225,12 @@ func (o Options) Validate() error {
 }
 
 // resolveOptions 是**装配期唯一入口**：补默认值 + 解析环境 + 校验，一次做完。
+//
+// "补默认值"只补 `ToolTimeout`/`SpillDir`：两个**官方有出厂值**的旋钮里，
+// `maxInlineTokens` 的出厂值（12500）由宿主三个入口在注册 flag 时给出（见
+// cmd/dshd/host_run_options.go 的 defaultMaxInlineTokensFromEnv），库层拿到的 0
+// 一律按"未配置/关闭"处理——那是直接构造 Options 的调用方与测试要的语义。
+// `MaxChars` 官方没有这个旋钮，所以**没有**出厂值。
 //
 // 配置错误在这里返回 error（装配期 fail-loud），绝不留到每次调用才炸。
 func resolveOptions(opts Options) (Options, error) {
@@ -614,19 +652,21 @@ func enforceSerialization(res *spi.Result) error {
 //
 // 两臂的次序（官方 0.2.2 base #79 `@deepseek-ai/dsh-spill-policy`）：
 //
-//  0. **token 预算臂**（只有显式配了 MaxInlineTokens 才启用）：文本与图片共享同一个
-//     估算 token 预算，超了就换头/尾 + notice，并在恢复文件里记图片可读路径。
-//     实现在 spill_policy.go 的 retainInline。
-//  1. **字符臂**（MaxChars，兼容下限）：token 臂没配、或者没触发时照旧生效。
+//  0. **token 预算臂**（`MaxInlineTokens > 0` 时启用；宿主出厂就传官方 12500）：
+//     文本与图片共享同一个估算 token 预算，超了就换头/尾 + notice，并在恢复
+//     文件里记图片可读路径。实现在 spill_policy.go 的 retainInline。
+//  1. **字符臂**（MaxChars，本仓兼容机制，官方**没有**这个旋钮）：**只有显式配了
+//     `MaxChars > 0` 才存在**。0 = 不参与——这是出厂默认，因为官方只有 token 预算，
+//     而我们曾经编出来的 4000 字符会抢在 12500 token 之前把结果截掉。
 //
 // 两条都配时"先触发者生效"：token 臂成功换掉正文之后，字符臂不再对**同一段正文**
 // 二次裁剪（否则会把刚写好的 notice 再切一刀）。token 臂没触发（预算内 / 拿不到
-// 图片可读路径 / 写盘失败）时，字符臂仍然是那道兜底，行为与引入 token 臂之前一致。
+// 图片可读路径 / 写盘失败）时，显式配置的字符臂仍然是那道兜底。
 func (p *Pipeline) spill(res *spi.Result, toolName string) {
 	bodyRetained := p.opts.MaxInlineTokens > 0 && p.retainInline(res, toolName)
 
 	// 先把 Text 截掉：无论走不走 Data 外置，模型看到的那段文本都要有界。
-	textSpilled := !bodyRetained && len(res.Text) > p.opts.MaxChars
+	textSpilled := !bodyRetained && p.overChars(len(res.Text))
 
 	if bodyRetained || res.Data == nil {
 		// 没有结构化 Data 也不能放过：Text 本身超了就直接截。
@@ -638,7 +678,7 @@ func (p *Pipeline) spill(res *spi.Result, toolName string) {
 		return
 	}
 	raw, err := json.Marshal(res.Data)
-	if err != nil || len(raw) <= p.opts.MaxChars {
+	if err != nil || !p.overChars(len(raw)) {
 		if textSpilled {
 			p.spillText(res, textSpilled, "")
 		}
@@ -677,10 +717,24 @@ func (p *Pipeline) spill(res *spi.Result, toolName string) {
 	}
 }
 
+// overChars 判"字符臂要不要接管"。
+//
+// `MaxChars <= 0` = 未配置 = 字符臂**根本不存在**（官方 spill-policy 没有字符旋钮，
+// 出厂不许有数值默认值；0 也不再被悄悄补成 4000）。它只是显式的兼容手段
+// （`--max-chars=N`），以及 A/B 时的对照组。
+func (p *Pipeline) overChars(n int) bool {
+	return p.opts.MaxChars > 0 && n > p.opts.MaxChars
+}
+
 // spillText 把模型可见正文压到预算内：留头留尾，中间换一行指针。
 //
 // 留尾巴是因为很多输出（日志、报错、命令结果）的关键信息在最后。
 func (p *Pipeline) spillText(res *spi.Result, over bool, pointer string) {
+	if p.opts.MaxChars <= 0 {
+		// 字符臂没配就没有预算可用。调用方只在 overChars 为真时才进来，
+		// 这条是防御：宁可原样返回，也不许用 0 预算把正文切成空。
+		return
+	}
 	budget := p.opts.MaxChars * 3 / 4 // 留出指针/提示的位置，正文本身不超阈值
 	head := budget * 3 / 4
 	tail := budget - head

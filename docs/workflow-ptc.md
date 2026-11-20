@@ -189,11 +189,13 @@ workflow 被中断：已完成 2/5 步（grep、read），第 3 步 read 中断�
 
 | 层 | 阈值 | 行为 | 证据 |
 |---|---|---|---|
-| spill（事后，落盘） | 4000 **字符** | Data 外置成 artifact + 指针；Text 砍到 3000 rune（`MaxChars*3/4`） | `modules/tools/pipeline.go:23`、`:30-33`、`:200-218`、`:225`；默认值来源 `cmd/dshd/main.go:357`、`cmd/dshd/acp.go:403` |
+| spill（事后，落盘） | 官方 `maxInlineTokens` = **12500 估算 token**（文本+图片共享）；`--max-chars` 是显式才生效的兼容字符臂（出厂 0 = 不参与） | Data 外置成 artifact + 指针；token 臂换头/尾 + notice；字符臂显式配置时把 Text 砍到 `MaxChars*3/4` | `modules/tools/pipeline.go`（`DefaultMaxInlineTokens`、`overChars`、`spill`）；`modules/tools/spill_policy.go`（`retainInline`）；注册处 `cmd/dshd/host_run_options.go`（`addSpillBudgetFlags`）；官方原件 `dsh-base/cordis.patch.yml:417` |
 | prune（事前，投影） | 8192 **字符**（阈值）；头 4096 / 尾 1024 | 超阈值才裁：头 4096 字符 + 官方 marker + 尾 1024 字符；**不超预算原样返回**（官方三件套，单位是码点而不是字节/行） | `internal/prune/prune.go`（`DefaultThresholdChars`/`DefaultHeadChars`/`DefaultTailChars`）；调用点 `internal/session/project.go:33` |
 | compact（历史） | 尾巴 2000 token；摘要输入 24000 字符 / 单条 1200 字符 | 只压前缀 | `internal/compact/compact.go:38-40`、`:52-63`、`:116-119` |
 
+
 `prune` 的预算**不再自己定数**：直接取官方三件套（`dsh-compaction-tool-result-pruner/lib/index.js:10-14` 的 `thresholdChars` 8192 / `headChars` 4096 / `tailChars` 1024，单位是 Unicode 码点；官方 base profile `cordis.patch.yml:438-440` 出厂再配一次）。以前那套"16KB 字节 / 200 行"是宿主自造的，理由是"4000 字符的中文约 12KB"——那个前提（spill 的 4000 字符默认）已随 #101 删除，而且按字节量中文本来就会比官方多压一刀（8192 字节只剩 2730 个汉字）。
+
 
 ### 4.2 脚本侧的四条预算
 
