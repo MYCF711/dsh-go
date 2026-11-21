@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // RFC6455 里写死的握手魔术串：accept = base64(sha1(key + 这一串))。
@@ -46,14 +48,46 @@ const (
 // 每条消息独立 deflate（双向 no_context_takeover），不保留跨消息字典。
 //
 // 读走 br（Hijack 时 http 层可能已经缓冲了几个字节），写走 conn 并由 wmu 串行化。
+//
+// 它还实现 Pinger：服务端每 pingEvery 发一条 WS ping，对端的 pong（以及任何
+// 客户端帧）都会刷新 lastRead，供 heartbeat 判"读侧是否真的空闲"。
+// 没有这一层时半开连接（进程挂起/网线拔掉）会在 TCP 层一直不报错，
+// ServeConn 的 goroutine 与连接对象永久挂在那里——正是 heartbeat 要防的那个故障。
 type WSConn struct {
 	conn       net.Conn
 	br         *bufio.Reader
 	compressed bool
 	wmu        sync.Mutex
+
+	// lastRead 是最近一次**完整读到对端一帧**的时刻（UnixNano）。
+	// 控制帧也算：pong 是对端活着的直接证据。0 表示还没读过任何帧。
+	lastRead atomic.Int64
 }
 
 var _ Conn = (*WSConn)(nil)
+var _ Pinger = (*WSConn)(nil)
+var _ activityTracker = (*WSConn)(nil)
+
+// Ping 发一条 WS ping 控制帧（服务端帧不带掩码）。对端按 RFC6455 回 pong，
+// 那个 pong 会刷新 lastRead，于是"对端还活着"有读侧证据。
+func (c *WSConn) Ping() error {
+	if c == nil {
+		return errors.New("Ping 收到 nil 连接")
+	}
+	return c.writeFrame(false, wsOpPing, nil)
+}
+
+// LastClientActivity 返回最近一次读到对端帧的时刻；没读过任何帧时返回零值。
+func (c *WSConn) LastClientActivity() time.Time {
+	if c == nil {
+		return time.Time{}
+	}
+	n := c.lastRead.Load()
+	if n == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, n)
+}
 
 // Upgrade 完成 RFC6455 握手，并可选协商 RFC7692 permessage-deflate。
 // 没有 Sec-WebSocket-Extensions 的旧客户端走原始路径，响应也不带扩展头。
@@ -104,7 +138,11 @@ func Upgrade(w http.ResponseWriter, r *http.Request) (*WSConn, error) {
 		conn.Close()
 		return nil, fmt.Errorf("升级失败：回 101 时写不出去：%w", err)
 	}
-	return &WSConn{conn: conn, br: brw.Reader, compressed: compressed}, nil
+	c := &WSConn{conn: conn, br: brw.Reader, compressed: compressed}
+	// 握手完成即算"对端刚刚活动过"：握手本身是一次读侧事实，
+	// 若这里留 0，heartbeat 会把"刚连上但还没发帧"的合法连接判成从未活动。
+	c.lastRead.Store(time.Now().UnixNano())
+	return c, nil
 }
 
 // negotiateDeflate 从逗号分隔的多份 offer 中选第一份可接受的 deflate。
@@ -350,6 +388,9 @@ func (c *WSConn) readFrame() (wsFrame, error) {
 	if _, err := io.ReadFull(c.br, payload); err != nil {
 		return wsFrame{}, err
 	}
+	// 完整读过一帧（文本、ping、pong 都算）：这是对端还活着的读侧证据。
+	// 放在解掩码/解压之前：字节已经到齐，后面的失败属于"帧坏了"，不是"对端没了"。
+	c.lastRead.Store(time.Now().UnixNano())
 	for i := range payload {
 		payload[i] ^= mask[i%4]
 	}
