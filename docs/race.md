@@ -76,3 +76,30 @@ grep -rn "toolchains\|mingw" --include=*.go cmd/ internal/ modules/ codecs/   # 
 `-race` 变绿**不等于并发就对了**：它只覆盖被跑到的那些交错。
 `TestConcurrentJournalAndHubInvariants` 仍然有用（它专门去撞 journal/hub 的交错），
 两者是补充关系，不是替代关系。
+
+## check.sh 的 race 步：输出落到文件 + 整步硬预算（2026-11-21）
+
+这条门禁自身有两个洞，都修了：
+
+**① 不许用 `$( )` 捕获这一步。** 命令替换要等管道写端**全部**关闭才 EOF；
+`go test` 会起 test 二进制，test 二进制再起 dshd / helper，只要有一个后代进程
+继承着那个写端还活着，bash 就永远等不到 EOF —— 整条门禁停在 race 这一行，
+**后面 20 多道守卫一条都跑不到**（PR #104 因此漏掉 text-only 白名单漂移，靠 CI 才捞住）。
+现在由 `scripts/race-step.sh` 来跑：子进程输出**重定向到文件**，bash 只等直接子进程。
+
+**② 整步必须有预算。** `go test -timeout 30m` 只约束**单个包**，"整个 `./...`
+要跑多久"原来没有任何上限，所以"卡住"只能是无限等。现在默认 **2700s**
+（`DSHGO_RACE_BUDGET=<秒>` 可改），到点先按 Windows 进程树 `taskkill /T` 收掉
+go → `*.test.exe` → dshd/helper（**只收我们自己这棵树**），在日志里留一行
+"预算打满 + 当时哪个 test 二进制还活着"，然后**继续跑后面的守卫**。
+预算不是断言：到点照样是 FAIL，只是不再是"无限等"。
+
+判定口径：`race-step.sh` 退出码 **124 = 预算打满（这一步没跑完，不是通过）**，
+其它非零 = 命令自己失败（cgo 缺失、DATA RACE、断言失败等，仍按原逻辑判）。
+
+**顺带修掉一个真实的耗时源**：`codecs/v4` 的 `TestReadRealCorpus` 原来把
+`$DSH_HOME/sessions` **全量**读一遍（本机 4944 个文件 / 3.6 GB，`-race` 下实测按
+200 文件 25.9s 外推 ≈ 14 分钟），它一个包就顶掉整套 race 的大半时间，机器上再有
+别的任务占着就会撞 30m 包超时。现在按路径字典序**等距取样 20 个文件 / 24 MB 上限**
+（单文件 > 8 MB 跳过并报数），日志里打"语料总量 vs 本次读了多少"；
+要全量深跑设 `DSHGO_REAL_CORPUS_ALL=1`。

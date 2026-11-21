@@ -11,10 +11,12 @@
 """
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 # 造红用的草稿目录**必须放在仓库外**。
 #
@@ -171,8 +173,8 @@ def main():
          ""),
         ("serve 推帧用 resp.Content != \"\" 决定发不发",
          "cmd/dshd/serve_turn.go",
-         r'if resp != nil && assistantHasPayload\(resp\.Content, resp\.Reasoning, len\(resp\.ToolCalls\)\) \{',
-         'if resp != nil && resp.Content != "" {'),
+         r'\t\t\tif !assistantHasPayload\(msg\.Content, reasoning\[n\.Seq\], len\(msg\.ToolCalls\)\) \{',
+         '\t\t\tif msg.Content == "" {'),
     ]
     for name, rel, pattern, repl in text_only_reverts:
         target = os.path.join(to_tree, rel)
@@ -285,7 +287,7 @@ def main():
     ss_revert(
         "ACP 写盘重新自己铺块（941460c 之前）",
         "cmd/dshd/acp.go",
-        r"\t\t\tblocks := assistantBlocksFrom\(a\.Content, a\.Reasoning, a\.ToolCalls\)\n",
+        r"\t\t\tblocks := session\.AssistantBlocks\(a\.Content, a\.Reasoning, a\.ToolCalls\)\n",
         "\t\t\tblocks := make([]map[string]any, 0, 1+len(a.ToolCalls))\n"
         "\t\t\tif a.Content != \"\" {\n"
         "\t\t\t\tblocks = append(blocks, session.TextBlock(a.Content))\n"
@@ -488,6 +490,68 @@ def main():
         code != 0 and "0 个 Go 文件" in out, out.strip()[-200:])
 
     shutil.rmtree(ss_root, ignore_errors=True)
+
+    # ---- 7) race-step：门禁里"可能卡住"的那一步必须变成有限时间内的一次明确失败 ----
+    #
+    # 2026-11-21 的洞：check.sh 的 race 步原来写成
+    #   race_out="$(go test ./... -race -timeout 30m 2>&1)"
+    # 命令替换要等管道写端**全部**关闭才 EOF。只要有一个后代进程还活着并继承了那个
+    # 写端，bash 就永远等不到 EOF——整条门禁停在那一行，后面 20 多道守卫一条都跑不到。
+    # 下面两条守两侧：a) 继承写端的孙进程不许把这一步挂住；b) 预算到点必须返回 124
+    #   并把整棵树（含 native 子进程）杀掉，不留 test 二进制继续跑。
+    race_log = os.path.join(TMP, "race-step.log")
+
+    t_old = time.time()
+    subprocess.run(["bash", "-c", "x=\"$(bash -c 'sleep 6 &')\""], capture_output=True)
+    old_elapsed = time.time() - t_old
+
+    t_new = time.time()
+    p_new = subprocess.run(["bash", "scripts/race-step.sh", "--budget", "30",
+                            "--log", race_log, "--", "bash", "-c", "sleep 6 &"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+    new_elapsed = time.time() - t_new
+    chk("race-step：继承输出写端的孙进程不许把这一步挂住（同一形状旧 `$( )` 实测 %.1fs）" % old_elapsed,
+        p_new.returncode == 0 and new_elapsed < 3.0,
+        "new=%.1fs rc=%s stderr=%s" % (new_elapsed, p_new.returncode,
+                                       (p_new.stderr or "").strip()[-160:]))
+
+    # b) 预算到点：用真的 `go test` 起一个永不返回的测试——这就是门禁卡住时的那棵树
+    #    （go → *.test.exe）。要验的不是"超时"两个字，是"返回 + 树被收干净"。
+    hang_dir = os.path.join(TMP, "hangproc")
+    os.makedirs(hang_dir, exist_ok=True)
+    with open(os.path.join(hang_dir, "go.mod"), "w", encoding="utf-8", newline="") as fh:
+        fh.write("module hangproc\n\ngo 1.21\n")
+    with open(os.path.join(hang_dir, "hang_test.go"), "w", encoding="utf-8", newline="") as fh:
+        fh.write("package hangproc\n\nimport \"testing\"\n\nfunc TestHangs(t *testing.T) { select {} }\n")
+
+    race_script = os.path.abspath("scripts/race-step.sh")
+    t_trip = time.time()
+    p = subprocess.run(
+        ["bash", "-c",
+         "cd %s && bash %s --budget 8 --log %s -- go test ./... -timeout 10m"
+         % (shlex.quote(hang_dir), shlex.quote(race_script), shlex.quote(race_log))],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+    trip_elapsed = time.time() - t_trip
+    trip_log = ""
+    try:
+        trip_log = open(race_log, encoding="utf-8", errors="replace").read()
+    except OSError:
+        pass
+    leftovers = subprocess.run(["tasklist", "/FI", "IMAGENAME eq hangproc.test.exe"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+    no_test_left = "hangproc.test.exe" not in (leftovers.stdout or "")
+    # 杀完立刻查可能碰上"已经杀了但还没被回收"，重试几次再判——自测不许假红。
+    for _ in range(6):
+        if no_test_left:
+            break
+        time.sleep(0.5)
+        leftovers = subprocess.run(["tasklist", "/FI", "IMAGENAME eq hangproc.test.exe"],
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+        no_test_left = "hangproc.test.exe" not in (leftovers.stdout or "")
+    chk("race-step：预算打满 → 返回 124 且 test 二进制不留在树上（%.1fs）" % trip_elapsed,
+        p.returncode == 124 and "预算打满" in trip_log and "已中止" in trip_log and no_test_left,
+        "rc=%s log=%s tasklist=%s" % (p.returncode, trip_log.strip()[-200:],
+                                      (leftovers.stdout or "").strip()[-120:]))
 
     shutil.rmtree(TMP, ignore_errors=True)
     print("合计 OK=%d FAIL=%d" % (ok, fail))
