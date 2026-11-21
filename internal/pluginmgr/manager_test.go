@@ -448,3 +448,74 @@ func TestPluginManagerCrashHelper(t *testing.T) {
 	}
 	os.Exit(0)
 }
+
+// 卸载回滚失败**必须**被观察到，而且事务现场必须留住。
+//
+// 这是"回滚失败却报告成功"里后果最重的一处：包体移进事务区之后，若把它移回
+// packages/ 失败，trash 里那份就是**唯一副本**。以前这里 `_ = os.Rename(...)`
+// 吞掉回滚错误、紧接着 `_ = os.RemoveAll(txDir)` 把 trash 连同 journal 一起删掉，
+// 调用方只看到"卸载失败"——以为包还在，实际已经永久丢包，下次启动也救不回来。
+func TestUninstallRollbackFailureIsReportedAndRecoverable(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "manager")
+	src := writeTestPackage(t, filepath.Join(home, "pkg"), "acme.audit", "1.0.0")
+	m, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Install(src); err != nil {
+		t.Fatal(err)
+	}
+
+	packageDir := filepath.Join(root, "packages", "acme.audit")
+	m.afterPhase = func(phase string) error {
+		switch phase {
+		case "package_removed":
+			// 包体已经进了事务区。在这里占住 packages/<id>，让"移回去"必然失败：
+			// 等于注入一次磁盘级回滚失败，不依赖平台权限或内存故障。
+			if err := os.MkdirAll(packageDir, 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(packageDir, "blocker"), []byte("x"), 0o600)
+		case "committing":
+			return fmt.Errorf("injected uninstall failure after package moved")
+		}
+		return nil
+	}
+	err = m.Uninstall("acme.audit")
+	m.afterPhase = nil
+	if err == nil {
+		t.Fatal("注入失败之后卸载必须报错")
+	}
+	if !strings.Contains(err.Error(), "卸载回滚失败") {
+		t.Fatalf("回滚失败必须报出来（不许吞成一句普通的卸载失败）：%v", err)
+	}
+	txs, readErr := os.ReadDir(filepath.Join(root, "transactions"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(txs) != 1 {
+		t.Fatalf("回滚失败后事务目录必须保留（reconcile 要靠它自愈），实际 %d 个", len(txs))
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "transactions", txs[0].Name(), "trash")); statErr != nil {
+		t.Fatalf("包体唯一副本没了（永久丢包）：%v", statErr)
+	}
+
+	// 清掉注入的占位目录：reconcile 应当把包体移回 packages/，状态与文件重新一致。
+	if err := os.RemoveAll(packageDir); err != nil {
+		t.Fatal(err)
+	}
+	res, err := m.Reconcile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Recovered != 1 {
+		t.Fatalf("reconcile 应当收掉这 1 条未完成事务：%+v", res)
+	}
+	if _, statErr := os.Stat(filepath.Join(packageDir, "1.0.0", "plugin.json")); statErr != nil {
+		t.Fatalf("reconcile 没能把包体移回 packages/：%v", statErr)
+	}
+	if p := onlyPlugin(t, m); p.Version != "1.0.0" {
+		t.Fatalf("状态应当仍是原版本：%+v", p)
+	}
+}

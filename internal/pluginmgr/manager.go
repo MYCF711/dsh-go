@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,6 +97,25 @@ func (m *Manager) finishTransaction(tx *transaction) {
 	// A cleanup failure leaves a committed journal. Reconcile will finish it;
 	// the already committed operation is not misreported as a failed update.
 	_ = os.RemoveAll(m.txDir(tx.ID))
+}
+
+// joinRollback 把"回滚也失败"如实并进主错误。
+//
+// 为什么不用裸 errors.Join：Transport 适配层走 AsError → internalError，
+// 只返回第一个 *Error，join 出来的第二段就被丢掉了——那又变回"回滚失败没人知道"。
+// 所以主错误是 *Error 时把明细并进它的 Message（code/hint/status 保持不变），
+// 否则退回 errors.Join（两个原因都保留）。
+func joinRollback(primary, rollback error, detail string) error {
+	if rollback == nil {
+		return primary
+	}
+	var apiErr *Error
+	if errors.As(primary, &apiErr) && apiErr != nil {
+		merged := *apiErr
+		merged.Message = fmt.Sprintf("%s；%s: %v", apiErr.Message, detail, rollback)
+		return &merged
+	}
+	return errors.Join(primary, fmt.Errorf("%s: %w", detail, rollback))
 }
 
 func (m *Manager) rollbackInstallTransaction(tx *transaction) error {
@@ -281,8 +301,12 @@ func (m *Manager) installVersionLocked(operation string, sourceManifest Manifest
 	success := false
 	defer func() {
 		if !success {
-			if rollbackErr := m.rollbackInstallTransaction(tx); retErr == nil && rollbackErr != nil {
-				retErr = rollbackErr
+			if rollbackErr := m.rollbackInstallTransaction(tx); rollbackErr != nil {
+				// 回滚失败要与主错误一起报。以前是 `retErr == nil && rollbackErr != nil`
+				// 才用它——而 `!success` 时 retErr 本来就不会是 nil，等于把回滚失败
+				// 丢掉了：事务目录/版本目录是谁留下的，调用方永远不知道。
+				retErr = joinRollback(retErr, rollbackErr, fmt.Sprintf(
+					"安装事务 %s 回滚失败（事务目录保留，下次启动 reconcile 会再试）", tx.ID))
 			}
 		}
 	}()
@@ -557,11 +581,27 @@ func (m *Manager) Uninstall(id string) (retErr error) {
 			return
 		}
 		trash := filepath.Join(m.txDir(tx.ID), "trash")
-		if _, err := os.Stat(trash); err == nil {
+		if _, statErr := os.Stat(trash); statErr == nil {
 			_ = os.MkdirAll(filepath.Join(m.root, "packages"), 0o700)
-			_ = os.Rename(trash, filepath.Join(m.root, "packages", id))
+			if renameErr := os.Rename(trash, filepath.Join(m.root, "packages", id)); renameErr != nil {
+				// 回滚没成功：trash 里的包体是**唯一副本**，所以事务目录必须留下——
+				// 以前这里 `_ = os.Rename(...)` 后又 `_ = os.RemoveAll(txDir)`，等于
+				// 回滚失败时把包体和可自愈的 journal 一起删了（永久丢包），而调用方
+				// 只看到"卸载失败"。现在如实报出，并保留现场交给 reconcile。
+				retErr = joinRollback(retErr, renameErr, fmt.Sprintf(
+					"卸载回滚失败：包体仍在 %s，事务 %s 已保留（下次启动 reconcile 会再试；也可手动移回 packages/%s）",
+					filepath.ToSlash(trash), tx.ID, id))
+				return
+			}
+		} else if !os.IsNotExist(statErr) {
+			retErr = joinRollback(retErr, statErr, fmt.Sprintf(
+				"卸载回滚前读不到事务包体（%s），事务 %s 已保留", filepath.ToSlash(trash), tx.ID))
+			return
 		}
-		_ = os.RemoveAll(m.txDir(tx.ID))
+		if err := os.RemoveAll(m.txDir(tx.ID)); err != nil {
+			retErr = joinRollback(retErr, err, fmt.Sprintf(
+				"回滚已完成，但清理事务目录 %s 失败（reconcile 会收尾）", tx.ID))
+		}
 	}()
 	packageDir := filepath.Join(m.root, "packages", id)
 	trash := filepath.Join(m.txDir(tx.ID), "trash")
