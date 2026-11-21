@@ -158,11 +158,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 	if !a.ReplaceAll {
 		reps = 1
 	}
-	n := -1
-	if !a.ReplaceAll {
-		n = 1
-	}
-	updated := strings.Replace(content, strings.ReplaceAll(a.OldString, "\r\n", "\n"), a.NewString, n)
+	updated := splicePreservingEOL(string(data), content, strings.ReplaceAll(a.OldString, "\r\n", "\n"), a.NewString, reps)
 	if err := t.fs.Write(a.FilePath, []byte(updated)); err != nil {
 		return spi.Result{Hint: "写入失败；确认路径可写"}, err
 	}
@@ -187,6 +183,107 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		Summary: summary,
 		Data:    p,
 	}, nil
+}
+
+// splicePreservingEOL 在**原文**上做替换：未被命中的字节一个都不动。
+//
+// 为什么不能把规范化后的整串直接写回：`\r\n` → `\n` 是有损的（`strings.ReplaceAll`），
+// 写回就等于把**整个文件**的行尾改掉——改一行，git diff 显示全文都改了，别人机器
+// 上的 CRLF 习惯被无声破坏。我们原来正是这么做的
+// （`updated := strings.ReplaceAll(content, ...)` 之后整串 `t.fs.Write`）。
+//
+// 官方也没做对，所以别照抄它那版：`dsh-fs-local/src/fsio.ts:721-726`
+// （`detectLineEndings`）只采样**前 4096 字符**数多数票
+// （`return crlfCount > lfCount ? 'CRLF' : 'LF'`），再按这个票数把**全文**重新编码
+// （`src/fsio.ts:736-738` `restoreLineEndings`）。混合行尾的文件因此被整体改写：
+// 前 4096 字符全 CRLF、后 3000 行全 LF 的文件，一次单行编辑就把那 3000 行全变成 CRLF；
+// 而判定依据只是一个采样。它比我们原版好，但仍然是"改一处、重写全文"。
+//
+// 这里的做法是精确的：`\r\n`→`\n` 只删掉那个 `\r`，所以规范化文本除被删的字节外与
+// 原文**逐字节对齐**，命中区间可以精确落回原文坐标。于是：
+//   - 原文其余字节原样保留（混合行尾的文件不再被整体改写）；
+//   - 行尾风格只用来决定**新插入**的换行怎么写，判据与官方一致（多数票）。
+//
+// 零代价：不增加任何上限或交互，纯 ASCII / 纯 LF 文件走的路径与改前完全等价
+// （坐标映射在无 `\r\n` 时是恒等），不改变"找不到 / 不唯一"的任何判定。
+//
+// raw 是原文，norm 是 raw 去掉 `\r\n` 里的 `\r` 之后的文本（调用方已算好），
+// oldNorm 是规范化后的 old_string，reps 是要替换的出现次数（非重叠）。
+func splicePreservingEOL(raw, norm, oldNorm, newString string, reps int) string {
+	starts := matchStarts(norm, oldNorm)
+	if len(starts) == 0 {
+		// 调用方已确认 count>0；这里只是不让空输入走到下面的坐标映射。
+		return raw
+	}
+	if reps > 0 && reps < len(starts) {
+		starts = starts[:reps]
+	}
+
+	// 新插入的换行跟随文件的多数票（与官方 detectLineEndings 同一判据），
+	// 只影响新文本，不重写任何既有行。
+	insert := newString
+	if crlf := strings.Count(raw, "\r\n"); crlf > strings.Count(raw, "\n")-crlf {
+		insert = strings.ReplaceAll(strings.ReplaceAll(insert, "\r\n", "\n"), "\n", "\r\n")
+	}
+
+	spans := normSpansToRaw(raw, starts, len(oldNorm))
+	var b strings.Builder
+	b.Grow(len(raw) + len(insert)*len(spans))
+	prev := 0
+	for _, sp := range spans {
+		b.WriteString(raw[prev:sp[0]])
+		b.WriteString(insert)
+		prev = sp[1]
+	}
+	b.WriteString(raw[prev:])
+	return b.String()
+}
+
+// matchStarts 返回 needle 在 hay 里**不重叠**的出现起点，与 `strings.Replace` 的口径一致。
+func matchStarts(hay, needle string) []int {
+	if needle == "" {
+		return nil
+	}
+	var starts []int
+	for off := 0; off+len(needle) <= len(hay); {
+		i := strings.Index(hay[off:], needle)
+		if i < 0 {
+			break
+		}
+		at := off + i
+		starts = append(starts, at)
+		off = at + len(needle)
+	}
+	return starts
+}
+
+// normSpansToRaw 把规范化坐标下的起点数组落回原文坐标（宽度相同，都是 width 个规范化字节）。
+//
+// 规范化只做了"删掉 `\r\n` 里的 `\r`"这一件事，所以两个坐标系单调对齐：
+// 一次前向扫描同时推进两个下标即可，O(len(raw)) 时间、O(1) 额外内存。
+func normSpansToRaw(raw string, starts []int, width int) [][2]int {
+	spans := make([][2]int, 0, len(starts))
+	ri, ni := 0, 0
+	// advance 消费规范化文本的一个字节，并在原文里跨过可能的 `\r\n` 两字节。
+	advance := func() {
+		if ri+1 < len(raw) && raw[ri] == '\r' && raw[ri+1] == '\n' {
+			ri += 2
+		} else if ri < len(raw) {
+			ri++
+		}
+		ni++
+	}
+	for _, s := range starts {
+		for ni < s {
+			advance()
+		}
+		rs := ri
+		for ni < s+width {
+			advance()
+		}
+		spans = append(spans, [2]int{rs, ri})
+	}
+	return spans
 }
 
 // Module 返回装配用的模块描述。
