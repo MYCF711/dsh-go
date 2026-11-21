@@ -173,8 +173,8 @@ def main():
          ""),
         ("serve 推帧用 resp.Content != \"\" 决定发不发",
          "cmd/dshd/serve_turn.go",
-         r'if resp != nil && assistantHasPayload\(resp\.Content, resp\.Reasoning, len\(resp\.ToolCalls\)\) \{',
-         'if resp != nil && resp.Content != "" {'),
+         r'\t\t\tif !assistantHasPayload\(msg\.Content, reasoning\[n\.Seq\], len\(msg\.ToolCalls\)\) \{',
+         '\t\t\tif msg.Content == "" {'),
     ]
     for name, rel, pattern, repl in text_only_reverts:
         target = os.path.join(to_tree, rel)
@@ -287,7 +287,7 @@ def main():
     ss_revert(
         "ACP 写盘重新自己铺块（941460c 之前）",
         "cmd/dshd/acp.go",
-        r"\t\t\tblocks := assistantBlocksFrom\(a\.Content, a\.Reasoning, a\.ToolCalls\)\n",
+        r"\t\t\tblocks := session\.AssistantBlocks\(a\.Content, a\.Reasoning, a\.ToolCalls\)\n",
         "\t\t\tblocks := make([]map[string]any, 0, 1+len(a.ToolCalls))\n"
         "\t\t\tif a.Content != \"\" {\n"
         "\t\t\t\tblocks = append(blocks, session.TextBlock(a.Content))\n"
