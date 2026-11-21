@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"dshgo/internal/sandbox"
 )
 
 const (
@@ -130,8 +132,14 @@ func locateWorkspaceChangesRepo(ctx context.Context, gitPath, cwd string) (*work
 // （`C:\Users\Administrator\…`）。两份都对，但 `filepath.Rel` 认不出是同一棵树，
 // 于是每条 path 都变成 `..\..\..\Administrator\…` 这种垃圾，deliverables 卡片
 // 的显示路径与"工作区内相对路径"同时失真。
+//
+// "第二种拼法"还有一个来源：目录 junction。filepath.EvalSymlinks 在 Go ≥1.23 的
+// `winsymlink=1` 下不跟 junction（对 junction 下面的路径直接 errno=3），于是
+// `<link>\repo` 与它真实目标被当成两棵树，`filepath.Rel` 又给出垃圾显示路径。
+// 这里只影响显示与 git 的工作目录/对象目录取值，没有放行/拒绝判定；换成
+// sandbox.ResolveExistingPath 后普通路径仍走 EvalSymlinks，一字不差。
 func workspaceChangesCanonical(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	if resolved, err := sandbox.ResolveExistingPath(path); err == nil {
 		if abs, err := filepath.Abs(resolved); err == nil {
 			return filepath.Clean(abs)
 		}

@@ -53,6 +53,7 @@ import (
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/fssearch"
+	"dshgo/internal/sandbox"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
 	"dshgo/internal/worktree"
@@ -506,11 +507,18 @@ func officialResolveWithin(root, path, base string, allowEmpty bool) (string, st
 	}
 	// 词法边界过了还要按**真实解析后**的路径再核一次：符号链接/联接点会把
 	// 一个看起来在里面的路径指到外面去。
-	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
-		if resolvedTarget, terr := filepath.EvalSymlinks(target); terr == nil {
+	//
+	// 这里必须走 sandbox.ResolveExistingPath 而不是 filepath.EvalSymlinks：
+	// 后者在 Go ≥1.23 的 `winsymlink=1` 下不跟目录 junction，而且对 junction
+	// **下面**的路径直接报 ERROR_PATH_NOT_FOUND（实测 errno=3）。用 EvalSymlinks
+	// 的话 `workspaceFiles.read("link\secret.txt")`（link 是指向工作区外的
+	// junction）里 `resolvedTarget` 拿不到 → 整个复核被静默跳过 → 读到工作区外。
+	// 普通路径（无重解析点）ResolveExistingPath 内部仍是 EvalSymlinks，行为不变。
+	if resolvedRoot, err := sandbox.ResolveExistingPath(root); err == nil {
+		if resolvedTarget, terr := sandbox.ResolveExistingPath(target); terr == nil {
 			if !officialPathWithin(resolvedRoot, resolvedTarget) {
 				return "", "", transport.OfficialWorkspaceError("workspaceFiles/outside-workspace",
-					"路径 %q 经符号链接解析后跑出工作区根（%q）", path, resolvedRoot)
+					"路径 %q 经符号链接/junction 解析后跑出工作区根（%q）", path, resolvedRoot)
 			}
 		}
 	}

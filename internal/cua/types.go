@@ -31,6 +31,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"dshgo/internal/sandbox"
 )
 
 // ApplicationIDPattern 是官方 CuaApplicationId 的判据：
@@ -255,12 +257,20 @@ func ApplicationIdentity(executablePath string) Grant {
 // 先尽力解析符号链接/联接点（解析不了不算错：很多系统目录本来就解不开），
 // 再取绝对路径并清理分隔符。**不去改大小写**——保留真实大小写给界面显示，
 // 大小写归一化只发生在算摘要那一步（见 ApplicationIdentity）。
+//
+// 解析必须走 sandbox.ResolveExistingPath：`ApplicationIdentity` 就是拿它的结果做
+// sha256，也就是 `cuaAccess` 里"这条许可/拒绝属于哪个应用"的**身份键**。只靠
+// filepath.EvalSymlinks 时，Go ≥1.23 的 `winsymlink=1` 让同一条 exe 走 junction
+// 拼法和走真实路径算出**两个不同**的身份摘要（EvalSymlinks 对 junction 本身原样
+// 返回、对 junction 下面的路径直接 errno=3）——于是 deny 过的应用换个拼法就
+// 落在"没决策过"上，revoke 也只撤得掉其中一条。
+// 没有重解析点的普通路径，ResolveExistingPath 内部仍然走 EvalSymlinks。
 func CanonicalExecutablePath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return ""
 	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	if resolved, err := sandbox.ResolveExistingPath(path); err == nil {
 		path = resolved
 	}
 	if abs, err := filepath.Abs(path); err == nil {

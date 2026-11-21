@@ -37,9 +37,14 @@ import (
 
 var procGetFinalPathNameByHandleW = kernel32Proc("GetFinalPathNameByHandleW")
 
-// resolveExistingPath 把一条**已存在**的路径解析成它的最终目标（跟随 junction/
+// ResolveExistingPath 把一条**已存在**的路径解析成它的最终目标（跟随 junction/
 // 符号链接/其它重解析点）。非 Windows 由 reparse_other.go 提供 EvalSymlinks 版本。
-func resolveExistingPath(path string) (string, error) {
+//
+// 这是本包对外的**唯一**一条解析入口：包外（forge 面板的可写根判定、workspaceFiles
+// 的读边界、静态站 dist 围栏）判「这条路径到底指向哪」时必须调它，不许各自再写一遍
+// `filepath.EvalSymlinks`——那样每一个调用点都会各自漏一次 junction（见文件头）。
+// 另两个判据（pathHasReparsePoint / isReparsePoint）没有包外调用者，保持包内。
+func ResolveExistingPath(path string) (string, error) {
 	reparse, err := pathHasReparsePoint(path)
 	if err != nil {
 		return "", err
