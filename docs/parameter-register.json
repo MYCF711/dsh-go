@@ -5634,13 +5634,14 @@
       "officialSource": "app.asar:dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/README.md:66",
       "officialDefault": 2000,
       "status": "COVERED-EQUIV",
-      "reason": "宿主对每行预览有 400 字符上限（官方 2000 字节），截断点更靠前；能力相同、阈值不同。",
+      "reason": "宿主对每行预览有 400 **字节**上限（官方 2000 字节），且与官方 `previewLine` 逐条对齐：裁点落在 UTF-8 字符边界上（官方 GREP_MAX_LINE_BYTES 注释 the cut preserves UTF-8 boundaries）、裁过就补 ` (line truncated)`。阈值不同（400 vs 2000 字节），语义相同。",
       "evidence": [
-        "modules/tool/grep/grep.go:43 `maxLineChars  = 400`",
-        "modules/tool/grep/grep.go:66-196 `if len(line) > maxLineChars { line = line[:maxLineChars] }`"
+        "modules/tool/grep/grep.go:44 `maxLineBytes  = 400`",
+        "modules/tool/grep/grep.go:74-83 `previewLine`：`for cut > 0 && !utf8.RuneStart(line[cut]) { cut-- }` + `line[:cut] + lineTruncMarker`",
+        "modules/tool/grep/grep.go:50 `lineTruncMarker = \" (line truncated)\"`（官方 search-core.ts:301 同一句话）"
       ],
       "triageDomain": "agent-loop",
-      "hostEquivalent": "modules/tool/grep/grep.go:43 `maxLineChars = 400` + :194-196 逐行截断",
+      "hostEquivalent": "modules/tool/grep/grep.go:44 `maxLineBytes = 400` + :252 `previewLine(line, maxLineBytes)` 逐行预览截断",
       "legacyNote": "官方有该参数、宿主未见同名读取点：按 §2 登记为结构化未实现（不静默忽略）。",
       "officialAnchor": "ALIVE"
     },

@@ -374,5 +374,29 @@
     "new": "\tif !configured {\n\t\treturn 0\n\t}",
     "pkg": "./cmd/dshd",
     "test": "TestInlineBudgetOfficialDefaults"
+  },
+  {
+    "name": "grep-preview-cuts-mid-rune",
+    "file": "modules/tool/grep/grep.go",
+    "old": "\treturn line[:cut] + lineTruncMarker",
+    "new": "\treturn line[:maxBytes] + lineTruncMarker",
+    "pkg": "./modules/tool/grep",
+    "test": "TestPreviewLineKeepsUTF8Boundary"
+  },
+  {
+    "name": "grep-preview-hides-truncation",
+    "file": "modules/tool/grep/grep.go",
+    "old": "\treturn line[:cut] + lineTruncMarker",
+    "new": "\treturn line[:cut]",
+    "pkg": "./modules/tool/grep",
+    "test": "TestPreviewLineMarksTruncation"
+  },
+  {
+    "name": "grep-partial-scan-silent",
+    "file": "modules/tool/grep/grep.go",
+    "old": "\t\t\tpartial++",
+    "new": "\t\t\tpartial += 0",
+    "pkg": "./modules/tool/grep",
+    "test": "TestGrepReportsPartialScan"
   }
 ]
