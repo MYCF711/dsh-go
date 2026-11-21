@@ -449,13 +449,41 @@ func (w *windowsACLRunner) prepare(root string) error {
 	return nil
 }
 
+// fileAttributeReparsePoint 是 `GetFileAttributes` 的 FILE_ATTRIBUTE_REPARSE_POINT。
+const fileAttributeReparsePoint = 0x00000400
+
+// isReparsePoint 报告一个**已存在**的路径是不是 reparse point（junction / symlink /
+// 其它重解析点一律算）。
+//
+// 为什么不用 `os.Lstat(...).Mode()&os.ModeSymlink`：那个判据在本机不可靠。实测
+// （`runner_windows_junction_test.go`）同一个目录 junction，在一种进程里被 Go 报成
+// `Lrw-rw-rw-`（ModeSymlink），在另一种进程里被报成 `?rw-rw-rw-`（ModeIrregular，
+// 即重解析标签没读出来）。用 ModeSymlink 判会得出"这不是链接"的结论，而
+// `GetFileAttributes` 的属性位两种情形下都是 `0x410`（DIRECTORY|REPARSE_POINT）。
+// 判机制本身，不判 Go 的类型推断。
+func isReparsePoint(path string) (bool, error) {
+	p, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return false, err
+	}
+	attrs, err := syscall.GetFileAttributes(p)
+	if err != nil {
+		return false, err
+	}
+	return attrs&fileAttributeReparsePoint != 0, nil
+}
+
 // ensureControlledRoot 建受控根，并拒绝「这个路径其实是 reparse point/symlink」。
 //
 // 为什么单独判：ACL 打在**解析后的目标**上。如果受控根是个 junction 指到用户工作区，
 // 给 root 授 ACE 就等于给用户工作区授 ACE——那正是本单的硬红线。
 func ensureControlledRoot(root string) error {
 	if st, err := os.Lstat(root); err == nil {
-		if st.Mode()&os.ModeSymlink != 0 {
+		reparse, rerr := isReparsePoint(root)
+		if rerr != nil {
+			return fmt.Errorf("%w: 读 %s 的属性: %v", ErrRunnerRootInvalid, root, rerr)
+		}
+		if reparse || st.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("%w: %s 是符号链接/reparse point，拒绝在其上打 ACL",
 				ErrRunnerRootInvalid, root)
 		}
@@ -464,6 +492,34 @@ func ensureControlledRoot(root string) error {
 		}
 	} else if !os.IsNotExist(err) {
 		return err
+	}
+	// **父目录也不许是 reparse point。**
+	//
+	// 为什么单列一条：ACL 与 Low 标签打在**解析后的目标**上，而 `<home>/sandbox-roots`
+	// 这个父目录在本机是**可被同用户任何进程预先创建**的。如果它先被造成一个指向
+	// 用户目录树的 junction，`MkdirAll(root)` 就会把受控根建在那个目标里，随后
+	// `modifyDACL`/`setLowLabel` 就落到了用户的目录上——正好是本单硬红线
+	// （"绝不往用户/共享工作区写驻留 ACE 或 Low 标签"）。
+	//
+	// 下面那条 canonical 父子关系检查挡不住它：它是拿**解析后**的父目录去比解析后的
+	// 受控根，只要根确实建在解析后的父目录里，它就恒真。所以必须在建之前先看父目录本身。
+	//
+	// 只查紧邻的父目录，不往上追：`<home>` 自己可能就是被重定向的 junction，
+	// 那是用户的合法布局，不应该因此把 runner 判死。
+	if parent := filepath.Dir(root); parent != root {
+		if _, err := os.Lstat(parent); err == nil {
+			reparse, rerr := isReparsePoint(parent)
+			if rerr != nil {
+				return fmt.Errorf("%w: 读受控根父目录 %s 的属性: %v", ErrRunnerRootInvalid, parent, rerr)
+			}
+			if reparse {
+				return fmt.Errorf("%w: 受控根父目录 %s 是符号链接/reparse point，"+
+					"在那里建根会把 ACE 与 Low 标签打到它解析后的目标上",
+					ErrRunnerRootInvalid, parent)
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return fmt.Errorf("建受控根 %s: %w", root, err)

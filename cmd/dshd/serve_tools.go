@@ -175,33 +175,15 @@ func (r *loopRunner) run(ctx context.Context, sessionID, turnID, text, promptCon
 	}
 	args := append(r.childArgs(sessionID, text, promptContentFile), "--turn-id", turnID)
 	cmd := exec.CommandContext(ctx, exe, args...)
-	// 沙盒档位：子进程的 bash/pwsh 靠这几个变量判定 allow/deny/needs-approval。
-	// 只写子进程 Env（os.Environ + 增量），绝不 os.Setenv——A/B 会话会互相污染。
-	if r.sandboxStore != nil && r.sandboxPresets != nil {
-		env, envErr := sandboxWriteChildEnv(r.home, sessionID, r.sandboxPresets, r.sandboxStore)
-		if envErr != nil {
-			r.emitTurn(sessionID, turnID, envErr)
-			return envErr
-		}
-		// 策略根也要固定：只写档位而让子进程继承父环境里的
-		// DSHD_SANDBOX_WORKSPACE/HOME/EXTRA_READ，等于允许"这个会话的工作区"
-		// 和"策略判定的工作区"是两条不同的 canonical 路径。
-		wd, wdErr := os.Getwd()
-		if wdErr != nil {
-			r.emitTurn(sessionID, turnID, wdErr)
-			return wdErr
-		}
-		userHome, homeErr := os.UserHomeDir()
-		if homeErr != nil {
-			r.emitTurn(sessionID, turnID, homeErr)
-			return homeErr
-		}
-		roots, rootsErr := sandboxChildRoots(wd, r.home, userHome)
-		if rootsErr != nil {
-			r.emitTurn(sessionID, turnID, rootsErr)
-			return rootsErr
-		}
-		cmd.Env = append(os.Environ(), append(env, roots...)...)
+	// 沙盒档位 + 策略根：见 turnChildSandboxEnv。只写子进程 Env
+	// （os.Environ + 增量），绝不 os.Setenv——A/B 会话会互相污染。
+	turnEnv, envErr := r.turnChildSandboxEnv(sessionID)
+	if envErr != nil {
+		r.emitTurn(sessionID, turnID, envErr)
+		return envErr
+	}
+	if turnEnv != nil {
+		cmd.Env = append(os.Environ(), turnEnv...)
 	}
 	var stderr bytes.Buffer
 
