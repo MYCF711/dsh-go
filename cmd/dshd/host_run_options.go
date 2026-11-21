@@ -67,19 +67,23 @@ const (
 	// `dshd run`，而 argv 里只有字符串；`auto` 比传一个数字多带这一位信息，
 	// 也不用再加一个隐藏 flag。（字符串 `auto` ↔ 数值 compact.AutoCompactUnset。）
 	autoCompactAuto = "auto"
-	// defaultReasoningEffort 是**官方 0.2.2 桌面 profile 的出厂推理档**。
+	// defaultReasoningEffort 是**出厂**推理档 —— 官方出厂**不设**，所以这里也是空。
 	//
-	// 官方原件：`D:/DeepSeek Harness/home/profiles/desktop/cordis.patch.yml.bak-1794253367009:8`
-	// （`agent-default-model.config.reasoningEffort: max`）。官方的默认模型选择把
-	// 这一档一起带进会话，核心再把 selection 的 effort 校验并物化进每条请求
-	// （`tmp/GO3-PARAMS/_official/dsh-llm/lib/index.js:2188-2210`：
-	// `requested ?? reasoning.defaultEffort` → 落在 `resolvedConfig.reasoningEffort`），
-	// 适配器据此发 `reasoning_effort` / `output_config.effort`
-	// （`dsh-llm-pi-ai/lib/index.js:1993`、`dsh-llm-deepseek/lib/index.js:1720-1734`）。
+	// 2026-11-21 自纠：上一版这里写死 `"max"`，依据是
 	//
-	// 所以"宿主默认不带推理档"与官方出厂行为相反；要关掉仍可显式
-	// `--reasoning=`（空值）或 `--reasoning off`。
-	defaultReasoningEffort = "max"
+	//	D:/DeepSeek Harness/home/profiles/desktop/cordis.patch.yml.bak-...:8
+	//
+	// **那是本机 $DSH_HOME 下的用户 profile，不是官方出厂配置。** 把用户自己的
+	// 偏好当成官方默认写进宿主，等于让每个装机的人都被强加一个他们没选过的档 ——
+	// 这正是「很多参数不是用户设的」那类错误的同一个形状。
+	//
+	// 官方出厂的事实（rc.5 基线，`tmp/GO8-RC5/official-rc5/dsh/node_modules/
+	// @deepseek-ai/dsh-base/cordis.patch.yml`）：`reasoningEffort` **零命中**，
+	// 出厂不声明这一档；模型目录里各模型自带 `reasoningEfforts` 列表，由用户在
+	// 设置里选，没选就不发。
+	//
+	// 所以：默认空 = 不发；要指定就显式 `--reasoning=max|high|...`。
+	defaultReasoningEffort = ""
 )
 
 // defaultReasoningEffortFromEnv 是三个入口（run / acp / serve）共用的默认值解析。

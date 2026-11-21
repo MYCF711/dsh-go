@@ -15,17 +15,27 @@ import (
 
 // Options 是压缩策略参数。
 type Options struct {
-	// KeepRecent 是**至少**保留的最近消息数（默认 2）。
+	// KeepRecent 是**至少**保留的最近消息数。
 	//
-	// 它现在是下限，不是保留量：真正的保留量由 KeepTokens 定。
-	// 踩过：按"8 条"留，在一条工具输出就 2,300 token 的会话里，
-	// 8 条能顶到 8k 以上，压缩看着一直在跑，上下文却纹丝不动。
+	// 官方没有条数下限——它只按 token 预算切（`selectCompactableRange`，
+	// `dsh-compaction-basic/lib/index.js:410-432`），保留 0 条时也合法。宿主保留
+	// 一个下限纯粹是安全垫：预算算不出来时（窗口未知）不能把模型眼前清空。
+	// 默认值见 withDefaults。
 	KeepRecent int
-	// KeepTokens 是保留尾巴的 token 预算（默认 2000）。
+	// KeepTokens 是保留尾巴的 token 预算。
 	//
-	// 按体积留而不是按条数留：**一条大输出和一条短消息不该等价**。
+	// **这是官方 `retainTokens` 的宿主等价物**，官方口径是
+	// `floor((W − O) × 0.16)`（`lib/index.js:17`、`:133`），由调用方用
+	// `PressureBudget.RetainTokens()` 算出来传进来（见 `cmd/dshd` 的自动压缩）。
+	//
+	// `<= 0` 表示**没有 token 预算，只按条数留**——这正是官方手动压缩的形状：
+	// `compactNow` 给 `selectCompactableRange(..., 0)`（`lib/index.js:1009`）。
+	// 宿主以前在这里有一条自造的兜底 `= 2000`（官方没有任何绝对 token 默认值），
+	// 先把它删掉了：算不出预算就退回"只按条数"，不编一个数。
 	KeepTokens int
-	// MinToCompact 是触发压缩的最小条数（默认 2）。太少不值得压。
+	// MinToCompact 是触发压缩的最小条数。太少不值得压。
+	//
+	// 这是宿主的性价比判断（官方没有这个判据：它只看 token 量），保持原值。
 	MinToCompact int
 	// MaxMessages 是表面超过多少条才触发（0 = 不看条数，只按调用方要求）。
 	MaxMessages int
@@ -35,9 +45,7 @@ func (o Options) withDefaults() Options {
 	if o.KeepRecent <= 0 {
 		o.KeepRecent = 2
 	}
-	if o.KeepTokens <= 0 {
-		o.KeepTokens = 2000
-	}
+	// KeepTokens 不再补一个自造的绝对值：`<= 0` 就是"只按条数留"。
 	if o.MinToCompact <= 0 {
 		o.MinToCompact = 2
 	}
@@ -112,11 +120,15 @@ func Select(surface []session.SurfaceMsg, opts Options) ([]session.SurfaceMsg, s
 	return cut, session.Span{Start: minSeq, End: maxSeq}, true
 }
 
-// 输入预算：太大既贵又容易被截断，太小压不住长会话。
-const (
-	maxPromptChars  = 24000
-	maxMessageChars = 1200
-)
+// 摘要输入**不设**字符上限。
+//
+// 宿主以前在这里有两个自造的数：`maxPromptChars = 24000` 和
+// `maxMessageChars = 1200`——官方没有任何对应值。官方摘要调用的输入是
+// "把被压缩的那段对话原样重放一遍"（`summarizeWithLlm`：
+// `dsh-compaction-basic/lib/index.js:292-340`，replay the conversation prefix），
+// 逐条不截断、总量也不截断：前缀与上一次真实请求共享，靠的正是 provider 的
+// KV cache。我们按 1200 字砍单条，等于**一条工具输出只有开头进得了摘要**，
+// 后面全丢——压完的摘要自然是残的。这两条上限已删除。
 
 // Chat 是摘要生成依赖的模型入口。
 type Chat interface {
@@ -160,21 +172,14 @@ func SummarizeWithMaxTokens(ctx context.Context, chat Chat, model string, items 
 	b.WriteString("1. 保留：用户目标、已确认的决定与原因、尚未完成的事、关键文件路径与命令。\n")
 	b.WriteString("2. 丢掉：寒暄、重复解释、已被推翻的方案。\n")
 	b.WriteString("3. 不要编造原文里没有的内容；不确定就写「未提及」。\n")
-	b.WriteString("4. 用中文，分小节，控制在 400 字以内。\n\n")
+	b.WriteString("4. 用中文，分小节。不设字数上限：把该留的留全，长度只受摘要调用的输出 token 上限约束。\n\n")
 	b.WriteString("--- 对话开始 ---\n")
-	for i, m := range items {
+	for _, m := range items {
 		role := m.Message.Role
 		if m.Summary {
 			role = "earlier-summary"
 		}
-		if b.Len() > maxPromptChars {
-			fmt.Fprintf(&b, "（后面还有 %d 条因篇幅省略）\n", len(items)-i)
-			break
-		}
 		text := strings.TrimSpace(m.Message.Content)
-		if len([]rune(text)) > maxMessageChars {
-			text = string([]rune(text)[:maxMessageChars]) + "…（本条已截断）"
-		}
 		if text == "" && len(m.Message.ToolCalls) > 0 {
 			names := make([]string, 0, len(m.Message.ToolCalls))
 			for _, tc := range m.Message.ToolCalls {

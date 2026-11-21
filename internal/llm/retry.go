@@ -33,24 +33,46 @@ import (
 // 两条并发流各自算各自的次数、预算与退避，互不串味。
 
 const (
-	// defaultRetryAttempts 是一条请求最多发几次（含首发）：1 首发 + 3 重试。
+	// defaultRetryAttempts 是一条请求最多发几次（含首发）。
 	//
-	// 3 次而不是"重试到成功"：网关真挂了的时候，用户要的是尽快看到错误，
-	// 不是被一个死循环按在"正在生成"上。按默认退避，最坏额外等 ~3.5 秒。
-	defaultRetryAttempts = 4
+	// 官方 `maxRetries` 出厂 5（`dsh-llm/lib/types/retry-policy.js:12`
+	// `DEFAULT_MAX_RETRIES = 5`，rc.2 与 rc.1 同值），语义是"重试几次"，
+	// 所以总尝试 = 5 + 1 = 6。
+	//
+	// 宿主以前写 4（1 首发 + 3 重试），比官方少重试 2 次——网关抖一下，
+	// 官方能扛过去的那一轮我们会直接把错误交给用户。
+	defaultRetryAttempts = 6
 
 	// defaultRetryBase 是第 1 次重试的退避基值：base * 2^(n-1)。
+	//
+	// 官方 `DEFAULT_INITIAL_DELAY_MS = 500`（同一处）。
 	defaultRetryBase = 500 * time.Millisecond
 
 	// defaultRetryMaxWait 是**单次**等待的上限，同时也是 Retry-After 的天花板：
 	// 网关让我们等得比这更久，就别在这个 turn 里等了（见 plan）。
-	defaultRetryMaxWait = 8 * time.Second
+	//
+	// 官方 `DEFAULT_MAX_DELAY_MS = 10_000`（同一处）。宿主以前写 8s——官方允许
+	// 等到 10s 的那一档，我们提前放弃了。
+	defaultRetryMaxWait = 10 * time.Second
 
 	// defaultRetryBudget 是一条请求用于重试等待的**总**预算。
-	defaultRetryBudget = 20 * time.Second
+	//
+	// **官方没有这个字段**：官方只有 `maxRetries` 与 `maxDelayMs` 两个上界，
+	// 没有"总等待预算"（`dsh-llm/lib/types/retry-policy.js:30-44` 的
+	// normalPolicySchema / alwaysPolicySchema 都只有这三项）。宿主那条自造的
+	// 20s 会与官方 maxRetries=5 打架：按 maxDelayMs=10s 退避到第 5 次就已经
+	// 25.5s，20s 的预算会把官方明确允许的最后两次重试砍掉。所以出厂改成 0 =
+	// 不设总预算，上界只由 attempts 与 maxWait 决定（与官方一致）。
+	// 字段保留：用例与显式配置仍可设一个总预算。
+	defaultRetryBudget = 0
 
-	// defaultRetryJitter 是抖动比例：等 (1-jitter)*d ~ d。
-	defaultRetryJitter = 0.5
+	// defaultRetryJitter 是对称抖动比例：等 (1-j)*d ~ (1+j)*d。
+	//
+	// 官方 `DEFAULT_JITTER_RATIO = 0.1`（同一处），公式见
+	// `dsh-llm-retry/lib/index.js:47`：
+	//   jitter = 1 - jitterRatio + 2 * jitterRatio * random()
+	// 宿主以前是 0.5 且**只往下抖**（(1-0.5)*d ~ d），分布与官方完全不同。
+	defaultRetryJitter = 0.1
 )
 
 // retryConfig 是一条 client 的重试参数。零值不可用：用 defaultRetryConfig()。
@@ -128,10 +150,16 @@ func (s *retryState) retryable(code string) bool {
 	return s.cfg.codes[code]
 }
 
-// backoff 是第 n 次重试前的指数退避，带向下抖动。
+// backoff 是第 n 次重试前的指数退避，带**对称**抖动。
 //
-// 只往下抖（(1-jitter)*d ~ d）而不是上下都抖：向上抖会顶破 maxWait，
-// 也让"最多等多久"变成一个说不准的数。
+// 公式逐项照抄官方 `localDelay`（`dsh-llm-retry/lib/index.js:47`）：
+//
+//	exponential = min(initialDelayMs * 2^(retry-1), maxDelayMs)
+//	factor      = 1 - jitterRatio + 2 * jitterRatio * random()   // [1-r, 1+r]
+//	delay       = min(exponential * factor, maxDelayMs)
+//
+// 两处都是官方形状：抖动**上下对称**（以前只往下抖），并且**最后再 clamp 一次**
+// maxDelayMs（以前先 clamp 再抖，抖动过的值可能顶破上限）。
 func (s *retryState) backoff() time.Duration {
 	base := s.cfg.base
 	if base <= 0 {
@@ -149,11 +177,12 @@ func (s *retryState) backoff() time.Duration {
 		d = s.cfg.maxWait
 	}
 	if j := s.cfg.jitter; j > 0 {
-		span := int64(float64(d) * j)
-		if span > 0 {
-			// math/rand 的全局源本身并发安全，这里只拿它出一个随机数，
-			// 不承载任何跨请求的状态。
-			d -= time.Duration(rand.Int63n(span + 1))
+		// math/rand 的全局源本身并发安全，这里只拿它出一个随机数，
+		// 不承载任何跨请求的状态。
+		factor := 1 - j + 2*j*rand.Float64()
+		d = time.Duration(float64(d) * factor)
+		if s.cfg.maxWait > 0 && d > s.cfg.maxWait {
+			d = s.cfg.maxWait
 		}
 	}
 	return d

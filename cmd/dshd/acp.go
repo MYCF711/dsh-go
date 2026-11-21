@@ -1444,10 +1444,23 @@ const defaultACPKeepRecent = 2
 //
 // 抽出来是为了让 keepRecent 真的有使用点：字段被赋值、被读取、被测试看见，
 // 才不会退化成一个"看起来可调"的死字段。
+//
+// 保留尾巴（KeepTokens）按官方 `retainTokens = floor((W − O) × retainRatio)` 算：
+// 官方 `dsh-compaction-basic/lib/index.js:17`（`DEFAULT_RETAIN_RATIO = .16`）与
+// `:133`（公式），由 `internal/compact.PressureBudget.RetainTokens()` 落地。
+//
+// 以前这里写死 2000——官方没有任何绝对 token 默认值，1M 窗口下官方留 ~15 万、
+// 我们留 2000（差 75 倍），压一次上下文就几乎清空。窗口未知时（算不出预算）
+// 退回"只按条数留"，那正是官方手动压缩的形状（`selectCompactableRange(..., 0)`，
+// `:1009`），而不是编一个数。
 func (r *acpRunner) compactSelectOptions() compact.Options {
+	keepTokens := 0
+	if retain, err := r.compactPolicy().Budget(r.ctxWindow, r.capacity.MaxOutput).RetainTokens(); err == nil {
+		keepTokens = retain
+	}
 	return compact.Options{
 		KeepRecent:   r.keepRecent,
-		KeepTokens:   2000,
+		KeepTokens:   keepTokens,
 		MinToCompact: 2,
 	}
 }

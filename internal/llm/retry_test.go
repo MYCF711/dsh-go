@@ -396,12 +396,36 @@ func TestStreamRetryJitterStaysInsideBounds(t *testing.T) {
 	if len(waits) != defaultRetryAttempts-1 {
 		t.Fatalf("应当重试 %d 次，实际 %v", defaultRetryAttempts-1, waits)
 	}
+	// 官方抖动是**对称**的（`localDelay`：1-r+2r·random，r=0.5 → 因子落在
+	// [0.5, 1.5]），不是旧实现的"只往下抖"。[d/2, d] 是旧语义，改成官方区间。
 	for i, w := range waits {
 		d := 100 * time.Millisecond << uint(i)
-		low := d / 2
-		if w < low || w > d {
-			t.Fatalf("第 %d 次退避 = %v，应落在 [%v, %v]", i+1, w, low, d)
+		low, high := d/2, d*3/2
+		if w < low || w > high {
+			t.Fatalf("第 %d 次退避 = %v，应落在 [%v, %v]（官方对称抖动 1-r+2r·random）", i+1, w, low, high)
 		}
+	}
+}
+
+// 生产默认必须逐项等于官方 `dsh-llm/lib/types/retry-policy.js:12-15`：
+// DEFAULT_MAX_RETRIES=5（→ 6 次尝试）、500ms、10_000ms、0.1，且**没有**总预算
+// （官方 normalPolicySchema 只有 maxRetries / retryableCodes / backoff）。
+func TestDefaultRetryConfigMatchesOfficial(t *testing.T) {
+	cfg := defaultRetryConfig()
+	if cfg.attempts != 6 {
+		t.Fatalf("默认尝试次数 = %d，官方 maxRetries 5 + 首发 = 6", cfg.attempts)
+	}
+	if cfg.base != 500*time.Millisecond {
+		t.Fatalf("默认退避基值 = %v，官方 DEFAULT_INITIAL_DELAY_MS 500ms", cfg.base)
+	}
+	if cfg.maxWait != 10*time.Second {
+		t.Fatalf("默认单次上限 = %v，官方 DEFAULT_MAX_DELAY_MS 10s", cfg.maxWait)
+	}
+	if cfg.jitter != 0.1 {
+		t.Fatalf("默认抖动 = %v，官方 DEFAULT_JITTER_RATIO 0.1", cfg.jitter)
+	}
+	if cfg.budget != 0 {
+		t.Fatalf("默认总预算 = %v，官方没有这个字段（应为 0 = 不设）", cfg.budget)
 	}
 }
 
@@ -686,4 +710,38 @@ func asGatewayError(t *testing.T, err error) *GatewayError {
 		t.Fatalf("错误类型 = %T（%v）：必须仍是 *GatewayError，否则协议层翻不成四字段", err, err)
 	}
 	return gw
+}
+
+// 官方抖动是**对称**的：`localDelay` 的因子是 1-r+2r·random，落在 [1-r, 1+r]，
+// 所以退避必须**能**比名义值大。旧实现只往下抖（1-j·random），样本恒 ≤ 名义值。
+//
+// 500 次采样下，若因子只落在 [0.9, 1.0]（向下抖），max 不可能超过名义值；
+// 对称抖动 p(max ≤ 1.001×名义) = 0.5^500 ≈ 0，不会偶发红。
+func TestBackoffJitterIsSymmetric(t *testing.T) {
+	cfg := retryConfig{attempts: 6, base: time.Second, maxWait: time.Minute, jitter: 0.1}
+	st := newRetryState(cfg)
+	st.sent = 1 // 第 1 次重试，名义退避 = 1s
+	nominal := time.Second
+	var sawAbove bool
+	for i := 0; i < 500; i++ {
+		if d := st.backoff(); d > nominal+nominal/1000 {
+			sawAbove = true
+			break
+		}
+	}
+	if !sawAbove {
+		t.Fatal("500 次采样里没有一次退避大于名义值：抖动仍在只往下抖，官方是对称的 1-r+2r·random")
+	}
+}
+
+// 抖动之后仍不许顶破 maxWait（官方 `localDelay` 最后再 Math.min 一次）。
+func TestBackoffJitterNeverExceedsMaxWait(t *testing.T) {
+	cfg := retryConfig{attempts: 6, base: time.Second, maxWait: time.Second, jitter: 0.9}
+	st := newRetryState(cfg)
+	st.sent = 1
+	for i := 0; i < 500; i++ {
+		if d := st.backoff(); d > time.Second {
+			t.Fatalf("退避 %v 顶破了 maxWait 1s：抖动没有在最后 clamp", d)
+		}
+	}
 }

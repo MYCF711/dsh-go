@@ -1934,8 +1934,10 @@ func runCompactor(chat agent.Chat, logw *session.Log, override int, policy compa
 		if meter.Estimate(surface) <= threshold {
 			return nil, nil // 没超预算，历史不动
 		}
-		// KeepRecent 是下限（至少留 6 条），真正的保留量由 KeepTokens 定。
-		// run 这条路径不暴露 token 预算：默认 2000 够用，超了也还有下面的兜底。
+		// KeepRecent 是下限（至少留 6 条）。不传 KeepTokens = 只按条数留，
+		// 与官方手动压缩一致（`compactNow` → `selectCompactableRange(..., 0)`，
+		// `dsh-compaction-basic/lib/index.js:1009`）。run 这条路径拿不到窗口容量，
+		// 算不出官方的 retainTokens，所以不假装有一个 token 预算。
 		items, span, ok := compact.Select(surface, compact.Options{KeepRecent: 6, MinToCompact: 2})
 		if !ok {
 			// 已经超预算，但"预算内能留的"就是全部——这时必须让步：
