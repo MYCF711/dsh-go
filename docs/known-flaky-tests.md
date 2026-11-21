@@ -51,6 +51,31 @@
 
 **下一步该做的**：全量跑时抓 `screen` 的输出（`t.Fatalf("原生字节汇没就绪；screen=%q")` 会把当时的屏幕内容打出来），看子进程是**根本没起来**还是**起来了但没写就绪文件**。两者修法完全不同。
 
+## 2026-11-21/22 新增成员
+
+这一轮做双盲 debug 时又撞到 4 个，其中 1 个查到了根因并修掉（性质与上面三个相同），3 个仍是负载型。
+
+| # | 用例 | 现象 | 根因 | 状态 |
+|---|---|---|---|---|
+| 5 | `modules/exec/bash` `TestStopUnknownCrossInstanceAndDuplicate` | 全量跨包红 / 单包绿 / `-race -count=10` 绿 | **不是测试写共享状态** —— MSYS 运行时在并发起进程压力下把 `child_copy: cygheap read copy failed … Win32 error 299` 写进 job 的 `2>&1` 合并管道；而 `OutputPage` 的 `wait` 只承诺「有新输出**或**已结束」，第一个噪声字节就带 `Done=false` 返回 | **已修**（测试侧 `waitJobEnded` 按 `NextCursor` 续读到 `Done`，与生产适配器 `cmd/dshd/jobs_out.go:183` 同一用法） |
+| 6 | `cmd/dshd` `TestOfficialWorkspaceChangesDirectoryTargetRealFS` | CI 红（「changes 流提前结束」） | 负载型 | **未修**（`-race -count=3` 1.367s 绿） |
+| 7 | `modules/tool/pwsh` `TestWithTimeoutBudgetAppliesToRun` | 全量红（16.04s） | 负载型 | **未修**（单包 `-count=3` 4.77s 绿） |
+| 8 | `internal/terminal` `TestPTYTerminalCloseReclaimsProcessTree` | 4 路并发整包压测时红（「心跳没在动：测试无效」） | 负载型 + 该用例自检心跳的机制在重负载下不可靠 | **未修** |
+
+### 第 5 个的教训最值钱：**症状在测试侧，根因在 OS 侧**
+
+它一开始被定性成「跨包状态污染 / 哪个测试写了共享状态」，查下来**仓库内没有任何测试写固定路径/env/共享目录**（全是 `t.TempDir()`、`t.Setenv`）。
+
+**真正的写入者是 MSYS/Cygwin 运行时自己。**
+
+**所以「跨包跑才红」不能直接推出「测试间有共享状态」** —— 也可能是外部环境往被你观测的通道里插了东西。
+
+### 第 5 个修的也是契约，不是断言
+
+`OutputPage.wait` 的契约是「有新输出**或**已结束」，测试却当它是「等到结束」用。**修法是把测试改用生产用的那个更强契约**（`jobs_out.go:183` 已经在按 `NextCursor` 读到 `Done`），
+
+**不是放宽断言，是让测试用对 API。**
+
 ## 诊断方法（可复用）
 
 ```bash
