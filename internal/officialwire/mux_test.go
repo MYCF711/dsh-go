@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -335,10 +336,18 @@ func TestMuxHeartbeatKeepsResponsivePeer(t *testing.T) {
 	ws, _ := dialAuthorized(t, ts, client, InteractionsNone)
 
 	// 连续 8 个心跳周期都回 pong。
+	//
+	// 读超时 ≠ 连接断开：心跳间隔是 25ms，负载下一个 ping 晚到几十毫秒是正常的，
+	// 那是这一片没读到帧，不是对端关了连接。旧写法把两者混成同一个 err，
+	// 于是负载下会报「还在心跳期就被断开了」—— 报的不是被测行为，是测试自己读超时。
+	// 现在只把**真的关闭**判红，超时继续转；总窗口仍是 300ms，断言强度没降。
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		op, payload, err := ws.readFrame(t, 50*time.Millisecond)
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				continue // 这一片没帧，接着等；是否被断开由下一轮与后面的可用性断言判定
+			}
 			t.Fatalf("还在心跳期就被断开了：%v", err)
 		}
 		if op == opPing {
