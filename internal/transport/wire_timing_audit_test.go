@@ -177,4 +177,3 @@ func TestAuditSubscribeWatermarkAheadMustAskForBaseline(t *testing.T) {
 		})
 	}
 }
-
