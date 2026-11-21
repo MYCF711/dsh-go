@@ -118,7 +118,7 @@ func (t *Tool) Description() string {
 	return "Execute a TypeScript program against the available tools. Takes two required arguments: " +
 		"`code`, the BODY of an async function (erasable syntax only; top-level `await` and `return` work), " +
 		"and `description`, a short summary of what the program does. " +
-		"Call tools as `await tools.name(args)` per the declarations in the system prompt. " +
+		"Call tools as `await tools.name(args)`, where `name` is any tool available to you. " +
 		"Only what you print or return is program output — curate it. " +
 		"Image-bearing subtool results are attached after the run."
 }
