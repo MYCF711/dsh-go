@@ -8,6 +8,13 @@
 > `#29 session-query-sqlite`（不做倒排）、`#40`/`#43` sandbox ACL（不做 partial 隔离）、
 > `#42 bash-sandbox`（官方 win32 自己就 disabled）。它们的说明在上一个文档 §2/§3。
 
+> **2026-11-21 复核（官方 rc.5）**：本文件 §2 / §7.2 / §8.2 的 `#53 agent-instructions` 两条缺口已被后续两轮取代——
+> ① fs 操作后的嵌套发现 / change·removal 批次已落地（`internal/ainstr/**`，durable 帧默认开且在 run 与 ACP 两个入口接线）；
+> ② 用户全局双链的官方 `<system-reminder>` 帧形状已落地（`internal/prompt/instructions_chains.go` + `prompt.Context.InstructionsInDurableFrame`，
+> 系统提示不再装配任何指令段）。现行剩余：替换型基线 intro、父/子 `exec.parent` touch 冒泡、真模型 A/B；
+> 以 `docs/host-stable-gap-register.md` §3.3 的 `#53` 行与 `docs/evidence/base-plugins-per-item-0.2.2-rc.2.json` 为准。
+> 本节以下的原文保留为当轮记录，不再代表现状。
+
 本文件只承担一件事：**本轮没有收口的那几条，官方到底是什么形状、我们停在哪一层、缺的那一层
 由谁承担、什么条件下重新评估**。不是"没做"，是"停在哪一站"写得能核对。
 
