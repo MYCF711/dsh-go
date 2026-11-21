@@ -182,6 +182,16 @@ func runProviderLoop(ctx context.Context, r *loopRunner, provider llm.ModelProvi
 	args := append(r.childArgs(sessionID, text, promptContentFile...), "--turn-id", turnID, "--base", provider.BaseURL)
 	cmd := exec.CommandContext(ctx, exe, args...)
 	cmd.Env = append(providerLoopEnvironment(provider), accountRouteChildEnv(provider.Account, r.home)...)
+	// 沙盒档位与策略根**也必须**在这条路上写上：provider 路由的那一轮同样是
+	// 一个 `dshd run` 子进程，同样只按 DSHD_SANDBOX_MODE 判 allow/deny。
+	// 漏了它，`read-only` 会话在这条路上退回子进程默认档——`GateFromEnv` 见不到
+	// 变量就返回 nil 闸门，bash 直接放行，而界面上档位显示得好好的。
+	if turnEnv, envErr := r.turnChildSandboxEnv(sessionID); envErr != nil {
+		r.emitTurn(sessionID, turnID, envErr)
+		return envErr
+	} else {
+		cmd.Env = append(cmd.Env, turnEnv...)
+	}
 	var stderr bytes.Buffer
 
 	var watchWG sync.WaitGroup
