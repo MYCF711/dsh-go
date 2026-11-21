@@ -545,9 +545,26 @@ func (h *forgePanelHost) blockerOf(ctx context.Context, sessionID, directory str
 // 那一层：它既绝对化也把 Windows 的 8.3 短名（`ADMINI~1`）解析成长名——不解析
 // 就会把同一个目录判成两个，凭空造出 `outside-writable-root`。
 //
-// 细节：EvalSymlinks 只对**存在**的路径有效。所以遇到还没建出来的路径时逐级回退
+// 细节：解析只对**存在**的路径有效。所以遇到还没建出来的路径时逐级回退
 // 到第一个存在的祖先再解析、把剩下的相对段接回去；否则 `C:\Users\…\Temp` 被解析成
 // 长名、而它下面还没建的 `…\Temp\repo` 停在短名，两条就不是"包含"关系了。
+//
+// # 为什么解析走 ResolveExistingPath 而不是 filepath.EvalSymlinks（写边界）
+//
+// 这个函数的返回值**唯一**用途是 `blockerOf` 里的 `officialPathWithin`：它决定
+// `worktree.blocker` 是不是 `outside-writable-root`，也就是界面敢不敢把写操作放给
+// 这个 checkout。EvalSymlinks 在 Go ≥1.23 的 `winsymlink=1` 下**不跟目录 junction**
+// （而且对 junction **下面**的路径直接报 ERROR_PATH_NOT_FOUND，实测 errno=3），
+// 于是两种绕过都成立：
+//   - checkout 根就是 junction（`<ws>\link` → `C:\外部\repo`）：Eval 原样返回 junction
+//     拼法，`within(<ws>, <ws>\link)` 为真 → blocker null → 写被放进一个实际在可写根
+//     之外的仓库；
+//   - checkout 根在 junction 下面（`<ws>\link\repo`）：Eval 报错 → 走下面的逐级回退，
+//     父目录同样解析成 junction 拼法 → 结论一样。
+//
+// 换成 ResolveExistingPath：没有重解析点时它内部还是 EvalSymlinks（普通路径一个字节
+// 都不变），命中重解析点才用 GetFinalPathNameByHandleW 拿真实目标，于是上面两种情形
+// 都会落到 junction 的真实目标上，`officialPathWithin` 判否 → `outside-writable-root`。
 func forgeCanonicalDir(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -555,7 +572,7 @@ func forgeCanonicalDir(path string) string {
 		return ""
 	}
 	canonical := officialCanonicalPath(path)
-	if resolved, err := filepath.EvalSymlinks(canonical); err == nil {
+	if resolved, err := sandbox.ResolveExistingPath(canonical); err == nil {
 		return filepath.Clean(resolved)
 	}
 	parent := filepath.Dir(canonical)

@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"dshgo/internal/sandbox"
 )
 
 // IndexFile 是 dist 的入口文件名（官方 `distIndex` 的 basename）。
@@ -79,10 +81,17 @@ func New(cfg Config) (*Frontend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("webfrontend: dist 目录 %q 求绝对路径失败: %w", dir, err)
 	}
-	// 符号链接必须在这里求值一次：macOS 的 /tmp 就是 /private/tmp 的软链，
+	// 路径必须在这里解析到真实目标一次：macOS 的 /tmp 就是 /private/tmp 的软链，
 	// 不求值的话每个请求的围栏都会把合法路径判成越界（403），而且只在
 	// 那种机器上复现。
-	root, err := filepath.EvalSymlinks(abs)
+	//
+	// 用 sandbox.ResolveExistingPath 而不是 filepath.EvalSymlinks：Go ≥1.23 的
+	// `winsymlink=1` 下 EvalSymlinks **不跟目录 junction**（见
+	// internal/sandbox/reparse_windows.go 文件头）。两条都必须解析到同一个坐标系，
+	// 否则 dist 本身经 junction 部署时（例如 `<Users>/dist` → `D:/build/dist`），
+	// 下面 resolve() 拿真实目标跟 junction 拼法比，每个合法资产都会被判越界。
+	// 没有重解析点的普通路径，ResolveExistingPath 内部仍然走 EvalSymlinks。
+	root, err := sandbox.ResolveExistingPath(abs)
 	if err != nil {
 		return nil, fmt.Errorf("webfrontend: dist 目录 %q 不可用: %w", dir, err)
 	}
@@ -403,10 +412,15 @@ func openRegular(path string) (*os.File, os.FileInfo, error) {
 //  1. 归一化后必须落在 root 内（官方 `target !== distRoot && !startsWith(distRoot + sep)`）。
 //     用 `sep` 而不是 `/`：Windows 上 `resolve()` 给的是反斜杠路径，用 `/`
 //     会把每一条合法子路径都判成越界。
-//  2. 符号链接求值后**还要**落在 root 内。第 1 道挡不住"dist 里放一个
+//  2. 符号链接/junction 解析后**还要**落在 root 内。第 1 道挡不住"dist 里放一个
 //     指向 /etc 的软链"——路径本身在根内，读出去的却是根外的文件。
 //     官方静态站不做这一步（Node 的 readFile 跟着软链走），本仓的安全
 //     要求是"只允许 dist 目录内路径"，所以必须做。
+//     这一步只能走 sandbox.ResolveExistingPath：filepath.EvalSymlinks 在 Go ≥1.23
+//     的 `winsymlink=1` 下对目录 junction 是瞎的——junction 本身原样返回、junction
+//     **下面**的路径直接 ERROR_PATH_NOT_FOUND（实测 errno=3），而下面的 err != nil
+//     分支会把它当成"文件不存在"放行，于是 `/<junction>/secret` 反而被当合法路径
+//     读出去（serveAsset 的 os.Stat 会跟着 junction 真读到）。
 func (f *Frontend) resolve(urlPath string) (string, bool) {
 	// filepath.Join 会顺手 Clean 掉 `..` 与重复分隔符，和官方
 	// `resolve(normalize(join(distRoot, pathname)))` 等价。
@@ -414,7 +428,7 @@ func (f *Frontend) resolve(urlPath string) (string, bool) {
 	if !within(f.root, target) {
 		return "", false
 	}
-	resolved, err := filepath.EvalSymlinks(target)
+	resolved, err := sandbox.ResolveExistingPath(target)
 	if err != nil {
 		// 不存在不是越界：交给 serveAsset 回 404。
 		// 但注意这里要返回 target——它在根内，围栏已经过了。

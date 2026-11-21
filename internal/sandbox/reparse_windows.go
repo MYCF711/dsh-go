@@ -37,9 +37,14 @@ import (
 
 var procGetFinalPathNameByHandleW = kernel32Proc("GetFinalPathNameByHandleW")
 
-// resolveExistingPath 把一条**已存在**的路径解析成它的最终目标（跟随 junction/
+// ResolveExistingPath 把一条**已存在**的路径解析成它的最终目标（跟随 junction/
 // 符号链接/其它重解析点）。非 Windows 由 reparse_other.go 提供 EvalSymlinks 版本。
-func resolveExistingPath(path string) (string, error) {
+//
+// 这是本包对外的**唯一**一条解析入口：包外（forge 面板的可写根判定、workspaceFiles
+// 的读边界、静态站 dist 围栏）判「这条路径到底指向哪」时必须调它，不许各自再写一遍
+// `filepath.EvalSymlinks`——那样每一个调用点都会各自漏一次 junction（见文件头）。
+// 另两个判据（pathHasReparsePoint / isReparsePoint）没有包外调用者，保持包内。
+func ResolveExistingPath(path string) (string, error) {
 	reparse, err := pathHasReparsePoint(path)
 	if err != nil {
 		return "", err
@@ -156,11 +161,3 @@ func IsReparsePoint(path string) (bool, error) { return isReparsePoint(path) }
 // 用途：`root\junction\file.txt` 的 `os.Lstat` 是一个正常常规文件，最后一段的
 // 判据看不见中间那条 junction；要判"整条路径没有链接"只能用这个。
 func PathHasReparsePoint(path string) (bool, error) { return pathHasReparsePoint(path) }
-
-// ResolveExistingPath 把一条**已存在**的路径解析到最终目标（跟随 junction/
-// 符号链接/其它重解析点）。没有 reparse point 时就是 filepath.EvalSymlinks，
-// 普通路径行为一字节不变。
-//
-// 用途：边界复核（"解析后还在不在根里"）——Go ≥1.23 的 EvalSymlinks 不跟
-// 目录 junction，只靠它会让越界路径看起来还在根内。
-func ResolveExistingPath(path string) (string, error) { return resolveExistingPath(path) }
