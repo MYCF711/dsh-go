@@ -331,7 +331,7 @@
       "id": "llm-pi-ai",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`internal/llm/provider.go:133` `providerAdapters`（内置 `openai-completions` + `deepseek-completions`）、`:139` `RegisterProviderAdapter`、`:158` `LookupProviderAdapter`；`internal/llm/provider_registry.go:68` `ListProviders`、`:79` `ListConfigurableProviders`、`:133` `DiscoverModelsForProvider`（provider→端点→真实发现）",
+      "evidence": "`internal/llm/provider.go:133` `providerAdapters`（三条内置 wire：`openai-completions` + `deepseek-completions` + `deepseek-account`）、`:139` `RegisterProviderAdapter`、`:158` `LookupProviderAdapter`（未知 api fail-loud，不回落）；`internal/llm/provider_registry.go:71` `ListProviders`、`:82` `ListConfigurableProviders`、`:136` `DiscoverModelsForProvider`、`:146` `DiscoverModelsForProviderProtocol`；`internal/llm/model_catalog.go:1276-1278`（`model.api` 按已注册协议闭合校验；负例 `internal/llm/model_catalog_test.go:156`）",
       "changes": [
         {
           "from": "DO_NOT_IMPLEMENT",
@@ -339,7 +339,8 @@
           "source": "audit-4.1"
         }
       ],
-      "note": "官方**出厂就是 dormant**（`dsh-base/cordis.patch.yml:128-136`：「mounted dormant: zero routes … until a `llm-pi-ai:` settings section supplies provider profiles」，rc.1 解包树同行号复核）——即默认装配下官方也没有额外 provider 路由。本仓注册面/配置面/发现面都在，缺的是 pi-ai 自带的另外三种协议适配器（`catalog.ts` 987 行是 pi-ai SDK 的 provider 目录生成件，`provider-data.generated.ts` 52 行）。**用户 2026-11-15 拍板不扩四协议**（`docs/handoff-2026-11-15.md:53`）。结论：默认装配不比官方少，形态差异保留（见 §HOST-PARTIAL10）。"
+      "note": "**【2026-11-21 rc.5 复核：B 不该补】**官方出厂 **dormant**：`dsh-base/cordis.patch.yml:135-136` 挂载但零路由，`:128-134` 注释「mounted dormant: zero routes (and no extra models in the picker) until a `llm-pi-ai:` settings section supplies provider profiles」，同一句还写「Supplying those profiles is exactly what the web Models page does」⇒ 默认装配零路由，但用户在 Models 页加 provider 就 live（`dsh-llm-pi-ai/src/index.ts:310-312` 的 dormant posture）。插件本体＝**7 条 wire 协议**（`src/catalog.ts:338-346`：mistral-conversations／openai-completions／openai-responses／azure-openai-responses／openai-codex-responses／anthropic-messages／bedrock-converse-stream）＋**44 条 catalog provider**（`src/provider-data.generated.ts:9-50`，含 env 名单与 defaultBaseURL）＋OAuth 登录流（`src/login.ts:1-6`）。本仓三条内置 wire + 注册/配置/发现三面都在（见 evidence）。**差值只在「用户声明非 OpenAI 协议」这一刻**——出厂装配不比官方少。**代价**：协议选择/每协议 retry·compat·models/OAuth 失败面全要新长（用户付配置面），7 条 wire + 44 条目录由我们维护 ⇒ 有代价；用户 2026-11-15 已拍板不扩四协议（`docs/handoff-2026-11-15.md:53`）。旧记录写「PLAN 硬规则不做多 provider／只承认一条协议」已过时。详见 `docs/base-plugins-partial-rest-official-shape.md` §9.2.1。",
+      "triage": "B"
     },
     {
       "id": "session-persistence-jsonl",
@@ -357,8 +358,9 @@
       "id": "session-query-sqlite",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`internal/session/query.go:130` `SearchSessions`、`:53` `EncodeQueryCursor`、`:22` 自述 `Engine` 恒为 `scan`；`go.mod` 无 sqlite 依赖",
-      "note": "官方**出厂就是关闭检索**：`dsh-base/cordis.patch.yml:157-161` `path: ':memory:'` + `openAt: never`，注释（`:145-156`）写明 search 一律 `SESSION_QUERY_SEARCH_DISABLED`、SQLite 从不打开。本仓 scan 档在默认装配下**比官方更强**（`docs/parameter-register.md:544` 已记），缺 FTS5 是形态差异。**用户 2026-11-15 拍板不引入 SQLite**（`docs/handoff-2026-11-15.md:53`）。见 §HOST-PARTIAL10。"
+      "evidence": "`internal/session/query.go:28-29` `QueryEngineScan`（唯一引擎，自述不是 FTS5）、`:130` `SearchSessions`（跨会话子串扫描 + 游标分页 + `Hidden` 压缩遮蔽标注 + `ScannedSessions` 成本）、`:53` `EncodeQueryCursor`；页大小 20/100（`:31`/`:33`，与官方逐字一致）；`go.mod` 无 sqlite 依赖",
+      "note": "**【2026-11-21 rc.5 复核：B 不该补】**官方**出厂就是关的**：`dsh-base/cordis.patch.yml:157-161` 与 `dsh-web-app/cordis.patch.yml:27-30` 都是 `path: ':memory:'` + `openAt: never`；base 注释 `:149-156` 写明 search 在参数归一化前就报 `SESSION_QUERY_SEARCH_DISABLED`（`dsh-session-query-sqlite/src/index.ts:334-342`）、SQLite 从不打开，而 `ctx.sessionQuery` 仍挂载（精读/标题/血缘可用），Web 侧边栏只按标题/工作区名匹配；要做内容检索的部署在后续 patch 层把 `openAt` 覆盖成 `first-search`/`startup`（包自身默认其实是 `startup`：`src/index.ts:208`）。FTS5 见 `src/schema.ts:126-127`；规模 `index.ts` 1131 / `query.ts` 477 / `schema.ts` 173 行。本仓 scan 档**出厂比官方强**（官方默认 search 直接报错）；差额只在官方非默认 opt-in 下的索引/排名/分词。**代价**：零依赖宿主引入 SQLite（CGO 或大体积纯 Go 引擎）、检索结果可见变化（scan 顺序/excerpt → FTS5 排名）、派生索引生命周期（官方三文件量级）⇒ 有代价；用户已拍板不引入 SQLite。详见同文档 §9.2.2。",
+      "triage": "B"
     },
     {
       "id": "working-directory",
@@ -492,7 +494,7 @@
       "id": "sandbox",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`internal/sandbox/runner.go`（受控根路径/引用计数生命周期/`EnforcementFor`/`ProbeExecutable`）、`internal/sandbox/runner_windows.go`（`CreateRestrictedToken(WRITE_RESTRICTED=0x8)` + `SetTokenInformation(TokenIntegrityLevel, S-1-16-4096)` + `GetNamedSecurityInfoW`/`SetEntriesInAclW`/`SetNamedSecurityInfoW` 直授随机会话 SID + `os/exec` 的 `syscall.SysProcAttr.Token` 启动）、`internal/sandbox/runner_other.go`（非 Windows fail-loud）、`internal/sandbox/policy.go:66-77` `EnforcementWindowsACLWriteOnly`、`internal/sandbox/runner_windows_test.go`（四条证明）、`cmd/dshd/serve_sandbox_policy.go` `sandboxEnforcementNow`（`enforcement` + `enforcement_note` 如实上报）",
+      "evidence": "`internal/sandbox/runner.go:326` `EnforcementFor` / `:339` `EnforcementWindowsACLWriteOnly` / `:39` `EnvACLRoot`；`internal/sandbox/runner_windows.go`（`CreateRestrictedToken(WRITE_RESTRICTED)` + `SetTokenInformation(TokenIntegrityLevel, S-1-16-4096)` + `SetEntriesInAclW` 直授随机会话 SID + `os/exec` 的 `syscall.SysProcAttr.Token`）；`internal/sandbox/runner_other.go`（非 Windows fail-loud）；`internal/sandbox/policy.go:68`/`:77` 两个如实的 enforcement 值；`cmd/dshd/serve_sandbox_policy.go:326` `sandboxEnforcementNow`；测试 `internal/sandbox/runner_windows_test.go`（四条证明）",
       "changes": [
         {
           "from": "DEFERRED",
@@ -500,7 +502,8 @@
           "source": "audit-4.1"
         }
       ],
-      "note": "2026-11-20 收口（task-129）：Windows ACL runner 真落地，四条证明在 `runner_windows_test.go`（根外写 code=5 / 根内写 code=0 / 删根后父目录 DACL 逐字不变 / 同 Low 完整性只差一个 ACE 的因果对照）。**仍是 PARTIAL 且比官方窄一层**：只授宿主自有的 `<home>/sandbox-roots/<session-id>/`，绝不往用户/共享工作区写驻留 ACE 或 Low 标签（官方 `README.zh.md:130-131` 的驻留代价由此避免）；读、网络、进程可见性、注册表不受限；默认不启用（`DSHD_SANDBOX_ACL_ROOT`），没配时 enforcement 如实报 `policy-only-no-os-isolation`。旧的「需用户拍板是否接受驻留 ACL」问题因此不再成立——本实现没有驻留改动，删掉受控根即无残留。"
+      "note": "**【2026-11-21 rc.5 复核：B 不该补】**官方 Windows **默认就真隔离**：`dsh-base/cordis.patch.yml:240-241` 的 `id: sandbox` 绑的是 `@deepseek-ai/dsh-sandbox-local`（真 runner，不是抽象包），`:243-247` 的 `sandbox-policy` 默认 `workspace-write` + `workspaceRoot: process.cwd()`；`dsh-sandbox-local/src/index.ts:184` 的 win32 链是 `['windows-acl']`（无链 fail-closed），enforcement 自标 `partial`（`:206`），语义「写入与删除受限；读取、网络与进程可见性不受限」（`dsh-sandbox-windows-acl/README.zh.md:127`）。本仓 ACL runner 真落地但**只授宿主自有 `<home>/sandbox-roots/<session-id>/`**，绝不往用户/共享工作区写驻留 ACE 或 Low 标签；默认不启用（`EnvACLRoot`），没配时 enforcement 一律 `policy-only-no-os-isolation`；且默认审批策略是 `allow`（`cmd/dshd/serve.go:197`）⇒ 默认既不隔离也不弹审批。**差值**：官方在**真实工作区**限写/限删，我们只在人造受控根里限。**代价**：对真实目录落**驻留** ACE + 常驻 Low 标签（官方 `dsh-sandbox-windows-acl/README.zh.md:130`：手工 `icacls` 回收不了、`ERROR_NONE_MAPPED` 1332；`:131`：Low 标签生命期长于 DSH，且对同用户任何别家 Low 完整性进程放宽该目录树）＋`:129` 控制台隔离不可用＋默认从放行变拒绝 ⇒ 落在用户机器上的不可逆代价；用户 2026-11-15 拍板不做 ACL partial 隔离。详见同文档 §9.2.3。",
+      "triage": "B"
     },
     {
       "id": "sandbox-policy",
@@ -516,7 +519,7 @@
       "id": "bash-sandbox",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`modules/exec/bash/sandbox_scope.go` `SandboxCall`（准入层配对校验）、`modules/exec/bash/tools.go` `sandbox.GateFromEnv` + `justification` schema + 官方拒绝/升级标记行；`internal/sandbox/escalation.go`",
+      "evidence": "`modules/exec/bash/sandbox_scope.go:20-21` `SandboxCall`（准入层配对校验）、`modules/exec/bash/tools.go:117` `sandbox.GateFromEnv` / `:145` 官方 `justification` 描述 / `:171-173` `Justification` 字段、`internal/sandbox/escalation.go`（官方四码/阶梯/标记行逐字）；bash 工具默认挂 `cmd/dshd/main.go:152`",
       "changes": [
         {
           "from": "OFFICIAL_UNSUPPORTED",
@@ -524,13 +527,14 @@
           "source": "audit-4.1"
         }
       ],
-      "note": "官方 `cordis.patch.yml:251` 在 win32 `disabled: true`（同批 `:283` 连 tool-bash 也 disabled），本仓形状与官方一致；本仓额外还跑三档策略闸门 + 官方 escalation 契约（多，不少）"
+      "note": "**【2026-11-21 rc.5 复核：A 已等价（平台条件使然）】**官方该行是「吃沙箱的 bash 执行器」——注册成 `ctx.shell` 取代本地执行器、要求 `ctx.sandbox` + `ctx.sandboxPolicy`（`dsh-bash-sandbox/src/index.ts:1-10`），**但 win32 上整行 disabled**（`dsh-base/cordis.patch.yml:249-252`，`:251` = `disabled: !!js process.platform === 'win32'`），同批 `tool-bash` 也 disabled（`:281-283`）⇒ 本平台没有「被沙箱包着的 bash」这个行为可对齐。本仓 Windows 上**有** bash 工具且带三档闸门 + 官方 escalation ⇒ 相对官方是**多，不少**。**零待办**：逐项表只能取 IMPLEMENTED/PARTIAL/MISSING 三值，所以记 `PARTIAL` + `audit_status=OFFICIAL_UNSUPPORTED`，实质结论＝OFFICIAL_UNSUPPORTED。**重新评估条件**：支持范围扩到 Linux/macOS，或官方在 Windows 上重开该行（每次升级重核 `dsh-base/cordis.patch.yml`）。详见同文档 §9.2.4。",
+      "triage": "A"
     },
     {
       "id": "pwsh-sandbox",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "`modules/tool/pwsh/sandbox_runner.go`（每会话 runner 缓存 + 能力探针 + 如实退回 + `workdirInsideRoot`）、`modules/tool/pwsh/pwsh.go` 结果 `data` 的 `enforcement`/`sandbox_root`/`runner_note`、`modules/tool/pwsh/sandbox_runner_test.go`、`internal/sandbox/runner.go` `ProbeExecutable`",
+      "evidence": "`modules/tool/pwsh/sandbox_runner.go:66-74`（每会话 runner 缓存 + 能力探针 + 如实退回）、`modules/tool/pwsh/pwsh.go:406-408`（受控根下 `run_in_background` 明确拒绝）/ `:440`（默认 `policy-only-no-os-isolation`）、`modules/tool/pwsh/sandbox_runner_test.go`、`internal/sandbox/runner.go` `ProbeExecutable`；工具默认挂 `cmd/dshd/main.go:185`",
       "changes": [
         {
           "from": "DEFERRED",
@@ -538,7 +542,8 @@
           "source": "audit-4.1"
         }
       ],
-      "note": "2026-11-20 收口（task-129）：已接线到真 ACL runner，但**先探一次**再决定——探针不通就如实退回策略层并把原因写进 `runner_note`，不静默降级；受控根模式下 `run_in_background` 明确拒绝（后台面打不了受限令牌），越界 workdir fail-loud（不替调用方改写 cwd）。**本机实测**：PowerShell 7 在受限令牌下加载期就 `0xc0000142`（`cmd.exe` 正常；只造受限令牌、不降完整性仍 `0xc0000142` ⇒ 挡住它的是受限令牌本身，不是 Low 标签），所以今天生产里 `enforcement` 仍是 `policy-only-no-os-isolation`。与官方形状的差距因此从「没有 runner」变成「runner 有、但受控根版在受限令牌下跑不了 pwsh」——受限令牌下的 DLL 加载/窗口站访问需要另一轮独立设计。"
+      "note": "**【2026-11-21 rc.5 复核：B 不该补】**官方 win32 **默认开**：`dsh-base/cordis.patch.yml:255-256` 是 `disabled: !!js process.platform !== 'win32'`（即 Windows 上开）；`dsh-pwsh-sandbox` 就是把精确 pwsh argv 走 `ctx.sandbox`（Windows → ACL 受限令牌链）的执行器，并上报 mode/enforcement/denial（`dsh-pwsh-sandbox/src/index.ts:1-8`），而 standard/ptc/cordis 三个 preset 都挂 `tool-pwsh`（`presets/standard.patch.yml:24-26`、`ptc.patch.yml:24-26`、`cordis.patch.yml:27-29`；宿主平面那行被 web `cordis.patch.yml:519-520` 关掉）⇒ 这三条路径上官方 Windows 每条 pwsh 都在 runner 里。**minimal 例外**：`persistent-pwsh` = `dsh-tool-pwsh-persistent`（`presets/minimal.patch.yml:66-74`）是 PTY 工具，整文件对 `sandbox`/`confine`/`ctx.shell` 零命中（`src/index.ts:1-6`）⇒ 官方自己也有一条未受限的 pwsh 路径。本仓已接线到真 ACL runner，但先探一次、探不通就**如实退回**并把原因写进 `runner_note`；受控根下 `run_in_background` 明确拒绝；今天生产 `enforcement` 仍是 `policy-only-no-os-isolation`；默认审批 `allow`。**订正旧记录**：`0xC0000142` 在官方边界文档里归因于**控制台隔离不可用**（`dsh-sandbox-windows-acl/README.zh.md:129`：`CREATE_NO_WINDOW`/`CREATE_NEW_CONSOLE` 的子进程在 DLL 初始化期死亡，管道 stdio 不受影响）⇒ 不能据此断定「受限令牌跑不了 pwsh」，第一步应是**零代价探路**（探针改成共享宿主控制台 + 管道 stdio）。但受控根只允许写根内，要「在真实工作区干活」仍回到 #40 的驻留 ACL 代价 ⇒ 有代价。详见同文档 §9.2.5。",
+      "triage": "B"
     },
     {
       "id": "approval",
@@ -821,22 +826,24 @@
       "id": "ptc-runtime",
       "status": "PARTIAL",
       "audit_status": "MISSING",
-      "evidence": "缝：`internal/ptc/runtime.go:49` `Runtime`（官方 `PtcRuntime` 抽象类的 Go 形状）、`:85` `ResolveTimeout` 三态、`:133` `ResolveSandbox`；词汇与校验：`internal/ptc/identifiers.go:21` `PortableReservedWords`（ECMAScript∪Python 逐字）、`:55` `ReservedBindingGlobals`、`:79` `ValidateGlobalName`、`:114` `ValidateBindings`；provider：`internal/ptc/nodeprovider/provider.go:226` `New`（`persistent-in-memory` **装配期就拒**）、`:356` `Resolve`、`:348` `SandboxMode`（无 confinement 报 false）、`:286` `ProgramFormat`（vm-script→script）、`internal/ptc/nodeprovider/run.go:36` `Run`、`internal/ptc/nodeprovider/runner.go:313` `execute`/`:519` `terminate` 超时/取消/cancel 收整棵进程树、`internal/ptc/nodeprovider/worker.go:25` 外部 node 的 worker **文本**（宿主不解释 JS）；`internal/ptc/nodeprovider/retained.go:59` `acquireRetained`（按 owner 常驻）/`:89` `dropRetained`；`internal/ptc/nodeprovider/runner.go:313` `execute`（`format`/`retainsState` 进帧）；见 `docs/ptc-vm-script.md`；测试 `internal/ptc/{identifiers,runtime}_test.go` + `internal/ptc/nodeprovider/provider_test.go`（22 条，真 node 往返）",
-      "note": "2026-11-19 改判（原登记 DO_NOT_IMPLEMENT 是**过度外推**）：R6 的词面是「不嵌 JS 运行时」，不是「不许有 PTC」。官方这个包本身就是纯契约（`src/index.ts` 只有抽象类与三组保留名、`src/types.ts` 只有类型），Go 侧照抄零 JS；执行走外部受管 node（与既有裁定 dynamicCordisRunner、`internal/cordis/extern` 同形）。2026-11-20：**已补 `vm-script`**（`node:vm` Script 求值 + `scriptPersistence` 按 owner 常驻/`Release`/同 owner 单飞；隔离层级如实见 `docs/ptc-vm-script.md`，不称沙箱）。仍 PARTIAL：`persistent-in-memory`（Node REPL）未做（装配期拒绝）；顶层 `await` lowering（官方 `evaluators/vm-script-await.ts` 的 acorn 依赖）未移植；没有文件 confinement（`SandboxMode()` 报 false、显式档位请求被拒），因此未登记任何沙盒等价物。",
+      "evidence": "缝：`internal/ptc/runtime.go:49` `Runtime`（官方抽象类同形，含 Language/Isolation/ProgramFormat/RetainsState/ExecutionInstructions/SandboxMode/Timeout）、`:85` `ResolveTimeout` 三态、`:133` `ResolveSandbox`、`:144` `ValidateProgramFormat`；词汇与校验 `internal/ptc/identifiers.go:21/55/79/114`；provider：`internal/ptc/nodeprovider/provider.go:85` `DefaultConfig`（per-call）/ `:226` `New`（`persistent-in-memory` 装配期拒）/ `:278` `Language` / `:286` `ProgramFormat` / `:348` `SandboxMode() -> (\"\", false)` / `:356` `Resolve`；`run.go:36` `Run`；`runner.go:313` `execute`/`:519` `terminate`；`retained.go:59` `acquireRetained`/`:89` `dropRetained`；`worker.go:324-377` `createScriptContext`；`docs/ptc-vm-script.md`",
+      "note": "**【2026-11-21 rc.5 复核：B 不该补】**官方两层：契约层 `dsh-ptc-runtime` 纯抽象（`src/index.ts:43`/`:58`/`:67` 三组保留名 + `:105-167` 抽象类），执行层 `dsh-ptc-runtime-node` 默认 `executionMode: per-call` + `scriptPersistence: false`（`src/config.ts:10-19`，交叉校验 `:57`），三个求值器 `evaluators/index.ts:7-12`（function-body/repl/script），`evaluators/vm-script.ts:63-72` 含 `await` 就走 TLA lowering（`vm-script-await.ts:193-290`，acorn 依赖），`src/worker.ts:287` 把 argv 送进 `ctx.sandbox.confine`（除 danger-full-access）。本仓契约逐条实现、provider 有 per-call 与 vm-script（+ `scriptPersistence` 按 owner 保留）。**差值 3 条**：① `persistent-in-memory`（REPL）未做；② 顶层 `await` lowering 未移植；③ **程序进程没有文件 confinement**（`SandboxMode()` 恒 `(\"\", false)`，官方默认有）。**代价**：①② **没有消费者**（`run_code` 固定 per-call：`modules/tool/runcode/runcode.go:199`；workflow 走 Go 原生引擎）⇒ 补了是空壳，要可用得先长出 `executionMode` 配置面（新的用户可见配置）；③ 与 #40 同一份驻留 ACL 代价，或接受「程序只能写受控根」的行为变化 ⇒ 有代价。详见同文档 §9.2.6。",
       "changes": [
         {
           "from": "MISSING",
           "to": "PARTIAL",
           "source": "post-audit-pr"
         }
-      ]
+      ],
+      "triage": "B"
     },
     {
       "id": "workflow-ptc",
       "status": "PARTIAL",
       "audit_status": "PARTIAL",
-      "evidence": "原生引擎：`internal/workflow/engine.go:130` `Start`、`:258` `Agent`、`:356` `Parallel`（**真并发**，受 `MaxConcurrentAgents` 闸）、`:405` `Pipeline`（逐 item 无 barrier）、`:224` `Phase`、`:237` `Log`、`:34` `DefaultLimits`（0/1000/4096 逐条官方）；工具：`modules/tool/workflow/orchestrate.go:107` `workflow.New`；provider 现在可用：`internal/ptc/nodeprovider/`",
-      "note": "仍 PARTIAL，但残余缺口已收窄：官方脚本是 JS（`node:vm` 的 script/repl 形态，`src/runtime.ts:1-40` + `src/guest-source.ts`），本仓 provider 现在**已有 `script` 形态**（vm-script，2026-11-20；官方 `src/host.ts:293` 交来的 `(async () => …)()` 形状可直接跑，见 `docs/ptc-vm-script.md`），但 `workflow` 工具尚未把 JS 脚本接到这条 provider 上——当前脚本仍是声明式 JSON 步骤表；六类钩子语义（agent/parallel/pipeline/phase/log + 上限、致命 vs 普通失败、取消）由 Go 原生引擎逐条实现并有测试。"
+      "evidence": "原生引擎：`internal/workflow/engine.go:34` `DefaultLimits` / `:130` `Start` / `:258` `Agent` / `:356` `Parallel`（真并发，受 `MaxConcurrentAgents` 闸）/ `:405` `Pipeline`（逐 item 无 barrier）/ `:224` `Phase` / `:237` `Log`；工具：`modules/tool/workflow/workflow.go:40` schema / `:125` `Exec`（默认挂 `cmd/dshd/main.go:172`）；脚本语法 `modules/tool/workflow/orchestrate.go:1-22`（JSON 操作表）；provider `internal/ptc/nodeprovider/`",
+      "note": "**【2026-11-21 rc.5 复核：B 不该补】**官方是 JS 工作流跑在**全新 Node 进程**、按调用 Session 的文件沙箱策略执行（`dsh-workflow-ptc/README.zh.md:11`；`src/index.ts:104` `inject = ['subagents','ptcRuntime','sandboxPolicy','workingDirectory']`、`:107` `provider: spawn` 默认、`:118` 只收 TypeScript 运行时、`:161-167` 经 ptcRuntime + sandboxPolicy.resolve 起跑；`host.ts:285-291` 运行时无 sandboxMode 且策略非 danger-full-access 就拒绝、`:292` 交付 `(async () => ...)()`）。**装配**：base `:410-411` 开，但 **web `dsh-web-app/cordis.patch.yml:598` 把宿主行关掉**、改由 preset 在作用域里挂：standard `:111-116` 开、cordis `:107-112` 开、**ptc `:108-116` 自己 disabled**、minimal 零命中 ⇒ 官方 Web 是「按 preset 决定有没有 workflow」。本仓六钩子语义齐（含上限/致命分类/取消/真并发），但脚本是**声明式 JSON 操作表**、`run_in_background` 明确拒绝（`workflow.go:46`；官方默认 true：`dsh-tool-workflow/src/index.ts:177`）。**代价**：换 JS = 改模型可见 schema/Description 字节 + 换掉模型已学会的调用形状 + guest 钩子桥 + jobs 后台面 + 先有 confinement ⇒ 有代价。详见同文档 §9.2.7。",
+      "triage": "B"
     },
     {
       "id": "tool-workflow",
@@ -1016,15 +1023,16 @@
       "id": "tool-executor-ptc",
       "status": "PARTIAL",
       "audit_status": "MISSING",
-      "evidence": "`modules/tool/runcode/runcode.go:214` `Exec`、`:287` `allowanceFor`（官方 floor(timeoutMs/60000×perMinute)）、`modules/tool/runcode/scheduler.go:113` `call`（先计数后派发 + ToolCallError 类型契约 + fail-closed 并发分类）、`modules/tool/runcode/runcode.go:63` `OptInEnv`、`cmd/dshd/main.go:227` 装配开关（`DSHD_PTC=1`）；测试 `modules/tool/runcode/runcode_test.go`（含真 node 的额度耗尽/取消/工具失败可 catch）",
-      "note": "2026-11-19：`run_code` 工具面已真实存在（工具名/schema 字段 code/description/timeoutMs、`logs`+`result` 输出形状、`CODE_RUN_FAILED`/`ABORTED` 身份、按 timeoutMs 折算的总额度、`maxParallelSubCalls` 并发闸、子调用走 `spi.SubDispatch` 受管通道）。仍 PARTIAL：**不做执行器替换**（官方 enabled 时取代 tool-executor-native，本仓是与原生工具并列的加法）、没有 system prompt 的 `tools:sdk`/`tools:ptc-only` 段、不发 `ptc-dispatch` 事件、图片型子结果不转 deferred user-message、`reset(agent)` 与 sandbox 升级审批未接。 **2026-11-20**：provider 已有 `script` 形态（vm-script，见 `docs/ptc-vm-script.md`），但 `run_code` 仍固定 per-call（`modules/tool/runcode/runcode.go:199` 用 `DefaultConfig()`），未接线到 vm-script。",
+      "evidence": "`modules/tool/runcode/runcode.go:63` `OptInEnv = DSHD_PTC` / `:118-124` Description / `:199` `nodeprovider.DefaultConfig()`（固定 per-call）/ `:214` `Exec` / `:253` `Bindings` / `:287` `allowanceFor`（官方 floor(timeoutMs/60000×perMinute)）；`modules/tool/runcode/scheduler.go:113` `call`（先计数后派发 + ToolCallError 契约 + fail-closed 并发分类）；`cmd/dshd/main.go:229` 装配开关；测试 `modules/tool/runcode/runcode_test.go`",
+      "note": "**【2026-11-21 rc.5 复核：B 不该补】**官方是**执行器**不是工具：`dsh-tool-executor-ptc/src/index.ts:112-113` `apply()` 末尾 `ctx.tools.setExecutor(new PtcExecutor(...))`，开启后只 `run_code` 可直接调（`:38-56` 的 describe/reject；README.zh:12/:59）、注册 `tools:ptc-only`/`tools:sdk` 两个系统提示段（`:34-38`；SDK 渲染器 TS 335 行 + Python 817 行）、发 `tool/ptc-dispatch`/`tool/ptc-dispatch-start`（`src/ptc.ts:560`/`:587`）、有 `reset(agent)`（`:73-96`，要求 retainsState 并向会话注入一条重置消息）、更宽 `sandbox_permissions` 要求 `justification` 且**在程序启动前**审批（README.zh:67）。出厂：base `:522-523` `disabled: true`，只有 `dsh-web-app/presets/ptc.patch.yml:127-128` 开。本仓 `run_code` 工具面真实存在（工具名/schema/额度/并发闸/受管子调用都在，见 evidence），但是**加法**：与原生工具并列、无 SDK 段、无 ptc-dispatch 事件、无 reset、图片 deferred 与升级审批未接。**代价**：执行器替换会让原生工具从「直接可调」变成「只能从程序里调」（模型可见行为变化）、SDK 段进系统提示（改字节）、新登记 v4 事件、提权多一次弹窗 ⇒ 有代价。**C 子项（只标注不补）**：Description 的 \"per the declarations in the system prompt\" 是假指针（本仓没有那个段；工具在原生工具表里本来就可见），改文案**零代价**（默认装配不变、`modules/tool/runcode/runcode_test.go:135` 只断言含 `TypeScript`），见同文档 §9.4。详见 §9.2.8。",
       "changes": [
         {
           "from": "MISSING",
           "to": "PARTIAL",
           "source": "post-audit-pr"
         }
-      ]
+      ],
+      "triage": "B"
     },
     {
       "id": "system-prompt",
