@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"dshgo/internal/spi"
 	"dshgo/internal/terminal"
@@ -314,15 +315,46 @@ func (t *task) append(b []byte) {
 		t.buf = append(t.buf, b...)
 		t.total += int64(len(b))
 		if len(t.buf) > maxRetainedJobOutput {
-			drop := len(t.buf) - maxRetainedJobOutput
-			copy(t.buf, t.buf[drop:])
-			t.buf = t.buf[:maxRetainedJobOutput]
-			t.base += int64(drop)
+			t.dropHeadLocked(len(t.buf) - maxRetainedJobOutput)
 		}
 		t.scanLocked()
 		t.notifyLocked()
 	}
 	t.mu.Unlock()
+}
+
+// dropHeadLocked 把保留窗口的头部裁掉 drop 字节（调用方持有 t.mu）。
+//
+// 裁剪点**必须落在 UTF-8 字符边界上**。官方做得不对：`dsh-subprocess-local`
+// 的 OutputCollector 按字节精确认尾（`src/output.ts:174-179`
+// `this.chunks[0] = head.subarray(excess)`），出口再用
+// `slice.toString('utf8')`（`src/output.ts:265-267`）——窗口首字节落在多字节
+// 字符中间时就吐出一个替换字符。同一个发行版里 `dsh-jobs-local` 的 ring
+// 对**同一件事**反而做对了（`src/ring.ts:30-32` `utf8Tail` 会把起点推过
+// 续字节 `10xxxxxx`，注释还写明"the surviving text never starts inside a
+// code point"）。我们抄的是错的那一版。
+//
+// 后果不是纯粹的洁癖：`bash{command: <打印中文>}` 溢出 1 MiB 后，模型看到的
+// 第一行以 U+FFFD 开头，会把它当成"命令吐了乱码"，而不是"输出被截断了、
+// 原文在 spill 文件里"。而中文输出是本仓的常态。
+//
+// 代价为零：最多多跳过 3 个续字节，`total - base == len(buf)` 的不变量不变
+// （base 和 buf 同时减去同一个 drop），纯 ASCII 流永远不多跳一步。
+// 既有 `TestTaskOutputRetentionIsBounded` 用 `strings.Repeat("x", …)`，
+// 断言 base==123，改后一位不动。
+func (t *task) dropHeadLocked(drop int) {
+	if drop <= 0 {
+		return
+	}
+	if drop > len(t.buf) {
+		drop = len(t.buf)
+	}
+	for drop < len(t.buf) && !utf8.RuneStart(t.buf[drop]) {
+		drop++
+	}
+	copy(t.buf, t.buf[drop:])
+	t.buf = t.buf[:len(t.buf)-drop]
+	t.base += int64(drop)
 }
 
 // scanLocked 在保留缓冲里找哨兵；marker 和其后字节不计入用户输出 total。

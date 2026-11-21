@@ -79,13 +79,12 @@ func nonNegativeIntEnv(name string, def int) int {
 // `maxRetainedJobOutput` 管——这是"裁剪不破坏正在运行的 job"的实现保证。
 // total 是全量字节数、base 是已经裁掉的偏移，两者一起让 `page()` 如实报 truncated，
 // 而不是把"少给了"伪装成"就这么多"。
+//
+// 裁剪点走 `dropHeadLocked`（UTF-8 边界对齐），理由见那里的注释。
 func (t *task) trimSettledLocked() {
 	budget := settledRetainBytes()
 	if budget <= 0 || len(t.buf) <= budget {
 		return
 	}
-	drop := len(t.buf) - budget
-	copy(t.buf, t.buf[drop:])
-	t.buf = t.buf[:budget]
-	t.base += int64(drop)
+	t.dropHeadLocked(len(t.buf) - budget)
 }

@@ -529,19 +529,19 @@
       "verified_at": "2026-11-09"
     },
     {
-      "site": "modules/exec/bash/session.go:132",
+      "site": "modules/exec/bash/session.go:133",
       "what": "后台任务等待",
       "sync": "读过：job 表每次访问先 s.mu.Lock（100/109/122）",
       "verified_at": "2026-11-03"
     },
     {
-      "site": "modules/exec/bash/session.go:133",
+      "site": "modules/exec/bash/session.go:134",
       "what": "readLoop：排空子进程输出",
       "sync": "读过：输出缓冲由 s 自己的锁保护；EOF/Close 退出",
       "verified_at": "2026-11-09"
     },
     {
-      "site": "modules/exec/bash/session.go:133",
+      "site": "modules/exec/bash/session.go:134",
       "what": "waitLoop：等子进程退出",
       "sync": "读过：写 processRC 并 close(waitDone) 一次；读方用 <-waitDone 同步",
       "verified_at": "2026-11-09"
