@@ -288,6 +288,10 @@ func TestProbeTimeoutIsUnknownNotMissing(t *testing.T) {
 	if !strings.Contains(res.Summary, "没查完") {
 		t.Fatalf("摘要要说「没查完」：%q", res.Summary)
 	}
+	// 库这一栏也要说清「没查」，而不是显示「库 0 个」让人以为一个库都没装。
+	if !strings.Contains(res.Summary, "（没查）") {
+		t.Fatalf("摘要里库那一栏要说「没查」：%q", res.Summary)
+	}
 }
 
 // TestProbeRetriesColdStartOnce 钉住 CI 上那条真实路径：第一次启动是冷的

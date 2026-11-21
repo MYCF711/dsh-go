@@ -308,11 +308,16 @@ func (t *Tool) Exec(ctx context.Context, _ json.RawMessage) (spi.Result, error) 
 	probeBin(ctx, bud.pnpm, "pnpm", &d.Pnpm, &d.Missing)
 
 	data, _ := json.MarshalIndent(d, "", "  ")
+	// 摘要里的库那一栏：只有**没查完/没查**时才加状态括注。ready 时加状态既啰嗦
+	// 又会落到 statusLabel 的兜底分支（ready 没有版本可显示），变成「库 6 个（?）」。
+	libs := fmt.Sprintf("库 %d 个", len(d.Libraries))
+	if d.LibrariesStatus != StatusReady {
+		libs += "（" + statusLabel(d.LibrariesStatus, "") + "）"
+	}
 	res := spi.Result{
-		Summary: fmt.Sprintf("python %s｜库 %d 个（%s）｜node %s｜pnpm %s",
+		Summary: fmt.Sprintf("python %s｜%s｜node %s｜pnpm %s",
 			statusLabel(d.Python.Status, d.Python.Version),
-			len(d.Libraries),
-			statusLabel(d.LibrariesStatus, ""),
+			libs,
 			statusLabel(d.Node.Status, d.Node.Version),
 			statusLabel(d.Pnpm.Status, d.Pnpm.Version)),
 		Text: string(data),
