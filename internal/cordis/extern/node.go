@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // resolveNode 找出可用的 node 可执行文件。
@@ -89,5 +90,10 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	// 切点回退到码元边界：裸 s[:n] 会把多字节字符切成半个，错误消息里就是乱码。
+	end := n
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "…"
 }

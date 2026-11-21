@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,5 +184,152 @@ func TestToggleWithoutManifestFails(t *testing.T) {
 	tl := &Tool{manifest: filepath.Join(t.TempDir(), "no-such.toml")}
 	if _, err := tl.Exec(context.Background(), json.RawMessage(`{"action":"disable","id":"tool-a"}`)); err == nil {
 		t.Fatal("没有 manifest 时改不了，应当报错")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 回滚诚实性：「回滚失败却报告成功」是**没有症状**的缺陷（用户以为配置干净，
+// 实际留下一个下次启动直接解析失败的 manifest），所以这里钉三件事：
+//   1. 回滚写回失败必须能被观察到（错误 + writeDirty 状态 + .bak 位置）；
+//   2. 回滚成功必须有**回读校验**，不许凭"写没报错"就说已回滚；
+//   3. 写失败但文件其实没变时，不许谎报一次"已回滚"。
+// ---------------------------------------------------------------------------
+
+// 回滚写回失败：状态必须是 writeDirty，错误要能被 errors.Is 识别、
+// 要指出原文备份位置，而且**绝不能**出现"已回滚"。
+func TestRollbackWriteFailureIsReported(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "dsh.toml")
+	original := []byte("[profile]\nname = \"test\"\n")
+	if err := os.WriteFile(p, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifestWrites := 0
+	tl := &Tool{manifest: p, writeFile: func(name string, data []byte, perm os.FileMode) error {
+		if name == p {
+			manifestWrites++
+			if manifestWrites > 1 { // 第 1 次是改动本体，第 2 次是回滚写回
+				return errors.New("injected rollback write failure")
+			}
+		}
+		return os.WriteFile(name, data, perm)
+	}}
+	// 直接喂一段解析不过的内容，走"解析失败 → 回滚"这条路。
+	state, err := tl.writeGuarded([]string{"[[module]", `id = "x"`}, original)
+	if err == nil {
+		t.Fatal("解析不过必须报错")
+	}
+	if state != writeDirty {
+		t.Fatalf("回滚写回失败时状态必须是 writeDirty，拿到 %v", state)
+	}
+	if !errors.Is(err, errWriteNotRestored) {
+		t.Fatalf("错误要能被 errors.Is(errWriteNotRestored) 识别：%v", err)
+	}
+	if strings.Contains(err.Error(), "已回滚") {
+		t.Fatalf("回滚没成功却说已回滚：%v", err)
+	}
+	if !strings.Contains(err.Error(), ".bak") {
+		t.Fatalf("要指出原文备份在哪，人才能捞回来：%v", err)
+	}
+	body, readErr := os.ReadFile(p)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(body) == string(original) {
+		t.Fatalf("夹具没生效：文件竟然已经回到原文（%q）", body)
+	}
+}
+
+// 解析失败但回滚成功：状态是 writeRestored，错误里要写"回读校验一致"，
+// 磁盘上必须逐字节回到原文。
+func TestParseFailureRestoresAndVerifies(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "dsh.toml")
+	original := []byte("[profile]\nname = \"test\"\n")
+	if err := os.WriteFile(p, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state, err := (&Tool{manifest: p}).writeGuarded([]string{"[[module]", `id = "x"`}, original)
+	if err == nil {
+		t.Fatal("解析不过必须报错")
+	}
+	if state != writeRestored {
+		t.Fatalf("回滚成功时状态必须是 writeRestored，拿到 %v", state)
+	}
+	if !strings.Contains(err.Error(), "回读校验一致") {
+		t.Fatalf("回滚成功要说明是回读校验过的：%v", err)
+	}
+	if errors.Is(err, errWriteNotRestored) {
+		t.Fatalf("回滚成功了就不该带 errWriteNotRestored：%v", err)
+	}
+	body, readErr := os.ReadFile(p)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(body) != string(original) {
+		t.Fatalf("回滚后应与原文逐字节一致，实际：%q", body)
+	}
+}
+
+// 写一半就失败（os.WriteFile 先截断）：回读发现文件已变，就必须回滚，
+// 并如实说"改动落过盘、已还原"——不许当没事发生。
+func TestPartialWriteFailureRestoresAndSaysSo(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "dsh.toml")
+	original := []byte("[profile]\nname = \"test\"\n")
+	if err := os.WriteFile(p, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	injected := false
+	tl := &Tool{manifest: p, writeFile: func(name string, data []byte, perm os.FileMode) error {
+		if name == p && !injected {
+			injected = true
+			if werr := os.WriteFile(name, []byte("[[module]"), perm); werr != nil {
+				return werr
+			}
+			return errors.New("injected partial write failure")
+		}
+		return os.WriteFile(name, data, perm)
+	}}
+	state, err := tl.writeGuarded([]string{"[profile]", `name = "test"`, "", "[[module]]", `id = "tool-a"`}, original)
+	if err == nil {
+		t.Fatal("写失败必须报错")
+	}
+	if state != writeRestored {
+		t.Fatalf("写失败但文件被改动过、随后还原成功，状态应是 writeRestored，拿到 %v", state)
+	}
+	if !strings.Contains(err.Error(), "写 manifest 失败") || !strings.Contains(err.Error(), "回读校验一致") {
+		t.Fatalf("错误要说明先写失败、再已还原：%v", err)
+	}
+	body, readErr := os.ReadFile(p)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(body) != string(original) {
+		t.Fatalf("还原后应与原文逐字节一致，实际：%q", body)
+	}
+}
+
+// 文件只读导致写失败、但文件一个字节都没变：提示必须说"原样未改"，
+// 不许谎报"已回滚"（回滚动作根本没发生过）。
+func TestReadOnlyManifestIsReportedAsUntouched(t *testing.T) {
+	tl, p := newTool(t)
+	if err := os.Chmod(p, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
+	res, err := tl.Exec(context.Background(), json.RawMessage(`{"action":"disable","id":"tool-a"}`))
+	if err == nil {
+		t.Fatal("只读文件写不进去，必须报错")
+	}
+	if strings.Contains(res.Hint, "已回滚") {
+		t.Fatalf("文件没变却说已回滚：%s", res.Hint)
+	}
+	if !strings.Contains(res.Hint, "原样未改") {
+		t.Fatalf("要如实说文件没变：%s", res.Hint)
+	}
+	body, readErr := os.ReadFile(p)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(body) != sample {
+		t.Fatalf("失败的调用不该改动文件：%q", body)
 	}
 }

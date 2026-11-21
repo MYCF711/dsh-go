@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"dshgo/codecs/v4"
 	"dshgo/internal/agent"
@@ -1541,7 +1542,12 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	// 切点回退到码元边界：裸 s[:n] 会把多字节字符切成半个，错误消息里就是乱码。
+	end := n
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "…"
 }
 
 // cmdSession 目前只有一个子命令 rewrite：读→写，用来验证我们的编码器，

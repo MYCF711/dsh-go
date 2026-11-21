@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 )
@@ -215,10 +216,17 @@ func (e *Executor) mergeBase(ctx context.Context, root, a, b string) (string, er
 	if err != nil {
 		// 官方允许 0/1/128：1 是没有共同祖先，128 是默认 ref 已失效；
 		// 两者都没有可用 fork point，而不是把整次 localDiff 伪装成 Git 崩溃。
-		if strings.Contains(err.Error(), "exit status 1") || strings.Contains(err.Error(), "exit status 128") {
-			return "", nil
+		//
+		// 判据必须是**真实退出码**（errors.As 取 *exec.ExitError），不是匹配
+		// "exit status 1" 文本：Contains 会把 129/10x/1xx 一起当成 1，真实失败
+		// （例如未知选项的 129）会被静默读成"没有 fork point"，本地 diff 于是变空。
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if code := exitErr.ExitCode(); code == 1 || code == 128 {
+				return "", nil
+			}
 		}
-		return "", fmt.Errorf("git merge-base 失败: %v: %s", err, strings.TrimSpace(stderr))
+		return "", fmt.Errorf("git merge-base 失败: %w: %s", err, strings.TrimSpace(stderr))
 	}
 	return strings.TrimSpace(out), nil
 }
