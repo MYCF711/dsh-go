@@ -239,7 +239,7 @@ W48 先完成管理器与适配器，W50 已把真实 dshd CLI 与 serve 主分�
 
 `expectedRevision` 与 list 行的 `revision` 是对应会话文件原始字节的 SHA-256；`schedule.list` 每行 additive 透出 `sessionId/status/endedAt/revision`，原全局 list 的容错与排序语义不变。单删先校验再独占临时文件、Sync、同目录 rename。批量清先全量预检，任何损坏文件都在首个写入前失败；多文件写入中途失败按逆序回滚已写文件，回滚失败会合并报错，绝不返回假成功。
 
-生产 `jobs.output` 的 scoped 回调把 `sessionId/cursor/limit/waitMs` 一并传到当前 `cmdRun`，IPC 也只携带当前页；旧 `JobsOutput` 回调仅作兼容分页 fallback。父进程按 session 登记自己启动的子进程 PID/完整 executable/stdin，应答同时核对随机 requestId、sessionId、job id；每次 stop 前用 `QueryFullProcessImageName` 复核精确 PID。禁止按镜像名查找、全局 `taskkill` 或操作其他会话。最终输出以原子写保存在当前 home 的 `state/jobs/<sessionId>/<id>.json`，停止和进程退出后仍可读，A/B home 不共享。
+生产 `jobs.output` 的 scoped 回调把 `sessionId/cursor/limit/waitMs` 一并传到当前 `cmdRun`，IPC 也只携带当前页；旧 `JobsOutput` 回调仅作兼容分页 fallback（它没有会话身份，生产装配不接线它，缺 `sessionId` 一律 400）。父进程按 session 登记自己启动的子进程 PID/完整 executable/stdin，应答同时核对随机 requestId、sessionId、job id；每次 stop 前用 `QueryFullProcessImageName` 复核精确 PID。禁止按镜像名查找、全局 `taskkill` 或操作其他会话。最终输出以原子写保存在当前 home 的 `state/jobs/<sessionId>/<id>.json`，停止和进程退出后仍可读，A/B home 不共享。
 
 真实 dshd + 临时 home 的 ready token→cookie 已验 schedule A/B、删除/重开、重复删除、冲突、clear-ended/readback；W69/W70 又以 Job Object/process group 与有界 Pager 完成 parent/child/grandchild 进程树停止和输出回读。W73 已由真实 UI apiclient/壳/自动化与后台任务页消费删除、clear-ended、rune 分页、truncated 与 stop/readback，证据 `../dsh-ui/docs/task-actions-ui.md`。完整命令、先红输出、日志与未验项见 [`docs/task-actions.md`](task-actions.md)；**可见 live GUI 与完整工作日仍未验**。
 

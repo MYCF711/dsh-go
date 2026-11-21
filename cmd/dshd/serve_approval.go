@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,11 +50,6 @@ type approvalBroker struct {
 	// 不串行就会写出交错的半行，子进程解析失败，而现象是"审批偶尔没生效"。
 	writeMu sync.Mutex
 	emit    func(sessionID, typ string, data json.RawMessage)
-	// jobsOut 是"父进程问任务输出"的等待表：请求 id → 应答 channel。
-	//
-	// 和审批的 pending 同构但不共用：审批是**子进程问、父进程答**（数据是 bool），
-	// 这里是**父进程问、子进程答**（数据是一段输出）。方向相反，混在一起会乱。
-	jobsOutPending map[string]chan string
 	// onJobs 收到子进程推上来的后台任务清单（`@@JOBS@@` 行）。
 	// nil = 这个宿主不关心（老测试）。
 	onJobs func(jobs []transport.JobInfo)
@@ -140,7 +134,10 @@ func (b *approvalBroker) useStdinFor(sessionID string, w io.WriteCloser) {
 	b.mu.Lock()
 	stale := b.takePendingLocked(sessionID)
 	b.stdins[sessionID] = w
-	b.stdin = w // 保留"最后一条 stdin"的老语义（terminal_bridge 的兜底、老测试）
+	// b.stdin 保留"最后一条 stdin"的老语义，但**已没有生产读者**：
+	// terminal_bridge 的兜底已删（拿不到 liveRun 就 fail-loud），jobs.output 的
+	// 死接线也已删。现在只服务仍按老语义写的测试夹具。
+	b.stdin = w
 	b.mu.Unlock()
 
 	for _, ask := range stale {
@@ -219,10 +216,6 @@ func (b *approvalBroker) WatchSession(sessionID string, r io.Reader, alsoTo io.W
 		if serveUserTerminalBridgeLine(b, sessionID, line) {
 			continue
 		}
-		if respID, payload, ok := parseJobsOutResp(line); ok {
-			b.deliverJobsOut(respID, payload)
-			continue
-		}
 		if jobs, ok := parseJobsLine(line); ok {
 			if b.onJobsForSession != nil {
 				b.onJobsForSession(sessionID, jobs)
@@ -257,74 +250,6 @@ func parseJobsLine(line string) ([]transport.JobInfo, bool) {
 		return nil, false // 坏行当没看见：拒绝比"半个清单"好
 	}
 	return jobs, true
-}
-
-// parseJobsOutResp 解析 `@@JOBS-OUT-RESP@@ {"id":"job-1",...}`。
-//
-// 返回 (请求 id, 原始负载, 是否认得)。
-func parseJobsOutResp(line string) (string, string, bool) {
-	const tag = "@@JOBS-OUT-RESP@@ "
-	if !strings.HasPrefix(line, tag) {
-		return "", "", false
-	}
-	payload := strings.TrimPrefix(line, tag)
-	var probe struct {
-		ID string `json:"id"`
-	}
-	if json.Unmarshal([]byte(payload), &probe) != nil || probe.ID == "" {
-		return "", "", false // 坏行当没看见
-	}
-	return probe.ID, payload, true
-}
-
-// deliverJobsOut 把应答投给正在等它的那个 jobs.output 调用。
-//
-// **channel 缓冲 1，投递不阻塞**：没人等（超时走了）就丢掉——
-// 阻塞在这里会让整个 stderr 分发停住，连带审批也收不到。
-func (b *approvalBroker) deliverJobsOut(id, payload string) {
-	b.mu.Lock()
-	ch := b.jobsOutPending[id]
-	delete(b.jobsOutPending, id)
-	b.mu.Unlock()
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- payload:
-	default:
-	}
-}
-
-// askJobsOut 发一条"查任务输出"的请求，等子进程回一条应答。
-func (b *approvalBroker) askJobsOut(ctx context.Context, id string) (string, error) {
-	b.mu.Lock()
-	if b.stdin == nil {
-		b.mu.Unlock()
-		return "", fmt.Errorf("这条会话的子进程还没起来（没有 stdin）")
-	}
-	if b.jobsOutPending == nil {
-		b.jobsOutPending = map[string]chan string{}
-	}
-	ch := make(chan string, 1)
-	b.jobsOutPending[id] = ch
-	b.mu.Unlock()
-	defer func() {
-		b.mu.Lock()
-		delete(b.jobsOutPending, id)
-		b.mu.Unlock()
-	}()
-
-	// **请求 id 带上任务 id**：子进程按它回，父进程按它找等待者。
-	// 同一个任务并发查两次的话第二次会覆盖第一次的等待者——
-	// 那种情况下第二次的结果更晚但更新，覆盖是可接受的（不比"给出旧输出"差）。
-	fmt.Fprintf(b.stdin, "%s{\"id\":%q}\n", jobsOutReqTag, id)
-
-	select {
-	case payload := <-ch:
-		return payload, nil
-	case <-ctx.Done():
-		return "", fmt.Errorf("等子进程回任务输出超时（%v）", ctx.Err())
-	}
 }
 
 func parseApprovalLine(line string) (approvalReq, bool) {

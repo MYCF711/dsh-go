@@ -686,29 +686,20 @@ func cmdServe(args []string) error {
 		// 后台任务：清单是**子进程推上来的那份**；输出要**当场问子进程**。
 		//
 		// **JobsOutput 只在轮次进行中可用**：每轮起一个新的子进程（`loopRunner`），
-		// 跑完就退，`spi.Job` 也跟着没了。轮次之外调它会拿到
-		// 「这条会话的子进程还没起来（没有 stdin）」——那不是 bug，是真实限制
-		// （后台任务跟着子进程活，「任务还在跑但子进程已退」本身就说不通）。
+		// 跑完就退，`spi.Job` 也跟着没了。轮次之外调它会拿到空输出——那不是 bug，
+		// 是真实限制（后台任务跟着子进程活，「任务还在跑但子进程已退」本身就说不通）。
+		//
+		// **旧的 Options.JobsOutput 故意不接线**：它只收 job id、没有会话身份，
+		// 宿主只能把请求写进 broker 的「最后一根 stdin」；而 busy 是按会话判的，
+		// 两个会话同时跑时那一根可能是**别的会话**的子进程——写错不是慢一点，
+		// 是把 A 的查询送进 B 的子进程（A 要么拿空输出、要么拿到 B 的同名任务输出）。
+		// 生产只走下面的 scoped 入口：HTTP 必须带 sessionId（scoped 接线后缺了
+		// 直接 400），jobActions 按会话找到**那一轮自己的** stdin，答复再按
+		// requestId + (sessionId, id) 对齐（见 jobs_actions.go 的 ask/Output）。
 		JobsList: func() []transport.JobInfo {
 			lr.jobsMu.Lock()
 			defer lr.jobsMu.Unlock()
 			return lr.jobs
-		},
-		JobsOutput: func(id string, wait time.Duration) (transport.JobOutput, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), wait+5*time.Second)
-			defer cancel()
-			payload, err := broker.askJobsOut(ctx, id)
-			if err != nil {
-				return transport.JobOutput{}, err
-			}
-			var out transport.JobOutput
-			if err := json.Unmarshal([]byte(payload), &out); err != nil {
-				return transport.JobOutput{}, err
-			}
-			if out.ID == "" {
-				out.ID = id
-			}
-			return out, nil
 		},
 		JobsOutputScoped: func(sessionID, id string, cursor, limit int, wait time.Duration) (transport.JobOutput, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), wait+5*time.Second)

@@ -145,28 +145,43 @@ func serveUserTerminalBridgeLine(b *approvalBroker, sessionID, line string) bool
 
 // writeReply 把一行应答写回**这个会话当前那一轮**的子进程 stdin。
 //
-// 优先用 jobActions 里登记的 per-turn stdin（按会话找到唯一那一轮），拿不到才退回
-// broker 上"最后一条 stdin"。为什么要分开：A/B 两个会话可以同时在一轮里，
-// broker 的 `stdin` 只有一个槽——写错了字（另一个会话的子进程）虽然不会让它读错
-// 数据（requestId 对它不认得，会被忽略），但本会话的工具就只能等到超时。
+// **只有一条判据：`jobActions.liveRun(sessionID)` 登记的那根 per-turn stdin。**
+// 这里以前还有一条"拿不到就退回 broker 的 `b.stdin`（最后一条 stdin）"的兜底，
+// 已经删掉——它没有正确答案：
+//
+//   - `b.stdin` 是**最后一条起过的** stdin，与"这个会话"没有任何关系。
+//     A/B 两会话可以同时各跑一轮（`promptService` 的 busy 按会话判），B 后起
+//     就占住那个槽；给 A 的应答于是写进 B 的子进程。对端按 requestId 认不出会
+//     丢弃（`BridgeClient.Deliver`），所以表面只是"丢了"，但 A 的工具照样等到
+//     超时，而我们把一个不属于自己的副作用留在了别人的子进程里。
+//   - 它在生产里也**触发不到**：serve 一定先给 broker 装 `jobActions`
+//     （serve.go 的 `broker.actions = jobActions`），两条起子进程的路径
+//     （`loopRunner.run` 与 `runProviderLoop`）都在 `cmd.Start()` 之后立刻
+//     `registerTurnRun` 同一 sessionID，而 stderr 的分发 goroutine 一定先于
+//     `unregisterRun`（defer，在 `watchWG.Wait()` 之后）结束 —— 也就是说
+//     "能读到这个子进程的行"时，那一轮一定还登记着。
+//     唯一能落进兜底的是 `registerTurnRun` 失败、子进程刚被 kill 的窗口，
+//     而那个窗口里的子进程连一轮都没跑完，不可能写过桥请求。
+//   - 它**真实服务的是测试夹具**：`newBridgeFixture` 直接 `useStdin` 把一根
+//     假管道挂到 broker 上，于是"生产走的 per-turn 路径"在那几条用例里根本没
+//     被执行过。删掉兜底后夹具必须走真登记，覆盖的才是生产路径。
+//
+// 拿不到就明确报错（调用方会落一行 stderr，工具侧按超时失败）：异常时
+// **一根管子都不写**，比"写进某根不知道谁的管子"更正确。
 func (br *userTerminalBridge) writeReply(b *approvalBroker, sessionID, line string) error {
-	if b.actions != nil {
-		if run := b.actions.liveRun(sessionID); run != nil && run.stdin != nil {
-			run.writeMu.Lock()
-			defer run.writeMu.Unlock()
-			_, err := fmt.Fprintln(run.stdin, line)
-			return err
-		}
+	if b == nil {
+		return errors.New("审批 broker 为 nil，终端桥没有可写回的子进程")
 	}
-	b.mu.Lock()
-	stdin := b.stdin
-	b.mu.Unlock()
-	if stdin == nil {
-		return errors.New("这条会话没有正在运行的子进程（没有 stdin）")
+	if b.actions == nil {
+		return errors.New("这一轮的 job/steer 登记表没装上（approvalBroker.actions 为 nil），终端桥没有可写回的子进程")
 	}
-	b.writeMu.Lock()
-	defer b.writeMu.Unlock()
-	_, err := fmt.Fprintln(stdin, line)
+	run := b.actions.liveRun(sessionID)
+	if run == nil || run.stdin == nil {
+		return fmt.Errorf("会话 %q 没有正在运行的一轮子进程：终端桥的应答无处可写", sessionID)
+	}
+	run.writeMu.Lock()
+	defer run.writeMu.Unlock()
+	_, err := fmt.Fprintln(run.stdin, line)
 	return err
 }
 
