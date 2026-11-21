@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func writeGlobalRoot(t *testing.T, path, text string) {
@@ -150,5 +151,38 @@ func TestUserGlobalChainDisabledByNegativeBudget(t *testing.T) {
 	ctx := userGlobalContext(t, "harness-home 手册", "shared-root 手册", -1)
 	if got := (GlobalRules{}).Build(ctx); got != "" {
 		t.Fatalf("负预算应整条链不注入，实际：\n%s", got)
+	}
+}
+
+// TestRuleTruncationKeepsUTF8Boundary 钉住"预算切在多字节码元中间时不许切碎"。
+//
+// 官方 truncateUtf8（src/render.ts:84-94）：按字节截、切点回退到码元边界。
+// 修之前用户全局链（joinUserGlobalBlocks）与工作区链（rulesFromFile）都是裸
+// `text[:limit]`，汉字会被劈成半个码元——那半个字节跟着系统提示一起进模型请求。
+func TestRuleTruncationKeepsUTF8Boundary(t *testing.T) {
+	// "宽" 是 3 字节；100 = 33 个整字 + 1 字节，正好落在第 34 个字的码元中间。
+	text := strings.Repeat("宽", 80)
+	ctx := userGlobalContext(t, text, "", 100)
+	got := (GlobalRules{}).Build(ctx)
+	if !utf8.ValidString(got) {
+		t.Fatalf("用户全局链截断切碎了 UTF-8 码元：%q", got)
+	}
+	if body := budgetRuleBody(t, got, "全局约定"); len(body) != 99 {
+		t.Fatalf("用户全局链正文应回退到码元边界 99 字节，实际 %d：%q", len(body), body)
+	}
+	if !strings.Contains(got, "以上内容已截断") {
+		t.Fatalf("截断必须可见：%s", got)
+	}
+
+	workspace := filepath.Join(t.TempDir(), "AGENTS.md")
+	if err := os.WriteFile(workspace, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	section := rulesFromFile("工作区约定", workspace, 100)
+	if !utf8.ValidString(section) {
+		t.Fatalf("工作区链截断切碎了 UTF-8 码元：%q", section)
+	}
+	if body := budgetRuleBody(t, section, "工作区约定"); len(body) != 99 {
+		t.Fatalf("工作区链正文应回退到码元边界 99 字节，实际 %d：%q", len(body), body)
 	}
 }
