@@ -131,6 +131,9 @@ func accountView(st account.State) transport.OfficialAccountView {
 	if st.Attempt != nil {
 		out.Attempt = &transport.OfficialAccountAttempt{
 			ID: st.Attempt.ID, Phase: st.Attempt.Phase, AuthorizeURL: st.Attempt.AuthorizeURL,
+			// UserCode 必须一路带到 wire：`account.Attempt` 保留它就是为了让客户端
+			// 能显示"去哪个页面、输什么码"，投影里漏掉等于那条能力整条断掉。
+			UserCode:  st.Attempt.UserCode,
 			ExpiresAt: st.Attempt.ExpiresAt, ErrorCode: st.Attempt.ErrorCode,
 		}
 	}
