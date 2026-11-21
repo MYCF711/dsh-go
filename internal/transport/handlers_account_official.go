@@ -235,8 +235,20 @@ type OfficialAccountAttempt struct {
 	ID           string `json:"id"`
 	Phase        string `json:"phase"`
 	AuthorizeURL string `json:"authorizeUrl,omitempty"`
-	ExpiresAt    int64  `json:"expiresAt,omitempty"`
-	ErrorCode    string `json:"errorCode,omitempty"`
+	// UserCode 是 RFC 8628 device authorization 里**人要在浏览器里输入的那串码**。
+	//
+	// 官方 `AccountView.attempt` 是 `additionalProperties: true`，所以这是加性字段、
+	// 不改官方形状（内部模型的口径见 `internal/account/account.go` 的
+	// `Attempt.UserCode`：那句话点名"UI 与 authorization flow 都需要它"）。
+	// 缺了它，客户端在不读宿主内部状态的前提下就没有"输什么码"的来源：
+	// 界面侧 `internal/apiclient/account.go` 的 `AccountAttempt.UserCode` 已经
+	// 按 `userCode` 解码，拿不到就只能是空串。
+	//
+	// **只在 device-code 流程真的进行中才出现**（omitempty），其余路径的线上字节
+	// 与之前逐字节一致。
+	UserCode  string `json:"userCode,omitempty"`
+	ExpiresAt int64  `json:"expiresAt,omitempty"`
+	ErrorCode string `json:"errorCode,omitempty"`
 }
 
 // OfficialAccountView 是官方 `AccountView`：安全账号投影。
