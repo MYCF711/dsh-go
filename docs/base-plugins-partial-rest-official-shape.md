@@ -307,19 +307,78 @@ transcript"；"Seed boundary"：首轮完成前种子为空，"behaves like a fr
    按字节钉着现形状。按"不许删测试/放宽断言"的纪律，这属"要改判据"，
    得由 Lead 定口径后单独做（本单**没有**为了变绿去改那些探针）。
 
-### 7.3 `#54 skill`：仍然 PARTIAL，理由是"没有第二个 layer"
+### 7.3 `#54 skill`：仍然 PARTIAL —— 官方那个层有真实生产者，我们的宿主表达不出那个生产者
 
-官方 `dsh-skill/README.md:84` 的分层是"registration 落进**调用上下文 scope** 的层"：
-"host rows and repository plugins land in the global layer, **a plugin mounted by an
-agent preset's standing composition lands in that preset's layer**"。
+> 2026-11-21 按 **rc.5** 复核（官方根 `tmp/GO8-RC5/official-rc5/dsh/node_modules/@deepseek-ai/`）。
+> 本节旧版引的是 rc.2 行号（`src/index.ts:420-440`），rc.5 已位移；下面每个锚点都按 rc.5 重核过。
 
-本仓没有这个生产者：`internal/modes` 的 preset 只是模式（工具白名单轴），不承载模块
-组合；`serve_agent_api_skills.go` 的生产装配只挂一个 filesystem provider
-（`skill.Registry` 的全局层）。在没有"per-scope provider"的情况下把分层 API 建出来，
-是一个**没有任何生产者**的空层——那违反"不许空壳"。重新评估条件不变：出现
-"preset 自带 provider"的装配形状时，按官方 `ScopedLayers`（`src/index.ts:420-440`）补。
-"incomplete 持久化"仍是官方 README:148 自述的**开放问题**（"consumers should own that
-state"），本仓落在 consumer 侧，不是缺口。
+**官方结构（rc.5，逐层）**
+
+| 层 | 谁往里注册 | 出处 |
+|---|---|---|
+| 全局层 `layers.global` | 宿主行与仓库插件。base 平面把 `skill` / `skill-filesystem` / `tool-skill` 三行作为**宿主行**插入 profile root；Web 平面的 `skill-office`（bundled provider）也在宿主面 | `dsh-skill/src/index.ts:362-365`（`new ScopedLayers(...)`）、`dsh-base/cordis.patch.yml:312-319`、`dsh-web-app/cordis.patch.yml:308-311` |
+| 每个 `ScopeKey` 一层（preset 层） | **preset 常驻编排挂的插件**：`agentPreset.plugins` 是必填行数组，注册时 `createScope(owner, key)` 铸 scope，`mountPreset(ctx, id, plugins)` 把行挂进该 scope ⇒ 里面的 `ctx.skills.registerProvider` / `register` 全部落这一层 | `dsh-agent-preset/src/index.ts:22`、`dsh-agent-preset-registry/src/index.ts:121,126`、`dsh-skill/src/index.ts:411-421`（`registerProvider` 走 `layers.effect(this.ctx, …)` 定层）、`:441`（`register` 用 `scopeOf(this.ctx)`） |
+
+**覆盖规则两条，别混**
+
+- **跨层**：读时 `[global, ...chainLayers(scope)]`，逐层 `merged.set(name, entry)` 后写覆盖
+  ⇒ **最近层整条盖掉远层，rank 不参与**（`dsh-skill/src/index.ts:551-565`，`:556` 拼层、`:562` 覆盖）。
+- **层内**：先按 `(rank, providerOrder, localOrder)` 排序再 first-wins（`compareIndexedCandidates`
+  `:807-811`，`collectLayer` `:567-586`）。runtime 内嵌 skill 固定 `RUNTIME_RANK=250`
+  且 `providerOrder=-1`（`:25`、`:700`）；文件系统 rank 100/200/300/400/500/600
+  （`dsh-skill-filesystem/src/index.ts:35-39` + `dsh-skill/src/index.ts:28` 的 `BUNDLED_SKILL_RANK`）。
+
+**这一层在官方出厂装配里不是摆设**：base 平面把 `skill-filesystem` 当宿主行
+（`dsh-base/cordis.patch.yml:315-316`），而 **Web 平面把宿主这两行关掉、把本地发现整体交给 preset** ——
+原文 `dsh-web-app/cordis.patch.yml:542-549`「the base host `skill-filesystem` row is disabled here
+(presets own local discovery)」，紧接 `:551-555` 两行 `disabled: true`。所以官方 Web 下
+"有哪些本地 skill"是**每个 preset 各自的 scope 结论**（`scope` 缺省时只读全局层）。
+
+rc.5 出厂四个 preset 文件就是这条机制的实证（`dsh-web-app/presets/`）：
+`standard.patch.yml:40-46`（`skill-filesystem` + `customSkillDirs` 43-44、`tool-skill` 45-46）、
+`ptc.patch.yml:40-43`、`cordis.patch.yml:126-132` 各自挂这两行；
+**`minimal.patch.yml` 一行都没有（全文 `skill` 零命中）** ⇒ 官方出厂下 `minimal` 预设的 agent
+既没有本地 skill 目录，也没有 `skill` 工具 = **一个 skill 都看不到**。分层在这里是**被用来省掉一整类能力**，
+不是纯形状差异。
+
+**我们的结构**
+
+- `modules/tool/skill/registry.go:49-57` 文件头自述：刻意只实现**全局层**，跨层 shadowing 留空；
+  `:637-640` 的 `collect` 只做一层，层内键序与官方**逐字同序**（rank → providerOrder → localOrder）。
+- 根集合 4/6 已映射（`cmd/dshd/serve_agent_api_skills.go:44-52`）：project-dsh 100、project-agents 200、
+  custom 300、user-dsh 400；`user-agents`(500) 未映射、`bundled`(600) 走物化进 `<home>/skills`
+  （属 `#55 skill-filesystem` 的口径，不在本节改判）。
+- 生产装配只有**一个** provider（文件系统）：`cmd/dshd/serve_agent_api_skills.go:317`、
+  `modules/tool/skill/skill.go:157`。
+- preset 于我们 = tools×approval×sandbox（`internal/modes`）；`internal/agentpresets/yaml.go:1-20`
+  与 `cordis.go:1-8` **只把官方 `read` 载荷渲染成 YAML 给客户端看，不装载任何插件**
+  ⇒ 官方那个层在我们这里**没有生产者**（`grep -rn "ScopedLayers\|ScopeKey" --include=*.go` 仍只命中注释）。
+
+**逐条差异**
+
+| # | 官方 | 我们 | 性质 |
+|---|---|---|---|
+| 1 | 跨层：最近层整条盖远层 | 无层，只按 rank | **形状差异**；无生产者时不可观测 |
+| 2 | preset 层由 preset `plugins` 行生产：出厂 `standard`/`ptc`/`cordis` 挂 filesystem，**`minimal` 一行不挂 ⇒ 看不到任何 skill** | preset 不装插件，`plugins` 只出现在展示载荷里；**所有 preset 看同一份目录** | **能力差异**（官方能按 preset 加/减 skill；我们只能"都有"——按能力下限规则"更多"不算欠账，但"按 preset 减"确实做不到） |
+| 3 | 层内 `(rank, providerOrder, localOrder)` first-wins | 同键序、同 first-wins，只在 global 层内 | **等价** |
+| 4 | 收集缓存 `collectCacheMaxEntries=128`（`:22`/`:358`/`:542-544`） | 缓存在 consumer（`DSHD_SKILLS_CACHE_TTL_MS` 等） | 已登记等价（`registry.go` 文件头末段） |
+
+**代价表（铁律 13：逐条回答"有没有人要为这个改动付什么"）**
+
+| 问题 | 答案 |
+|---|---|
+| 解析顺序会变吗？ | **只建层、不加生产者 → 不变**（每层只有 global 非空）——但那正是**零收益空壳**，仓规明令不做。要让层真有东西必须同时补 preset 插件装配（把本地发现搬进 preset 层），那时：① **按 preset 增减技能**成为可能，照官方出厂对齐就等于让 `minimal` 类预设**看不到任何本地 skill**（官方 `minimal.patch.yml` 现状，`dsh-web-app/presets/`），而这正是用户今天能看到的技能 ⇒ **已装技能的可见性会变**；② 同名解析从"全局 rank 最小"变成"近层整条盖"，preset 若挂 `includeDefaultRoots:false` 的自定义目录，用户项目级/用户级 override 会被 preset 层同名项盖掉。**⇒ 照官方形状补 = 有代价，且落在已装技能的可见性与优先级上。** |
+| 会变慢吗？ | **会**。官方每 scope 一份收集缓存（`collectCacheMaxEntries` 默认 128，`:22`/`:358`/`:542-544` 就是为此存在），冷启动按 preset 数 × 根数重复扫盘；我们今天是 1 次全量扫盘 + consumer 侧 TTL 缓存。 |
+| 会多出用户可见的设置项/提示吗？ | **会**。要让用户真正用上，preset 得长出 `plugins` 行 / `customSkillDirs` 字段（官方 preset 装载失败还会告警 `agent preset <id>: <problem>`，`dsh-agent-preset-registry/src/index.ts:134-135`），那是新的用户可见配置面与错误面。 |
+
+**结论：不补，维持 PARTIAL。** 纯分层 = 空层（违反"不许空壳"、零收益）；照官方形状补 = 三条代价里
+第一条直接改变已装技能的可见性/优先级 ⇒ 铁律 13 判"有代价 ⇒ 不做"。**不是账本记错**：官方 Web 出厂
+确实按 preset 分视图，我们确实做不到；只是今天没有任何我们能表达的装配形状能把这个差异显出来。
+**重新评估条件（比旧版更具体）**：出现"宿主真能把 preset 的插件行装载起来"（`internal/agentpresets`
+从渲染升级为装配，或外部 Cordis 运行时接进 preset 作用域）时，`skill` 与 `agent-preset*` 一起做，
+按官方 `dsh-scope/src/store.ts:159-216`（`ScopedLayers` 的 `global`/`peek`/`chainLayers`/`merge`）补层。
+"incomplete 持久化"仍是官方 README:148 自述的**开放问题**（"consumers should own that state"），
+本仓落在 consumer 侧，不是缺口。
 
 ### 7.4 `#6 deepseek-llm-api-extensions`：被 `#8` 锁住，不可单方面补
 
