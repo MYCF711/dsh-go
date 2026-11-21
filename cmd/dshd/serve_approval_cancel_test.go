@@ -156,7 +156,7 @@ func TestBrokerCancelStopsStaleTimeout(t *testing.T) {
 
 	// 下一轮起来了：换一根新的 stdin（每轮一个新子进程）。
 	next := &fakeStdin{}
-	b.useStdin(next)
+	b.useStdinFor("s1", next)
 
 	// 等过原来的超时点：该到的"过期应答"就是这时候会来。
 	time.Sleep(200 * time.Millisecond)

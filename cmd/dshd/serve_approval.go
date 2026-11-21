@@ -34,6 +34,16 @@ type approvalBroker struct {
 	// 界面上看着像卡住了，宿主这边却已经没有等待者。
 	pending map[string]*pendingAsk
 	stdin   io.WriteCloser
+	// stdins 是**按会话**的当前轮子进程 stdin。
+	//
+	// 为什么不能只有一个槽：`promptService` 的 busy 是**按会话**的，所以一个
+	// serve 进程里可以同时有两个会话各跑一轮、各有一个子进程、各问各的审批。
+	// 只有一个槽时，"给会话 A 的答复"会写进会话 B 的子进程——A 的命令等不到
+	// 回答被超时拒掉，而 B 的子进程会把那一行当成自己的答复
+	// （`markerAsk` 此前不比 requestId，见 approval_stdio.go 的说明）。
+	//
+	// 键是会话 id；空串键留给"没有会话身份"的老用法/测试（等价于旧的单槽）。
+	stdins map[string]io.WriteCloser
 	// writeMu 串行化对子进程 stdin 的写。
 	//
 	// 为什么必须有：审批可以有**两个**来源同时结算——客户端点了允许、
@@ -77,6 +87,12 @@ type pendingAsk struct {
 	// ch 收决定：true = 允许。带 1 格缓冲，所以结算方永远不会因为
 	// 等待者还没跑到 select 而卡住。
 	ch chan bool
+	// stdin 是**问出这条请求的那个子进程**的 stdin。
+	//
+	// 每条请求记自己那根管道，而不是结算时现取 broker 的"当前 stdin"：
+	// 后者在一进程多会话时会指向**另一个**会话的子进程，答复就串号了。
+	// nil = 问出这条请求时没有可用管道（这种情况按拒绝收工，不往别处写）。
+	stdin io.WriteCloser
 	// stop 在宿主**主动取消**这条请求时关闭，让超时那条 goroutine 立刻收工。
 	//
 	// 不关的后果不是"多一条日志"：每轮都会起一个**新子进程**，它的 requestId
@@ -90,6 +106,7 @@ func newApprovalBroker(stdin io.WriteCloser, emit func(sessionID, typ string, da
 	return &approvalBroker{
 		pending: map[string]*pendingAsk{},
 		allowed: map[string]map[string]bool{},
+		stdins:  map[string]io.WriteCloser{},
 		stdin:   stdin,
 		emit:    emit,
 		timeout: approvalTimeout(),
@@ -110,11 +127,59 @@ func approvalTimeout() time.Duration {
 	return 120 * time.Second
 }
 
-// useStdin 换成本轮子进程的 stdin（每轮一个子进程，管道是新的）。
-func (b *approvalBroker) useStdin(w io.WriteCloser) {
+// useStdinFor 把某个会话换成这一轮子进程的 stdin（每轮一个子进程，管道是新的）。
+//
+// 顺带把**这个会话上一轮遗留的挂起审批**清掉：新子进程不可能再回答它们
+// （它连那些 requestId 都没编出来过），留着只有两种结局——重连时被当成
+// "还挂着"重放成一条永远答不上的气泡，或者用户点了"允许"、宿主回报
+// accepted，而没有任何进程消费这一行。两种都是把死状态说成活的。
+//
+// 同一会话的轮次是串行的（`promptService` 的 busy 按会话判），所以"新 stdin
+// 到位"必然意味着上一轮已经收工，清掉不会误伤还活着的问题。
+func (b *approvalBroker) useStdinFor(sessionID string, w io.WriteCloser) {
 	b.mu.Lock()
-	b.stdin = w
+	stale := b.takePendingLocked(sessionID)
+	b.stdins[sessionID] = w
+	b.stdin = w // 保留"最后一条 stdin"的老语义（terminal_bridge 的兜底、老测试）
 	b.mu.Unlock()
+
+	for _, ask := range stale {
+		// 让超时那条 goroutine 立刻收工：它认领会失败，所以不会重复结算。
+		close(ask.stop)
+	}
+}
+
+// useStdin 是"没有会话身份"的老入口（等价于旧行为：覆盖唯一的槽位）。
+func (b *approvalBroker) useStdin(w io.WriteCloser) {
+	b.useStdinFor("", w)
+}
+
+// stdinForLocked 取某个会话当前的子进程 stdin。调用方必须持有 b.mu。
+func (b *approvalBroker) stdinForLocked(sessionID string) io.WriteCloser {
+	if w, ok := b.stdins[sessionID]; ok && w != nil {
+		return w
+	}
+	return b.stdin
+}
+
+// stdinFor 是 stdinForLocked 的加锁版本。
+func (b *approvalBroker) stdinFor(sessionID string) io.WriteCloser {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.stdinForLocked(sessionID)
+}
+
+// takePendingLocked 摘掉某个会话上全部还挂着的审批并返回它们。
+// 调用方必须持有 b.mu（返回的对象在锁外结算/收工）。
+func (b *approvalBroker) takePendingLocked(sessionID string) []*pendingAsk {
+	var out []*pendingAsk
+	for id, ask := range b.pending {
+		if ask.payload.sessionID == sessionID {
+			out = append(out, ask)
+			delete(b.pending, id)
+		}
+	}
+	return out
 }
 
 // setEmit 挂上推送出口（由 serve 在启动时注入，闭包捕获 loopRunner）。
@@ -285,7 +350,8 @@ func (b *approvalBroker) handle(req approvalReq) {
 	if b.alwaysAllowed(req.SessionID, req.Tool) {
 		fmt.Fprintf(os.Stderr, "审批：会话 %s 的 %s 早先已选择「以后都允许」，本轮自动放行\n",
 			req.SessionID, req.Tool)
-		b.reply(req.RequestID, true)
+		// 答复写回**问出这条请求的那个会话**的 stdin（不是 broker 的"最后一条"）。
+		b.replyTo(b.stdinFor(req.SessionID), req.RequestID, true)
 		return
 	}
 
@@ -335,11 +401,14 @@ func (b *approvalBroker) handle(req approvalReq) {
 	if b.pending == nil { // 直接构造的 broker（老测试）也要能用
 		b.pending = map[string]*pendingAsk{}
 	}
-	b.pending[req.RequestID] = &pendingAsk{
+	ask := &pendingAsk{
 		payload: pendingPayload{sessionID: req.SessionID, tool: req.Tool, data: payload},
 		ch:      ch,
-		stop:    stop,
+		// 管道在**问出这条请求的这一刻**就绑死：结算时现取会拿到别的会话的子进程。
+		stdin: b.stdinForLocked(req.SessionID),
+		stop:  stop,
 	}
+	b.pending[req.RequestID] = ask
 	b.mu.Unlock()
 
 	if b.emit != nil {
@@ -350,7 +419,7 @@ func (b *approvalBroker) handle(req approvalReq) {
 	go func() {
 		select {
 		case allow := <-ch:
-			b.reply(req.RequestID, allow)
+			b.replyTo(ask.stdin, req.RequestID, allow)
 		case <-stop:
 			// 已经被 cancel 结算过了：这里**什么都不做**。
 			// 再推一条超时、再写一行应答，都是在编造另一件事。
@@ -363,7 +432,7 @@ func (b *approvalBroker) handle(req approvalReq) {
 			if b.emit != nil {
 				b.emit(req.SessionID, "approval/timeout", payload)
 			}
-			b.reply(req.RequestID, false)
+			b.replyTo(ask.stdin, req.RequestID, false)
 		}
 	}()
 }
@@ -487,7 +556,8 @@ func (b *approvalBroker) CancelSession(sessionID string) int {
 	for i, ask := range victims {
 		// 先让超时那条 goroutine 收工：它认领会失败，所以不会重复结算。
 		close(ask.stop)
-		b.reply(ids[i], false)
+		// 拒绝写回**这条请求自己的**子进程（按会话记的那根管道）。
+		b.replyTo(ask.stdin, ids[i], false)
 		if b.emit != nil {
 			// 负载与 approval/request **同形**：客户端靠 requestId 收掉那个气泡，
 			// 不需要第二条解码路径（approval/timeout 也是这么发的）。
@@ -515,15 +585,24 @@ func cancelTurn(b *approvalBroker, p *promptService, sessionID string) error {
 	return err
 }
 
-// reply 把决定写回子进程。写失败不影响判定本身（子进程读不到会按拒绝处理）。
+// reply 把决定写回**broker 当前那条** stdin（老入口：无会话身份时用）。
 func (b *approvalBroker) reply(requestID string, allow bool) {
-	if b.stdin == nil {
+	b.replyTo(b.stdinFor(""), requestID, allow)
+}
+
+// replyTo 把决定写回**指定**子进程的 stdin。
+//
+// w 为 nil 时一个字节都不写：这条请求问出来的时候没有可用管道，写到哪里都是
+// 猜——而猜错就是"另一条命令拿到这次批准"。不写，子进程按自己的超时收工（拒绝）。
+// 写失败不影响判定本身（子进程读不到会按拒绝处理）。
+func (b *approvalBroker) replyTo(w io.WriteCloser, requestID string, allow bool) {
+	if w == nil {
 		return
 	}
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
 	line, _ := json.Marshal(map[string]any{"requestId": requestID, "allow": allow})
-	fmt.Fprintf(b.stdin, "%s%s\n", approvalResponseTag, line)
+	fmt.Fprintf(w, "%s%s\n", approvalResponseTag, line)
 }
 
 // decisionOf 把 optionId 翻成 true/false；不认识的返回 false,false。

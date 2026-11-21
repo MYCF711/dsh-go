@@ -97,13 +97,85 @@ func startStdinDispatcher() {
 	})
 }
 
+// approvalResponse 是父进程写回的一行应答。
+//
+// 带 requestId 是**协议的一部分**（父进程每条应答都写），不是装饰：
+// 同一根 stdin 上会混进别的请求的应答（见 awaitApprovalResponse 的说明）。
+type approvalResponse struct {
+	RequestID string `json:"requestId"`
+	Allow     bool   `json:"allow"`
+}
+
+// awaitApprovalResponse 从应答通道里取**属于 wantID 的那一条**，别的丢弃。
+//
+// # 为什么必须按 requestId 取，而不是"来一条算一条"
+//
+// 应答通道是整个子进程共用的一条（stdinDispatcher），而父进程可能在同一时刻
+// 处理不只这一条请求。已经发生过的两条真实路径：
+//
+//  1. **同一会话里迟到的应答**：这次工具调用自己的 ctx 到期（工具级超时）后
+//     markerAsk 已经放弃等待，但父进程那一刻正好把"允许"写进 stdin；那一行
+//     留在缓冲里，下一次工具审批会读到它 —— 一次批准就这样落到了**另一条**
+//     命令上。
+//  2. **另一个会话的应答**：宿主一个进程里可以同时有两个会话各跑一轮
+//     （`promptService` 的 busy 是**按会话**的），而审批 broker 的 stdin 槽位
+//     只有一个；给会话 A 的答复会写进会话 B 的子进程。`terminal_bridge.go`
+//     的 writeReply 注释里把这条当成"不会读错，requestId 对它不认得，会被
+//     忽略"——但此前 markerAsk 根本没比过 requestId，那句话是不成立的。
+//
+// 丢掉的应答不重试：它属于另一条请求，那条请求的父进程会按自己的超时结算。
+// 等不到自己的应答就按拒绝收工（fail-closed）。
+func awaitApprovalResponse(ctx context.Context, ch <-chan string, wantID string) (bool, bool) {
+	for {
+		select {
+		case line, open := <-ch:
+			if !open {
+				// stdin 关了（父进程死了、管道断了）：再也不会有应答。
+				return false, false
+			}
+			resp, ok := parseApprovalResponse(line)
+			if !ok {
+				continue // 不是本协议的应答行：忽略，继续等
+			}
+			if resp.RequestID != wantID {
+				// 别的请求的答复：**丢弃**。当成自己的就是审批串号。
+				continue
+			}
+			return resp.Allow, true
+		case <-ctx.Done():
+			// 父进程超时 / 这一轮被取消：当作没允许，不阻塞这一轮。
+			return false, false
+		}
+	}
+}
+
+// parseApprovalResponse 解析一行应答；不是应答行时 ok=false。
+//
+// requestId 为空一律当"认不出"：宁可继续等（最后按拒绝收工），也不把一条
+// 来路不明的 allow 当成自己的。
+func parseApprovalResponse(line string) (approvalResponse, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, approvalResponseTag) {
+		return approvalResponse{}, false
+	}
+	var resp approvalResponse
+	if json.Unmarshal([]byte(strings.TrimPrefix(line, approvalResponseTag)), &resp) != nil {
+		return approvalResponse{}, false
+	}
+	if strings.TrimSpace(resp.RequestID) == "" {
+		return approvalResponse{}, false
+	}
+	return resp, true
+}
+
 // markerAsk 是没有终端、但有宿主在旁边时的审批通道。
 //
-// 读不到应答（管道断了、父进程死了）一律**拒绝**：
+// 读不到应答（管道断了、父进程死了、这条请求的答复根本没来）一律**拒绝**：
 // 没人能回答的时候，"默认同意"是最坏的选择。
 func markerAsk(ctx context.Context, sessionID, tool, args string) (bool, error) {
+	requestID := "perm-" + session.NewID()
 	req, err := json.Marshal(map[string]any{
-		"requestId": "perm-" + session.NewID(),
+		"requestId": requestID,
 		"sessionId": sessionID,
 		"tool":      tool,
 		"args":      args,
@@ -116,27 +188,11 @@ func markerAsk(ctx context.Context, sessionID, tool, args string) (bool, error) 
 	// **走共享分发，不自己 new reader**：见 stdinDispatcher 的注释
 	// （每次新建 reader 会预读并丢掉下一行；而 jobs.output 也在用同一根 stdin）。
 	startStdinDispatcher()
-	var line string
-	select {
-	case l, ok := <-approvalCh:
-		if !ok {
-			return false, nil // stdin 关了：没人能回答，一律拒绝
-		}
-		line = l
-	case <-ctx.Done():
-		return false, nil // 父进程超时：当作没允许，不阻塞这一轮
-	}
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, approvalResponseTag) {
+	allow, ok := awaitApprovalResponse(ctx, approvalCh, requestID)
+	if !ok {
 		return false, nil
 	}
-	var resp struct {
-		Allow bool `json:"allow"`
-	}
-	if json.Unmarshal([]byte(strings.TrimPrefix(line, approvalResponseTag)), &resp) != nil {
-		return false, nil
-	}
-	return resp.Allow, nil
+	return allow, nil
 }
 
 // approvalViaStdio 决定这一轮要不要走父子通道：

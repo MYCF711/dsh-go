@@ -581,3 +581,65 @@ func TestConcurrentViewersReceiveAllFrames(t *testing.T) {
 		t.Fatalf("并发 viewer 收帧失败: %v", err)
 	}
 }
+
+// viewer 页面（`GET /s/{id}`）必须与 /v1/connect 用**同一份**允许名单。
+//
+// 红侧事实（修前）：这一页只查"share 存在且未过期"，不查 viewer 身份。
+// 于是 `accessMode=selected` 的分享，名单外的匿名访问者虽然连不上 WS，
+// 仍能拿到一页 HTML——里面写着 shareId 和 `mode: write`（= 这个分享可发键）。
+// 同一份名单在数据面生效、在门面上失效，泄漏的是"存在/可写"这两条事实。
+func TestSelectedShareViewerPageRequiresIdentity(t *testing.T) {
+	f := newRelayFixture(t, func(cfg *Config) {
+		cfg.Viewers = []ViewerCredential{
+			{SubjectID: "alice", Secret: "alice-secret"},
+			{SubjectID: "bob", Secret: "bob-secret"},
+		}
+	})
+	share := f.createShare(t, map[string]any{
+		"sessionId": "s1", "accessMode": "selected",
+		"allowedSubjectIds": []string{"alice"}, "sessionMode": "write",
+	})
+
+	page := func(secret string) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, f.http.URL+"/s/"+share.ShareID, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		if secret != "" {
+			req.Header.Set("Authorization", "Bearer "+secret)
+		}
+		resp, err := f.http.Client().Do(req)
+		if err != nil {
+			t.Fatalf("GET /s/%s: %v", share.ShareID, err)
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode
+	}
+
+	if code := page(""); code != http.StatusForbidden {
+		t.Fatalf("selected share 的匿名 viewer 页面 status = %d，want 403（会泄漏 shareId 与 sessionMode）", code)
+	}
+	if code := page("bob-secret"); code != http.StatusForbidden {
+		t.Fatalf("名单外 viewer 的页面 status = %d，want 403", code)
+	}
+	if code := page("alice-secret"); code != http.StatusOK {
+		t.Fatalf("名单内 viewer 的页面 status = %d，want 200", code)
+	}
+
+	// 开放的分享不受影响：不带任何凭据照样能打开页面。
+	open := f.createShare(t, map[string]any{"sessionId": "s2"})
+	req, err := http.NewRequest(http.MethodGet, f.http.URL+"/s/"+open.ShareID, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := f.http.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET open page: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("open share 的页面 status = %d，want 200", resp.StatusCode)
+	}
+}

@@ -197,7 +197,7 @@ func runProviderLoop(ctx context.Context, r *loopRunner, provider llm.ModelProvi
 			cmd.Env = append(cmd.Env, "DSHD_USER_TERMINALS_STDIO=1")
 			if r.policy == "ask" {
 				cmd.Env = append(cmd.Env, "DSHD_APPROVAL_STDIO=1")
-				r.broker.useStdin(stdin)
+				r.broker.useStdinFor(sessionID, stdin)
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "jobs/审批 stdin 没建起来（%v），本轮任务动作不可用\n", serr)

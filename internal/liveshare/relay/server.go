@@ -819,11 +819,23 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 
 // handleViewerPage 是一个最小可用的 viewer 页面：连上 WS 后把收到的帧打印出来，
 // 让 create 返回的 link 不是死链。生产级 viewer 由后续 GUI 线负责。
+//
+// **身份判定与 /v1/connect 逐条相同**（authenticateViewer + viewerAllowedLocked）。
+// 为什么这一页也要判：它把 shareId 与 sessionMode 直接写进 HTML——
+// `mode: write` 等于告诉访问者"这里可以发键"。名单外的匿名访问者拿不到数据面
+// （/v1/connect 会 403），却能从这一页确认"这个 share 存在、而且是可写的"。
+// 同一份允许名单不能只在数据面生效、在门面上失效。
 func (s *Server) handleViewerPage(w http.ResponseWriter, r *http.Request) {
 	shareID := r.PathValue("id")
+	subjectID, authErr := s.authenticateViewer(r)
+	if authErr != nil {
+		writeError(w, http.StatusUnauthorized, "viewer_secret_invalid", authErr.Error())
+		return
+	}
 	s.mu.Lock()
 	share := s.shares[shareID]
 	ok := share != nil && !s.expiredLocked(share)
+	allowed := ok && s.viewerAllowedLocked(share, subjectID)
 	mode := ""
 	if ok {
 		mode = share.SessionMode
@@ -831,6 +843,12 @@ func (s *Server) handleViewerPage(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	if !ok {
 		http.Error(w, "share 不存在或已过期", http.StatusNotFound)
+		return
+	}
+	if !allowed {
+		s.recordAudit(AuditEvent{Action: "viewer-denied", Actor: subjectActor(subjectID),
+			Detail: map[string]any{"shareId": shareID, "reason": "not-in-allowlist", "route": "viewer-page"}})
+		writeError(w, http.StatusForbidden, "viewer_forbidden", "这个 viewer 不在 share 的允许名单里")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
