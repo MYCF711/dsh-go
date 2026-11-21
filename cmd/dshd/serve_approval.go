@@ -134,7 +134,10 @@ func (b *approvalBroker) useStdinFor(sessionID string, w io.WriteCloser) {
 	b.mu.Lock()
 	stale := b.takePendingLocked(sessionID)
 	b.stdins[sessionID] = w
-	b.stdin = w // 保留"最后一条 stdin"的老语义（terminal_bridge 的兜底、老测试）
+	// b.stdin 保留"最后一条 stdin"的老语义，但**已没有生产读者**：
+	// terminal_bridge 的兜底已删（拿不到 liveRun 就 fail-loud），jobs.output 的
+	// 死接线也已删。现在只服务仍按老语义写的测试夹具。
+	b.stdin = w
 	b.mu.Unlock()
 
 	for _, ask := range stale {

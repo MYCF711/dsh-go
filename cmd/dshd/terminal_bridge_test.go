@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -109,16 +110,42 @@ func decodeBridgeReplies(t *testing.T, lines []string) []terminal.BridgeResponse
 }
 
 // newBridgeFixture 造一份"父进程里真实装着桥"的 fixture。
+//
+// 子进程出口走**真登记**（`jobActionBroker.registerTurnRun`），与生产同一条路径：
+// `loopRunner.run` 在 `cmd.Start()` 之后把这一轮的 PID/stdin 记进去，桥的应答
+// 只认那一条（`terminal_bridge.go` 的 writeReply）。以前这里是直接
+// `b.useStdin(stdin)` —— 挂的是 broker 的全局槽位，于是这几条用例测的是那条
+// 已经删掉的兜底，而不是生产路径。
 func newBridgeFixture(t *testing.T, jt *fakeTerminalRoster) (*approvalBroker, *recordingWriteCloser) {
 	t.Helper()
 	b := newApprovalBroker(nil, nil)
+	actions := newJobActionBroker(t.TempDir())
+	b.actions = actions
 	if _, err := installUserTerminalBridge(b, jt, t.TempDir()); err != nil {
 		t.Fatalf("装桥失败: %v", err)
 	}
 	t.Cleanup(func() { uninstallUserTerminalBridge(b) })
 	stdin := &recordingWriteCloser{}
-	b.useStdin(stdin)
+	t.Cleanup(registerBridgeTurn(t, actions, "session-A", stdin))
 	return b, stdin
+}
+
+// registerBridgeTurn 把一根 stdin 登记成**这个会话当前那一轮**的子进程出口。
+//
+// PID/映像用测试进程自己：`registerTurnRun` 会先 `verifyProcessImage`，随便编一个
+// PID 在这一步就被拒——这道校验防的正是"PID 被 OS 复用后写到别的进程"，
+// 所以夹具也不能绕过它（绕过就等于换了一条生产里不存在的路）。
+func registerBridgeTurn(t *testing.T, actions *jobActionBroker, sessionID string, stdin io.WriteCloser) func() {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("取测试进程映像失败: %v", err)
+	}
+	run, err := actions.registerTurnRun(sessionID, "turn-1", os.Getpid(), exe, stdin)
+	if err != nil {
+		t.Fatalf("登记会话 %s 这一轮的子进程失败: %v", sessionID, err)
+	}
+	return func() { actions.unregisterRun(run) }
 }
 
 // runBridgeLines 把若干行喂进父进程的**真**逐行分发（WatchSession），等它收工。
@@ -210,6 +237,95 @@ func TestTerminalBridgeRefusesCrossSession(t *testing.T) {
 	}
 	if jt.listCalls != 0 {
 		t.Fatalf("跨会话请求不该碰数据源，实际调用 %d 次", jt.listCalls)
+	}
+}
+
+// TestTerminalBridgeRepliesReachEachSessionsOwnChild：两会话各跑一轮时，
+// 应答必须各回**自己那一轮**的子进程。
+//
+// 这是生产路径的判据：`promptService` 的 busy 按会话判，A/B 可以同时在一轮里，
+// 每轮一个子进程、一根新 stdin。写回判据只有 `liveRun(sessionID)` 那一条——
+// 退回 broker 的全局槽位（"最后一条起过的 stdin"）就会把 A 的应答写进 B。
+func TestTerminalBridgeRepliesReachEachSessionsOwnChild(t *testing.T) {
+	jt := &fakeTerminalRoster{
+		infos: []transport.OfficialWebTerminalInfo{
+			{ID: "t1", Title: "build", Cwd: `C:\work`, State: "running", Origin: "user", Control: "user"},
+		},
+	}
+	b := newApprovalBroker(nil, nil)
+	actions := newJobActionBroker(t.TempDir())
+	b.actions = actions
+	if _, err := installUserTerminalBridge(b, jt, t.TempDir()); err != nil {
+		t.Fatalf("装桥失败: %v", err)
+	}
+	t.Cleanup(func() { uninstallUserTerminalBridge(b) })
+
+	stdinA := &recordingWriteCloser{}
+	stdinB := &recordingWriteCloser{}
+	t.Cleanup(registerBridgeTurn(t, actions, "session-A", stdinA))
+	t.Cleanup(registerBridgeTurn(t, actions, "session-B", stdinB))
+
+	runBridgeLines(t, b, "session-A",
+		terminal.BridgeRequestTag+`{"requestId":"rA","sessionId":"session-A","op":"list"}`)
+	runBridgeLines(t, b, "session-B",
+		terminal.BridgeRequestTag+`{"requestId":"rB","sessionId":"session-B","op":"list"}`)
+
+	repliesA := decodeBridgeReplies(t, stdinA.all())
+	repliesB := decodeBridgeReplies(t, stdinB.all())
+	if len(repliesA) != 1 || repliesA[0].RequestID != "rA" || !repliesA[0].OK {
+		t.Fatalf("会话 A 的子进程没拿到自己那条应答: %+v", repliesA)
+	}
+	if len(repliesB) != 1 || repliesB[0].RequestID != "rB" || !repliesB[0].OK {
+		t.Fatalf("会话 B 的子进程没拿到自己那条应答: %+v", repliesB)
+	}
+}
+
+// TestTerminalBridgeNeverWritesIntoAnotherSessionsChild：拿不到**本会话**那一轮
+// 子进程时，桥必须明确失败，一根管子都不写。
+//
+// 红侧事实（修前）：`writeReply` 在 `liveRun(sessionID)` 取不到时退回 broker 的
+// `b.stdin` —— 那是"最后一条起过的 stdin"，与"这个会话"没有任何关系。B 后起就
+// 占住那个槽，于是给 A 的桥应答被写进了 B 的子进程（对端按 requestId 认不出会
+// 丢弃，所以表面上只是"丢了"，但 A 的工具照样等到超时，而我们确实把一个不属于
+// 自己的副作用留在了别人的子进程里）。
+//
+// 触发窗口本身极窄（`registerTurnRun` 失败、子进程刚被 kill，而它还没跑完一轮，
+// 见 writeReply 的注释），所以这条用例直接按契约判：**异常时 fail-loud，不许串**。
+func TestTerminalBridgeNeverWritesIntoAnotherSessionsChild(t *testing.T) {
+	jt := &fakeTerminalRoster{
+		infos: []transport.OfficialWebTerminalInfo{
+			{ID: "t1", Title: "build", Cwd: `C:\work`, State: "running", Origin: "user", Control: "user"},
+		},
+	}
+	b := newApprovalBroker(nil, nil)
+	actions := newJobActionBroker(t.TempDir())
+	b.actions = actions
+	br, err := installUserTerminalBridge(b, jt, t.TempDir())
+	if err != nil {
+		t.Fatalf("装桥失败: %v", err)
+	}
+	t.Cleanup(func() { uninstallUserTerminalBridge(b) })
+
+	// 会话 B 是"最后起过的那一轮"：broker 的全局槽位指向 B 的子进程。
+	// `useStdinFor` 是真接线（`--policy ask` 下每轮都调，见 loopRunner.run），
+	// 所以这个槽位在真实宿主里确实会被填上——它只是**不能**被桥当成写回目标。
+	stdinB := &recordingWriteCloser{}
+	b.useStdinFor("session-B", stdinB)
+	t.Cleanup(registerBridgeTurn(t, actions, "session-B", stdinB))
+
+	// 而这一行来自 session-A，而 session-A 这一轮没有登记（异常窗口）。
+	runBridgeLines(t, b, "session-A",
+		terminal.BridgeRequestTag+`{"requestId":"r1","sessionId":"session-A","op":"list"}`)
+
+	if got := stdinB.all(); len(got) != 0 {
+		t.Fatalf("会话 A 的桥应答被写进了会话 B 的子进程：%v", got)
+	}
+	// 同一个判据的正面：写回本身必须**明确失败**，而不是静默丢帧。
+	if err := br.writeReply(b, "session-A", terminal.BridgeResponseTag+`{"requestId":"r1","ok":true}`); err == nil {
+		t.Fatal("拿不到本会话的子进程时 writeReply 必须返回错误（否则异常被静默吞掉）")
+	}
+	if got := stdinB.all(); len(got) != 0 {
+		t.Fatalf("失败路径也不许往别人的子进程写：%v", got)
 	}
 }
 
