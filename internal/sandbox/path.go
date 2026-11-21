@@ -70,6 +70,10 @@ func canonicalRoot(label, root string) (string, error) {
 }
 
 // canonicalPath 解析最深已存在祖先的符号链接/reparse point，再拼回不存在后缀。
+//
+// Windows 上「reparse point」这一半由 resolveExistingPath 负责：Go ≥1.23 的
+// EvalSymlinks **不跟目录 junction**（见 reparse_windows.go 文件头），只靠它
+// 会让经 junction 的越界路径看起来还在工作区里。
 // 因此“已存在目标”和“经同一父目录新建目标”使用同一条 canonical 边界。
 func canonicalPath(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
@@ -84,7 +88,7 @@ func canonicalPath(path string) (string, error) {
 	for {
 		_, err := os.Lstat(current)
 		if err == nil {
-			resolved, err := filepath.EvalSymlinks(current)
+			resolved, err := resolveExistingPath(current)
 			if err != nil {
 				return "", fmt.Errorf("%w: EvalSymlinks(%q): %v", ErrInvalidPath, current, err)
 			}

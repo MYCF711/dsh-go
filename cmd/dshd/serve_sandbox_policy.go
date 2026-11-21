@@ -505,6 +505,42 @@ func sandboxWriteChildEnv(home, sessionID string, presets *modes.Registry, store
 	return sandboxChildEnv(src.Effective)
 }
 
+// turnChildSandboxEnv 返回**一轮 run 子进程**必须带上的策略环境行：档位 + 策略根。
+//
+// 为什么必须是一个函数、两条 spawn 路径都调它：父进程有两条起轮子进程的路
+// （`loopRunner.run` 走「继承环境 + 增量」，`runProviderLoop` 走「provider 重建
+// 环境」）。档位只写在其中一条上，另一条就静默退回子进程默认值——`read-only`
+// 会话在那条路上 bash 照样跑（子进程 `GateFromEnv` 见不到 DSHD_SANDBOX_MODE
+// 就返回 nil 闸门，工具层直接放行），而界面上档位显示得好好的。
+//
+// 返回 nil（store/presets 未接线）表示保持旧行为：不往子进程写档位，
+// 由它按继承环境判定。
+func (r *loopRunner) turnChildSandboxEnv(sessionID string) ([]string, error) {
+	if r == nil || r.sandboxStore == nil || r.sandboxPresets == nil {
+		return nil, nil
+	}
+	env, err := sandboxWriteChildEnv(r.home, sessionID, r.sandboxPresets, r.sandboxStore)
+	if err != nil {
+		return nil, err
+	}
+	// 策略根也要固定：只写档位而让子进程继承父环境里的
+	// DSHD_SANDBOX_WORKSPACE/HOME/EXTRA_READ，等于允许"这个会话的工作区"
+	// 和"策略判定的工作区"是两条不同的 canonical 路径。
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	roots, err := sandboxChildRoots(wd, r.home, userHome)
+	if err != nil {
+		return nil, err
+	}
+	return append(env, roots...), nil
+}
+
 // sandboxErrIsWidenDenied 给上层做错误分类用（HTTP 400 vs 500）。
 func sandboxErrIsWidenDenied(err error) bool {
 	return errors.Is(err, sandbox.ErrWidenDenied)
