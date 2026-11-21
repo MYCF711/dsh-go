@@ -508,6 +508,44 @@ func (r *Runner) EndStep() (paths []string) {
 	return paths
 }
 
+// StepOpen 报告"当前还处在一个没收口的 step 里"。
+//
+// 用途只有一个：收尾路径（turn 结束）判断要不要补一次 EndStep。正常路径上
+// `step/end` 已经调过 EndStep，这里返回 false，收尾自然是空操作。
+func (r *Runner) StepOpen() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stepOpen
+}
+
+// AbortStep 收掉一个**打开了却没等到 EndStep** 的 step，返回攒着还没投影的路径。
+//
+// 为什么必须有这条退路：`BeginStep` 在每一步模型请求之前把 stepOpen 置 true，
+// 而 `EndStep` 只由 `step/end` 事件驱动。可 step 的出口远不止"正常收工"——
+// 模型调用失败、空响应、参数非法、工具批次出错、取消，都会直接 return，没有
+// step/end。只要有一条这样的出口，stepOpen 就会停在 true：
+//   - 之后每次 `Touch` 都返回 flush=false（攒着不投），
+//   - 而唯一的 drain 点是下一次成功的 step/end —— 上一轮已经结束，等很久。
+//
+// 现象是"文件改了、界面上什么都不变"，日志里也没有任何报错；这是最难自查的
+// 那类卡死。所以在 turn 结束时无条件对一次账：还在 open 就收掉，攒下的路径
+// 照样交给调用方投影（不丢工作，只补一次投影时机）。
+//
+// 语义与 EndStep 完全一致，因此可被重复调用：第二次 stepOpen 已是 false，
+// 返回 nil（调用方拿到空批就什么都不做）。
+func (r *Runner) AbortStep() (paths []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.stepOpen && len(r.pending) == 0 {
+		return nil
+	}
+	r.stepOpen = false
+	paths = append([]string(nil), r.pending...)
+	r.pending = nil
+	sort.Strings(paths)
+	return paths
+}
+
 // ComposeAndCommit 在"同一会话串行"的纪律下跑一次 compose。
 //
 // `state` 与 `commit` 都由调用方给：

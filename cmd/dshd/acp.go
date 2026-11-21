@@ -582,6 +582,10 @@ func (r *acpRunner) Prompt(ctx context.Context, sessionID, cwd, text string, emi
 		hist = append(hist, llm.Message{Role: "user", Content: aiInstrText})
 	}
 	startSeq := logw.Seq()
+	// 一轮结束（含取消、模型报错、溢出重试全部耗尽）就对一次 step 状态：出错的那一步
+	// 不会发 `step/end`，stepOpen 会留在 true，之后本会话的指令投影不再刷新
+	// （见 aiInstrRunner.FinishTurn）。ACP 的 logw 不在这里关，defer 安全。
+	defer aiInstr.FinishTurn(logw, cwd)
 	next, err := loop.Run(ctx, turn, hist)
 	for attempt := 0; err != nil && attempt < r.compactPolicy().MaxOverflowRetries && compact.IsContextOverflow(err); attempt++ {
 		if logw.Seq() != startSeq {
@@ -985,6 +989,9 @@ func (r *acpRunner) Fork(ctx context.Context, sessionID, cwd string) (string, er
 
 func (r *acpRunner) Close(sessionID string) error {
 	r.forgetSandbox(sessionID)
+	// 指令投影器是按会话常驻的（version 缓存 + 攒批 + step 状态）。不在这里摘掉，
+	// 同一个 id 再打开会拿到上一轮的旧 Runner —— 见 forgetAIInstr 的说明。
+	r.forgetAIInstr(sessionID)
 	if r.approvals != nil {
 		r.approvals.Forget(sessionID)
 	}

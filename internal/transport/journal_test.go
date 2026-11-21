@@ -134,3 +134,51 @@ func TestJournalAppendIsConcurrencySafe(t *testing.T) {
 		t.Fatalf("应有 %d 个不同 seq，实际 %d", n, len(seen))
 	}
 }
+
+// TestJournalsForgetDropsDeletedSession 钉"会话删掉后它的 journal 不能留在表里"。
+//
+// 这张表此前没有任何删除路径：`session.delete` 只删目录与活体 agent，journal
+// （容量 4096 帧、每帧带原始 data）会连同它的键一辈子留在内存里，进程重启才清。
+// 键还在的另一个后果是：删除之后再 `sub` 那条 topic，会从这份已经删掉的会话里
+// **重放帧**，客户端看到一条已不存在的会话还在说话。
+//
+// 变异点：把 Forget 的 `delete` 换成空操作，本测试在"表里必须摘掉""新 journal
+// 水位必须归零""世代必须换新"三处都会红。
+func TestJournalsForgetDropsDeletedSession(t *testing.T) {
+	js := NewJournals(nil)
+	old := js.Get("session-gone")
+	old.Append("turn/done", json.RawMessage(`{"ok":true}`), 1)
+	oldEpoch := old.Epoch()
+	if old.LastSeq() != 1 {
+		t.Fatalf("前置条件：应有 1 帧，实际 %d", old.LastSeq())
+	}
+
+	js.Forget("session-gone")
+	if _, ok := js.m["session-gone"]; ok {
+		t.Fatal("Forget 之后表里必须没有这条会话（否则内存只增不减）")
+	}
+
+	fresh := js.Get("session-gone")
+	if fresh.LastSeq() != 0 {
+		t.Fatalf("删除后重新取到的新 journal 必须是没有旧帧的（水位 0），实际 %d", fresh.LastSeq())
+	}
+	if fresh.Epoch() == oldEpoch {
+		t.Fatalf("新 journal 必须换世代（客户端据此收到 session/reset），仍是 %d", fresh.Epoch())
+	}
+}
+
+// TestJournalsForgetIsScopedToOneSession 钉"只摘指定的那条"。
+func TestJournalsForgetIsScopedToOneSession(t *testing.T) {
+	js := NewJournals(nil)
+	keep := js.Get("session-keep")
+	keep.Append("turn/done", json.RawMessage(`{"ok":true}`), 1)
+	js.Get("session-gone").Append("turn/done", json.RawMessage(`{"ok":true}`), 1)
+
+	js.Forget("session-gone")
+	if again := js.Get("session-keep"); again != keep {
+		t.Fatal("别的会话必须原样保留（同一个 journal 对象）")
+	}
+	if js.Get("session-keep").LastSeq() != 1 {
+		t.Fatal("别的会话的帧不能跟着丢")
+	}
+}
