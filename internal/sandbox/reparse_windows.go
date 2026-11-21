@@ -134,3 +134,33 @@ func isNotExistErr(err error) bool {
 	}
 	return errno == syscall.ERROR_FILE_NOT_FOUND || errno == syscall.ERROR_PATH_NOT_FOUND
 }
+
+// 下面三个是给 internal/sandbox 之外的调用方用的薄包装：判据只此一份，
+// 别的包（cmd/dshd、internal/creation …）不要再按 `os.ModeSymlink` 自己判一遍。
+//
+// 为什么要导出：Go ≥1.23 的 `winsymlink=1` 语义下目录 junction（MOUNT_POINT）
+// 既不是 `ModeSymlink` 也不是目录，`os.Lstat` 报 `ModeIrregular`；凡是
+// "拒绝链接"的安全判据只要写成 `Mode()&os.ModeSymlink != 0` 就会在 junction 上
+// 漏掉。`GetFileAttributes` 的 `FILE_ATTRIBUTE_REPARSE_POINT` 属性位在新旧语义下
+// 都是 `0x410`，是唯一稳定的判据（见 isReparsePoint 的注释）。
+
+// IsReparsePoint 报告 path **本身**是不是 reparse point（junction/符号链接/
+// 其它重解析点）。path 不存在时返回错误（不是 (false, nil)）。
+//
+// 用途：拒绝"最后一段是链接"的放行判据（例如"包根必须是真实目录"）。
+func IsReparsePoint(path string) (bool, error) { return isReparsePoint(path) }
+
+// PathHasReparsePoint 报告 path 的**任一已存在前缀**是不是 reparse point，
+// 即"这条路径是不是经链接进去的"。
+//
+// 用途：`root\junction\file.txt` 的 `os.Lstat` 是一个正常常规文件，最后一段的
+// 判据看不见中间那条 junction；要判"整条路径没有链接"只能用这个。
+func PathHasReparsePoint(path string) (bool, error) { return pathHasReparsePoint(path) }
+
+// ResolveExistingPath 把一条**已存在**的路径解析到最终目标（跟随 junction/
+// 符号链接/其它重解析点）。没有 reparse point 时就是 filepath.EvalSymlinks，
+// 普通路径行为一字节不变。
+//
+// 用途：边界复核（"解析后还在不在根里"）——Go ≥1.23 的 EvalSymlinks 不跟
+// 目录 junction，只靠它会让越界路径看起来还在根内。
+func ResolveExistingPath(path string) (string, error) { return resolveExistingPath(path) }
