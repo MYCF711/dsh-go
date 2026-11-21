@@ -256,7 +256,23 @@ func ServeConn(conn Conn, hub *Hub) error {
 
 			journal := hub.journals.Get(sessionID)
 			win := journal.Window(frame.SinceSeq, 0)
-			rebuild := (frame.JournalEpoch != 0 && win.Epoch != frame.JournalEpoch) || !win.Covered
+			// 三种"按 seq 补不出来"的情况，答复都一样：**明确要求重建基线**
+			// （发 session/reset，让客户端丢弃旧水位重新 load）。
+			//
+			//   - 世代对不上：旧 seq 属于另一个序号域；
+			//   - sinceSeq 之前的历史已经滑出内存（!Covered）：给不出中间那段；
+			//   - **水位比 journal 还大**：两边对不上，`Window` 永远返回空集，
+			//     之后每个新帧都被 `seq > sinceSeq` 过掉——一帧不发、不报错、
+			//     不发 gap。客户端只看到"连着但什么都不来"（`Journal.Reset` 的
+			//     注释早就把这种情况点名了，但这里一直没实现）。
+			//
+			// 第三种必须在这里判：`session.history` 对同一份输入回 409
+			// `stale_epoch`（server.go 的 handleSessionHistory），两条通道不许
+			// 对同一种错给两种答复。客户端拿到超前的 sinceSeq 是常态——
+			// 缓存的 `m.seqs[id]` 跨宿主重启/换 journal 之后还在，
+			// 而 epoch 未必跟着回来（dsh-ui 的 epochLookup 取不到就是 0）。
+			watermarkAhead := frame.SinceSeq > win.LastSeq
+			rebuild := (frame.JournalEpoch != 0 && win.Epoch != frame.JournalEpoch) || !win.Covered || watermarkAhead
 			replayBase := frame.SinceSeq
 			if rebuild {
 				replayBase = win.LastSeq
