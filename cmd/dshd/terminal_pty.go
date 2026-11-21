@@ -205,6 +205,51 @@ type officialPTYTerminalAPI struct {
 	closedEntries map[string]*officialPTYEntry
 	sweepStop     chan struct{}
 	sweepOnce     sync.Once
+
+	// rosterPublisher 是"这个会话的终端集合可能变了"的出口。
+	//
+	// 生产接线是 `transport.OfficialJobTerminal.PublishTerminalChange`（serve 装配时
+	// `setRosterPublisher` 一次），等价官方 `TerminalController` 的
+	// `changed(sessionId)`（`@deepseek-ai/dsh-api-terminal-controller/src/index.ts:405`：
+	// 遍历该会话的 roster 监听器）。
+	//
+	// **nil 是合法状态**：没接线时 `terminal.watch` 退回"每会话一个差分轮询器"
+	// （`internal/terminal/watch.go` 的 DefaultSetWatchInterval=250ms），
+	// 语义完全一样，只是慢一个间隔。所以任何一处漏接都只会让行为退回今天的样子，
+	// 不会丢事件——这是它敢做成可选的原因。
+	rosterPublisher func(sessionID string)
+}
+
+// setRosterPublisher 接上 roster 变更出口（serve 装配时调一次，之后只读）。
+//
+// 必须在服务开始收请求前调用：之后所有 publishRosterChange 走 a.mu 读同一个值。
+func (a *officialPTYTerminalAPI) setRosterPublisher(publish func(sessionID string)) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.rosterPublisher = publish
+	a.mu.Unlock()
+}
+
+// publishRosterChange 报告"本会话的终端集合可能变了"（**调用点必须在状态已落定之后**）。
+//
+// 为什么"之后"：terminal.watch 是 whole-set 差分，帧内容由真值来源 `terminal.list`
+// 现算。早于落定地报一次，重取到的还是旧集合 → 去重成不发帧，等于白报。
+//
+// 为什么不担心重复报：`SetWatcher.Publish` 无订阅者时是一次 map miss（什么都不做），
+// 有订阅者时是容量 1 的非阻塞投递（合并），且帧数由 payload 去重决定
+// （`watch.go` 的 mergePoll 用 bytes.Equal）。所以多点重复报不会放大成多帧。
+func (a *officialPTYTerminalAPI) publishRosterChange(sessionID string) {
+	if a == nil || sessionID == "" {
+		return
+	}
+	a.mu.Lock()
+	publish := a.rosterPublisher
+	a.mu.Unlock()
+	if publish != nil {
+		publish(sessionID)
+	}
 }
 
 // newOfficialPTYTerminalAPI 起 PTY 终端层。
@@ -630,6 +675,9 @@ func (a *officialPTYTerminalAPI) TerminalCreate(ctx context.Context, sessionID s
 	a.entries[entry.key()] = entry
 	a.mu.Unlock()
 	a.persistSession(sessionID)
+	// 官方 create 在 allocate 提交后调 changed（src/index.ts:427）：集合多了一条，
+	// 正在看 terminal.watch 的人要**立刻**看到，而不是等下一次差分。
+	a.publishRosterChange(sessionID)
 	return entry.info(), nil
 }
 
@@ -712,6 +760,9 @@ func (a *officialPTYTerminalAPI) TerminalClose(ctx context.Context, sessionID, i
 
 	a.closeEntry(entry)
 	a.persistSession(sessionID)
+	// 官方 close 成功后调 changed（src/index.ts:369）。agent 终端的关闭也走这里
+	// （TerminalAgentClose 委托过来），所以只接这一处就覆盖两条关闭路径。
+	a.publishRosterChange(sessionID)
 	return nil
 }
 
@@ -758,6 +809,9 @@ func (a *officialPTYTerminalAPI) TerminalRename(ctx context.Context, sessionID, 
 	a.mu.Unlock()
 	a.persistSession(sessionID)
 	a.broadcastTerminalState(sessionID, id)
+	// 官方 rename 走 `broadcastState()` → `stateListener()` → `changed()`
+	// （src/terminal.ts:321-324 + src/index.ts:426）：title 在 info 里，属于集合内容变了。
+	a.publishRosterChange(sessionID)
 	return nil
 }
 
@@ -814,6 +868,9 @@ func (a *officialPTYTerminalAPI) InputTyped(sessionID, id, data string, typed bo
 		// 官方在写字节之前发布 control=user，保证后续 agent 输入不能再排在
 		// 人员按键之后；所有 follower（含 HTTP 上行对应的 attach）都收到 state。
 		a.broadcastTerminalState(sessionID, id)
+		// control 在 info 里（官方 `src/terminal.ts:138` 改完就 broadcastState），
+		// 同一条状态发布会走到 roster 监听器 → 另一个窗口的徽标要立刻变。
+		a.publishRosterChange(sessionID)
 	}
 	if err := term.Input(data); err != nil {
 		return false, mapPTYError(err)
@@ -1197,8 +1254,20 @@ func (s *officialPTYJobTerminalService) Close() {
 }
 
 // Handler 返回可以直接挂到 transport.Options 上的路由对象。
+//
+// **这一行也是 roster 推送的接线点**：PTY 层在身份/状态变化点回调
+// `publishRosterChange`，出口就是同一个 handler 的 `terminal.watch` 事件源。
+//
+// 为什么不做成"再传一个参数"：官方就是这个形状——控制器自己既是 roster 的
+// 所有者，也是监听器表的持有者（`src/index.ts:405 changed` 遍历 `this.rosters`），
+// 所以"谁提供 watch"和"谁被通知"必须是同一个对象；分成两处必然留一个能接错。
+// 工程上让它结构上只可能接对：拿到 handler 的唯一入口就在这里。
 func (s *officialPTYJobTerminalService) Handler() *transport.OfficialJobTerminal {
-	return &transport.OfficialJobTerminal{Svc: s}
+	h := &transport.OfficialJobTerminal{Svc: s}
+	if s != nil && s.officialPTYTerminalAPI != nil {
+		s.officialPTYTerminalAPI.setRosterPublisher(h.PublishTerminalChange)
+	}
+	return h
 }
 
 // newOfficialPTYJobTerminalService 组装官方 11 个方法的 **PTY** 服务面。
