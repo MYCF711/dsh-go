@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"dshgo/internal/ptc"
 )
@@ -548,9 +549,19 @@ func (s *session) close() {
 	_ = s.stdin.Close()
 }
 
+// truncate 把 stderr 尾部裁到 limit **字节**以内，且截点一定落在 UTF-8 字符边界上。
+//
+// 为什么不能直接 `text[:limit]`：子进程 stderr 里是中文/混编码，按字节切会把
+// 一个多字节字符切成半个——这条 message 会跟着 workerExit → ptc.Fail 变成
+// **工具结果**交给模型和界面，json.Marshal 把那半个字符编码成 U+FFFD，
+// 用户看到末尾一团乱码。退到边界最多少 3 个字节，预算口径不变。
 func truncate(text string, limit int) string {
 	if len(text) <= limit {
 		return text
 	}
-	return text[:limit] + "…（截断）"
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "…（截断）"
 }
