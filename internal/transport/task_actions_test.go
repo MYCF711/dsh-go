@@ -216,3 +216,53 @@ func TestTaskActionsGoldenOverHTTP(t *testing.T) {
 		})
 	}
 }
+
+// 生产装配（cmd/dshd/serve.go）同时给 JobsOutput 和 JobsOutputScoped：只要 scoped
+// 存在，jobs.output 就必须只走 scoped。旧的只收 id 的回调没有会话身份，落到它
+// 身上就等于"按全局那一根子进程 stdin 猜会话"——两个会话并发时会把 A 的查询
+// 写进 B 的子进程（A 拿空输出、或拿到 B 的同名任务输出）。
+//
+// 红侧：把 handleJobsOutput 的分支顺序改回"先 legacy"，本用例立刻红（legacy 被调）。
+func TestJobsOutputScopedWinsOverLegacyFallback(t *testing.T) {
+	var legacyCalls, scopedCalls int
+	s := newTaskActionServer(t, Options{
+		JobsOutput: func(id string, wait time.Duration) (JobOutput, error) {
+			legacyCalls++
+			return JobOutput{ID: id, Output: "legacy-path"}, nil
+		},
+		JobsOutputScoped: func(sessionID, id string, cursor, limit int, wait time.Duration) (JobOutput, error) {
+			scopedCalls++
+			return PageJobOutput(JobOutput{ID: id, SessionID: sessionID, Output: "abcdef"}, cursor, limit), nil
+		},
+	})
+
+	// 带 sessionId：走 scoped，legacy 一次都不许被调。
+	rec := taskActionRequest(t, s, "jobs.output", `{"sessionId":"session-a","id":"j1","limit":2}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Result map[string]any `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Result["output"] != "ab" || got.Result["sessionId"] != "session-a" {
+		t.Fatalf("scoped 结果不对：%+v", got.Result)
+	}
+	if scopedCalls != 1 || legacyCalls != 0 {
+		t.Fatalf("带 sessionId 的请求没走 scoped：scoped=%d legacy=%d", scopedCalls, legacyCalls)
+	}
+
+	// 不带 sessionId：生产形状下必须 400，且仍然不许回落到 legacy。
+	rec = taskActionRequest(t, s, "jobs.output", `{"id":"j1"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("缺 sessionId 应当 400，实际 %d body=%s", rec.Code, rec.Body.String())
+	}
+	if legacyCalls != 0 {
+		t.Fatalf("缺 sessionId 的请求回落到没有会话身份的 legacy 回调 %d 次", legacyCalls)
+	}
+	if scopedCalls != 1 {
+		t.Fatalf("缺 sessionId 不该调用 scoped：%d", scopedCalls)
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"dshgo/internal/sandbox"
 	"dshgo/internal/session"
 	"dshgo/internal/transport"
 )
@@ -114,6 +115,17 @@ func cleanAuthorizedPath(path string) (string, os.FileInfo, error) {
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		return "", nil, attachmentBadRequest("不接受符号链接；请显式给出真实常规文件路径", nil)
+	}
+	// 上面那条只看**最后一段**的 FileMode，对两类链接是瞎的：
+	//  1. 目录 junction（Go ≥1.23 的 winsymlink=1 语义报 ModeIrregular，不是
+	//     ModeSymlink；见 internal/sandbox/reparse_windows.go 文件头）；
+	//  2. 中间组件是链接——`root\junction\file.txt` 的 Lstat 就是一个正常常规文件。
+	// 判据用 internal/sandbox 的同一份实现（#120）：GetFileAttributes 的
+	// REPARSE_POINT 属性位，扫整条已存在前缀。普通路径行为不变。
+	if linked, lerr := sandbox.PathHasReparsePoint(abs); lerr != nil {
+		return "", nil, attachmentBadRequest("本地路径不可读取", lerr)
+	} else if linked {
+		return "", nil, attachmentBadRequest("不接受符号链接/junction；请显式给出真实常规文件路径", nil)
 	}
 	if !info.Mode().IsRegular() {
 		return "", nil, attachmentBadRequest("本地路径不是常规文件", nil)

@@ -39,6 +39,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"dshgo/internal/sandbox"
 )
 
 const (
@@ -318,7 +320,8 @@ func hasRuntimeExtension(target string) bool {
 	return false
 }
 
-// containedFile 把一个包内相对路径解析成真实路径，并保证它留在包内且不是 symlink。
+// containedFile 把一个包内相对路径解析成真实路径，并保证它留在包内且不是链接
+// （symlink / 目录 junction / 其它重解析点都算链接）。
 func containedFile(dir, relative string) (string, error) {
 	trimmed := strings.TrimSpace(relative)
 	if trimmed == "" {
@@ -328,8 +331,7 @@ func containedFile(dir, relative string) (string, error) {
 		return "", fmt.Errorf("creation: 生成包里的路径 %q 不能是绝对路径", trimmed)
 	}
 	full := filepath.Clean(filepath.Join(dir, filepath.FromSlash(trimmed)))
-	rel, err := filepath.Rel(dir, full)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if creationPathEscapes(dir, full) {
 		return "", fmt.Errorf("creation: 生成包里的路径 %q 逃出了包目录", trimmed)
 	}
 	info, err := os.Lstat(full)
@@ -339,7 +341,48 @@ func containedFile(dir, relative string) (string, error) {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("creation: 生成包里不允许 symlink（%q；本仓 pluginmgr 也会拒绝包内 symlink）", trimmed)
 	}
+	// Lstat 只看 Mode、而且只看得见**最后一段**。目录 junction 在 Go ≥1.23 的
+	// `winsymlink=1` 语义下报 ModeIrregular（既不是 ModeSymlink 也不是目录，见
+	// internal/sandbox/reparse_windows.go 文件头）；中间组件是链接时 Lstat 看到的
+	// 甚至是一个正常常规文件。判据复用 internal/sandbox 的同一份实现：扫描已存在
+	// 前缀的 GetFileAttributes REPARSE_POINT 属性位。
+	linked, lerr := sandbox.PathHasReparsePoint(full)
+	if lerr != nil {
+		return "", fmt.Errorf("creation: 读生成包里 %q 的路径属性失败: %w", trimmed, lerr)
+	}
+	if linked {
+		// 最后一段本身是链接 → 生成包里不允许任何链接条目（pluginmgr 的 WalkDir
+		// 判据同样拒绝），直接拒。
+		if reparse, rerr := sandbox.IsReparsePoint(full); rerr != nil {
+			return "", fmt.Errorf("creation: 读生成包里 %q 的属性失败: %w", trimmed, rerr)
+		} else if reparse {
+			return "", fmt.Errorf("creation: 生成包里不允许 junction/reparse point（%q；本仓 pluginmgr 也会拒绝包内链接）", trimmed)
+		}
+		// 中间组件是链接：`pkg\junction\evil.js` 的 Lstat 是常规文件，上面全过，
+		// 而 readCapped/requireBuiltEntry 打开它就会落到包外。按**解析后**的真实
+		// 路径核一次包含性。注意这里**只在确实有链接时**才解析：没有链接的普通
+		// 路径（含 UNC/网络盘）一次 EvalSymlinks 都不多做，行为一字节不变；
+		// 而"暂存目录的祖先本身是 junction"这种合法场景仍按解析后的真实路径判，
+		// 不会被一刀切拒掉。
+		resolvedDir, derr := sandbox.ResolveExistingPath(dir)
+		if derr != nil {
+			return "", fmt.Errorf("creation: 解析生成包目录失败: %w", derr)
+		}
+		resolvedFull, ferr := sandbox.ResolveExistingPath(full)
+		if ferr != nil {
+			return "", fmt.Errorf("creation: 解析生成包里的 %q 失败: %w", trimmed, ferr)
+		}
+		if creationPathEscapes(resolvedDir, resolvedFull) {
+			return "", fmt.Errorf("creation: 生成包里的路径 %q 经 junction/symlink 解析后逃出了包目录", trimmed)
+		}
+	}
 	return full, nil
+}
+
+// creationPathEscapes 判 target 是否逃出 base（target == base 不算逃）。
+func creationPathEscapes(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	return err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // readCapped 读一个 ≤1 MiB 的常规文件。

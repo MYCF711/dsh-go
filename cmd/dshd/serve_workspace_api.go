@@ -26,8 +26,10 @@ package main
 //     此刻真有 live turn 或排队项"；`stop` 走 `CancelPlacement(interrupt)`，
 //     与 `session.cancel` 同一条路径。
 //   - **workspaceFiles** 的根是**该会话日志头里的 cwd**（不是进程 cwd）。读路径
-//     一律先做词法边界检查，再对真实解析后的路径（EvalSymlinks）复核一次，
-//     因此 `..`、绝对路径越界、符号链接逃逸都出不去工作区根。
+//     一律先做词法边界检查，再对真实解析后的路径复核一次（EvalSymlinks +
+//     Windows 目录 junction/其它重解析点，走 internal/sandbox 的
+//     ResolveExistingPath；Go ≥1.23 的 EvalSymlinks 不跟 junction），
+//     因此 `..`、绝对路径越界、符号链接/junction 逃逸都出不去工作区根。
 //   - **directoryPicker** 的 home 是宿主账户 home（`os.UserHomeDir`，测试可注入），
 //     列的是真实目录项；建目录真的 Mkdir，已存在就报 `directory-picker/exists`。
 //
@@ -508,12 +510,12 @@ func officialResolveWithin(root, path, base string, allowEmpty bool) (string, st
 	// 词法边界过了还要按**真实解析后**的路径再核一次：符号链接/联接点会把
 	// 一个看起来在里面的路径指到外面去。
 	//
-	// 这里必须走 sandbox.ResolveExistingPath 而不是 filepath.EvalSymlinks：
-	// 后者在 Go ≥1.23 的 `winsymlink=1` 下不跟目录 junction，而且对 junction
-	// **下面**的路径直接报 ERROR_PATH_NOT_FOUND（实测 errno=3）。用 EvalSymlinks
-	// 的话 `workspaceFiles.read("link\secret.txt")`（link 是指向工作区外的
-	// junction）里 `resolvedTarget` 拿不到 → 整个复核被静默跳过 → 读到工作区外。
-	// 普通路径（无重解析点）ResolveExistingPath 内部仍是 EvalSymlinks，行为不变。
+	// 必须用 sandbox.ResolveExistingPath 而不是裸 filepath.EvalSymlinks：Go ≥1.23
+	// 的 `winsymlink=1` 语义下 EvalSymlinks **不跟目录 junction**（原样返回，见
+	// internal/sandbox/reparse_windows.go 文件头），只靠它会让
+	// `root\junction\secret.txt` 看起来还在工作区里，而 os.Open 会照着 junction
+	// 落到工作区外——这正是本文件头承诺"符号链接逃逸出不去"的那条防线。
+	// 没有 reparse point 的普通路径仍走 EvalSymlinks，行为一字节不变。
 	if resolvedRoot, err := sandbox.ResolveExistingPath(root); err == nil {
 		if resolvedTarget, terr := sandbox.ResolveExistingPath(target); terr == nil {
 			if !officialPathWithin(resolvedRoot, resolvedTarget) {
@@ -559,8 +561,13 @@ func officialHasSchemePrefix(path string) bool {
 }
 
 // officialResolvedAbsolute 给出"官方 absolutePath"：符号链接解析后的绝对路径。
+//
+// 用 sandbox.ResolveExistingPath（#120 的 junction 判据）：官方这一层是 Node
+// `fs.realpath`，它会把目录 junction 解析到真实目标；Go ≥1.23 的 EvalSymlinks
+// 不跟 junction，只靠它的话，junction 工作区里每个 absolutePath 都会报成
+// junction 自己的路径（和官方不一致）。普通路径仍是 EvalSymlinks 的结果。
 func officialResolvedAbsolute(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	if resolved, err := sandbox.ResolveExistingPath(path); err == nil {
 		return filepath.Clean(resolved)
 	}
 	return filepath.Clean(path)

@@ -2,18 +2,18 @@
 
 package main
 
-// `workspaceFiles.*` 读边界对目录 junction 的盲区。
+// workspaceFiles 的边界复核是**安全判据**（决定放不放行）：本文件头承诺
+// "读路径一律先做词法边界检查，再对真实解析后的路径复核一次，因此 `..`、
+// 绝对路径越界、符号链接逃逸都出不去工作区根"。
 //
-// `officialResolveWithin` 先用词法比较挡 `..`，再按**真实解析后**的路径复核一次
-// 符号链接/junction 逃逸。第二道复核如果只靠 `filepath.EvalSymlinks`，在 Go ≥1.23
-// 的 `winsymlink=1` 下对目录 junction 完全不起作用（junction 本身原样返回、
-// junction 下面的路径直接 ERROR_PATH_NOT_FOUND / 实测 errno=3），于是
+// 这个承诺在 Go ≥1.23 的 `winsymlink=1` 语义下对目录 junction 是假的：
+// `filepath.EvalSymlinks` **不跟 junction**（原样返回），于是
+// `root\escape-junction\secret.txt` 的"真实解析结果"看起来还在 root 里，
+// 而 os.Open/os.ReadFile 会照着 junction 读到工作区外。
 //
-//	<root>\link-out\secret.txt     （link-out → 工作区外的目录）
-//
-// 会被当成工作区内路径**读出去**。三个读方法（read / list / stat）共用这条路径，
-// 所以三个都要钉。反向控制同样要钉：junction 指向工作区**里面**时官方的
-// symlink 语义是跟随（不是拒绝），修复不许把它一起判死。
+// 修复：边界复核改用 internal/sandbox.ResolveExistingPath（#120 的同一份实现：
+// 先按 REPARSE_POINT 属性位探测，命中才用 GetFinalPathNameByHandleW；
+// 普通路径仍走 EvalSymlinks，行为一字节不变）。
 
 import (
 	"net/http"
@@ -23,93 +23,71 @@ import (
 	"testing"
 )
 
-// workspaceScopeID 是本组用例的会话 id（每个用例独立 home + 独立 id）。
-func junctionScopeSession(t *testing.T, h *officialWorkspaceHarness, id string) (root, outside string) {
-	t.Helper()
-	base := t.TempDir()
-	root = newOfficialWorkspaceDir(t, base, "root")
-	outside = newOfficialWorkspaceDir(t, base, "outside")
-	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("outside-secret\n"), 0o644); err != nil {
-		t.Fatalf("写工作区外文件: %v", err)
-	}
-	newRealSession(t, h.home, root, id)
-	return root, outside
-}
-
-// TestOfficialWorkspaceFilesRefuseReadThroughJunction 读族三方法经 junction 越界必须拒。
-func TestOfficialWorkspaceFilesRefuseReadThroughJunction(t *testing.T) {
+// TestOfficialWorkspaceFilesRejectsJunctionEscape 经 junction 的越界读/列目录/读字节
+// 必须报 workspaceFiles/outside-workspace；工作区**内部**的 junction 不算逃逸。
+func TestOfficialWorkspaceFilesRejectsJunctionEscape(t *testing.T) {
 	h := newOfficialWorkspaceHarness(t)
-	const id = "ffffffff-0000-0000-0000-00000000j001"
-	root, outside := junctionScopeSession(t, h, id)
-	link := filepath.Join(root, "link-out")
-	makeTestJunction(t, link, outside)
+	root := newOfficialWorkspaceDir(t, t.TempDir(), "root")
+	outside := newOfficialWorkspaceDir(t, t.TempDir(), "outside")
+	id := "dddddddd-0000-0000-0000-0000000000a1"
+	newRealSession(t, h.home, root, id)
 
-	cases := []struct {
-		method string
-		body   map[string]any
-	}{
-		{"workspaceFiles.read", map[string]any{
-			"workspaceFileScopeId": id, "path": "link-out/secret.txt", "range": map[string]any{},
-		}},
-		{"workspaceFiles.list", map[string]any{
-			"workspaceFileScopeId": id, "path": "link-out",
-		}},
-		{"workspaceFiles.stat", map[string]any{
-			"workspaceFileScopeId": id, "path": "link-out/secret.txt",
-		}},
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("nope\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		msg := h.fail(t, c.method, c.body, http.StatusBadRequest)
+	makeTestJunction(t, filepath.Join(root, "escape-junction"), outside)
+
+	// 变异点：把 sandbox.ResolveExistingPath 改回裸 filepath.EvalSymlinks，这三条
+	// 都会红——修复前 resolvedTarget 仍是 root\escape-junction\...（junction 没被
+	// 跟），词法上"还在工作区里"，read 会真的把 outside 的内容返回给客户端。
+	for _, method := range []string{"workspaceFiles.read", "workspaceFiles.list", "workspaceFiles.readBytes"} {
+		body := map[string]any{"workspaceFileScopeId": id, "path": "escape-junction/secret.txt"}
+		switch method {
+		case "workspaceFiles.read":
+			body["range"] = map[string]any{}
+		case "workspaceFiles.list":
+			body["path"] = "escape-junction"
+		case "workspaceFiles.readBytes":
+			body["options"] = map[string]any{}
+		}
+		msg := h.fail(t, method, body, http.StatusBadRequest)
 		if !strings.Contains(msg, "workspaceFiles/outside-workspace") {
-			t.Fatalf("%s 经 junction 读到工作区外，错误=%q，want workspaceFiles/outside-workspace"+
-				"（junction 没被解析 = 读边界漏了）", c.method, msg)
+			t.Fatalf("%s 经 junction 越界应报 workspaceFiles/outside-workspace：%q", method, msg)
 		}
 	}
 
-	// 内容本身没被发出去：read 的结果里不许出现工作区外的正文。
-	code, out := h.call(t, "workspaceFiles.read", map[string]any{
-		"workspaceFileScopeId": id, "path": "link-out/secret.txt", "range": map[string]any{},
-	})
-	if code == http.StatusOK {
-		t.Fatalf("工作区外文件被读出来了：%v", out)
-	}
-}
-
-// TestOfficialWorkspaceFilesFollowJunctionInsideWorkspace 反向控制。
-//
-// junction 的目标仍在工作区里 → 官方语义是"跟随目录"（与 symlink 同一条），
-// list 要能列、read 要能读，不许因为修复变成一律拒绝。
-func TestOfficialWorkspaceFilesFollowJunctionInsideWorkspace(t *testing.T) {
-	h := newOfficialWorkspaceHarness(t)
-	const id = "ffffffff-0000-0000-0000-00000000j002"
-	root := newOfficialWorkspaceDir(t, t.TempDir(), "root")
-	inner := filepath.Join(root, "inner")
-	if err := os.MkdirAll(inner, 0o755); err != nil {
+	// 正控 1：根内普通文件照旧可读（别把正常路径一起判死）。
+	if err := os.WriteFile(filepath.Join(root, "ok.txt"), []byte("ok"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(inner, "a.txt"), []byte("a\n"), 0o644); err != nil {
+	res := h.ok(t, "workspaceFiles.read", map[string]any{
+		"workspaceFileScopeId": id, "path": "ok.txt", "range": map[string]any{},
+	})
+	if res["text"] != "ok" {
+		t.Fatalf("普通文件应照旧可读：%v", res)
+	}
+
+	// 正控 2：指向**工作区内**的 junction 不是逃逸（按解析后的真实路径判，不做
+	// 一刀切拒绝）；并且 absolutePath 必须是解析后的真实路径——官方这一层是
+	// Node `fs.realpath`，它跟 junction，而 Go 的 EvalSymlinks 不跟。
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	newRealSession(t, h.home, root, id)
-	link := filepath.Join(root, "link-in")
-	makeTestJunction(t, link, inner)
-
-	res := h.ok(t, "workspaceFiles.list", map[string]any{
-		"workspaceFileScopeId": id, "path": "link-in",
-	})
-	entries, _ := res["entries"].([]any)
-	if len(entries) != 1 {
-		t.Fatalf("工作区内的目录 junction 必须能列（官方 list 跟随目录）：%v", res)
+	inside := filepath.Join(root, "sub", "inside.txt")
+	if err := os.WriteFile(inside, []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if entry, _ := entries[0].(map[string]any); entry["name"] != "a.txt" {
-		t.Fatalf("子项不对：%v", res)
-	}
-
-	// 普通路径一个字节都不变：走同一条 officialResolveWithin。
+	makeTestJunction(t, filepath.Join(root, "inside-junction"), filepath.Join(root, "sub"))
 	res = h.ok(t, "workspaceFiles.read", map[string]any{
-		"workspaceFileScopeId": id, "path": "inner/a.txt", "range": map[string]any{},
+		"workspaceFileScopeId": id, "path": "inside-junction/inside.txt", "range": map[string]any{},
 	})
-	if res["text"] != "a" {
-		t.Fatalf("工作区内普通路径的读语义必须照旧：%v", res)
+	if res["text"] != "inside" {
+		t.Fatalf("工作区内的 junction 不该被拒：%v", res)
+	}
+	got, _ := res["absolutePath"].(string)
+	want := resolvedOrSelf(inside)
+	if !strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) {
+		t.Fatalf("absolutePath 应报 junction 解析后的真实路径：%q（期望 %q）", got, want)
 	}
 }
