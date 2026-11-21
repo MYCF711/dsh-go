@@ -203,6 +203,10 @@ func (a *officialPTYTerminalAPI) TerminalOpenForAgent(ctx context.Context, sessi
 	a.entries[entry.key()] = entry
 	a.mu.Unlock()
 	a.persistSession(sessionID)
+	// agent 新开的终端是**用户可见的时延来源**：它不是客户端自己发的 create，
+	// 客户端没有任何本地状态可回填，只能等 roster。官方在 allocate 提交后立刻
+	// changed（src/index.ts:427），这里对齐。
+	a.publishRosterChange(sessionID)
 	return entry.info(), nil
 }
 
