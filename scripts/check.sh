@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 fail=0
 # 记录每次判定，供最后的"守卫清单"核对：清单里写的必须在、且必须 PASS。
 gate_log="$(mktemp)"
-trap 'rm -f "$gate_log"' EXIT
+trap 'rm -f "$gate_log"; [ -n "${race_log:-}" ] && rm -f "$race_log"; true' EXIT
 pass() { printf '  PASS  %s
 ' "$1"; printf 'PASS %s
 ' "$1" >> "$gate_log"; }
@@ -58,9 +58,39 @@ else
   # `panic: test timed out after 20m0s` 且**没有任何 --- FAIL 行** —— 说明不是某条用例
   # 挂了，是整包被自己的超时掐死。2 核 runner 上 cmd/dshd 的 subprocess 用例在 -race
   # 下越来越慢（分母是几十条、每条 28s 起）。同样只放宽等待，不动断言。
-  race_out="$(go test ./... -race -timeout 30m 2>&1)"; race_rc=$?
-  if [ $race_rc -eq 0 ]; then
-    pass "go test -race"
+  #
+  # 2026-11-21：**不再抬等待时长，改成两条硬约束**（抬了三次，10m→20m→30m，治不了
+  # "不返回"；真正让它"不返回"的是下面这两件事，不是断言太紧）：
+  #
+  #   ① **这条命令不许用 `$( )` 捕获**。命令替换要等管道写端**全部**关闭才 EOF，
+  #      而 `go test` 会起 test 二进制，test 二进制再起 dshd / helper / bash。
+  #      只要有一个后代进程还活着并继承了那个写端，bash 就永远等不到 EOF——
+  #      整条门禁停在这一行，**后面 20 多道守卫一条都跑不到**（PR #104 就是这样
+  #      漏掉了 text-only 白名单漂移，靠 CI 才捞住）。实测本机 Git Bash：
+  #        x="$(bash -c 'sleep 20 &')"    → 20 秒才返回（写端被孙进程继承）
+  #        bash -c 'sleep 20 &' >/tmp/x   → 立即返回（重定向到文件不等写端）
+  #      所以跑法改成"输出落到文件"，见 scripts/race-step.sh。
+  #
+  #   ② **整步必须有有限预算**。`go test -timeout 30m` 只约束**单个包**：
+  #      `./...` 里每个包各有一份 30m，机器慢/被别的任务占着时可以合法地跑很久；
+  #      而整步原来没有任何上限，"卡住"就只能是无限等。预算到点先杀整棵进程树
+  #      （go → test 二进制 → dshd/helper，只杀我们这棵树），再打一条明确的 FAIL，
+  #      然后**继续跑后面的守卫**——门禁不许被一步卡死。
+  #      默认 2700s：比"单包 30m + WaitDelay 3m"这个合法上限还宽，只兜"不返回"。
+  #      真要更长就设 DSHGO_RACE_BUDGET=<秒>，别改断言。
+  race_budget="${DSHGO_RACE_BUDGET:-2700}"
+  race_t0=$(date +%s)
+  race_log="$(mktemp)"
+  bash scripts/race-step.sh --budget "$race_budget" --log "$race_log" -- \
+    go test ./... -race -timeout 30m
+  race_rc=$?
+  race_out="$(cat "$race_log")"
+  if [ "$race_rc" -eq 124 ]; then
+    # 预算打满 = 这一步没跑完。按失败处理，并且把"哪里卡住/后面还跑不跑"说清楚。
+    printf '%s\n' "$race_out" | tail -30
+    bad "go test -race：${race_budget}s 硬预算内没跑完，已被中止（这不是通过——竞态面本次**未被验证**）；后面所有守卫已继续执行。要更长设 DSHGO_RACE_BUDGET=<秒>"
+  elif [ $race_rc -eq 0 ]; then
+    pass "go test -race（$(( $(date +%s) - race_t0 ))s）"
   elif echo "$race_out" | grep -qiE 'requires cgo|C compiler|gcc.{0,12}not found|exec: "gcc"'; then
     printf '%s\n' "$race_out" | tail -5
     bad "-race 没跑起来（$(echo "$race_out" | head -1)）——SKIP 不算通过：装 C 工具链并设 CGO_ENABLED=1（见 docs/race.md）"
@@ -435,6 +465,31 @@ if [ -f scripts/gate-manifest.txt ]; then
   fi
 else
   bad "scripts/gate-manifest.txt 不见了：门禁失去了自我核对的能力"
+fi
+
+# ---------- 本次门禁到底跑了什么 ----------
+# 只报"有没有 FAIL"回答不了"哪些步真的跑了"：race 撞预算那一轮就是"看起来没红"的
+# 形状——没有 FAIL，但后面 20 多道守卫一条都没执行。所以收尾把账摊开：步数，
+# 以及跳过/警告/失败逐条列出（PASS 不列，否则一屏全是 PASS 反而看不见问题）。
+if [ -s "$gate_log" ]; then
+  g_pass=$(grep -c '^PASS ' "$gate_log" || true)
+  g_skip=$(grep -c '^SKIP ' "$gate_log" || true)
+  g_warn=$(grep -c '^WARN ' "$gate_log" || true)
+  g_fail=$(grep -c '^FAIL ' "$gate_log" || true)
+  printf '\n== 本次执行账：PASS=%s SKIP=%s WARN=%s FAIL=%s（共 %s 步） ==\n' \
+    "$g_pass" "$g_skip" "$g_warn" "$g_fail" "$(grep -c . "$gate_log" || true)"
+  if [ "$g_skip" -gt 0 ]; then
+    echo "  -- 跳过（这些步本次没验） --"
+    grep '^SKIP ' "$gate_log" | sed 's/^SKIP /    /'
+  fi
+  if [ "$g_warn" -gt 0 ]; then
+    echo "  -- 警告（跑了，但不判红） --"
+    grep '^WARN ' "$gate_log" | sed 's/^WARN /    /'
+  fi
+  if [ "$g_fail" -gt 0 ]; then
+    echo "  -- 失败 --"
+    grep '^FAIL ' "$gate_log" | sed 's/^FAIL /    /'
+  fi
 fi
 
 echo
