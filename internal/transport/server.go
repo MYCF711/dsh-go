@@ -143,7 +143,12 @@ type Options struct {
 	WorkspaceList func(path string) ([]WorkspaceEntry, error)
 	// JobsList 列后台任务；JobsOutput 取某个任务的输出。
 	// **nil = 这个宿主没有后台任务能力**（比如不带 exec 模块），回 501 不是 500。
-	JobsList   func() []JobInfo
+	JobsList func() []JobInfo
+	// JobsOutput 是任务输出的**旧兼容入口**：只有 id，没有会话身份。
+	//
+	// 没有会话身份就意味着宿主只能写"全局那一根子进程 stdin"，而轮次是按会话
+	// 并发的（见 cmd/dshd/serve.go 的注释）。所以生产装配**不接线它**；
+	// 保留字段只为单会话嵌入方/既有测试，生产 jobs.output 一律走下面的 scoped。
 	JobsOutput func(id string, wait time.Duration) (JobOutput, error)
 	// JobsOutputScoped 是真实分页/会话隔离入口；cursor/limit 单位是 Unicode code point。
 	// 非 nil 时生产路径必须带 sessionId，旧 JobsOutput 只作兼容 fallback。
