@@ -76,13 +76,23 @@ else
   #      而整步原来没有任何上限，"卡住"就只能是无限等。预算到点先杀整棵进程树
   #      （go → test 二进制 → dshd/helper，只杀我们这棵树），再打一条明确的 FAIL，
   #      然后**继续跑后面的守卫**——门禁不许被一步卡死。
-  #      默认 2700s：比"单包 30m + WaitDelay 3m"这个合法上限还宽，只兜"不返回"。
+  #      默认 3600s：比"单包 45m + WaitDelay 3m"这个合法上限还宽，只兜"不返回"。
   #      真要更长就设 DSHGO_RACE_BUDGET=<秒>，别改断言。
-  race_budget="${DSHGO_RACE_BUDGET:-2700}"
+  #
+  # 2026-11-22：单包超时 30m -> 45m、预算 2700s -> 3600s。
+  # **这不是重走"抬了三次超时"的老路，两次性质不同**：
+  #   当初抬超时治不了「不返回」，因为真原因是上面 ①②（`$( )` 捕获死等 /
+  #   缺整步预算）。那两条已经修好了 —— 现在报的是 `panic: test timed out
+  #   after 30m0s`，**是包真的跑满 30 分钟，不是卡死**。
+  #   证据：`cmd/dshd` 在 16 核本地 -race 就要 468~535s（约 8~9 分钟），
+  #   2 核 CI runner 上 3~4 倍即 24~36 分钟，**正好压在 30m 边界上** ——
+  #   于是同一个包在 CI 上时红时绿，挡掉了 #118/#119/#120 在内的多个 PR。
+  #   包真慢就该给够时间；"卡住"另有 ①② 与预算兜着。
+  race_budget="${DSHGO_RACE_BUDGET:-3600}"
   race_t0=$(date +%s)
   race_log="$(mktemp)"
   bash scripts/race-step.sh --budget "$race_budget" --log "$race_log" -- \
-    go test ./... -race -timeout 30m
+    go test ./... -race -timeout 45m
   race_rc=$?
   race_out="$(cat "$race_log")"
   if [ "$race_rc" -eq 124 ]; then
