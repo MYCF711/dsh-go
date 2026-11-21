@@ -29,6 +29,14 @@ import (
 // DefaultThresholdRatio 是官方 `context.compaction.thresholdRatio` 的出厂值。
 const DefaultThresholdRatio = 0.8
 
+// DefaultRetainRatio 是官方 `context.compaction.retainRatio` 的出厂值（16%）。
+//
+// 官方 `dsh-compaction-basic/lib/index.js:17`：`const DEFAULT_RETAIN_RATIO = .16;`
+// 它决定**压完之后还留多少原始消息**：`retainTokens = floor(messageBudget × 0.16)`
+// （同文件 `:133`）。宿主以前用的是一个自造的绝对值 `KeepTokens = 2000`——1M 窗口
+// 下官方留 ~15 万 token、我们只留 2000（差 75 倍），压一次上下文就几乎清空。
+const DefaultRetainRatio = 0.16
+
 // ReservedCompletionTokens 是官方 `reservedCompletionTokens(header, defaultMaxTokens)`：
 // 请求头自己声明的 `maxTokens` 优先，否则用 adapter 的每请求默认值，都没有就是 0。
 //
@@ -54,6 +62,9 @@ type PressureBudget struct {
 	HeadroomTokens int
 	// ThresholdRatio 是窗口比例阈值（官方默认 0.8）；<=0 时按默认值。
 	ThresholdRatio float64
+	// RetainRatio 是压完之后保留的原始尾巴占消息预算的比例（官方默认 0.16，
+	// `dsh-compaction-basic/lib/index.js:17`）；<=0 时按默认值。
+	RetainRatio float64
 }
 
 // MessageBudgetTokens 是"prompt 能用多少"：W − O。
@@ -102,6 +113,35 @@ func (b PressureBudget) ThresholdTokens() (int, error) {
 		return byRatio, nil
 	}
 	return budget, nil
+}
+
+// RetainTokens 是官方压缩后保留的尾巴预算：`floor(messageBudget × retainRatio)`
+// （`dsh-compaction-basic/lib/index.js:133`）。
+//
+// 官方还在同一处做了一条 fail-loud（`:134`）：`retainTokens` 必须**小于**
+// `thresholdTokens`，否则"留的比触发线还多"永远压不下去。这里照同一形状校验。
+//
+// 窗口未知时返回错误，不退回任何绝对值——调用方按"只按条数留"处理（官方
+// `selectCompactableRange(..., 0)` 在手动压缩时正是这个形状，见 `:1009`）。
+func (b PressureBudget) RetainTokens() (int, error) {
+	message, err := b.MessageBudgetTokens()
+	if err != nil {
+		return 0, err
+	}
+	ratio := b.RetainRatio
+	if ratio <= 0 || ratio >= 1 {
+		ratio = DefaultRetainRatio
+	}
+	retain := int(math.Floor(float64(message) * ratio))
+	threshold, err := b.ThresholdTokens()
+	if err != nil {
+		return 0, err
+	}
+	if retain >= threshold {
+		return 0, fmt.Errorf("保留预算 %d 不小于压缩阈值 %d（retainRatio=%.3g，thresholdRatio=%.3g）；"+
+			"留得比触发线还多就永远压不下去，把 retainRatio 调小", retain, threshold, ratio, b.ThresholdRatio)
+	}
+	return retain, nil
 }
 
 // 宿主 `--auto-compact` 的三种取值。它是**显式覆盖**手段，出厂没有数值默认值。

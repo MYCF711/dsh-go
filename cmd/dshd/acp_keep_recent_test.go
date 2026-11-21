@@ -15,6 +15,7 @@ package main
 import (
 	"testing"
 
+	"dshgo/internal/llm"
 	"dshgo/internal/spi"
 )
 
@@ -34,9 +35,27 @@ func TestACPCompactSelectOptionsFollowKeepRecent(t *testing.T) {
 	if got := r.compactSelectOptions().KeepRecent; got != 5 {
 		t.Fatalf("改 keepRecent 后使用点仍读到 %d，期望 5：字段没有接到使用点", got)
 	}
-	// 其余两项保持原值（这次只接 keepRecent，不顺手改别人的预算）。
+	// KeepTokens 不再是我方自造的 2000，而是官方
+	// `retainTokens = floor((W − O) × retainRatio)`
+	//（`dsh-compaction-basic/lib/index.js:17` 的 `DEFAULT_RETAIN_RATIO = .16`、
+	// `:133` 的公式）。窗口写死成 1M / maxOutput 128k，算出来是 139520——
+	// 与旧值 2000 差 69.76 倍，把 2000 改回去这条会立刻红。
+	r.ctxWindow = 1_000_000
+	r.capacity = llm.ModelCapacity{ContextWindow: 1_000_000, MaxOutput: 128_000}
 	opts := r.compactSelectOptions()
-	if opts.KeepTokens != 2000 || opts.MinToCompact != 2 {
-		t.Fatalf("KeepTokens/MinToCompact = %d/%d，期望保持 2000/2", opts.KeepTokens, opts.MinToCompact)
+	const wantKeepTokens = 139520 // floor((1000000−128000) × 0.16)
+	if opts.KeepTokens != wantKeepTokens {
+		t.Fatalf("KeepTokens = %d，期望 %d（官方 retainRatio 0.16 × 消息预算 872000）",
+			opts.KeepTokens, wantKeepTokens)
+	}
+	if opts.MinToCompact != 2 {
+		t.Fatalf("MinToCompact = %d，期望 2", opts.MinToCompact)
+	}
+	// 窗口未知 → 算不出官方预算，退回「只按条数留」（官方手动压缩的形状：
+	// `selectCompactableRange(..., 0)`，`lib/index.js:1009`），不编一个绝对数。
+	r.ctxWindow = 0
+	r.capacity = llm.ModelCapacity{}
+	if got := r.compactSelectOptions().KeepTokens; got != 0 {
+		t.Fatalf("窗口未知时 KeepTokens = %d，期望 0（只按条数留，不编绝对值）", got)
 	}
 }

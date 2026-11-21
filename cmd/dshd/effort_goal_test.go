@@ -80,11 +80,13 @@ func TestEffortGoalRealDSHDSetEffortCatalogLoadABRestartAndRunner(t *testing.T) 
 	assertEffortSelection(t, client, server.base, sessionA, "")
 	assertEffortSelection(t, client, server.base, sessionB, "low")
 	assertActualEffort(t, client, server.base, sessionA, "deep")
-	// 清掉会话档后回落到**宿主默认档**：官方 profile 出厂 max
-	// （cordis.patch.yml.bak-1794253367009:8），见 reasoning_default_test.go。
-	// 该 fixture 模型只声明 off/low/deep，所以 v4 记录的 catalog level 仍是 ""
-	// （宿主默认值不是这个模型的声明 key），但真实请求带的是默认 wire 值 "max"。
-	effortGoalPromptAndAssert(t, client, server, sessionA, "prove cleared", seen, "effort-model", "max")
+	// 清掉会话档后回落到**宿主默认档** —— 官方出厂**不设**这一档
+	// （rc.5 dsh-base/cordis.patch.yml 里 reasoningEffort 零命中），
+	// 所以真实请求**不带** reasoning_effort，wire 值是空串。
+	//
+	// 2026-11-21 自纠：上一版这里断言 "max"，依据是本机 $DSH_HOME 的用户 profile，
+	// 不是官方出厂配置 —— 把用户偏好当官方默认，见 reasoning_default_test.go。
+	effortGoalPromptAndAssert(t, client, server, sessionA, "prove cleared", seen, "effort-model", "")
 	assertActualEffort(t, client, server.base, sessionA, "")
 	assertActualEffort(t, client, server.base, sessionB, "low")
 	t.Log("EFFORT_REAL_SUMMARY OK=1 FAIL=0")

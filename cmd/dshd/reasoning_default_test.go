@@ -25,9 +25,8 @@ package main
 import "testing"
 
 func TestDefaultReasoningEffortMatchesOfficialProfile(t *testing.T) {
-	if defaultReasoningEffort != "max" {
-		t.Fatalf("默认推理档 = %q，官方 profile 是 max"+
-			"（cordis.patch.yml.bak-1794253367009:8 agent-default-model.reasoningEffort）",
+	if defaultReasoningEffort != "" {
+		t.Fatalf("默认推理档 = %q，官方出厂**不设**这一档（rc.5 dsh-base/cordis.patch.yml 里 reasoningEffort 零命中）",
 			defaultReasoningEffort)
 	}
 }
@@ -39,13 +38,13 @@ func TestDefaultReasoningEffortFromEnv(t *testing.T) {
 		want string
 	}{
 		// 未设 env：官方出厂档。
-		{name: "未设env用official默认", env: "", want: "max"},
+		{name: "未设env用official默认（空=不发）", env: "", want: ""},
 		// env 非空：envOr 语义，逐字覆盖（含关闭档 off）。
 		{name: "env覆盖为xhigh", env: "xhigh", want: "xhigh"},
 		{name: "env覆盖为off", env: "off", want: "off"},
 		// 空 env 不能被当成"显式清空"——那样 exporter/空导出变量就会把官方默认改坏；
 		// 真要关掉必须走 --reasoning=（显式空参数）。
-		{name: "空env不覆盖", env: "", want: "max"},
+		{name: "空env不覆盖", env: "", want: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

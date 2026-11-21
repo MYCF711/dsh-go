@@ -40,6 +40,9 @@ func autoCompact(ctx context.Context, path string, keep, maxMessages int, model,
 		return out, err
 	}
 	surface := session.Surface(before)
+	// 手动压缩不传 KeepTokens：官方手动那条路径给 `selectCompactableRange` 的
+	// retainTokens 就是 0（`dsh-compaction-basic/lib/index.js:1009`，`compactNow`），
+	// 也就是"只按条数留、把其余全压掉"。`Options.KeepTokens <= 0` 正是这个形状。
 	span, n, ok := compact.Plan(surface, compact.Options{
 		KeepRecent: keep, MinToCompact: 2, MaxMessages: maxMessages,
 	})

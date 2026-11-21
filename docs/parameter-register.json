@@ -20,11 +20,11 @@
     "summary": {
       "entries": 239,
       "byVerdict": {
-        "OK": 134,
+        "OK": 136,
         "HARDCODED": 2,
         "UNREAD": 5,
         "DEVIATION-SAFETY": 1,
-        "N-A": 97
+        "N-A": 95
       },
       "flags": 98,
       "officialCoverage": {
@@ -1142,7 +1142,7 @@
     {
       "key": "runCompactor.KeepRecent",
       "domain": "host",
-      "officialSource": "compaction.keepRecent",
+      "officialSource": "（官方无条数下限）dsh-compaction-basic selectCompactableRange :410-432",
       "officialDefault": null,
       "hostReadPoint": "cmd/dshd/main.go:1724",
       "hostUsePoint": "run 自动压缩的保留条数下限；注释写「run 这条路径不暴露 token 预算」，KeepTokens 走 compact 包默认 2000",
@@ -1150,8 +1150,8 @@
       "verdict": "N-A",
       "fixedBy": null,
       "owner": "host",
-      "note": "run 自动压缩的保留条数（6，兜底 2）；压缩策略内部预算。；锚点纠正（t16）：`compact.Select(..., compact.Options{KeepRecent: 6, ...})` 的保留条数下限（原 cmd/dshd/main.go:1704）",
-      "evidence": "cmd/dshd/main.go:1724"
+      "note": "GO8-RC5：KeepTokens 不再兜底 2000，run 路径按官方手动压缩形状「只按条数留」（retainTokens=0，:1009）。KeepRecent=6 是宿主选择，官方无对应值。",
+      "evidence": "cmd/dshd/main.go:1937-1943"
     },
     {
       "key": "runCompactor.CompactionMeta",
@@ -1184,30 +1184,30 @@
     {
       "key": "acp autoCompactNow 选项",
       "domain": "host",
-      "officialSource": "compaction.keepRecent / keepTokens",
-      "officialDefault": null,
+      "officialSource": "dsh-compaction-basic/lib/index.js:17 DEFAULT_RETAIN_RATIO=.16 / :133 retainTokens=floor(messageBudget×ratio)",
+      "officialDefault": "retainTokens = floor((contextWindow−reservedCompletionTokens)×0.16)",
       "hostReadPoint": "cmd/dshd/acp.go:1336",
       "hostUsePoint": "ACP 自动压缩的保留预算，写死在调用点",
-      "ourDefault": "KeepRecent: 2, KeepTokens: 2000, MinToCompact: 2",
-      "verdict": "N-A",
+      "ourDefault": "KeepRecent: r.keepRecent, KeepTokens: floor((W−O)×0.16)（窗口未知时 0 = 只按条数）, MinToCompact: 2",
+      "verdict": "OK",
       "fixedBy": null,
       "owner": "host",
-      "note": "ACP 自动压缩的保留预算（KeepRecent/KeepTokens/MinToCompact），与 compact.Options 同源。",
-      "evidence": "cmd/dshd/acp.go:1336"
+      "note": "GO8-RC5：删掉自造兜底 2000，改走官方 retainRatio 0.16（PressureBudget.RetainTokens）。窗口未知时退回「只按条数留」，对齐官方手动压缩 selectCompactableRange(...,0)（:1009）。",
+      "evidence": "internal/compact/budget.go:126 RetainTokens；cmd/dshd/acp.go compactSelectOptions；测试 internal/compact/official_defaults_test.go"
     },
     {
       "key": "compact.Options 默认值",
       "domain": "host",
-      "officialSource": "compaction.keepRecent / keepTokens",
-      "officialDefault": null,
+      "officialSource": "dsh-compaction-basic/lib/index.js:17/:133（retainRatio）；条数下限官方无（selectCompactableRange :410-432）",
+      "officialDefault": "KeepTokens = floor((W−O)×0.16)；KeepRecent/MinToCompact 官方无对应值",
       "hostReadPoint": "internal/compact/compact.go:35",
       "hostUsePoint": "withDefaults：零值即默认；三个调用方（run/acp/session compact/autoCompact）各自再写一遍不同的数",
-      "ourDefault": "KeepRecent=2, KeepTokens=2000, MinToCompact=2",
-      "verdict": "N-A",
+      "ourDefault": "KeepRecent=2（宿主安全垫）, KeepTokens=0=只按条数（不再兜底 2000）, MinToCompact=2",
+      "verdict": "OK",
       "fixedBy": null,
       "owner": "host",
-      "note": "内部压缩预算的零值默认（KeepRecent/KeepTokens/MinToCompact），由调用方覆盖。",
-      "evidence": "internal/compact/compact.go:35"
+      "note": "GO8-RC5：删掉自造的 KeepTokens=2000 兜底；<=0 语义改为「只有条数预算」。KeepRecent/MinToCompact 官方没有，标注为宿主安全垫。",
+      "evidence": "internal/compact/compact.go:45-51；测试 TestKeepTokensZeroMeansCountOnly"
     },
     {
       "key": "compact.Summarize MaxTokens",
@@ -1226,30 +1226,30 @@
     {
       "key": "compact maxPromptChars",
       "domain": "host",
-      "officialSource": "compaction.summaryPromptChars",
+      "officialSource": "（官方无此概念）dsh-compaction-basic summarizeWithLlm :292-340 原样重放被压前缀，逐条与总量都不截断",
       "officialDefault": null,
       "hostReadPoint": "internal/compact/compact.go:117",
       "hostUsePoint": "摘要请求的输入字符预算；超了直接截断并写「后面还有 N 条」",
-      "ourDefault": "24000",
+      "ourDefault": "已删除（原 24000）",
       "verdict": "N-A",
       "fixedBy": null,
       "owner": "host",
-      "note": "摘要输入字符预算（24000），内部截断保护。",
-      "evidence": "internal/compact/compact.go:117"
+      "note": "GO8-RC5：官方摘要输入不设字符上限，24000 是本仓自造，已删。",
+      "evidence": "internal/compact/compact.go:123-130（删除说明）；测试 TestSummarizeDoesNotCapTotalPrompt"
     },
     {
       "key": "compact maxMessageChars",
       "domain": "host",
-      "officialSource": "compaction.summaryMessageChars",
+      "officialSource": "（官方无此概念）同上",
       "officialDefault": null,
       "hostReadPoint": "internal/compact/compact.go:118",
       "hostUsePoint": "单条消息进摘要前的截断长度（rune）",
-      "ourDefault": "1200",
+      "ourDefault": "已删除（原 1200）",
       "verdict": "N-A",
       "fixedBy": null,
       "owner": "host",
-      "note": "单条消息进摘要前的截断长度（1200 rune）。",
-      "evidence": "internal/compact/compact.go:118"
+      "note": "GO8-RC5：官方按条不截断，1200 rune 自造，已删；同时删掉摘要指令里的「控制在 400 字以内」。",
+      "evidence": "internal/compact/compact.go:167-176；测试 TestSummarizeDoesNotTruncateLongMessage"
     },
     {
       "key": "compact.Summarize 系统提示",
