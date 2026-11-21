@@ -2,7 +2,9 @@
   "_说明": "权限分支登记表：每个决定『放不放行』的函数都必须写明钉住它的测试函数名。scripts/perm-guard.py 会检查这张表与代码一致。",
   "_本轮登记说明": {
     "internal/agent/parallel.go::executionMode": "rc.2 同步把 blocksOnHuman 改名成 executionMode（判据从 bool 扩成三档：查不到工具 / Caps().NeedsApproval() / 逐调用的 spi.ConcurrencySafe ⇒ 都返回 modeExclusive），所以**改登记、不删条目**。它拦的是『这条工具调用要不要走等人车道、能不能并发』：NeedsApproval 为真就独占——审批通道是一问一答、只有 1 个缓冲位（cmd/dshd/approval_stdio.go），两个并发审批会吃到对方的应答。钉它的用例仍是 TestApprovalClassToolsAreSerialized（parallel_test.go:417，原来钉 blocksOnHuman 的那条）；另有一条 TestApprovalOverridesDeclaredConcurrencySafety（parallel_test.go:1042）钉『审批压过工具自己声明的并发安全』。",
-    "internal/agent/parallel.go::maxParallelToolCalls": "本轮新增的并发上限解析：字段优先，否则读 DSHD_MAX_PARALLEL_TOOL_CALLS，未设置/非法/≤0 一律回落官方默认 10（负数不解释成『无限』）。它是真实权限分支——这个数字直接决定『同一批调用里有多少个可以同时动磁盘/网络/同一批文件』：调大就是放宽并发放行，会改变真实副作用（并发写同一文件的顺序、对端看到的 QPS），所以不能当成资源旋钮随手改。守卫命中的由头是紧跟其后的 executionMode 文档注释（perm-guard 按 func 边界切块、注释算进上一个函数体——与 cmd/dshd/main.go::cmdTools 那条豁免同一成因），但函数本身是真判定，因此**登记测试而不是豁免**：TestMaxParallelToolCallsParsing（parallel_test.go:644，含默认值 10 / env 三值 / 字段压过 env 三段）。"
+    "internal/agent/parallel.go::maxParallelToolCalls": "本轮新增的并发上限解析：字段优先，否则读 DSHD_MAX_PARALLEL_TOOL_CALLS，未设置/非法/≤0 一律回落官方默认 10（负数不解释成『无限』）。它是真实权限分支——这个数字直接决定『同一批调用里有多少个可以同时动磁盘/网络/同一批文件』：调大就是放宽并发放行，会改变真实副作用（并发写同一文件的顺序、对端看到的 QPS），所以不能当成资源旋钮随手改。守卫命中的由头是紧跟其后的 executionMode 文档注释（perm-guard 按 func 边界切块、注释算进上一个函数体——与 cmd/dshd/main.go::cmdTools 那条豁免同一成因），但函数本身是真判定，因此**登记测试而不是豁免**：TestMaxParallelToolCallsParsing（parallel_test.go:644，含默认值 10 / env 三值 / 字段压过 env 三段）。",
+    "cmd/dshd/serve_approval.go::replyTo": "本轮新增：审批答复必须写回「问出请求那一刻绑死的那根 stdin」，而不是读当前全局槽位——旧写法在两会话并发时会把 allow:true 写进另一会话的子进程（A 超时被拒、B 被执行）。钉住它的测试断言答复落到 asked 会话自己的管道上。",
+    "cmd/dshd/approval_stdio.go::startStdinDispatcher": "本轮新增：审批答复按 requestId 过滤，只认自己那条、其余丢弃、等不到按拒绝——旧写法只解析 allow 不比对 requestId，迟到的或别的会话的 allow:true 会被当成本次批准。"
   },
   "gates": {
     "cmd/dshd/acp.go::approvalDecision": "TestApprovalDecision",
@@ -20,7 +22,9 @@
     "cmd/dshd/serve_approval.go::reply": "TestApprovalReplyWritesParseableLine",
     "internal/agent/parallel.go::executionMode": "TestApprovalClassToolsAreSerialized",
     "internal/agent/parallel.go::maxParallelToolCalls": "TestMaxParallelToolCallsParsing",
-    "cmd/dshd/serve_sandbox_policy.go::sandboxApprovalValue": "TestSandboxLegacyApprovalValueStillReturnsRealMode"
+    "cmd/dshd/serve_sandbox_policy.go::sandboxApprovalValue": "TestSandboxLegacyApprovalValueStillReturnsRealMode",
+    "cmd/dshd/approval_stdio.go::startStdinDispatcher": "TestMarkerAskReadsResponse",
+    "cmd/dshd/serve_approval.go::replyTo": "TestApprovalReplyGoesToAskingSessionsChild"
   },
   "exempt": {
     "internal/prompt/prompt.go::Build": "这个文件里的 Build 只有 ToolGuide.Build 含权限字样（prompt.go:96 的 Caps().NeedsApproval()），它只决定工具名进『只读工具：』还是『会改世界的工具：』这一行文字：整段是往 strings.Builder 里写字符串，不改工具表、不返回放行结果，也没有 allow/deny 分支；Runtime.Build 与 WorkspaceRules.Build 里没有任何权限字样（可 grep 该文件的 \"allow\"/\"deny\"/NeedsApproval/modeApproval 只有这一处）。这行文字本身由 internal/prompt/prompt_test.go 的 TestToolGuideSplitsByCaps 钉着。",
