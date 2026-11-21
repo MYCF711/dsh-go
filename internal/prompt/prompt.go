@@ -314,12 +314,16 @@ func userGlobalRulesSection(candidates []string, limit int) string {
 
 // joinUserGlobalBlocks 把候选渲染成 `全局约定（path）：\n正文` 块，块间一个空行；
 // limit>0 时对**最后一块**的正文按字节截断（与 `rulesFromFile` 同一形状与同一说明）。
+//
+// 截断走 `truncateUTF8`（官方 `truncateUtf8`，src/render.ts:84-94）：预算按字节算，
+// 但切点回退到码元边界——裸 `text[:limit]` 会把汉字劈成半个，那半个码元会跟着
+// 系统提示一起进模型请求。
 func joinUserGlobalBlocks(files []globalRuleFile, limit int) string {
 	blocks := make([]string, 0, len(files))
 	for i, f := range files {
 		text := f.text
 		if limit > 0 && i == len(files)-1 && len(text) > limit {
-			text = text[:limit] + truncationNotice
+			text = truncateUTF8(text, limit) + truncationNotice
 		}
 		blocks = append(blocks,
 			"全局约定（"+filepath.ToSlash(f.path)+"）：\n"+strings.TrimSpace(text))
@@ -368,7 +372,8 @@ func rulesFromFile(title, path string, limit int) string {
 	}
 	text := string(b)
 	if limit > 0 && len(text) > limit {
-		text = text[:limit] + truncationNotice
+		// 同 `joinUserGlobalBlocks`：按字节算预算、按码元边界切（官方 truncateUtf8）。
+		text = truncateUTF8(text, limit) + truncationNotice
 	}
 	return title + "（" + filepath.ToSlash(path) + "）：\n" + strings.TrimSpace(text)
 }

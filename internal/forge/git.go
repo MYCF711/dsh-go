@@ -51,7 +51,9 @@ func (e *Executor) run(ctx context.Context, dir string, args ...string) (string,
 		return out.String(), errb.String(), fmt.Errorf("git %s 超时/取消: %w", strings.Join(args, " "), ctx.Err())
 	}
 	if err != nil {
-		return out.String(), errb.String(), fmt.Errorf("git %s 失败: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
+		// %w 而非 %v：`*exec.ExitError` 必须留在链上，判"没有 fork point"这类
+		// 分支要看真实退出码，不能去匹配 "exit status N" 文本。
+		return out.String(), errb.String(), fmt.Errorf("git %s 失败: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
 	return out.String(), errb.String(), nil
 }
