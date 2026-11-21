@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"dshgo/internal/fsutil"
 	"dshgo/internal/kernel"
@@ -40,9 +41,46 @@ const (
 	defaultLimit  = 100
 	maxLimit      = 500
 	maxFileBytes  = 2 << 20
-	maxLineChars  = 400
+	maxLineBytes  = 400
 	scannerBufMax = 1 << 20
+
+	// lineTruncMarker 是截断行的标记，取自官方 `previewLine` 的同一句话
+	// （`dsh-tool-fs-search/src/search-core.ts:301`）。不标的话，模型会把
+	// 半截行当成完整行直接引用。
+	lineTruncMarker = " (line truncated)"
 )
+
+// previewLine 把一条匹配行裁到 maxBytes 字节以内：**裁在 UTF-8 字符边界上**，并标出被裁过。
+//
+// 官方原件（`dsh-tool-fs-search/src/search-core.ts:297-302`）：
+//
+//	export function previewLine(line: string, maxBytes: number): string {
+//	  const retainer = new TextRetainer({ kind: 'head', maxBytes })
+//	  retainer.push(line)
+//	  const kept = retainer.finish()
+//	  return kept.truncated ? `${kept.text} (line truncated)` : kept.text
+//	}
+//
+// 它的 `finish()` 在出口把尾部半个码位削掉（`trimTrailingPartialUtf8`，
+// `dsh-output-retention/src/index.ts`），`GREP_MAX_LINE_BYTES` 的注释写明
+// "the cut preserves UTF-8 boundaries"，官方 grep 侧默认 2000 字节。
+//
+// 为什么非这么裁：这里是 `line[:400]` 直接切**字节**。中文/emoji 行被切成半个字符后，
+// 字符串里就带着非法 UTF-8；而 grep 的结果没有 Text，投影层退回 `Summary + JSON(Data)`
+// 给模型（`internal/session/project.go:31`），`encoding/json` 会把非法字节换成 U+FFFD ——
+// 模型看到的是「这一行有乱码」，真相是「这一行被截断了，后面还有」。
+// 这与已经修过的 bash 输出裁剪（官方 `dsh-subprocess-local/src/output.ts:174-179`）
+// 是同一个病，只是入口不同：那处我们已经按 `utf8.RuneStart` 前推，这里当时漏了。
+func previewLine(line string, maxBytes int) string {
+	if maxBytes <= 0 || len(line) <= maxBytes {
+		return line
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return line[:cut] + lineTruncMarker
+}
 
 // Tool 实现 spi.Tool。
 type Tool struct {
@@ -86,12 +124,21 @@ type Match struct {
 }
 
 type payload struct {
-	Pattern      string  `json:"pattern"`
-	Base         string  `json:"base"`
-	Count        int     `json:"count"`
-	FilesScanned int     `json:"files_scanned"`
-	FilesSkipped int     `json:"files_skipped"`
-	Truncated    bool    `json:"truncated"`
+	Pattern      string `json:"pattern"`
+	Base         string `json:"base"`
+	Count        int    `json:"count"`
+	FilesScanned int    `json:"files_scanned"`
+	FilesSkipped int    `json:"files_skipped"`
+	Truncated    bool   `json:"truncated"`
+	// PartialFiles 是「扫到中途就停下」的文件数：某一行比扫描缓冲（scannerBufMax）还长时
+	// `bufio.Scanner` 会直接 `Scan()==false`，该文件**后面的行一条都没扫**。
+	//
+	// 为什么要单独一个数、不再静默：这个洞的症状不是报错，而是"0 处命中 + 提示你去检查
+	// pattern 和路径"（改前实测：1.2 MiB 单行 + 下一行 NEEDLE → count=0、skipped=0、
+	// 提示「没有命中：确认 base 路径对不对」）。模型据此得出"代码里没有这个符号"这个
+	// **事实错误**，而真相是文件只扫了一行。同类病在本仓已有判例（官方 #12 是"长行让
+	// 整次搜索失败"，我们不会失败，但会静默漏扫——两种都让答案变成错的）。
+	PartialFiles int     `json:"partial_files,omitempty"`
 	Matches      []Match `json:"matches"`
 }
 
@@ -144,6 +191,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		matches []Match
 		scanned int
 		skipped int
+		partial int // 扫到中途停下（某行超扫描缓冲）的文件数，见 payload.PartialFiles
 		patSegs []string
 	)
 	if a.Include != "" {
@@ -201,13 +249,21 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 			if !re.MatchString(line) {
 				continue
 			}
-			if len(line) > maxLineChars {
-				line = line[:maxLineChars]
-			}
+			line = previewLine(line, maxLineBytes)
 			matches = append(matches, Match{Path: rootRel, Line: lineNo, Text: line})
 			if len(matches) >= a.Limit {
 				return errLimitReached
 			}
+		}
+		// `bufio.Scanner` 遇到比缓冲还长的行会直接停：`Scan()` 返回 false、`Err()` 非 nil，
+		// 而循环体一次都没进到那一行——**该文件后面的行一条都没扫**。
+		//
+		// 改前这里没有 `Err()` 检查，于是"文件只扫了 1 行"这件事在返回值里一点痕迹都没有：
+		// count=0、skipped=0，提示还在说"确认 base 路径对不对"。那是把"没扫到"报成了
+		// "不存在"，比报错贵得多。现在只加一个数与一句话，不改任何跳过语义。
+		if serr := sc.Err(); serr != nil {
+			partial++
+			return nil
 		}
 		return nil
 	})
@@ -233,6 +289,7 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		FilesScanned: scanned,
 		FilesSkipped: skipped,
 		Truncated:    truncated,
+		PartialFiles: partial,
 		Matches:      matches,
 	}
 	// 跳过的数字要分成两截说：目录名规则 + 仓库自己的 .dshdignore。
@@ -253,6 +310,17 @@ func (t *Tool) Exec(ctx context.Context, raw json.RawMessage) (spi.Result, error
 		hint = "没有命中：确认 base 路径对不对，或把 pattern 放宽（这是正则，不是通配符）"
 	case truncated:
 		hint = fmt.Sprintf("已到 %d 条上限；用 include 收窄文件类型，或换更精确的 pattern", a.Limit)
+	}
+	// 有文件只扫了一半时，上面那句"没有命中：确认 base 路径对不对"就是**误导**：
+	// 路径是对的，是那个文件后面的行根本没被扫。所以这句必须顶到最前面说。
+	if partial > 0 {
+		note := fmt.Sprintf("%d 个文件里有一行超过 %d KiB 的扫描上限，那些文件后面的行没扫到（结果可能不全，别据此断定「不存在」）",
+			partial, scannerBufMax>>10)
+		if hint == "" {
+			hint = note
+		} else {
+			hint = note + "；" + hint
+		}
 	}
 	return spi.Result{
 		Summary: summary,
