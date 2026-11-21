@@ -325,6 +325,15 @@ type Server struct {
 	cookies map[string]struct{} // 已发放的有效会话 cookie
 	srv     *http.Server
 	url     string
+	// ws 是**还活着的 WebSocket 连接**。
+	//
+	// 为什么必须自己记：`http.Server.Close()` 只关它自己管的连接，而 `/ws` 升级时
+	// 已经把连接 Hijack 走了——net/http 在 Hijack 的那一刻就把它从 activeConn 里
+	// 摘掉，之后既不跟踪也不关闭（Go 文档明说 Close 不知道 hijacked 连接）。
+	// 于是 `Server.Close()` 之后：监听关了、HTTP 请求进不来了，可每条 WS 的
+	// `go ServeConn` 仍在读、Hub 里仍挂着它的订阅、宿主注入的回调仍在被调用。
+	// 壳/测试里"关了还在收帧"就是这条。
+	ws map[*WSConn]struct{}
 
 	// chatImportSlot/chatImportActive 是 DeepSeek 聊天导入的**唯一槽位**
 	// （官方 `DeepseekChatImportService.claim()`，src/index.ts:120-131：
@@ -424,12 +433,24 @@ func (s *Server) Start() (string, error) {
 	return s.url, nil
 }
 
-// Close 关掉监听。没 Start 过时是空操作。
+// Close 关掉监听，并关掉**已经升级出去**的 WebSocket 连接。没 Start 过时是空操作。
+//
+// 两条都要关：监听只管"新的连接进不来"，hijacked 的 WS 连接不在 net/http 的账上
+// （见 Server.ws 的说明），只关监听的话每条活 WS 的 ServeConn goroutine 会一直活着
+// 往一个已经收摊的宿主里写帧。
 func (s *Server) Close() error {
 	s.mu.Lock()
 	srv := s.srv
+	conns := make([]*WSConn, 0, len(s.ws))
+	for conn := range s.ws {
+		conns = append(conns, conn)
+	}
+	s.ws = nil
 	s.mu.Unlock()
 
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
 	if srv == nil {
 		return nil
 	}
@@ -510,7 +531,22 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // Upgrade 已经写过 400
 	}
-	go ServeConn(conn, s.hub)
+	// 登记必须在起 goroutine 之前：Close 与之竞争时，不能出现"已经关完了
+	// 它才登记进来"的连接——那条连接会活过整个 Close。
+	s.mu.Lock()
+	if s.ws == nil {
+		s.ws = make(map[*WSConn]struct{})
+	}
+	s.ws[conn] = struct{}{}
+	s.mu.Unlock()
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.ws, conn)
+			s.mu.Unlock()
+		}()
+		_ = ServeConn(conn, s.hub)
+	}()
 }
 
 // handleConnect 拿 launch token 换 cookie。同一个 token 只换一次。

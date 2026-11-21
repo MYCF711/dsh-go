@@ -28,6 +28,49 @@ func startTestJob(t *testing.T, svc *Service, command string) string {
 	return res.JobID
 }
 
+// waitJobEnded 用输出分页 API 反复续读，直到任务**真的结算**（Done=true）或超时，
+// 返回最后一页。
+//
+// 为什么不能只调一次 OutputPage 就断言 Done：`wait` 只承诺"有新输出或已结束"就
+// 返回（service.go:308 `if page.Output != "" || page.Done || …`）。而任务的输出
+// 管道是 `2>&1` 合流的（shellenv.go:138），**子进程运行时自己会往里写东西**——
+// MSYS/Cygwin 在并发起进程的压力下偶发（实测原文，pid/地址每次不同）：
+//
+//	0 [main] sleep (54480) child_copy: cygheap read copy failed,
+//	0x800000000..0x80000B9D0, done 0, windows pid 54480, Win32 error 299
+//
+// （ERROR_PARTIAL_COPY：子进程拷父进程 cygheap 时失败）。这类字节与我们的代码无关，
+// 但会先于"结束"进入缓冲：调用方一看到它，第一次 OutputPage 就带着 Done=false 回来，
+// 断言随之变红——而任务其实毫秒之后就结算了（实测失败那次的 OutputPage 根本没等到
+// 10s，整条用例 0.10s 就红了）。
+//
+// 所以"等到结束"必须自己续读：下一轮从 NextCursor 接着等（官方语义就是这样用的，
+// 见 spi.JobMaxPageWait："调用方可用 nextCursor 继续等"）。判据不变——最终仍必须
+// 读到 Done，等不到照样红。
+//
+// 返回的是**最后一页**；是否真的读到了 ended 由调用方断言，不在这里替它下结论。
+func waitJobEnded(t *testing.T, svc *Service, id string, timeout time.Duration) spi.JobOutputPage {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var page spi.JobOutputPage
+	for {
+		started := time.Now()
+		next, err := svc.OutputPage(id, page.NextCursor, spi.JobDefaultPageLimit, time.Until(deadline))
+		if err != nil {
+			t.Fatalf("读任务 %s 输出失败: %v", id, err)
+		}
+		page = next
+		if page.Done || !time.Now().Before(deadline) {
+			return page
+		}
+		// 和宿主自己的适配器一样留一个下限（cmd/dshd/jobs_out.go:183）：Pager 若因为
+		// "一直有新输出"而立即返回，这里不忙等占满 CPU。
+		if time.Since(started) < time.Millisecond {
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
 func TestOutputPageAfterDoneAndBoundaries(t *testing.T) {
 	requireBash(t)
 	svc := newSvc(t)
@@ -119,9 +162,13 @@ func TestStopUnknownCrossInstanceAndDuplicate(t *testing.T) {
 	// 判据是"停止后**最终**能读到 ended"。给 10s 而不是 2s：这条会真起
 	// `sleep 30` 子进程，满载（并行包 + 覆盖率/race 构建）时收尾结算可能远超 2s，
 	// 2s 会误报成"停止没生效"；而"停止真的没生效"的表现是这条永远读不到 ended。
-	page, err := a.OutputPage(idA, 0, 1, 10*time.Second)
-	if err != nil || !page.Done {
-		t.Fatalf("停止后应可读 ended 状态: %+v, %v", page, err)
+	//
+	// 走 waitJobEnded 而不是单次 OutputPage：停止后在结算完成之前，管道里可能先到
+	// 一个字节（MSYS 运行时写的 stderr 告警，见该函数说明），单次调用会立刻带着
+	// Done=false 返回。续读到 Done 才是"读到 ended"这个判据的真实含义。
+	page := waitJobEnded(t, a, idA, 10*time.Second)
+	if !page.Done {
+		t.Fatalf("停止后应可读 ended 状态: %+v", page)
 	}
 
 	doneID := startTestJob(t, a, `printf done; sleep 0.1`)

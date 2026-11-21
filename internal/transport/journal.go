@@ -302,6 +302,25 @@ func (js *Journals) Get(sessionID string) *Journal {
 	return js.getLocked(sessionID)
 }
 
+// Forget 忘掉一条会话的 journal（会话被**删除**之后调用）。
+//
+// 为什么必须有它：这张表原来只有 Get/Append/Reset，没有任何删除路径。会话删掉
+// 之后它的 Journal（容量 4096 帧、每帧带原始 data）还一辈子留在内存里，键也还在
+// ——进程不重启就一直涨，而且 `Count`/日志都看不出来。更糟的是删除后再有客户端
+// `sub` 那条 topic，仍然会从这份"已经删掉的会话"里重放帧。
+//
+// 语义只做一件事：把条目摘掉。下一次 Get 会造一条**新世代**的空 journal，
+// 客户端按既有规则收到 `session/reset`（不是静默续号）——与"会话已经不存在"
+// 这个事实一致。
+func (js *Journals) Forget(sessionID string) {
+	if js == nil || sessionID == "" {
+		return
+	}
+	js.mu.Lock()
+	delete(js.m, sessionID)
+	js.mu.Unlock()
+}
+
 func (js *Journals) getLocked(sessionID string) *Journal {
 	if j, ok := js.m[sessionID]; ok {
 		return j

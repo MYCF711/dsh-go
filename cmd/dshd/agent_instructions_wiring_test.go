@@ -25,6 +25,7 @@ package main
 //	  这是 official resume reconcile 的直接证据。
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -417,4 +418,124 @@ func TestAIInstrPromptInjectionIsUserRole(t *testing.T) {
 		return
 	}
 	t.Fatal("日志里没有 agent-instructions 帧")
+}
+
+// TestAIInstrFinishTurnClosesAbandonedStep 钉"一轮结束时 step 状态必须对账"。
+//
+// 背景（真实退路，不是假想）：`agent.Loop` 只在**正常收工**的两条分支发 `step/end`
+// （`internal/agent/loop.go` 的 `len(resp.ToolCalls)==0` 与工具批次成功之后）。
+// 模型调用失败、空响应、`finish=length` 当失败、工具参数不是 JSON object、取消——
+// 这些出口都直接 return，没有 `step/end`。于是 `BeginStep` 置上的 stepOpen 留在 true，
+// 此后本会话每次 `Touch` 都在攒批而**永不投影**，直到下一次成功的 step/end。
+// 表现是"改了 AGENTS.md，界面上一直不刷新"，日志里一句错都没有。
+//
+// 变异点：把 `FinishTurn` 里的 `AbortStep` 换成 `EndStep` 之外的任何"什么都不做"，
+// 或删掉两个生产入口上的调用，本测试在"StepOpen 必须复位"与"补一次投影"两处红。
+func TestAIInstrFinishTurnClosesAbandonedStep(t *testing.T) {
+	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
+	t.Setenv("DSHD_INSTRUCTION_DURABLE", "1")
+	home, root, cwd, logw := aiInstrFixture(t)
+	runner := newAIInstrRunner(home, defaultWorkspaceBytes)
+	if runner == nil {
+		t.Fatal("链与 durable 开关都显式打开时，runner 不该是 nil")
+	}
+	if _, err := runner.Baseline(logw, cwd); err != nil {
+		t.Fatal(err)
+	}
+	before := len(aiInstrFramesFromLog(t, logw.Path))
+
+	// 走一步：读了一个嵌套指令文件，然后这一轮**异常收尾**（没有 step/end）。
+	writeFixtureFile(t, filepath.Join(root, "pkg", "AGENTS.md"), "pkg-rules\n")
+	// PreStep 返回的是包装后的钩子，必须**调用**它才算"一步开始"（生产由 Loop 调）。
+	preStep := runner.PreStep(nil)
+	if err := preStep(context.Background(), 1); err != nil {
+		t.Fatalf("PreStep: %v", err)
+	}
+	runner.OnToolCallSettled("read", json.RawMessage(`{"file_path":"pkg/AGENTS.md"}`), true)
+	if !runner.runner.StepOpen() {
+		t.Fatal("PreStep 之后 step 必须是打开状态（这是 AbortStep 要收的那一位）")
+	}
+	if during := len(aiInstrFramesFromLog(t, logw.Path)); during != before {
+		t.Fatalf("step 打开期间不该投影，%d → %d", before, during)
+	}
+
+	runner.FinishTurn(logw, cwd)
+	if runner.runner.StepOpen() {
+		t.Fatal("FinishTurn 必须复位 stepOpen：不复位就是本会话之后再也不刷新指令投影（静默卡死）")
+	}
+	after := aiInstrFramesFromLog(t, logw.Path)
+	if len(after) != before+1 {
+		t.Fatalf("退路收口必须把这批 touch 投影掉（不丢工作），%d → %d", before, len(after))
+	}
+	if !strings.Contains(after[len(after)-1].Text, "pkg-rules") {
+		t.Fatalf("补投影的帧应带真实正文:\n%s", after[len(after)-1].Text)
+	}
+
+	// 幂等：正常收尾后再兜一次不能多写一条。
+	runner.FinishTurn(logw, cwd)
+	if again := len(aiInstrFramesFromLog(t, logw.Path)); again != len(after) {
+		t.Fatalf("FinishTurn 必须幂等（正常收尾后是空操作），%d → %d", len(after), again)
+	}
+}
+
+// TestAIInstrFinishTurnNoOpOnCleanStepEnd 钉正常路径不受影响：
+// `step/end` 已经收口过时，turn 收尾不能再补一条帧（否则每轮多一条重复投影）。
+func TestAIInstrFinishTurnNoOpOnCleanStepEnd(t *testing.T) {
+	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
+	t.Setenv("DSHD_INSTRUCTION_DURABLE", "1")
+	home, root, cwd, logw := aiInstrFixture(t)
+	runner := newAIInstrRunner(home, defaultWorkspaceBytes)
+	if _, err := runner.Baseline(logw, cwd); err != nil {
+		t.Fatal(err)
+	}
+	before := len(aiInstrFramesFromLog(t, logw.Path))
+	writeFixtureFile(t, filepath.Join(root, "pkg", "AGENTS.md"), "pkg-rules\n")
+	preStep := runner.PreStep(nil)
+	if err := preStep(context.Background(), 1); err != nil {
+		t.Fatalf("PreStep: %v", err)
+	}
+	runner.OnToolCallSettled("read", json.RawMessage(`{"file_path":"pkg/AGENTS.md"}`), true)
+	runner.OnStepEnd(logw, cwd)
+	clean := len(aiInstrFramesFromLog(t, logw.Path))
+	if clean != before+1 {
+		t.Fatalf("正常 step/end 应落一条，%d → %d", before, clean)
+	}
+	runner.FinishTurn(logw, cwd)
+	if after := len(aiInstrFramesFromLog(t, logw.Path)); after != clean {
+		t.Fatalf("step/end 已收口时 turn 收尾必须是空操作，%d → %d", clean, after)
+	}
+}
+
+// TestACPClosedSessionForgetsAIInstrRunner 钉"会话关闭后不再持有它的指令投影器"。
+//
+// 两个后果都不是"多占一点内存"：
+//   - 长跑的 ACP 进程给每个开过的会话留一份 Runner，只增不减（`Close` 已经摘
+//     logs/hist/turns，唯独漏了这一张）；
+//   - 同一个 session id 关掉再打开（Resume 用原 id 是常态）会命中旧 Runner，
+//     上一轮异常收尾留下的 `stepOpen=true` 与 `pending` 直接带进新会话——
+//     新会话从第一拍起就不刷新指令投影，而且没有任何日志。
+//
+// 变异点：删掉 `acpRunner.Close` 里的 `forgetAIInstr` 调用（或把它写成空操作），
+// 本测试在"表里必须摘掉""再打开必须是新 runner"两处红。
+func TestACPClosedSessionForgetsAIInstrRunner(t *testing.T) {
+	t.Setenv("DSHD_INSTRUCTION_CHAIN", "")
+	t.Setenv("DSHD_INSTRUCTION_DURABLE", "1")
+	runner := &acpRunner{home: t.TempDir(), workspaceBytes: defaultWorkspaceBytes}
+	first := runner.aiInstrFor("sess-1")
+	if first == nil {
+		t.Fatal("链与 durable 都显式打开时 aiInstrFor 不该返回 nil")
+	}
+	if again := runner.aiInstrFor("sess-1"); again != first {
+		t.Fatal("同一会话必须复用同一份投影器（否则攒批与 version 缓存各说各话）")
+	}
+	if err := runner.Close("sess-1"); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, ok := runner.aiInstr["sess-1"]; ok {
+		t.Fatal("Close 之后必须摘掉这张表的条目（否则长跑只增不减）")
+	}
+	reopened := runner.aiInstrFor("sess-1")
+	if reopened == first {
+		t.Fatal("重新打开的会话必须是新投影器：旧 Runner 的 stepOpen/pending 会跨生命周期泄漏")
+	}
 }

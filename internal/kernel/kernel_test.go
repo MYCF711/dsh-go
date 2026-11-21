@@ -385,3 +385,52 @@ func TestDisabledModuleIsSkipped(t *testing.T) {
 		t.Fatalf("只该剩 a，实际 %v", got)
 	}
 }
+
+// TestBusDropsDisposedSubscriptionFromTable 钉"作用域撤销后监听器真的从表里消失"。
+//
+// 为什么这条重要：只把 subscription 标 dead 也能让 Emit 不再调用它，所以功能上
+// 看起来完全正常；坏的是**表本身只增不减**——插件热重载、动态包 retract 每来一次
+// 就积一批死条目，而每次 Emit/Serial/Bail/Waterfall/Parallel 都要在 RLock 下扫整张
+// 表并为快照分配一个新切片。宿主长跑时表现为"事件越发越慢"，Count 与日志都看不出
+// 表在涨。
+//
+// 变异点：把 On 的撤销闭包里那段"从 subs[event] 摘掉自己"删掉（保留 dead = true），
+// 本测试在 len(b.subs[...]) 与 Count 两处都会红。
+func TestBusDropsDisposedSubscriptionFromTable(t *testing.T) {
+	k := New("t")
+	b := k.Bus()
+	child := k.Root().Child("kid")
+	b.On(child, "e", func(*Event) error { return nil })
+	if got := len(b.subs["e"]); got != 1 {
+		t.Fatalf("注册后表里应有 1 条，得到 %d", got)
+	}
+	child.Dispose()
+	if got := len(b.subs["e"]); got != 0 {
+		t.Fatalf("撤销后表里必须摘干净（否则长跑只增不减），得到 %d", got)
+	}
+	if got := b.Count("e"); got != 0 {
+		t.Fatalf("撤销后 Count 应为 0，得到 %d", got)
+	}
+	if _, ok := b.subs["e"]; ok {
+		t.Fatal("该 event 一条订阅都不剩时，键也要一起删掉（不能留下空切片）")
+	}
+}
+
+// TestBusKeepsLiveSubscriptionsWhenSiblingDisposed 钉"摘的只是自己那一条"：
+// 同一 event 上还有活订阅时，别人的条目不能被顺手清掉。
+func TestBusKeepsLiveSubscriptionsWhenSiblingDisposed(t *testing.T) {
+	k := New("t")
+	b := k.Bus()
+	kept := 0
+	victim := k.Root().Child("victim")
+	b.On(k.Root(), "e", func(*Event) error { kept++; return nil })
+	b.On(victim, "e", func(*Event) error { return errors.New("must not run") })
+	victim.Dispose()
+	if got := len(b.subs["e"]); got != 1 {
+		t.Fatalf("应只剩 1 条活订阅，得到 %d", got)
+	}
+	b.Emit("e", nil)
+	if kept != 1 {
+		t.Fatalf("活订阅应被调用一次，得到 %d", kept)
+	}
+}

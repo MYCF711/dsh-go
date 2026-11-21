@@ -288,6 +288,27 @@ func (a *aiInstrRunner) OnStepEnd(logw *session.Log, cwd string) {
 	a.AfterStep(logw, cwd, paths)
 }
 
+// FinishTurn 在**一轮结束时对账 step 状态**：还在 open 就收掉并补一次投影。
+//
+// 为什么不能只靠 OnStepEnd：step 的出口不止"正常收工"。模型调用失败、空响应、
+// 响应终止、工具参数非法、取消——这些路径都不会发 `step/end`，`BeginStep` 置上的
+// stepOpen 就留在 true（见 `ainstr.Runner.AbortStep` 的说明）。后果不是一次丢批，
+// 而是该会话之后每次 Touch 都攒着不投，直到下一次**成功**的 step/end 才排掉；
+// 界面表现是"改了 AGENTS.md 却一直不刷新"，日志里一句错都没有。
+//
+// 调用点必须覆盖**所有** turn 出口，且要在日志还开着的时候（`run` 入口的
+// `logw.Close()` 是 defer，晚于这里）。正常收工时是一次空操作。
+func (a *aiInstrRunner) FinishTurn(logw *session.Log, cwd string) {
+	if a == nil {
+		return
+	}
+	paths := a.runner.AbortStep()
+	if len(paths) == 0 {
+		return
+	}
+	a.AfterStep(logw, cwd, paths)
+}
+
 // aiInstrFor 返回某会话的 durable 投影器（ACP 进程内多会话 ⇒ 每会话一份）。
 //
 // 与 run 入口的差别只有"按会话隔离"：version 缓存与攒批都是每会话状态，
@@ -304,4 +325,23 @@ func (r *acpRunner) aiInstrFor(sessionID string) *aiInstrRunner {
 	runner := newAIInstrRunner(r.home, r.workspaceBytes)
 	r.aiInstr[sessionID] = runner
 	return runner
+}
+
+// forgetAIInstr 是会话关闭时的清理口（`acpRunner.Close` 调）。
+//
+// 不摘的代价有两条，都不是"多占一点内存"那么轻：
+//
+//  1. **只增不减**：`Close` 已经会摘 logs/hist/turns，唯独漏了这一张——长跑的
+//     ACP 进程给每个开过的会话留一份 Runner（含 version 缓存与攒批），永不回收。
+//  2. **状态跨生命周期泄漏**：同一个 session id 关掉再打开（Resume 用原 id 是常态）
+//     会命中旧 Runner。上一轮若是异常收尾，它的 `stepOpen` 还停在 true、`pending`
+//     里还压着旧路径——新会话从第一拍起就不刷新指令投影，且没有任何日志。
+//     这正是"状态机卡死"最难查的形态：看起来像网络慢。
+func (r *acpRunner) forgetAIInstr(sessionID string) {
+	if r == nil || sessionID == "" {
+		return
+	}
+	r.aiInstrMu.Lock()
+	delete(r.aiInstr, sessionID)
+	r.aiInstrMu.Unlock()
 }

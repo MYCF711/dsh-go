@@ -1397,6 +1397,10 @@ func cmdRun(argv []string) (retErr error) {
 	// 所有 v4 事件（step/*、tool/call、tool/result、assistant/message）都带它，
 	// 写死 1 会让第二轮起的工具事件全落到第一轮名下。
 	hist, err = loop.Run(runCtx, turn, hist)
+	// 一轮结束（**含所有错误退路**）就对一次 step 状态：出错的那一步不会发
+	// `step/end`，stepOpen 会留在 true，之后本会话的指令投影就再也不刷新
+	// （见 aiInstrRunner.FinishTurn）。必须在这里、在 logw.Close 之前跑。
+	aiInstr.FinishTurn(logw, cwd)
 	if err != nil {
 		return err
 	}

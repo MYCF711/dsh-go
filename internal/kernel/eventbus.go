@@ -35,6 +35,12 @@ type Bus struct {
 func newBus() *Bus { return &Bus{subs: make(map[string][]*subscription)} }
 
 // On 注册监听器，随作用域撤销。
+//
+// 撤销时**把这条从表里摘掉**，而不是只标 dead。只标 dead 的话，`b.subs[event]`
+// 只增不减：插件热重载/动态包 retract 每来一次就积一批 dead 条目，而每次
+// Emit/Serial/Bail/Waterfall/Parallel 都要在 RLock 下把整张表扫一遍、再为快照
+// 分配一个新切片。长跑宿主的表现是"事件发得越多越慢"，而 Count 与任何日志都
+// 看不出表在涨。
 func (b *Bus) On(s *Scope, event string, h Handler) {
 	if s == nil || h == nil {
 		return
@@ -46,7 +52,19 @@ func (b *Bus) On(s *Scope, event string, h Handler) {
 
 	s.Effect(func() {
 		b.mu.Lock()
-		sub.dead = true
+		sub.dead = true // 已经取走快照的调用方靠它跳过（见 snapshot）
+		list := b.subs[event]
+		for i, existing := range list {
+			if existing == sub {
+				list = append(list[:i], list[i+1:]...)
+				break
+			}
+		}
+		if len(list) == 0 {
+			delete(b.subs, event)
+		} else {
+			b.subs[event] = list
+		}
 		b.mu.Unlock()
 	})
 }

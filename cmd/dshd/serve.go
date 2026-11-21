@@ -875,7 +875,14 @@ func cmdServe(args []string) error {
 			if err := agents.Dispose(sessionID); err != nil {
 				fmt.Fprintf(os.Stderr, "agent 收尾失败（session=%s）：%v\n", sessionID, err)
 			}
-			return serveDelete(*home, sessionID, broker, prompts)
+			if err := serveDelete(*home, sessionID, broker, prompts); err != nil {
+				return err
+			}
+			// 删除成功之后把 journal 一起忘掉：那张表没有别的删除路径，会话删掉后
+			// 它（容量 4096 帧）会一直占着内存，而且再 `sub` 这条 topic 还会从
+			// "已经删掉的会话"里重放帧。失败时不摘：留在表里还能被重放/诊断。
+			journals.Forget(sessionID)
+			return nil
 		},
 		Fork: func(sessionID, title string) (string, error) {
 			return serveFork(*home, sessionID, title)
