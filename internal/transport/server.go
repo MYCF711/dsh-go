@@ -1498,6 +1498,23 @@ func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotImplemented, errorBody("not implemented"))
 		return
 	}
+	// H14 + 时序：水位必须在**投影之前**拍下。
+	//
+	// load 同时给两样东西：messages（投影）和 lastSeq（客户端接着收的水位）。
+	// 客户端拿 lastSeq 去订阅（`dsh-ui/cmd/app/main.go:773-779`），而订阅端会把
+	// `seq <= sinceSeq` 当重复丢掉。所以只要水位在投影之后才读，投影期间追加的帧
+	// 就**三处同时消失**——投影里没有（它在投影之后）、重放里没有（水位已越过它）、
+	// 客户端判重也不要（seq 不大于自己的水位）。症状是"发出去没反应"，两边都不报错。
+	//
+	// 先读水位的代价是：投影期间追加的帧会既在 messages 里、又被重放一次。
+	// 重放是幂等的（v4 帧带 v4Seq/messageId，客户端按身份合并），丢帧不是。
+	var journalEpoch int64
+	var journalLast int
+	if s.opt.Journals != nil {
+		j := s.opt.Journals.Get(fillID(in.SessionID, in.ID))
+		journalEpoch, journalLast = j.Epoch(), j.LastSeq()
+	}
+
 	res, err := s.opt.Load(fillID(in.SessionID, in.ID), firstNonZero(in.Limit, in.TailMessages))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorBody(err.Error()))
@@ -1523,10 +1540,10 @@ func (s *Server) handleSessionLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	// H14：load 是首屏投影，不能拿来补洞；但它必须告诉客户端
 	// "从哪个世代、哪个水位接着收"——否则客户端只能猜。
+	// 世代/水位都取自上面的**投影前快照**（见那一处注释）。
 	if s.opt.Journals != nil {
-		j := s.opt.Journals.Get(fillID(in.SessionID, in.ID))
-		res.JournalEpoch = j.Epoch()
-		res.LastSeq = j.LastSeq()
+		res.JournalEpoch = journalEpoch
+		res.LastSeq = journalLast
 	}
 	writeJSON(w, http.StatusOK, res)
 }
