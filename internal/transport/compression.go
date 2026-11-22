@@ -105,28 +105,43 @@ func (w *compressedResponse) WriteHeader(code int) {
 	w.status = code
 }
 
+// ensureDecided 保证「压/不压」已经定下、状态头也已经发出去。
+//
+// **Write 与 Flush 都必须走它。** 2026-11-22 修：Flush 原先不 decide，
+// 于是 handler 先 Flush 再 Write 时，底层 f.Flush() 先把「200 且没有
+// Content-Encoding」的头发了出去，之后 Write 再 decide(true) 已经晚了 ——
+// 头已上线，gzip 字节就裸奔。表现是 account.watch 这类流式接口返回
+// 一段解不开的字节（客户端没见到 Content-Encoding，按明文读）。
+func (w *compressedResponse) ensureDecided() error {
+	if w.decided {
+		return nil
+	}
+	length := int64(-1)
+	if cl := w.Header().Get("Content-Length"); cl != "" {
+		if n, err := strconv.ParseInt(cl, 10, 64); err == nil {
+			length = n
+		}
+	}
+	switch {
+	case w.Header().Get("Content-Encoding") != "":
+		w.decide(false)
+	case length >= 0 && length < w.threshold:
+		// 已知长度且没到阈值：不压（小响应压了更大，还要多一次缓冲）。
+		w.decide(false)
+	default:
+		w.decide(true)
+		gz, err := gzip.NewWriterLevel(w.ResponseWriter, w.level)
+		if err != nil {
+			return fmt.Errorf("transport: 初始化 gzip 失败: %w", err)
+		}
+		w.gz = gz
+	}
+	return nil
+}
+
 func (w *compressedResponse) Write(p []byte) (int, error) {
-	if !w.decided {
-		length := int64(-1)
-		if cl := w.Header().Get("Content-Length"); cl != "" {
-			if n, err := strconv.ParseInt(cl, 10, 64); err == nil {
-				length = n
-			}
-		}
-		switch {
-		case w.Header().Get("Content-Encoding") != "":
-			w.decide(false)
-		case length >= 0 && length < w.threshold:
-			// 已知长度且没到阈值：不压（小响应压了更大，还要多一次缓冲）。
-			w.decide(false)
-		default:
-			w.decide(true)
-			gz, err := gzip.NewWriterLevel(w.ResponseWriter, w.level)
-			if err != nil {
-				return 0, fmt.Errorf("transport: 初始化 gzip 失败: %w", err)
-			}
-			w.gz = gz
-		}
+	if err := w.ensureDecided(); err != nil {
+		return 0, err
 	}
 	if w.compress {
 		return w.gz.Write(p)
@@ -163,7 +178,14 @@ func (w *compressedResponse) finish() {
 }
 
 // Flush 让流式响应（长历史分页）在压缩下也能及时出门。
+//
+// **必须先把「压/不压」定下来**：否则底层 Flush 会抢在 decide 之前把头发出去，
+// 之后再也改不了 Content-Encoding（见 ensureDecided 的注释）。
 func (w *compressedResponse) Flush() {
+	if err := w.ensureDecided(); err != nil {
+		// 定不下来时退成不压，至少保证头发出去之后不会出现「声称明文、实际 gzip」。
+		w.decide(false)
+	}
 	if w.gz != nil {
 		_ = w.gz.Flush()
 	}
