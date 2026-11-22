@@ -44,19 +44,18 @@ func streamThenWrite(w http.ResponseWriter, r *http.Request) {
 }
 
 // assertHeaderMatchesBody 是这条守卫的唯一判据。
-func assertHeaderMatchesBody(t *testing.T, rec *httptest.ResponseRecorder) {
+func assertHeaderMatchesBody(t *testing.T, hdr http.Header, body []byte) {
 	t.Helper()
 
-	enc := rec.Header().Get("Content-Encoding")
-	body := rec.Body.Bytes()
+	enc := hdr.Get("Content-Encoding")
 
 	switch enc {
 	case "":
 		// 头说没有编码 —— 体必须是能当明文读的。若这里出问题，
 		// 说明写出去的其实是 gzip 字节而头没跟上（本文件的病）。
 		if isGzip(body) {
-			t.Fatalf("头没有 Content-Encoding，体却是 gzip 字节（长度 %d，头 %d 字节）—— "+
-				"客户端会按明文读，拿到一堆解不开的二进制", len(body), len(rec.Header().Get("Content-Type")))
+			t.Fatalf("头没有 Content-Encoding，体却是 gzip 字节（长度 %d）—— "+
+				"客户端会按明文读，拿到一堆解不开的二进制", len(body))
 		}
 	case "gzip":
 		// 头说是 gzip —— 体必须解得开，且解出来不能是空的（空体说明只是尾巴）。
@@ -116,10 +115,7 @@ func TestCompressedFlushBeforeWriteKeepsHeaderHonest(t *testing.T) {
 		t.Fatalf("读响应失败：%v", err)
 	}
 
-	rec := httptest.NewRecorder()
-	rec.HeaderMap = resp.Header
-	_, _ = rec.Body.Write(body)
-	assertHeaderMatchesBody(t, rec)
+	assertHeaderMatchesBody(t, resp.Header, body)
 }
 
 // TestCompressedFlushOnlyKeepsHeaderHonest 覆盖「只 Flush 不写体」这个边界。
@@ -170,5 +166,5 @@ func TestCompressedNormalWriteStillCompresses(t *testing.T) {
 	if got := rec.Header().Get("Content-Encoding"); got != "gzip" {
 		t.Fatalf("大响应仍然应该被压缩，实际 Content-Encoding=%q（把压缩关掉不算修好这个 bug）", got)
 	}
-	assertHeaderMatchesBody(t, rec)
+	assertHeaderMatchesBody(t, rec.Header(), rec.Body.Bytes())
 }
